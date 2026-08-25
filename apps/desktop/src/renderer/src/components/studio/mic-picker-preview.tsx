@@ -1,14 +1,11 @@
 import { useRef, type ReactElement, type RefObject } from 'react'
 
-import { Button } from '@/components/ui/button'
-import { Kbd } from '@/components/ui/kbd'
 import { LiveWaveform, type LiveWaveformHandle } from '@/components/ui/live-waveform'
 import { useStudioCore } from '@/hooks/use-studio'
 import {
   useStudioMicVisualLifecycle,
   useStudioMicVisualPainter
 } from '@/hooks/use-studio-mic-visual'
-import { audioMixerMonitorWhenIdle, withAudioMixerMonitorWhenIdle } from '@/lib/mic-visual-gate'
 
 /**
  * See-before-you-pick mic preview (Studio audio rework S4): a scrolling live
@@ -27,15 +24,11 @@ export function MicPickerPreview({
   deviceName: string | undefined
 }): ReactElement {
   const lifecycle = useStudioMicVisualLifecycle()
-  const { captureConfig, isSessionActive, settings, setSettings } = useStudioCore()
+  const { captureConfig } = useStudioCore()
   const waveformRef = useRef<LiveWaveformHandle>(null)
   useMicPickerFramePainter(waveformRef)
   const enabled = Boolean(deviceName)
-  const monitoringOff =
-    enabled &&
-    !isSessionActive &&
-    !captureConfig.audio.microphoneMuted &&
-    !audioMixerMonitorWhenIdle(settings)
+  const muted = enabled && captureConfig.audio.microphoneMuted
 
   return (
     <div className="flex flex-col gap-1" data-videorc-mic-preview>
@@ -55,18 +48,11 @@ export function MicPickerPreview({
           Live preview unavailable — the mic may be in use or needs permission. Recording is
           unaffected.
         </span>
-      ) : monitoringOff ? (
-        <span className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-          <span>Input monitoring is off while idle.</span>
-          <Button
-            className="shrink-0"
-            size="xs"
-            variant="ghost"
-            onClick={() => setSettings((current) => withAudioMixerMonitorWhenIdle(current, true))}
-          >
-            Monitor input
-            <Kbd>M</Kbd>
-          </Button>
+      ) : muted ? (
+        // The one honest reason the waveform is flat while the picker is open:
+        // idle no longer silences it, so a mute is worth naming.
+        <span className="text-xs text-muted-foreground">
+          Microphone is muted — unmute to see its level.
         </span>
       ) : null}
     </div>

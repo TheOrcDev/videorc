@@ -2,13 +2,9 @@ import { StrictMode, act, createElement } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-// Existing lifecycle cases run with idle monitoring ON so the gate is not
-// what they exercise; the gate cases below flip these explicitly.
 const providerState = vi.hoisted(() => ({
   microphoneMuted: false,
-  sessionActive: false,
-  monitorWhenIdle: true,
-  setSettingsCalls: 0
+  sessionActive: false
 }))
 
 vi.mock('@/hooks/use-document-visible', () => ({ useDocumentVisible: () => true }))
@@ -17,20 +13,7 @@ vi.mock('@/hooks/use-studio', () => ({
     captureConfig: { audio: { microphoneMuted: providerState.microphoneMuted } },
     mediaAccess: { microphone: 'granted' },
     selectedMicrophone: { id: 'backend-mic-1', name: 'Studio microphone' },
-    isSessionActive: providerState.sessionActive,
-    settings: { audioMixer: { monitorWhenIdle: providerState.monitorWhenIdle } },
-    setSettings: (
-      update:
-        | { audioMixer?: { monitorWhenIdle?: boolean } }
-        | ((current: { audioMixer?: { monitorWhenIdle?: boolean } }) => {
-            audioMixer?: { monitorWhenIdle?: boolean }
-          })
-    ) => {
-      providerState.setSettingsCalls += 1
-      const current = { audioMixer: { monitorWhenIdle: providerState.monitorWhenIdle } }
-      const next = typeof update === 'function' ? update(current) : update
-      providerState.monitorWhenIdle = next.audioMixer?.monitorWhenIdle === true
-    }
+    isSessionActive: providerState.sessionActive
   })
 }))
 
@@ -64,23 +47,20 @@ describe('StudioMicVisualProvider', () => {
     restoreEnvironment = undefined
     providerState.microphoneMuted = false
     providerState.sessionActive = false
-    providerState.monitorWhenIdle = true
-    providerState.setSettingsCalls = 0
   })
 
-  it('keeps the microphone closed while idle and arms it for a session automatically', async () => {
+  it('meters an idle mixer and releases the microphone when the mixer leaves', async () => {
     const environment = installBrowserAudioEnvironment()
     restoreEnvironment = environment.restore
     const lifecycleStates: boolean[] = []
-    providerState.monitorWhenIdle = false
-    const renderProvider = async (): Promise<void> => {
+    const renderProvider = async (enabled: boolean): Promise<void> => {
       await act(async () => {
         root?.render(
           createElement(
             StrictMode,
             null,
             createElement(StudioMicVisualProvider, {
-              enabled: true,
+              enabled,
               children: createElement(VisualConsumer, {
                 onLifecycle: (active) => lifecycleStates.push(active)
               })
@@ -92,89 +72,23 @@ describe('StudioMicVisualProvider', () => {
       })
     }
 
-    // Idle Studio, monitoring off: no getUserMedia, no AudioContext, no clock —
-    // the OS shows no mic indicator and the bars sit at floor.
+    // No session, nothing armed, no toggle: the meter runs because the mixer
+    // is on screen. "Is my microphone working?" is asked BEFORE recording, and
+    // bars pinned at the floor cannot answer it.
     root = createRoot(environment.container)
-    await renderProvider()
-    await act(async () => {
-      await Promise.resolve()
-      await Promise.resolve()
-    })
-    expect(environment.getUserMedia).not.toHaveBeenCalled()
-    expect(environment.contexts).toHaveLength(0)
-    expect(environment.scheduledFrames.size).toBe(0)
-    expect(lifecycleStates.at(-1)).toBe(false)
-
-    // A session starts (recording or streaming): the meter arms itself.
-    providerState.sessionActive = true
-    await renderProvider()
+    await renderProvider(true)
     await vi.waitFor(() => expect(environment.contexts).toHaveLength(1))
     expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
     expect(environment.scheduledFrames.size).toBe(1)
     expect(lifecycleStates.at(-1)).toBe(true)
 
-    // Session ends with monitoring still off: the microphone is released.
-    providerState.sessionActive = false
-    await renderProvider()
+    // The workspace moves elsewhere: the microphone is released immediately —
+    // it is genuinely open while metering, so leaving must close it.
+    await renderProvider(false)
     await vi.waitFor(() => expect(environment.contexts[0].close).toHaveBeenCalledTimes(1))
     expect(environment.stopTrack).toHaveBeenCalledTimes(1)
     expect(environment.scheduledFrames.size).toBe(0)
     expect(lifecycleStates.at(-1)).toBe(false)
-
-    // Monitor input on (the M shortcut flips the persisted setting): idle
-    // monitoring opens the analyser again.
-    environment.pressKey('m')
-    expect(providerState.setSettingsCalls).toBe(1)
-    expect(providerState.monitorWhenIdle).toBe(true)
-    await renderProvider()
-    await vi.waitFor(() => expect(environment.contexts).toHaveLength(2))
-    expect(environment.getUserMedia).toHaveBeenCalledTimes(2)
-    expect(lifecycleStates.at(-1)).toBe(true)
-  })
-
-  it('ignores the M shortcut while a session runs and inside editable fields', async () => {
-    const environment = installBrowserAudioEnvironment()
-    restoreEnvironment = environment.restore
-    providerState.monitorWhenIdle = false
-    providerState.sessionActive = true
-    root = createRoot(environment.container)
-    await act(async () => {
-      root?.render(
-        createElement(
-          StrictMode,
-          null,
-          createElement(StudioMicVisualProvider, {
-            enabled: true,
-            children: createElement(LifecycleObserver)
-          })
-        )
-      )
-      await Promise.resolve()
-    })
-    environment.pressKey('m')
-    expect(providerState.setSettingsCalls).toBe(0)
-
-    providerState.sessionActive = false
-    await act(async () => {
-      root?.render(
-        createElement(
-          StrictMode,
-          null,
-          createElement(StudioMicVisualProvider, {
-            enabled: true,
-            children: createElement(LifecycleObserver)
-          })
-        )
-      )
-      await Promise.resolve()
-    })
-    environment.pressKey('m', { editable: true })
-    environment.pressKey('m', { metaKey: true })
-    environment.pressKey('m', { repeat: true })
-    expect(providerState.setSettingsCalls).toBe(0)
-    environment.pressKey('M')
-    expect(providerState.setSettingsCalls).toBe(1)
-    expect(providerState.monitorWhenIdle).toBe(true)
   })
 
   it('tears down visual microphone resources and stops reporting live when muted', async () => {

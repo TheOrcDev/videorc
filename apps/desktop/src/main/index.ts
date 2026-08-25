@@ -2133,6 +2133,15 @@ function notesWindowHtml(document: NotesDocument): string {
       font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       overflow: hidden; user-select: none; -webkit-user-select: none; }
     body { display: flex; flex-direction: column; }
+    /* Same scrollbar recipe as the app (styles.css): no track, a barely-there
+       thumb inset inside its hit area. This window is a data-URL document, so
+       it cannot inherit the app stylesheet — keep the two in step by hand. */
+    ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+    ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+    ::-webkit-scrollbar-button { display: none; }
+    ::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.12); border: 3px solid transparent;
+      background-clip: content-box; border-radius: 999px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
+    ::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.22); }
     .drag-bar { height: 34px; display: flex; align-items: center; gap: 10px;
       padding: 0 12px 0 78px; box-sizing: border-box; background: ${DARK_WINDOW_PALETTE.panel};
       border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline}; -webkit-app-region: drag; }

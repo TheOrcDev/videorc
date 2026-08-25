@@ -151,6 +151,10 @@ pub fn choose_camera_format(
         .iter()
         .filter(|format| format_supports_fps(format, target_fps))
         .collect::<Vec<_>>();
+    // Resolution first among the fps-capable formats: a format that covers the
+    // requested pixels keeps the image native, while a smaller one is upscaled
+    // for the rest of the session. The nearest covering format wins so a 4K ask
+    // does not grab an 8K sensor mode it does not need.
     let selected = fps_capable
         .iter()
         .copied()
@@ -207,8 +211,18 @@ pub fn normalize_camera_formats(mut formats: Vec<CameraFormatSummary>) -> Vec<Ca
     formats
 }
 
+/// Capture devices advertise the fractional NTSC rates (29.97, 59.94) that
+/// broadcast video actually uses, while sessions are configured in whole
+/// numbers. Without a tolerance an Elgato Cam Link 4K — whose 2160p format
+/// tops out at 29.97 — fails a 30 fps request by 0.03, is dropped from the
+/// fps-capable set, and loses to 1080p60: the camera then captures 1080p and
+/// the 4K session upscales it, with only a "closest format" warning to show
+/// for it. One frame of slack costs nothing and matches the renderer's own
+/// FPS_TOLERANCE in camera-format-shortfall.ts.
+const FPS_TOLERANCE: f64 = 1.0;
+
 fn format_supports_fps(format: &CameraFormatSummary, target_fps: f64) -> bool {
-    format.min_fps <= target_fps && format.max_fps >= target_fps
+    format.min_fps <= target_fps + FPS_TOLERANCE && format.max_fps >= target_fps - FPS_TOLERANCE
 }
 
 fn camera_format_pixels(format: &CameraFormatSummary) -> u64 {
@@ -860,6 +874,100 @@ mod tests {
         assert_eq!(choice.format.width, 3840);
         assert_eq!(choice.format.height, 2160);
         assert!(choice.fallback_reason.unwrap().contains("1-30 fps"));
+    }
+
+    /// The owner's Elgato Cam Link 4K, as macOS enumerates it: the 2160p mode
+    /// runs at the fractional NTSC rate, the 1080p modes go faster.
+    fn cam_link_4k_formats() -> Vec<CameraFormatSummary> {
+        vec![
+            CameraFormatSummary {
+                width: 3840,
+                height: 2160,
+                min_fps: 29.97,
+                max_fps: 29.97,
+            },
+            CameraFormatSummary {
+                width: 1920,
+                height: 1080,
+                min_fps: 59.94,
+                max_fps: 59.94,
+            },
+            CameraFormatSummary {
+                width: 1920,
+                height: 1080,
+                min_fps: 29.97,
+                max_fps: 29.97,
+            },
+            CameraFormatSummary {
+                width: 1280,
+                height: 720,
+                min_fps: 59.94,
+                max_fps: 59.94,
+            },
+        ]
+    }
+
+    #[test]
+    fn captures_4k_natively_when_the_camera_runs_at_the_fractional_ntsc_rate() {
+        // 29.97 is not 30, and demanding an exact match made a 4K30 session
+        // capture 1080p60 and upscale it — the camera's own 4K mode was
+        // discarded for being 0.03 fps short.
+        let choice = choose_camera_format(&cam_link_4k_formats(), 3840, 2160, 30).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (3840, 2160));
+        assert!(
+            choice.fallback_reason.is_none(),
+            "a native-resolution capture at the device's own rate is not a fallback: {:?}",
+            choice.fallback_reason
+        );
+    }
+
+    #[test]
+    fn still_reports_a_shortfall_when_the_camera_truly_cannot_reach_the_request() {
+        // 60 fps at 4K is genuinely beyond this device, so the warning the
+        // owner sees in that case is honest and must survive.
+        let choice = choose_camera_format(&cam_link_4k_formats(), 3840, 2160, 60).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (1920, 1080));
+        assert!(choice.fallback_reason.is_some());
+    }
+
+    #[test]
+    fn prefers_covering_resolution_over_a_faster_smaller_format() {
+        // Both satisfy 30 fps; only one keeps the image native for a 4K canvas.
+        let formats = vec![
+            CameraFormatSummary {
+                width: 1920,
+                height: 1080,
+                min_fps: 1.0,
+                max_fps: 120.0,
+            },
+            CameraFormatSummary {
+                width: 3840,
+                height: 2160,
+                min_fps: 1.0,
+                max_fps: 30.0,
+            },
+        ];
+
+        let choice = choose_camera_format(&formats, 3840, 2160, 30).unwrap();
+
+        assert_eq!((choice.format.width, choice.format.height), (3840, 2160));
+    }
+
+    #[test]
+    fn fps_tolerance_does_not_accept_a_format_that_is_a_whole_tier_short() {
+        // Tolerance is one frame, not a licence to call 30 fps "close to 60".
+        let formats = vec![CameraFormatSummary {
+            width: 1920,
+            height: 1080,
+            min_fps: 1.0,
+            max_fps: 30.0,
+        }];
+
+        let choice = choose_camera_format(&formats, 1920, 1080, 60).unwrap();
+
+        assert!(choice.fallback_reason.is_some());
     }
 
     #[test]

@@ -93,8 +93,11 @@ export function SessionPanel({
           onNavigate={() => openStudioPanel('recording')}
         />
         {/* Presence W3: while a session runs, whether the co-host is reading
-            chat is a session fact — knowable without the Comments window. */}
-        {active ? <CohostSessionRow /> : null}
+            chat is a session fact — knowable without the Comments window.
+            Streaming only: the co-host reads LIVE chat, so a record-only
+            session has no chat for it to read and the row would be an idle
+            status for a feature that is not part of what the user started. */}
+        {active && captureConfig.streamEnabled ? <CohostSessionRow /> : null}
       </div>
 
       <div className="flex flex-col gap-2 border-t border-border pt-4">

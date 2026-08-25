@@ -13,8 +13,8 @@ const settingsTabBody = settingsSource.slice(
   settingsSource.indexOf('function AboutAndUpdates')
 )
 
-/** Section titles per column of the upper (ConfigGrid) region, in render order. */
-function upperRegionColumns(): string[][] {
+/** Section titles per column of the single ConfigGrid, in render order. */
+function settingsColumns(): string[][] {
   const region = settingsTabBody.slice(
     settingsTabBody.indexOf('<ConfigGrid>'),
     settingsTabBody.indexOf('</ConfigGrid>')
@@ -39,10 +39,20 @@ describe('Settings layout', () => {
     expect(configGrid).toContain("cn('grid items-start gap-5 lg:grid-cols-2', className)")
   })
 
-  it('splits the upper region into two stacked, content-height columns', () => {
-    expect(upperRegionColumns()).toEqual([
-      ['Recording & storage', 'System access'],
-      ['Co-host', 'Global shortcuts', 'Remote control']
+  it('lays every card out in ONE grid, so no column can wait on another', () => {
+    // Two stacked grids left a void: a grid row is as tall as its tallest
+    // column, and the second grid could not start until the first ended, so
+    // whenever the (tall) co-host column outgrew the left one, the left column
+    // stopped early and the gap stretched to the next grid. One grid with two
+    // independent stacks cannot reproduce that.
+    const grids = settingsTabBody.match(/<ConfigGrid>/g) ?? []
+    expect(grids).toHaveLength(1)
+  })
+
+  it('splits the cards into two stacked, content-height columns', () => {
+    expect(settingsColumns()).toEqual([
+      ['Recording & storage', 'System access', 'Appearance & behavior', 'Import', 'Support'],
+      ['Co-host', 'Global shortcuts', 'Remote control', 'Shortcuts']
     ])
   })
 

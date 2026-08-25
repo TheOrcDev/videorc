@@ -152,13 +152,13 @@ export function SettingsTab({
 
   return (
     <div className="flex flex-col gap-5">
-      {/* B4 (live feedback batch 3): two content-height columns, NOT a stretch
-        grid — Remote control (header-only when off) used to inflate to the tall
-        Co-host card's row height. Left carries the two long-form cards, right
-        stacks the three shorter ones, so the columns land within a card of each
-        other and every card is exactly as tall as its own content. Below `lg`
-        the columns collapse and the sections read in priority order: storage,
-        permissions, co-host, shortcuts, remote. */}
+      {/* ONE grid, two continuous columns (was two stacked grids). A grid row is
+        as tall as its tallest column and the second grid could not start until the
+        first ended, so whenever the right column outgrew the left — the co-host
+        card is tall — the left column stopped early and a void stretched down to
+        the next grid. Two independent stacks cannot do that: each card sits at its
+        own content height with a uniform gap, and neither column waits for the
+        other. Below `lg` they collapse and read in priority order. */}
       <ConfigGrid>
         <div className="flex flex-col gap-5">
           <PanelSection
@@ -411,6 +411,94 @@ export function SettingsTab({
               </p>
             </div>
           </PanelSection>
+          <PanelSection
+            description="How Videorc looks and behaves on this device."
+            icon={ThemeIcon}
+            title="Appearance & behavior"
+          >
+            <FieldGroup>
+              <Field>
+                <FieldLabel>Theme</FieldLabel>
+                <ToggleGroup
+                  type="single"
+                  value={theme ?? 'system'}
+                  variant="outline"
+                  onValueChange={(value) => value && setTheme(value)}
+                >
+                  <ToggleGroupItem value="light">Light</ToggleGroupItem>
+                  <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
+                  <ToggleGroupItem value="system">System</ToggleGroupItem>
+                </ToggleGroup>
+              </Field>
+              {runtimeInfo?.platform === 'win32' ? (
+                <Field>
+                  <div className="flex items-center justify-between gap-3">
+                    <FieldLabel>Graphics acceleration</FieldLabel>
+                    <StatusBadge
+                      tone={runtimeInfo.hardwareAccelerationDisabled ? 'warn' : 'good'}
+                      value={gpuRenderingLabel(runtimeInfo)}
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {graphicsAccelerationDescription(runtimeInfo)}
+                  </p>
+                  {runtimeInfo.hardwareAccelerationDisabled &&
+                  runtimeInfo.gpuFallback.source !== 'env' ? (
+                    <Button
+                      className="w-fit"
+                      disabled={runtimeInfo.gpuFallback.retryScheduled}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void scheduleHardwareAccelerationRetry()}
+                    >
+                      <RefreshIcon data-icon="inline-start" />
+                      {runtimeInfo.gpuFallback.retryScheduled
+                        ? 'Retry scheduled'
+                        : 'Retry on next launch'}
+                    </Button>
+                  ) : null}
+                </Field>
+              ) : null}
+            </FieldGroup>
+          </PanelSection>
+
+          <PanelSection
+            description="Coming from OBS Studio? Bring your scenes and settings across."
+            icon={DownloadIcon}
+            title="Import"
+          >
+            {/* O4 (OBS import plan): the wizard previews the truthful
+                imported/approximated/skipped report BEFORE anything applies. */}
+            <div>
+              <Button size="sm" variant="outline" onClick={() => setObsImportOpen(true)}>
+                <DownloadIcon data-icon="inline-start" />
+                Import from OBS…
+              </Button>
+            </div>
+            <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
+          </PanelSection>
+
+          <PanelSection description="Get help or report a problem." icon={BugIcon} title="Support">
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  disabled={supportBundleExportPending}
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void exportSupportBundle()}
+                >
+                  <BugIcon data-icon="inline-start" />
+                  {supportBundleExportPending ? 'Exporting\u2026' : 'Export support bundle'}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Reporting a problem? Export a support bundle (redacted logs + diagnostics) to share
+                with us.
+              </p>
+            </div>
+          </PanelSection>
+
+          <AboutAndUpdates onShowWhatsNew={onShowWhatsNew} />
         </div>
 
         <div className="flex flex-col gap-5">
@@ -517,129 +605,35 @@ export function SettingsTab({
               <p className="text-xs text-muted-foreground">{REMOTE_CONTROL_OFF_HINT}</p>
             )}
           </PanelSection>
-        </div>
-      </ConfigGrid>
-
-      {/* Lower region: the four short cards stack in one column beside the tall
-        Shortcuts card, so the columns read as balanced. */}
-      <ConfigGrid>
-        <div className="flex flex-col gap-5">
           <PanelSection
-            description="How Videorc looks and behaves on this device."
-            icon={ThemeIcon}
-            title="Appearance & behavior"
+            description="Every keyboard shortcut in Videorc."
+            icon={KeyboardIcon}
+            title="Shortcuts"
           >
-            <FieldGroup>
-              <Field>
-                <FieldLabel>Theme</FieldLabel>
-                <ToggleGroup
-                  type="single"
-                  value={theme ?? 'system'}
-                  variant="outline"
-                  onValueChange={(value) => value && setTheme(value)}
-                >
-                  <ToggleGroupItem value="light">Light</ToggleGroupItem>
-                  <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
-                  <ToggleGroupItem value="system">System</ToggleGroupItem>
-                </ToggleGroup>
-              </Field>
-              {runtimeInfo?.platform === 'win32' ? (
-                <Field>
-                  <div className="flex items-center justify-between gap-3">
-                    <FieldLabel>Graphics acceleration</FieldLabel>
-                    <StatusBadge
-                      tone={runtimeInfo.hardwareAccelerationDisabled ? 'warn' : 'good'}
-                      value={gpuRenderingLabel(runtimeInfo)}
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {graphicsAccelerationDescription(runtimeInfo)}
-                  </p>
-                  {runtimeInfo.hardwareAccelerationDisabled &&
-                  runtimeInfo.gpuFallback.source !== 'env' ? (
-                    <Button
-                      className="w-fit"
-                      disabled={runtimeInfo.gpuFallback.retryScheduled}
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void scheduleHardwareAccelerationRetry()}
+            <div className="flex flex-col gap-3">
+              {[...shortcutsByGroup().entries()].map(([group, entries]) => (
+                <div key={group} className="flex flex-col gap-1">
+                  <span className="text-[12.5px] leading-none font-medium text-subtle">
+                    {group}
+                  </span>
+                  {entries.map((entry) => (
+                    <div
+                      key={entry.id}
+                      className="flex items-center gap-3 rounded-row px-2.5 py-1.5 text-sm"
                     >
-                      <RefreshIcon data-icon="inline-start" />
-                      {runtimeInfo.gpuFallback.retryScheduled
-                        ? 'Retry scheduled'
-                        : 'Retry on next launch'}
-                    </Button>
-                  ) : null}
-                </Field>
-              ) : null}
-            </FieldGroup>
-          </PanelSection>
-
-          <PanelSection
-            description="Coming from OBS Studio? Bring your scenes and settings across."
-            icon={DownloadIcon}
-            title="Import"
-          >
-            {/* O4 (OBS import plan): the wizard previews the truthful
-                imported/approximated/skipped report BEFORE anything applies. */}
-            <div>
-              <Button size="sm" variant="outline" onClick={() => setObsImportOpen(true)}>
-                <DownloadIcon data-icon="inline-start" />
-                Import from OBS…
-              </Button>
-            </div>
-            <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
-          </PanelSection>
-
-          <PanelSection description="Get help or report a problem." icon={BugIcon} title="Support">
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={supportBundleExportPending}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void exportSupportBundle()}
-                >
-                  <BugIcon data-icon="inline-start" />
-                  {supportBundleExportPending ? 'Exporting\u2026' : 'Export support bundle'}
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Reporting a problem? Export a support bundle (redacted logs + diagnostics) to share
-                with us.
-              </p>
+                      <span className="flex-1 truncate text-muted-foreground">{entry.label}</span>
+                      <KbdGroup>
+                        {displayKeyGlyphs(entry.keys, runtimeInfo?.platform).map((key, index) => (
+                          <Kbd key={`${entry.id}-${index}`}>{key}</Kbd>
+                        ))}
+                      </KbdGroup>
+                    </div>
+                  ))}
+                </div>
+              ))}
             </div>
           </PanelSection>
-
-          <AboutAndUpdates onShowWhatsNew={onShowWhatsNew} />
         </div>
-
-        <PanelSection
-          description="Every keyboard shortcut in Videorc."
-          icon={KeyboardIcon}
-          title="Shortcuts"
-        >
-          <div className="flex flex-col gap-3">
-            {[...shortcutsByGroup().entries()].map(([group, entries]) => (
-              <div key={group} className="flex flex-col gap-1">
-                <span className="text-[12.5px] leading-none font-medium text-subtle">{group}</span>
-                {entries.map((entry) => (
-                  <div
-                    key={entry.id}
-                    className="flex items-center gap-3 rounded-row px-2.5 py-1.5 text-sm"
-                  >
-                    <span className="flex-1 truncate text-muted-foreground">{entry.label}</span>
-                    <KbdGroup>
-                      {displayKeyGlyphs(entry.keys, runtimeInfo?.platform).map((key, index) => (
-                        <Kbd key={`${entry.id}-${index}`}>{key}</Kbd>
-                      ))}
-                    </KbdGroup>
-                  </div>
-                ))}
-              </div>
-            ))}
-          </div>
-        </PanelSection>
       </ConfigGrid>
     </div>
   )
