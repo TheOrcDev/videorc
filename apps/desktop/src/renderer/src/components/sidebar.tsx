@@ -6,7 +6,9 @@ import { AccountMenu } from '@/components/account-menu'
 import { type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
+import { useModifierHeld } from '@/hooks/use-modifier-held'
 import { displayKeyGlyph } from '@/lib/platform'
+import { shortcutChipProps } from '@/lib/shortcut-overlay'
 import { useUpdater } from '@/hooks/use-updater'
 import { updateChip } from '@/lib/update-ui'
 import {
@@ -26,6 +28,7 @@ function NavRow({
   triggerId,
   shortcutDigit,
   modKey,
+  shortcutVisible,
   onClick
 }: {
   icon: AppIcon
@@ -34,6 +37,7 @@ function NavRow({
   triggerId: string
   shortcutDigit?: string
   modKey: string
+  shortcutVisible: boolean
   onClick: () => void
 }): ReactElement {
   return (
@@ -56,7 +60,11 @@ function NavRow({
       />
       <span className="flex-1 truncate text-left">{label}</span>
       {shortcutDigit ? (
-        <Kbd>
+        // Mounted whether or not it shows: reserving the width stops every
+        // row from reflowing the instant ⌘ goes down. `aria-keyshortcuts` on
+        // the button already tells assistive tech about the shortcut, so the
+        // hidden chip is decoration and stays out of the accessibility tree.
+        <Kbd {...shortcutChipProps(shortcutVisible)}>
           {modKey}
           {shortcutDigit}
         </Kbd>
@@ -150,6 +158,10 @@ export function Sidebar({
   const tabsIn = (group: string): typeof WORKSPACE_TABS =>
     WORKSPACE_TABS.filter((tab) => tab.group === group)
   const modKey = displayKeyGlyph('⌘', platform)
+  // Chips reveal while the command modifier is held — the shortcut layer
+  // surfaces exactly when the user reaches for it (videorc-design keeps the
+  // app keyboard-first; this keeps it quiet too).
+  const shortcutVisible = useModifierHeld(platform)
 
   return (
     <aside className="-mt-9 flex w-56 shrink-0 flex-col border-r bg-sidebar pt-9 text-sidebar-foreground backdrop-blur-2xl">
@@ -186,7 +198,7 @@ export function Sidebar({
         >
           <SearchIcon className="size-4 shrink-0" />
           <span className="flex-1 text-left">Search</span>
-          <KbdGroup>
+          <KbdGroup {...shortcutChipProps(shortcutVisible)}>
             <Kbd>{modKey}</Kbd>
             <Kbd>K</Kbd>
           </KbdGroup>
@@ -202,6 +214,7 @@ export function Sidebar({
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
               modKey={modKey}
+              shortcutVisible={shortcutVisible}
               onClick={() => onSelect(tab.id)}
             />
           ))}
@@ -218,6 +231,7 @@ export function Sidebar({
               triggerId={panel.legacyTabId}
               shortcutDigit={shortcutDigitFor(panel.id)}
               modKey={modKey}
+              shortcutVisible={shortcutVisible}
               onClick={() => onSelectStudioPanel(panel.id)}
             />
           ))}
@@ -234,6 +248,7 @@ export function Sidebar({
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
               modKey={modKey}
+              shortcutVisible={shortcutVisible}
               onClick={() => onSelect(tab.id)}
             />
           ))}
@@ -255,6 +270,7 @@ export function Sidebar({
                 triggerId={tab.id}
                 shortcutDigit={shortcutDigitFor(tab.id)}
                 modKey={modKey}
+                shortcutVisible={shortcutVisible}
                 onClick={() => onSelect(tab.id)}
               />
             ))}
