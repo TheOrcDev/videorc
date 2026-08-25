@@ -1,11 +1,8 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
-import { STORAGE_KEYS, defaultSettings, loadJson } from './capture'
 import {
   audioMixerMonitorLabel,
-  audioMixerMonitorWhenIdle,
   micVisualAnalyserEnabled,
-  withAudioMixerMonitorWhenIdle,
   type MicVisualGateInput
 } from './mic-visual-gate'
 
@@ -14,22 +11,18 @@ const ON_SCREEN: MicVisualGateInput = {
   documentVisible: true,
   microphoneSelected: true,
   muted: false,
-  sessionActive: false,
-  monitorWhenIdle: false
+  sessionActive: false
 }
 
 describe('micVisualAnalyserEnabled', () => {
-  it('keeps the microphone closed in an idle Studio with monitoring off', () => {
-    // The owner's complaint: bars reacting while not recording. Default OFF.
-    expect(micVisualAnalyserEnabled(ON_SCREEN)).toBe(false)
+  it('meters an idle mixer, because that is when people check the microphone', () => {
+    // This used to be false until a session started or a toggle was flipped,
+    // so the bars sat at the floor and looked identical to a dead microphone.
+    expect(micVisualAnalyserEnabled(ON_SCREEN)).toBe(true)
   })
 
-  it('arms the analyser for the whole session without touching the toggle', () => {
+  it('meters a running session too', () => {
     expect(micVisualAnalyserEnabled({ ...ON_SCREEN, sessionActive: true })).toBe(true)
-  })
-
-  it('opens the analyser while idle only when the user asked to monitor input', () => {
-    expect(micVisualAnalyserEnabled({ ...ON_SCREEN, monitorWhenIdle: true })).toBe(true)
   })
 
   it.each<[string, Partial<MicVisualGateInput>]>([
@@ -37,9 +30,12 @@ describe('micVisualAnalyserEnabled', () => {
     ['the document is hidden', { documentVisible: false }],
     ['no microphone is selected', { microphoneSelected: false }],
     ['the microphone is muted', { muted: true }]
-  ])('stays closed when %s even if armed', (_label, overrides) => {
-    const armed = { ...ON_SCREEN, sessionActive: true, monitorWhenIdle: true }
-    expect(micVisualAnalyserEnabled({ ...armed, ...overrides })).toBe(false)
+  ])('stays closed when %s, session or not', (_label, overrides) => {
+    // The microphone is genuinely open while the meter runs, so every one of
+    // these must still close it — this is what keeps the OS indicator honest.
+    for (const sessionActive of [false, true]) {
+      expect(micVisualAnalyserEnabled({ ...ON_SCREEN, sessionActive, ...overrides })).toBe(false)
+    }
   })
 })
 
@@ -48,7 +44,7 @@ describe('audioMixerMonitorLabel', () => {
     expect(audioMixerMonitorLabel({ sessionActive: true, signalLive: true })).toBe('Live')
   })
 
-  it('says Monitoring for idle input monitoring that is actually delivering', () => {
+  it('says Monitoring for an idle meter that is actually delivering', () => {
     expect(audioMixerMonitorLabel({ sessionActive: false, signalLive: true })).toBe('Monitoring')
   })
 
@@ -56,39 +52,5 @@ describe('audioMixerMonitorLabel', () => {
     expect(audioMixerMonitorLabel({ sessionActive: false, signalLive: false })).toBe('Idle')
     // Muted mid-session: the path is not live, and the label must not claim it.
     expect(audioMixerMonitorLabel({ sessionActive: true, signalLive: false })).toBe('Idle')
-  })
-})
-
-describe('audioMixer.monitorWhenIdle persistence', () => {
-  afterEach(() => {
-    vi.unstubAllGlobals()
-  })
-
-  it('defaults to off, including for settings persisted before the key existed', () => {
-    expect(audioMixerMonitorWhenIdle(defaultSettings)).toBe(false)
-    expect(audioMixerMonitorWhenIdle(undefined)).toBe(false)
-    expect(audioMixerMonitorWhenIdle({ audioMixer: {} })).toBe(false)
-    vi.stubGlobal('localStorage', {
-      getItem: () => JSON.stringify({ outputDirectory: '/tmp/out', keepOriginalRecording: true }),
-      setItem: vi.fn(),
-      removeItem: vi.fn()
-    })
-    expect(audioMixerMonitorWhenIdle(loadJson(STORAGE_KEYS.settings, defaultSettings))).toBe(false)
-  })
-
-  it('round-trips the toggle through the settings storage path', () => {
-    const updated = withAudioMixerMonitorWhenIdle(defaultSettings, true)
-    expect(updated).not.toBe(defaultSettings)
-    expect(defaultSettings.audioMixer?.monitorWhenIdle).toBe(false)
-
-    const stored = new Map<string, string>([[STORAGE_KEYS.settings, JSON.stringify(updated)]])
-    vi.stubGlobal('localStorage', {
-      getItem: (key: string) => stored.get(key) ?? null,
-      setItem: (key: string, value: string) => stored.set(key, value),
-      removeItem: (key: string) => stored.delete(key)
-    })
-    const reloaded = loadJson(STORAGE_KEYS.settings, defaultSettings)
-    expect(audioMixerMonitorWhenIdle(reloaded)).toBe(true)
-    expect(audioMixerMonitorWhenIdle(withAudioMixerMonitorWhenIdle(reloaded, false))).toBe(false)
   })
 })

@@ -39,6 +39,15 @@
 :root {
   --radius: 0.625rem;
 
+  /* Scrollbars carry no track at all — only a thumb, and barely that. Glass
+     here means what it means everywhere else in this app: translucency plus a
+     hairline, never a real backdrop blur (unreachable in this Electron setup;
+     see the design language's wallpaper-underlay note). Light mode needs a
+     darker thumb to register on porcelain. */
+  --scrollbar-thumb: oklch(0 0 0 / 15%);
+  --scrollbar-thumb-hover: oklch(0 0 0 / 28%);
+  --scrollbar-thumb-ring: oklch(0 0 0 / 6%);
+
   /* White glass — the porcelain twin of the black-glass column below.
      White-over-bright reads solid at higher alphas — light mode needs a
      thinner coat than dark to show at all. */
@@ -125,6 +134,9 @@
 }
 
 .dark {
+  --scrollbar-thumb: oklch(1 0 0 / 12%);
+  --scrollbar-thumb-hover: oklch(1 0 0 / 22%);
+  --scrollbar-thumb-ring: oklch(1 0 0 / 8%);
   /* Black glass — the reference column, tuned to the logo's glossy black orb:
      a true-black base (L 0.13 — not #000, which kills the glass depth), chrome
      text, polished-edge hairlines one step brighter than the classic 8%.
@@ -330,6 +342,35 @@
   :focus-visible {
     @apply outline-2 outline-offset-2 outline-ring/70;
   }
+  /* No track, no arrows, no corner — just a thumb floating over the content.
+     The transparent border plus background-clip insets the painted thumb to
+     ~4px inside a 10px hit area: barely visible to look at, still easy to
+     grab. Applies to native overflow scrollers everywhere; the Radix
+     ScrollArea mirrors the same tokens in its own component. */
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+    background: transparent;
+  }
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-track-piece,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+  ::-webkit-scrollbar-button {
+    display: none;
+  }
+  ::-webkit-scrollbar-thumb {
+    background-color: var(--scrollbar-thumb);
+    border: 3px solid transparent;
+    background-clip: content-box;
+    border-radius: 999px;
+    box-shadow: inset 0 0 0 1px var(--scrollbar-thumb-ring);
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background-color: var(--scrollbar-thumb-hover);
+  }
+
   /* Honour reduced-motion: collapse transitions/animations, keep behaviour. */
   @media (prefers-reduced-motion: reduce) {
     *,

@@ -4260,11 +4260,11 @@ describe('real StudioProvider lifecycle', () => {
     expect(await api.getPendingOAuthCallbacks()).toEqual(pendingProviderCallbacks)
   })
 
-  it('arms the visual mic meter for a session and never opens the mic while idle', async () => {
-    // Live feedback batch 3, B2: the owner saw the mixer react while not
-    // recording. With Monitor input at its default (off), an idle Studio must
-    // not touch getUserMedia; starting a session arms the analyser by itself;
-    // stopping releases it again.
+  it('meters the mic on a real idle Studio and keeps it open across a session', async () => {
+    // The meter is armed by the mixer being on screen, not by a session: the
+    // question it answers ("is my microphone working?") is asked before
+    // recording starts. B2 previously kept it closed while idle; that made an
+    // idle meter indistinguishable from a dead microphone.
     const backend = new StudioBackend()
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -4326,16 +4326,17 @@ describe('real StudioProvider lifecycle', () => {
       await new Promise((resolve) => setTimeout(resolve, 50))
     })
     expect(latest()?.core.isSessionActive).toBe(false)
-    expect(latest()?.core.settings.audioMixer?.monitorWhenIdle).toBe(false)
-    expect(audio.getUserMedia).not.toHaveBeenCalled()
-    expect(audio.contexts).toHaveLength(0)
-    expect(micLifecycle.at(-1)).toBe(false)
+    // Idle, with no toggle flipped: the analyser is already running.
+    await waitForObservation(() => micLifecycle.at(-1) === true)
+    expect(audio.getUserMedia).toHaveBeenCalledTimes(1)
+    expect(audio.contexts).toHaveLength(1)
 
     await act(async () => {
       await latest()?.core.startSession()
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'recording')
-    await waitForObservation(() => micLifecycle.at(-1) === true)
+    expect(micLifecycle.at(-1)).toBe(true)
+    // Starting a session must REUSE the open stream, not open a second one.
     expect(audio.getUserMedia).toHaveBeenCalledTimes(1)
     expect(audio.getUserMedia.mock.calls[0]?.[0]).toMatchObject({
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
@@ -4347,9 +4348,10 @@ describe('real StudioProvider lifecycle', () => {
       await latest()?.core.stopSession()
     })
     await waitForObservation(() => latest()?.recording.recording.state === 'idle')
-    await waitForObservation(() => micLifecycle.at(-1) === false)
-    expect(audio.contexts[0]?.close).toHaveBeenCalledTimes(1)
-    expect(audio.stopTrack).toHaveBeenCalledTimes(1)
+    // Stopping the session leaves the meter running: the mixer is still on
+    // screen, and the user is still entitled to see their level.
+    expect(micLifecycle.at(-1)).toBe(true)
+    expect(audio.contexts[0]?.close).not.toHaveBeenCalled()
     expect(audio.getUserMedia).toHaveBeenCalledTimes(1)
   }, 15_000)
 })

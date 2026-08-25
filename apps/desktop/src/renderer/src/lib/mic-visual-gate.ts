@@ -4,8 +4,6 @@
 // whenever Studio/Sources was on screen. Now: a running session always arms
 // it; an idle Studio only with the explicit "Monitor input" setting.
 
-import type { SettingsState } from './capture'
-
 export type MicVisualGateInput = Readonly<{
   /** Studio or Sources tab is the active workspace tab. */
   workspaceVisible: boolean
@@ -17,30 +15,20 @@ export type MicVisualGateInput = Readonly<{
   muted: boolean
   /** Recording/streaming active OR a start/stop request in flight. */
   sessionActive: boolean
-  /** Persisted settings.audioMixer.monitorWhenIdle. */
-  monitorWhenIdle: boolean
 }>
 
-/** Persisted preference with its default (OFF) applied. */
-export function audioMixerMonitorWhenIdle(
-  settings: Pick<SettingsState, 'audioMixer'> | undefined
-): boolean {
-  return settings?.audioMixer?.monitorWhenIdle === true
-}
-
-/** Settings updater for the Monitor input toggle (keeps sibling mixer prefs). */
-export function withAudioMixerMonitorWhenIdle<T extends Pick<SettingsState, 'audioMixer'>>(
-  settings: T,
-  monitorWhenIdle: boolean
-): T {
-  return { ...settings, audioMixer: { ...settings.audioMixer, monitorWhenIdle } }
-}
-
 /**
- * Analyser demand: (session active OR monitor-when-idle) AND the visual is
- * actually on screen for an unmuted, selected microphone. Starting a session
- * arms the meter without touching the toggle; stopping it disarms unless the
- * user opted into idle monitoring.
+ * Analyser demand: the mixer is on screen, the document is visible, and a
+ * microphone is selected and unmuted. Session or not.
+ *
+ * This used to require a running session or the "Monitor input" toggle, so an
+ * idle Studio showed bars pinned at the floor — indistinguishable from a dead
+ * microphone, which is exactly what people check before they hit record. The
+ * meter is now live whenever it is being looked at.
+ *
+ * The cost is deliberate and visible: macOS shows its microphone indicator
+ * while the mixer is open, because the microphone genuinely is. Leaving the
+ * page or hiding the window releases it (the visibility inputs above).
  */
 export function micVisualAnalyserEnabled(input: MicVisualGateInput): boolean {
   if (!input.workspaceVisible || !input.documentVisible) {
@@ -49,7 +37,7 @@ export function micVisualAnalyserEnabled(input: MicVisualGateInput): boolean {
   if (!input.microphoneSelected || input.muted) {
     return false
   }
-  return input.sessionActive || input.monitorWhenIdle
+  return true
 }
 
 export type AudioMixerMonitorLabel = 'Live' | 'Monitoring' | 'Idle'
