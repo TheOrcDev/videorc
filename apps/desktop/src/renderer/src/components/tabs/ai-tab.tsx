@@ -1,17 +1,17 @@
 import {
-  Brain,
-  CopySimple,
-  Crosshair,
-  DownloadSimple,
-  Info,
-  Lightning,
-  Scissors,
-  ShieldCheck,
-  Sparkle,
-  Warning,
-  Waveform,
-  type Icon
-} from '@phosphor-icons/react'
+  type AppIcon as Icon,
+  BrainIcon,
+  ClipIcon,
+  CopyIcon,
+  CrosshairIcon,
+  DownloadIcon,
+  FastIcon,
+  InfoIcon,
+  SparkleIcon,
+  VerifiedIcon,
+  WarningIcon,
+  WaveformIcon
+} from '@/components/icons'
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import { toast } from 'sonner'
 
@@ -120,7 +120,7 @@ export function AiTab({
         <AiHeader />
         <Empty className="rounded-panel border py-10">
           <EmptyMedia variant="icon">
-            <Brain weight="duotone" />
+            <BrainIcon weight="duotone" />
           </EmptyMedia>
           <EmptyTitle>Record something in Studio first</EmptyTitle>
           <EmptyDescription>
@@ -148,7 +148,7 @@ export function AiTab({
         <div className="flex flex-col gap-4">
           <PanelSection
             description="Pick a recording, then run or review its AI artifacts."
-            icon={Sparkle}
+            icon={SparkleIcon}
             title="Session"
           >
             {/* D2: rich rows instead of a mystery dropdown — you always see
@@ -209,7 +209,7 @@ export function AiTab({
 
           {/* D3: consent + quota as pipeline step 0 — one state-aware card with
               a single next action, instead of a two-alert wall. */}
-          <PanelSection icon={ShieldCheck} title="Cloud AI — step 0">
+          <PanelSection icon={VerifiedIcon} title="Cloud AI — step 0">
             <div
               className={
                 'flex flex-col gap-2 rounded-row border p-3 ' +
@@ -219,7 +219,7 @@ export function AiTab({
               }
             >
               <div className="flex items-center gap-2">
-                <ShieldCheck
+                <VerifiedIcon
                   className={cloudAi.ready && aiConsent ? 'text-success' : 'text-muted-foreground'}
                   weight="fill"
                 />
@@ -262,7 +262,7 @@ export function AiTab({
           </PanelSection>
         </div>
 
-        <PanelSection icon={Brain} title="Publish & intelligence">
+        <PanelSection icon={BrainIcon} title="Publish & intelligence">
           {selected ? (
             <ArtifactView
               cloudReady={cloudAi.ready}
@@ -354,7 +354,7 @@ export function AiTab({
               }
             }}
           >
-            <Lightning data-icon="inline-start" weight="fill" />
+            <FastIcon data-icon="inline-start" weight="fill" />
             {runAction.label}
           </Button>
           <Button
@@ -362,7 +362,7 @@ export function AiTab({
             variant="outline"
             onClick={() => exportPublishPack(session.id)}
           >
-            <DownloadSimple data-icon="inline-start" />
+            <DownloadIcon data-icon="inline-start" />
             {exportRunning ? 'Exporting…' : 'Export pack'}
           </Button>
         </div>
@@ -372,9 +372,9 @@ export function AiTab({
             variant={runningStatus.tone === 'warning' ? 'warning' : 'default'}
           >
             {runningStatus.tone === 'warning' ? (
-              <Warning weight="fill" />
+              <WarningIcon weight="fill" />
             ) : (
-              <Lightning weight="fill" />
+              <FastIcon weight="fill" />
             )}
             <AlertTitle>{runningStatus.title}</AlertTitle>
             <AlertDescription>{runningStatus.description}</AlertDescription>
@@ -474,7 +474,7 @@ function ArtifactView({
                     type="button"
                     onClick={() => void copyToClipboard(variant, 'Title')}
                   >
-                    <CopySimple className="size-3.5 shrink-0 text-muted-foreground" />
+                    <CopyIcon className="size-3.5 shrink-0 text-muted-foreground" />
                     <span className="min-w-0 flex-1">{variant}</span>
                   </button>
                 ))}
@@ -505,7 +505,7 @@ function ArtifactView({
           ['reason', 'Reason'],
           ['suggestedUse', 'Use']
         ]}
-        icon={Lightning}
+        icon={FastIcon}
         items={highlightItems}
         primaryField="title"
       />
@@ -542,7 +542,7 @@ function ArtifactView({
             extract is the run's tangible output — show it, name it, reveal it. */}
         {audioExtract ? (
           <div className="flex items-center gap-2 rounded-row border border-success/30 bg-success/5 px-3 py-2">
-            <Waveform className="size-4 shrink-0 text-success" weight="duotone" />
+            <WaveformIcon className="size-4 shrink-0 text-success" weight="duotone" />
             <span className="min-w-0 flex-1 truncate text-xs">
               Audio extracted
               {audioExtract.filePath ? (
@@ -641,7 +641,7 @@ function ArtifactView({
                       }
                     }}
                   >
-                    <Lightning data-icon="inline-start" weight="fill" />
+                    <FastIcon data-icon="inline-start" weight="fill" />
                     {running
                       ? 'Running…'
                       : perKind && CARD_OUTPUT_GROUP[step.kind]
@@ -659,7 +659,7 @@ function ArtifactView({
                       variant="outline"
                       onClick={() => void copyToClipboard(action.text(), action.label)}
                     >
-                      <CopySimple data-icon="inline-start" />
+                      <CopyIcon data-icon="inline-start" />
                       {action.label}
                     </Button>
                   ))}
@@ -690,7 +690,7 @@ function ArtifactView({
                           )
                         }
                       >
-                        <Lightning data-icon="inline-start" weight="fill" />
+                        <FastIcon data-icon="inline-start" weight="fill" />
                         {running ? 'Running…' : 'Regenerate'}
                       </Button>
                     </>
@@ -733,7 +733,7 @@ function ArtifactView({
                     ['subject', 'Subject'],
                     ['reason', 'Why']
                   ]}
-                  icon={Crosshair}
+                  icon={CrosshairIcon}
                   items={smartZoomItems}
                   primaryField="action"
                 />
@@ -748,7 +748,7 @@ function ArtifactView({
                         ['suggestion', 'Suggestion'],
                         ['confidence', 'Confidence']
                       ]}
-                      icon={Waveform}
+                      icon={WaveformIcon}
                       items={noiseCleanupItems}
                       primaryField="issue"
                     />
@@ -760,7 +760,7 @@ function ArtifactView({
                         ['reason', 'Reason'],
                         ['editSuggestion', 'Edit']
                       ]}
-                      icon={Scissors}
+                      icon={ClipIcon}
                       items={silenceRemovalItems}
                       primaryField="reason"
                     />
@@ -776,7 +776,7 @@ function ArtifactView({
                     ['explanation', 'Explanation'],
                     ['action', 'Action']
                   ]}
-                  icon={Warning}
+                  icon={WarningIcon}
                   items={healthItems}
                   primaryField="issue"
                 />
@@ -789,7 +789,7 @@ function ArtifactView({
             one-click in the tab. */}
         <div className="flex flex-col gap-2 rounded-panel border border-primary/30 bg-primary/5 p-3">
           <div className="flex items-center gap-2">
-            <DownloadSimple className="text-primary" weight="duotone" />
+            <DownloadIcon className="text-primary" weight="duotone" />
             <span className="flex-1 text-sm font-semibold">Publish pack</span>
           </div>
           <div className="flex flex-wrap gap-x-3 gap-y-1">
@@ -819,7 +819,7 @@ function ArtifactView({
                 )
               }
             >
-              <CopySimple data-icon="inline-start" />
+              <CopyIcon data-icon="inline-start" />
               Copy YouTube description
             </Button>
           </div>
@@ -925,7 +925,7 @@ function SocialPostsSection({
       <div className="flex flex-wrap items-center gap-1.5">
         {xPost ? (
           <Button size="xs" variant="outline" onClick={() => void copyToClipboard(xPost, 'X post')}>
-            <CopySimple data-icon="inline-start" />
+            <CopyIcon data-icon="inline-start" />
             Copy X post
           </Button>
         ) : null}
@@ -935,7 +935,7 @@ function SocialPostsSection({
             variant="outline"
             onClick={() => void copyToClipboard(xThread.join('\n\n'), 'X thread')}
           >
-            <CopySimple data-icon="inline-start" />
+            <CopyIcon data-icon="inline-start" />
             Copy X thread
           </Button>
         ) : null}
@@ -945,13 +945,13 @@ function SocialPostsSection({
             variant="outline"
             onClick={() => void copyToClipboard(twitchTitle, 'Twitch title')}
           >
-            <CopySimple data-icon="inline-start" />
+            <CopyIcon data-icon="inline-start" />
             Copy Twitch title
           </Button>
         ) : null}
         {available ? (
           <Button disabled={running} size="xs" variant="outline" onClick={onGenerate}>
-            <Lightning data-icon="inline-start" weight="fill" />
+            <FastIcon data-icon="inline-start" weight="fill" />
             {running ? 'Running…' : hasContent ? 'Regenerate' : 'Generate posts'}
           </Button>
         ) : null}
@@ -1009,7 +1009,7 @@ function ClipsSection({
   return (
     <div className="flex flex-col gap-2 rounded-panel border p-3">
       <div className="flex items-center gap-2">
-        <Scissors className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+        <ClipIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
         <span className="flex-1 text-sm font-semibold">Clips</span>
         <Button
           disabled={loading}
@@ -1088,7 +1088,7 @@ function ArtifactProblem({ artifact }: { artifact: AiArtifact }): ReactElement {
   if (artifact.status === 'pending-consent') {
     return (
       <Alert>
-        <Info weight="fill" />
+        <InfoIcon weight="fill" />
         <AlertTitle>Audio extracted — cloud AI waiting for consent</AlertTitle>
         <AlertDescription>{message}</AlertDescription>
       </Alert>
@@ -1097,7 +1097,7 @@ function ArtifactProblem({ artifact }: { artifact: AiArtifact }): ReactElement {
 
   return (
     <Alert variant="warning">
-      <Warning weight="fill" />
+      <WarningIcon weight="fill" />
       <AlertTitle>AI artifact failed</AlertTitle>
       <AlertDescription>{message}</AlertDescription>
     </Alert>

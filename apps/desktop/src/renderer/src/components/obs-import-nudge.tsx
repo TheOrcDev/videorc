@@ -1,4 +1,4 @@
-import { DownloadSimple, X } from '@phosphor-icons/react'
+import { CloseIcon, DownloadIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -45,7 +45,7 @@ export function ObsImportNudge(): ReactElement | null {
 
   return (
     <div className="flex items-center gap-2 rounded-row border bg-muted/40 px-3 py-2 text-sm">
-      <DownloadSimple className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+      <DownloadIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
       <span className="min-w-0 flex-1 truncate text-muted-foreground">
         Coming from OBS? Bring your scenes and settings across.
       </span>
@@ -53,7 +53,7 @@ export function ObsImportNudge(): ReactElement | null {
         Import from OBS…
       </Button>
       <Button aria-label="Dismiss OBS import hint" size="xs" variant="ghost" onClick={dismiss}>
-        <X className="size-3.5" />
+        <CloseIcon className="size-3.5" />
       </Button>
       {importOpen ? (
         <Suspense fallback={null}>

@@ -1,4 +1,4 @@
-import { ArrowSquareOut, PushPinSimple, VideoCamera, Warning } from '@phosphor-icons/react'
+import { CameraIcon, ExternalLinkIcon, PinIcon, WarningIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -219,7 +219,7 @@ function DockedPreviewFrame({
           style={{ aspectRatio: slotRatio }}
         >
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
-            <VideoCamera className="size-8 text-muted-foreground" weight="duotone" />
+            <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
             <span className="text-sm font-medium text-[#F4F4F5]">{status.title}</span>
             <span className="text-xs text-[#A1A1AA]">{status.detail}</span>
           </div>
@@ -242,7 +242,7 @@ function DockedPreviewFrame({
           variant="secondary"
           onClick={onPopOut}
         >
-          <ArrowSquareOut className="size-4" />
+          <ExternalLinkIcon className="size-4" />
           Pop out
         </Button>
         <Button size="sm" variant="secondary" onClick={onClose}>
@@ -351,9 +351,9 @@ function DetachedPreviewCard({
       style={{ aspectRatio: previewFootprintRatio(aspect) }}
     >
       {nativePreviewSurfaceEnabled && supervisorStatus.tone !== 'warn' ? (
-        <VideoCamera className="size-8 text-muted-foreground" weight="duotone" />
+        <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
       ) : (
-        <Warning className="size-8 text-warning" weight="duotone" />
+        <WarningIcon className="size-8 text-warning" weight="duotone" />
       )}
       {nativePreviewSurfaceEnabled ? (
         previewWindowOpen ? (
@@ -370,7 +370,7 @@ function DetachedPreviewCard({
                 Focus window
               </Button>
               <Button data-videorc-preview-stick size="sm" variant="outline" onClick={onStick}>
-                <PushPinSimple className="size-4" />
+                <PinIcon className="size-4" />
                 Stick to app
               </Button>
               <Button size="sm" variant="outline" onClick={onClose}>

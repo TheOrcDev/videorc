@@ -1,4 +1,11 @@
-import { GearSix, Pulse, SignIn, SignOut, Sparkle, UserCircle } from '@phosphor-icons/react'
+import {
+  AccountIcon,
+  HealthIcon,
+  SettingsIcon,
+  SignInIcon,
+  SignOutIcon,
+  SparkleIcon
+} from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
 
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
@@ -88,7 +95,7 @@ export function AccountMenu({
               name={displayName}
             />
           ) : (
-            <UserCircle className="size-4 shrink-0 text-muted-foreground" weight="regular" />
+            <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
           )}
           <span className="truncate text-xs font-medium">{displayName}</span>
           {/* Secondary backend status: a small dot only — the label lives in the
@@ -115,31 +122,31 @@ export function AccountMenu({
 
         {signedIn ? (
           <DropdownMenuItem onSelect={openAccount}>
-            <UserCircle />
+            <AccountIcon />
             Account
           </DropdownMenuItem>
         ) : (
           <DropdownMenuItem onSelect={signIn}>
-            <SignIn />
+            <SignInIcon />
             Sign in
           </DropdownMenuItem>
         )}
         <DropdownMenuItem onSelect={() => openVideorcWebLink(VIDEORC_WEB_LINKS.premium)}>
-          <Sparkle />
+          <SparkleIcon />
           View Premium
         </DropdownMenuItem>
 
         <DropdownMenuSeparator />
 
         <DropdownMenuItem onSelect={onOpenHealth}>
-          <Pulse />
+          <HealthIcon />
           Health
           <span className="ml-auto">
             <StatusDot tone={statusTone} label={statusLabel} pulse={live} />
           </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={onOpenSettings}>
-          <GearSix />
+          <SettingsIcon />
           Settings
         </DropdownMenuItem>
 
@@ -151,7 +158,7 @@ export function AccountMenu({
               variant="destructive"
               onSelect={signOut}
             >
-              <SignOut />
+              <SignOutIcon />
               Sign out
             </DropdownMenuItem>
           </>

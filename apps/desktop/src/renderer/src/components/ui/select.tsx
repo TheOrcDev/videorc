@@ -4,8 +4,7 @@ import * as React from 'react'
 import { Select as SelectPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
-import { CaretDownIcon, CheckIcon, CaretUpIcon } from '@phosphor-icons/react'
-
+import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from '@/components/icons'
 function containWheel(event: React.WheelEvent): void {
   event.stopPropagation()
 }
@@ -48,7 +47,7 @@ function SelectTrigger({
     >
       {children}
       <SelectPrimitive.Icon asChild>
-        <CaretDownIcon className="pointer-events-none size-4 text-muted-foreground" />
+        <ChevronDownIcon className="pointer-events-none size-4 text-muted-foreground" />
       </SelectPrimitive.Icon>
     </SelectPrimitive.Trigger>
   )
@@ -156,7 +155,7 @@ function SelectScrollUpButton({
       )}
       {...props}
     >
-      <CaretUpIcon />
+      <ChevronUpIcon />
     </SelectPrimitive.ScrollUpButton>
   )
 }
@@ -174,7 +173,7 @@ function SelectScrollDownButton({
       )}
       {...props}
     >
-      <CaretDownIcon />
+      <ChevronDownIcon />
     </SelectPrimitive.ScrollDownButton>
   )
 }

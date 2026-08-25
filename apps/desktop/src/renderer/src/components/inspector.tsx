@@ -1,4 +1,4 @@
-import { CaretDown, type Icon } from '@phosphor-icons/react'
+import { type AppIcon, ChevronDownIcon } from '@/components/icons'
 import { useState, type ReactElement, type ReactNode } from 'react'
 
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
@@ -17,7 +17,7 @@ export function InspectorSection({
   children,
   className
 }: {
-  icon?: Icon
+  icon?: AppIcon
   title: string
   summary?: ReactNode
   defaultOpen?: boolean
@@ -43,7 +43,7 @@ export function InspectorSection({
         ) : (
           <span className="ml-auto" />
         )}
-        <CaretDown
+        <ChevronDownIcon
           className={cn(
             'size-4 shrink-0 text-muted-foreground transition-transform duration-150',
             open && 'rotate-180'

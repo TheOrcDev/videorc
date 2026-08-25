@@ -1,4 +1,4 @@
-import { ArrowSquareOut, PushPinSimple, WarningCircle } from '@phosphor-icons/react'
+import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
@@ -261,7 +261,7 @@ function StudioPreviewPanel(): ReactElement {
   const healthErrorRow =
     previewHealth.tone === 'error' && previewHealth.detail ? (
       <div className="flex items-center gap-2 rounded-row border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
-        <WarningCircle className="size-4 shrink-0" weight="fill" />
+        <AlertIcon className="size-4 shrink-0" weight="fill" />
         <span className="min-w-0">{previewHealth.detail}</span>
       </div>
     ) : null
@@ -304,7 +304,7 @@ function StudioPreviewPanel(): ReactElement {
               variant="ghost"
               onClick={() => void setPreviewWindowMode('docked')}
             >
-              <PushPinSimple className="size-4" />
+              <PinIcon className="size-4" />
             </Button>
           ) : previewWindow.open ? (
             <Button
@@ -315,7 +315,7 @@ function StudioPreviewPanel(): ReactElement {
               variant="ghost"
               onClick={() => void setPreviewWindowMode('floating')}
             >
-              <ArrowSquareOut className="size-4" />
+              <ExternalLinkIcon className="size-4" />
             </Button>
           ) : (
             <Button
@@ -326,7 +326,7 @@ function StudioPreviewPanel(): ReactElement {
               variant="ghost"
               onClick={() => void openPreviewWindow()}
             >
-              <ArrowSquareOut className="size-4" />
+              <ExternalLinkIcon className="size-4" />
             </Button>
           )}
         </div>

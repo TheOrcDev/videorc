@@ -1,17 +1,17 @@
 import {
-  ArrowCounterClockwise,
-  ArrowSquareOut,
-  ArrowsClockwise,
-  CheckCircle,
-  Eye,
-  ImageSquare,
-  PencilSimple,
-  SlidersHorizontal,
-  Trash,
-  UploadSimple,
-  Warning,
-  X
-} from '@phosphor-icons/react'
+  AdjustIcon,
+  CloseIcon,
+  DeleteIcon,
+  EditIcon,
+  ExternalLinkIcon,
+  ImageIcon,
+  PreviewIcon,
+  ResetIcon,
+  SuccessIcon,
+  SyncIcon,
+  UploadIcon,
+  WarningIcon
+} from '@/components/icons'
 import { useState, type ComponentProps, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -162,11 +162,11 @@ export function AssetsTab(): ReactElement {
 
       <PanelSection
         title="Background presets"
-        icon={ImageSquare}
+        icon={ImageIcon}
         description={`${registry.slots.length} slots`}
         action={
           <Button disabled={importing} size="sm" variant="outline" onClick={() => importInto(null)}>
-            <UploadSimple data-icon="inline-start" />
+            <UploadIcon data-icon="inline-start" />
             Import
           </Button>
         }
@@ -286,18 +286,18 @@ function PresetTile({
         ) : (
           <span className="absolute inset-0 grid place-items-center bg-muted/30">
             {status === 'missing-file' ? (
-              <Warning className="size-6 text-warning" weight="duotone" />
+              <WarningIcon className="size-6 text-warning" weight="duotone" />
             ) : status === 'empty' ? (
-              <UploadSimple className="size-6 text-muted-foreground/40" weight="duotone" />
+              <UploadIcon className="size-6 text-muted-foreground/40" weight="duotone" />
             ) : (
-              <ImageSquare className="size-6 text-muted-foreground/40" weight="duotone" />
+              <ImageIcon className="size-6 text-muted-foreground/40" weight="duotone" />
             )}
           </span>
         )}
       </button>
 
       {active ? (
-        <CheckCircle
+        <SuccessIcon
           weight="fill"
           className="pointer-events-none absolute left-1.5 top-1.5 z-10 size-4 text-success"
         />
@@ -309,18 +309,18 @@ function PresetTile({
             label={`Actions for ${name}`}
             className="bg-background/70 backdrop-blur-sm"
             items={[
-              { id: 'rename', label: 'Rename', icon: PencilSimple, onSelect: onStartRename },
+              { id: 'rename', label: 'Rename', icon: EditIcon, onSelect: onStartRename },
               {
                 id: 'replace',
                 label: 'Replace image…',
-                icon: ArrowsClockwise,
+                icon: SyncIcon,
                 disabled: importing,
                 onSelect: onReplace
               },
               {
                 id: 'reveal',
                 label: 'Reveal in Finder',
-                icon: Eye,
+                icon: PreviewIcon,
                 disabled: asset.kind !== 'imported' || !asset.assetPath,
                 onSelect: () => {
                   void window.videorc?.revealBackgroundAsset?.(asset.id)
@@ -329,10 +329,16 @@ function PresetTile({
               {
                 id: 'reset-style',
                 label: 'Reset style to defaults',
-                icon: ArrowCounterClockwise,
+                icon: ResetIcon,
                 onSelect: () => onResetStyle(asset.id)
               },
-              { id: 'remove', label: 'Remove', icon: Trash, destructive: true, onSelect: onRemove }
+              {
+                id: 'remove',
+                label: 'Remove',
+                icon: DeleteIcon,
+                destructive: true,
+                onSelect: onRemove
+              }
             ]}
           />
         </div>
@@ -395,11 +401,11 @@ function ActiveBackgroundBar({
   return (
     <PanelSection
       title="Active background"
-      icon={ImageSquare}
+      icon={ImageIcon}
       action={
         activeSlot ? (
           <Button size="sm" variant="outline" onClick={onClear}>
-            <X data-icon="inline-start" />
+            <CloseIcon data-icon="inline-start" />
             Remove from scene
           </Button>
         ) : undefined
@@ -415,7 +421,7 @@ function ActiveBackgroundBar({
               onError={() => onMissing(activeSlot.id)}
             />
           ) : (
-            <ImageSquare className="size-5 text-muted-foreground/40" weight="duotone" />
+            <ImageIcon className="size-5 text-muted-foreground/40" weight="duotone" />
           )}
         </div>
         <div className="min-w-0 flex-1 text-sm">
@@ -446,7 +452,7 @@ function ActiveBackgroundBar({
             <Popover>
               <PopoverTrigger asChild>
                 <Button size="sm" variant="outline">
-                  <SlidersHorizontal data-icon="inline-start" />
+                  <AdjustIcon data-icon="inline-start" />
                   Adjust style
                 </Button>
               </PopoverTrigger>
@@ -486,7 +492,7 @@ function ActiveBackgroundBar({
               </PopoverContent>
             </Popover>
             <Button size="sm" variant="outline" onClick={() => void openPreviewWindow()}>
-              <ArrowSquareOut data-icon="inline-start" />
+              <ExternalLinkIcon data-icon="inline-start" />
               Open preview
             </Button>
           </div>

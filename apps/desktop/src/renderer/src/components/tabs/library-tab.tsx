@@ -1,24 +1,24 @@
 import {
-  ArrowCounterClockwise,
-  ArrowsDownUp,
-  Copy,
-  PencilSimple,
-  Trash,
-  UploadSimple,
-  ChatCircle,
-  CheckCircle,
-  CircleNotch,
-  DotsThree,
-  FileVideo,
-  FolderOpen,
-  LockSimple,
-  MagnifyingGlass,
-  Play,
-  Sparkle,
-  VideoCamera,
-  WaveformSlash,
-  Wrench
-} from '@phosphor-icons/react'
+  CameraIcon,
+  ChatIcon,
+  CopyIcon,
+  DeleteIcon,
+  EditIcon,
+  FolderIcon,
+  LockIcon,
+  MoreIcon,
+  PlayIcon,
+  RepairIcon,
+  ResetIcon,
+  SearchIcon,
+  SortIcon,
+  SparkleIcon,
+  SpinnerIcon,
+  SuccessIcon,
+  UploadIcon,
+  VideoFileIcon,
+  WaveformMutedIcon
+} from '@/components/icons'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -246,7 +246,7 @@ export function LibraryTab({
         title="Library"
         action={
           <Button size="sm" onClick={() => setActive('studio')}>
-            <VideoCamera data-icon="inline-start" weight="fill" />
+            <CameraIcon data-icon="inline-start" weight="fill" />
             New Recording
           </Button>
         }
@@ -278,11 +278,11 @@ export function LibraryTab({
           variant="outline"
           onClick={() => setSort((current) => (current === 'newest' ? 'oldest' : 'newest'))}
         >
-          <ArrowsDownUp data-icon="inline-start" />
+          <SortIcon data-icon="inline-start" />
           {sort === 'newest' ? 'Newest' : 'Oldest'}
         </Button>
         <div className="relative min-w-48 flex-1">
-          <MagnifyingGlass className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             aria-label="Search recordings"
             className="h-8 pl-8"
@@ -292,7 +292,7 @@ export function LibraryTab({
           />
         </div>
         <Button disabled={importing} size="sm" variant="outline" onClick={() => void runImport()}>
-          <UploadSimple data-icon="inline-start" />
+          <UploadIcon data-icon="inline-start" />
           {importing ? 'Importing…' : 'Import'}
         </Button>
       </div>
@@ -307,7 +307,7 @@ export function LibraryTab({
             variant="destructive"
             onClick={() => setDeleting(sessions.filter((session) => selected.includes(session.id)))}
           >
-            <Trash data-icon="inline-start" />
+            <DeleteIcon data-icon="inline-start" />
             Delete
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setSelected([])}>
@@ -324,7 +324,7 @@ export function LibraryTab({
       {sessions.length === 0 ? (
         <Empty className="rounded-panel border py-16">
           <EmptyMedia variant="icon">
-            <FileVideo weight="duotone" />
+            <VideoFileIcon weight="duotone" />
           </EmptyMedia>
           <EmptyTitle>No sessions yet</EmptyTitle>
           <EmptyDescription>
@@ -460,7 +460,7 @@ export function LibraryTab({
               {deleting.length === 1
                 ? 'The recording and its file move to the system Trash.'
                 : `${deleting.length} recordings and their files move to the system Trash.`}{' '}
-              You can restore them from the Trash.
+              You can restore them from the DeleteIcon.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -635,7 +635,7 @@ export function SessionPoster({
           }}
         />
       ) : (
-        <FileVideo className="size-4 text-muted-foreground/50" weight="duotone" />
+        <VideoFileIcon className="size-4 text-muted-foreground/50" weight="duotone" />
       )}
     </span>
   )
@@ -844,7 +844,7 @@ function RowActions({
         variant="ghost"
         onClick={() => void playFile()}
       >
-        <Play weight="fill" />
+        <PlayIcon weight="fill" />
       </Button>
       <NoiseCleanupDirectAction
         sessionId={session.id}
@@ -859,7 +859,7 @@ function RowActions({
         variant="ghost"
         onClick={onOpenInAi}
       >
-        <Sparkle weight="fill" />
+        <SparkleIcon weight="fill" />
       </Button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -870,27 +870,27 @@ function RowActions({
             variant="ghost"
           >
             {busy || cleanupView.busy ? (
-              <CircleNotch className="animate-spin" />
+              <SpinnerIcon className="animate-spin" />
             ) : (
-              <DotsThree weight="bold" />
+              <MoreIcon weight="bold" />
             )}
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           <DropdownMenuGroup>
             <DropdownMenuItem disabled={!filePath || live} onClick={() => void playFile()}>
-              <Play />
+              <PlayIcon />
               Play
             </DropdownMenuItem>
             <DropdownMenuItem onClick={onOpenInAi}>
-              <Sparkle />
+              <SparkleIcon />
               Open in Publish
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={!filePath}
               onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}
             >
-              <FolderOpen />
+              <FolderIcon />
               Show in Finder
             </DropdownMenuItem>
             {cleanupView.menuLabel ? (
@@ -898,7 +898,7 @@ function RowActions({
                 disabled={!cleanupMenuAction}
                 onClick={() => cleanupMenuAction && void runNoiseCleanupAction(cleanupMenuAction)}
               >
-                {cleanupView.premiumLocked ? <LockSimple /> : <WaveformSlash />}
+                {cleanupView.premiumLocked ? <LockIcon /> : <WaveformMutedIcon />}
                 {cleanupView.menuLabel}
               </DropdownMenuItem>
             ) : null}
@@ -906,7 +906,7 @@ function RowActions({
               disabled={!canExportMp4 || fileActionsBusy}
               onClick={() => void remuxSession(session.id)}
             >
-              <FileVideo />
+              <VideoFileIcon />
               Export MP4
             </DropdownMenuItem>
             <DropdownMenuItem
@@ -915,21 +915,21 @@ function RowActions({
                 void openSessionCommentsWindow(session.id, session.title, session.startedAt)
               }
             >
-              <ChatCircle />
+              <ChatIcon />
               Open Comments
             </DropdownMenuItem>
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuGroup>
             <DropdownMenuItem disabled={busy} onClick={onRename}>
-              <PencilSimple />
+              <EditIcon />
               Rename
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={!filePath || fileActionsBusy || duplicating || live}
               onClick={() => void runDuplicate()}
             >
-              <Copy />
+              <CopyIcon />
               {duplicating ? 'Duplicating…' : 'Duplicate'}
             </DropdownMenuItem>
           </DropdownMenuGroup>
@@ -939,7 +939,7 @@ function RowActions({
               disabled={!filePath || fileActionsBusy || captureProtected}
               onClick={() => void runCheck()}
             >
-              <CheckCircle />
+              <SuccessIcon />
               {phase === 'checking' ? 'Checking…' : 'Check quality'}
             </DropdownMenuItem>
             {canRepair ? (
@@ -947,7 +947,7 @@ function RowActions({
                 disabled={fileActionsBusy || captureProtected}
                 onClick={() => void runRepair()}
               >
-                <Wrench />
+                <RepairIcon />
                 {phase === 'repairing' ? 'Repairing…' : 'Repair & fix'}
               </DropdownMenuItem>
             ) : null}
@@ -956,7 +956,7 @@ function RowActions({
                 disabled={fileActionsBusy || captureProtected}
                 onClick={() => void runRestore()}
               >
-                <ArrowCounterClockwise />
+                <ResetIcon />
                 Restore original
               </DropdownMenuItem>
             ) : null}
@@ -968,7 +968,7 @@ function RowActions({
               variant="destructive"
               onClick={onDelete}
             >
-              <Trash />
+              <DeleteIcon />
               Delete
             </DropdownMenuItem>
           </DropdownMenuGroup>
@@ -1011,11 +1011,11 @@ export function NoiseCleanupDirectAction({
       onClick={() => view.directAction && onAction(view.directAction)}
     >
       {view.premiumLocked ? (
-        <LockSimple data-icon="inline-start" />
+        <LockIcon data-icon="inline-start" />
       ) : view.busy ? (
-        <CircleNotch className="animate-spin" data-icon="inline-start" />
+        <SpinnerIcon className="animate-spin" data-icon="inline-start" />
       ) : (
-        <WaveformSlash data-icon="inline-start" />
+        <WaveformMutedIcon data-icon="inline-start" />
       )}
       <span className="hidden min-[1280px]:inline">{view.directLabel}</span>
     </Button>

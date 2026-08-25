@@ -1,22 +1,22 @@
 import {
-  ArrowClockwise,
-  Broadcast,
-  Keyboard,
-  Bug,
-  CaretDown,
-  CheckCircle,
-  CircleNotch,
-  DownloadSimple,
-  FilmSlate,
-  FolderOpen,
-  GearSix,
-  LockKey,
-  MinusCircle,
-  PaintBrush,
-  Sparkle,
-  Warning,
-  XCircle
-} from '@phosphor-icons/react'
+  BugIcon,
+  ChevronDownIcon,
+  ClapperboardIcon,
+  DisabledIcon,
+  DownloadIcon,
+  ErrorIcon,
+  FolderIcon,
+  KeyboardIcon,
+  LivestreamIcon,
+  LockIcon,
+  RefreshIcon,
+  SettingsIcon,
+  SparkleIcon,
+  SpinnerIcon,
+  SuccessIcon,
+  ThemeIcon,
+  WarningIcon
+} from '@/components/icons'
 import { useTheme } from 'next-themes'
 import { useEffect, useState, type ReactElement } from 'react'
 
@@ -163,7 +163,7 @@ export function SettingsTab({
         <div className="flex flex-col gap-5">
           <PanelSection
             description="Where recordings are written and what new sessions use."
-            icon={GearSix}
+            icon={SettingsIcon}
             title="Recording & storage"
           >
             <FieldGroup>
@@ -177,7 +177,7 @@ export function SettingsTab({
                     {outputDirectory || 'Videorc default recordings folder'}
                   </div>
                   <Button size="sm" variant="outline" onClick={() => void browseOutputDirectory()}>
-                    <FolderOpen data-icon="inline-start" />
+                    <FolderIcon data-icon="inline-start" />
                     Browse
                   </Button>
                   <Button
@@ -190,7 +190,7 @@ export function SettingsTab({
                       }
                     }}
                   >
-                    <FolderOpen data-icon="inline-start" />
+                    <FolderIcon data-icon="inline-start" />
                     Reveal
                   </Button>
                 </div>
@@ -200,17 +200,17 @@ export function SettingsTab({
                   </p>
                 ) : directoryFacts && !directoryFacts.exists ? (
                   <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
-                    <Warning className="size-3.5 shrink-0" weight="fill" />
+                    <WarningIcon className="size-3.5 shrink-0" weight="fill" />
                     <span>This folder authorization expired — choose it again.</span>
                   </div>
                 ) : directoryFacts && !directoryFacts.writable ? (
                   <p className="flex items-center gap-1.5 text-xs text-warning">
-                    <Warning className="size-3.5 shrink-0" weight="fill" />
+                    <WarningIcon className="size-3.5 shrink-0" weight="fill" />
                     This folder is not writable — recordings will fail to save here.
                   </p>
                 ) : directoryFacts ? (
                   <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <CheckCircle className="size-3.5 shrink-0 text-success" weight="fill" />
+                    <SuccessIcon className="size-3.5 shrink-0 text-success" weight="fill" />
                     Folder writable
                     {typeof directoryFacts.freeBytes === 'number'
                       ? ` · ${formatFreeSpace(directoryFacts.freeBytes)} free`
@@ -260,13 +260,13 @@ export function SettingsTab({
 
             <div className="flex flex-col gap-0.5">
               <NavigableRow
-                icon={FilmSlate}
+                icon={ClapperboardIcon}
                 label="Recording preset"
                 value={recordingQuality(captureConfig.video)}
                 onNavigate={() => openStudioPanel('recording')}
               />
               <NavigableRow
-                icon={Broadcast}
+                icon={LivestreamIcon}
                 label="Stream destinations"
                 value={streamingSummary(
                   captureConfig.streamEnabled,
@@ -281,7 +281,7 @@ export function SettingsTab({
               when it is genuinely missing; keep the manual override in Advanced. */}
             {health?.ffmpeg.available ? (
               <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <CheckCircle className="size-3.5 shrink-0 text-success" weight="fill" />
+                <SuccessIcon className="size-3.5 shrink-0 text-success" weight="fill" />
                 <span className="truncate">
                   FFmpeg ready{health.ffmpeg.version ? ` · ${health.ffmpeg.version}` : ''}
                 </span>
@@ -289,7 +289,7 @@ export function SettingsTab({
             ) : health ? (
               <div className="flex flex-col gap-2 rounded-row border border-warning/40 bg-warning/10 p-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-warning-foreground dark:text-warning">
-                  <Warning className="size-4 shrink-0" weight="fill" />
+                  <WarningIcon className="size-4 shrink-0" weight="fill" />
                   Recording needs FFmpeg
                 </div>
                 <p className="text-xs text-muted-foreground">
@@ -304,7 +304,7 @@ export function SettingsTab({
 
             <Collapsible>
               <CollapsibleTrigger className="group flex w-fit items-center gap-2 rounded-row px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-                <CaretDown className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+                <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
                 <span>Advanced</span>
               </CollapsibleTrigger>
               <CollapsibleContent className="flex flex-col gap-3 pt-2">
@@ -320,11 +320,11 @@ export function SettingsTab({
 
           <PanelSection
             description={`What ${osSettingsName(runtimeInfo?.platform)} lets Videorc capture right now.`}
-            icon={LockKey}
+            icon={LockIcon}
             title="System access"
             action={
               <Button size="sm" variant="ghost" onClick={() => void refreshBackend()}>
-                <ArrowClockwise data-icon="inline-start" />
+                <RefreshIcon data-icon="inline-start" />
                 Refresh
               </Button>
             }
@@ -374,13 +374,13 @@ export function SettingsTab({
                       </Button>
                     ) : null}
                     {row.state === 'granted' ? (
-                      <CheckCircle
+                      <SuccessIcon
                         aria-label={`${row.label} granted`}
                         className="size-4 shrink-0 text-success"
                         weight="fill"
                       />
                     ) : row.state === 'not-granted' || row.state === 'device-issue' ? (
-                      <XCircle
+                      <ErrorIcon
                         aria-label={
                           row.state === 'device-issue'
                             ? `${row.label} device issue`
@@ -390,7 +390,7 @@ export function SettingsTab({
                         weight="fill"
                       />
                     ) : (
-                      <MinusCircle
+                      <DisabledIcon
                         aria-label={`${row.label} checked on first use`}
                         className="size-4 shrink-0 text-muted-foreground"
                         weight="fill"
@@ -402,7 +402,7 @@ export function SettingsTab({
             </div>
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
               <Button size="sm" variant="outline" onClick={onOpenPermissionsSetup}>
-                <LockKey data-icon="inline-start" />
+                <LockIcon data-icon="inline-start" />
                 Set up permissions
               </Button>
               <p className="text-xs text-muted-foreground">
@@ -418,7 +418,7 @@ export function SettingsTab({
 
           <PanelSection
             description="Work system-wide, even when Videorc is in the background — bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. Cmd+Shift+R."
-            icon={GearSix}
+            icon={SettingsIcon}
             title="Global shortcuts"
           >
             <FieldGroup>
@@ -468,7 +468,7 @@ export function SettingsTab({
               />
             }
             description="Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this Mac only."
-            icon={GearSix}
+            icon={SettingsIcon}
             title="Remote control"
           >
             {remoteStatus?.enabled ? (
@@ -526,7 +526,7 @@ export function SettingsTab({
         <div className="flex flex-col gap-5">
           <PanelSection
             description="How Videorc looks and behaves on this device."
-            icon={PaintBrush}
+            icon={ThemeIcon}
             title="Appearance & behavior"
           >
             <FieldGroup>
@@ -564,7 +564,7 @@ export function SettingsTab({
                       variant="outline"
                       onClick={() => void scheduleHardwareAccelerationRetry()}
                     >
-                      <ArrowClockwise data-icon="inline-start" />
+                      <RefreshIcon data-icon="inline-start" />
                       {runtimeInfo.gpuFallback.retryScheduled
                         ? 'Retry scheduled'
                         : 'Retry on next launch'}
@@ -577,21 +577,21 @@ export function SettingsTab({
 
           <PanelSection
             description="Coming from OBS Studio? Bring your scenes and settings across."
-            icon={DownloadSimple}
+            icon={DownloadIcon}
             title="Import"
           >
             {/* O4 (OBS import plan): the wizard previews the truthful
                 imported/approximated/skipped report BEFORE anything applies. */}
             <div>
               <Button size="sm" variant="outline" onClick={() => setObsImportOpen(true)}>
-                <DownloadSimple data-icon="inline-start" />
+                <DownloadIcon data-icon="inline-start" />
                 Import from OBS…
               </Button>
             </div>
             <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
           </PanelSection>
 
-          <PanelSection description="Get help or report a problem." icon={Bug} title="Support">
+          <PanelSection description="Get help or report a problem." icon={BugIcon} title="Support">
             <div className="flex flex-col gap-2">
               <div className="flex flex-wrap gap-2">
                 <Button
@@ -600,7 +600,7 @@ export function SettingsTab({
                   variant="outline"
                   onClick={() => void exportSupportBundle()}
                 >
-                  <Bug data-icon="inline-start" />
+                  <BugIcon data-icon="inline-start" />
                   {supportBundleExportPending ? 'Exporting\u2026' : 'Export support bundle'}
                 </Button>
               </div>
@@ -616,7 +616,7 @@ export function SettingsTab({
 
         <PanelSection
           description="Every keyboard shortcut in Videorc."
-          icon={Keyboard}
+          icon={KeyboardIcon}
           title="Shortcuts"
         >
           <div className="flex flex-col gap-3">
@@ -654,7 +654,7 @@ function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): Re
   return (
     <PanelSection
       description="Check for new versions of Videorc and install them."
-      icon={Sparkle}
+      icon={SparkleIcon}
       title="About & updates"
     >
       <div className="flex flex-col gap-4">
@@ -720,14 +720,14 @@ function UpdateControl({
     case 'checking':
       return (
         <Button disabled className="w-fit" size="sm" variant="outline">
-          <CircleNotch className="animate-spin" data-icon="inline-start" />
+          <SpinnerIcon className="animate-spin" data-icon="inline-start" />
           Checking for updates…
         </Button>
       )
     case 'available':
       return (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <DownloadSimple className="size-4 shrink-0" />
+          <DownloadIcon className="size-4 shrink-0" />
           <span>Version {status.version} available — starting download…</span>
         </div>
       )
@@ -762,7 +762,7 @@ function UpdateControl({
             size="sm"
             onClick={onInstall}
           >
-            <ArrowClockwise data-icon="inline-start" />
+            <RefreshIcon data-icon="inline-start" />
             Restart &amp; install {status.version}
           </Button>
           <p className="text-xs text-muted-foreground">
@@ -776,11 +776,11 @@ function UpdateControl({
       return (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <CheckCircle className="size-3.5 shrink-0 text-success" weight="fill" />
+            <SuccessIcon className="size-3.5 shrink-0 text-success" weight="fill" />
             <span>You’re on the latest version ({status.currentVersion}).</span>
           </div>
           <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-            <ArrowClockwise data-icon="inline-start" />
+            <RefreshIcon data-icon="inline-start" />
             Check again
           </Button>
         </div>
@@ -789,11 +789,11 @@ function UpdateControl({
       return (
         <div className="flex flex-col gap-2">
           <div className="flex items-start gap-1.5 text-xs text-warning-foreground dark:text-warning">
-            <Warning className="size-3.5 shrink-0" weight="fill" />
+            <WarningIcon className="size-3.5 shrink-0" weight="fill" />
             <span>Couldn’t check for updates: {status.message}</span>
           </div>
           <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-            <ArrowClockwise data-icon="inline-start" />
+            <RefreshIcon data-icon="inline-start" />
             Try again
           </Button>
         </div>
@@ -801,7 +801,7 @@ function UpdateControl({
     default:
       return (
         <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-          <ArrowClockwise data-icon="inline-start" />
+          <RefreshIcon data-icon="inline-start" />
           Check for updates
         </Button>
       )

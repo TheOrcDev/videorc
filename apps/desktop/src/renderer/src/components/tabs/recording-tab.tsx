@@ -1,4 +1,4 @@
-import { FileVideo, WarningCircle } from '@phosphor-icons/react'
+import { AlertIcon, VideoFileIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -54,7 +54,7 @@ export function RecordingTab(): ReactElement {
           />
         }
         description="Local recording exports MP4 into the recordings folder after capture finalizes. Completed files live in the Library."
-        icon={FileVideo}
+        icon={VideoFileIcon}
         title="Output"
       >
         {isSessionActive ? (
@@ -88,7 +88,7 @@ export function RecordingTab(): ReactElement {
             </FieldDescription>
             {profileEntitlementMessage ? (
               <Alert variant="warning">
-                <WarningCircle />
+                <AlertIcon />
                 <AlertDescription className="flex flex-wrap items-center gap-2">
                   <span>{profileEntitlementMessage}</span>
                   {!profileGate.allowed && profileGate.upgradeUrl ? (
@@ -105,7 +105,7 @@ export function RecordingTab(): ReactElement {
             ) : null}
             {compatibilityMessage ? (
               <Alert variant={compatibility.blockingReason ? 'destructive' : 'warning'}>
-                <WarningCircle />
+                <AlertIcon />
                 <AlertDescription>{compatibilityMessage}</AlertDescription>
               </Alert>
             ) : null}

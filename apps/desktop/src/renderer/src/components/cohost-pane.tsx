@@ -1,4 +1,4 @@
-import { CaretDown, Robot } from '@phosphor-icons/react'
+import { ChevronDownIcon, CohostIcon } from '@/components/icons'
 import {
   useEffect,
   useMemo,
@@ -271,11 +271,15 @@ export function CohostPane({
       onOpenChange={setOpen}
     >
       <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-row px-2.5 py-1.5 text-left transition-colors hover:bg-accent/60">
-        <CaretDown
+        <ChevronDownIcon
           aria-hidden
           className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
         />
-        <Robot aria-hidden className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+        <CohostIcon
+          aria-hidden
+          className="size-4 shrink-0 text-muted-foreground"
+          weight="duotone"
+        />
         <span className="shrink-0 text-xs font-medium text-foreground">Co-host</span>
         <span className="shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
           alpha
@@ -474,7 +478,7 @@ function CohostNotice({ label, children }: { label: string; children: ReactNode 
       className="flex shrink-0 items-center gap-2 rounded-row border border-border/60 bg-card/30 px-2.5 py-1.5 text-[11px] text-muted-foreground"
       data-slot="cohost-notice"
     >
-      <Robot aria-hidden className="size-4 shrink-0" weight="duotone" />
+      <CohostIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
       <Badge className="shrink-0" variant="outline">
         {label}
         <span className="ml-1 shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">

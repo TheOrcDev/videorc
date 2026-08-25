@@ -1,4 +1,4 @@
-import { ArrowsClockwise, MagnifyingGlass, type Icon } from '@phosphor-icons/react'
+import { type AppIcon, SearchIcon, SyncIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
@@ -28,7 +28,7 @@ function NavRow({
   modKey,
   onClick
 }: {
-  icon: Icon
+  icon: AppIcon
   label: string
   isActive: boolean
   triggerId: string
@@ -113,7 +113,7 @@ function SidebarUpdateChip({
             onClick={() => (chip.action === 'install' ? install() : onOpenSettings())}
           >
             <span className="relative flex size-4 shrink-0 items-center justify-center">
-              <ArrowsClockwise className="size-4 text-muted-foreground" />
+              <SyncIcon className="size-4 text-muted-foreground" />
               <span className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-[oklch(0.72_0.19_150)]" />
             </span>
             <span className="min-w-0 flex-1 truncate">{chip.label}</span>
@@ -184,7 +184,7 @@ export function Sidebar({
           onClick={onOpenCommand}
           className="flex items-center gap-2 rounded-row border border-border px-2.5 py-1.5 text-sm text-muted-foreground transition-colors duration-100 hover:bg-accent hover:text-foreground"
         >
-          <MagnifyingGlass className="size-4 shrink-0" />
+          <SearchIcon className="size-4 shrink-0" />
           <span className="flex-1 text-left">Search</span>
           <KbdGroup>
             <Kbd>{modKey}</Kbd>

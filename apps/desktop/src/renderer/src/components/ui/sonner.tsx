@@ -3,14 +3,13 @@
 import { useTheme } from 'next-themes'
 import { Toaster as Sonner, type ToasterProps } from 'sonner'
 import {
-  CheckCircleIcon,
+  CloseIcon,
+  ErrorIcon,
   InfoIcon,
-  WarningIcon,
-  XCircleIcon,
   SpinnerIcon,
-  XIcon
-} from '@phosphor-icons/react'
-
+  SuccessIcon,
+  WarningIcon
+} from '@/components/icons'
 const Toaster = ({ closeButton = true, toastOptions, ...props }: ToasterProps) => {
   const { theme = 'system' } = useTheme()
 
@@ -20,12 +19,12 @@ const Toaster = ({ closeButton = true, toastOptions, ...props }: ToasterProps) =
       className="toaster group"
       closeButton={closeButton}
       icons={{
-        success: <CheckCircleIcon className="size-4" />,
+        success: <SuccessIcon className="size-4" />,
         info: <InfoIcon className="size-4" />,
         warning: <WarningIcon className="size-4" />,
-        error: <XCircleIcon className="size-4" />,
+        error: <ErrorIcon className="size-4" />,
         loading: <SpinnerIcon className="size-4 animate-spin" />,
-        close: <XIcon className="size-3.5" />
+        close: <CloseIcon className="size-3.5" />
       }}
       style={
         {
