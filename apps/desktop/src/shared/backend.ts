@@ -3391,6 +3391,8 @@ export interface VideorcApi {
   onShortcutNavigate: (callback: (key: string) => void) => () => void
   /** Whether the command modifier is physically down; see main's before-input-event. */
   onShortcutModifier: (callback: (held: boolean) => void) => () => void
+  /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */
+  onWindowVisible: (callback: (visible: boolean) => void) => () => void
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLifecycle: (callback: (event: BackendLifecycleEvent) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void

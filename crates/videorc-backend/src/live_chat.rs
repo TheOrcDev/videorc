@@ -3129,6 +3129,35 @@ mod tests {
     }
 
     #[test]
+    fn stop_session_is_idempotent_so_both_terminal_paths_can_call_it() {
+        // Teardown now runs from BOTH the session.stop RPC and the monitor's
+        // terminal path (a capture that ends on its own must not leave the
+        // chat connector and co-host running). Whichever fires second must be
+        // a harmless no-op rather than corrupting state or bumping the
+        // generation into a live session.
+        let mut coordinator = LiveChatCoordinator::new(10);
+        coordinator.start_session(
+            "s1".to_string(),
+            vec![provider_row(StreamPlatform::Youtube)],
+        );
+
+        coordinator.stop_session();
+        let generation_after_first = coordinator.generation;
+        let session_after_first = coordinator.session_id.clone();
+
+        coordinator.stop_session();
+
+        assert_eq!(coordinator.session_id, session_after_first);
+        assert!(coordinator.session_id.is_none());
+        assert!(coordinator.senders.is_empty());
+        assert_eq!(
+            coordinator.generation,
+            generation_after_first.wrapping_add(1),
+            "a second stop only advances the guard generation; it must not resurrect a session"
+        );
+    }
+
+    #[test]
     fn stop_session_marks_providers_ended_and_keeps_transcript() {
         let mut coordinator = LiveChatCoordinator::new(10);
         coordinator.start_session(

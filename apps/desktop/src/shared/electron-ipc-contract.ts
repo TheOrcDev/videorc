@@ -197,6 +197,7 @@ export interface ElectronIpcEventMap {
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
   'shortcut:modifier': boolean
+  'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
   'preview-surface:pump-mode': boolean
   'preview-surface:resync-scene': undefined
@@ -233,6 +234,7 @@ export const electronEventChannels = [
   'oauth:callback-url',
   'shortcut:navigate',
   'shortcut:modifier',
+  'window:visible',
   'global-shortcuts:triggered',
   'preview-surface:pump-mode',
   'preview-surface:resync-scene',
@@ -1057,6 +1059,11 @@ const specificRuntimeEventSchemas = {
   // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
   // never receives those chords — nor, in practice, the keyup that ends them.
   'shortcut:modifier': booleanSchema,
+  // Whether the main window is actually on screen. The renderer cannot tell:
+  // the window runs with backgroundThrottling disabled, which also freezes the
+  // Page Visibility API, so document.visibilityState reads 'visible' even when
+  // the window is minimised or hidden.
+  'window:visible': booleanSchema,
   'global-shortcuts:triggered': enumSchema(['record-toggle', 'stream-toggle', 'mic-toggle']),
   'preview-surface:pump-mode': booleanSchema,
   'preview-surface:resync-scene': undefinedSchema,

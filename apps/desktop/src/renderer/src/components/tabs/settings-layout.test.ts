@@ -21,12 +21,16 @@ function settingsColumns(): string[][] {
   )
   const columns: string[][] = []
   for (const chunk of region.split('<div className="flex flex-col gap-5">').slice(1)) {
+    // Component-rendered sections carry no title prop, so match them by tag —
+    // and in the order they actually appear, since the collapsed reading order
+    // is exactly this sequence.
     const titles: string[] = []
-    for (const match of chunk.matchAll(/title="([^"]+)"/g)) {
-      titles.push(match[1] as string)
-    }
-    if (chunk.includes('<CohostSettingsSection />')) {
-      titles.unshift('Co-host')
+    for (const match of chunk.matchAll(
+      /title="([^"]+)"|<(CohostSettingsSection|AboutAndUpdates)\b/g
+    )) {
+      if (match[1]) titles.push(match[1])
+      else if (match[2] === 'CohostSettingsSection') titles.push('Co-host')
+      else titles.push('About & updates')
     }
     columns.push(titles)
   }
@@ -51,9 +55,27 @@ describe('Settings layout', () => {
 
   it('splits the cards into two stacked, content-height columns', () => {
     expect(settingsColumns()).toEqual([
-      ['Recording & storage', 'System access', 'Appearance & behavior', 'Import', 'Support'],
-      ['Co-host', 'Global shortcuts', 'Remote control', 'Shortcuts']
+      ['Recording & storage', 'System access', 'Co-host', 'Global shortcuts', 'Remote control'],
+      ['Appearance & behavior', 'Import', 'Support', 'About & updates', 'Shortcuts']
     ])
+  })
+
+  it('collapses in priority order on a narrow window', () => {
+    // Below `lg` the grid is one column and the left stack is read before the
+    // right, so column order IS the reading order. The window can be resized
+    // to 960px (main/index.ts minWidth) — under Tailwind's 1024px lg — so this
+    // ships. The cards people open Settings for must come before preferences
+    // and the version card.
+    const [first, second] = settingsColumns()
+    const reading = [...(first ?? []), ...(second ?? [])]
+    expect(reading.slice(0, 5)).toEqual([
+      'Recording & storage',
+      'System access',
+      'Co-host',
+      'Global shortcuts',
+      'Remote control'
+    ])
+    expect(reading.indexOf('About & updates')).toBeGreaterThan(reading.indexOf('Remote control'))
   })
 
   it('never pins a Settings card to a fixed height', () => {

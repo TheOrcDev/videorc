@@ -1653,6 +1653,31 @@ function createWindow(): void {
   // event ever reaching us (⌘Tab is exactly that).
   mainWindow.on('blur', () => publishShortcutModifier(false))
 
+  // The renderer cannot detect minimise/hide on its own: this window disables
+  // backgroundThrottling (and macOS occlusion backgrounding), which also
+  // freezes the Page Visibility API — document.visibilityState stays
+  // 'visible' and no visibilitychange fires. Anything that must release
+  // hardware when the window goes away (the microphone meter) depends on
+  // this signal, so publish it from the side that knows.
+  let lastPublishedWindowVisible: boolean | null = null
+  const publishWindowVisible = (visible: boolean): void => {
+    if (visible === lastPublishedWindowVisible) {
+      return
+    }
+    lastPublishedWindowVisible = visible
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      sendElectronEvent(mainWindow.webContents, 'window:visible', visible)
+    }
+  }
+  mainWindow.on('show', () => publishWindowVisible(true))
+  mainWindow.on('restore', () => publishWindowVisible(true))
+  mainWindow.on('maximize', () => publishWindowVisible(true))
+  mainWindow.on('hide', () => publishWindowVisible(false))
+  mainWindow.on('minimize', () => publishWindowVisible(false))
+  mainWindow.webContents.on('did-finish-load', () => {
+    publishWindowVisible(Boolean(mainWindow?.isVisible() && !mainWindow.isMinimized()))
+  })
+
   mainWindow.on('closed', () => {
     commentsCommandBroker.rejectAll()
     destroyNativePreviewSurface()
