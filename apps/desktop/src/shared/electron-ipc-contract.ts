@@ -196,6 +196,7 @@ export interface ElectronIpcEventMap {
   'captions-window:lines': CaptionsUpdate[]
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
+  'shortcut:modifier': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
   'preview-surface:pump-mode': boolean
   'preview-surface:resync-scene': undefined
@@ -231,6 +232,7 @@ export const electronEventChannels = [
   'captions-window:lines',
   'oauth:callback-url',
   'shortcut:navigate',
+  'shortcut:modifier',
   'global-shortcuts:triggered',
   'preview-surface:pump-mode',
   'preview-surface:resync-scene',
@@ -1051,6 +1053,10 @@ const specificRuntimeEventSchemas = {
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
+  // Whether the command modifier is physically down. Main is the only place
+  // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
+  // never receives those chords — nor, in practice, the keyup that ends them.
+  'shortcut:modifier': booleanSchema,
   'global-shortcuts:triggered': enumSchema(['record-toggle', 'stream-toggle', 'mic-toggle']),
   'preview-surface:pump-mode': booleanSchema,
   'preview-surface:resync-scene': undefinedSchema,

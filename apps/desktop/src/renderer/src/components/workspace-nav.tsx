@@ -86,6 +86,16 @@ export function shortcutDigitFor(tab: WorkspaceTab): string | undefined {
   return WORKSPACE_SHORTCUTS.find((entry) => entry.tab === tab)?.digit
 }
 
+/**
+ * A page's position in the shortcut order, which is also its position down the
+ * sidebar. The reveal cascade uses it so the chips arrive top-to-bottom
+ * regardless of which sidebar group a row sits in.
+ */
+export function shortcutOrderFor(tab: WorkspaceTab): number {
+  const index = WORKSPACE_SHORTCUTS.findIndex((entry) => entry.tab === tab)
+  return index === -1 ? 0 : index
+}
+
 export function workspaceTabLabel(tab: WorkspaceTab): string {
   return (
     WORKSPACE_TABS.find((entry) => entry.id === tab)?.label ??

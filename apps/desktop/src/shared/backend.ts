@@ -3389,6 +3389,8 @@ export interface VideorcApi {
    * the raw key here ("1".."9" or ",").
    */
   onShortcutNavigate: (callback: (key: string) => void) => () => void
+  /** Whether the command modifier is physically down; see main's before-input-event. */
+  onShortcutModifier: (callback: (held: boolean) => void) => () => void
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLifecycle: (callback: (event: BackendLifecycleEvent) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void

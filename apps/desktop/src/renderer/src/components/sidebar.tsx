@@ -5,8 +5,10 @@ import logoUrl from '@/assets/videorc-logo.png'
 import { AccountMenu } from '@/components/account-menu'
 import { type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
+import { Badge } from '@/components/ui/badge'
 import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { useModifierHeld } from '@/hooks/use-modifier-held'
+import { usePrefersReducedMotion } from '@/hooks/use-reduced-motion'
 import { displayKeyGlyph } from '@/lib/platform'
 import { shortcutChipProps } from '@/lib/shortcut-overlay'
 import { useUpdater } from '@/hooks/use-updater'
@@ -15,6 +17,7 @@ import {
   STUDIO_PANELS,
   WORKSPACE_TABS,
   shortcutDigitFor,
+  shortcutOrderFor,
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
@@ -29,6 +32,7 @@ function NavRow({
   shortcutDigit,
   modKey,
   shortcutVisible,
+  shortcutIndex,
   onClick
 }: {
   icon: AppIcon
@@ -38,6 +42,7 @@ function NavRow({
   shortcutDigit?: string
   modKey: string
   shortcutVisible: boolean
+  shortcutIndex: number
   onClick: () => void
 }): ReactElement {
   return (
@@ -64,7 +69,7 @@ function NavRow({
         // row from reflowing the instant ⌘ goes down. `aria-keyshortcuts` on
         // the button already tells assistive tech about the shortcut, so the
         // hidden chip is decoration and stays out of the accessibility tree.
-        <Kbd {...shortcutChipProps(shortcutVisible)}>
+        <Kbd {...shortcutChipProps(shortcutVisible, shortcutIndex)}>
           {modKey}
           {shortcutDigit}
         </Kbd>
@@ -162,25 +167,29 @@ export function Sidebar({
   // surfaces exactly when the user reaches for it (videorc-design keeps the
   // app keyboard-first; this keeps it quiet too).
   const shortcutVisible = useModifierHeld(platform)
+  // The cascade is an inline delay, so no CSS variant can drop it for us.
+  const reducedMotion = usePrefersReducedMotion()
 
   return (
-    <aside className="-mt-9 flex w-56 shrink-0 flex-col border-r bg-sidebar pt-9 text-sidebar-foreground backdrop-blur-2xl">
-      <div className="flex select-none items-center gap-3 px-4 py-4">
+    <aside className="-mt-9 flex w-48 shrink-0 flex-col border-r bg-sidebar pt-9 text-sidebar-foreground backdrop-blur-2xl">
+      <div className="flex select-none items-center gap-3 px-4 py-3">
         {/* The PNG bakes a ~4% transparent margin around the tile; the scaled
             overflow-hidden wrapper crops it so the hairline ring hugs the art. */}
         <div className="size-9 shrink-0 overflow-hidden rounded-[9px] shadow-[0_2px_8px_rgba(0,0,0,0.35)] ring-1 ring-border dark:shadow-[0_3px_10px_rgba(0,0,0,0.55)]">
           <img alt="Videorc" className="size-full scale-[1.09]" src={logoUrl} />
         </div>
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="flex min-w-0 items-baseline gap-1.5 text-sm leading-none font-semibold tracking-tight">
-            <span className="truncate">Videorc</span>
-            <span className="shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
-              beta
-            </span>
+        <div className="flex min-w-0 flex-col items-start gap-1.5">
+          <span className="truncate text-sm leading-none font-semibold tracking-tight">
+            Videorc
           </span>
-          <span className="truncate text-[11px] leading-none tracking-wide text-muted-foreground">
-            Recording studio
-          </span>
+          {/* Monochrome: the channel is not a status, and colour in this app
+              means live or broken. */}
+          <Badge
+            variant="outline"
+            className="h-4 rounded-chip px-1.5 py-0 text-[10px] leading-none font-medium tracking-wide text-muted-foreground"
+          >
+            beta
+          </Badge>
         </div>
       </div>
       <div
@@ -213,6 +222,7 @@ export function Sidebar({
               isActive={active === tab.id}
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
+              shortcutIndex={reducedMotion ? 0 : shortcutOrderFor(tab.id)}
               modKey={modKey}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelect(tab.id)}
@@ -230,6 +240,7 @@ export function Sidebar({
               isActive={activeStudioPanel === panel.id}
               triggerId={panel.legacyTabId}
               shortcutDigit={shortcutDigitFor(panel.id)}
+              shortcutIndex={reducedMotion ? 0 : shortcutOrderFor(panel.id)}
               modKey={modKey}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelectStudioPanel(panel.id)}
@@ -247,6 +258,7 @@ export function Sidebar({
               isActive={active === tab.id}
               triggerId={tab.id}
               shortcutDigit={shortcutDigitFor(tab.id)}
+              shortcutIndex={reducedMotion ? 0 : shortcutOrderFor(tab.id)}
               modKey={modKey}
               shortcutVisible={shortcutVisible}
               onClick={() => onSelect(tab.id)}
@@ -269,6 +281,7 @@ export function Sidebar({
                 isActive={active === tab.id}
                 triggerId={tab.id}
                 shortcutDigit={shortcutDigitFor(tab.id)}
+                shortcutIndex={reducedMotion ? 0 : shortcutOrderFor(tab.id)}
                 modKey={modKey}
                 shortcutVisible={shortcutVisible}
                 onClick={() => onSelect(tab.id)}

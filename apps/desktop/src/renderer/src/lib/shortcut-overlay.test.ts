@@ -64,6 +64,30 @@ describe('nextModifierHeldState', () => {
   })
 })
 
+describe('nextModifierHeldState — sources beyond this window', () => {
+  it('closes when a page shortcut fires', () => {
+    // ⌘1–⌘9 are intercepted by the main process, so this window never sees the
+    // chord and, in practice, never sees the keyup that ends it. Without this
+    // the chips stayed on screen after every ⌘+digit.
+    assert.equal(nextModifierHeldState(true, { kind: 'shortcut-fired' }), false)
+  })
+
+  it('takes the main process as the authority in both directions', () => {
+    assert.equal(nextModifierHeldState(false, { kind: 'main', modifierDown: true }), true)
+    // Stale local state must lose to a fresher reading from main.
+    assert.equal(nextModifierHeldState(true, { kind: 'main', modifierDown: false }), false)
+  })
+
+  it('repairs a stuck layer on pointer movement without the modifier', () => {
+    assert.equal(nextModifierHeldState(true, { kind: 'pointer', modifierDown: false }), false)
+  })
+
+  it('keeps the layer up while the mouse moves WITH the modifier held', () => {
+    // Reaching for the mouse mid-⌘ must not hide the shortcuts you are reading.
+    assert.equal(nextModifierHeldState(true, { kind: 'pointer', modifierDown: true }), true)
+  })
+})
+
 describe('shortcutChipProps', () => {
   it('keeps chips mounted and out of the accessibility tree in both states', () => {
     for (const visible of [true, false]) {
@@ -77,9 +101,34 @@ describe('shortcutChipProps', () => {
     }
   })
 
-  it('fades in fast and respects reduced motion', () => {
-    const props = shortcutChipProps(true)
-    assert.match(props.className, /duration-100/)
-    assert.match(props.className, /motion-reduce:transition-none/)
+  it('reveals with a fade, a slide and a scale — and hides instantly', () => {
+    const shown = shortcutChipProps(true)
+    assert.match(shown.className, /duration-\[120ms\]/)
+    assert.match(shown.className, /translate-x-0/)
+    assert.match(shown.className, /scale-100/)
+    // Hiding has no transition: a keyboard layer that lingers after the key is
+    // released reads as lag, not polish.
+    const hidden = shortcutChipProps(false)
+    assert.match(hidden.className, /duration-0/)
+    assert.match(hidden.className, /translate-x-1/)
+    assert.match(hidden.className, /scale-\[0\.98\]/)
+  })
+
+  it('cascades down the list on reveal and never on hide', () => {
+    assert.equal(shortcutChipProps(true, 0).style.transitionDelay, undefined)
+    assert.equal(shortcutChipProps(true, 3).style.transitionDelay, '36ms')
+    // Capped, so the last row is still fast — the cascade is a texture, not a wait.
+    assert.equal(shortcutChipProps(true, 50).style.transitionDelay, '96ms')
+    assert.equal(shortcutChipProps(false, 5).style.transitionDelay, undefined)
+  })
+
+  it('drops the transform under reduced motion, and can drop the cascade too', () => {
+    const props = shortcutChipProps(true, 4)
+    assert.match(props.className, /motion-reduce:transition-opacity/)
+    assert.match(props.className, /motion-reduce:transform-none/)
+    // The cascade is an inline delay, which no CSS variant can reach — the
+    // caller opts out by passing index 0 (see the sidebar's reduced-motion
+    // read). Proving the opt-out works is the most this pure function can do.
+    assert.equal(shortcutChipProps(true, 0).style.transitionDelay, undefined)
   })
 })
