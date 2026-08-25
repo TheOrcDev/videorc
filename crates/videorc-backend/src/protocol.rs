@@ -1505,6 +1505,38 @@ pub struct WebSocketTransportDiagnosticStats {
     pub slow_pressure_disconnect_count: u64,
 }
 
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCameraDropReasonStats {
+    pub frame_was_late: u64,
+    pub out_of_buffers: u64,
+    pub discontinuity: u64,
+    pub unknown: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewScreenFrameStatusStats {
+    pub complete: u64,
+    pub idle: u64,
+    pub blank: u64,
+    pub suspended: u64,
+    pub started: u64,
+    pub stopped: u64,
+    pub unknown: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSourceSurfaceBackingStats {
+    pub live_count: u64,
+    pub peak_count: u64,
+    pub estimated_bytes: u64,
+    pub peak_estimated_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_age_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct DiagnosticStats {
@@ -1906,6 +1938,18 @@ pub struct DiagnosticStats {
     /// Cumulative live-source frames uploaded to Metal from CPU BGRA bytes.
     #[serde(default)]
     pub compositor_source_byte_upload_frames: u64,
+    /// Cumulative held capture frames that reused an already imported Metal texture.
+    #[serde(default)]
+    pub compositor_source_capture_texture_reuses: u64,
+    /// Camera subset of held capture texture reuses.
+    #[serde(default)]
+    pub compositor_camera_source_capture_texture_reuses: u64,
+    /// Screen/window subset of held capture texture reuses.
+    #[serde(default)]
+    pub compositor_screen_source_capture_texture_reuses: u64,
+    /// Completed-command boundaries that flushed the CoreVideo Metal texture cache.
+    #[serde(default)]
+    pub compositor_source_texture_cache_flushes: u64,
     /// Cumulative live-source zero-copy import attempts that fell back to byte upload.
     #[serde(default)]
     pub compositor_source_import_failures: u64,
@@ -2021,6 +2065,28 @@ pub struct DiagnosticStats {
     pub preview_camera_frame_age_ms: Option<u64>,
     pub preview_camera_source_fps: Option<f64>,
     pub preview_camera_dropped_frames: u64,
+    /// AVFoundation didOutput callbacks observed before any FrameStore validation/publication.
+    #[serde(default)]
+    pub preview_camera_capture_callback_count: u64,
+    /// AVFoundation didDrop callbacks, independent of locally rejected didOutput samples.
+    #[serde(default)]
+    pub preview_camera_did_drop_callback_count: u64,
+    /// Camera frames successfully published to the shared FrameStore.
+    #[serde(default)]
+    pub preview_camera_frame_store_publications: u64,
+    /// Age of the latest AVFoundation didOutput callback, even if it did not publish a frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_capture_callback_age_ms: Option<u64>,
+    /// Latest camera FrameStore sequence visible to consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_latest_sequence: Option<u64>,
+    /// FourCC delivered by the latest valid AVFoundation sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_capture_pixel_format: Option<String>,
+    #[serde(default)]
+    pub preview_camera_drop_reasons: PreviewCameraDropReasonStats,
+    #[serde(default)]
+    pub preview_camera_surface_backing: PreviewSourceSurfaceBackingStats,
     /// Latest native camera state reported by the AVFoundation preview source.
     #[serde(default)]
     pub preview_camera_state: Option<PreviewCameraState>,
@@ -2096,6 +2162,22 @@ pub struct DiagnosticStats {
     pub preview_screen_frame_age_ms: Option<u64>,
     pub preview_screen_source_fps: Option<f64>,
     pub preview_screen_dropped_frames: u64,
+    /// ScreenCaptureKit callbacks observed before status/image validation.
+    #[serde(default)]
+    pub preview_screen_capture_callback_count: u64,
+    /// Screen frames successfully published to the shared FrameStore.
+    #[serde(default)]
+    pub preview_screen_frame_store_publications: u64,
+    /// Age of the latest ScreenCaptureKit callback, including non-complete statuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_screen_capture_callback_age_ms: Option<u64>,
+    /// Latest screen FrameStore sequence visible to consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_screen_latest_sequence: Option<u64>,
+    #[serde(default)]
+    pub preview_screen_frame_statuses: PreviewScreenFrameStatusStats,
+    #[serde(default)]
+    pub preview_screen_surface_backing: PreviewSourceSurfaceBackingStats,
     /// Latest native ScreenCaptureKit status message, including permission/startup errors.
     #[serde(default)]
     pub preview_screen_message: Option<String>,
@@ -2144,7 +2226,9 @@ pub struct DiagnosticStats {
     /// ScreenCaptureKit stream queue depth requested for the live screen source.
     #[serde(default)]
     pub preview_screen_capture_queue_depth: u32,
+    /// CPU buffers currently owned by the camera/screen stores and spare pools.
     pub preview_source_frame_buffer_count: u64,
+    /// CPU bytes currently owned by the camera/screen stores and spare pools.
     pub preview_source_frame_bytes: u64,
     pub preview_source_frame_dropped_frames: u64,
     pub mic_captured_frames: Option<u64>,
@@ -4638,6 +4722,110 @@ mod tests {
             wire.get("compositorBackend").is_none(),
             "optional compositor backend must be omitted rather than serialized as null"
         );
+    }
+
+    #[test]
+    fn diagnostic_capture_pressure_idle_fixture_omits_unavailable_fields_without_nulls() {
+        let wire = serde_json::to_value(crate::diagnostics::idle_diagnostics())
+            .expect("idle diagnostics serialize");
+
+        for field in [
+            "previewCameraCaptureCallbackAgeMs",
+            "previewCameraLatestSequence",
+            "previewCameraCapturePixelFormat",
+            "previewScreenCaptureCallbackAgeMs",
+            "previewScreenLatestSequence",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unset optional capture field {field} must be omitted rather than null"
+            );
+        }
+        for field in ["previewCameraSurfaceBacking", "previewScreenSurfaceBacking"] {
+            let surface = wire
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("required surface diagnostics object {field}"));
+            assert!(
+                !surface.contains_key("oldestAgeMs"),
+                "unset optional {field}.oldestAgeMs must be omitted rather than null"
+            );
+            assert!(
+                surface.values().all(|value| !value.is_null()),
+                "required {field} counters must never serialize as null"
+            );
+        }
+    }
+
+    #[test]
+    fn diagnostic_capture_pressure_maximal_fixture_round_trips_without_nulls() {
+        let mut diagnostics = crate::diagnostics::idle_diagnostics();
+        diagnostics.compositor_source_capture_texture_reuses = 120;
+        diagnostics.compositor_camera_source_capture_texture_reuses = 70;
+        diagnostics.compositor_screen_source_capture_texture_reuses = 50;
+        diagnostics.compositor_source_texture_cache_flushes = 6;
+        diagnostics.preview_camera_capture_callback_count = 1_001;
+        diagnostics.preview_camera_did_drop_callback_count = 17;
+        diagnostics.preview_camera_frame_store_publications = 984;
+        diagnostics.preview_camera_capture_callback_age_ms = Some(12);
+        diagnostics.preview_camera_latest_sequence = Some(984);
+        diagnostics.preview_camera_capture_pixel_format = Some("BGRA".to_string());
+        diagnostics.preview_camera_drop_reasons = PreviewCameraDropReasonStats {
+            frame_was_late: 3,
+            out_of_buffers: 5,
+            discontinuity: 7,
+            unknown: 2,
+        };
+        diagnostics.preview_camera_surface_backing = PreviewSourceSurfaceBackingStats {
+            live_count: 2,
+            peak_count: 4,
+            estimated_bytes: 66_355_200,
+            peak_estimated_bytes: 132_710_400,
+            oldest_age_ms: Some(42),
+        };
+        diagnostics.preview_screen_capture_callback_count = 1_010;
+        diagnostics.preview_screen_frame_store_publications = 990;
+        diagnostics.preview_screen_capture_callback_age_ms = Some(9);
+        diagnostics.preview_screen_latest_sequence = Some(990);
+        diagnostics.preview_screen_frame_statuses = PreviewScreenFrameStatusStats {
+            complete: 990,
+            idle: 4,
+            blank: 3,
+            suspended: 2,
+            started: 1,
+            stopped: 1,
+            unknown: 9,
+        };
+        diagnostics.preview_screen_surface_backing = PreviewSourceSurfaceBackingStats {
+            live_count: 3,
+            peak_count: 6,
+            estimated_bytes: 99_532_800,
+            peak_estimated_bytes: 199_065_600,
+            oldest_age_ms: Some(31),
+        };
+
+        let wire = serde_json::to_value(&diagnostics).expect("maximal diagnostics serialize");
+        for field in [
+            "previewCameraCaptureCallbackAgeMs",
+            "previewCameraLatestSequence",
+            "previewCameraCapturePixelFormat",
+            "previewScreenCaptureCallbackAgeMs",
+            "previewScreenLatestSequence",
+        ] {
+            assert_ne!(wire.get(field), Some(&serde_json::Value::Null), "{field}");
+        }
+        assert_eq!(wire["previewCameraDropReasons"]["outOfBuffers"], 5);
+        assert_eq!(wire["previewCameraSurfaceBacking"]["oldestAgeMs"], 42);
+        assert_eq!(wire["previewScreenFrameStatuses"]["suspended"], 2);
+        assert_eq!(wire["previewScreenSurfaceBacking"]["peakCount"], 6);
+        assert_eq!(wire["compositorSourceCaptureTextureReuses"], 120);
+        assert_eq!(wire["compositorCameraSourceCaptureTextureReuses"], 70);
+        assert_eq!(wire["compositorScreenSourceCaptureTextureReuses"], 50);
+        assert_eq!(wire["compositorSourceTextureCacheFlushes"], 6);
+
+        let restored: DiagnosticStats =
+            serde_json::from_value(wire).expect("maximal diagnostics deserialize");
+        assert_eq!(restored, diagnostics);
     }
 
     #[test]

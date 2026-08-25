@@ -12,7 +12,7 @@ use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, ChildStdout, Command};
+use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, mpsc, oneshot};
 use tokio::time::{Duration, sleep, timeout};
 use uuid::Uuid;
@@ -49,9 +49,15 @@ use crate::diagnostics::{
 };
 #[cfg(target_os = "windows")]
 use crate::encoder_bridge::DirectD3D11CameraOverlay;
+#[cfg(any(target_os = "windows", test))]
+use crate::encoder_bridge::encoder_bridge_lifecycle_snapshot;
+#[cfg(target_os = "windows")]
+use crate::encoder_bridge::gate_encoder_bridge_lifecycle_persistence;
 use crate::encoder_bridge::{
-    EncoderBridgeDiagnosticsContext, EncoderBridgeOutputProfile, EncoderBridgeOutputRole,
-    EncoderBridgeRecordingSession, EncoderBridgeVideoOutput, start_synthetic_recording_bridge,
+    EncoderBridgeDiagnosticsContext, EncoderBridgeLifecycleSnapshot, EncoderBridgeOutputProfile,
+    EncoderBridgeOutputRole, EncoderBridgeRecordingSession, EncoderBridgeShutdownBatch,
+    EncoderBridgeShutdownBatchReport, EncoderBridgeVideoOutput, begin_encoder_bridge_shutdown,
+    start_synthetic_recording_bridge, wait_for_encoder_bridge_start_admission,
 };
 use crate::entitlements;
 use crate::ffmpeg::{ffprobe_path_for, resolve_ffmpeg_path};
@@ -1144,6 +1150,9 @@ pub struct LivePreviewState {
     pub status: PreviewLiveStatus,
     pub desired_params: Option<PreviewLiveParams>,
     pub idle_process: Option<ActiveLivePreview>,
+    /// Every fallback start owns one generation. Recording/start/stop edges
+    /// invalidate it so an awaited stale request cannot install a new child.
+    pub generation: u64,
 }
 
 #[derive(Debug)]
@@ -1341,7 +1350,57 @@ pub fn initial_live_preview_state() -> LivePreviewState {
         status: unavailable_live_preview_status(None),
         desired_params: None,
         idle_process: None,
+        generation: 0,
     }
+}
+
+fn advance_idle_preview_generation(preview: &mut LivePreviewState) -> u64 {
+    preview.generation = preview.generation.wrapping_add(1);
+    preview.generation
+}
+
+fn begin_idle_preview_start(preview: &mut LivePreviewState) -> u64 {
+    advance_idle_preview_generation(preview)
+}
+
+fn reserve_idle_preview_start(
+    preview: &mut LivePreviewState,
+    capture_admission_idle: bool,
+) -> Option<u64> {
+    capture_admission_idle.then(|| begin_idle_preview_start(preview))
+}
+
+fn cancel_idle_preview_start(preview: &mut LivePreviewState) {
+    advance_idle_preview_generation(preview);
+}
+
+fn idle_preview_start_is_current(
+    preview: &LivePreviewState,
+    generation: u64,
+    params: &PreviewLiveParams,
+    recording_active: bool,
+    capture_admission_idle: bool,
+) -> bool {
+    capture_admission_idle
+        && !recording_active
+        && preview.generation == generation
+        && preview.desired_params.as_ref() == Some(params)
+}
+
+async fn idle_preview_start_is_current_for_state(
+    state: &AppState,
+    generation: u64,
+    params: &PreviewLiveParams,
+) -> bool {
+    let recording_active = state.recording.lock().await.is_some();
+    let preview = state.live_preview.lock().await;
+    idle_preview_start_is_current(
+        &preview,
+        generation,
+        params,
+        recording_active,
+        state.capture_interruption.capture_admission_is_idle(),
+    )
 }
 
 /// Expand a leading `~` to the platform home directory. Shells do this before
@@ -1512,6 +1571,13 @@ pub async fn start_session(
         .capture_interruption
         .try_begin_session_start()
         .map_err(|blocker| anyhow::anyhow!(blocker.to_string()))?;
+    // SessionStarting becomes authoritative before `state.recording` is
+    // populated. Invalidate any reserved fallback child under the same lock
+    // used to reserve/install it, closing that startup window immediately.
+    {
+        let mut preview = state.live_preview.lock().await;
+        cancel_idle_preview_start(&mut preview);
+    }
     if state.recording.lock().await.is_some() {
         bail!("A capture session is already running");
     }
@@ -1524,6 +1590,12 @@ pub async fn start_session(
     hydrate_stream_key_secret_refs(&state, &mut params)?;
     normalize_stream_only_output_video(&mut params)?;
     validate_session_entitlements(&params, &entitlements::current_entitlements())?;
+
+    // Admission belongs before capture permits, output creation, compositor,
+    // native audio, or FFmpeg. A detached writer remains visible until its
+    // outer and nested FIFO threads have actually released their resources.
+    let session_id = Uuid::new_v4().to_string();
+    wait_for_encoder_bridge_start_admission(&session_id, Duration::from_secs(2)).await?;
 
     let capture_permit = state.ffmpeg_work.begin_capture_when_available().await;
     validate_outputs(&params)?;
@@ -1542,7 +1614,6 @@ pub async fn start_session(
             .with_context(|| format!("Could not create {}", output_dir.display()))?;
     }
 
-    let session_id = Uuid::new_v4().to_string();
     let started_at = Utc::now();
     // FX8: the display title reads in the user's wall clock — it sat next to
     // Library's locally-rendered date column showing a different time. The
@@ -2676,7 +2747,7 @@ pub async fn start_session(
     let windows_d3d11_auxiliary_input = windows_d3d11_media
         .as_ref()
         .and_then(WindowsD3d11SessionPump::auxiliary_encoder_source);
-    let (encoder_bridge, encoder_bridge_stream) = if use_encoder_bridge {
+    let (mut encoder_bridge, mut encoder_bridge_stream) = if use_encoder_bridge {
         let bridge_fifo_path = encoder_bridge_fifo
             .clone()
             .context("Encoder bridge FIFO path was unavailable")?;
@@ -2691,35 +2762,7 @@ pub async fn start_session(
             encoder_bridge_video_output,
             encoder_bridge_stream_profile.is_some(),
         );
-        // Start fence: a writer thread from a PREVIOUS session still running
-        // here means that session leaked its encoder (still encoding with no
-        // session attached). It competes with this session's capture pipeline
-        // and produces the frozen-frames failure, so wait briefly for it to
-        // die and otherwise say so loudly before recording anyway.
-        {
-            let fence_deadline = Instant::now() + Duration::from_secs(2);
-            while crate::encoder_bridge::live_synthetic_writers() > 0
-                && Instant::now() < fence_deadline
-            {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-            let lingering = crate::encoder_bridge::live_synthetic_writers();
-            if lingering > 0 {
-                let message = format!(
-                    "{lingering} encoder writer(s) from a previous session are still running; \
-                     this recording may drop or freeze frames until they exit."
-                );
-                state.emit_log("warn", message.clone());
-                let _ = emit_health_event(
-                    &state,
-                    Some(&session_id),
-                    HealthLevel::Warn,
-                    "encoder-bridge-writer-lingering",
-                    &message,
-                );
-            }
-        }
-        let mut recording_bridge = start_synthetic_recording_bridge(
+        let mut recording_bridge = Some(start_synthetic_recording_bridge(
             state.clone(),
             session_id.clone(),
             params.output.video.fps,
@@ -2741,56 +2784,76 @@ pub async fn start_session(
             params.output.stream_enabled && encoder_bridge_stream_profile.is_none(),
             recording_diagnostics_context,
             video_epoch.clone(),
-        )?;
-        let mut stream_bridge = match (
-            encoder_bridge_stream_fifo.clone(),
-            encoder_bridge_stream_profile.as_ref(),
-        ) {
-            (Some(stream_fifo_path), Some(stream_profile)) => {
-                #[cfg(target_os = "windows")]
-                let has_stream_source = encoder_bridge_stream_frame_store.is_some()
-                    || windows_d3d11_auxiliary_input.is_some();
-                #[cfg(not(target_os = "windows"))]
-                let has_stream_source = encoder_bridge_stream_frame_store.is_some();
-                if !has_stream_source {
-                    bail!(
-                        "Split-output encoder bridge has neither a compositor frame store nor a D3D11 auxiliary ticket source"
+        )?);
+        let mut stream_bridge = None;
+        let bridge_startup_result: Result<()> = async {
+            stream_bridge = match (
+                encoder_bridge_stream_fifo.clone(),
+                encoder_bridge_stream_profile.as_ref(),
+            ) {
+                (Some(stream_fifo_path), Some(stream_profile)) => {
+                    #[cfg(target_os = "windows")]
+                    let has_stream_source = encoder_bridge_stream_frame_store.is_some()
+                        || windows_d3d11_auxiliary_input.is_some();
+                    #[cfg(not(target_os = "windows"))]
+                    let has_stream_source = encoder_bridge_stream_frame_store.is_some();
+                    if !has_stream_source {
+                        bail!(
+                            "Split-output encoder bridge has neither a compositor frame store nor a D3D11 auxiliary ticket source"
+                        );
+                    }
+                    let stream_diagnostics_context = encoder_bridge_diagnostics_context(
+                        EncoderBridgeOutputRole::Stream,
+                        Some(&params.output.video),
+                        Some(stream_profile),
+                        encoder_bridge_video_output,
+                        true,
                     );
+                    Some(start_synthetic_recording_bridge(
+                        state.clone(),
+                        session_id.clone(),
+                        stream_profile.fps,
+                        stream_profile.width,
+                        stream_profile.height,
+                        stream_fifo_path,
+                        encoder_bridge_stream_frame_store.clone(),
+                        None,
+                        #[cfg(target_os = "windows")]
+                        None,
+                        #[cfg(target_os = "windows")]
+                        windows_d3d11_auxiliary_input,
+                        encoder_bridge_video_output,
+                        Some(stream_profile.bitrate_kbps),
+                        true,
+                        stream_diagnostics_context,
+                        video_epoch.clone(),
+                    )?)
                 }
-                let stream_diagnostics_context = encoder_bridge_diagnostics_context(
-                    EncoderBridgeOutputRole::Stream,
-                    Some(&params.output.video),
-                    Some(stream_profile),
-                    encoder_bridge_video_output,
-                    true,
-                );
-                Some(start_synthetic_recording_bridge(
-                    state.clone(),
-                    session_id.clone(),
-                    stream_profile.fps,
-                    stream_profile.width,
-                    stream_profile.height,
-                    stream_fifo_path,
-                    encoder_bridge_stream_frame_store.clone(),
-                    None,
-                    #[cfg(target_os = "windows")]
-                    None,
-                    #[cfg(target_os = "windows")]
-                    windows_d3d11_auxiliary_input,
-                    encoder_bridge_video_output,
-                    Some(stream_profile.bitrate_kbps),
-                    true,
-                    stream_diagnostics_context,
-                    video_epoch.clone(),
-                )?)
+                _ => None,
+            };
+            recording_bridge
+                .as_mut()
+                .expect("recording bridge was just started")
+                .wait_until_ready()
+                .await?;
+            if let Some(stream_bridge) = stream_bridge.as_mut() {
+                stream_bridge.wait_until_ready().await?;
             }
-            _ => None,
-        };
-        recording_bridge.wait_until_ready().await?;
-        if let Some(stream_bridge) = stream_bridge.as_mut() {
-            stream_bridge.wait_until_ready().await?;
+            Ok(())
         }
-        (Some(recording_bridge), stream_bridge)
+        .await;
+        if let Err(error) = bridge_startup_result {
+            let batch = begin_recording_encoder_bridge_teardown(
+                &mut recording_bridge,
+                &mut stream_bridge,
+                ENCODER_BRIDGE_TEARDOWN_GRACE,
+            );
+            let _ =
+                finish_recording_encoder_bridge_teardown(&state, batch, "partial-start-failure")
+                    .await;
+            return Err(error);
+        }
+        (recording_bridge, stream_bridge)
     } else {
         (None, None)
     };
@@ -2830,6 +2893,31 @@ pub async fn start_session(
             pump.monitor(),
         )
     });
+    let screen_overlay = match screen_overlay_fifo {
+        Some(screen_overlay_fifo) => match ScreenOverlaySession::start(
+            screen_overlay_fifo,
+            params.output.video.width,
+            params.output.video.height,
+            active_screen.clone().map(|screen| screen.image_path),
+        ) {
+            Ok(screen_overlay) => Some(screen_overlay),
+            Err(error) => {
+                let batch = begin_recording_encoder_bridge_teardown(
+                    &mut encoder_bridge,
+                    &mut encoder_bridge_stream,
+                    ENCODER_BRIDGE_TEARDOWN_GRACE,
+                );
+                let _ = finish_recording_encoder_bridge_teardown(
+                    &state,
+                    batch,
+                    "partial-start-failure",
+                )
+                .await;
+                return Err(error);
+            }
+        },
+        None => None,
+    };
     let active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
@@ -2845,15 +2933,7 @@ pub async fn start_session(
         pipeline,
         native_audio: attached_native_audio,
         ffmpeg_live_audio_session,
-        screen_overlay: match screen_overlay_fifo {
-            Some(screen_overlay_fifo) => Some(ScreenOverlaySession::start(
-                screen_overlay_fifo,
-                params.output.video.width,
-                params.output.video.height,
-                active_screen.clone().map(|screen| screen.image_path),
-            )?),
-            None => None,
-        },
+        screen_overlay,
         encoder_bridge,
         encoder_bridge_stream,
         #[cfg(target_os = "windows")]
@@ -4209,6 +4289,7 @@ pub async fn start_live_preview(
         let status = recording_live_preview_status(&state, None);
         {
             let mut guard = state.live_preview.lock().await;
+            cancel_idle_preview_start(&mut guard);
             guard.desired_params = Some(params);
             guard.status = status.clone();
         }
@@ -4220,12 +4301,31 @@ pub async fn start_live_preview(
         return Ok(status);
     }
 
-    start_idle_live_preview(state, params, PreviewLiveState::Connecting).await
+    let reserved_generation = {
+        let mut preview = state.live_preview.lock().await;
+        preview.desired_params = Some(params.clone());
+        reserve_idle_preview_start(
+            &mut preview,
+            state.capture_interruption.capture_admission_is_idle(),
+        )
+    };
+    let Some(reserved_generation) = reserved_generation else {
+        return Ok(live_preview_status(&state).await);
+    };
+
+    start_idle_live_preview(
+        state,
+        params,
+        PreviewLiveState::Connecting,
+        reserved_generation,
+    )
+    .await
 }
 
 pub async fn stop_live_preview(state: AppState) -> Result<PreviewLiveStatus> {
     let process = {
         let mut guard = state.live_preview.lock().await;
+        cancel_idle_preview_start(&mut guard);
         let process = guard.idle_process.take();
         guard.desired_params = None;
         guard.status = unavailable_live_preview_status(Some("Live preview stopped.".to_string()));
@@ -4270,6 +4370,38 @@ pub fn subscribe_live_preview_frames(
     state.preview_frames.subscribe()
 }
 
+const ENCODER_BRIDGE_TEARDOWN_GRACE: Duration = Duration::from_secs(3);
+
+fn take_all_encoder_bridge_sessions(
+    recording: &mut Option<EncoderBridgeRecordingSession>,
+    stream: &mut Option<EncoderBridgeRecordingSession>,
+) -> Vec<EncoderBridgeRecordingSession> {
+    recording.take().into_iter().chain(stream.take()).collect()
+}
+
+fn begin_recording_encoder_bridge_teardown(
+    recording: &mut Option<EncoderBridgeRecordingSession>,
+    stream: &mut Option<EncoderBridgeRecordingSession>,
+    grace: Duration,
+) -> Option<EncoderBridgeShutdownBatch> {
+    begin_encoder_bridge_shutdown(take_all_encoder_bridge_sessions(recording, stream), grace)
+}
+
+async fn finish_recording_encoder_bridge_teardown(
+    state: &AppState,
+    batch: Option<EncoderBridgeShutdownBatch>,
+    origin: &'static str,
+) -> Option<EncoderBridgeShutdownBatchReport> {
+    let report = batch?.finish().await;
+    if let Some(error) = report.task_error.as_ref() {
+        state.emit_log(
+            "warn",
+            format!("Encoder bridge {origin} teardown task failed: {error}"),
+        );
+    }
+    Some(report)
+}
+
 fn ffmpeg_command(ffmpeg_path: &str) -> Command {
     let mut command = Command::new(ffmpeg_path);
     command.kill_on_drop(true);
@@ -4279,6 +4411,7 @@ fn ffmpeg_command(ffmpeg_path: &str) -> Command {
 pub async fn shutdown_capture_processes(state: AppState) {
     let idle_process = {
         let mut guard = state.live_preview.lock().await;
+        cancel_idle_preview_start(&mut guard);
         guard.desired_params = None;
         guard.status = unavailable_live_preview_status(Some(
             "Backend is shutting down; live preview stopped.".to_string(),
@@ -4291,16 +4424,91 @@ pub async fn shutdown_capture_processes(state: AppState) {
         let mut guard = state.recording.lock().await;
         guard.take()
     };
-    stop_recording_process_for_shutdown(recording).await;
+    stop_recording_process_for_shutdown(&state, recording).await;
+}
+
+enum IdlePreviewChildInstall {
+    Installed {
+        pid: u32,
+        stdout: Option<ChildStdout>,
+        stderr: Option<ChildStderr>,
+        child: Box<tokio::process::Child>,
+    },
+    Reaped {
+        #[cfg_attr(not(test), allow(dead_code))]
+        pid: u32,
+        #[cfg_attr(not(test), allow(dead_code))]
+        wait_succeeded: bool,
+    },
+}
+
+async fn install_or_reap_idle_preview_child(
+    state: &AppState,
+    params: &PreviewLiveParams,
+    generation: u64,
+    mut child: tokio::process::Child,
+) -> IdlePreviewChildInstall {
+    let pid = child.id().unwrap_or_default();
+    let recording_active = state.recording.lock().await.is_some();
+    let installed = {
+        let mut preview = state.live_preview.lock().await;
+        if idle_preview_start_is_current(
+            &preview,
+            generation,
+            params,
+            recording_active,
+            state.capture_interruption.capture_admission_is_idle(),
+        ) {
+            let stdout = child.stdout.take();
+            let stderr = child.stderr.take();
+            let stdin = child.stdin.take();
+            preview.idle_process = Some(ActiveLivePreview {
+                pid,
+                stdin,
+                first_frame_received: false,
+            });
+            Some((stdout, stderr))
+        } else {
+            None
+        }
+    };
+    if let Some((stdout, stderr)) = installed {
+        return IdlePreviewChildInstall::Installed {
+            pid,
+            stdout,
+            stderr,
+            child: Box::new(child),
+        };
+    }
+
+    // The process was created in the narrow spawn/install race. It never
+    // becomes shared state: stop and reap this exact owned child now.
+    let _ = child.kill().await;
+    let wait_succeeded = child.wait().await.is_ok();
+    IdlePreviewChildInstall::Reaped {
+        pid,
+        wait_succeeded,
+    }
 }
 
 async fn start_idle_live_preview(
     state: AppState,
     params: PreviewLiveParams,
     starting_state: PreviewLiveState,
+    reserved_generation: u64,
 ) -> Result<PreviewLiveStatus> {
-    let old_process = {
+    let (old_process, start_generation) = {
         let mut guard = state.live_preview.lock().await;
+        if !idle_preview_start_is_current(
+            &guard,
+            reserved_generation,
+            &params,
+            false,
+            state.capture_interruption.capture_admission_is_idle(),
+        ) {
+            return Ok(guard.status.clone());
+        }
+        let start_generation = reserved_generation;
         let old_process = guard.idle_process.take();
         guard.desired_params = Some(params.clone());
         guard.status = PreviewLiveStatus {
@@ -4314,17 +4522,24 @@ async fn start_idle_live_preview(
             url: Some(live_preview_url(&state)),
             message: Some("Starting explicit JPEG polling fallback preview.".to_string()),
         };
-        old_process
+        (old_process, start_generation)
     };
     clear_latest_preview_frame(&state).await;
     state.emit_event("preview.live.status", live_preview_status(&state).await);
     stop_live_preview_process(old_process).await;
 
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
-    let session_params = live_preview_session_params(params, ffmpeg_path.clone());
+    let session_params = live_preview_session_params(params.clone(), ffmpeg_path.clone());
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &session_params).await;
     capture.microphone = None;
     let args = live_preview_ffmpeg_args(&capture, &session_params)?;
+
+    // Source discovery may await device enumeration. Revalidate immediately
+    // before spawn so a recording edge or newer preview request cannot create
+    // a stale fallback child.
+    if !idle_preview_start_is_current_for_state(&state, start_generation, &params).await {
+        return Ok(live_preview_status(&state).await);
+    }
 
     let mut command = ffmpeg_command(&ffmpeg_path);
     command
@@ -4332,46 +4547,51 @@ async fn start_idle_live_preview(
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    let mut child = match spawn_owned_tokio(&mut command) {
+    let child = match spawn_owned_tokio(&mut command) {
         Ok(child) => child,
         Err(error) => {
             let status = unavailable_live_preview_status(Some(format!(
                 "Could not start {ffmpeg_path} for live preview: {error}"
             )));
+            let recording_active = state.recording.lock().await.is_some();
             {
                 let mut guard = state.live_preview.lock().await;
-                guard.status = status.clone();
-                guard.idle_process = None;
+                if idle_preview_start_is_current(
+                    &guard,
+                    start_generation,
+                    &params,
+                    recording_active,
+                    state.capture_interruption.capture_admission_is_idle(),
+                ) {
+                    guard.status = status.clone();
+                    guard.idle_process = None;
+                }
             }
-            state.emit_event("preview.live.status", status.clone());
-            return Ok(status);
+            let current = live_preview_status(&state).await;
+            state.emit_event("preview.live.status", current.clone());
+            return Ok(current);
         }
     };
 
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let stdin = child.stdin.take();
-    let pid = child.id().unwrap_or_default();
-
+    let IdlePreviewChildInstall::Installed {
+        pid,
+        stdout,
+        stderr,
+        child,
+    } = install_or_reap_idle_preview_child(&state, &params, start_generation, child).await
+    else {
+        return Ok(live_preview_status(&state).await);
+    };
     if let Some(stdout) = stdout {
         tokio::spawn(publish_preview_stdout(state.clone(), Some(pid), stdout));
     }
     if let Some(stderr) = stderr {
         tokio::spawn(log_live_preview_stderr(state.clone(), stderr));
     }
-
-    {
-        let mut guard = state.live_preview.lock().await;
-        guard.idle_process = Some(ActiveLivePreview {
-            pid,
-            stdin,
-            first_frame_received: false,
-        });
-    }
     let status = live_preview_status(&state).await;
     state.emit_event("preview.live.status", status.clone());
     tokio::spawn(watch_idle_live_preview_first_frame(state.clone(), pid));
-    tokio::spawn(monitor_idle_live_preview(state.clone(), child, pid));
+    tokio::spawn(monitor_idle_live_preview(state.clone(), *child, pid));
     Ok(status)
 }
 
@@ -4415,6 +4635,7 @@ fn live_preview_video_settings(mut video: VideoSettings) -> VideoSettings {
 async fn stop_idle_live_preview_for_recording(state: AppState) {
     let process = {
         let mut guard = state.live_preview.lock().await;
+        cancel_idle_preview_start(&mut guard);
         let process = guard.idle_process.take();
         if guard.desired_params.is_some() || process.is_some() {
             guard.status = PreviewLiveStatus {
@@ -4468,10 +4689,16 @@ async fn clear_latest_preview_frame(state: &AppState) {
 }
 
 async fn restart_idle_live_preview_if_desired(state: AppState) {
-    let desired_params = {
+    let restart_snapshot = {
         let mut guard = state.live_preview.lock().await;
-        let desired_params = guard.desired_params.clone();
-        if desired_params.is_some() {
+        let restart_snapshot = guard.desired_params.clone().and_then(|params| {
+            reserve_idle_preview_start(
+                &mut guard,
+                state.capture_interruption.capture_admission_is_idle(),
+            )
+            .map(|reserved_generation| (reserved_generation, params))
+        });
+        if restart_snapshot.is_some() {
             guard.status = PreviewLiveStatus {
                 state: PreviewLiveState::Reconnecting,
                 source: PreviewLiveSource::IdlePreview,
@@ -4487,12 +4714,18 @@ async fn restart_idle_live_preview_if_desired(state: AppState) {
             guard.status =
                 unavailable_live_preview_status(Some("No live preview requested.".to_string()));
         }
-        desired_params
+        restart_snapshot
     };
     state.emit_event("preview.live.status", live_preview_status(&state).await);
 
-    if let Some(params) = desired_params {
-        let _ = start_idle_live_preview(state, params, PreviewLiveState::Reconnecting).await;
+    if let Some((snapshot_generation, params)) = restart_snapshot {
+        let _ = start_idle_live_preview(
+            state,
+            params,
+            PreviewLiveState::Reconnecting,
+            snapshot_generation,
+        )
+        .await;
     }
 }
 
@@ -4800,20 +5033,46 @@ async fn stop_live_preview_process(process: Option<ActiveLivePreview>) {
     }
 }
 
-async fn stop_recording_process_for_shutdown(recording: Option<ActiveRecording>) {
+async fn stop_recording_process_for_shutdown(
+    _state: &AppState,
+    recording: Option<ActiveRecording>,
+) {
     let Some(mut recording) = recording else {
         return;
     };
+
+    let had_encoder_bridge =
+        recording.encoder_bridge.is_some() || recording.encoder_bridge_stream.is_some();
+    #[cfg(not(target_os = "windows"))]
+    let bridge_teardown = begin_recording_encoder_bridge_teardown(
+        &mut recording.encoder_bridge,
+        &mut recording.encoder_bridge_stream,
+        ENCODER_BRIDGE_TEARDOWN_GRACE,
+    );
+    #[cfg(target_os = "windows")]
+    let bridge_persistence_gate = gate_encoder_bridge_lifecycle_persistence(
+        recording
+            .encoder_bridge
+            .iter()
+            .chain(recording.encoder_bridge_stream.iter()),
+    );
+    #[cfg(target_os = "windows")]
+    {
+        // Preserve the Windows finalization path; it performs its platform
+        // specific writer join when ActiveRecording drops.
+        if let Some(stream) = recording.encoder_bridge_stream.as_ref() {
+            stream.stop();
+        }
+        if let Some(primary) = recording.encoder_bridge.as_ref() {
+            primary.stop();
+        }
+    }
 
     let ffmpeg_live_audio_session = recording.ffmpeg_live_audio_session.take();
     if let Some(session) = ffmpeg_live_audio_session.as_ref() {
         session.begin_stop();
     }
-    if let Some(encoder_bridge) = &recording.encoder_bridge {
-        if let Some(encoder_bridge_stream) = &recording.encoder_bridge_stream {
-            encoder_bridge_stream.stop();
-        }
-        encoder_bridge.stop();
+    if had_encoder_bridge {
         if let Some(session) = ffmpeg_live_audio_session {
             let _ = session.close_stdin().await;
         }
@@ -4827,19 +5086,25 @@ async fn stop_recording_process_for_shutdown(recording: Option<ActiveRecording>)
         native_audio.finish_recording_window();
     }
 
-    if recording.pid == 0 {
-        return;
+    if recording.pid != 0 {
+        sleep(SHUTDOWN_GRACE_DELAY).await;
+        if process_is_running(recording.pid).await {
+            let _ = send_process_signal(recording.pid, "TERM").await;
+            sleep(SHUTDOWN_GRACE_DELAY).await;
+            if process_is_running(recording.pid).await {
+                let _ = send_process_signal(recording.pid, "KILL").await;
+            }
+        }
     }
 
-    sleep(SHUTDOWN_GRACE_DELAY).await;
-    if !process_is_running(recording.pid).await {
-        return;
-    }
-
-    let _ = send_process_signal(recording.pid, "TERM").await;
-    sleep(SHUTDOWN_GRACE_DELAY).await;
-    if process_is_running(recording.pid).await {
-        let _ = send_process_signal(recording.pid, "KILL").await;
+    #[cfg(not(target_os = "windows"))]
+    let _ =
+        finish_recording_encoder_bridge_teardown(_state, bridge_teardown, "application-shutdown")
+            .await;
+    #[cfg(target_os = "windows")]
+    {
+        drop(recording);
+        drop(bridge_persistence_gate);
     }
 }
 
@@ -5393,16 +5658,32 @@ async fn monitor_session(
     let Some(mut monitored_recording) = monitored_recording else {
         return;
     };
+    let mut encoder_bridge_lifecycle = EncoderBridgeLifecycleSnapshot::default();
+    let mut encoder_bridge_teardown_duration_ms = 0_u64;
+    let mut encoder_bridge_detached_writers = 0_usize;
 
     #[cfg(target_os = "windows")]
     if let Some(mut active) = retired_active {
         let mut final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
+        let bridge_persistence_gate = gate_encoder_bridge_lifecycle_persistence(
+            active
+                .encoder_bridge
+                .iter()
+                .chain(active.encoder_bridge_stream.iter()),
+        );
+        if let Some(stream_bridge) = active.encoder_bridge_stream.as_ref() {
+            stream_bridge.stop();
+        }
+        if let Some(recording_bridge) = active.encoder_bridge.as_ref() {
+            recording_bridge.stop();
+        }
         if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
             stream_bridge.stop_and_join_writer();
         }
         if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
             recording_bridge.stop_and_join_writer();
         }
+        drop(bridge_persistence_gate);
         final_snapshot_phase
             .writers_joined()
             .expect("Windows D3D11 writers join exactly once before final diagnostics");
@@ -5455,36 +5736,60 @@ async fn monitor_session(
             suspension.restore().await;
         }
         drop(active);
+        // Windows bridge registration is process-global too. Keep final
+        // accounting truthful if a raw/MF writer remains live and would block
+        // the next session's admission.
+        encoder_bridge_lifecycle = encoder_bridge_lifecycle_snapshot();
+        encoder_bridge_detached_writers = encoder_bridge_lifecycle.detached_writers;
     }
     #[cfg(not(target_os = "windows"))]
     if let Some(mut active) = retired_active {
-        // Deterministic, bounded bridge teardown — the macOS twin of the
-        // Windows stop_and_join_writer arm above. The muxer process is gone,
-        // so both writers must die before finalize/export/idle-preview work:
-        // relying on Drop's unbounded join (or on this function even reaching
-        // its end) left stopped sessions' writers alive and still encoding 4K
-        // through VideoToolbox, starving the next session's capture pipeline
-        // (2026-08-24 frozen-frames incident).
-        let bridges: Vec<EncoderBridgeRecordingSession> = active
-            .encoder_bridge
-            .take()
-            .into_iter()
-            .chain(active.encoder_bridge_stream.take())
-            .collect();
+        // Begin the shared deadline before any other ActiveRecording Drop can
+        // join overlay/audio workers. Reaping proceeds concurrently with that
+        // unrelated cleanup.
+        let bridge_teardown = begin_recording_encoder_bridge_teardown(
+            &mut active.encoder_bridge,
+            &mut active.encoder_bridge_stream,
+            ENCODER_BRIDGE_TEARDOWN_GRACE,
+        );
         drop(active);
-        if !bridges.is_empty() {
-            let reap_result = tokio::task::spawn_blocking(move || {
-                let reaps: Vec<bool> = bridges
-                    .into_iter()
-                    .map(|bridge| bridge.stop_and_reap(Duration::from_secs(3)))
-                    .collect();
-                reaps.into_iter().all(|reaped| reaped)
-            })
-            .await;
-            if !matches!(reap_result, Ok(true)) {
-                let message = "Encoder bridge writer did not exit within 3s of session end; \
-                     thread detached and may keep encoder resources busy until it exits."
-                    .to_string();
+        if let Some(report) = finish_recording_encoder_bridge_teardown(
+            &state,
+            bridge_teardown,
+            "recording-process-exit",
+        )
+        .await
+        {
+            encoder_bridge_teardown_duration_ms = report.teardown_duration_ms;
+            encoder_bridge_detached_writers = report
+                .reports
+                .iter()
+                .filter(|bridge| bridge.detached)
+                .count();
+            for bridge in &report.reports {
+                if let Some(failure) = bridge.terminal_failure.clone() {
+                    match bridge.role {
+                        Some(EncoderBridgeOutputRole::Stream) => {
+                            monitored_recording.stream_bridge_terminal_failure = Some(failure);
+                        }
+                        Some(
+                            EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared,
+                        )
+                        | None => {
+                            monitored_recording.recording_bridge_terminal_failure = Some(failure);
+                        }
+                    }
+                }
+            }
+            encoder_bridge_lifecycle = report.lifecycle;
+            if encoder_bridge_lifecycle.live_resources > 0 {
+                let message = format!(
+                    "Encoder bridge teardown left {} capture-relevant resource(s) live (outer={}, FIFO={}, detached={}); restart Videorc before recording again.",
+                    encoder_bridge_lifecycle.live_resources,
+                    encoder_bridge_lifecycle.live_outer_writers,
+                    encoder_bridge_lifecycle.live_fifo_writers,
+                    encoder_bridge_lifecycle.detached_writers,
+                );
                 state.emit_log("warn", message.clone());
                 let _ = emit_health_event(
                     &state,
@@ -5494,6 +5799,21 @@ async fn monitor_session(
                     &message,
                 );
             }
+            let _ = emit_session_log(
+                &state,
+                &session_id,
+                HealthLevel::Info,
+                "encoder-bridge-writer-lifecycle",
+                &format!(
+                    "state=teardown-complete durationMs={} liveOuter={} liveFifo={} liveResources={} detached={}",
+                    encoder_bridge_teardown_duration_ms,
+                    encoder_bridge_lifecycle.live_outer_writers,
+                    encoder_bridge_lifecycle.live_fifo_writers,
+                    encoder_bridge_lifecycle.live_resources,
+                    encoder_bridge_lifecycle.detached_writers,
+                ),
+                None,
+            );
         }
     }
 
@@ -5590,15 +5910,24 @@ async fn monitor_session(
     // One INFO line per session naming every stage's frame count, so the next
     // support bundle shows WHERE the target cadence was lost. Pure read of
     // the final snapshot; no new locks on the stop path.
+    let frame_accounting = format!(
+        "{}; encoderBridgeLifecycle liveOuter={} liveFifo={} liveResources={} detached={} teardownDurationMs={}",
+        crate::diagnostics::format_recording_frame_accounting(
+            &final_diagnostics,
+            duration_ms.unwrap_or(0),
+        ),
+        encoder_bridge_lifecycle.live_outer_writers,
+        encoder_bridge_lifecycle.live_fifo_writers,
+        encoder_bridge_lifecycle.live_resources,
+        encoder_bridge_detached_writers.max(encoder_bridge_lifecycle.detached_writers),
+        encoder_bridge_teardown_duration_ms,
+    );
     let _ = emit_health_event(
         &state,
         Some(&session_id),
         HealthLevel::Info,
         "recording-frame-accounting",
-        &crate::diagnostics::format_recording_frame_accounting(
-            &final_diagnostics,
-            duration_ms.unwrap_or(0),
-        ),
+        &frame_accounting,
     );
     publish_windows_d3d11_media_session_end(&state, &session_id).await;
     let recording_bridge_terminal_failure = monitored_recording
@@ -15331,6 +15660,60 @@ mod tests {
     use super::*;
     use crate::capture_input::AVFOUNDATION_VIDEO_PIXEL_FORMAT;
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_and_partial_start_share_signal_all_absolute_deadline_path() {
+        let _serial = crate::encoder_bridge::ENCODER_BRIDGE_LIFECYCLE_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let state = test_state();
+
+        for origin in ["application-shutdown", "partial-start-failure"] {
+            let (recording, recording_stop, release_recording) =
+                EncoderBridgeRecordingSession::blocked_for_lifecycle_test(
+                    &format!("session-{origin}-recording"),
+                    EncoderBridgeOutputRole::Recording,
+                );
+            let (stream, stream_stop, release_stream) =
+                EncoderBridgeRecordingSession::blocked_for_lifecycle_test(
+                    &format!("session-{origin}-stream"),
+                    EncoderBridgeOutputRole::Stream,
+                );
+            let mut recording = Some(recording);
+            let mut stream = Some(stream);
+            let started_at = Instant::now();
+            let batch = begin_recording_encoder_bridge_teardown(
+                &mut recording,
+                &mut stream,
+                Duration::from_millis(120),
+            );
+
+            assert!(recording.is_none() && stream.is_none());
+            assert!(recording_stop.load(Ordering::Relaxed));
+            assert!(stream_stop.load(Ordering::Relaxed));
+            let report = finish_recording_encoder_bridge_teardown(&state, batch, origin)
+                .await
+                .expect("two bridges produce one structured report");
+            assert!(report.task_error.is_none());
+            assert_eq!(report.reports.len(), 2);
+            assert!(report.reports.iter().all(|bridge| bridge.detached));
+            assert!(
+                started_at.elapsed() < Duration::from_millis(300),
+                "recording and stream must not receive sequential deadlines"
+            );
+            release_recording
+                .send(())
+                .expect("release recording writer");
+            release_stream.send(()).expect("release stream writer");
+            let clear_deadline = Instant::now() + Duration::from_secs(1);
+            while encoder_bridge_lifecycle_snapshot().live_resources > 0
+                && Instant::now() < clear_deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(encoder_bridge_lifecycle_snapshot().live_resources, 0);
+        }
+    }
+
     #[test]
     fn pipeline_frozen_output_classifier_uses_bridge_repeats_and_camera_holds() {
         let mut stats = crate::diagnostics::idle_diagnostics();
@@ -22188,6 +22571,80 @@ mod tests {
         assert!(state.status.url.is_none());
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn fallback_spawn_install_race_reaps_cancelled_child_and_blocks_fresh_reserve() {
+        let state = test_state();
+        let params = PreviewLiveParams {
+            sources: base_params(true, false).sources,
+            layout: base_params(true, false).layout,
+            ffmpeg_path: None,
+            video: Some(default_video_settings()),
+        };
+        let reserved_generation = {
+            let mut preview = state.live_preview.lock().await;
+            preview.desired_params = Some(params.clone());
+            reserve_idle_preview_start(
+                &mut preview,
+                state.capture_interruption.capture_admission_is_idle(),
+            )
+            .expect("idle monitor reserves its exact generation")
+        };
+
+        #[cfg(target_os = "windows")]
+        let mut command = Command::new("more.com");
+        #[cfg(not(target_os = "windows"))]
+        let mut command = Command::new("cat");
+        command
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = spawn_owned_tokio(&mut command).expect("spawn owned fallback test child");
+        let spawned_pid = child.id().unwrap_or_default();
+
+        // Recording admission wins after spawn but before install. The real
+        // cancellation edge invalidates the reserved generation under the
+        // preview lock.
+        let admission = state
+            .capture_interruption
+            .try_begin_session_start()
+            .unwrap();
+        let generation_after_cancel = {
+            let mut preview = state.live_preview.lock().await;
+            cancel_idle_preview_start(&mut preview);
+            preview.generation
+        };
+        {
+            let mut preview = state.live_preview.lock().await;
+            assert_eq!(
+                reserve_idle_preview_start(
+                    &mut preview,
+                    state.capture_interruption.capture_admission_is_idle(),
+                ),
+                None,
+                "SessionStarting cannot reserve a replacement token"
+            );
+            assert_eq!(preview.generation, generation_after_cancel);
+        }
+
+        match install_or_reap_idle_preview_child(&state, &params, reserved_generation, child).await
+        {
+            IdlePreviewChildInstall::Reaped {
+                pid,
+                wait_succeeded,
+            } => {
+                assert_eq!(pid, spawned_pid);
+                assert!(wait_succeeded, "stale owned child is synchronously reaped");
+            }
+            IdlePreviewChildInstall::Installed { .. } => {
+                panic!("cancelled fallback child must never enter shared preview state")
+            }
+        }
+        assert!(state.live_preview.lock().await.idle_process.is_none());
+        drop(admission);
+        assert!(state.capture_interruption.capture_admission_is_idle());
+    }
+
     #[test]
     fn same_connecting_idle_preview_is_reused() {
         let params = PreviewLiveParams {
@@ -22214,6 +22671,7 @@ mod tests {
                 stdin: None,
                 first_frame_received: false,
             }),
+            generation: 1,
         };
 
         assert!(should_reuse_idle_live_preview(&state, &params));
@@ -22235,6 +22693,7 @@ mod tests {
                 stdin: None,
                 first_frame_received: false,
             }),
+            generation: 1,
         };
 
         assert!(!should_reuse_idle_live_preview(&state, &params));

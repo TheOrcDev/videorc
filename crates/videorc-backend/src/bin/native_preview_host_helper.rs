@@ -1,6 +1,10 @@
 #[cfg(target_os = "macos")]
 #[path = "../color.rs"]
 mod color;
+#[cfg(all(target_os = "macos", test))]
+#[allow(dead_code)]
+#[path = "../frame_store.rs"]
+mod frame_store;
 #[cfg(target_os = "macos")]
 #[path = "../metal_compositor.rs"]
 mod metal_compositor;

@@ -479,8 +479,44 @@ class StudioBackend {
           activeFfmpegProcesses: 0,
           activeFfprobeProcesses: 0,
           micDroppedFrames: 0,
+          compositorSourceCaptureTextureReuses: 0,
+          compositorCameraSourceCaptureTextureReuses: 0,
+          compositorScreenSourceCaptureTextureReuses: 0,
+          compositorSourceTextureCacheFlushes: 0,
           previewCameraDroppedFrames: 0,
+          previewCameraCaptureCallbackCount: 0,
+          previewCameraDidDropCallbackCount: 0,
+          previewCameraFrameStorePublications: 0,
+          previewCameraDropReasons: {
+            frameWasLate: 0,
+            outOfBuffers: 0,
+            discontinuity: 0,
+            unknown: 0
+          },
+          previewCameraSurfaceBacking: {
+            liveCount: 0,
+            peakCount: 0,
+            estimatedBytes: 0,
+            peakEstimatedBytes: 0
+          },
           previewScreenDroppedFrames: 0,
+          previewScreenCaptureCallbackCount: 0,
+          previewScreenFrameStorePublications: 0,
+          previewScreenFrameStatuses: {
+            complete: 0,
+            idle: 0,
+            blank: 0,
+            suspended: 0,
+            started: 0,
+            stopped: 0,
+            unknown: 0
+          },
+          previewScreenSurfaceBacking: {
+            liveCount: 0,
+            peakCount: 0,
+            estimatedBytes: 0,
+            peakEstimatedBytes: 0
+          },
           previewSourceFrameDroppedFrames: 0,
           droppedFrames: 0,
           skippedFrames: 0,

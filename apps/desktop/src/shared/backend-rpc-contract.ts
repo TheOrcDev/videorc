@@ -997,6 +997,40 @@ const previewImagePollCountsSchema = objectSchema(
   { allowUnknown: false }
 )
 
+const previewCameraDropReasonStatsSchema = objectSchema(
+  {
+    frameWasLate: nonNegativeInteger,
+    outOfBuffers: nonNegativeInteger,
+    discontinuity: nonNegativeInteger,
+    unknown: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
+const previewScreenFrameStatusStatsSchema = objectSchema(
+  {
+    complete: nonNegativeInteger,
+    idle: nonNegativeInteger,
+    blank: nonNegativeInteger,
+    suspended: nonNegativeInteger,
+    started: nonNegativeInteger,
+    stopped: nonNegativeInteger,
+    unknown: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
+const previewSourceSurfaceBackingStatsSchema = objectSchema(
+  {
+    liveCount: nonNegativeInteger,
+    peakCount: nonNegativeInteger,
+    estimatedBytes: nonNegativeInteger,
+    peakEstimatedBytes: nonNegativeInteger,
+    oldestAgeMs: optionalSchema(nonNegativeInteger)
+  },
+  { allowUnknown: false }
+)
+
 const diagnosticStatsSchema = boundedSemanticValue(
   'bounded diagnostic statistics',
   objectSchema(
@@ -1016,6 +1050,26 @@ const diagnosticStatsSchema = boundedSemanticValue(
       encoderBridgeMfInputCreditWaitP95Ms: optionalSchema(nullableSchema(numberSchema({ min: 0 }))),
       windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
       previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
+      compositorSourceCaptureTextureReuses: nonNegativeInteger,
+      compositorCameraSourceCaptureTextureReuses: nonNegativeInteger,
+      compositorScreenSourceCaptureTextureReuses: nonNegativeInteger,
+      compositorSourceTextureCacheFlushes: nonNegativeInteger,
+      previewCameraCaptureCallbackCount: nonNegativeInteger,
+      previewCameraDidDropCallbackCount: nonNegativeInteger,
+      previewCameraFrameStorePublications: nonNegativeInteger,
+      previewCameraCaptureCallbackAgeMs: optionalSchema(nonNegativeInteger),
+      previewCameraLatestSequence: optionalSchema(nonNegativeInteger),
+      previewCameraCapturePixelFormat: optionalSchema(
+        stringSchema({ minLength: 1, maxLength: 16 })
+      ),
+      previewCameraDropReasons: previewCameraDropReasonStatsSchema,
+      previewCameraSurfaceBacking: previewSourceSurfaceBackingStatsSchema,
+      previewScreenCaptureCallbackCount: nonNegativeInteger,
+      previewScreenFrameStorePublications: nonNegativeInteger,
+      previewScreenCaptureCallbackAgeMs: optionalSchema(nonNegativeInteger),
+      previewScreenLatestSequence: optionalSchema(nonNegativeInteger),
+      previewScreenFrameStatuses: previewScreenFrameStatusStatsSchema,
+      previewScreenSurfaceBacking: previewSourceSurfaceBackingStatsSchema,
       updatedAt: optionalSchema(timestamp)
     },
     { allowUnknown: true }

@@ -9,7 +9,8 @@ use crate::ffmpeg_work::FfmpegWorkSnapshot;
 use crate::frame_store::FrameStoreStats;
 use crate::protocol::{
     CameraCapabilityFormat, CompositorBackend, DiagnosticBottleneck, DiagnosticStats,
-    PermissionPane, PreviewCameraStatus, PreviewImagePollCounts, PreviewScreenStatus,
+    PermissionPane, PreviewCameraDropReasonStats, PreviewCameraStatus, PreviewImagePollCounts,
+    PreviewScreenFrameStatusStats, PreviewScreenStatus, PreviewSourceSurfaceBackingStats,
     PreviewSurfaceBacking, PreviewTransport, StreamHealth,
 };
 use crate::source_registry::SourceRegistrySnapshot;
@@ -19,6 +20,10 @@ pub struct CompositorSourceImportStats {
     pub iosurface_frames: u64,
     pub cvpixelbuffer_frames: u64,
     pub byte_upload_frames: u64,
+    pub capture_texture_reuses: u64,
+    pub camera_capture_texture_reuses: u64,
+    pub screen_capture_texture_reuses: u64,
+    pub texture_cache_flushes: u64,
     pub import_failures: u64,
     pub camera_iosurface_frames: u64,
     pub camera_cvpixelbuffer_frames: u64,
@@ -40,6 +45,18 @@ impl CompositorSourceImportStats {
         self.byte_upload_frames = self
             .byte_upload_frames
             .saturating_add(other.byte_upload_frames);
+        self.capture_texture_reuses = self
+            .capture_texture_reuses
+            .saturating_add(other.capture_texture_reuses);
+        self.camera_capture_texture_reuses = self
+            .camera_capture_texture_reuses
+            .saturating_add(other.camera_capture_texture_reuses);
+        self.screen_capture_texture_reuses = self
+            .screen_capture_texture_reuses
+            .saturating_add(other.screen_capture_texture_reuses);
+        self.texture_cache_flushes = self
+            .texture_cache_flushes
+            .saturating_add(other.texture_cache_flushes);
         self.import_failures = self.import_failures.saturating_add(other.import_failures);
         self.camera_iosurface_frames = self
             .camera_iosurface_frames
@@ -339,6 +356,17 @@ fn format_optional_count(value: Option<u64>) -> String {
     value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
 }
 
+fn format_optional_age_ms(value: Option<u64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("{value}ms"))
+}
+
+fn format_optional_dimensions(width: Option<u32>, height: Option<u32>) -> String {
+    match (width, height) {
+        (Some(width), Some(height)) => format!("{width}x{height}"),
+        _ => "n/a".to_string(),
+    }
+}
+
 fn estimated_frames(fps: Option<f64>, duration_ms: i64) -> Option<u64> {
     let fps = fps.filter(|fps| fps.is_finite() && *fps > 0.0)?;
     if duration_ms <= 0 {
@@ -393,6 +421,65 @@ pub fn format_recording_frame_accounting(stats: &DiagnosticStats, duration_ms: i
             stats.compositor_camera_source_fresh_serves,
             stats.compositor_camera_source_held_serves,
             stats.compositor_camera_source_served_age_max_ms
+        ),
+        format!(
+            "capture detail: camera {} callbacks / {} didDrop / {} published, PTS gap max {}, native {}, output {}, pixel {}; screen {} callbacks / {} published, callback gap max {}",
+            stats.preview_camera_capture_callback_count,
+            stats.preview_camera_did_drop_callback_count,
+            stats.preview_camera_frame_store_publications,
+            format_optional_ms(stats.preview_camera_sample_pts_gap_max_ms),
+            format_optional_dimensions(
+                stats.preview_camera_selected_format_width,
+                stats.preview_camera_selected_format_height
+            ),
+            format_optional_dimensions(
+                stats.preview_camera_actual_width,
+                stats.preview_camera_actual_height
+            ),
+            stats
+                .preview_camera_capture_pixel_format
+                .as_deref()
+                .unwrap_or("n/a"),
+            stats.preview_screen_capture_callback_count,
+            stats.preview_screen_frame_store_publications,
+            format_optional_ms(stats.preview_screen_capture_gap_max_ms)
+        ),
+        format!(
+            "capture attribution: camera late {} / out-of-buffers {} / discontinuity {} / unknown {}; screen complete {} / idle {} / blank {} / suspended {} / started {} / stopped {} / unknown {}",
+            stats.preview_camera_drop_reasons.frame_was_late,
+            stats.preview_camera_drop_reasons.out_of_buffers,
+            stats.preview_camera_drop_reasons.discontinuity,
+            stats.preview_camera_drop_reasons.unknown,
+            stats.preview_screen_frame_statuses.complete,
+            stats.preview_screen_frame_statuses.idle,
+            stats.preview_screen_frame_statuses.blank,
+            stats.preview_screen_frame_statuses.suspended,
+            stats.preview_screen_frame_statuses.started,
+            stats.preview_screen_frame_statuses.stopped,
+            stats.preview_screen_frame_statuses.unknown
+        ),
+        format!(
+            "Metal sources: {} IOSurface imports / {} CVPixelBuffer imports / {} held reuses (camera {}, screen {}) / {} cache flushes / {} import failures",
+            stats.compositor_source_iosurface_import_frames,
+            stats.compositor_source_cvpixelbuffer_import_frames,
+            stats.compositor_source_capture_texture_reuses,
+            stats.compositor_camera_source_capture_texture_reuses,
+            stats.compositor_screen_source_capture_texture_reuses,
+            stats.compositor_source_texture_cache_flushes,
+            stats.compositor_source_import_failures
+        ),
+        format!(
+            "surface backing: camera {} live / {} peak ({} live bytes / {} peak bytes, oldest {}), screen {} live / {} peak ({} live bytes / {} peak bytes, oldest {})",
+            stats.preview_camera_surface_backing.live_count,
+            stats.preview_camera_surface_backing.peak_count,
+            stats.preview_camera_surface_backing.estimated_bytes,
+            stats.preview_camera_surface_backing.peak_estimated_bytes,
+            format_optional_age_ms(stats.preview_camera_surface_backing.oldest_age_ms),
+            stats.preview_screen_surface_backing.live_count,
+            stats.preview_screen_surface_backing.peak_count,
+            stats.preview_screen_surface_backing.estimated_bytes,
+            stats.preview_screen_surface_backing.peak_estimated_bytes,
+            format_optional_age_ms(stats.preview_screen_surface_backing.oldest_age_ms)
         ),
         format!(
             "bridge input: {bridge_input} ({} fresh, {} repeat, {} synthetic) at {} fps",
@@ -578,6 +665,10 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_source_iosurface_import_frames: 0,
         compositor_source_cvpixelbuffer_import_frames: 0,
         compositor_source_byte_upload_frames: 0,
+        compositor_source_capture_texture_reuses: 0,
+        compositor_camera_source_capture_texture_reuses: 0,
+        compositor_screen_source_capture_texture_reuses: 0,
+        compositor_source_texture_cache_flushes: 0,
         compositor_source_import_failures: 0,
         compositor_camera_source_iosurface_import_frames: 0,
         compositor_camera_source_cvpixelbuffer_import_frames: 0,
@@ -615,6 +706,14 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_camera_frame_age_ms: None,
         preview_camera_source_fps: None,
         preview_camera_dropped_frames: 0,
+        preview_camera_capture_callback_count: 0,
+        preview_camera_did_drop_callback_count: 0,
+        preview_camera_frame_store_publications: 0,
+        preview_camera_capture_callback_age_ms: None,
+        preview_camera_latest_sequence: None,
+        preview_camera_capture_pixel_format: None,
+        preview_camera_drop_reasons: PreviewCameraDropReasonStats::default(),
+        preview_camera_surface_backing: PreviewSourceSurfaceBackingStats::default(),
         preview_camera_state: None,
         preview_camera_device_unique_id: None,
         preview_camera_status_message: None,
@@ -642,6 +741,12 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_screen_frame_age_ms: None,
         preview_screen_source_fps: None,
         preview_screen_dropped_frames: 0,
+        preview_screen_capture_callback_count: 0,
+        preview_screen_frame_store_publications: 0,
+        preview_screen_capture_callback_age_ms: None,
+        preview_screen_latest_sequence: None,
+        preview_screen_frame_statuses: PreviewScreenFrameStatusStats::default(),
+        preview_screen_surface_backing: PreviewSourceSurfaceBackingStats::default(),
         preview_screen_message: None,
         preview_screen_native_width: None,
         preview_screen_native_height: None,
@@ -1375,6 +1480,32 @@ pub fn apply_preview_camera_source_stats(
     stats
 }
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreviewCameraCaptureStats {
+    pub callback_count: u64,
+    pub did_drop_callback_count: u64,
+    pub frame_store_publications: u64,
+    pub callback_age_ms: Option<u64>,
+    pub latest_sequence: Option<u64>,
+    pub pixel_format: Option<String>,
+    pub drop_reasons: PreviewCameraDropReasonStats,
+}
+
+pub fn apply_preview_camera_capture_stats(
+    mut stats: DiagnosticStats,
+    capture: PreviewCameraCaptureStats,
+) -> DiagnosticStats {
+    stats.preview_camera_capture_callback_count = capture.callback_count;
+    stats.preview_camera_did_drop_callback_count = capture.did_drop_callback_count;
+    stats.preview_camera_frame_store_publications = capture.frame_store_publications;
+    stats.preview_camera_capture_callback_age_ms = capture.callback_age_ms;
+    stats.preview_camera_latest_sequence = capture.latest_sequence;
+    stats.preview_camera_capture_pixel_format = capture.pixel_format;
+    stats.preview_camera_drop_reasons = capture.drop_reasons;
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
 pub fn apply_preview_camera_capability_stats(
     mut stats: DiagnosticStats,
     camera_id: Option<String>,
@@ -1443,6 +1574,28 @@ pub fn apply_preview_screen_source_stats(
     stats
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreviewScreenCaptureStats {
+    pub callback_count: u64,
+    pub frame_store_publications: u64,
+    pub callback_age_ms: Option<u64>,
+    pub latest_sequence: Option<u64>,
+    pub frame_statuses: PreviewScreenFrameStatusStats,
+}
+
+pub fn apply_preview_screen_capture_stats(
+    mut stats: DiagnosticStats,
+    capture: PreviewScreenCaptureStats,
+) -> DiagnosticStats {
+    stats.preview_screen_capture_callback_count = capture.callback_count;
+    stats.preview_screen_frame_store_publications = capture.frame_store_publications;
+    stats.preview_screen_capture_callback_age_ms = capture.callback_age_ms;
+    stats.preview_screen_latest_sequence = capture.latest_sequence;
+    stats.preview_screen_frame_statuses = capture.frame_statuses;
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct PreviewScreenCaptureTimingStats {
     pub capture_gap_p95_ms: Option<f64>,
@@ -1474,6 +1627,8 @@ pub fn apply_preview_source_frame_store_stats(
     camera: FrameStoreStats,
     screen: FrameStoreStats,
 ) -> DiagnosticStats {
+    stats.preview_camera_surface_backing = surface_backing_stats(camera);
+    stats.preview_screen_surface_backing = surface_backing_stats(screen);
     stats.preview_source_frame_buffer_count =
         camera.buffer_count.saturating_add(screen.buffer_count);
     stats.preview_source_frame_bytes = camera.bytes_retained.saturating_add(screen.bytes_retained);
@@ -1481,6 +1636,16 @@ pub fn apply_preview_source_frame_store_stats(
         camera.frames_dropped.saturating_add(screen.frames_dropped);
     stats.updated_at = Utc::now().to_rfc3339();
     stats
+}
+
+fn surface_backing_stats(stats: FrameStoreStats) -> PreviewSourceSurfaceBackingStats {
+    PreviewSourceSurfaceBackingStats {
+        live_count: stats.surface_backing_live_count,
+        peak_count: stats.surface_backing_peak_count,
+        estimated_bytes: stats.surface_backing_estimated_bytes,
+        peak_estimated_bytes: stats.surface_backing_peak_estimated_bytes,
+        oldest_age_ms: stats.surface_backing_oldest_age_ms,
+    }
 }
 
 pub fn apply_preview_stats(
@@ -1662,6 +1827,12 @@ pub fn apply_compositor_source_import_stats(
     stats.compositor_source_iosurface_import_frames = source_import.iosurface_frames;
     stats.compositor_source_cvpixelbuffer_import_frames = source_import.cvpixelbuffer_frames;
     stats.compositor_source_byte_upload_frames = source_import.byte_upload_frames;
+    stats.compositor_source_capture_texture_reuses = source_import.capture_texture_reuses;
+    stats.compositor_camera_source_capture_texture_reuses =
+        source_import.camera_capture_texture_reuses;
+    stats.compositor_screen_source_capture_texture_reuses =
+        source_import.screen_capture_texture_reuses;
+    stats.compositor_source_texture_cache_flushes = source_import.texture_cache_flushes;
     stats.compositor_source_import_failures = source_import.import_failures;
     stats.compositor_camera_source_iosurface_import_frames = source_import.camera_iosurface_frames;
     stats.compositor_camera_source_cvpixelbuffer_import_frames =
@@ -2564,6 +2735,54 @@ mod tests {
         stats.encoder_bridge_encoded_output_frames = 119;
         stats.encoder_bridge_encoded_output_bytes = 4_096;
         stats.compositor_cpu_frames = 214;
+        stats.preview_camera_capture_callback_count = 101;
+        stats.preview_camera_did_drop_callback_count = 4;
+        stats.preview_camera_frame_store_publications = 97;
+        stats.preview_camera_sample_pts_gap_max_ms = Some(66.7);
+        stats.preview_camera_selected_format_width = Some(3840);
+        stats.preview_camera_selected_format_height = Some(2160);
+        stats.preview_camera_actual_width = Some(1920);
+        stats.preview_camera_actual_height = Some(1080);
+        stats.preview_camera_capture_pixel_format = Some("BGRA".to_string());
+        stats.preview_camera_drop_reasons = PreviewCameraDropReasonStats {
+            frame_was_late: 1,
+            out_of_buffers: 2,
+            discontinuity: 1,
+            unknown: 0,
+        };
+        stats.preview_screen_capture_callback_count = 103;
+        stats.preview_screen_frame_store_publications = 100;
+        stats.preview_screen_capture_gap_max_ms = Some(91.2);
+        stats.preview_screen_frame_statuses = PreviewScreenFrameStatusStats {
+            complete: 100,
+            idle: 1,
+            blank: 1,
+            suspended: 0,
+            started: 1,
+            stopped: 0,
+            unknown: 0,
+        };
+        stats.compositor_source_iosurface_import_frames = 60;
+        stats.compositor_source_cvpixelbuffer_import_frames = 40;
+        stats.compositor_source_capture_texture_reuses = 23;
+        stats.compositor_camera_source_capture_texture_reuses = 11;
+        stats.compositor_screen_source_capture_texture_reuses = 12;
+        stats.compositor_source_texture_cache_flushes = 3;
+        stats.compositor_source_import_failures = 2;
+        stats.preview_camera_surface_backing = PreviewSourceSurfaceBackingStats {
+            live_count: 2,
+            peak_count: 4,
+            estimated_bytes: 64,
+            peak_estimated_bytes: 128,
+            oldest_age_ms: Some(42),
+        };
+        stats.preview_screen_surface_backing = PreviewSourceSurfaceBackingStats {
+            live_count: 3,
+            peak_count: 6,
+            estimated_bytes: 96,
+            peak_estimated_bytes: 192,
+            oldest_age_ms: Some(31),
+        };
         let stats = apply_recording_frame_accounting(
             stats,
             RecordingFrameAccountingSnapshot {
@@ -2585,6 +2804,10 @@ mod tests {
              captured: screen 59.0 fps (~395), camera n/a fps (~n/a); \
              compositor: 214 ticks, 188 intervals skipped, render 32.0 fps, 0 dropped, 214 cpu, 0 cpu-fallback; \
              source serves: screen 0 fresh / 0 held (oldest 0ms), camera 0 fresh / 0 held (oldest 0ms); \
+             capture detail: camera 101 callbacks / 4 didDrop / 97 published, PTS gap max 66.7ms, native 3840x2160, output 1920x1080, pixel BGRA; screen 103 callbacks / 100 published, callback gap max 91.2ms; \
+             capture attribution: camera late 1 / out-of-buffers 2 / discontinuity 1 / unknown 0; screen complete 100 / idle 1 / blank 1 / suspended 0 / started 1 / stopped 0 / unknown 0; \
+             Metal sources: 60 IOSurface imports / 40 CVPixelBuffer imports / 23 held reuses (camera 11, screen 12) / 3 cache flushes / 2 import failures; \
+             surface backing: camera 2 live / 4 peak (64 live bytes / 128 peak bytes, oldest 42ms), screen 3 live / 6 peak (96 live bytes / 192 peak bytes, oldest 31ms); \
              bridge input: 119 (116 fresh, 3 repeat, 0 synthetic) at 17.7 fps; \
              submitted: 119 (mf 119), coalesced-dropped 0, encoder-dropped 0; \
              encoded output: 119 frames (4096 bytes, 0 errors); \
@@ -2642,6 +2865,10 @@ mod tests {
                 iosurface_frames: 11,
                 cvpixelbuffer_frames: 7,
                 byte_upload_frames: 5,
+                capture_texture_reuses: 13,
+                camera_capture_texture_reuses: 8,
+                screen_capture_texture_reuses: 5,
+                texture_cache_flushes: 3,
                 import_failures: 2,
                 camera_iosurface_frames: 1,
                 camera_cvpixelbuffer_frames: 7,
@@ -2659,6 +2886,10 @@ mod tests {
         assert_eq!(stats.compositor_source_iosurface_import_frames, 11);
         assert_eq!(stats.compositor_source_cvpixelbuffer_import_frames, 7);
         assert_eq!(stats.compositor_source_byte_upload_frames, 5);
+        assert_eq!(stats.compositor_source_capture_texture_reuses, 13);
+        assert_eq!(stats.compositor_camera_source_capture_texture_reuses, 8);
+        assert_eq!(stats.compositor_screen_source_capture_texture_reuses, 5);
+        assert_eq!(stats.compositor_source_texture_cache_flushes, 3);
         assert_eq!(stats.compositor_source_import_failures, 2);
         assert_eq!(stats.compositor_camera_source_iosurface_import_frames, 1);
         assert_eq!(
@@ -2699,6 +2930,73 @@ mod tests {
         assert_eq!(stats.preview_screen_publish_p95_ms, Some(1.1));
         assert_eq!(stats.preview_screen_frame_bytes, 8_294_400);
         assert_eq!(stats.preview_screen_capture_queue_depth, 3);
+    }
+
+    #[test]
+    fn capture_pressure_stats_preserve_callback_status_and_surface_accounting() {
+        let stats = apply_preview_camera_capture_stats(
+            idle_diagnostics(),
+            PreviewCameraCaptureStats {
+                callback_count: 101,
+                did_drop_callback_count: 4,
+                frame_store_publications: 97,
+                callback_age_ms: Some(11),
+                latest_sequence: Some(97),
+                pixel_format: Some("BGRA".to_string()),
+                drop_reasons: PreviewCameraDropReasonStats {
+                    frame_was_late: 1,
+                    out_of_buffers: 2,
+                    discontinuity: 1,
+                    unknown: 0,
+                },
+            },
+        );
+        let stats = apply_preview_screen_capture_stats(
+            stats,
+            PreviewScreenCaptureStats {
+                callback_count: 103,
+                frame_store_publications: 100,
+                callback_age_ms: Some(8),
+                latest_sequence: Some(100),
+                frame_statuses: PreviewScreenFrameStatusStats {
+                    complete: 100,
+                    idle: 1,
+                    blank: 1,
+                    suspended: 0,
+                    started: 1,
+                    stopped: 0,
+                    unknown: 0,
+                },
+            },
+        );
+        let stats = apply_preview_source_frame_store_stats(
+            stats,
+            FrameStoreStats {
+                surface_backing_live_count: 2,
+                surface_backing_peak_count: 4,
+                surface_backing_estimated_bytes: 64,
+                surface_backing_peak_estimated_bytes: 128,
+                surface_backing_oldest_age_ms: Some(42),
+                ..Default::default()
+            },
+            FrameStoreStats {
+                surface_backing_live_count: 3,
+                surface_backing_peak_count: 6,
+                surface_backing_estimated_bytes: 96,
+                surface_backing_peak_estimated_bytes: 192,
+                surface_backing_oldest_age_ms: Some(31),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(stats.preview_camera_capture_callback_count, 101);
+        assert_eq!(stats.preview_camera_did_drop_callback_count, 4);
+        assert_eq!(stats.preview_camera_drop_reasons.out_of_buffers, 2);
+        assert_eq!(stats.preview_camera_surface_backing.live_count, 2);
+        assert_eq!(stats.preview_camera_surface_backing.oldest_age_ms, Some(42));
+        assert_eq!(stats.preview_screen_capture_callback_count, 103);
+        assert_eq!(stats.preview_screen_frame_statuses.complete, 100);
+        assert_eq!(stats.preview_screen_surface_backing.peak_count, 6);
     }
 
     #[test]

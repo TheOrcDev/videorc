@@ -86,6 +86,19 @@ impl Default for CaptureInterruptionCoordinator {
 }
 
 impl CaptureInterruptionCoordinator {
+    /// Read-only admission predicate for media paths that must not start while
+    /// a capture is starting, active/finalizing, or interrupted. Expiring a
+    /// stale interruption lease mirrors the normal admission methods, but this
+    /// query never reserves or changes an otherwise-live admission state.
+    pub fn capture_admission_is_idle(&self) -> bool {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        expire_interruption_if_needed(&mut inner, Instant::now());
+        matches!(inner.state, CaptureAdmissionState::Idle)
+    }
+
     pub fn try_begin_session_start(
         self: &Arc<Self>,
     ) -> Result<SessionStartAdmission, CaptureAdmissionBlocker> {
@@ -389,6 +402,18 @@ mod tests {
         CONSUMED_INTERRUPTION_LEASE_TTL, CaptureAdmissionBlocker, CaptureInterruptionCoordinator,
         INTERRUPTION_LEASE_TTL,
     };
+
+    #[test]
+    fn read_only_idle_query_rejects_session_starting_and_recovers_after_abandon() {
+        let coordinator = Arc::new(CaptureInterruptionCoordinator::default());
+        assert!(coordinator.capture_admission_is_idle());
+
+        let admission = coordinator.try_begin_session_start().unwrap();
+        assert!(!coordinator.capture_admission_is_idle());
+
+        drop(admission);
+        assert!(coordinator.capture_admission_is_idle());
+    }
 
     #[test]
     fn lost_acquire_response_recovers_same_owner_action_lease() {

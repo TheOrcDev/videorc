@@ -15,6 +15,7 @@
 #![cfg(target_os = "macos")]
 #![allow(dead_code)]
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -219,12 +220,14 @@ impl GpuChromaKey {
 /// One source layer to composite: BGRA8 pixels at `width`×`height`, drawn into the
 /// destination rectangle `dest` = (x, y, w, h) in normalized [0,1] coordinates with the
 /// origin at the top-left (the convention the scene model uses).
+#[derive(Clone, Copy)]
 pub struct GpuSource<'a> {
     pub kind: GpuSourceKind,
     pub bgra: &'a [u8],
-    /// Stable identity for immutable byte-backed pixels. When unchanged, Metal keeps the
-    /// existing source texture and skips `replaceRegion`. Dynamic capture frames leave this
-    /// unset so byte fallbacks still upload every fresh frame.
+    /// Stable identity for immutable pixels. For capture sources this is the
+    /// process-unique frame-storage identity, allowing a held frame to reuse its
+    /// completed CoreVideo/IOSurface import without confusing reset sequences or
+    /// recycled backing addresses.
     pub content_key: Option<GpuSourceContentKey>,
     /// Zero-copy capture-source surface. When present (and `VIDEORC_ZEROCOPY_SOURCES` is on) the
     /// compositor imports it as a Metal texture instead of uploading `bgra` via `replaceRegion`.
@@ -291,6 +294,12 @@ pub enum GpuSourceKind {
     TestPattern,
 }
 
+impl GpuSourceKind {
+    fn is_capture(self) -> bool {
+        matches!(self, Self::Camera | Self::Screen | Self::Window)
+    }
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct MetalSourceImportStats {
     pub iosurface_frames: u64,
@@ -298,6 +307,10 @@ pub struct MetalSourceImportStats {
     pub byte_upload_frames: u64,
     pub immutable_texture_uploads: u64,
     pub immutable_texture_reuses: u64,
+    pub capture_texture_reuses: u64,
+    pub camera_capture_texture_reuses: u64,
+    pub screen_capture_texture_reuses: u64,
+    pub texture_cache_flushes: u64,
     pub import_failures: u64,
     pub camera_iosurface_frames: u64,
     pub camera_cvpixelbuffer_frames: u64,
@@ -325,6 +338,18 @@ impl MetalSourceImportStats {
         self.immutable_texture_reuses = self
             .immutable_texture_reuses
             .saturating_add(other.immutable_texture_reuses);
+        self.capture_texture_reuses = self
+            .capture_texture_reuses
+            .saturating_add(other.capture_texture_reuses);
+        self.camera_capture_texture_reuses = self
+            .camera_capture_texture_reuses
+            .saturating_add(other.camera_capture_texture_reuses);
+        self.screen_capture_texture_reuses = self
+            .screen_capture_texture_reuses
+            .saturating_add(other.screen_capture_texture_reuses);
+        self.texture_cache_flushes = self
+            .texture_cache_flushes
+            .saturating_add(other.texture_cache_flushes);
         self.import_failures = self.import_failures.saturating_add(other.import_failures);
         self.camera_iosurface_frames = self
             .camera_iosurface_frames
@@ -353,9 +378,10 @@ impl MetalSourceImportStats {
         self.import_time_ms += other.import_time_ms;
     }
 
-    fn record(&mut self, kind: GpuSourceKind, outcome: SourceImportOutcome, elapsed_ms: f64) {
+    fn record_ready(&mut self, kind: GpuSourceKind, ready: SourceTextureReady, elapsed_ms: f64) {
         self.import_time_ms += elapsed_ms;
-        match outcome {
+        self.record_import_failures(kind, ready.failures);
+        match ready.outcome {
             SourceImportOutcome::IosurfaceImported => {
                 self.iosurface_frames = self.iosurface_frames.saturating_add(1);
                 match kind {
@@ -405,40 +431,49 @@ impl MetalSourceImportStats {
             SourceImportOutcome::ImmutableByteReused => {
                 self.immutable_texture_reuses = self.immutable_texture_reuses.saturating_add(1);
             }
-            SourceImportOutcome::IosurfaceImportFailedToByteUpload => {
-                self.import_failures = self.import_failures.saturating_add(1);
-                self.byte_upload_frames = self.byte_upload_frames.saturating_add(1);
+            SourceImportOutcome::CaptureTextureReused => {
+                self.capture_texture_reuses = self.capture_texture_reuses.saturating_add(1);
                 match kind {
                     GpuSourceKind::Camera => {
-                        self.camera_import_failures = self.camera_import_failures.saturating_add(1);
-                        self.camera_byte_upload_frames =
-                            self.camera_byte_upload_frames.saturating_add(1);
+                        self.camera_capture_texture_reuses =
+                            self.camera_capture_texture_reuses.saturating_add(1);
                     }
                     GpuSourceKind::Screen | GpuSourceKind::Window => {
-                        self.screen_import_failures = self.screen_import_failures.saturating_add(1);
-                        self.screen_byte_upload_frames =
-                            self.screen_byte_upload_frames.saturating_add(1);
+                        self.screen_capture_texture_reuses =
+                            self.screen_capture_texture_reuses.saturating_add(1);
                     }
                     GpuSourceKind::Image | GpuSourceKind::TestPattern => {}
                 }
             }
-            SourceImportOutcome::CvpixelbufferImportFailedToByteUpload => {
-                self.import_failures = self.import_failures.saturating_add(1);
-                self.byte_upload_frames = self.byte_upload_frames.saturating_add(1);
-                match kind {
-                    GpuSourceKind::Camera => {
-                        self.camera_import_failures = self.camera_import_failures.saturating_add(1);
-                        self.camera_byte_upload_frames =
-                            self.camera_byte_upload_frames.saturating_add(1);
-                    }
-                    GpuSourceKind::Screen | GpuSourceKind::Window => {
-                        self.screen_import_failures = self.screen_import_failures.saturating_add(1);
-                        self.screen_byte_upload_frames =
-                            self.screen_byte_upload_frames.saturating_add(1);
-                    }
-                    GpuSourceKind::Image | GpuSourceKind::TestPattern => {}
-                }
+        }
+    }
+
+    fn record_failed_source(
+        &mut self,
+        kind: GpuSourceKind,
+        failures: SourceImportFailures,
+        elapsed_ms: f64,
+    ) {
+        self.import_time_ms += elapsed_ms;
+        self.record_import_failures(kind, failures);
+    }
+
+    fn record_import_failures(&mut self, kind: GpuSourceKind, failures: SourceImportFailures) {
+        let failure_count = failures.count();
+        if failure_count == 0 {
+            return;
+        }
+        self.import_failures = self.import_failures.saturating_add(failure_count);
+        match kind {
+            GpuSourceKind::Camera => {
+                self.camera_import_failures =
+                    self.camera_import_failures.saturating_add(failure_count);
             }
+            GpuSourceKind::Screen | GpuSourceKind::Window => {
+                self.screen_import_failures =
+                    self.screen_import_failures.saturating_add(failure_count);
+            }
+            GpuSourceKind::Image | GpuSourceKind::TestPattern => {}
         }
     }
 }
@@ -450,8 +485,25 @@ enum SourceImportOutcome {
     ByteUploaded,
     ImmutableByteUploaded,
     ImmutableByteReused,
-    IosurfaceImportFailedToByteUpload,
-    CvpixelbufferImportFailedToByteUpload,
+    CaptureTextureReused,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SourceImportFailures {
+    cvpixelbuffer: bool,
+    iosurface: bool,
+}
+
+impl SourceImportFailures {
+    fn count(self) -> u64 {
+        u64::from(self.cvpixelbuffer) + u64::from(self.iosurface)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SourceTextureReady {
+    outcome: SourceImportOutcome,
+    failures: SourceImportFailures,
 }
 
 /// True when a Metal device is available on this machine.
@@ -511,6 +563,10 @@ const TARGET_RING_SIZE: usize = 3;
 /// Growth headroom when every base slot is held by an in-flight encode; the
 /// VideoToolbox frame-delay cap (≤2) makes reaching this bound an anomaly.
 const TARGET_RING_MAX_SIZE: usize = TARGET_RING_SIZE + 2;
+/// CoreVideo requires periodic texture-cache housekeeping. At 30 fps with a
+/// screen and camera this cadence flushes roughly once per second, after the
+/// command buffer that consumed the imported views has completed.
+const CV_METAL_TEXTURE_CACHE_FLUSH_INTERVAL_IMPORTS: u64 = 64;
 
 pub struct MetalSceneCompositor {
     device: Retained<MetalDevice>,
@@ -527,6 +583,9 @@ pub struct MetalSceneCompositor {
     target_height: usize,
     source_textures: Vec<Option<CachedSourceTexture>>,
     source_texture_cache: Option<MetalSourceTextureCache>,
+    pending_source_import_stats: PendingMetalSourceImportStats,
+    #[cfg(test)]
+    force_next_pixel_buffer_import_failure: bool,
 }
 
 struct CachedTargetTexture {
@@ -540,21 +599,128 @@ struct CachedTargetTexture {
 }
 
 struct CachedSourceTexture {
+    // Keep this before `backing`: Rust releases fields in declaration order,
+    // so the CVMetalTexture wrapper outlives its derived Metal texture.
     texture: Retained<MetalTexture>,
+    backing: CachedSourceBacking,
     width: usize,
     height: usize,
     content_key: Option<GpuSourceContentKey>,
 }
 
-struct MetalSourceTextureCache(CFRetained<CVMetalTextureCache>);
+enum CachedSourceBacking {
+    ByteUpload,
+    IoSurface,
+    /// CoreVideo's contract requires this wrapper to remain retained for as
+    /// long as the associated `CachedSourceTexture::texture` is used by the
+    /// GPU. Keeping it in the same cache entry makes the ownership inseparable.
+    CvPixelBuffer(CFRetained<CVMetalTexture>),
+}
+
+struct MetalSourceTextureCache {
+    cache: CFRetained<CVMetalTextureCache>,
+    flush_policy: MetalTextureCacheFlushPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct MetalTextureCacheFlushPolicy {
+    imports_since_flush: u64,
+    flush_requested: bool,
+}
+
+impl MetalTextureCacheFlushPolicy {
+    fn record_import(&mut self) {
+        self.imports_since_flush = self.imports_since_flush.saturating_add(1);
+        if self.imports_since_flush >= CV_METAL_TEXTURE_CACHE_FLUSH_INTERVAL_IMPORTS {
+            self.flush_requested = true;
+        }
+    }
+
+    fn record_import_failure(&mut self) {
+        self.flush_requested = true;
+    }
+
+    fn record_flush(&mut self) {
+        self.imports_since_flush = 0;
+        self.flush_requested = false;
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PendingMetalSourceImportStats {
+    stats: MetalSourceImportStats,
+}
+
+impl PendingMetalSourceImportStats {
+    fn preserve_failed_compose(&mut self, stats: MetalSourceImportStats) {
+        self.stats.merge(stats);
+    }
+
+    fn take(&mut self) -> MetalSourceImportStats {
+        std::mem::take(&mut self.stats)
+    }
+
+    fn complete_successful_compose(
+        &mut self,
+        current: MetalSourceImportStats,
+    ) -> MetalSourceImportStats {
+        let mut reported = self.take();
+        reported.merge(current);
+        reported
+    }
+
+    fn snapshot(&self) -> MetalSourceImportStats {
+        self.stats
+    }
+}
+
+/// Own the only post-encode completion boundary used by scene composition.
+/// Keeping failure/success as data until after this function returns prevents
+/// an import or byte-fallback error from bypassing command completion and the
+/// pending CoreVideo cache flush.
+fn finish_encoded_work<T, E>(
+    encode_result: Result<T, E>,
+    end_encoding: impl FnOnce(),
+    commit: impl FnOnce(),
+    wait_until_completed: impl FnOnce(),
+    flush_after_completed: impl FnOnce() -> bool,
+) -> (Result<T, E>, bool) {
+    end_encoding();
+    commit();
+    wait_until_completed();
+    let flushed = flush_after_completed();
+    (encode_result, flushed)
+}
 
 impl MetalSourceTextureCache {
     fn new(cache: CFRetained<CVMetalTextureCache>) -> Self {
-        Self(cache)
+        Self {
+            cache,
+            flush_policy: MetalTextureCacheFlushPolicy::default(),
+        }
     }
 
     fn cache(&self) -> &CVMetalTextureCache {
-        self.0.as_ref()
+        self.cache.as_ref()
+    }
+
+    fn record_import(&mut self) {
+        self.flush_policy.record_import();
+    }
+
+    fn record_import_failure(&mut self) {
+        self.flush_policy.record_import_failure();
+    }
+
+    /// Flush only from the post-command-completion boundary. This guarantees
+    /// no cached view is in flight on the compositor's serial command queue.
+    fn flush_after_completed_work(&mut self) -> bool {
+        if !self.flush_policy.flush_requested {
+            return false;
+        }
+        self.cache.flush(0);
+        self.flush_policy.record_flush();
+        true
     }
 }
 
@@ -709,8 +875,9 @@ unsafe impl Sync for MetalCompositorTargetPixelBuffer {}
 // wrapper only allows Tokio to move the owning task between worker threads.
 unsafe impl Send for CachedTargetTexture {}
 
-// SAFETY: Source textures follow the same ownership model as the target texture: each one
-// is owned by a single compositor instance and refreshed sequentially in the render loop.
+// SAFETY: Source textures and their optional retained CVMetalTexture wrapper
+// are owned by a single compositor instance and refreshed sequentially in the
+// render loop. The wrapper is never accessed independently of that owner.
 unsafe impl Send for CachedSourceTexture {}
 
 // SAFETY: CVMetalTextureCache is retained by one compositor and only used from the render loop.
@@ -753,6 +920,9 @@ impl MetalSceneCompositor {
             target_height: 0,
             source_textures: Vec::new(),
             source_texture_cache,
+            pending_source_import_stats: PendingMetalSourceImportStats::default(),
+            #[cfg(test)]
+            force_next_pixel_buffer_import_failure: false,
         })
     }
 
@@ -825,6 +995,7 @@ impl MetalSceneCompositor {
         let mut command_encode_ms = 0.0;
         let mut encode_segment_started_at = Instant::now();
         let mut encoder_blend = false;
+        let mut encode_result: Result<(), ()> = Ok(());
         for (source_index, source) in sources.iter().enumerate() {
             if source.blend != encoder_blend {
                 encoder.setRenderPipelineState(if source.blend {
@@ -835,12 +1006,19 @@ impl MetalSceneCompositor {
                 encoder_blend = source.blend;
             }
             let vertices = quad_vertices(source.dest);
-            let buffer = unsafe {
+            let Some(vertices_ptr) = NonNull::new(vertices.as_ptr() as *mut c_void) else {
+                encode_result = Err(());
+                break;
+            };
+            let Some(buffer) = (unsafe {
                 self.device.newBufferWithBytes_length_options(
-                    NonNull::new(vertices.as_ptr() as *mut c_void)?,
+                    vertices_ptr,
                     std::mem::size_of_val(&vertices),
                     MTLResourceOptions::StorageModeShared,
-                )?
+                )
+            }) else {
+                encode_result = Err(());
+                break;
             };
             // Pixel aspect of the destination quad — the circle mask normalizes by the
             // shorter side so a non-square quad still masks a round circle, not an ellipse.
@@ -863,18 +1041,41 @@ impl MetalSceneCompositor {
             };
             command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
             let source_texture_started_at = Instant::now();
-            let import_outcome = self.ensure_source_texture(source_index, source)?;
+            let source_texture = self.ensure_source_texture(source_index, source);
             let source_texture_elapsed_ms =
                 source_texture_started_at.elapsed().as_secs_f64() * 1000.0;
             source_texture_ms += source_texture_elapsed_ms;
-            source_import_stats.record(source.kind, import_outcome, source_texture_elapsed_ms);
-            let texture = &self.source_textures[source_index].as_ref()?.texture;
+            match source_texture {
+                Ok(ready) => {
+                    source_import_stats.record_ready(source.kind, ready, source_texture_elapsed_ms);
+                }
+                Err(failures) => {
+                    source_import_stats.record_failed_source(
+                        source.kind,
+                        failures,
+                        source_texture_elapsed_ms,
+                    );
+                    encode_result = Err(());
+                    break;
+                }
+            }
+            let Some(texture) = self.source_textures[source_index]
+                .as_ref()
+                .map(|cached| &cached.texture)
+            else {
+                encode_result = Err(());
+                break;
+            };
+            let Some(params_ptr) = NonNull::new(std::ptr::addr_of!(params) as *mut c_void) else {
+                encode_result = Err(());
+                break;
+            };
             let draw_started_at = Instant::now();
             unsafe {
                 encoder.setVertexBuffer_offset_atIndex(Some(&buffer), 0, 0);
                 encoder.setFragmentTexture_atIndex(Some(texture), 0);
                 encoder.setFragmentBytes_length_atIndex(
-                    NonNull::new(std::ptr::addr_of!(params) as *mut c_void)?,
+                    params_ptr,
                     std::mem::size_of::<FragParams>(),
                     0,
                 );
@@ -884,17 +1085,45 @@ impl MetalSceneCompositor {
             encode_segment_started_at = Instant::now();
         }
         command_encode_ms += encode_segment_started_at.elapsed().as_secs_f64() * 1000.0;
-        encoder.endEncoding();
-        let command_wait_started_at = Instant::now();
-        command_buffer.commit();
-        command_buffer.waitUntilCompleted();
-        let command_wait_ms = command_wait_started_at.elapsed().as_secs_f64() * 1000.0;
+        let command_wait_started_at = Cell::new(None);
+        let command_wait_ms = Cell::new(0.0);
+        let source_texture_cache = &mut self.source_texture_cache;
+        let (encode_result, cache_flushed) = finish_encoded_work(
+            encode_result,
+            || encoder.endEncoding(),
+            || {
+                command_wait_started_at.set(Some(Instant::now()));
+                command_buffer.commit();
+            },
+            || {
+                command_buffer.waitUntilCompleted();
+                if let Some(started_at) = command_wait_started_at.get() {
+                    command_wait_ms.set(started_at.elapsed().as_secs_f64() * 1000.0);
+                }
+            },
+            || {
+                source_texture_cache
+                    .as_mut()
+                    .is_some_and(MetalSourceTextureCache::flush_after_completed_work)
+            },
+        );
+        if cache_flushed {
+            source_import_stats.texture_cache_flushes = 1;
+        }
+        if encode_result.is_err() {
+            self.pending_source_import_stats
+                .preserve_failed_compose(source_import_stats);
+            return None;
+        }
+        let source_import_stats = self
+            .pending_source_import_stats
+            .complete_successful_compose(source_import_stats);
         Some(MetalComposeTimings {
             ensure_target_ms,
             source_texture_ms,
             source_import_stats,
             command_encode_ms,
-            command_wait_ms,
+            command_wait_ms: command_wait_ms.get(),
             total_ms: total_started_at.elapsed().as_secs_f64() * 1000.0,
             ..MetalComposeTimings::default()
         })
@@ -1018,37 +1247,70 @@ impl MetalSceneCompositor {
         &mut self,
         index: usize,
         source: &GpuSource<'_>,
-    ) -> Option<SourceImportOutcome> {
+    ) -> Result<SourceTextureReady, SourceImportFailures> {
         if self.source_textures.len() <= index {
             self.source_textures.resize_with(index + 1, || None);
         }
+        // The storage identity is the first decision. In particular, do not
+        // create another CoreVideo/IOSurface view for a held capture frame.
+        // Capture content keys are storage identities regardless of whether
+        // the cached texture came from zero-copy import or the byte fallback.
+        if source.content_key.is_some()
+            && let Some(cached) = self.source_textures[index].as_ref()
+            && cached.width == source.width
+            && cached.height == source.height
+            && cached.content_key == source.content_key
+        {
+            return Ok(SourceTextureReady {
+                outcome: if source.kind.is_capture() {
+                    SourceImportOutcome::CaptureTextureReused
+                } else {
+                    SourceImportOutcome::ImmutableByteReused
+                },
+                failures: SourceImportFailures::default(),
+            });
+        }
         // Zero-copy fast paths: import retained capture-source storage directly as a Metal
-        // texture, skipping the per-frame BGRA upload. A fresh texture view is created each frame
-        // because source storage changes; on any failure we fall through to the byte-upload path.
-        let mut pixel_buffer_import_failed = false;
+        // texture, skipping the per-frame BGRA upload. A fresh texture view is created only when
+        // the frame's process-unique storage identity changes; held frames reuse the completed
+        // prior import. On any failure we fall through to the byte-upload path.
+        let mut failures = SourceImportFailures::default();
         if source_zerocopy_enabled()
             && let Some(pixel_buffer) = source.pixel_buffer
         {
-            if let Some(cache) = self.source_texture_cache.as_ref()
-                && let Some(texture) = import_pixel_buffer_texture(
+            #[cfg(test)]
+            let force_import_failure =
+                std::mem::take(&mut self.force_next_pixel_buffer_import_failure);
+            #[cfg(not(test))]
+            let force_import_failure = false;
+            if let Some(cache) = self.source_texture_cache.as_mut()
+                && !force_import_failure
+                && let Some(imported) = import_pixel_buffer_texture(
                     cache.cache(),
                     pixel_buffer,
                     source.width,
                     source.height,
                 )
             {
+                cache.record_import();
                 self.source_textures[index] = Some(CachedSourceTexture {
-                    texture,
+                    texture: imported.texture,
+                    backing: CachedSourceBacking::CvPixelBuffer(imported.cv_texture),
                     width: source.width,
                     height: source.height,
-                    content_key: None,
+                    content_key: source.content_key,
                 });
-                return Some(SourceImportOutcome::CvpixelbufferImported);
+                return Ok(SourceTextureReady {
+                    outcome: SourceImportOutcome::CvpixelbufferImported,
+                    failures,
+                });
             }
-            pixel_buffer_import_failed = true;
+            if let Some(cache) = self.source_texture_cache.as_mut() {
+                cache.record_import_failure();
+            }
+            failures.cvpixelbuffer = true;
         }
 
-        let mut iosurface_import_failed = false;
         if source_zerocopy_enabled()
             && let Some(surface) = source.iosurface
         {
@@ -1057,47 +1319,64 @@ impl MetalSceneCompositor {
             {
                 self.source_textures[index] = Some(CachedSourceTexture {
                     texture,
+                    backing: CachedSourceBacking::IoSurface,
                     width: source.width,
                     height: source.height,
-                    content_key: None,
+                    content_key: source.content_key,
                 });
-                return Some(SourceImportOutcome::IosurfaceImported);
+                return Ok(SourceTextureReady {
+                    outcome: SourceImportOutcome::IosurfaceImported,
+                    failures,
+                });
             }
-            iosurface_import_failed = true;
+            failures.iosurface = true;
         }
 
         let needs_texture = match self.source_textures[index].as_ref() {
-            Some(cached) => cached.width != source.width || cached.height != source.height,
+            Some(cached) => {
+                cached.width != source.width
+                    || cached.height != source.height
+                    || !matches!(&cached.backing, CachedSourceBacking::ByteUpload)
+            }
             None => true,
         };
         if needs_texture {
+            let texture = make_texture(
+                &self.device,
+                source.width,
+                source.height,
+                MTLTextureUsage::ShaderRead,
+            )
+            .ok_or(failures)?;
             self.source_textures[index] = Some(CachedSourceTexture {
-                texture: make_texture(
-                    &self.device,
-                    source.width,
-                    source.height,
-                    MTLTextureUsage::ShaderRead,
-                )?,
+                texture,
+                backing: CachedSourceBacking::ByteUpload,
                 width: source.width,
                 height: source.height,
                 content_key: None,
             });
         }
 
-        let cached = self.source_textures[index].as_mut()?;
+        let cached = self.source_textures[index].as_mut().ok_or(failures)?;
         if source.content_key.is_some() && cached.content_key == source.content_key {
-            return Some(SourceImportOutcome::ImmutableByteReused);
+            return Ok(SourceTextureReady {
+                outcome: if source.kind.is_capture() {
+                    SourceImportOutcome::CaptureTextureReused
+                } else {
+                    SourceImportOutcome::ImmutableByteReused
+                },
+                failures,
+            });
         }
-        upload_bgra_to_texture(&cached.texture, source)?;
+        upload_bgra_to_texture(&cached.texture, source).ok_or(failures)?;
         cached.content_key = source.content_key;
-        Some(if source.content_key.is_some() {
-            SourceImportOutcome::ImmutableByteUploaded
-        } else if iosurface_import_failed {
-            SourceImportOutcome::IosurfaceImportFailedToByteUpload
-        } else if pixel_buffer_import_failed {
-            SourceImportOutcome::CvpixelbufferImportFailedToByteUpload
-        } else {
-            SourceImportOutcome::ByteUploaded
+        Ok(SourceTextureReady {
+            outcome: if source.content_key.is_some() && !source.kind.is_capture() {
+                SourceImportOutcome::ImmutableByteUploaded
+            } else {
+                SourceImportOutcome::ByteUploaded
+            },
+            failures,
         })
     }
 
@@ -1136,6 +1415,51 @@ impl MetalSceneCompositor {
                     .map(|texture| (texture.width, texture.height))
             })
             .collect()
+    }
+
+    #[cfg(test)]
+    fn cached_source_texture_count(&self) -> usize {
+        self.source_textures
+            .iter()
+            .filter(|cached| cached.is_some())
+            .count()
+    }
+
+    #[cfg(test)]
+    fn cached_source_cvmetal_texture_count(&self) -> usize {
+        self.source_textures
+            .iter()
+            .filter(|cached| {
+                cached.as_ref().is_some_and(|cached| {
+                    matches!(&cached.backing, CachedSourceBacking::CvPixelBuffer(_))
+                })
+            })
+            .count()
+    }
+
+    #[cfg(test)]
+    fn texture_cache_imports_since_flush(&self) -> Option<u64> {
+        self.source_texture_cache
+            .as_ref()
+            .map(|cache| cache.flush_policy.imports_since_flush)
+    }
+
+    /// Drain import/flush evidence from a compose that returned no timings so
+    /// the outer compositor can attach it to that tick's CPU-fallback report.
+    /// Taking the snapshot here prevents a later successful retry from
+    /// reporting the same failure a second time.
+    pub(crate) fn take_pending_source_import_stats(&mut self) -> MetalSourceImportStats {
+        self.pending_source_import_stats.take()
+    }
+
+    #[cfg(test)]
+    fn pending_source_import_stats(&self) -> MetalSourceImportStats {
+        self.pending_source_import_stats.snapshot()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn force_next_pixel_buffer_import_failure(&mut self) {
+        self.force_next_pixel_buffer_import_failure = true;
     }
 }
 
@@ -1400,6 +1724,32 @@ pub fn make_texture_cache(device: &MetalDevice) -> Option<CFRetained<CVMetalText
     NonNull::new(cache).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
 }
 
+/// A CoreVideo texture view and the Metal texture derived from it. CoreVideo
+/// requires callers to retain the CVMetalTexture wrapper until the GPU has
+/// finished using the MTLTexture; carrying both handles in one owned value
+/// makes that lifetime relationship explicit.
+pub struct ImportedPixelBufferTexture {
+    // Rust drops fields in declaration order: release the derived Metal
+    // texture before releasing the CoreVideo wrapper that owns its view.
+    texture: Retained<MetalTexture>,
+    cv_texture: CFRetained<CVMetalTexture>,
+}
+
+impl ImportedPixelBufferTexture {
+    pub fn cv_texture(&self) -> &CVMetalTexture {
+        self.cv_texture.as_ref()
+    }
+
+    pub fn texture(&self) -> &MetalTexture {
+        &self.texture
+    }
+}
+
+// SAFETY: Both retained objects refer to immutable CoreVideo/Metal handles.
+// The compositor moves the owner between Tokio workers but accesses it only
+// from its serial render loop and waits for each command buffer to complete.
+unsafe impl Send for ImportedPixelBufferTexture {}
+
 /// Import an IOSurface-backed BGRA `CVPixelBuffer` as an `MTLTexture` with no CPU copy —
 /// the zero-copy source path the live capture rewrite will use in place of copying camera/
 /// screen frames into `Vec<u8>`. Returns `None` if the buffer is not Metal-compatible.
@@ -1408,7 +1758,7 @@ pub fn import_pixel_buffer_texture(
     pixel_buffer: &CVPixelBuffer,
     width: usize,
     height: usize,
-) -> Option<Retained<MetalTexture>> {
+) -> Option<ImportedPixelBufferTexture> {
     let mut cv_texture: *mut CVMetalTexture = std::ptr::null_mut();
     let ret = unsafe {
         CVMetalTextureCache::create_texture_from_image(
@@ -1427,7 +1777,11 @@ pub fn import_pixel_buffer_texture(
         return None;
     }
     let cv_texture = unsafe { CFRetained::from_raw(NonNull::new(cv_texture)?) };
-    CVMetalTextureGetTexture(&cv_texture)
+    let texture = CVMetalTextureGetTexture(&cv_texture)?;
+    Some(ImportedPixelBufferTexture {
+        texture,
+        cv_texture,
+    })
 }
 
 /// Import a compositor IOSurface handoff as a Metal texture on this process/device.
@@ -1607,6 +1961,14 @@ fn make_iosurface_bgra_pixel_buffer(
         return None;
     }
     NonNull::new(pb).map(|ptr| unsafe { CFRetained::from_raw(ptr) })
+}
+
+#[cfg(test)]
+pub(crate) fn make_test_iosurface_bgra_pixel_buffer(
+    width: usize,
+    height: usize,
+) -> Option<CFRetained<CVPixelBuffer>> {
+    make_iosurface_bgra_pixel_buffer(width, height)
 }
 
 fn clear_pass(texture: &MetalTexture, rgba: [f64; 4]) -> Retained<MTLRenderPassDescriptor> {
@@ -2684,14 +3046,415 @@ mod tests {
         // Runs the real CVMetalTextureCacheCreateTextureFromImage path against an
         // IOSurface-backed buffer, matching the live capture import path.
         match import_pixel_buffer_texture(&cache, &pb, w, h) {
-            Some(texture) => {
-                assert_eq!(texture.width(), w);
-                assert_eq!(texture.height(), h);
+            Some(imported) => {
+                assert_eq!(imported.texture().width(), w);
+                assert_eq!(imported.texture().height(), h);
             }
             None => {
                 eprintln!("skipping: IOSurface-backed pixel buffer did not import on this device")
             }
         }
+    }
+
+    #[test]
+    fn metal_source_texture_cache_retains_cvmetal_wrapper_with_texture() {
+        let device = MTLCreateSystemDefaultDevice()
+            .expect("focused CVMetal cache tests require a Metal device on macOS");
+        let cache = make_texture_cache(&device)
+            .expect("focused CVMetal cache tests require CVMetalTextureCache creation");
+        let (w, h) = (16usize, 16usize);
+        let pixel_buffer = make_iosurface_bgra_pixel_buffer(w, h)
+            .expect("focused CVMetal cache tests require local IOSurface allocation");
+        let imported = import_pixel_buffer_texture(&cache, &pixel_buffer, w, h)
+            .expect("local IOSurface-backed BGRA buffer must import through CVMetalTextureCache");
+
+        assert_eq!(imported.texture().width(), w);
+        assert_eq!(imported.texture().height(), h);
+        assert!(CVMetalTextureGetTexture(imported.cv_texture()).is_some());
+
+        drop(pixel_buffer);
+        assert_eq!(imported.texture().width(), w);
+        assert_eq!(imported.texture().height(), h);
+    }
+
+    #[test]
+    fn metal_source_texture_cache_reuses_held_storage_identity() {
+        assert!(
+            source_zerocopy_enabled(),
+            "focused CVMetal cache tests require VIDEORC_ZEROCOPY_SOURCES enabled"
+        );
+        let mut compositor = MetalSceneCompositor::new()
+            .expect("focused CVMetal cache tests require a Metal compositor");
+        let (w, h) = (16usize, 16usize);
+        let pixel_buffer = make_iosurface_bgra_pixel_buffer(w, h)
+            .expect("focused CVMetal cache tests require local IOSurface allocation");
+        let fallback_bgra = vec![0u8; w * h * 4];
+        let key = GpuSourceContentKey {
+            namespace: 4,
+            revision: 41,
+            variant: 0,
+        };
+        let make_source = || GpuSource {
+            kind: GpuSourceKind::Camera,
+            bgra: &fallback_bgra,
+            content_key: Some(key),
+            iosurface: None,
+            pixel_buffer: Some(&pixel_buffer),
+            width: w,
+            height: h,
+            dest: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
+            mirror: false,
+            mask: SourceMask::None,
+            blend: false,
+            chroma_key: None,
+        };
+
+        let first = compositor
+            .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[make_source()])
+            .expect("first capture import");
+        assert_eq!(first.source_import_stats.cvpixelbuffer_frames, 1);
+        // `compose_target_with_timings` returns only after waitUntilCompleted;
+        // the cache entry must still own the CoreVideo wrapper at that point.
+        assert_eq!(compositor.cached_source_cvmetal_texture_count(), 1);
+        let held = compositor
+            .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[make_source()])
+            .expect("held capture reuse");
+
+        assert_eq!(held.source_import_stats.cvpixelbuffer_frames, 0);
+        assert_eq!(held.source_import_stats.capture_texture_reuses, 1);
+        assert_eq!(held.source_import_stats.camera_capture_texture_reuses, 1);
+        assert_eq!(held.source_import_stats.screen_capture_texture_reuses, 0);
+        assert_eq!(held.source_import_stats.import_failures, 0);
+        assert_eq!(compositor.cached_source_cvmetal_texture_count(), 1);
+    }
+
+    #[test]
+    fn metal_source_texture_cache_reuses_held_capture_byte_fallback() {
+        let mut compositor = MetalSceneCompositor::new()
+            .expect("focused Metal source-cache tests require a Metal compositor");
+        let (w, h) = (16usize, 16usize);
+        let fallback_bgra = vec![0u8; w * h * 4];
+        let make_source = || GpuSource {
+            kind: GpuSourceKind::Camera,
+            bgra: &fallback_bgra,
+            content_key: Some(GpuSourceContentKey {
+                namespace: 4,
+                revision: 42,
+                variant: 0,
+            }),
+            iosurface: None,
+            pixel_buffer: None,
+            width: w,
+            height: h,
+            dest: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
+            mirror: false,
+            mask: SourceMask::None,
+            blend: false,
+            chroma_key: None,
+        };
+
+        let first = compositor
+            .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[make_source()])
+            .expect("first capture byte upload");
+        assert_eq!(first.source_import_stats.byte_upload_frames, 1);
+        assert_eq!(first.source_import_stats.camera_byte_upload_frames, 1);
+        assert_eq!(first.source_import_stats.immutable_texture_uploads, 0);
+        assert_eq!(compositor.cached_source_cvmetal_texture_count(), 0);
+
+        let held = compositor
+            .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[make_source()])
+            .expect("held capture byte reuse");
+        assert_eq!(held.source_import_stats.byte_upload_frames, 0);
+        assert_eq!(held.source_import_stats.capture_texture_reuses, 1);
+        assert_eq!(held.source_import_stats.camera_capture_texture_reuses, 1);
+        assert_eq!(held.source_import_stats.immutable_texture_reuses, 0);
+    }
+
+    #[test]
+    fn metal_source_texture_cache_characterizes_bounded_lifetimes() {
+        assert!(
+            source_zerocopy_enabled(),
+            "focused CVMetal cache tests require VIDEORC_ZEROCOPY_SOURCES enabled"
+        );
+        let mut compositor = MetalSceneCompositor::new()
+            .expect("focused CVMetal cache tests require a Metal compositor");
+        let cache = compositor
+            .source_texture_cache
+            .as_ref()
+            .expect("focused CVMetal cache tests require CVMetalTextureCache creation");
+        let (w, h) = (16usize, 16usize);
+        let probe_pixel_buffer = make_iosurface_bgra_pixel_buffer(w, h)
+            .expect("focused CVMetal cache tests require local IOSurface allocation");
+        import_pixel_buffer_texture(cache.cache(), &probe_pixel_buffer, w, h)
+            .expect("local IOSurface-backed BGRA buffer must import through CVMetalTextureCache");
+
+        let distinct_frame_count = CV_METAL_TEXTURE_CACHE_FLUSH_INTERVAL_IMPORTS * 4;
+        let backing_bytes = (w * h * 4) as u64;
+        let mut store: crate::frame_store::FrameStore<()> = crate::frame_store::FrameStore::new(1);
+        let mut prior_external_handle = None;
+        let mut imports = 0u64;
+        let mut held_reuses = 0u64;
+        let mut flushes = 0u64;
+
+        for sequence in 0..distinct_frame_count {
+            let Some(pixel_buffer) = make_iosurface_bgra_pixel_buffer(w, h) else {
+                panic!("IOSurface allocation failed after the successful preflight");
+            };
+            let had_prior_external_handle = prior_external_handle.is_some();
+            let frame = store.publish_with_source_handles(
+                sequence,
+                w as u32,
+                h as u32,
+                (),
+                Instant::now(),
+                vec![0; backing_bytes as usize],
+                None,
+                Some(crate::frame_store::RetainedPixelBuffer::new(pixel_buffer)),
+            );
+            assert_eq!(
+                store.stats().surface_backing_live_count,
+                if had_prior_external_handle { 2 } else { 1 },
+                "the replaced frame stays accounted while its external handle lives"
+            );
+            drop(prior_external_handle.take());
+            assert_eq!(store.stats().surface_backing_live_count, 1);
+
+            let source = GpuSource {
+                kind: GpuSourceKind::Screen,
+                bgra: &frame.bytes,
+                content_key: Some(GpuSourceContentKey {
+                    namespace: 5,
+                    revision: frame.storage_identity(),
+                    variant: 0,
+                }),
+                iosurface: None,
+                pixel_buffer: frame
+                    .source_pixel_buffer
+                    .as_ref()
+                    .map(|retained| retained.pixel_buffer()),
+                width: w,
+                height: h,
+                dest: [0.0, 0.0, 1.0, 1.0],
+                crop: [0.0; 4],
+                mirror: false,
+                mask: SourceMask::None,
+                blend: false,
+                chroma_key: None,
+            };
+            let imported = compositor
+                .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[source])
+                .expect("fresh-frame characterization compose");
+            assert_eq!(imported.source_import_stats.cvpixelbuffer_frames, 1);
+            assert_eq!(compositor.cached_source_cvmetal_texture_count(), 1);
+            imports = imports.saturating_add(imported.source_import_stats.cvpixelbuffer_frames);
+            flushes = flushes.saturating_add(imported.source_import_stats.texture_cache_flushes);
+
+            let held = compositor
+                .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[source])
+                .expect("held-frame characterization compose");
+            assert_eq!(held.source_import_stats.cvpixelbuffer_frames, 0);
+            assert_eq!(held.source_import_stats.capture_texture_reuses, 1);
+            assert_eq!(held.source_import_stats.screen_capture_texture_reuses, 1);
+            held_reuses =
+                held_reuses.saturating_add(held.source_import_stats.capture_texture_reuses);
+            flushes = flushes.saturating_add(held.source_import_stats.texture_cache_flushes);
+            prior_external_handle = Some(frame);
+        }
+
+        assert_eq!(imports, distinct_frame_count);
+        assert_eq!(held_reuses, distinct_frame_count);
+        assert_eq!(flushes, 4);
+        assert_eq!(compositor.texture_cache_imports_since_flush(), Some(0));
+        let retained = store.stats();
+        assert_eq!(retained.surface_backing_live_count, 1);
+        assert_eq!(retained.surface_backing_peak_count, 2);
+        assert_eq!(retained.surface_backing_estimated_bytes, backing_bytes);
+        assert_eq!(
+            retained.surface_backing_peak_estimated_bytes,
+            backing_bytes * 2
+        );
+
+        let replacement = store.publish(0, 1, 1, (), Instant::now(), vec![0; 4]);
+        drop(replacement);
+        assert_eq!(store.stats().surface_backing_live_count, 1);
+        drop(prior_external_handle);
+        let released = store.stats();
+        assert_eq!(released.surface_backing_live_count, 0);
+        assert_eq!(released.surface_backing_estimated_bytes, 0);
+        assert_eq!(released.surface_backing_oldest_age_ms, None);
+
+        compositor
+            .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[])
+            .expect("drop cached source texture after completed work");
+        assert_eq!(compositor.cached_source_texture_count(), 0);
+        assert_eq!(compositor.cached_source_cvmetal_texture_count(), 0);
+    }
+
+    #[test]
+    fn metal_source_texture_cache_flushes_after_import_failure() {
+        let mut compositor = MetalSceneCompositor::new()
+            .expect("focused CVMetal cache tests require a Metal compositor");
+        {
+            let cache = compositor
+                .source_texture_cache
+                .as_mut()
+                .expect("focused CVMetal cache tests require CVMetalTextureCache creation");
+            cache.record_import_failure();
+            assert!(cache.flush_policy.flush_requested);
+        }
+
+        let timings = compositor
+            .compose_target_with_timings(16, 16, [0.0, 0.0, 0.0, 1.0], &[])
+            .expect("completed command boundary");
+
+        assert_eq!(timings.source_import_stats.texture_cache_flushes, 1);
+        let cache = compositor.source_texture_cache.as_ref().unwrap();
+        assert!(!cache.flush_policy.flush_requested);
+        assert_eq!(cache.flush_policy.imports_since_flush, 0);
+    }
+
+    #[test]
+    fn metal_source_texture_cache_injected_import_failure_orders_completion_before_flush() {
+        let events = std::cell::RefCell::new(Vec::new());
+        let mut flush_policy = MetalTextureCacheFlushPolicy::default();
+        flush_policy.record_import_failure();
+        let injected_failure = SourceImportFailures {
+            cvpixelbuffer: true,
+            iosurface: false,
+        };
+
+        let (result, flushed) = finish_encoded_work(
+            Err::<(), _>(injected_failure),
+            || events.borrow_mut().push("end-encoding"),
+            || events.borrow_mut().push("commit"),
+            || events.borrow_mut().push("wait"),
+            || {
+                assert_eq!(events.borrow().last(), Some(&"wait"));
+                events.borrow_mut().push("flush");
+                if flush_policy.flush_requested {
+                    flush_policy.record_flush();
+                    true
+                } else {
+                    false
+                }
+            },
+        );
+
+        assert_eq!(result, Err(injected_failure));
+        assert!(flushed);
+        assert_eq!(
+            events.into_inner(),
+            vec!["end-encoding", "commit", "wait", "flush"]
+        );
+        assert_eq!(flush_policy, MetalTextureCacheFlushPolicy::default());
+    }
+
+    #[test]
+    fn metal_source_texture_cache_failed_fallback_reports_once_then_recovers() {
+        assert!(
+            source_zerocopy_enabled(),
+            "focused CVMetal cache tests require VIDEORC_ZEROCOPY_SOURCES enabled"
+        );
+        let mut compositor = MetalSceneCompositor::new()
+            .expect("focused CVMetal cache tests require a Metal compositor");
+        compositor
+            .source_texture_cache
+            .as_ref()
+            .expect("focused CVMetal cache tests require CVMetalTextureCache creation");
+        let (w, h) = (16usize, 16usize);
+        let pixel_buffer = make_iosurface_bgra_pixel_buffer(w, h)
+            .expect("focused CVMetal cache tests require local IOSurface allocation");
+        let source = GpuSource {
+            kind: GpuSourceKind::Camera,
+            bgra: &[],
+            content_key: Some(GpuSourceContentKey {
+                namespace: 4,
+                revision: 99,
+                variant: 0,
+            }),
+            iosurface: None,
+            pixel_buffer: Some(&pixel_buffer),
+            width: w,
+            height: h,
+            dest: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
+            mirror: false,
+            mask: SourceMask::None,
+            blend: false,
+            chroma_key: None,
+        };
+
+        compositor.force_next_pixel_buffer_import_failure();
+        assert!(
+            compositor
+                .compose_target_with_timings(
+                    w,
+                    h,
+                    [0.0, 0.0, 0.0, 1.0],
+                    std::slice::from_ref(&source),
+                )
+                .is_none(),
+            "empty zero-copy fallback must preserve the compose failure"
+        );
+        let fallback_report = compositor.take_pending_source_import_stats();
+        assert_eq!(fallback_report.import_failures, 1);
+        assert_eq!(fallback_report.camera_import_failures, 1);
+        assert_eq!(fallback_report.texture_cache_flushes, 1);
+        assert_eq!(
+            compositor.take_pending_source_import_stats(),
+            MetalSourceImportStats::default(),
+            "the failed tick's fallback evidence must be take-once"
+        );
+        let cache = compositor.source_texture_cache.as_ref().unwrap();
+        assert_eq!(cache.flush_policy, MetalTextureCacheFlushPolicy::default());
+
+        let recovered = compositor
+            .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], std::slice::from_ref(&source))
+            .expect("post-flush retry must import the same held frame");
+        assert_eq!(recovered.source_import_stats.cvpixelbuffer_frames, 1);
+        assert_eq!(recovered.source_import_stats.import_failures, 0);
+        assert_eq!(recovered.source_import_stats.camera_import_failures, 0);
+        assert_eq!(recovered.source_import_stats.texture_cache_flushes, 0);
+        assert_eq!(
+            compositor.pending_source_import_stats(),
+            MetalSourceImportStats::default()
+        );
+    }
+
+    #[test]
+    fn metal_source_texture_cache_failure_accounting_survives_fallback_and_failed_compose() {
+        let pixel_buffer_failure = SourceImportFailures {
+            cvpixelbuffer: true,
+            iosurface: false,
+        };
+        let mut fallback_stats = MetalSourceImportStats::default();
+        fallback_stats.record_ready(
+            GpuSourceKind::Screen,
+            SourceTextureReady {
+                outcome: SourceImportOutcome::IosurfaceImported,
+                failures: pixel_buffer_failure,
+            },
+            1.0,
+        );
+        assert_eq!(fallback_stats.iosurface_frames, 1);
+        assert_eq!(fallback_stats.import_failures, 1);
+        assert_eq!(fallback_stats.screen_import_failures, 1);
+
+        let mut failed_compose_stats = MetalSourceImportStats::default();
+        failed_compose_stats.record_failed_source(GpuSourceKind::Camera, pixel_buffer_failure, 2.0);
+        let mut pending = PendingMetalSourceImportStats::default();
+        pending.preserve_failed_compose(failed_compose_stats);
+        assert_eq!(pending.snapshot().import_failures, 1);
+        assert_eq!(pending.snapshot().camera_import_failures, 1);
+
+        let reported = pending.complete_successful_compose(fallback_stats);
+        assert_eq!(reported.import_failures, 2);
+        assert_eq!(reported.camera_import_failures, 1);
+        assert_eq!(reported.screen_import_failures, 1);
+        assert_eq!(reported.iosurface_frames, 1);
+        assert_eq!(pending.snapshot(), MetalSourceImportStats::default());
     }
 
     #[test]
