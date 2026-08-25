@@ -1,5 +1,12 @@
 # Plan 034: 4K pipeline headroom — remove the per-frame GPU stall and source-drop hazards
 
+> **BLOCKED by Plan 041 (2026-08-24)**: Do not execute any U-slice while the
+> macOS 4K screen+camera source-decay incident is open. Plan 041 owns the
+> capture-producer diagnosis, CVMetal cache/retention correction, real-device
+> acceptance, and any camera-acquisition policy. After Plan 041 is DONE, rebase
+> this plan: treat U2 as superseded and reassess U1/U3/U4 against the accepted
+> incident baseline before resuming.
+
 > **Executor instructions**: One execution unit is exactly one named U-slice,
 > in order (U2 depends on U1; U3 and U4 depend on U2's evidence). Mark the
 > slice `IN PROGRESS`, run only that slice and its verification, record
@@ -111,8 +118,8 @@ under hard content, and only then consider a default flip.
 ## Ledger
 
 | Slice | Status | Evidence |
-|-------|--------|----------|
-| U1 | TODO | |
-| U2 | TODO | |
-| U3 | TODO | |
-| U4 | TODO | |
+| ----- | ------ | -------- |
+| U1    | TODO   |          |
+| U2    | TODO   |          |
+| U3    | TODO   |          |
+| U4    | TODO   |          |
