@@ -170,6 +170,7 @@ const api: VideorcApi = {
   onOAuthCallbackUrl: (callback) => subscribe('oauth:callback-url', callback),
   onShortcutNavigate: (callback) => subscribe('shortcut:navigate', callback),
   onShortcutModifier: (callback) => subscribe('shortcut:modifier', callback),
+  onWindowVisible: (callback) => subscribe('window:visible', callback),
   onBackendConnection: (callback) => subscribe('backend:connection', callback),
   onBackendLifecycle: (callback) => subscribe('backend:lifecycle', callback),
   onBackendLog: (callback) => subscribe('backend:log', callback),

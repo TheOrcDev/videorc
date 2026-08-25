@@ -152,13 +152,17 @@ export function SettingsTab({
 
   return (
     <div className="flex flex-col gap-5">
-      {/* ONE grid, two continuous columns (was two stacked grids). A grid row is
-        as tall as its tallest column and the second grid could not start until the
-        first ended, so whenever the right column outgrew the left — the co-host
-        card is tall — the left column stopped early and a void stretched down to
-        the next grid. Two independent stacks cannot do that: each card sits at its
-        own content height with a uniform gap, and neither column waits for the
-        other. Below `lg` they collapse and read in priority order. */}
+      {/* ONE grid, two continuous columns. A grid row is as tall as its tallest
+        column and a second grid could not start until the first ended, so when
+        the taller column outgrew the other, the short one stopped early and a
+        void stretched down the page. Two independent stacks cannot do that.
+
+        Column order is the NARROW-WINDOW reading order: below `lg` the grid
+        collapses and the left stack is read before the right, so the left
+        carries the cards people come to Settings for (storage, permissions,
+        co-host, shortcuts, remote) and the right carries preferences and
+        reference. The window can be resized to 960px, under the `lg`
+        breakpoint, so this order ships. */}
       <ConfigGrid>
         <div className="flex flex-col gap-5">
           <PanelSection
@@ -411,97 +415,7 @@ export function SettingsTab({
               </p>
             </div>
           </PanelSection>
-          <PanelSection
-            description="How Videorc looks and behaves on this device."
-            icon={ThemeIcon}
-            title="Appearance & behavior"
-          >
-            <FieldGroup>
-              <Field>
-                <FieldLabel>Theme</FieldLabel>
-                <ToggleGroup
-                  type="single"
-                  value={theme ?? 'system'}
-                  variant="outline"
-                  onValueChange={(value) => value && setTheme(value)}
-                >
-                  <ToggleGroupItem value="light">Light</ToggleGroupItem>
-                  <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
-                  <ToggleGroupItem value="system">System</ToggleGroupItem>
-                </ToggleGroup>
-              </Field>
-              {runtimeInfo?.platform === 'win32' ? (
-                <Field>
-                  <div className="flex items-center justify-between gap-3">
-                    <FieldLabel>Graphics acceleration</FieldLabel>
-                    <StatusBadge
-                      tone={runtimeInfo.hardwareAccelerationDisabled ? 'warn' : 'good'}
-                      value={gpuRenderingLabel(runtimeInfo)}
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {graphicsAccelerationDescription(runtimeInfo)}
-                  </p>
-                  {runtimeInfo.hardwareAccelerationDisabled &&
-                  runtimeInfo.gpuFallback.source !== 'env' ? (
-                    <Button
-                      className="w-fit"
-                      disabled={runtimeInfo.gpuFallback.retryScheduled}
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void scheduleHardwareAccelerationRetry()}
-                    >
-                      <RefreshIcon data-icon="inline-start" />
-                      {runtimeInfo.gpuFallback.retryScheduled
-                        ? 'Retry scheduled'
-                        : 'Retry on next launch'}
-                    </Button>
-                  ) : null}
-                </Field>
-              ) : null}
-            </FieldGroup>
-          </PanelSection>
 
-          <PanelSection
-            description="Coming from OBS Studio? Bring your scenes and settings across."
-            icon={DownloadIcon}
-            title="Import"
-          >
-            {/* O4 (OBS import plan): the wizard previews the truthful
-                imported/approximated/skipped report BEFORE anything applies. */}
-            <div>
-              <Button size="sm" variant="outline" onClick={() => setObsImportOpen(true)}>
-                <DownloadIcon data-icon="inline-start" />
-                Import from OBS…
-              </Button>
-            </div>
-            <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
-          </PanelSection>
-
-          <PanelSection description="Get help or report a problem." icon={BugIcon} title="Support">
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={supportBundleExportPending}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void exportSupportBundle()}
-                >
-                  <BugIcon data-icon="inline-start" />
-                  {supportBundleExportPending ? 'Exporting\u2026' : 'Export support bundle'}
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Reporting a problem? Export a support bundle (redacted logs + diagnostics) to share
-                with us.
-              </p>
-            </div>
-          </PanelSection>
-
-          <AboutAndUpdates onShowWhatsNew={onShowWhatsNew} />
-        </div>
-
-        <div className="flex flex-col gap-5">
           <CohostSettingsSection />
 
           <PanelSection
@@ -605,6 +519,97 @@ export function SettingsTab({
               <p className="text-xs text-muted-foreground">{REMOTE_CONTROL_OFF_HINT}</p>
             )}
           </PanelSection>
+        </div>
+
+        <div className="flex flex-col gap-5">
+          <PanelSection
+            description="How Videorc looks and behaves on this device."
+            icon={ThemeIcon}
+            title="Appearance & behavior"
+          >
+            <FieldGroup>
+              <Field>
+                <FieldLabel>Theme</FieldLabel>
+                <ToggleGroup
+                  type="single"
+                  value={theme ?? 'system'}
+                  variant="outline"
+                  onValueChange={(value) => value && setTheme(value)}
+                >
+                  <ToggleGroupItem value="light">Light</ToggleGroupItem>
+                  <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
+                  <ToggleGroupItem value="system">System</ToggleGroupItem>
+                </ToggleGroup>
+              </Field>
+              {runtimeInfo?.platform === 'win32' ? (
+                <Field>
+                  <div className="flex items-center justify-between gap-3">
+                    <FieldLabel>Graphics acceleration</FieldLabel>
+                    <StatusBadge
+                      tone={runtimeInfo.hardwareAccelerationDisabled ? 'warn' : 'good'}
+                      value={gpuRenderingLabel(runtimeInfo)}
+                    />
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {graphicsAccelerationDescription(runtimeInfo)}
+                  </p>
+                  {runtimeInfo.hardwareAccelerationDisabled &&
+                  runtimeInfo.gpuFallback.source !== 'env' ? (
+                    <Button
+                      className="w-fit"
+                      disabled={runtimeInfo.gpuFallback.retryScheduled}
+                      size="sm"
+                      variant="outline"
+                      onClick={() => void scheduleHardwareAccelerationRetry()}
+                    >
+                      <RefreshIcon data-icon="inline-start" />
+                      {runtimeInfo.gpuFallback.retryScheduled
+                        ? 'Retry scheduled'
+                        : 'Retry on next launch'}
+                    </Button>
+                  ) : null}
+                </Field>
+              ) : null}
+            </FieldGroup>
+          </PanelSection>
+
+          <PanelSection
+            description="Coming from OBS Studio? Bring your scenes and settings across."
+            icon={DownloadIcon}
+            title="Import"
+          >
+            {/* O4 (OBS import plan): the wizard previews the truthful
+                imported/approximated/skipped report BEFORE anything applies. */}
+            <div>
+              <Button size="sm" variant="outline" onClick={() => setObsImportOpen(true)}>
+                <DownloadIcon data-icon="inline-start" />
+                Import from OBS…
+              </Button>
+            </div>
+            <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
+          </PanelSection>
+
+          <PanelSection description="Get help or report a problem." icon={BugIcon} title="Support">
+            <div className="flex flex-col gap-2">
+              <div className="flex flex-wrap gap-2">
+                <Button
+                  disabled={supportBundleExportPending}
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void exportSupportBundle()}
+                >
+                  <BugIcon data-icon="inline-start" />
+                  {supportBundleExportPending ? 'Exporting\u2026' : 'Export support bundle'}
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                Reporting a problem? Export a support bundle (redacted logs + diagnostics) to share
+                with us.
+              </p>
+            </div>
+          </PanelSection>
+
+          <AboutAndUpdates onShowWhatsNew={onShowWhatsNew} />
           <PanelSection
             description="Every keyboard shortcut in Videorc."
             icon={KeyboardIcon}

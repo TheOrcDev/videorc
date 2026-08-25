@@ -6326,6 +6326,16 @@ async fn monitor_session(
         }
     };
     drop(finalizing_permit);
+    // Live chat and the co-host belong to the SESSION, not to the stop RPC.
+    // They used to be torn down only by `session.stop`, so a capture that
+    // ended on its own — an RTMP timeout, an encoder-bridge failure, FFmpeg
+    // exiting early: all shipped incidents in this repo — left the chat
+    // connector delivering messages and the co-host scheduler ticking against
+    // a session that no longer existed. It kept reading the user's chat and
+    // spending cloud-AI quota, and would carry straight through into the next
+    // record-only session. Terminal is terminal, whoever declared it.
+    crate::live_chat::stop_live_chat(&state).await;
+
     // The terminal event is the desktop updater/restart gate. Publish it only
     // after MP4 export, caption ownership, duration probing, metadata commit,
     // and post-recording maintenance scheduling are complete and the backend's
