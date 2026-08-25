@@ -1049,6 +1049,7 @@ const diagnosticStatsSchema = boundedSemanticValue(
       // regresses the skip_serializing_if on this Windows-only field.
       encoderBridgeMfInputCreditWaitP95Ms: optionalSchema(nullableSchema(numberSchema({ min: 0 }))),
       encoderBridgeOutputQueueHighWaterFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeOutputQueueOldestFrameAgeMs: optionalSchema(nonNegativeInteger),
       encoderBridgeOutputQueueOldestFrameAgeHighWaterMs: optionalSchema(nonNegativeInteger),
       encoderBridgeOutputLastProgressAgeMs: optionalSchema(nonNegativeInteger),
       encoderBridgeOutputPressureRecoveryEvents: optionalSchema(nonNegativeInteger),

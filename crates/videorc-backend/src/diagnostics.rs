@@ -3257,8 +3257,16 @@ mod tests {
         assert!(wire["encoderBridgeRecordingEncoderSpeed"].is_null());
         assert!(wire["encoderBridgeStreamEncoderSpeed"].is_null());
         assert_eq!(wire["encoderBridgeOutputQueueHighWaterFrames"], 0);
-        assert!(wire["encoderBridgeOutputQueueOldestFrameAgeHighWaterMs"].is_null());
-        assert!(wire["encoderBridgeOutputLastProgressAgeMs"].is_null());
+        for field in [
+            "encoderBridgeOutputQueueOldestFrameAgeMs",
+            "encoderBridgeOutputQueueOldestFrameAgeHighWaterMs",
+            "encoderBridgeOutputLastProgressAgeMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unobserved encoder output age {field} must be absent, not null"
+            );
+        }
         assert_eq!(wire["encoderBridgeOutputPressureRecoveryEvents"], 0);
         assert_eq!(wire["encoderBridgeOutputPreEncodeSkippedFrames"], 0);
         assert_eq!(wire["encoderBridgeEncodedAccessUnitDroppedFrames"], 0);

@@ -1605,13 +1605,13 @@ pub struct DiagnosticStats {
     #[serde(default)]
     pub encoder_bridge_output_queue_high_water_frames: u64,
     /// Oldest frame currently waiting for VideoToolbox completion or FIFO output.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_bridge_output_queue_oldest_frame_age_ms: Option<u64>,
     /// Peak oldest-frame age retained after a pressured queue recovers.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_bridge_output_queue_oldest_frame_age_high_water_ms: Option<u64>,
     /// Milliseconds since the most recent encoder completion or complete FIFO AU write.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_bridge_output_last_progress_age_ms: Option<u64>,
     /// Cumulative enqueue attempts that encountered a full bounded output queue.
     #[serde(default)]
