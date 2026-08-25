@@ -1,4 +1,4 @@
-import { LockKey } from '@phosphor-icons/react'
+import { LockIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 import { Fragment } from 'react'
 
@@ -91,7 +91,7 @@ function VideoPresetSelectItem({
       {option.label}
       {!gate.allowed ? (
         <span className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground">
-          <LockKey className="size-3" weight="fill" />
+          <LockIcon className="size-3" weight="fill" />
           {gate.upgradeUrl ? 'Premium' : 'Locked'}
         </span>
       ) : null}

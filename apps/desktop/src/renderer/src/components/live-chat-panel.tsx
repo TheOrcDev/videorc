@@ -1,4 +1,4 @@
-import { ChatCircle } from '@phosphor-icons/react'
+import { ChatIcon } from '@/components/icons'
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -236,7 +236,7 @@ export function LiveChatPanel({
             <Empty className="min-h-[8rem] border-0 p-4">
               <EmptyHeader>
                 <EmptyMedia variant="icon">
-                  <ChatCircle weight="duotone" />
+                  <ChatIcon weight="duotone" />
                 </EmptyMedia>
                 <EmptyTitle className="text-sm">No comments yet</EmptyTitle>
                 <EmptyDescription className="text-xs">{emptyMessage}</EmptyDescription>

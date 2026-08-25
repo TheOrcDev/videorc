@@ -1,15 +1,15 @@
 import {
-  Broadcast,
-  CaretRight,
-  FrameCorners,
-  ImageSquare,
-  Info,
-  Record,
-  Robot,
-  StopCircle,
-  WarningCircle,
-  type Icon
-} from '@phosphor-icons/react'
+  AlertIcon,
+  type AppIcon,
+  ChevronRightIcon,
+  CohostIcon,
+  FrameIcon,
+  ImageIcon,
+  InfoIcon,
+  LivestreamIcon,
+  RecordIcon,
+  StopIcon
+} from '@/components/icons'
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { CohostPresenceDot } from '@/components/cohost-status'
@@ -81,13 +81,13 @@ export function SessionPanel({
     <PanelSection>
       <div className="flex flex-col gap-0.5">
         <SessionRow
-          icon={Broadcast}
+          icon={LivestreamIcon}
           label="Streaming"
           value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
           onNavigate={() => openStudioPanel('live')}
         />
         <SessionRow
-          icon={FrameCorners}
+          icon={FrameIcon}
           label="Output"
           value={outputSummary(video)}
           onNavigate={() => openStudioPanel('recording')}
@@ -106,7 +106,7 @@ export function SessionPanel({
               variant="destructive"
               onClick={onStop}
             >
-              <StopCircle data-icon="inline-start" weight="fill" />
+              <StopIcon data-icon="inline-start" weight="fill" />
               {stopLabel}
             </Button>
           ) : (
@@ -118,7 +118,7 @@ export function SessionPanel({
                 variant="destructive"
                 onClick={onRecord}
               >
-                <Record data-icon="inline-start" weight="fill" />
+                <RecordIcon data-icon="inline-start" weight="fill" />
                 Record
                 <Kbd className="ml-1.5">␣</Kbd>
               </Button>
@@ -129,7 +129,7 @@ export function SessionPanel({
                 variant="outline"
                 onClick={onLiveStream}
               >
-                <Broadcast data-icon="inline-start" weight="fill" />
+                <LivestreamIcon data-icon="inline-start" weight="fill" />
                 Stream
               </Button>
             </>
@@ -137,7 +137,7 @@ export function SessionPanel({
         </div>
         {!active && blockedReason ? (
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Info className="size-3.5 shrink-0" />
+            <InfoIcon className="size-3.5 shrink-0" />
             <span className="min-w-0">{blockedReason}</span>
             {blockedJump ? (
               <button
@@ -160,7 +160,7 @@ export function SessionPanel({
             key={startFailure.at}
             role="alert"
           >
-            <WarningCircle className="mt-px size-3.5 shrink-0 text-destructive" weight="fill" />
+            <AlertIcon className="mt-px size-3.5 shrink-0 text-destructive" weight="fill" />
             <p
               className="line-clamp-3 min-w-0 flex-1 text-destructive"
               title={startFailure.message}
@@ -216,7 +216,7 @@ function CohostSessionRow(): ReactElement {
 
   return (
     <SessionRow
-      icon={Robot}
+      icon={CohostIcon}
       label="Co-host"
       title={view.tooltipLines.join('\n') || undefined}
       value={
@@ -243,7 +243,7 @@ function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): React
       <span className="text-xs font-medium text-muted-foreground">Takeover</span>
       {ready.length === 0 ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <ImageSquare className="size-3.5 shrink-0" weight="duotone" />
+          <ImageIcon className="size-3.5 shrink-0" weight="duotone" />
           <span className="min-w-0">No takeover screens yet.</span>
           <button
             className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
@@ -274,7 +274,7 @@ function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): React
                   variant={isActive ? 'default' : 'outline'}
                   onClick={() => void (isActive ? clearActiveScreen() : activateScreen(screen.id))}
                 >
-                  <ImageSquare data-icon="inline-start" weight={isActive ? 'fill' : 'duotone'} />
+                  <ImageIcon data-icon="inline-start" weight={isActive ? 'fill' : 'duotone'} />
                   {screen.name}
                 </Button>
               )
@@ -306,7 +306,7 @@ function SessionRow({
   title,
   onNavigate
 }: {
-  icon: Icon
+  icon: AppIcon
   label: string
   value: ReactNode
   /** Native tooltip for rows whose value is a summary of more facts. */
@@ -319,7 +319,9 @@ function SessionRow({
       <span className="flex-1 truncate text-left text-muted-foreground">{label}</span>
       <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
         {typeof value === 'string' ? <span className="truncate">{value}</span> : value}
-        {onNavigate ? <CaretRight className="size-3.5 shrink-0 text-muted-foreground" /> : null}
+        {onNavigate ? (
+          <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : null}
       </span>
     </>
   )

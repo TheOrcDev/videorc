@@ -1,17 +1,17 @@
 import {
-  Broadcast,
-  ClosedCaptioning,
-  FilmReel,
-  GearSix,
-  ImageSquare,
-  Monitor,
-  Pulse,
-  Record,
-  Sparkle,
-  SquaresFour,
-  VideoCamera,
-  type Icon
-} from '@phosphor-icons/react'
+  type AppIcon,
+  AssetsIcon,
+  CaptionsIcon,
+  HealthIcon,
+  LibraryIcon,
+  LivestreamIcon,
+  OutputIcon,
+  PublishIcon,
+  SceneIcon,
+  SettingsIcon,
+  SourcesIcon,
+  StudioIcon
+} from '@/components/icons'
 import { createContext, useContext } from 'react'
 
 // Studio control pages, grouped under "Studio" in the sidebar: one click away, but
@@ -31,25 +31,25 @@ export type WorkspaceTabGroup = 'stage' | 'library' | 'system'
 export type WorkspaceTabMeta = {
   id: WorkspaceTab
   label: string
-  icon: Icon
+  icon: AppIcon
   group: WorkspaceTabGroup
 }
 
 export type StudioPanelMeta = {
   id: StudioPanel
   label: string
-  icon: Icon
+  icon: AppIcon
   // The pre-rail tab id; kept as the `data-videorc-tab-trigger` value so smokes and
   // automation keep working across the C1 shell change.
   legacyTabId: string
 }
 
 export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
-  { id: 'studio', label: 'Studio', icon: VideoCamera, group: 'stage' },
-  { id: 'library', label: 'Library', icon: FilmReel, group: 'library' },
-  { id: 'ai', label: 'Publish', icon: Sparkle, group: 'library' },
-  { id: 'settings', label: 'Settings', icon: GearSix, group: 'system' },
-  { id: 'diagnostics', label: 'Health', icon: Pulse, group: 'system' }
+  { id: 'studio', label: 'Studio', icon: StudioIcon, group: 'stage' },
+  { id: 'library', label: 'Library', icon: LibraryIcon, group: 'library' },
+  { id: 'ai', label: 'Publish', icon: PublishIcon, group: 'library' },
+  { id: 'settings', label: 'Settings', icon: SettingsIcon, group: 'system' },
+  { id: 'diagnostics', label: 'Health', icon: HealthIcon, group: 'system' }
 ]
 
 // Sidebar order mirrors the live workflow: pick sources, compose, go live, output.
@@ -57,12 +57,12 @@ export const WORKSPACE_TABS: WorkspaceTabMeta[] = [
 // other capture device. Labels renamed 2026-06-13 (ux-ia-refactor-plan); ids and
 // legacyTabId stay so smokes and deep links keep working.
 export const STUDIO_PANELS: StudioPanelMeta[] = [
-  { id: 'sources', label: 'Sources', icon: Monitor, legacyTabId: 'sources' },
-  { id: 'layouts', label: 'Scene', icon: SquaresFour, legacyTabId: 'layout' },
-  { id: 'assets', label: 'Assets', icon: ImageSquare, legacyTabId: 'assets' },
-  { id: 'live', label: 'Livestream', icon: Broadcast, legacyTabId: 'streaming' },
-  { id: 'captions', label: 'Captions', icon: ClosedCaptioning, legacyTabId: 'captions' },
-  { id: 'recording', label: 'Output', icon: Record, legacyTabId: 'recording' }
+  { id: 'sources', label: 'Sources', icon: SourcesIcon, legacyTabId: 'sources' },
+  { id: 'layouts', label: 'Scene', icon: SceneIcon, legacyTabId: 'layout' },
+  { id: 'assets', label: 'Assets', icon: AssetsIcon, legacyTabId: 'assets' },
+  { id: 'live', label: 'Livestream', icon: LivestreamIcon, legacyTabId: 'streaming' },
+  { id: 'captions', label: 'Captions', icon: CaptionsIcon, legacyTabId: 'captions' },
+  { id: 'recording', label: 'Output', icon: OutputIcon, legacyTabId: 'recording' }
 ]
 
 // Page shortcuts in sidebar order. Studio + the Setup pages + Library take ⌘1–⌘8,

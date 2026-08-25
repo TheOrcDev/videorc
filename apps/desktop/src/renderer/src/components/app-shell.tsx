@@ -1,4 +1,4 @@
-import { ChatCircle } from '@phosphor-icons/react'
+import { ChatIcon } from '@/components/icons'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { CommandPalette } from '@/components/command-palette'
@@ -429,7 +429,7 @@ export function AppShell(): ReactElement {
                     commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
                   }
                 >
-                  <ChatCircle data-icon="inline-start" />
+                  <ChatIcon data-icon="inline-start" />
                   {commentsWindowOpen ? 'Close Comments' : 'Open Comments'}
                   <KbdGroup>
                     <Kbd>{modKey}</Kbd>

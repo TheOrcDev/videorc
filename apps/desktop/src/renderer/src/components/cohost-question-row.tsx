@@ -1,4 +1,4 @@
-import { NotePencil } from '@phosphor-icons/react'
+import { NoteIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -67,7 +67,7 @@ export function CohostQuestionRow({
       ) : null}
       <span className="min-w-0 flex-1 truncate text-foreground">{question.text}</span>
       {question.fromNotes ? (
-        <NotePencil
+        <NoteIcon
           aria-label="Answered from your co-host notes"
           className="size-3.5 shrink-0 text-muted-foreground"
           weight="duotone"

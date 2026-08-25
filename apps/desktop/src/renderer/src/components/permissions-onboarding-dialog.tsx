@@ -1,4 +1,4 @@
-import { ArrowRight, CircleNotch } from '@phosphor-icons/react'
+import { ArrowRightIcon, SpinnerIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
@@ -121,7 +121,7 @@ export function PermissionsOnboardingDialog({
           </span>
           <Button onClick={onComplete}>
             {allPermissionsResolved ? 'Continue' : 'Continue without granting'}
-            <ArrowRight data-icon="inline-end" />
+            <ArrowRightIcon data-icon="inline-end" />
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -143,7 +143,7 @@ function PermissionRow({
   const actionButton =
     action === 'request-media-access' ? (
       <Button disabled={pending} size="xs" variant="outline" onClick={onAction}>
-        {pending ? <CircleNotch className="animate-spin" data-icon="inline-start" /> : null}
+        {pending ? <SpinnerIcon className="animate-spin" data-icon="inline-start" /> : null}
         Enable
       </Button>
     ) : action === 'open-settings' ? (

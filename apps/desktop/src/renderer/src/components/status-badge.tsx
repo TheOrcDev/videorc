@@ -1,4 +1,4 @@
-import type { Icon } from '@phosphor-icons/react'
+import { AppIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -22,7 +22,7 @@ export function StatusBadge({
   label?: string
   value: string
   tone?: StatusTone
-  icon?: Icon
+  icon?: AppIcon
 }): ReactElement {
   return (
     <Badge variant={toneToVariant[tone]} className="h-6 gap-1.5 rounded-chip px-2.5">

@@ -1,10 +1,10 @@
 import {
-  ArrowClockwise,
-  ArrowSquareOut,
-  ClosedCaptioning,
-  Microphone,
-  WarningCircle
-} from '@phosphor-icons/react'
+  AlertIcon,
+  CaptionsIcon,
+  ExternalLinkIcon,
+  MicrophoneIcon,
+  RefreshIcon
+} from '@/components/icons'
 import type { ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -248,7 +248,7 @@ export function CaptionsControls(): ReactElement {
     <PanelSection
       action={<StatusBadge tone={status.tone} value={status.value} />}
       description="Transcribe your microphone during a recording or livestream."
-      icon={ClosedCaptioning}
+      icon={CaptionsIcon}
       title="Live captions"
     >
       <FieldGroup>
@@ -270,7 +270,7 @@ export function CaptionsControls(): ReactElement {
 
         {!gate.allowed ? (
           <Alert variant="warning">
-            <WarningCircle weight="fill" />
+            <AlertIcon weight="fill" />
             <AlertTitle>Premium captions</AlertTitle>
             <AlertDescription>
               {gate.reason}
@@ -291,7 +291,7 @@ export function CaptionsControls(): ReactElement {
         <div className="flex flex-col gap-3 rounded-row border border-border bg-muted/20 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2 text-sm">
-              <Microphone className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+              <MicrophoneIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
               <span className="font-medium">Microphone</span>
               <span className="text-muted-foreground">
                 · {captionsStatus.transport === 'realtime' ? 'Realtime' : 'Live transcription'}
@@ -309,7 +309,7 @@ export function CaptionsControls(): ReactElement {
             <p className="text-xs text-muted-foreground">{status.detail}</p>
             {showRetry ? (
               <Button disabled={captionsCommandPending} size="xs" variant="outline" onClick={retry}>
-                <ArrowClockwise data-icon="inline-start" />
+                <RefreshIcon data-icon="inline-start" />
                 Retry
               </Button>
             ) : null}
@@ -506,7 +506,7 @@ export function CaptionsControls(): ReactElement {
             variant="outline"
             onClick={() => void toggleCaptionsWindow()}
           >
-            <ArrowSquareOut data-icon="inline-start" />
+            <ExternalLinkIcon data-icon="inline-start" />
             {captionsWindow.open ? 'Close reader' : 'Open reader'}
             <KbdGroup className="ml-1">
               <Kbd>{modKey}</Kbd>

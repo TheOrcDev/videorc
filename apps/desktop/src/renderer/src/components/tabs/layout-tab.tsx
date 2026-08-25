@@ -1,12 +1,12 @@
 import {
-  ArrowCounterClockwise,
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
-  ArrowUp,
-  Layout,
-  SlidersHorizontal
-} from '@phosphor-icons/react'
+  AdjustIcon,
+  ArrowDownIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ArrowUpIcon,
+  LayoutIcon,
+  ResetIcon
+} from '@/components/icons'
 import { useEffect } from 'react'
 import type { ReactElement } from 'react'
 
@@ -117,7 +117,7 @@ export function LayoutTab(): ReactElement {
         <div className="flex min-w-0 flex-col gap-5">
           <PanelSection
             description="Pick how the screen and camera are composed."
-            icon={Layout}
+            icon={LayoutIcon}
             title="Layout preset"
           >
             <div className="flex flex-wrap gap-2">
@@ -202,7 +202,7 @@ export function LayoutTab(): ReactElement {
 
         <PanelSection
           className="min-w-0"
-          icon={SlidersHorizontal}
+          icon={AdjustIcon}
           title={selectedSource ? selectedSource.name : 'Inspector'}
         >
           {!selectedSource ? (
@@ -630,7 +630,7 @@ export function LayoutTab(): ReactElement {
                   applyLayoutPatch(defaults)
                 }}
               >
-                <ArrowCounterClockwise data-icon="inline-start" />
+                <ResetIcon data-icon="inline-start" />
                 Reset camera settings
               </Button>
 
@@ -688,7 +688,7 @@ export function LayoutTab(): ReactElement {
                   variant="outline"
                   onClick={() => void nudgeSceneSource(selectedSource.id, 0, -1)}
                 >
-                  <ArrowUp />
+                  <ArrowUpIcon />
                 </Button>
                 <span />
                 <Button
@@ -698,7 +698,7 @@ export function LayoutTab(): ReactElement {
                   variant="outline"
                   onClick={() => void nudgeSceneSource(selectedSource.id, -1, 0)}
                 >
-                  <ArrowLeft />
+                  <ArrowLeftIcon />
                 </Button>
                 <Button
                   aria-label="Nudge source down"
@@ -707,7 +707,7 @@ export function LayoutTab(): ReactElement {
                   variant="outline"
                   onClick={() => void nudgeSceneSource(selectedSource.id, 0, 1)}
                 >
-                  <ArrowDown />
+                  <ArrowDownIcon />
                 </Button>
                 <Button
                   aria-label="Nudge source right"
@@ -716,7 +716,7 @@ export function LayoutTab(): ReactElement {
                   variant="outline"
                   onClick={() => void nudgeSceneSource(selectedSource.id, 1, 0)}
                 >
-                  <ArrowRight />
+                  <ArrowRightIcon />
                 </Button>
               </div>
               {/* Disabled arrows must say why — silent dead controls read as

@@ -1,4 +1,4 @@
-import { ChatCircle, Eye, PaperPlaneRight, PushPin } from '@phosphor-icons/react'
+import { ChatIcon, PinIcon, PreviewIcon, SendIcon } from '@/components/icons'
 import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -320,7 +320,7 @@ export function CommentsReader({
             )}
             title={viewerChipDetail(viewerSample)}
           >
-            <Eye aria-hidden className="size-3.5 shrink-0" weight="duotone" />
+            <PreviewIcon aria-hidden className="size-3.5 shrink-0" weight="duotone" />
             {viewerChipLabel(viewerSample)}
           </span>
         ) : null}
@@ -357,7 +357,7 @@ export function CommentsReader({
               variant="ghost"
               onClick={onToggleAlwaysOnTop}
             >
-              <PushPin data-icon="inline-start" weight={alwaysOnTop ? 'fill' : 'regular'} />
+              <PinIcon data-icon="inline-start" weight={alwaysOnTop ? 'fill' : 'regular'} />
             </Button>
           ) : null}
           {onClear ? (
@@ -558,7 +558,7 @@ function SendRow({
             size="icon-xs"
             onClick={submit}
           >
-            <PaperPlaneRight data-icon="inline-end" weight="fill" />
+            <SendIcon data-icon="inline-end" weight="fill" />
           </InputGroupButton>
         </InputGroupAddon>
       </InputGroup>
@@ -632,7 +632,7 @@ function OffAir({ providers }: { providers: LiveChatProviderState[] }): ReactEle
     <Empty className="h-full border-0 p-6">
       <EmptyHeader>
         <EmptyMedia variant="icon">
-          <ChatCircle weight="duotone" />
+          <ChatIcon weight="duotone" />
         </EmptyMedia>
         <EmptyTitle className="text-base">No comments yet</EmptyTitle>
         <EmptyDescription>

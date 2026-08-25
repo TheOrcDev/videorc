@@ -1,13 +1,13 @@
 import {
-  ArrowSquareOut,
-  CaretDown,
-  Gauge,
-  Heartbeat,
-  Pulse,
-  TerminalWindow,
-  WarningCircle,
-  X
-} from '@phosphor-icons/react'
+  AlertIcon,
+  ChevronDownIcon,
+  CloseIcon,
+  ExternalLinkIcon,
+  GaugeIcon,
+  HealthIcon,
+  HeartbeatIcon,
+  TerminalIcon
+} from '@/components/icons'
 import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -164,7 +164,11 @@ export function DiagnosticsTab(): ReactElement {
       <div className="flex flex-col gap-4">
         {/* Verdicts first (ux-ia plan, slice 8): the page answers "is anything
             wrong?" before offering the numbers. */}
-        <PanelSection description="Is anything wrong right now?" icon={Heartbeat} title="Verdicts">
+        <PanelSection
+          description="Is anything wrong right now?"
+          icon={HeartbeatIcon}
+          title="Verdicts"
+        >
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge
               label="Likely bottleneck"
@@ -251,7 +255,7 @@ export function DiagnosticsTab(): ReactElement {
 
         <PanelSection
           description="Current capture and preview health."
-          icon={Gauge}
+          icon={GaugeIcon}
           title="Live stats"
         >
           <MetricGroup title="Pipeline">
@@ -620,7 +624,7 @@ export function DiagnosticsTab(): ReactElement {
           </MetricGroup>
         </PanelSection>
 
-        <PanelSection icon={Pulse} title="Pipeline">
+        <PanelSection icon={HealthIcon} title="Pipeline">
           {recording.pipeline ? (
             <div className="grid gap-2">
               {recording.pipeline.stages.map((stage) => (
@@ -647,7 +651,7 @@ export function DiagnosticsTab(): ReactElement {
       </div>
 
       <div className="flex flex-col gap-4">
-        <PanelSection icon={TerminalWindow} title="Support bundle">
+        <PanelSection icon={TerminalIcon} title="Support bundle">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-sm font-medium">Redacted diagnostics JSON</p>
@@ -658,13 +662,13 @@ export function DiagnosticsTab(): ReactElement {
               disabled={supportBundleExportPending}
               onClick={() => void exportSupportBundle()}
             >
-              <ArrowSquareOut className="mr-2 size-4" />
+              <ExternalLinkIcon className="mr-2 size-4" />
               {supportBundleExportPending ? 'Exporting' : 'Export'}
             </Button>
           </div>
         </PanelSection>
 
-        <PanelSection icon={WarningCircle} title="Actionable warnings">
+        <PanelSection icon={AlertIcon} title="Actionable warnings">
           {actionableEvents.length ? (
             <div className="flex flex-col gap-2">
               {actionableEvents.map((event) => (
@@ -687,7 +691,7 @@ export function DiagnosticsTab(): ReactElement {
           )}
         </PanelSection>
 
-        <PanelSection icon={TerminalWindow} title="Session logs">
+        <PanelSection icon={TerminalIcon} title="Session logs">
           <ScrollArea className="h-64 pr-3">
             {sessionLogsLoading && sessionLogs.length === 0 ? (
               <p className="text-sm text-muted-foreground">Loading session logs…</p>
@@ -701,7 +705,7 @@ export function DiagnosticsTab(): ReactElement {
           </ScrollArea>
         </PanelSection>
 
-        <PanelSection icon={TerminalWindow} title="Backend logs">
+        <PanelSection icon={TerminalIcon} title="Backend logs">
           <LastBackendCrash record={latestBackendCrash(runtimeInfo?.backendCrashes)} />
           <ScrollArea className="h-64 pr-3">
             <div className="flex flex-col gap-1.5">
@@ -744,7 +748,7 @@ function MetricGroup({ title, children }: { title: string; children: ReactNode }
   return (
     <Collapsible>
       <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-        <CaretDown className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+        <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
         <span>{title}</span>
       </CollapsibleTrigger>
       <CollapsibleContent>
@@ -781,7 +785,7 @@ function ActionableWarning({
             variant="ghost"
             onClick={() => void onHandlePermission(event.permissionPane!)}
           >
-            <ArrowSquareOut />
+            <ExternalLinkIcon />
           </Button>
         ) : null}
         <Button
@@ -791,7 +795,7 @@ function ActionableWarning({
           variant="ghost"
           onClick={onDismiss}
         >
-          <X />
+          <CloseIcon />
         </Button>
       </div>
     </div>

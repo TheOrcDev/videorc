@@ -1,24 +1,24 @@
 import {
-  ArrowCounterClockwise,
-  ArrowsClockwise,
-  Broadcast,
-  CaretDown,
-  CheckCircle,
-  FloppyDisk,
-  Gauge,
-  Heartbeat,
-  LinkSimple,
-  LockSimple,
-  MagnifyingGlass,
-  SignOut,
-  TextAa,
-  TwitchLogo,
-  Warning,
-  WarningCircle,
-  XLogo,
-  YoutubeLogo,
-  type Icon
-} from '@phosphor-icons/react'
+  AlertIcon,
+  type AppIcon,
+  ChevronDownIcon,
+  GaugeIcon,
+  HeartbeatIcon,
+  LinkIcon,
+  LivestreamIcon,
+  LockIcon,
+  ResetIcon,
+  SaveIcon,
+  SearchIcon,
+  SignOutIcon,
+  SuccessIcon,
+  SyncIcon,
+  TextIcon,
+  TwitchIcon,
+  WarningIcon,
+  XPlatformIcon,
+  YoutubeIcon
+} from '@/components/icons'
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
 
 import { ListRow } from '@/components/list-row'
@@ -92,11 +92,11 @@ import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
 type BadgeTone = 'success' | 'warning' | 'destructive' | 'outline'
 
-const PLATFORM_ICON: Record<StreamPlatform, Icon> = {
-  youtube: YoutubeLogo,
-  twitch: TwitchLogo,
-  x: XLogo,
-  custom: Broadcast
+const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
+  youtube: YoutubeIcon,
+  twitch: TwitchIcon,
+  x: XPlatformIcon,
+  custom: LivestreamIcon
 }
 
 export function StreamingTab(): ReactElement {
@@ -212,7 +212,7 @@ export function StreamingTab(): ReactElement {
       <div className="flex flex-col gap-5">
         {livestreamingEntitlementReason && !isSessionActive ? (
           <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-            <WarningCircle className="mt-0.5 size-4 shrink-0" weight="fill" />
+            <AlertIcon className="mt-0.5 size-4 shrink-0" weight="fill" />
             <span>{livestreamingEntitlementReason}</span>
           </div>
         ) : null}
@@ -278,7 +278,7 @@ export function StreamingTab(): ReactElement {
       <div className="flex flex-col gap-5">
         {compatibilityMessage ? (
           <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-            <WarningCircle className="mt-0.5 size-4 shrink-0" weight="fill" />
+            <AlertIcon className="mt-0.5 size-4 shrink-0" weight="fill" />
             <span>{compatibilityMessage}</span>
           </div>
         ) : null}
@@ -320,7 +320,7 @@ function StreamFailureBanner({
   return (
     <div className="flex flex-col gap-3 rounded-row border border-warning/40 bg-warning/10 p-3">
       <div className="flex items-start gap-2.5">
-        <WarningCircle className="size-5 shrink-0 text-warning" weight="fill" />
+        <AlertIcon className="size-5 shrink-0 text-warning" weight="fill" />
         <div className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Some destinations aren’t live</span>
           {failed.length ? (
@@ -550,7 +550,7 @@ function DestinationCard({
               }
             >
               <Badge variant="outline">
-                <LockSimple className="size-3" weight="fill" />
+                <LockIcon className="size-3" weight="fill" />
                 Premium
               </Badge>
             </button>
@@ -563,7 +563,7 @@ function DestinationCard({
             />
           )}
         </span>
-        <CaretDown
+        <ChevronDownIcon
           className={cn(
             'size-3.5 shrink-0 text-muted-foreground transition-transform',
             expanded && 'rotate-180'
@@ -578,7 +578,7 @@ function DestinationCard({
           className="-mt-2 flex flex-wrap items-center gap-2 border-l-2 border-warning/50 pl-3 text-xs text-warning-foreground dark:text-warning"
           id={enableLockId}
         >
-          <WarningCircle className="size-3.5 shrink-0" weight="fill" />
+          <AlertIcon className="size-3.5 shrink-0" weight="fill" />
           <span className="min-w-0 flex-1">{enableLockGate.reason}</span>
           {enableLockUpgradeUrl ? (
             <Button
@@ -766,7 +766,7 @@ function DestinationCard({
                   variant="ghost"
                   onClick={() => void onRestorePreviousStreamKey(target.id)}
                 >
-                  <ArrowCounterClockwise />
+                  <ResetIcon />
                   Restore previous {credentialLabel}
                   {target.previousStreamKeyHint ? ` (ends ${target.previousStreamKeyHint})` : ''}
                 </Button>
@@ -801,7 +801,7 @@ function DestinationCard({
               </DialogHeader>
               {pendingKeySave?.warning ? (
                 <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-                  <Warning className="mt-0.5 shrink-0" />
+                  <WarningIcon className="mt-0.5 shrink-0" />
                   <span>{pendingKeySave.warning}</span>
                 </div>
               ) : null}
@@ -874,7 +874,7 @@ const PLATFORM_GLYPH_TINT: Record<StreamPlatform, string> = {
 }
 
 function PlatformGlyph({ platform }: { platform: StreamPlatform }): ReactElement {
-  const Icon = PLATFORM_ICON[platform]
+  const AppIcon = PLATFORM_ICON[platform]
   return (
     <span
       className={cn(
@@ -882,7 +882,7 @@ function PlatformGlyph({ platform }: { platform: StreamPlatform }): ReactElement
         PLATFORM_GLYPH_TINT[platform]
       )}
     >
-      <Icon className="size-4" weight="fill" />
+      <AppIcon className="size-4" weight="fill" />
     </span>
   )
 }
@@ -967,7 +967,7 @@ function OAuthAccountPanel({
                 }
               }}
             >
-              <LinkSimple data-icon="inline-start" weight="bold" />
+              <LinkIcon data-icon="inline-start" weight="bold" />
               Connect
             </Button>
           </div>
@@ -1136,7 +1136,7 @@ function OAuthAccountPanel({
               variant="outline"
               onClick={() => void onRefreshYouTubeChannels(account.accountId)}
             >
-              <ArrowsClockwise data-icon="inline-start" weight="bold" />
+              <SyncIcon data-icon="inline-start" weight="bold" />
               {youtubeChannelsLoading ? 'Loading' : 'Refresh'}
             </Button>
           </div>
@@ -1170,7 +1170,7 @@ function OAuthAccountPanel({
               variant="outline"
               onClick={() => void onRefreshXNativeCapability(account.accountId)}
             >
-              <ArrowsClockwise data-icon="inline-start" weight="bold" />
+              <SyncIcon data-icon="inline-start" weight="bold" />
               {xNativeCapabilityLoading ? 'Checking' : 'Refresh'}
             </Button>
           </div>
@@ -1249,7 +1249,7 @@ function OAuthAccountPanel({
         variant="outline"
         onClick={() => onDisconnect(platform)}
       >
-        <SignOut data-icon="inline-start" weight="bold" />
+        <SignOutIcon data-icon="inline-start" weight="bold" />
         Disconnect
       </Button>
     </div>
@@ -1323,11 +1323,11 @@ function MetadataEditor({
           variant="secondary"
           onClick={onSave}
         >
-          <FloppyDisk data-icon="inline-start" weight="bold" />
+          <SaveIcon data-icon="inline-start" weight="bold" />
           {pending ? 'Saving' : 'Save'}
         </Button>
       }
-      icon={TextAa}
+      icon={TextIcon}
       title="Broadcast info"
     >
       {!draft ? (
@@ -1580,7 +1580,7 @@ function MetadataOverride({
                 variant="outline"
                 onClick={() => void onSearchTwitchCategories(twitchCategoryQuery)}
               >
-                <MagnifyingGlass data-icon="inline-start" weight="bold" />
+                <SearchIcon data-icon="inline-start" weight="bold" />
                 {twitchCategorySearchPending ? 'Searching' : 'Search'}
               </Button>
             </div>
@@ -1737,14 +1737,14 @@ function LiveOutputHealth({
               void onRetry().catch(() => {})
             }}
           >
-            <ArrowsClockwise data-icon="inline-start" weight="bold" />
+            <SyncIcon data-icon="inline-start" weight="bold" />
             Retry
           </Button>
         ) : null
       }
       contentClassName="gap-3"
       description={streamHealthDescription(attribution, liveOutputActive, preflight)}
-      icon={Heartbeat}
+      icon={HeartbeatIcon}
       title="Live output health"
     >
       <div className="flex items-center justify-between gap-3">
@@ -2014,7 +2014,7 @@ function StreamingReadiness({
   const diskMbPerMin = Math.round((recordingVideo.bitrateKbps / 8 / 1000) * 60)
 
   return (
-    <PanelSection icon={Gauge} title="Multistream readiness">
+    <PanelSection icon={GaugeIcon} title="Multistream readiness">
       <ChecklistRow
         detail={
           enabled.length ? `${readyCount}/${enabled.length} ready` : 'No destinations enabled'
@@ -2093,9 +2093,9 @@ function ChecklistRow({
     <div className="flex items-start justify-between gap-3 text-sm">
       <div className="flex items-center gap-2">
         {ok ? (
-          <CheckCircle className="size-4 shrink-0 text-primary" weight="fill" />
+          <SuccessIcon className="size-4 shrink-0 text-primary" weight="fill" />
         ) : (
-          <WarningCircle className="size-4 shrink-0 text-muted-foreground" weight="fill" />
+          <AlertIcon className="size-4 shrink-0 text-muted-foreground" weight="fill" />
         )}
         <span>{label}</span>
       </div>

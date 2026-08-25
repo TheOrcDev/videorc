@@ -77,6 +77,7 @@
     "ui:driver": "node scripts/ui-driver.mjs",
     "ui:cmd": "node scripts/ui-cmd.mjs",
     "test:analyzer": "node --test scripts/lib/recording-analyzer.test.mjs",
+    "icons:build": "node scripts/build-icons.mjs",
     "test:scripts": "node --test scripts/lib/*.test.mjs",
     "perf:scenario": "node scripts/performance-scenario-runner.mjs",
     "perf:scenario:list": "node scripts/performance-scenario-runner.mjs --list",

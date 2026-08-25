@@ -1,4 +1,4 @@
-import { Check, DeviceMobile, Monitor } from '@phosphor-icons/react'
+import { CheckIcon, DisplayIcon, MobileIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -94,7 +94,7 @@ export function ScenesGallery(): ReactElement {
               variant="ghost"
               onClick={() => switchMode('horizontal')}
             >
-              <Monitor className="size-4" />
+              <DisplayIcon className="size-4" />
             </Button>
             <Button
               aria-label="Vertical studio (9:16)"
@@ -109,7 +109,7 @@ export function ScenesGallery(): ReactElement {
               variant="ghost"
               onClick={() => switchMode('vertical')}
             >
-              <DeviceMobile className="size-4" />
+              <MobileIcon className="size-4" />
             </Button>
           </div>
           <Button size="sm" variant="ghost" onClick={() => openStudioPanel('layouts')}>
@@ -142,7 +142,9 @@ export function ScenesGallery(): ReactElement {
                 <span className="truncate text-sm font-medium">
                   {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
                 </span>
-                {active ? <Check className="size-4 shrink-0 text-primary" weight="bold" /> : null}
+                {active ? (
+                  <CheckIcon className="size-4 shrink-0 text-primary" weight="bold" />
+                ) : null}
               </span>
             </button>
           )

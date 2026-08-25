@@ -49,7 +49,14 @@ Type
 
 Icons
 - App/source icons: 24px rounded-square (radius ~6), vivid, full-color — they are the only large color on screen.
-- Inline/status icons: 16px, Phosphor (already in the app), tinted secondary gray unless conveying status.
+- Inline/status icons: 16px, tinted secondary gray unless conveying status.
+- **Import every icon from `@/components/icons`, never from an icon package.** The
+  registry names icons by MEANING (`SourcesIcon`, `AlertIcon`, `RecordIcon`), and
+  `no-restricted-imports` enforces it. Before adding a slot, check whether one
+  already means the same thing — the set is licence-counted (100 glyphs) and it
+  once grew to three warning variants and two pins because nobody could see the
+  whole set at once. `docs/icon-set.md` holds the licence terms, the build
+  pipeline (`pnpm icons:build`) and the semantic audit.
 
 Motion
 - Fast and subtle: 100–150ms ease-out. Panels fade+scale from 0.98; rows highlight instantly (no transition on selection). Nothing bounces.
@@ -115,5 +122,6 @@ Missing a primitive? Install it via the shadcn CLI (see the shadcn skill) — do
 - DO use one shared row component for every icon+title+meta list (destinations, sources, devices, recordings).
 - DON'T use solid opaque cards, colored section backgrounds, or borders heavier than 1px white/8%.
 - DON'T mix radii arbitrarily — panel/row/chip tiers only.
-- DON'T introduce new fonts, icon sets, or component libraries.
+- DON'T introduce new fonts or component libraries, and never import an icon
+  package directly — the icon set changes in `components/icons.tsx` alone.
 - DON'T restyle existing screens outside the migration plan.

@@ -1,4 +1,4 @@
-import { Microphone, SpeakerHigh, SpeakerSlash, WaveSine } from '@phosphor-icons/react'
+import { MicrophoneIcon, SpeakerOffIcon, SpeakerOnIcon, WaveformIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement, type RefObject } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -156,7 +156,7 @@ export function AudioMixer(): ReactElement {
       <div className="flex flex-col gap-2 rounded-row border bg-muted/20 p-3">
         <div className="flex items-center justify-between gap-2">
           <span className="flex min-w-0 items-center gap-2">
-            <Microphone className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+            <MicrophoneIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
             <span className="truncate text-sm font-medium">
               {selectedMicrophone?.name ?? 'No microphone'}
             </span>
@@ -178,9 +178,9 @@ export function AudioMixer(): ReactElement {
                 }
               >
                 {muted ? (
-                  <SpeakerSlash className="size-4 text-warning" weight="fill" />
+                  <SpeakerOffIcon className="size-4 text-warning" weight="fill" />
                 ) : (
-                  <SpeakerHigh className="size-4" weight="fill" />
+                  <SpeakerOnIcon className="size-4" weight="fill" />
                 )}
               </Button>
             ) : null}
@@ -262,7 +262,7 @@ export function AudioMixer(): ReactElement {
       {systemAudio ? (
         <div className="flex items-center justify-between gap-2 rounded-row border border-dashed bg-muted/10 p-3">
           <span className="flex min-w-0 items-center gap-2">
-            <WaveSine className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+            <WaveformIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
             <span className="flex min-w-0 flex-col">
               <span className="truncate text-sm font-medium">{systemAudio.name}</span>
               <span className="truncate text-xs text-muted-foreground">

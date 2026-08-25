@@ -1,4 +1,4 @@
-import { Moon, Sun } from '@phosphor-icons/react'
+import { DarkModeIcon, LightModeIcon } from '@/components/icons'
 import { useTheme } from 'next-themes'
 import { useEffect, useState, type ReactElement } from 'react'
 
@@ -24,7 +24,7 @@ export function ThemeToggle(): ReactElement {
       variant="ghost"
       onClick={toggleTheme}
     >
-      {mounted && isDark ? <Moon weight="fill" /> : <Sun weight="fill" />}
+      {mounted && isDark ? <DarkModeIcon weight="fill" /> : <LightModeIcon weight="fill" />}
     </Button>
   )
 }

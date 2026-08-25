@@ -1,14 +1,14 @@
 import {
-  CaretDown,
-  ClosedCaptioning,
-  Layout as LayoutIcon,
-  Microphone,
-  Monitor,
-  Record,
-  SpeakerHigh,
-  SpeakerSlash,
-  type Icon
-} from '@phosphor-icons/react'
+  type AppIcon,
+  CaptionsIcon,
+  ChevronDownIcon,
+  DisplayIcon,
+  LayoutIcon,
+  MicrophoneIcon,
+  RecordIcon,
+  SpeakerOffIcon,
+  SpeakerOnIcon
+} from '@/components/icons'
 import { Suspense, lazy, type ReactElement, type ReactNode } from 'react'
 
 import { SourceSelect } from '@/components/source-select'
@@ -146,7 +146,7 @@ export function QuickSettings(): ReactElement {
   const hasCamera = Boolean(captureConfig.sources.cameraId)
   const hasScreen = Boolean(selectedCaptureId)
   const muted = captureConfig.audio.microphoneMuted
-  const MuteIcon = muted ? SpeakerSlash : SpeakerHigh
+  const MuteIcon = muted ? SpeakerOffIcon : SpeakerOnIcon
   // Resolution options mirror the Output tab (recording-tab.tsx) and follow
   // the Studio mode — vertical mode offers only portrait canvases (the mode
   // toggle is the one home for orientation).
@@ -172,11 +172,11 @@ export function QuickSettings(): ReactElement {
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
       {/* SOURCE — screen + camera, edited off-air; full picker on Sources. */}
-      <QuickCard icon={Monitor} label="Source">
+      <QuickCard icon={DisplayIcon} label="Source">
         <Popover>
           <PopoverTrigger className={TRIGGER_CLASS} title={sourceSummary}>
             <span className="min-w-0 flex-1 truncate text-left font-medium">{sourceSummary}</span>
-            <CaretDown className="size-3 shrink-0 text-muted-foreground" />
+            <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
           </PopoverTrigger>
           <PopoverContent align="start" className="flex w-72 flex-col gap-3 p-3">
             <SourceSelect
@@ -213,16 +213,16 @@ export function QuickSettings(): ReactElement {
       </QuickCard>
 
       {/* MIC — picker off-air; mute is live-safe. */}
-      <QuickCard icon={Microphone} label="Mic">
+      <QuickCard icon={MicrophoneIcon} label="Mic">
         <Popover>
           <PopoverTrigger className={TRIGGER_CLASS}>
             <span className="min-w-0 flex-1 truncate text-left font-medium">
               {selectedMicrophone?.name ?? 'No microphone'}
             </span>
             {selectedMicrophone && muted ? (
-              <SpeakerSlash className="size-3.5 shrink-0 text-warning" weight="fill" />
+              <SpeakerOffIcon className="size-3.5 shrink-0 text-warning" weight="fill" />
             ) : null}
-            <CaretDown className="size-3 shrink-0 text-muted-foreground" />
+            <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
           </PopoverTrigger>
           <PopoverContent align="start" className="flex w-72 flex-col gap-3 p-3">
             <SourceSelect
@@ -272,7 +272,7 @@ export function QuickSettings(): ReactElement {
             <span className="min-w-0 flex-1 truncate text-left font-medium">
               {layoutSwitchPending ? 'Switching…' : presetLabel(captureConfig.layout.layoutPreset)}
             </span>
-            <CaretDown className="size-3 shrink-0 text-muted-foreground" />
+            <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
           </PopoverTrigger>
           <PopoverContent align="start" className="w-64 p-2">
             <div className="grid grid-cols-2 gap-1.5">
@@ -303,7 +303,7 @@ export function QuickSettings(): ReactElement {
       </QuickCard>
 
       {/* OUTPUT — recording resolution, mirroring the Output tab's options. */}
-      <QuickCard icon={Record} label="Output">
+      <QuickCard icon={RecordIcon} label="Output">
         <Select
           disabled={isSessionActive}
           value={knownResolution ? currentResolution : ''}
@@ -336,7 +336,7 @@ export function QuickSettings(): ReactElement {
 
       {/* CAPTIONS — live-safe premium toggle mirroring the Streaming tab's
           Live captions section (the config home, incl. the consent copy). */}
-      <QuickCard icon={ClosedCaptioning} label="Captions">
+      <QuickCard icon={CaptionsIcon} label="Captions">
         <div className="flex items-center justify-between gap-2 rounded-row border bg-background px-2.5 py-1.5">
           <span className="min-w-0 flex-1 truncate text-sm font-medium">
             {compactCaptionsStatus(
@@ -368,7 +368,7 @@ function QuickCard({
   label,
   children
 }: {
-  icon: Icon
+  icon: AppIcon
   label: string
   children: ReactNode
 }): ReactElement {

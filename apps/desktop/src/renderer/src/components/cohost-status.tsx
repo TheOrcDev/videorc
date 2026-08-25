@@ -1,4 +1,4 @@
-import { Robot } from '@phosphor-icons/react'
+import { CohostIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -92,7 +92,7 @@ export function CohostStatus({
       <PopoverContent align="end" className="w-72">
         <PopoverHeader>
           <PopoverTitle className="flex items-center gap-2 text-sm">
-            <Robot aria-hidden className="size-4 shrink-0" weight="duotone" />
+            <CohostIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
             Live Chat Co-host
           </PopoverTitle>
           <PopoverDescription>

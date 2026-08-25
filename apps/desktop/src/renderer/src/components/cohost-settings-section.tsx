@@ -1,4 +1,4 @@
-import { Robot, WarningCircle } from '@phosphor-icons/react'
+import { AlertIcon, CohostIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -58,12 +58,12 @@ export function CohostSettingsSection(): ReactElement | null {
   return (
     <PanelSection
       description="Alpha — expect rough edges. An AI producer reads your live chat, groups the questions people are actually asking, and drafts replies you approve. Nothing is ever sent without you."
-      icon={Robot}
+      icon={CohostIcon}
       title="Co-host (alpha)"
     >
       {locked ? (
         <Alert variant="warning">
-          <WarningCircle weight="fill" />
+          <AlertIcon weight="fill" />
           <AlertTitle>Premium co-host</AlertTitle>
           <AlertDescription>
             {cohostGate.allowed ? null : cohostGate.reason}

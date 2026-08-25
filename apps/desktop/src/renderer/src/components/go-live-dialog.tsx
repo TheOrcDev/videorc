@@ -1,4 +1,4 @@
-import { Broadcast, CheckCircle, ClosedCaptioning, WarningCircle } from '@phosphor-icons/react'
+import { AlertIcon, CaptionsIcon, LivestreamIcon, SuccessIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -186,7 +186,7 @@ export function GoLiveConfirmationDialog({
             {entitlementBlocker ? (
               <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-warning-foreground dark:text-warning">
-                  <WarningCircle className="size-4" weight="fill" />
+                  <AlertIcon className="size-4" weight="fill" />
                   {entitlementUpgradeUrl ? 'Premium issue' : 'Streaming entitlement issue'}
                 </div>
                 <p className="text-sm text-muted-foreground">{entitlementBlocker.reason}</p>
@@ -206,7 +206,7 @@ export function GoLiveConfirmationDialog({
             {errorIssues.length ? (
               <div className="flex flex-col gap-2 rounded-row border border-destructive/25 bg-destructive/5 p-3">
                 <div className="flex items-center gap-2 text-sm font-medium text-destructive">
-                  <WarningCircle className="size-4" weight="fill" />
+                  <AlertIcon className="size-4" weight="fill" />
                   Resolve before going live
                 </div>
                 <ul className="grid gap-1.5 text-sm text-muted-foreground">
@@ -223,7 +223,7 @@ export function GoLiveConfirmationDialog({
             {warningIssues.length ? (
               <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
                 <div className="flex items-center gap-2 text-sm font-medium">
-                  <WarningCircle className="size-4 text-warning" weight="fill" />
+                  <AlertIcon className="size-4 text-warning" weight="fill" />
                   Comments limitations
                 </div>
                 <ul className="grid gap-1.5 text-sm text-muted-foreground">
@@ -240,7 +240,7 @@ export function GoLiveConfirmationDialog({
             {partialSetup ? (
               <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
                 <div className="flex items-center gap-2 text-sm font-medium">
-                  <WarningCircle className="size-4 text-warning" weight="fill" />
+                  <AlertIcon className="size-4 text-warning" weight="fill" />
                   Some destinations failed setup
                 </div>
                 <ul className="grid gap-1.5 text-sm text-muted-foreground">
@@ -267,12 +267,12 @@ export function GoLiveConfirmationDialog({
               disabled={pending || Boolean(entitlementBlocker) || captionsReadiness.blocksStart}
               onClick={onContinuePartial}
             >
-              <Broadcast data-icon="inline-start" weight="fill" />
+              <LivestreamIcon data-icon="inline-start" weight="fill" />
               {pending ? 'Starting…' : 'Continue With Ready'}
             </Button>
           ) : (
             <Button disabled={pending || !preflight || blocked} onClick={onConfirm}>
-              <Broadcast data-icon="inline-start" weight="fill" />
+              <LivestreamIcon data-icon="inline-start" weight="fill" />
               {pending ? 'Checking…' : blocked ? 'Resolve Blockers First' : 'Confirm Go Live'}
             </Button>
           )}
@@ -303,11 +303,11 @@ export function GoLiveCaptionsStatus({
     >
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex items-center gap-2 text-sm font-medium">
-          <ClosedCaptioning className="size-4 text-muted-foreground" weight="duotone" />
+          <CaptionsIcon className="size-4 text-muted-foreground" weight="duotone" />
           Captions
         </div>
         <Badge variant={ready ? 'success' : blocked ? 'warning' : 'secondary'}>
-          {ready ? <CheckCircle data-icon="inline-start" weight="fill" /> : null}
+          {ready ? <SuccessIcon data-icon="inline-start" weight="fill" /> : null}
           {readiness.title.replace(/^Captions\s*/i, '')}
         </Badge>
       </div>
@@ -353,9 +353,9 @@ function GoLiveDestinationRow({
           <span className="font-medium">{destination.label}</span>
           <Badge variant={destination.ready ? 'success' : 'destructive'}>
             {destination.ready ? (
-              <CheckCircle data-icon="inline-start" weight="fill" />
+              <SuccessIcon data-icon="inline-start" weight="fill" />
             ) : (
-              <WarningCircle data-icon="inline-start" weight="fill" />
+              <AlertIcon data-icon="inline-start" weight="fill" />
             )}
             {destination.ready ? 'Ready' : 'Blocked'}
           </Badge>

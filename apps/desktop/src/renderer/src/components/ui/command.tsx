@@ -9,8 +9,7 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { MagnifyingGlassIcon, CheckIcon } from '@phosphor-icons/react'
-
+import { CheckIcon, SearchIcon } from '@/components/icons'
 function Command({ className, ...props }: React.ComponentProps<typeof CommandPrimitive>) {
   return (
     <CommandPrimitive
@@ -67,7 +66,7 @@ function CommandInput({
       data-slot="command-input-wrapper"
       className="flex h-13 shrink-0 items-center gap-3 border-b border-border px-4"
     >
-      <MagnifyingGlassIcon className="size-5 shrink-0 text-muted-foreground" />
+      <SearchIcon className="size-5 shrink-0 text-muted-foreground" />
       <CommandPrimitive.Input
         data-slot="command-input"
         className={cn(

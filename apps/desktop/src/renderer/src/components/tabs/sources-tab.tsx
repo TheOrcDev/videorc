@@ -1,15 +1,15 @@
 import {
-  ArrowCounterClockwise,
-  ArrowsClockwise,
-  Check,
-  Monitor,
-  SpeakerHigh,
-  SpeakerSlash,
-  UploadSimple,
-  VideoCamera,
-  Warning,
-  Waveform
-} from '@phosphor-icons/react'
+  CameraIcon,
+  CheckIcon,
+  DisplayIcon,
+  ResetIcon,
+  SpeakerOffIcon,
+  SpeakerOnIcon,
+  SyncIcon,
+  UploadIcon,
+  WarningIcon,
+  WaveformIcon
+} from '@/components/icons'
 import { useRef, useState, type ReactElement } from 'react'
 
 import { ConfigGrid } from '@/components/page'
@@ -224,24 +224,24 @@ export function SourcesTab(): ReactElement {
       <PanelSection
         action={
           <Button size="sm" variant="outline" onClick={() => void refreshBackend()}>
-            <ArrowsClockwise data-icon="inline-start" />
+            <SyncIcon data-icon="inline-start" />
             Refresh
           </Button>
         }
         className="lg:col-span-2"
         description="Pick what gets captured. Unavailable devices need permission or reconnection."
-        icon={Monitor}
+        icon={DisplayIcon}
         title="Capture sources"
       >
         {deviceList.warnings.map((warning) => (
           <Alert key={warning} variant="warning">
-            <Warning weight="fill" />
+            <WarningIcon weight="fill" />
             <AlertTitle>{warning}</AlertTitle>
           </Alert>
         ))}
         {hasCapturePermissionRequired ? (
           <Alert variant="warning">
-            <Warning weight="fill" />
+            <WarningIcon weight="fill" />
             <AlertTitle>
               Screen Recording permission is required for {capturePermissionTargetName}.
             </AlertTitle>
@@ -251,11 +251,11 @@ export function SourcesTab(): ReactElement {
                 variant="outline"
                 onClick={() => void handleSystemPermission('screen-recording')}
               >
-                <Monitor data-icon="inline-start" />
+                <DisplayIcon data-icon="inline-start" />
                 Open Screen Recording
               </Button>
               <Button size="sm" variant="ghost" onClick={() => void revealPermissionTarget()}>
-                <UploadSimple data-icon="inline-start" />
+                <UploadIcon data-icon="inline-start" />
                 Show Capture Helper
               </Button>
             </AlertDescription>
@@ -263,7 +263,7 @@ export function SourcesTab(): ReactElement {
         ) : null}
         {hasCameraPermissionRequired ? (
           <Alert variant="warning">
-            <Warning weight="fill" />
+            <WarningIcon weight="fill" />
             <AlertTitle>
               Camera permission is required for {capturePermissionTargetName}.
             </AlertTitle>
@@ -274,14 +274,14 @@ export function SourcesTab(): ReactElement {
                   variant="outline"
                   onClick={() => void handleSystemPermission('camera')}
                 >
-                  <VideoCamera data-icon="inline-start" />
+                  <CameraIcon data-icon="inline-start" />
                   {cameraPermissionAction === 'request-media-access'
                     ? 'Enable Camera'
                     : 'Open Camera Settings'}
                 </Button>
               ) : null}
               <Button size="sm" variant="ghost" onClick={() => void revealPermissionTarget()}>
-                <UploadSimple data-icon="inline-start" />
+                <UploadIcon data-icon="inline-start" />
                 Show Capture Helper
               </Button>
             </AlertDescription>
@@ -341,7 +341,7 @@ export function SourcesTab(): ReactElement {
                 mystery. */}
             {cameraShortfall ? (
               <p className="flex items-start gap-1.5 text-xs text-warning">
-                <Warning className="mt-0.5 size-3.5 shrink-0" weight="fill" />
+                <WarningIcon className="mt-0.5 size-3.5 shrink-0" weight="fill" />
                 <span>{cameraFormatShortfallMessage(cameraShortfall)}</span>
               </p>
             ) : null}
@@ -390,7 +390,7 @@ export function SourcesTab(): ReactElement {
       <PanelSection
         className="lg:col-span-2"
         description="Live input meter with manual source gain. No automatic processing is applied."
-        icon={Waveform}
+        icon={WaveformIcon}
         title="Microphone mixer"
       >
         <SourceSelect
@@ -412,9 +412,9 @@ export function SourcesTab(): ReactElement {
         <MicPickerPreview deviceName={selectedMicrophone?.name} />
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           {captureConfig.audio.microphoneMuted ? (
-            <SpeakerSlash className="size-4" weight="duotone" />
+            <SpeakerOffIcon className="size-4" weight="duotone" />
           ) : (
-            <SpeakerHigh className="size-4" weight="duotone" />
+            <SpeakerOnIcon className="size-4" weight="duotone" />
           )}
           {selectedMicrophone ? selectedMicrophone.name : 'No microphone selected'}
         </div>
@@ -488,7 +488,7 @@ export function SourcesTab(): ReactElement {
                     variant="outline"
                     onClick={() => setShowSyncStimulusInstructions((open) => !open)}
                   >
-                    <Waveform data-icon="inline-start" />
+                    <WaveformIcon data-icon="inline-start" />
                     Stimulus
                   </Button>
                   <Button
@@ -497,7 +497,7 @@ export function SourcesTab(): ReactElement {
                     variant="outline"
                     onClick={() => syncMeasurementInputRef.current?.click()}
                   >
-                    <UploadSimple data-icon="inline-start" />
+                    <UploadIcon data-icon="inline-start" />
                     Import JSON
                   </Button>
                   <Button
@@ -507,11 +507,11 @@ export function SourcesTab(): ReactElement {
                     variant="secondary"
                     onClick={applySyncRecommendation}
                   >
-                    <Check data-icon="inline-start" />
+                    <CheckIcon data-icon="inline-start" />
                     Apply
                   </Button>
                   <Button size="xs" type="button" variant="ghost" onClick={resetSyncCalibration}>
-                    <ArrowCounterClockwise data-icon="inline-start" />
+                    <ResetIcon data-icon="inline-start" />
                     Reset
                   </Button>
                 </div>
