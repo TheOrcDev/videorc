@@ -3091,6 +3091,79 @@ impl Drop for MediaFoundationD3d11H264Encoder {
 pub fn probe_hardware_encoder(
     config: MediaFoundationEncoderConfig,
 ) -> Result<MediaFoundationProbe> {
+    // Iris Xe iGPUs can E_UNEXPECTED at 1080p30 / 6000 CBR (see support bundle
+    // 20260826-190155Z). Retry the probe with the AI-recommended fallback
+    // bitrates before we abandon hardware for CPU encoding.
+    let fallback_bitrates = probe_fallback_bitrates(config.bitrate_kbps);
+    let mut last_error: Option<anyhow::Error> = None;
+    for &bitrate in &fallback_bitrates {
+        let candidate = MediaFoundationEncoderConfig {
+            bitrate_kbps: bitrate,
+            ..config.clone()
+        };
+        match try_probe_once(candidate) {
+            Ok(probe) => {
+                if bitrate != config.bitrate_kbps {
+                    tracing::warn!(
+                        "Media Foundation hardware probe succeeded on Intel fallback bitrate {bitrate} kbps (original {} kbps rejected with E_UNEXPECTED); recording will use {bitrate} kbps for hardware",
+                        config.bitrate_kbps
+                    );
+                }
+                return Ok(probe);
+            }
+            Err(error) => {
+                let is_e_unexpected = error.to_string().contains("HRESULT=0x8000FFFF");
+                if !is_e_unexpected || bitrate == *fallback_bitrates.last().unwrap() {
+                    // Either not the Intel E_UNEXPECTED case, or we've exhausted
+                    // the ladder — bubble the original (or last) error up so
+                    // recording.rs can fall back to software with an annotated
+                    // reason.
+                    if bitrate != config.bitrate_kbps {
+                        tracing::warn!(
+                            "Media Foundation hardware probe fallback at {bitrate} kbps also failed: {error:#}"
+                        );
+                    }
+                    last_error = Some(error);
+                    if !is_e_unexpected {
+                        break;
+                    }
+                } else {
+                    tracing::warn!(
+                        "Media Foundation hardware probe at {} kbps failed with E_UNEXPECTED — retrying at {next} kbps: {error:#}",
+                        bitrate,
+                        next = fallback_bitrates[fallback_bitrates
+                            .iter()
+                            .position(|&b| b == bitrate)
+                            .unwrap()
+                            + 1]
+                    );
+                    last_error = Some(error);
+                }
+            }
+        }
+    }
+    Err(last_error.unwrap())
+}
+
+fn probe_fallback_bitrates(requested: u32) -> Vec<u32> {
+    // Fix 2 from the Intel report: CBR allocations at 6000 can be rejected
+    // by Iris Xe MFTs. Walk down through the recommended fallbacks.
+    let mut candidates = vec![requested];
+    if requested >= 6000 {
+        for &alt in &[5500_u32, 5000_u32] {
+            if !candidates.contains(&alt) {
+                candidates.push(alt);
+            }
+        }
+    } else if requested > 5000 {
+        if !candidates.contains(&5000) {
+            candidates.push(5000);
+        }
+    }
+    candidates
+}
+
+fn try_probe_once(config: MediaFoundationEncoderConfig) -> Result<MediaFoundationProbe> {
     let frame_len = config.i420_len()?;
     let mut encoder = MediaFoundationH264Encoder::new(config.clone())?;
     let identity = encoder.identity().to_string();
@@ -3501,6 +3574,10 @@ fn mf_hresult_annotation(hresult: windows::core::HRESULT) -> Option<&'static str
         Some(
             "encoder requested output-type renegotiation (MF_E_TRANSFORM_STREAM_CHANGE; common on Intel iGPU MFTs)",
         )
+    } else if hresult.0 as u32 == 0x8000FFFF {
+        Some(
+            "unexpected encoder failure (E_UNEXPECTED; Intel Quick Sync via WMF rejected the 1080p30 / bitrate parameters — try lower bitrate, VBR, or the native QSV encoder)",
+        )
     } else {
         None
     }
@@ -3568,7 +3645,18 @@ mod tests {
             .expect("stream change must be annotated");
         assert!(annotation.contains("MF_E_TRANSFORM_STREAM_CHANGE"));
         assert!(annotation.contains("Intel iGPU"));
+        let e_unexpected = mf_hresult_annotation(windows::core::HRESULT(0x8000FFFF_u32 as i32))
+            .expect("E_UNEXPECTED must be annotated");
+        assert!(e_unexpected.contains("E_UNEXPECTED"));
         assert_eq!(mf_hresult_annotation(windows::core::HRESULT(0)), None);
+    }
+
+    #[test]
+    fn probe_fallback_bitrates_cover_intel_recommendations() {
+        assert_eq!(probe_fallback_bitrates(6000), vec![6000, 5500, 5000]);
+        assert_eq!(probe_fallback_bitrates(5500), vec![5500, 5000]);
+        assert_eq!(probe_fallback_bitrates(5000), vec![5000]);
+        assert_eq!(probe_fallback_bitrates(4000), vec![4000]);
     }
 
     #[test]
