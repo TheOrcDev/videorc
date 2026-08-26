@@ -1222,7 +1222,7 @@ impl MediaFoundationH264Encoder {
             match process_result {
                 Ok(()) => break sample,
                 Err(error)
-                    if is_mf_stream_change(error.code())
+                    if is_mf_retryable_output_error(error.code())
                         && renegotiations < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS =>
                 {
                     renegotiations += 1;
@@ -2768,7 +2768,7 @@ impl MediaFoundationD3d11H264Encoder {
             match process_result {
                 Ok(()) => break sample,
                 Err(error)
-                    if is_mf_stream_change(error.code())
+                    if is_mf_retryable_output_error(error.code())
                         && renegotiations < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS =>
                 {
                     renegotiations += 1;
@@ -3491,6 +3491,12 @@ fn is_mf_stream_change(hresult: windows::core::HRESULT) -> bool {
     hresult == MF_E_TRANSFORM_STREAM_CHANGE
 }
 
+/// Some Intel MFTs return E_UNEXPECTED while settling the first output type;
+/// retry it through the same bounded renegotiation path as stream change.
+fn is_mf_retryable_output_error(hresult: windows::core::HRESULT) -> bool {
+    is_mf_stream_change(hresult) || hresult == windows::core::HRESULT(0x8000FFFF_u32 as i32)
+}
+
 /// Bounded number of output-type renegotiations per `ProcessOutput` attempt.
 const MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS: u32 = 2;
 
@@ -3500,6 +3506,10 @@ fn mf_hresult_annotation(hresult: windows::core::HRESULT) -> Option<&'static str
     if is_mf_stream_change(hresult) {
         Some(
             "encoder requested output-type renegotiation (MF_E_TRANSFORM_STREAM_CHANGE; common on Intel iGPU MFTs)",
+        )
+    } else if hresult == windows::core::HRESULT(0x8000FFFF_u32 as i32) {
+        Some(
+            "encoder returned E_UNEXPECTED while settling output type; retried for Intel iGPU MFT compatibility",
         )
     } else {
         None
