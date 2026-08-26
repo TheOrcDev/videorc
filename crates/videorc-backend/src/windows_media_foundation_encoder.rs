@@ -45,23 +45,24 @@ use windows::Win32::Media::MediaFoundation::{
     IMFActivate, IMFAsyncCallback, IMFAsyncCallback_Impl, IMFAsyncResult, IMFAttributes,
     IMFDXGIDeviceManager, IMFMediaBuffer, IMFMediaEventGenerator, IMFSample, IMFTrackedSample,
     IMFTransform, METransformDrainComplete, METransformHaveOutput, METransformNeedInput,
-    MF_E_NO_EVENTS_AVAILABLE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY, MF_MT_ALL_SAMPLES_INDEPENDENT,
-    MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE, MF_MT_FRAME_SIZE,
-    MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING, MF_MT_MPEG_SEQUENCE_HEADER,
-    MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION, MF_MT_VIDEO_NOMINAL_RANGE,
-    MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE, MF_TRANSFORM_ASYNC,
-    MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MF2DBuffer_LockFlags_Write, MFCreate2DMediaBuffer,
-    MFCreateAttributes, MFCreateDXGIDeviceManager, MFCreateDXGISurfaceBuffer, MFCreateMediaType,
-    MFCreateMemoryBuffer, MFCreateSample, MFCreateTrackedSample, MFMediaType_Video,
-    MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown, MFStartup, MFT_CATEGORY_VIDEO_ENCODER,
-    MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG, MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER,
-    MFT_FRIENDLY_NAME_Attribute, MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH,
-    MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, MFT_MESSAGE_NOTIFY_END_OF_STREAM,
-    MFT_MESSAGE_NOTIFY_START_OF_STREAM, MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER,
-    MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES, MFT_OUTPUT_STREAM_PROVIDES_SAMPLES,
-    MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264, MFVideoFormat_I420, MFVideoFormat_NV12,
-    MFVideoInterlace_Progressive, MFVideoPrimaries_BT709, MFVideoTransFunc_709,
-    MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR, eAVEncH264VProfile_High,
+    MF_E_NO_EVENTS_AVAILABLE, MF_E_TRANSFORM_STREAM_CHANGE, MF_EVENT_FLAG_NO_WAIT, MF_LOW_LATENCY,
+    MF_MT_ALL_SAMPLES_INDEPENDENT, MF_MT_AVG_BITRATE, MF_MT_FIXED_SIZE_SAMPLES, MF_MT_FRAME_RATE,
+    MF_MT_FRAME_SIZE, MF_MT_INTERLACE_MODE, MF_MT_MAJOR_TYPE, MF_MT_MAX_KEYFRAME_SPACING,
+    MF_MT_MPEG_SEQUENCE_HEADER, MF_MT_MPEG2_PROFILE, MF_MT_SUBTYPE, MF_MT_TRANSFER_FUNCTION,
+    MF_MT_VIDEO_NOMINAL_RANGE, MF_MT_VIDEO_PRIMARIES, MF_MT_YUV_MATRIX, MF_SA_D3D11_AWARE,
+    MF_TRANSFORM_ASYNC, MF_TRANSFORM_ASYNC_UNLOCK, MF_VERSION, MF2DBuffer_LockFlags_Write,
+    MFCreate2DMediaBuffer, MFCreateAttributes, MFCreateDXGIDeviceManager,
+    MFCreateDXGISurfaceBuffer, MFCreateMediaType, MFCreateMemoryBuffer, MFCreateSample,
+    MFCreateTrackedSample, MFMediaType_Video, MFNominalRange_16_235, MFSTARTUP_FULL, MFShutdown,
+    MFStartup, MFT_CATEGORY_VIDEO_ENCODER, MFT_ENUM_ADAPTER_LUID, MFT_ENUM_FLAG,
+    MFT_ENUM_FLAG_HARDWARE, MFT_ENUM_FLAG_SORTANDFILTER, MFT_FRIENDLY_NAME_Attribute,
+    MFT_MESSAGE_COMMAND_DRAIN, MFT_MESSAGE_COMMAND_FLUSH, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING,
+    MFT_MESSAGE_NOTIFY_END_OF_STREAM, MFT_MESSAGE_NOTIFY_START_OF_STREAM,
+    MFT_MESSAGE_SET_D3D_MANAGER, MFT_OUTPUT_DATA_BUFFER, MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES,
+    MFT_OUTPUT_STREAM_PROVIDES_SAMPLES, MFT_REGISTER_TYPE_INFO, MFTEnumEx, MFVideoFormat_H264,
+    MFVideoFormat_I420, MFVideoFormat_NV12, MFVideoInterlace_Progressive, MFVideoPrimaries_BT709,
+    MFVideoTransFunc_709, MFVideoTransferMatrix_BT709, eAVEncCommonRateControlMode_CBR,
+    eAVEncH264VProfile_High,
 };
 use windows::Win32::System::Com::{
     COINIT_MULTITHREADED, CoInitializeEx, CoTaskMemFree, CoUninitialize,
@@ -1177,49 +1178,77 @@ impl MediaFoundationH264Encoder {
     }
 
     fn process_one_output(&mut self) -> Result<MediaFoundationEncodedFrame> {
-        let stream_info = unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
-            stage_windows_error(
-                "output-stream-info",
-                &error,
-                &self.identity,
-                Some(self.input_subtype),
-                &self.config.profile_label(),
-            )
-        })?;
-        let transform_provides_sample = stream_info.dwFlags
-            & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
-                as u32)
-            != 0;
-        let supplied_sample = if transform_provides_sample {
-            None
-        } else {
-            let sample = unsafe { MFCreateSample() }?;
-            let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
-            unsafe { sample.AddBuffer(&buffer) }?;
-            Some(sample)
+        let profile_label = self.config.profile_label();
+        let mut renegotiations = 0_u32;
+        let sample = loop {
+            let stream_info =
+                unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
+                    stage_windows_error(
+                        "output-stream-info",
+                        &error,
+                        &self.identity,
+                        Some(self.input_subtype),
+                        &profile_label,
+                    )
+                })?;
+            let transform_provides_sample = stream_info.dwFlags
+                & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
+                    as u32)
+                != 0;
+            let supplied_sample = if transform_provides_sample {
+                None
+            } else {
+                let sample = unsafe { MFCreateSample() }?;
+                let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
+                unsafe { sample.AddBuffer(&buffer) }?;
+                Some(sample)
+            };
+            let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: 0,
+                pSample: ManuallyDrop::new(supplied_sample),
+                dwStatus: 0,
+                pEvents: ManuallyDrop::new(None),
+            };
+            let mut status = 0_u32;
+            let process_result = unsafe {
+                self.transform.ProcessOutput(
+                    0,
+                    std::slice::from_mut(&mut output_buffer),
+                    &mut status,
+                )
+            };
+            let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
+            let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
+            match process_result {
+                Ok(()) => break sample,
+                Err(error)
+                    if is_mf_stream_change(error.code())
+                        && renegotiations < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS =>
+                {
+                    renegotiations += 1;
+                    tracing::warn!(
+                        "Media Foundation encoder {:?} requested output-type renegotiation (attempt {renegotiations}/{}); re-selecting output type",
+                        self.identity,
+                        MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
+                    );
+                    renegotiate_mft_output_type(
+                        &self.transform,
+                        &self.config,
+                        &self.identity,
+                        Some(self.input_subtype),
+                    )?;
+                }
+                Err(error) => {
+                    return Err(stage_windows_error(
+                        "process-output",
+                        &error,
+                        &self.identity,
+                        Some(self.input_subtype),
+                        &profile_label,
+                    ));
+                }
+            }
         };
-        let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
-            dwStreamID: 0,
-            pSample: ManuallyDrop::new(supplied_sample),
-            dwStatus: 0,
-            pEvents: ManuallyDrop::new(None),
-        };
-        let mut status = 0_u32;
-        let process_result = unsafe {
-            self.transform
-                .ProcessOutput(0, std::slice::from_mut(&mut output_buffer), &mut status)
-        };
-        let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
-        let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
-        process_result.map_err(|error| {
-            stage_windows_error(
-                "process-output",
-                &error,
-                &self.identity,
-                Some(self.input_subtype),
-                &self.config.profile_label(),
-            )
-        })?;
         let sample = sample.context("Media Foundation HaveOutput event returned no sample")?;
         let pts = unsafe { sample.GetSampleTime() }.map_err(|error| {
             stage_windows_error(
@@ -2695,49 +2724,77 @@ impl MediaFoundationD3d11H264Encoder {
     }
 
     fn process_one_output(&mut self) -> Result<MediaFoundationEncodedFrame> {
-        let stream_info = unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
-            stage_windows_error(
-                "d3d11-output-stream-info",
-                &error,
-                &self.identity,
-                Some(MediaFoundationInputSubtype::Nv12),
-                &self.config.profile_label(),
-            )
-        })?;
-        let transform_provides_sample = stream_info.dwFlags
-            & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
-                as u32)
-            != 0;
-        let supplied_sample = if transform_provides_sample {
-            None
-        } else {
-            let sample = unsafe { MFCreateSample() }?;
-            let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
-            unsafe { sample.AddBuffer(&buffer) }?;
-            Some(sample)
+        let profile_label = self.config.profile_label();
+        let mut renegotiations = 0_u32;
+        let sample = loop {
+            let stream_info =
+                unsafe { self.transform.GetOutputStreamInfo(0) }.map_err(|error| {
+                    stage_windows_error(
+                        "d3d11-output-stream-info",
+                        &error,
+                        &self.identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile_label,
+                    )
+                })?;
+            let transform_provides_sample = stream_info.dwFlags
+                & ((MFT_OUTPUT_STREAM_PROVIDES_SAMPLES.0 | MFT_OUTPUT_STREAM_CAN_PROVIDE_SAMPLES.0)
+                    as u32)
+                != 0;
+            let supplied_sample = if transform_provides_sample {
+                None
+            } else {
+                let sample = unsafe { MFCreateSample() }?;
+                let buffer = unsafe { MFCreateMemoryBuffer(stream_info.cbSize.max(1)) }?;
+                unsafe { sample.AddBuffer(&buffer) }?;
+                Some(sample)
+            };
+            let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
+                dwStreamID: 0,
+                pSample: ManuallyDrop::new(supplied_sample),
+                dwStatus: 0,
+                pEvents: ManuallyDrop::new(None),
+            };
+            let mut status = 0_u32;
+            let process_result = unsafe {
+                self.transform.ProcessOutput(
+                    0,
+                    std::slice::from_mut(&mut output_buffer),
+                    &mut status,
+                )
+            };
+            let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
+            let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
+            match process_result {
+                Ok(()) => break sample,
+                Err(error)
+                    if is_mf_stream_change(error.code())
+                        && renegotiations < MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS =>
+                {
+                    renegotiations += 1;
+                    tracing::warn!(
+                        "Media Foundation D3D11 encoder {:?} requested output-type renegotiation (attempt {renegotiations}/{}); re-selecting output type",
+                        self.identity,
+                        MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS
+                    );
+                    renegotiate_mft_output_type(
+                        &self.transform,
+                        &self.config,
+                        &self.identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                    )?;
+                }
+                Err(error) => {
+                    return Err(stage_windows_error(
+                        "d3d11-process-output",
+                        &error,
+                        &self.identity,
+                        Some(MediaFoundationInputSubtype::Nv12),
+                        &profile_label,
+                    ));
+                }
+            }
         };
-        let mut output_buffer = MFT_OUTPUT_DATA_BUFFER {
-            dwStreamID: 0,
-            pSample: ManuallyDrop::new(supplied_sample),
-            dwStatus: 0,
-            pEvents: ManuallyDrop::new(None),
-        };
-        let mut status = 0_u32;
-        let process_result = unsafe {
-            self.transform
-                .ProcessOutput(0, std::slice::from_mut(&mut output_buffer), &mut status)
-        };
-        let sample = unsafe { ManuallyDrop::take(&mut output_buffer.pSample) };
-        let _events = unsafe { ManuallyDrop::take(&mut output_buffer.pEvents) };
-        process_result.map_err(|error| {
-            stage_windows_error(
-                "d3d11-process-output",
-                &error,
-                &self.identity,
-                Some(MediaFoundationInputSubtype::Nv12),
-                &self.config.profile_label(),
-            )
-        })?;
         let sample = sample.context("Media Foundation HaveOutput event returned no sample")?;
         let pts = unsafe { sample.GetSampleTime() }.map_err(|error| {
             stage_windows_error(
@@ -3417,15 +3474,102 @@ fn stage_error(
     profile: &str,
 ) -> anyhow::Error {
     anyhow!(
-        "Media Foundation probe stage={stage} HRESULT=0x{:08X} encoder={identity:?} input={} profile={profile}",
+        "Media Foundation probe stage={stage} HRESULT=0x{:08X}{} encoder={identity:?} input={} profile={profile}",
         hresult.0 as u32,
+        mf_hresult_annotation(hresult)
+            .map(|annotation| format!(" ({annotation})"))
+            .unwrap_or_default(),
         subtype.map_or("<unset>", MediaFoundationInputSubtype::label)
     )
+}
+
+/// Intel iGPU MFTs report `MF_E_TRANSFORM_STREAM_CHANGE` on their first
+/// `ProcessOutput` calls while they settle the negotiated output type; NVIDIA
+/// MFTs never do. The condition means "renegotiate and retry", not failure —
+/// treating it as fatal is why Iris Xe machines fell back to CPU encoding.
+fn is_mf_stream_change(hresult: windows::core::HRESULT) -> bool {
+    hresult == MF_E_TRANSFORM_STREAM_CHANGE
+}
+
+/// Bounded number of output-type renegotiations per `ProcessOutput` attempt.
+const MFT_STREAM_CHANGE_MAX_RENEGOTIATIONS: u32 = 2;
+
+/// Human-facing annotations for the Media Foundation HRESULTs an operator can
+/// act on. Unknown codes return `None` so logs stay free of guesses.
+fn mf_hresult_annotation(hresult: windows::core::HRESULT) -> Option<&'static str> {
+    if is_mf_stream_change(hresult) {
+        Some(
+            "encoder requested output-type renegotiation (MF_E_TRANSFORM_STREAM_CHANGE; common on Intel iGPU MFTs)",
+        )
+    } else {
+        None
+    }
+}
+
+/// Answers a `MF_E_TRANSFORM_STREAM_CHANGE` report by re-selecting the
+/// encoder's own available output type, falling back to the configured type
+/// when the MFT refuses to advertise one.
+#[allow(clippy::too_many_arguments)]
+fn renegotiate_mft_output_type(
+    transform: &IMFTransform,
+    config: &MediaFoundationEncoderConfig,
+    identity: &str,
+    subtype: Option<MediaFoundationInputSubtype>,
+) -> Result<()> {
+    let profile = config.profile_label();
+    let advertised = unsafe { transform.GetOutputAvailableType(0, 0) };
+    match advertised {
+        Ok(media_type) => unsafe { transform.SetOutputType(0, &media_type, 0) }.map_err(|error| {
+            stage_windows_error(
+                "renegotiate-set-output-type",
+                &error,
+                identity,
+                subtype,
+                &profile,
+            )
+        }),
+        Err(_) => {
+            let output_type = create_video_type(
+                config,
+                MFVideoFormat_H264,
+                Some(eAVEncH264VProfile_High.0 as u32),
+            )
+            .map_err(|error| anyhow!("Media Foundation output type for {profile}: {error}"))?;
+            unsafe { transform.SetOutputType(0, &output_type, 0) }.map_err(|error| {
+                stage_windows_error(
+                    "renegotiate-configured-output-type",
+                    &error,
+                    identity,
+                    subtype,
+                    &profile,
+                )
+            })
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stream_change_hresult_is_classified_as_renegotiation() {
+        assert!(is_mf_stream_change(MF_E_TRANSFORM_STREAM_CHANGE));
+        // MF_E_TRANSFORM_NEED_MORE_INPUT (0xC00D6D62) is a different condition.
+        assert!(!is_mf_stream_change(windows::core::HRESULT(
+            0xC00D6D62_u32 as i32
+        )));
+        assert!(!is_mf_stream_change(windows::core::HRESULT(0)));
+    }
+
+    #[test]
+    fn hresult_annotations_name_only_known_codes() {
+        let annotation = mf_hresult_annotation(MF_E_TRANSFORM_STREAM_CHANGE)
+            .expect("stream change must be annotated");
+        assert!(annotation.contains("MF_E_TRANSFORM_STREAM_CHANGE"));
+        assert!(annotation.contains("Intel iGPU"));
+        assert_eq!(mf_hresult_annotation(windows::core::HRESULT(0)), None);
+    }
 
     #[test]
     fn scheduled_timestamps_do_not_regress_at_fractional_100ns_intervals() {
