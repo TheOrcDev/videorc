@@ -1897,6 +1897,35 @@ pub async fn start_session(
     )
     .await?;
     let encoder_bridge_video_output = windows_encoded_bridge_decision.effective;
+    // Intel iGPU MFTs that reject the requested CBR at probe time are only kept
+    // alive if every MF leg encodes at the bitrate the probe validated; encode
+    // config must match the probe or the MFT fails mid-session with
+    // E_UNEXPECTED where nothing can save hardware.
+    if matches!(
+        encoder_bridge_video_output,
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) && windows_encoded_bridge_decision.bitrate_overrides.any()
+    {
+        state.emit_log(
+            "info",
+            format!(
+                "Encoding Media Foundation legs at probed bitrates (recording={}, stream={}) after the hardware probe rejected requested bitrates.",
+                windows_encoded_bridge_decision
+                    .bitrate_overrides
+                    .recording_bitrate_kbps
+                    .unwrap_or(params.output.video.bitrate_kbps),
+                windows_encoded_bridge_decision
+                    .bitrate_overrides
+                    .stream_bitrate_kbps
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unchanged".to_string()),
+            ),
+        );
+    }
+    let encoder_bridge_recording_bitrate_kbps = windows_encoded_bridge_decision
+        .bitrate_overrides
+        .recording_bitrate_kbps
+        .unwrap_or(params.output.video.bitrate_kbps);
     let provider_stream_output_plan = if params.output.stream_enabled {
         match resolve_provider_stream_output_plan_for_effective_bridge(
             &params,
@@ -2835,7 +2864,7 @@ pub async fn start_session(
             #[cfg(target_os = "windows")]
             windows_d3d11_primary_input,
             encoder_bridge_video_output,
-            Some(params.output.video.bitrate_kbps),
+            Some(encoder_bridge_recording_bitrate_kbps),
             // Low latency only when live legs consume THIS output (shared
             // leg while streaming); a record-only output — including the
             // recording leg beside a dedicated stream bridge — encodes for
@@ -2890,7 +2919,12 @@ pub async fn start_session(
                         #[cfg(target_os = "windows")]
                         windows_d3d11_auxiliary_input,
                         encoder_bridge_video_output,
-                        Some(stream_profile.bitrate_kbps),
+                        Some(
+                            windows_encoded_bridge_decision
+                                .bitrate_overrides
+                                .stream_bitrate_kbps
+                                .unwrap_or(stream_profile.bitrate_kbps),
+                        ),
                         true,
                         stream_diagnostics_context,
                         video_epoch.clone(),
@@ -9409,6 +9443,23 @@ fn recording_encoder_bridge_video_output(
     )
 }
 
+/// Bitrates the Media Foundation probe actually validated, per bridge leg. On
+/// Intel iGPU MFTs that reject a requested CBR bitrate with E_UNEXPECTED the
+/// probe ladder settles on a lower bitrate; sessions must encode at these
+/// values or the same MFT rejects the config mid-session where no retry can
+/// keep hardware alive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+struct WindowsEncodedBridgeBitrateOverrides {
+    recording_bitrate_kbps: Option<u32>,
+    stream_bitrate_kbps: Option<u32>,
+}
+
+impl WindowsEncodedBridgeBitrateOverrides {
+    fn any(self) -> bool {
+        self.recording_bitrate_kbps.is_some() || self.stream_bitrate_kbps.is_some()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct WindowsEncodedBridgeDecision {
     capability_key: String,
@@ -9421,6 +9472,7 @@ struct WindowsEncodedBridgeDecision {
     fallback_reason: Option<String>,
     fallback_ffmpeg_encoder: ResolvedFfmpegH264Encoder,
     encoder_selection_fallback_reason: Option<String>,
+    bitrate_overrides: WindowsEncodedBridgeBitrateOverrides,
 }
 
 impl WindowsEncodedBridgeDecision {
@@ -9445,6 +9497,7 @@ impl WindowsEncodedBridgeDecision {
                 FfmpegH264Platform::WindowsSoftware,
             ),
             encoder_selection_fallback_reason: None,
+            bitrate_overrides: WindowsEncodedBridgeBitrateOverrides::default(),
         }
     }
 }
@@ -9524,6 +9577,7 @@ enum MediaFoundationTopologyProbe {
     Passed {
         encoder_identity: String,
         input_subtype: String,
+        bitrate_overrides: WindowsEncodedBridgeBitrateOverrides,
     },
     #[cfg(any(test, target_os = "windows"))]
     Rejected { reason: String },
@@ -9537,6 +9591,9 @@ enum MediaFoundationProfileProbe {
     Passed {
         encoder_identity: String,
         input_subtype: String,
+        // Bitrate the MFT actually accepted for this profile (differs from the
+        // requested bitrate only after an Intel E_UNEXPECTED fallback ladder).
+        bitrate_kbps: u32,
     },
     Rejected {
         reason: String,
@@ -9843,14 +9900,27 @@ fn summarize_media_foundation_topology_probes(
 ) -> MediaFoundationTopologyProbe {
     let mut identity = None;
     let mut input_subtype = None;
+    let mut bitrate_overrides = WindowsEncodedBridgeBitrateOverrides::default();
     for (index, profile) in plan.profiles.iter().enumerate() {
         match probes.get(index) {
             Some(MediaFoundationProfileProbe::Passed {
                 encoder_identity,
                 input_subtype: probe_input_subtype,
+                bitrate_kbps,
             }) => {
                 identity.get_or_insert_with(|| encoder_identity.clone());
                 input_subtype.get_or_insert_with(|| probe_input_subtype.clone());
+                if *bitrate_kbps != profile.video.bitrate_kbps {
+                    match profile.role {
+                        EncoderOutputTopologyProbeRole::Shared
+                        | EncoderOutputTopologyProbeRole::Recording => {
+                            bitrate_overrides.recording_bitrate_kbps = Some(*bitrate_kbps);
+                        }
+                        EncoderOutputTopologyProbeRole::Stream => {
+                            bitrate_overrides.stream_bitrate_kbps = Some(*bitrate_kbps);
+                        }
+                    }
+                }
             }
             Some(MediaFoundationProfileProbe::Rejected { reason }) => {
                 return MediaFoundationTopologyProbe::Rejected {
@@ -9877,6 +9947,7 @@ fn summarize_media_foundation_topology_probes(
     MediaFoundationTopologyProbe::Passed {
         encoder_identity: identity.unwrap_or_else(|| "<unknown>".to_string()),
         input_subtype: input_subtype.unwrap_or_else(|| "<unknown>".to_string()),
+        bitrate_overrides,
     }
 }
 
@@ -9943,6 +10014,7 @@ fn select_windows_encoded_bridge_decision(
         Some(MediaFoundationTopologyProbe::Passed {
             encoder_identity,
             input_subtype,
+            bitrate_overrides,
         }) => WindowsEncodedBridgeDecision {
             capability_key,
             requested,
@@ -9956,6 +10028,7 @@ fn select_windows_encoded_bridge_decision(
                 FfmpegH264Platform::WindowsSoftware,
             ),
             encoder_selection_fallback_reason: None,
+            bitrate_overrides,
         },
         #[cfg(any(test, target_os = "windows"))]
         Some(MediaFoundationTopologyProbe::Rejected { reason }) => WindowsEncodedBridgeDecision {
@@ -9971,6 +10044,7 @@ fn select_windows_encoded_bridge_decision(
                 FfmpegH264Platform::WindowsSoftware,
             ),
             encoder_selection_fallback_reason: None,
+            bitrate_overrides: WindowsEncodedBridgeBitrateOverrides::default(),
         },
         #[cfg(any(test, not(target_os = "windows")))]
         Some(MediaFoundationTopologyProbe::Unsupported { reason }) => {
@@ -9987,6 +10061,7 @@ fn select_windows_encoded_bridge_decision(
                     FfmpegH264Platform::WindowsSoftware,
                 ),
                 encoder_selection_fallback_reason: None,
+                bitrate_overrides: WindowsEncodedBridgeBitrateOverrides::default(),
             }
         }
         None => WindowsEncodedBridgeDecision {
@@ -10004,6 +10079,7 @@ fn select_windows_encoded_bridge_decision(
                 FfmpegH264Platform::WindowsSoftware,
             ),
             encoder_selection_fallback_reason: None,
+            bitrate_overrides: WindowsEncodedBridgeBitrateOverrides::default(),
         },
     }
 }
@@ -10069,9 +10145,21 @@ async fn probe_windows_media_foundation_topology(
         .await
         {
             Ok(probe) => {
+                if probe.effective_bitrate_kbps != profile.video.bitrate_kbps {
+                    tracing::warn!(
+                        "Media Foundation {} profile {}x{}@{} will encode at probed bitrate {} kbps instead of requested {} kbps after the Intel E_UNEXPECTED fallback ladder",
+                        profile.role.capability_label(),
+                        profile.video.width,
+                        profile.video.height,
+                        profile.video.fps,
+                        probe.effective_bitrate_kbps,
+                        profile.video.bitrate_kbps,
+                    );
+                }
                 probes.push(MediaFoundationProfileProbe::Passed {
                     encoder_identity: probe.encoder_identity,
                     input_subtype: probe.input_subtype.label().to_string(),
+                    bitrate_kbps: probe.effective_bitrate_kbps,
                 });
             }
             Err(error) => {
@@ -17200,6 +17288,7 @@ mod tests {
             MediaFoundationProfileProbe::Passed {
                 encoder_identity: "hardware-encoder".to_string(),
                 input_subtype: "NV12".to_string(),
+                bitrate_kbps: 6_000,
             },
             MediaFoundationProfileProbe::Rejected {
                 reason: format!("driver rejected stream profile\n{}", "x".repeat(1_000)),
@@ -17248,10 +17337,12 @@ mod tests {
             MediaFoundationProfileProbe::Passed {
                 encoder_identity: "hardware-encoder".to_string(),
                 input_subtype: "NV12".to_string(),
+                bitrate_kbps: 6_000,
             },
             MediaFoundationProfileProbe::Passed {
                 encoder_identity: "hardware-encoder".to_string(),
                 input_subtype: "NV12".to_string(),
+                bitrate_kbps: 6_000,
             },
         ];
         let decision = select_windows_encoded_bridge_decision(
@@ -17276,6 +17367,96 @@ mod tests {
         );
         assert_eq!(decision.input_subtype.as_deref(), Some("NV12"));
         assert_eq!(decision.fallback_reason, None);
+    }
+
+    #[test]
+    fn intel_probe_bitrate_fallback_flows_to_bridge_leg_overrides() {
+        let recording = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let stream = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4_500,
+        };
+        let plan = EncoderOutputTopologyPlan::split(recording, stream);
+        let probes = vec![
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "Intel Quick Sync".to_string(),
+                input_subtype: "I420".to_string(),
+                bitrate_kbps: 5_000,
+            },
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "Intel Quick Sync".to_string(),
+                input_subtype: "I420".to_string(),
+                bitrate_kbps: 4_500,
+            },
+        ];
+        let decision = select_windows_encoded_bridge_decision(
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+            "stream-output-topology-v1:test".to_string(),
+            Some(summarize_media_foundation_topology_probes(&plan, &probes)),
+            EncodeBackend::SoftwareOpenH264,
+        );
+
+        assert_eq!(
+            decision.effective,
+            EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+        );
+        // Recording leg must encode at the probed bitrate (the MFT rejected the
+        // requested 6000); stream leg keeps its own accepted bitrate.
+        assert_eq!(
+            decision.bitrate_overrides.recording_bitrate_kbps,
+            Some(5_000)
+        );
+        assert_eq!(decision.bitrate_overrides.stream_bitrate_kbps, None);
+    }
+
+    #[test]
+    fn intel_probe_stream_bitrate_fallback_only_overrides_stream_leg() {
+        let recording = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6_000,
+        };
+        let stream = VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4_500,
+        };
+        let plan = EncoderOutputTopologyPlan::split(recording, stream);
+        let probes = vec![
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "Intel Quick Sync".to_string(),
+                input_subtype: "I420".to_string(),
+                bitrate_kbps: 6_000,
+            },
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "Intel Quick Sync".to_string(),
+                input_subtype: "I420".to_string(),
+                bitrate_kbps: 4_000,
+            },
+        ];
+        let summary = summarize_media_foundation_topology_probes(&plan, &probes);
+        let MediaFoundationTopologyProbe::Passed {
+            bitrate_overrides, ..
+        } = summary
+        else {
+            panic!("both profiles passed");
+        };
+
+        assert_eq!(bitrate_overrides.recording_bitrate_kbps, None);
+        assert_eq!(bitrate_overrides.stream_bitrate_kbps, Some(4_000));
     }
 
     #[test]

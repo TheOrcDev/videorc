@@ -209,6 +209,11 @@ pub struct MediaFoundationProbe {
     pub encoder_identity: String,
     pub input_subtype: MediaFoundationInputSubtype,
     pub frames: Vec<MediaFoundationEncodedFrame>,
+    // Bitrate the probe actually validated. On Intel iGPU MFTs that reject the
+    // requested bitrate with E_UNEXPECTED, this is the fallback bitrate the
+    // ladder settled on; sessions must encode at THIS bitrate or the same MFT
+    // will reject the config mid-session where there is no clean retry.
+    pub effective_bitrate_kbps: u32,
 }
 
 pub struct MediaFoundationH264Encoder {
@@ -3193,6 +3198,7 @@ fn try_probe_once(config: MediaFoundationEncoderConfig) -> Result<MediaFoundatio
         encoder_identity: identity,
         input_subtype,
         frames,
+        effective_bitrate_kbps: config.bitrate_kbps,
     })
 }
 
