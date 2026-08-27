@@ -395,7 +395,9 @@ pub async fn apply_main_owned_preview_surface_bounds(
     state: &AppState,
     params: MainOwnedPreviewSurfaceBoundsParams,
 ) -> Result<PreviewSurfaceStatus, String> {
-    let _lifecycle = state.preview_surface_lifecycle.lock().await;
+    let _lifecycle = acquire_preview_surface_lifecycle(state)
+        .await
+        .map_err(|_| PreviewSurfaceBusy::MESSAGE.to_string())?;
     validate_main_owned_preview_window(&params.bounds)?;
 
     let status = {
@@ -506,16 +508,48 @@ fn validate_main_owned_preview_window(
     Ok(())
 }
 
+/// How long a surface RPC may wait for the lifecycle mutex before answering
+/// `surface-busy`. 2026-08-27 live incident: a healing destroy/create cycle
+/// held the lifecycle lock while an `update_bounds` sat inside the ordered
+/// dispatcher's single stateful-mutation slot for 30+ seconds — silently
+/// barriering every later command until the lane filled. A bounded wait turns
+/// that into a fast, retryable error the renderer's latest-wins bounds loop
+/// absorbs without user-visible noise.
+const PREVIEW_SURFACE_LIFECYCLE_ACQUIRE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(3);
+
+/// The lifecycle mutex could not be acquired inside the budget: another
+/// surface lifecycle operation (create/destroy/heal) is still running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreviewSurfaceBusy;
+
+impl PreviewSurfaceBusy {
+    pub const CODE: &'static str = "surface-busy";
+    pub const MESSAGE: &'static str =
+        "The preview surface is busy with another lifecycle operation; retry shortly.";
+}
+
+async fn acquire_preview_surface_lifecycle(
+    state: &AppState,
+) -> Result<tokio::sync::OwnedMutexGuard<()>, PreviewSurfaceBusy> {
+    tokio::time::timeout(
+        PREVIEW_SURFACE_LIFECYCLE_ACQUIRE_TIMEOUT,
+        state.preview_surface_lifecycle.clone().lock_owned(),
+    )
+    .await
+    .map_err(|_| PreviewSurfaceBusy)
+}
+
 pub async fn create_preview_surface(
     state: AppState,
     params: PreviewSurfaceCreateParams,
-) -> PreviewSurfaceStatus {
-    let _lifecycle = state.preview_surface_lifecycle.lock().await;
+) -> Result<PreviewSurfaceStatus, PreviewSurfaceBusy> {
+    let _lifecycle = acquire_preview_surface_lifecycle(&state).await?;
     let target_fps = params.target_fps.clamp(30, 120);
     let capture_active = capture_owns_compositor(&state);
     if let Some(status) = try_reuse_live_surface(&state, &params, target_fps, capture_active).await
     {
-        return status;
+        return Ok(status);
     }
 
     stop_current_surface(&state).await;
@@ -597,7 +631,7 @@ pub async fn create_preview_surface(
         state.preview_surface.lock().await.run_id = compositor_status.run_id;
     }
     state.emit_event("preview.surface.status", status.clone());
-    status
+    Ok(status)
 }
 
 /// Treat a repeated create request as an update while its existing preview
@@ -670,8 +704,8 @@ async fn try_reuse_live_surface(
 pub async fn update_preview_surface_bounds(
     state: &AppState,
     params: PreviewSurfaceBoundsParams,
-) -> PreviewSurfaceStatus {
-    let _lifecycle = state.preview_surface_lifecycle.lock().await;
+) -> Result<PreviewSurfaceStatus, PreviewSurfaceBusy> {
+    let _lifecycle = acquire_preview_surface_lifecycle(state).await?;
     let (status, preview_run_id) = {
         let mut slot = state.preview_surface.lock().await;
         let mut next = slot.status.clone();
@@ -703,11 +737,13 @@ pub async fn update_preview_surface_bounds(
             resize_preview_compositor_if_run_id(state, &run_id, status.width, status.height).await;
     }
     state.emit_event("preview.surface.status", status.clone());
-    status
+    Ok(status)
 }
 
-pub async fn destroy_preview_surface(state: &AppState) -> PreviewSurfaceStatus {
-    let _lifecycle = state.preview_surface_lifecycle.lock().await;
+pub async fn destroy_preview_surface(
+    state: &AppState,
+) -> Result<PreviewSurfaceStatus, PreviewSurfaceBusy> {
+    let _lifecycle = acquire_preview_surface_lifecycle(state).await?;
     stop_current_surface(state).await;
     let status = {
         let mut slot = state.preview_surface.lock().await;
@@ -767,7 +803,7 @@ pub async fn destroy_preview_surface(state: &AppState) -> PreviewSurfaceStatus {
         apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
     );
     state.emit_event("preview.surface.status", status.clone());
-    status
+    Ok(status)
 }
 
 pub async fn preview_surface_status(state: &AppState) -> PreviewSurfaceStatus {
@@ -1362,7 +1398,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let first = apply_main_owned_preview_surface_bounds(
             &state,
@@ -1403,7 +1440,9 @@ mod tests {
             Some(7)
         );
 
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
     }
 
     #[tokio::test]
@@ -1417,7 +1456,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let surface = state.preview_surface.lock().await;
         let last_command_kind = surface.native_host.last_command_kind();
@@ -1427,7 +1467,9 @@ mod tests {
             .map(|bounds| bounds.drawable_size());
         drop(surface);
         let compositor = compositor_status(&state).await;
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.state, PreviewSurfaceState::Live);
         assert_eq!(status.transport, PreviewTransport::ElectronProofSurface);
@@ -1460,7 +1502,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         take_native_preview_host_commands(&state).await;
         let first_compositor = compositor_status(&state).await;
         update_preview_surface_present(
@@ -1497,11 +1540,14 @@ mod tests {
                 source: PreviewSurfaceSource::Screen,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let second_compositor = compositor_status(&state).await;
         let commands = take_native_preview_host_commands(&state).await;
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(second_compositor.run_id, first_compositor.run_id);
         assert_eq!(second_compositor.width, 1280);
@@ -1533,7 +1579,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         take_native_preview_host_commands(&state).await;
         let first_compositor = compositor_status(&state).await;
 
@@ -1545,11 +1592,14 @@ mod tests {
                 source: PreviewSurfaceSource::Screen,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let second_compositor = compositor_status(&state).await;
         let commands = take_native_preview_host_commands(&state).await;
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_ne!(second_compositor.run_id, first_compositor.run_id);
         assert_eq!(second_compositor.target_fps, 30);
@@ -1587,6 +1637,7 @@ mod tests {
                     },
                 )
                 .await
+                .expect("preview surface lifecycle available")
             }));
         }
         barrier.wait().await;
@@ -1598,7 +1649,9 @@ mod tests {
 
         let compositor = compositor_status(&state).await;
         let commands = take_native_preview_host_commands(&state).await;
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(compositor.state, CompositorState::Live);
         assert_eq!(
@@ -1635,7 +1688,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let status = update_preview_surface_bounds(
             &state,
@@ -1643,7 +1697,8 @@ mod tests {
                 bounds: bounds(640.0, 360.0),
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let resize_count = state.diagnostics.lock().await.preview_surface_resize_count;
         let surface = state.preview_surface.lock().await;
@@ -1653,7 +1708,9 @@ mod tests {
             .bounds()
             .map(|bounds| bounds.drawable_size());
         drop(surface);
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.state, PreviewSurfaceState::Live);
         assert_eq!(status.width, 1280);
@@ -1677,7 +1734,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         let original_run = compositor_status(&state).await.run_id.unwrap();
 
         let suspension = suspend_preview_compositor_for_d3d11(&state, 11)
@@ -1693,7 +1751,9 @@ mod tests {
             state.preview_surface.lock().await.run_id.as_deref(),
             Some(restored_run.as_str())
         );
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
     }
 
     #[tokio::test]
@@ -1707,7 +1767,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         let suspension = suspend_preview_compositor_for_d3d11(&state, 11)
             .await
             .expect("live preview owns a suspendable compositor");
@@ -1731,7 +1792,9 @@ mod tests {
         assert_eq!(compositor_status(&state).await.run_id, newer.run_id);
         assert!(state.preview_surface.lock().await.run_id.is_none());
         stop_compositor(&state).await;
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
     }
 
     #[tokio::test]
@@ -1745,7 +1808,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let retired = suspend_preview_compositor_for_d3d11(&state, 21)
             .await
@@ -1774,7 +1838,9 @@ mod tests {
             state.preview_surface.lock().await.run_id.as_deref(),
             Some(restored_run.as_str())
         );
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
     }
 
     #[tokio::test]
@@ -1792,7 +1858,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         let suspension = suspend_preview_compositor_for_d3d11(&state, 31)
             .await
             .expect("live preview owns a suspendable compositor");
@@ -1829,7 +1896,9 @@ mod tests {
                     .contains("Started a replacement CPU preview compositor")),
             "fallback start must be logged: {logs:?}"
         );
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
     }
 
     #[tokio::test]
@@ -1845,11 +1914,14 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         let suspension = suspend_preview_compositor_for_d3d11(&state, 41)
             .await
             .expect("live preview owns a suspendable compositor");
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         suspension.restore().await;
 
@@ -2101,7 +2173,9 @@ mod tests {
                 });
         }
 
-        let destroyed = destroy_preview_surface(&state).await;
+        let destroyed = destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
         assert_eq!(destroyed.state, PreviewSurfaceState::Stopped);
         assert_eq!(destroyed.transport, PreviewTransport::Unavailable);
         assert_eq!(destroyed.backing, PreviewSurfaceBacking::None);
@@ -2128,7 +2202,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let recording_status = start_synthetic_compositor(
             state.clone(),
@@ -2146,7 +2221,9 @@ mod tests {
         )
         .await;
 
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
         let status = compositor_status(&state).await;
         stop_compositor(&state).await;
 
@@ -2197,7 +2274,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         let verification = async {
             let initial = wait_for_frame_dimensions_after(&state, 320, 180, None).await?;
             let initial_status = compositor_status(&state).await;
@@ -2208,7 +2286,8 @@ mod tests {
                     bounds: bounds(90.0, 160.0),
                 },
             )
-            .await;
+            .await
+            .expect("preview surface lifecycle available");
             let portrait =
                 wait_for_frame_dimensions_after(&state, 180, 320, Some(initial.sequence)).await?;
 
@@ -2221,14 +2300,17 @@ mod tests {
                     bounds: bounds(160.0, 90.0),
                 },
             )
-            .await;
+            .await
+            .expect("preview surface lifecycle available");
             let landscape =
                 wait_for_frame_dimensions_after(&state, 320, 180, Some(portrait.sequence)).await?;
             let final_status = compositor_status(&state).await;
             Ok::<_, String>((initial_status, portrait, landscape, final_status))
         }
         .await;
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         let (initial_status, portrait, landscape, final_status) =
             verification.expect("preview compositor should follow both orientation changes");
@@ -2252,7 +2334,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         wait_for_frame_dimensions_after(&state, 320, 180, None)
             .await
             .expect("preview compositor should publish before ownership changes");
@@ -2283,7 +2366,8 @@ mod tests {
                 bounds: bounds(90.0, 160.0),
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         let stale_run_resize =
             resize_preview_compositor_if_run_id(&state, &preview_run_id, 90, 160).await;
         let recording_run_resize = resize_preview_compositor_if_run_id(
@@ -2338,14 +2422,16 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         update_preview_surface_bounds(
             &state,
             PreviewSurfaceBoundsParams {
                 bounds: bounds(1280.0, 720.0),
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let status = compositor_status(&state).await;
         let preview_run_id = state.preview_surface.lock().await.run_id.clone();
@@ -2369,15 +2455,19 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         update_preview_surface_bounds(
             &state,
             PreviewSurfaceBoundsParams {
                 bounds: bounds(640.0, 360.0),
             },
         )
-        .await;
-        let destroyed = destroy_preview_surface(&state).await;
+        .await
+        .expect("preview surface lifecycle available");
+        let destroyed = destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(destroyed.pending_host_command_count, 3);
 
@@ -2418,7 +2508,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let status = update_preview_surface_present(
             &state,
@@ -2447,7 +2538,9 @@ mod tests {
         .await;
 
         let diagnostics = state.diagnostics.lock().await.clone();
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.transport, PreviewTransport::NativeSurface);
         assert_eq!(status.backing, PreviewSurfaceBacking::CaMetalLayer);
@@ -2502,7 +2595,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let status = activate_native_preview_host(
             &state,
@@ -2511,7 +2605,9 @@ mod tests {
         .await;
 
         let diagnostics = state.diagnostics.lock().await.clone();
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.transport, PreviewTransport::NativeSurface);
         assert_eq!(status.backing, PreviewSurfaceBacking::CaMetalLayer);
@@ -2548,7 +2644,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         activate_native_preview_host(
             &state,
             NativePreviewHostActivation::cametal_layer_presented(12),
@@ -2560,7 +2657,9 @@ mod tests {
             NativePreviewHostActivation::cametal_layer_presented(10),
         )
         .await;
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.presented_frame_id, Some(12));
         assert!(status.frames_rendered >= 12);
@@ -2599,7 +2698,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         let status = update_preview_surface_present(
             &state,
@@ -2628,7 +2728,9 @@ mod tests {
         .await;
 
         let diagnostics = state.diagnostics.lock().await.clone();
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.transport, PreviewTransport::ElectronProofSurface);
         assert_eq!(status.backing, PreviewSurfaceBacking::ElectronBrowserWindow);
@@ -2660,7 +2762,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
 
         update_preview_surface_present(
             &state,
@@ -2714,7 +2817,9 @@ mod tests {
         )
         .await;
 
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.transport, PreviewTransport::NativeSurface);
         assert_eq!(status.backing, PreviewSurfaceBacking::CaMetalLayer);
@@ -2734,7 +2839,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         update_preview_surface_present(
             &state,
             PreviewSurfacePresentParams {
@@ -2788,7 +2894,9 @@ mod tests {
         .await;
 
         let diagnostics = state.diagnostics.lock().await.clone();
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(stale.transport, PreviewTransport::NativeSurface);
         assert_eq!(stale.backing, PreviewSurfaceBacking::CaMetalLayer);
@@ -2822,7 +2930,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         update_preview_surface_present(
             &state,
             PreviewSurfacePresentParams {
@@ -2876,7 +2985,9 @@ mod tests {
         .await;
 
         let diagnostics = state.diagnostics.lock().await.clone();
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.presented_frame_id, Some(43));
         assert_eq!(status.compositor_frame_lag, Some(0));
@@ -2897,7 +3008,8 @@ mod tests {
                 source: PreviewSurfaceSource::Synthetic,
             },
         )
-        .await;
+        .await
+        .expect("preview surface lifecycle available");
         update_preview_surface_present(
             &state,
             PreviewSurfacePresentParams {
@@ -2924,7 +3036,9 @@ mod tests {
         )
         .await;
 
-        let status = destroy_preview_surface(&state).await;
+        let status = destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
 
         assert_eq!(status.state, PreviewSurfaceState::Stopped);
         assert_eq!(status.transport, PreviewTransport::Unavailable);

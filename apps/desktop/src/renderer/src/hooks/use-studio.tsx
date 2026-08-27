@@ -96,6 +96,7 @@ import {
   shouldAutoRefreshYouTubeChannels
 } from '@/lib/youtube-channels'
 import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
+import { isRetryableBackgroundSurfaceSyncError } from '@/lib/surface-sync-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import {
   INITIAL_ACCOUNT_READY_REFRESH_STATE,
@@ -7224,15 +7225,42 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Main is the sole live placement writer. Renderer reports the latest
           // bounds to backend telemetry/lifecycle state, but never sends movement to
           // the native host directly or replays the backend's delayed bounds echo.
-          const backendStatus = surfaceAlreadyCreated
-            ? await client.request<PreviewSurfaceStatus>('preview.surface.update_bounds', {
-                bounds: nextBounds
-              })
-            : await client.request<PreviewSurfaceStatus>('preview.surface.create', {
-                bounds: nextBounds,
-                targetFps: 60,
-                source: surfaceSource
-              })
+          let backendStatus: PreviewSurfaceStatus
+          try {
+            backendStatus = surfaceAlreadyCreated
+              ? await client.request<PreviewSurfaceStatus>('preview.surface.update_bounds', {
+                  bounds: nextBounds
+                })
+              : await client.request<PreviewSurfaceStatus>('preview.surface.create', {
+                  bounds: nextBounds,
+                  targetFps: 60,
+                  source: surfaceSource
+                })
+          } catch (error) {
+            // Background bounds sync is latest-wins maintenance. A busy
+            // surface, a full lane, or an outcome-unknown timeout is
+            // retryable: restore the pending bounds so the periodic window
+            // reconciler re-drives them, and stay silent — the 2026-08-27
+            // live incident surfaced exactly these as alarming error toasts
+            // mid-stream while the backend healed itself. Anything else is a
+            // real failure and still propagates to reportError.
+            if (isRetryableBackgroundSurfaceSyncError(error)) {
+              if (
+                generationIsCurrent(nextGeneration) &&
+                nativePreviewSurfaceBoundsPendingRef.current === null
+              ) {
+                nativePreviewSurfaceBoundsPendingRef.current = nextBounds
+                nativePreviewSurfaceBoundsPendingGenerationRef.current = nextGeneration
+              }
+              // Stay inside the single-flight loop: a window event may never
+              // arrive to re-drive a stale-bounds retry, so pace and go again.
+              // Generation checks end the loop naturally when the surface is
+              // torn down or replaced.
+              await new Promise((resolveRetry) => setTimeout(resolveRetry, 1500))
+              continue
+            }
+            throw error
+          }
           if (!surfaceAlreadyCreated) {
             nativePreviewCompositorSuppressedPresentsRef.current = 0
             resetNativePreviewCompositorTiming()
