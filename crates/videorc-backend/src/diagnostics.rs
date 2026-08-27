@@ -727,6 +727,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_screen_source_fresh_serves: 0,
         compositor_screen_source_held_serves: 0,
         compositor_screen_source_served_age_max_ms: 0,
+        capture_pipeline_degraded_stage: None,
         preview_repeated_frames: 0,
         preview_surface_resize_count: 0,
         preview_latency_ms: None,
@@ -1955,6 +1956,18 @@ pub fn apply_compositor_live_source_fetch_stats(
     stats.compositor_screen_source_fresh_serves = fetch.screen_fresh_serves;
     stats.compositor_screen_source_held_serves = fetch.screen_held_serves;
     stats.compositor_screen_source_served_age_max_ms = fetch.screen_served_age_max_ms;
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
+/// Publishes the capture-health monitor's verdict: the currently degraded
+/// stage label, or `None` while the pipeline is healthy (field omitted on the
+/// wire — see the serde note on the struct field).
+pub fn apply_capture_health(
+    mut stats: DiagnosticStats,
+    degraded_stage: Option<&'static str>,
+) -> DiagnosticStats {
+    stats.capture_pipeline_degraded_stage = degraded_stage.map(str::to_string);
     stats.updated_at = Utc::now().to_rfc3339();
     stats
 }

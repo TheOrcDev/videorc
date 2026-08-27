@@ -2326,6 +2326,12 @@ export interface DiagnosticStats {
   compositorScreenSourceHeldServes: number
   /** Oldest capture age (ms) of any screen/window frame the compositor served. */
   compositorScreenSourceServedAgeMaxMs: number
+  /**
+   * The pipeline stage the backend's capture-health monitor currently
+   * declares degraded ('camera-delivery' / 'compositor-render'); absent while
+   * healthy. Nullable for defense in depth against the serde-null trap.
+   */
+  capturePipelineDegradedStage?: string | null
   previewRepeatedFrames: number
   previewSurfaceResizeCount: number
   previewLatencyMs?: number

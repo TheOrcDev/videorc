@@ -12,6 +12,7 @@ mod audio;
 mod backend_authority;
 mod camera_capture;
 mod captions;
+mod capture_health;
 mod capture_input;
 mod capture_interruption;
 mod cohost;
@@ -1287,18 +1288,30 @@ async fn drive_loopback_oauth_callback(
 
 async fn resume_pending_oauth_completions(state: AppState) {
     const MAINTENANCE_INTERVAL: Duration = Duration::from_secs(5);
+    // A maintenance error is usually static for the whole process (a store
+    // that failed to load stays failed until restart). Logging it on every
+    // 5-second tick wrote the same ERROR line ~17k times a day into field
+    // logs (2026-08-27); log each distinct message once, and again only when
+    // the message changes or after recovery.
+    let mut last_maintenance_error: Option<String> = None;
     loop {
         let states = match state
             .oauth
             .maintain_pending(chrono::Utc::now(), secrets::delete_secret)
             .await
         {
-            Ok(states) => states,
+            Ok(states) => {
+                if last_maintenance_error.take().is_some() {
+                    state.emit_log("info", "OAuth recovery maintenance recovered.".to_string());
+                }
+                states
+            }
             Err(error) => {
-                state.emit_log(
-                    "error",
-                    format!("Could not maintain durable OAuth recovery work: {error}"),
-                );
+                let message = format!("Could not maintain durable OAuth recovery work: {error}");
+                if last_maintenance_error.as_deref() != Some(message.as_str()) {
+                    state.emit_log("error", message.clone());
+                    last_maintenance_error = Some(message);
+                }
                 tokio::time::sleep(MAINTENANCE_INTERVAL).await;
                 continue;
             }

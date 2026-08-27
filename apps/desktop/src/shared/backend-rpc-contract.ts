@@ -1079,6 +1079,11 @@ const diagnosticStatsSchema = boundedSemanticValue(
       previewScreenLatestSequence: optionalSchema(nonNegativeInteger),
       previewScreenFrameStatuses: previewScreenFrameStatusStatsSchema,
       previewScreenSurfaceBacking: previewSourceSurfaceBackingStatsSchema,
+      // Absent while the capture pipeline is healthy; nullable for defense in
+      // depth against the serde-null trap (0.9.68 / 0.9.79 outage class).
+      capturePipelineDegradedStage: optionalSchema(
+        nullableSchema(stringSchema({ minLength: 1, maxLength: 64 }))
+      ),
       updatedAt: optionalSchema(timestamp)
     },
     { allowUnknown: true }

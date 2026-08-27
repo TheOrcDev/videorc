@@ -372,8 +372,72 @@ const SCREEN_OVERLAY_FIFO_WRITE_RETRY: std::time::Duration = std::time::Duration
 const SCREEN_OVERLAY_FIFO_WRITE_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
 const SCREEN_OVERLAY_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
 const POST_RECORDING_GATE_IDLE_DELAY: Duration = Duration::from_secs(30);
-const POST_RECORDING_FAST_ASSESSMENT_TIMEOUT: Duration = Duration::from_secs(60);
-const POST_RECORDING_REPAIR_TIMEOUT: Duration = Duration::from_secs(180);
+const POST_RECORDING_FAST_ASSESSMENT_MIN_TIMEOUT: Duration = Duration::from_secs(60);
+const POST_RECORDING_FAST_ASSESSMENT_MAX_TIMEOUT: Duration = Duration::from_secs(900);
+const POST_RECORDING_REPAIR_MIN_TIMEOUT: Duration = Duration::from_secs(180);
+const POST_RECORDING_REPAIR_MAX_TIMEOUT: Duration = Duration::from_secs(1800);
+
+/// Quality budgets scale with the media: the analyzer decodes the whole file
+/// (freezedetect + exact-repeat runs), so a flat budget is a guarantee that
+/// long recordings fail unexamined — the 2026-08-27 field incident's 2-minute
+/// 4K recording could not finish inside the old flat 60s and the owner's
+/// frozen file shipped with no verdict at all. The gate runs on the idle
+/// maintenance lane, where a long bound beats a guaranteed failure; unknown
+/// duration (boot-resumed jobs) gets the cap.
+fn scaled_media_timeout(
+    duration_ms: Option<u64>,
+    min: Duration,
+    factor: u32,
+    max: Duration,
+) -> Duration {
+    match duration_ms {
+        Some(duration_ms) => {
+            let scaled = Duration::from_millis(duration_ms.saturating_mul(u64::from(factor)));
+            scaled.clamp(min, max)
+        }
+        None => max,
+    }
+}
+
+fn post_recording_assessment_timeout(duration_ms: Option<u64>) -> Duration {
+    scaled_media_timeout(
+        duration_ms,
+        POST_RECORDING_FAST_ASSESSMENT_MIN_TIMEOUT,
+        3,
+        POST_RECORDING_FAST_ASSESSMENT_MAX_TIMEOUT,
+    )
+}
+
+fn post_recording_repair_timeout(duration_ms: Option<u64>) -> Duration {
+    scaled_media_timeout(
+        duration_ms,
+        POST_RECORDING_REPAIR_MIN_TIMEOUT,
+        6,
+        POST_RECORDING_REPAIR_MAX_TIMEOUT,
+    )
+}
+
+/// The health event for a recording whose live pipeline counters reported
+/// frozen output but whose file-level check could not run to a verdict. The
+/// never-toast rule for tooling failures does not apply: the pipeline itself
+/// is the evidence, and staying info-level here is how the owner recorded a
+/// 55%-frozen file with no signal (2026-08-24) and a 79%-held one with none
+/// again (2026-08-27).
+fn emit_unverified_frozen_recording_health(
+    state: &AppState,
+    session_id: Option<&str>,
+    reason: &str,
+) {
+    let _ = emit_health_event(
+        state,
+        session_id,
+        HealthLevel::Warn,
+        "recording-quality-unverified",
+        &format!(
+            "This recording likely contains frozen frames — the live pipeline reported held frames during capture, and the automated check could not verify the file: {reason}"
+        ),
+    );
+}
 // Raw compositor frames arrive over a live FIFO alongside live device audio.
 // FFmpeg needs a dedicated demux thread for that input; without one, Windows
 // dshow polling can leave the named-pipe reader idle until its buffer fills,
@@ -6398,6 +6462,7 @@ async fn monitor_session(
                     final_path,
                     gate,
                     pipeline_reported_frozen_output(&final_diagnostics),
+                    duration_ms.and_then(|ms| u64::try_from(ms).ok()),
                 );
             }
             terminal_status
@@ -6541,6 +6606,7 @@ fn enqueue_post_recording_gate(
     final_path: PathBuf,
     gate: PostRecordingGate,
     pipeline_reported_freezes: bool,
+    duration_ms: Option<u64>,
 ) {
     tokio::spawn(async move {
         let path_str = final_path.display().to_string();
@@ -6573,8 +6639,9 @@ fn enqueue_post_recording_gate(
             format!("Running idle post-recording quality check on {path_str}."),
         );
 
+        let assessment_budget = post_recording_assessment_timeout(duration_ms);
         let fast_assessment = timeout(
-            POST_RECORDING_FAST_ASSESSMENT_TIMEOUT,
+            assessment_budget,
             run_quality_assessment(
                 ffmpeg_path.clone(),
                 path_str.clone(),
@@ -6586,7 +6653,7 @@ fn enqueue_post_recording_gate(
         .map_err(|_| {
             format!(
                 "quality assessment timed out after {}s",
-                POST_RECORDING_FAST_ASSESSMENT_TIMEOUT.as_secs()
+                assessment_budget.as_secs()
             )
         })
         .and_then(|result| result);
@@ -6623,6 +6690,9 @@ fn enqueue_post_recording_gate(
                     "warn",
                     format!("Fast post-recording quality assessment could not run: {error}"),
                 );
+                if expectations.pipeline_reported_freezes {
+                    emit_unverified_frozen_recording_health(&state, Some(&session_id), &error);
+                }
                 job.fail(
                     format!("quality assessment task failed: {error}"),
                     Utc::now().to_rfc3339(),
@@ -6641,15 +6711,16 @@ fn enqueue_post_recording_gate(
             return;
         }
 
+        let repair_budget = post_recording_repair_timeout(duration_ms);
         match timeout(
-            POST_RECORDING_REPAIR_TIMEOUT,
+            repair_budget,
             run_quality_gate(ffmpeg_path, path_str, expectations, cancel_token),
         )
         .await
         .map_err(|_| {
             format!(
                 "quality repair timed out after {}s",
-                POST_RECORDING_REPAIR_TIMEOUT.as_secs()
+                repair_budget.as_secs()
             )
         })
         .and_then(|result| result)
@@ -6909,8 +6980,11 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
             job.mark_running(Utc::now().to_rfc3339());
             let _ = state.database.upsert_repair_job(&job);
 
+            // A boot-resumed job has no session duration on hand; the capped
+            // budget applies (see post_recording_assessment_timeout).
+            let assessment_budget = post_recording_assessment_timeout(None);
             let fast_assessment = timeout(
-                POST_RECORDING_FAST_ASSESSMENT_TIMEOUT,
+                assessment_budget,
                 run_quality_assessment(
                     ffmpeg_path.clone(),
                     job.file_path.clone(),
@@ -6922,7 +6996,7 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
             .map_err(|_| {
                 format!(
                     "quality assessment timed out after {}s",
-                    POST_RECORDING_FAST_ASSESSMENT_TIMEOUT.as_secs()
+                    assessment_budget.as_secs()
                 )
             })
             .and_then(|result| result);
@@ -6962,6 +7036,9 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
                             job.file_path
                         ),
                     );
+                    if job.expectations().pipeline_reported_freezes {
+                        emit_unverified_frozen_recording_health(&state, None, &error);
+                    }
                     job.fail(
                         format!("resume assessment failed: {error}"),
                         Utc::now().to_rfc3339(),
@@ -6980,8 +7057,9 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
                 return;
             }
 
+            let repair_budget = post_recording_repair_timeout(None);
             let gate = timeout(
-                POST_RECORDING_REPAIR_TIMEOUT,
+                repair_budget,
                 run_quality_gate(
                     ffmpeg_path,
                     job.file_path.clone(),
@@ -6993,7 +7071,7 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
             .map_err(|_| {
                 format!(
                     "quality repair timed out after {}s",
-                    POST_RECORDING_REPAIR_TIMEOUT.as_secs()
+                    repair_budget.as_secs()
                 )
             })
             .and_then(|result| result);
@@ -26421,5 +26499,40 @@ mod tests {
         assert_eq!(new_session.session_id, "session-b");
         assert_eq!(new_session.total_bytes, None);
         assert_eq!(new_session.duplicated_frames, None);
+    }
+    #[test]
+    fn quality_budgets_scale_with_media_duration() {
+        use std::time::Duration;
+        // The 2026-08-27 field case: a ~125s 4K recording under the old flat
+        // 60s budget was guaranteed to time out unexamined. 3× media length
+        // gives the analyzer's full decode real headroom.
+        assert_eq!(
+            super::post_recording_assessment_timeout(Some(125_466)),
+            Duration::from_millis(376_398)
+        );
+        // Short clips keep the old floor…
+        assert_eq!(
+            super::post_recording_assessment_timeout(Some(5_000)),
+            Duration::from_secs(60)
+        );
+        // …hour-long recordings are capped, not unbounded…
+        assert_eq!(
+            super::post_recording_assessment_timeout(Some(3_600_000)),
+            Duration::from_secs(900)
+        );
+        // …and boot-resumed jobs with no duration on hand get the cap rather
+        // than a budget that guarantees failure.
+        assert_eq!(
+            super::post_recording_assessment_timeout(None),
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            super::post_recording_repair_timeout(Some(10_000)),
+            Duration::from_secs(180)
+        );
+        assert_eq!(
+            super::post_recording_repair_timeout(None),
+            Duration::from_secs(1800)
+        );
     }
 }
