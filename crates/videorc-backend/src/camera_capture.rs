@@ -225,6 +225,80 @@ fn format_supports_fps(format: &CameraFormatSummary, target_fps: f64) -> bool {
     format.min_fps <= target_fps + FPS_TOLERANCE && format.max_fps >= target_fps - FPS_TOLERANCE
 }
 
+/// Which part of an advertised frame-rate range a resolved request landed on.
+///
+/// AVFoundation validates a requested frame duration against the range's own
+/// CMTime rationals EXACTLY — for a fixed fractional range (29.97..29.97,
+/// 30.00003..30.00003) no decimal approximation of the endpoint survives the
+/// comparison. The caller must therefore request the range's own
+/// `minFrameDuration`/`maxFrameDuration` CMTime verbatim when the request
+/// resolves to an endpoint, and may only build its own rational for a value
+/// strictly inside an open range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CameraFrameRateEndpoint {
+    /// Use the range's `minFrameDuration` (the CMTime for its MAX fps).
+    RangeMax,
+    /// Use the range's `maxFrameDuration` (the CMTime for its MIN fps).
+    RangeMin,
+    /// Strictly inside the range: a self-built rational duration is safe.
+    Interior,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraFrameRateResolution {
+    /// Index into the ranges slice the request resolved against.
+    pub range_index: usize,
+    /// The fps the device will actually be asked for.
+    pub effective_fps: f64,
+    pub endpoint: CameraFrameRateEndpoint,
+}
+
+/// Resolves a requested integer fps against a format's advertised
+/// `(min_fps, max_fps)` ranges: picks the closest range, clamps into it, and
+/// names which endpoint (if any) the clamp landed on.
+///
+/// The old integer clamp — `requested.min(max.floor()).max(min.ceil())` —
+/// inverts on fractional fixed ranges: `30.00003..=30.00003` gives
+/// `floor(max) = 30 < ceil(min) = 31`, the empty interval lets `.max(31)`
+/// win, and the device rejects `1/31` with an NSException on every camera
+/// start (the field-logged 31-on-30 and 61-on-60 requests).
+pub fn resolve_camera_frame_rate(
+    requested_fps: u32,
+    ranges: &[(f64, f64)],
+) -> Option<CameraFrameRateResolution> {
+    let requested = f64::from(requested_fps.clamp(1, 240));
+    let mut best: Option<(usize, f64, f64, f64)> = None;
+    for (index, &(raw_min, raw_max)) in ranges.iter().enumerate() {
+        let min = raw_min.max(0.001);
+        let max = raw_max.max(min);
+        let clamped = requested.clamp(min, max);
+        let distance = (clamped - requested).abs();
+        let better = match &best {
+            None => true,
+            Some((_, _, _, best_distance)) => distance < *best_distance,
+        };
+        if better {
+            best = Some((index, min, max, distance));
+        }
+    }
+    let (range_index, min, max, _) = best?;
+    let effective_fps = requested.clamp(min, max);
+    // Endpoint detection is by identity of the clamp, not float tolerance: the
+    // clamp returns exactly `min` or `max` when it saturates.
+    let endpoint = if effective_fps >= max {
+        CameraFrameRateEndpoint::RangeMax
+    } else if effective_fps <= min {
+        CameraFrameRateEndpoint::RangeMin
+    } else {
+        CameraFrameRateEndpoint::Interior
+    };
+    Some(CameraFrameRateResolution {
+        range_index,
+        effective_fps,
+        endpoint,
+    })
+}
+
 fn camera_format_pixels(format: &CameraFormatSummary) -> u64 {
     u64::from(format.width) * u64::from(format.height)
 }
@@ -1016,5 +1090,46 @@ mod tests {
                 },
             ]
         );
+    }
+    #[test]
+    fn frame_rate_resolution_lands_on_the_fractional_fixed_range_endpoint() {
+        // Field log 2026-08-27: range 30.00003..=30.00003 (1000000/30000030).
+        // The old integer clamp produced 31 fps — outside the range — and the
+        // device rejected it with an NSException on every camera start.
+        let resolved = super::resolve_camera_frame_rate(30, &[(30.000_03, 30.000_03)]).unwrap();
+        assert_eq!(resolved.range_index, 0);
+        assert_eq!(resolved.endpoint, super::CameraFrameRateEndpoint::RangeMax);
+        assert!((resolved.effective_fps - 30.000_03).abs() < 1e-9);
+    }
+
+    #[test]
+    fn frame_rate_resolution_handles_the_sixty_on_fifty_nine_ninety_four_sibling() {
+        let resolved = super::resolve_camera_frame_rate(60, &[(59.94, 59.94)]).unwrap();
+        assert_eq!(resolved.endpoint, super::CameraFrameRateEndpoint::RangeMax);
+        assert!((resolved.effective_fps - 59.94).abs() < 1e-9);
+    }
+
+    #[test]
+    fn frame_rate_resolution_picks_the_closest_of_several_ranges() {
+        let ranges = [(25.0, 25.0), (30.0, 30.0), (50.0, 50.0)];
+        let resolved = super::resolve_camera_frame_rate(30, &ranges).unwrap();
+        assert_eq!(resolved.range_index, 1);
+        // An interior hit inside a wide range self-builds its duration.
+        let wide = super::resolve_camera_frame_rate(30, &[(1.0, 60.0)]).unwrap();
+        assert_eq!(wide.endpoint, super::CameraFrameRateEndpoint::Interior);
+        assert!((wide.effective_fps - 30.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn frame_rate_resolution_clamps_and_survives_degenerate_input() {
+        let low = super::resolve_camera_frame_rate(5, &[(24.0, 60.0)]).unwrap();
+        assert_eq!(low.endpoint, super::CameraFrameRateEndpoint::RangeMin);
+        assert!((low.effective_fps - 24.0).abs() < f64::EPSILON);
+        let high = super::resolve_camera_frame_rate(120, &[(1.0, 30.0)]).unwrap();
+        assert_eq!(high.endpoint, super::CameraFrameRateEndpoint::RangeMax);
+        assert!(super::resolve_camera_frame_rate(30, &[]).is_none());
+        // Junk ranges never panic and never resolve below the sane floor.
+        let junk = super::resolve_camera_frame_rate(30, &[(-5.0, -1.0)]).unwrap();
+        assert!(junk.effective_fps > 0.0);
     }
 }

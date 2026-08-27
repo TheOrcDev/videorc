@@ -12,8 +12,8 @@ use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
 
 use crate::camera_capture::{
-    CameraFormatSummary, camera_capability_matrix_for_id, parse_native_camera_id,
-    parse_windows_dshow_camera_id,
+    CameraFormatSummary, CameraFrameRateEndpoint, camera_capability_matrix_for_id,
+    parse_native_camera_id, parse_windows_dshow_camera_id, resolve_camera_frame_rate,
 };
 use crate::color::{ycbcr_bt709_full_to_bgr, ycbcr_bt709_video_to_bgr};
 use crate::diagnostics::{
@@ -2619,23 +2619,44 @@ mod macos {
             )));
         }
 
-        let fps = requested_fps
-            .clamp(1, 120)
-            .min(format.format.max_fps.floor().max(1.0) as u32)
-            .max(format.format.min_fps.ceil().max(1.0) as u32)
-            .max(1);
-        let frame_duration = unsafe { CMTime::new(1, fps as i32) };
-        let frame_rate_result = unsafe {
-            objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
-                device.setActiveVideoMinFrameDuration(frame_duration);
-                device.setActiveVideoMaxFrameDuration(frame_duration);
-            }))
-        };
-        if let Err(exception) = frame_rate_result {
-            tracing::warn!(
-                "Camera kept its native frame cadence ({fps} fps frame duration was rejected): {}",
-                describe_camera_exception(exception)
-            );
+        // Resolve the requested rate against the ACTIVE format's own advertised
+        // ranges, and at a range endpoint request the range's own CMTime
+        // verbatim — AVFoundation validates the duration against those
+        // rationals exactly, so no decimal approximation of a fractional
+        // endpoint (29.97, 30.00003) survives the comparison.
+        let ranges = unsafe { format.native_format.videoSupportedFrameRateRanges() };
+        let range_bounds = (0..ranges.count())
+            .map(|index| {
+                let range = ranges.objectAtIndex(index);
+                unsafe { (range.minFrameRate(), range.maxFrameRate()) }
+            })
+            .collect::<Vec<_>>();
+        if let Some(resolution) = resolve_camera_frame_rate(requested_fps, &range_bounds) {
+            let range = ranges.objectAtIndex(resolution.range_index);
+            let frame_duration = match resolution.endpoint {
+                CameraFrameRateEndpoint::RangeMax => unsafe { range.minFrameDuration() },
+                CameraFrameRateEndpoint::RangeMin => unsafe { range.maxFrameDuration() },
+                CameraFrameRateEndpoint::Interior => {
+                    // Nanosecond timescale keeps an interior rate within any
+                    // range wide enough to contain it.
+                    let timescale = 1_000_000_000_i32;
+                    let value = (f64::from(timescale) / resolution.effective_fps).round() as i64;
+                    unsafe { CMTime::new(value.max(1), timescale) }
+                }
+            };
+            let effective_fps = resolution.effective_fps;
+            let frame_rate_result = unsafe {
+                objc2::exception::catch(std::panic::AssertUnwindSafe(|| {
+                    device.setActiveVideoMinFrameDuration(frame_duration);
+                    device.setActiveVideoMaxFrameDuration(frame_duration);
+                }))
+            };
+            if let Err(exception) = frame_rate_result {
+                tracing::warn!(
+                    "Camera kept its native frame cadence ({effective_fps:.3} fps frame duration was rejected): {}",
+                    describe_camera_exception(exception)
+                );
+            }
         }
 
         unsafe { device.unlockForConfiguration() };

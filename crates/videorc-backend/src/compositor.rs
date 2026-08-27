@@ -12,11 +12,12 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use uuid::Uuid;
 
+use crate::capture_health::{CaptureHealthMonitor, CaptureHealthSample, CaptureHealthTransition};
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 use crate::compositor_synthetic::SyntheticMovingSource;
 use crate::diagnostics::{
     CompositorCpuFrameCounts, CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
-    CompositorSourceImportStats, apply_active_scene_revision,
+    CompositorSourceImportStats, apply_active_scene_revision, apply_capture_health,
     apply_compositor_live_source_fetch_stats, apply_compositor_outside_render_timing_stats,
     apply_compositor_source_import_stats, apply_compositor_stats, apply_compositor_timing_stats,
     apply_runtime_diagnostics_snapshot,
@@ -2100,6 +2101,10 @@ async fn run_synthetic_compositor_loop(
     let mut gpu_compositor = new_gpu_compositor(smooth_preview_scaling);
     let mut stream_gpu_compositor = stream_output.and_then(|_| new_gpu_compositor(false));
     let mut live_sources = CompositorLiveSources::refresh(&state).await;
+    // Rate-collapse watchdog for the always-on pipeline: the 2026-08-27
+    // incident (33 idle minutes of silent decay to ~6 fresh fps) is exactly
+    // the state every liveness-only watchdog ignores.
+    let mut capture_health = CaptureHealthMonitor::new();
     let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
     let mut next_live_source_refresh_at = Instant::now() + COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL;
 
@@ -2282,6 +2287,30 @@ async fn run_synthetic_compositor_loop(
                 if window_started_at.elapsed() >= COMPOSITOR_DIAGNOSTIC_WINDOW {
                     let elapsed = window_started_at.elapsed().as_secs_f64().max(0.001);
                     let measured_fps = frames_in_window as f64 / elapsed;
+                    {
+                        let fetch = live_sources.fetch_stats();
+                        let transition = capture_health.observe(CaptureHealthSample {
+                            target_fps: f64::from(target_fps),
+                            render_fps: measured_fps,
+                            camera_present: live_sources.camera.is_some(),
+                            camera_fresh_serves: fetch.camera_fresh_serves,
+                            screen_present: live_sources.screen.is_some(),
+                            screen_fresh_serves: fetch.screen_fresh_serves,
+                            window_secs: elapsed,
+                        });
+                        match transition {
+                            Some(CaptureHealthTransition::Degraded { stage, detail }) => {
+                                tracing::warn!(
+                                    "[capture-health] pipeline degraded at {}: {detail}",
+                                    stage.label()
+                                );
+                            }
+                            Some(CaptureHealthTransition::Recovered { detail }) => {
+                                tracing::info!("[capture-health] pipeline recovered: {detail}");
+                            }
+                            None => {}
+                        }
+                    }
                     let (p50, p95, p99) = frame_time_percentiles(&frame_times_ms);
                     let (_, source_fetch_p95, _) = frame_time_percentiles(&source_fetch_times_ms);
                     let (_, scene_snapshot_p95, _) =
@@ -2435,6 +2464,10 @@ async fn run_synthetic_compositor_loop(
                         );
                         let next =
                             apply_compositor_live_source_fetch_stats(next, live_sources.fetch_stats());
+                        let next = apply_capture_health(
+                            next,
+                            capture_health.degraded_stage().map(|stage| stage.label()),
+                        );
                         *diagnostics = next.clone();
                         next
                     };

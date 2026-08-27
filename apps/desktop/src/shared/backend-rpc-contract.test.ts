@@ -823,6 +823,19 @@ describe('backend RPC contract', () => {
     }
     expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
     expect(validateBackendEventPayload('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    // capturePipelineDegradedStage: absent while healthy (the wire omits it),
+    // a stage label while degraded, and null tolerated for defense in depth
+    // against the serde-null trap (0.9.68 / 0.9.79 outage class).
+    for (const degradedStage of ['camera-delivery', 'compositor-render', null]) {
+      const flagged = { ...diagnostics, capturePipelineDegradedStage: degradedStage }
+      expect(validateBackendEventPayload('diagnostics.stats', flagged)).toEqual(flagged)
+    }
+    expect(() =>
+      validateBackendEventPayload('diagnostics.stats', {
+        ...diagnostics,
+        capturePipelineDegradedStage: ''
+      })
+    ).toThrow('capturePipelineDegradedStage')
     for (const field of [
       'encoderBridgeOutputQueueOldestFrameAgeMs',
       'encoderBridgeOutputQueueOldestFrameAgeHighWaterMs',

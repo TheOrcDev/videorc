@@ -108,6 +108,7 @@
     "smoke:dev": "node scripts/smoke-dev-app.mjs",
     "smoke:recording-matrix": "node scripts/smoke-recording-matrix-app.mjs",
     "smoke:session-decay": "node scripts/smoke-recording-session-decay.mjs",
+    "smoke:capture-decay-soak": "node scripts/smoke-capture-decay-soak.mjs",
     "smoke:session-decay:gate": "node scripts/run-with-env.mjs VIDEORC_DECAY_SESSIONS=3 VIDEORC_DECAY_RECORDING_MS=10000 VIDEORC_DECAY_IDLE_MS=1000 -- node scripts/smoke-recording-session-decay.mjs",
     "smoke:linux-encoder-acceptance": "node scripts/smoke-linux-encoder-acceptance.mjs",
     "smoke:remote-control": "node scripts/smoke-remote-control-app.mjs",

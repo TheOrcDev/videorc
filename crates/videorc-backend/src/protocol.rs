@@ -2151,6 +2151,13 @@ pub struct DiagnosticStats {
     /// Oldest capture age (ms) of any screen/window frame the compositor served.
     #[serde(default)]
     pub compositor_screen_source_served_age_max_ms: u64,
+    /// The pipeline stage the capture-health monitor currently declares
+    /// degraded (`camera-delivery` / `compositor-render`), or absent while
+    /// healthy. skip_serializing_if is load-bearing: the renderer contract
+    /// accepts undefined, and a serialized `null` here is the app-killing
+    /// defect class of 0.9.68 and 0.9.79 ([[videorc-serde-null-contract-trap]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_pipeline_degraded_stage: Option<String>,
     pub preview_repeated_frames: u64,
     pub preview_surface_resize_count: u64,
     pub preview_latency_ms: Option<u64>,
@@ -4848,6 +4855,28 @@ mod tests {
                 "required {field} counters must never serialize as null"
             );
         }
+    }
+
+    #[test]
+    fn capture_pipeline_degraded_stage_is_omitted_when_healthy_and_a_string_when_set() {
+        // The serde-null → contract trap (0.9.68, 0.9.79): an Option without
+        // skip_serializing_if serializes null, and the renderer contract's
+        // optionalSchema rejects null. Healthy pipelines must OMIT the field.
+        let wire = serde_json::to_value(crate::diagnostics::idle_diagnostics())
+            .expect("idle diagnostics serialize");
+        assert!(
+            wire.get("capturePipelineDegradedStage").is_none(),
+            "healthy capturePipelineDegradedStage must be omitted rather than null"
+        );
+
+        let mut degraded = crate::diagnostics::idle_diagnostics();
+        degraded.capture_pipeline_degraded_stage = Some("camera-delivery".to_string());
+        let wire = serde_json::to_value(degraded).expect("degraded diagnostics serialize");
+        assert_eq!(
+            wire.get("capturePipelineDegradedStage")
+                .and_then(serde_json::Value::as_str),
+            Some("camera-delivery")
+        );
     }
 
     #[test]
