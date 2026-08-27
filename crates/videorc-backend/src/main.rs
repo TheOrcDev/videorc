@@ -128,9 +128,10 @@ use preview_screen::{
     start_preview_screen, stop_preview_screen,
 };
 use preview_surface::{
-    apply_main_owned_preview_surface_bounds, create_preview_surface, destroy_preview_surface,
-    preview_surface_status, register_preview_surface_resize, take_native_preview_host_commands,
-    update_preview_surface_bounds, update_preview_surface_present,
+    PreviewSurfaceBusy, apply_main_owned_preview_surface_bounds, create_preview_surface,
+    destroy_preview_surface, preview_surface_status, register_preview_surface_resize,
+    take_native_preview_host_commands, update_preview_surface_bounds,
+    update_preview_surface_present,
 };
 use protocol::{
     BackendConnection, BackendHealth, ClientCommand, RecordingState, ServerEvent, ServerResponse,
@@ -4348,6 +4349,51 @@ fn websocket_command_id(text: &str) -> String {
         .unwrap_or_else(|_| "unknown".to_string())
 }
 
+fn websocket_command_method(text: &str) -> String {
+    serde_json::from_str::<ClientCommand>(text)
+        .map(|command| command.method)
+        .unwrap_or_else(|_| "unknown".to_string())
+}
+
+/// A stateful mutation that outlives this budget gets named in the log — the
+/// 2026-08-27 live incident produced 30 seconds of silence because the stuck
+/// command was the RUNNING stateful mutation, invisible to the queue-age
+/// expiry that covers only QUEUED commands.
+const WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD: Duration = Duration::from_secs(2);
+
+/// The ordered dispatcher's currently-running stateful mutation, shared with
+/// the enqueue side so a `command-lane-full` rejection can name what is
+/// actually jamming the lane instead of only telling the client "full".
+#[derive(Clone, Default)]
+struct WebSocketRunningStatefulCommand(
+    std::sync::Arc<std::sync::Mutex<Option<(String, std::time::Instant)>>>,
+);
+
+impl WebSocketRunningStatefulCommand {
+    fn set(&self, method: String) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+            Some((method, std::time::Instant::now()));
+    }
+
+    fn clear(&self) {
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    fn snapshot(&self) -> Option<(String, u128)> {
+        self.0
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .map(|(method, started)| (method.clone(), started.elapsed().as_millis()))
+    }
+}
+
 async fn drain_websocket_layout_commands(tasks: &mut tokio::task::JoinSet<()>) {
     while let Some(completed) = tasks.join_next().await {
         if let Err(error) = completed {
@@ -4638,6 +4684,7 @@ async fn run_websocket_command_dispatcher(
     command_handler: WebSocketCommandHandler,
 ) {
     let (ordered_tx, ordered_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+    let running_stateful = WebSocketRunningStatefulCommand::default();
     let ordered_task = tokio::spawn(run_websocket_ordered_command_dispatcher(
         state.clone(),
         ordered_rx,
@@ -4645,6 +4692,7 @@ async fn run_websocket_command_dispatcher(
         reliable_metrics.clone(),
         slow_pressure.clone(),
         command_handler.clone(),
+        running_stateful.clone(),
     ));
     let (lanes, lane_receivers) =
         WebSocketIsolatedCommandLanes::new(&state.websocket_transport_metrics);
@@ -4777,6 +4825,15 @@ async fn run_websocket_command_dispatcher(
                 | mpsc::error::TrySendError::Closed(command) => command,
             };
             let command_id = websocket_command_id(command.text.as_str());
+            let rejected_method = websocket_command_method(command.text.as_str());
+            match running_stateful.snapshot() {
+                Some((running_method, elapsed_ms)) => tracing::warn!(
+                    "[command-lane] ordered lane full: rejected {rejected_method}; running stateful command {running_method} has held the lane for {elapsed_ms}ms"
+                ),
+                None => tracing::warn!(
+                    "[command-lane] ordered lane full: rejected {rejected_method}; no stateful command running (queue backlog)"
+                ),
+            }
             // Rejected work is definitely not applied, so release its global
             // completion fences before awaiting a potentially slow peer.
             drop(command);
@@ -4812,6 +4869,7 @@ async fn run_websocket_ordered_command_dispatcher(
     reliable_metrics: TrackedWebSocketQueueMetrics,
     slow_pressure: WebSocketSlowPressureSignal,
     command_handler: WebSocketCommandHandler,
+    running_stateful: WebSocketRunningStatefulCommand,
 ) {
     let mut layout_tasks = tokio::task::JoinSet::new();
     let mut audio_processing_tasks = tokio::task::JoinSet::new();
@@ -4973,8 +5031,32 @@ async fn run_websocket_ordered_command_dispatcher(
         let response_metrics = reliable_metrics.clone();
         let response_pressure = slow_pressure.clone();
         let handler = command_handler.clone();
+        let stateful_tracker = running_stateful.clone();
         stateful_task = Some(tokio::spawn(async move {
+            let method = websocket_command_method(text.as_str());
+            let started = std::time::Instant::now();
+            stateful_tracker.set(method.clone());
+            // One live line the moment the running mutation crosses the
+            // budget, aborted on completion — so a wedged command is named
+            // WHILE it is wedged, not only in the post-mortem.
+            let slow_method = method.clone();
+            let slow_watch = tokio::spawn(async move {
+                tokio::time::sleep(WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD).await;
+                tracing::warn!(
+                    "[command-lane] stateful command {slow_method} still running after {}ms; later ordered commands are barriered behind it",
+                    WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD.as_millis()
+                );
+            });
             let response = handler(command_state, text).await;
+            slow_watch.abort();
+            let elapsed = started.elapsed();
+            if elapsed >= WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD {
+                tracing::warn!(
+                    "[command-lane] stateful command {method} completed after {}ms",
+                    elapsed.as_millis()
+                );
+            }
+            stateful_tracker.clear();
             drop(_operator_mutation);
             drop(_session_start);
             queue_websocket_response(
@@ -6530,10 +6612,14 @@ async fn handle_text_message_with_role(
         }
         "preview.surface.create" => {
             match serde_json::from_value::<protocol::PreviewSurfaceCreateParams>(command.params) {
-                Ok(params) => {
-                    let status = create_preview_surface(state.clone(), params).await;
-                    ServerResponse::ok(command.id, status)
-                }
+                Ok(params) => match create_preview_surface(state.clone(), params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(PreviewSurfaceBusy) => ServerResponse::error(
+                        command.id,
+                        PreviewSurfaceBusy::CODE,
+                        PreviewSurfaceBusy::MESSAGE.to_string(),
+                    ),
+                },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -6541,10 +6627,14 @@ async fn handle_text_message_with_role(
         }
         "preview.surface.update_bounds" => {
             match serde_json::from_value::<protocol::PreviewSurfaceBoundsParams>(command.params) {
-                Ok(params) => {
-                    let status = update_preview_surface_bounds(state, params).await;
-                    ServerResponse::ok(command.id, status)
-                }
+                Ok(params) => match update_preview_surface_bounds(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(PreviewSurfaceBusy) => ServerResponse::error(
+                        command.id,
+                        PreviewSurfaceBusy::CODE,
+                        PreviewSurfaceBusy::MESSAGE.to_string(),
+                    ),
+                },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -6561,10 +6651,14 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        "preview.surface.destroy" => {
-            let status = destroy_preview_surface(state).await;
-            ServerResponse::ok(command.id, status)
-        }
+        "preview.surface.destroy" => match destroy_preview_surface(state).await {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(PreviewSurfaceBusy) => ServerResponse::error(
+                command.id,
+                PreviewSurfaceBusy::CODE,
+                PreviewSurfaceBusy::MESSAGE.to_string(),
+            ),
+        },
         "preview.surface.status" => {
             let status = preview_surface_status(state).await;
             ServerResponse::ok(command.id, status)
@@ -13470,6 +13564,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn busy_surface_lifecycle_answers_surface_busy_instead_of_stalling() {
+        // 2026-08-27 live incident: with the lifecycle mutex held by a healing
+        // destroy/create cycle, an update_bounds sat as the running stateful
+        // mutation for 30+ seconds with no response, barriering the whole
+        // ordered lane until it filled. Bounded acquisition must answer fast
+        // with a retryable error instead.
+        let state = test_state();
+        let _lifecycle_held = state.preview_surface_lifecycle.clone().lock_owned().await;
+        let bounds = json!({
+            "id": "bounds",
+            "method": "preview.surface.update_bounds",
+            "params": {
+                "bounds": {
+                    "screenX": 10.0,
+                    "screenY": 20.0,
+                    "width": 640.0,
+                    "height": 360.0,
+                    "scaleFactor": 2.0,
+                    "screenHeight": 1000.0
+                }
+            }
+        });
+        let started = std::time::Instant::now();
+        let response = handle_text_message(&state, &bounds.to_string()).await;
+        assert!(started.elapsed() < Duration::from_secs(5));
+        assert!(!response.ok);
+        let error = response.error.expect("busy error");
+        assert_eq!(error.code, PreviewSurfaceBusy::CODE);
+
+        let destroy = json!({ "id": "destroy", "method": "preview.surface.destroy" });
+        let response = handle_text_message(&state, &destroy.to_string()).await;
+        assert!(!response.ok);
+        assert_eq!(
+            response.error.expect("busy error").code,
+            PreviewSurfaceBusy::CODE
+        );
+    }
+
+    #[tokio::test]
     async fn preview_surface_native_host_commands_drain_over_ws() {
         let state = test_state();
         let create = json!({
@@ -13511,6 +13644,8 @@ mod tests {
         assert!(empty_response.ok);
         assert_eq!(empty_response.payload.unwrap(), json!([]));
 
-        destroy_preview_surface(&state).await;
+        destroy_preview_surface(&state)
+            .await
+            .expect("preview surface lifecycle available");
     }
 }
