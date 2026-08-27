@@ -3160,10 +3160,8 @@ fn probe_fallback_bitrates(requested: u32) -> Vec<u32> {
                 candidates.push(alt);
             }
         }
-    } else if requested > 5000 {
-        if !candidates.contains(&5000) {
-            candidates.push(5000);
-        }
+    } else if requested > 5000 && !candidates.contains(&5000) {
+        candidates.push(5000);
     }
     candidates
 }
