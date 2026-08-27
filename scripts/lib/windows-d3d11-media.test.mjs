@@ -7,6 +7,7 @@ import { fileURLToPath } from 'node:url'
 import {
   WINDOWS_D3D11_AGGREGATE_SCHEMA,
   WINDOWS_D3D11_HOST_SCHEMA,
+  WINDOWS_D3D11_MEDIA_STAGES,
   WINDOWS_D3D11_NATURAL_FALLBACK_SCENARIOS,
   WINDOWS_D3D11_PATH_SCHEMA,
   WINDOWS_D3D11_REQUIRED_RUST_TESTS,
@@ -278,6 +279,23 @@ describe('Windows D3D11 Rust discovery', () => {
           allowUnimplementedStages: true
         }),
       /unexpected/
+    )
+  })
+
+  it('treats an explicit null stage as the default preview depth', () => {
+    // smoke-windows-d3d11-media.mjs forwards parseWindowsD3d11MediaArgs output
+    // directly, so `--verify-windows-rust` without `--stage` reaches here with
+    // an explicit null that must resolve to the 'preview' default.
+    const expected = WINDOWS_D3D11_MEDIA_STAGES.slice(
+      0,
+      WINDOWS_D3D11_MEDIA_STAGES.indexOf('preview') + 1
+    ).flatMap((name) => WINDOWS_D3D11_REQUIRED_RUST_TESTS[name])
+    assert.deepEqual(
+      assertWindowsD3d11RustDiscovery(expected, {
+        stage: null,
+        allowUnimplementedStages: true
+      }),
+      expected
     )
   })
 })
