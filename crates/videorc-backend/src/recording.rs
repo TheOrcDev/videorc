@@ -5224,7 +5224,7 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         "-loglevel".to_string(),
         "warning".to_string(),
         "-i".to_string(),
-        input.display().to_string(),
+        ffmpeg_file_path(input),
         "-map".to_string(),
         "0".to_string(),
         "-c:v".to_string(),
@@ -5239,11 +5239,17 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         "-movflags".to_string(),
         "+faststart".to_string(),
     ];
+    args.extend(h264_bt709_color_tag_args());
+    args.extend([
+        "-bsf:v".to_string(),
+        "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+            .to_string(),
+    ]);
     if let Some(trim_seconds) = trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
     }
-    args.push(output.display().to_string());
+    args.push(ffmpeg_file_path(output));
     args
 }
 
@@ -6957,34 +6963,77 @@ async fn monitor_session(
     #[cfg(target_os = "windows")]
     if let Some(mut active) = retired_active {
         let mut final_snapshot_phase = WindowsD3d11FinalSnapshotPhase::default();
-        let bridge_persistence_gate = gate_encoder_bridge_lifecycle_persistence(
-            active
-                .encoder_bridge
-                .iter()
-                .chain(active.encoder_bridge_stream.iter()),
+        // The process may have been terminated after its normal stop grace
+        // expired while a raw fallback writer was still draining a complete
+        // frame. Reap both legs behind one absolute deadline; the old direct
+        // JoinHandle::join here could hold the monitor until the writer's
+        // thirty-second frame timeout (or forever on a wedged pipe), which
+        // prevented MP4 export from ever running.
+        let bridge_teardown = begin_recording_encoder_bridge_teardown(
+            &mut active.encoder_bridge,
+            &mut active.encoder_bridge_stream,
+            ENCODER_BRIDGE_TEARDOWN_GRACE,
         );
-        if let Some(stream_bridge) = active.encoder_bridge_stream.as_ref() {
-            stream_bridge.stop();
+        if let Some(report) = finish_recording_encoder_bridge_teardown(
+            &state,
+            bridge_teardown,
+            "recording-process-exit",
+        )
+        .await
+        {
+            encoder_bridge_teardown_duration_ms = report.teardown_duration_ms;
+            for bridge in &report.reports {
+                if let Some(failure) = bridge.terminal_failure.clone() {
+                    match bridge.role {
+                        Some(EncoderBridgeOutputRole::Stream) => {
+                            monitored_recording.stream_bridge_terminal_failure = Some(failure);
+                        }
+                        Some(
+                            EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared,
+                        )
+                        | None => {
+                            monitored_recording.recording_bridge_terminal_failure = Some(failure);
+                        }
+                    }
+                }
+            }
+            encoder_bridge_lifecycle = report.lifecycle;
+            if encoder_bridge_lifecycle.live_resources > 0 {
+                let message = format!(
+                    "Encoder bridge teardown left {} capture-relevant resource(s) live (outer={}, FIFO={}, detached={}); restart Videorc before recording again.",
+                    encoder_bridge_lifecycle.live_resources,
+                    encoder_bridge_lifecycle.live_outer_writers,
+                    encoder_bridge_lifecycle.live_fifo_writers,
+                    encoder_bridge_lifecycle.detached_writers,
+                );
+                state.emit_log("warn", message.clone());
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "encoder-bridge-writer-leaked",
+                    &message,
+                );
+            }
+            let _ = emit_session_log(
+                &state,
+                &session_id,
+                HealthLevel::Info,
+                "encoder-bridge-writer-lifecycle",
+                &format!(
+                    "state=teardown-complete durationMs={} liveOuter={} liveFifo={} liveResources={} detached={}",
+                    encoder_bridge_teardown_duration_ms,
+                    encoder_bridge_lifecycle.live_outer_writers,
+                    encoder_bridge_lifecycle.live_fifo_writers,
+                    encoder_bridge_lifecycle.live_resources,
+                    encoder_bridge_lifecycle.detached_writers,
+                ),
+                None,
+            );
         }
-        if let Some(recording_bridge) = active.encoder_bridge.as_ref() {
-            recording_bridge.stop();
-        }
-        if let Some(stream_bridge) = active.encoder_bridge_stream.as_mut() {
-            stream_bridge.stop_and_join_writer();
-        }
-        if let Some(recording_bridge) = active.encoder_bridge.as_mut() {
-            recording_bridge.stop_and_join_writer();
-        }
-        drop(bridge_persistence_gate);
         final_snapshot_phase
             .writers_joined()
             .expect("Windows D3D11 writers join exactly once before final diagnostics");
-        // Terminal bridge failures may be published only as the writer exits;
-        // refresh them after the bounded MF drain/flush has completed.
-        monitored_recording.recording_bridge_terminal_failure =
-            active.recording_bridge_terminal_failure();
-        monitored_recording.stream_bridge_terminal_failure =
-            active.stream_bridge_terminal_failure();
         let mut retained_snapshot = None;
         if let Some(mut monitor) = active.windows_d3d11_monitor.take() {
             monitor.request_stop();
@@ -8549,12 +8598,15 @@ fn should_finalize_recording_session(
     // before the user asks to stop is still an early termination (for example,
     // a source/pipe that silently ended) and must never publish a shortened
     // artifact as successful.
-    // Stop intent must win the monitor's exit-ready race, but that alone is not
-    // proof that muxer flush completed. A forced
-    // TERM/KILL or any non-zero FFmpeg exit keeps the artifact as recovery
-    // media and marks the session failed unless a future explicit verifier can
-    // prove the container is complete.
-    if recording_bridge_terminal_failure.is_some() || !ffmpeg_exit_success {
+    // Stop intent must win the monitor's exit-ready race. Windows FFmpeg can
+    // report a non-zero status while closing a stopped graph even though the
+    // local MKV is still exportable; let the MP4 exporter validate that output
+    // instead of unconditionally marooning it as recovery media. A recording
+    // bridge failure remains terminal because it means the video producer did
+    // not finish its contract.
+    if recording_bridge_terminal_failure.is_some()
+        || (!ffmpeg_exit_success && !stop_intent_preceded_exit)
+    {
         return false;
     }
     // A dead STREAM output ends FFmpeg without a user stop, but the RECORDING
@@ -26292,8 +26344,8 @@ mod tests {
     fn only_an_explicit_graceful_stop_can_finalize_an_unbounded_capture() {
         assert!(!should_finalize_recording_session(true, false, None, None));
         assert!(
-            !should_finalize_recording_session(false, true, None, None),
-            "a non-zero/forced FFmpeg exit after stop must remain failed"
+            should_finalize_recording_session(false, true, None, None),
+            "a stopped Windows graph may have a non-zero exit while its MKV remains exportable"
         );
         assert!(should_finalize_recording_session(true, true, None, None));
 
@@ -27198,6 +27250,33 @@ mod tests {
             args.last().map(String::as_str),
             Some("/tmp/videorc-test.mp4")
         );
+    }
+
+    #[test]
+    fn mp4_export_normalizes_windows_verbatim_paths() {
+        #[cfg(target_os = "windows")]
+        {
+            let args = mp4_export_args(
+                Path::new(r"\\?\C:\recordings\capture.mkv"),
+                Path::new(r"\\?\C:\recordings\.videorc-export.partial\export.mp4"),
+                None,
+            );
+            assert_eq!(arg_value(&args, "-i"), Some(r"C:\recordings\capture.mkv"));
+            assert_eq!(
+                args.last().map(String::as_str),
+                Some(r"C:\recordings\.videorc-export.partial\export.mp4")
+            );
+            assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
+            assert_eq!(arg_value(&args, "-color_primaries"), Some("bt709"));
+            assert_eq!(arg_value(&args, "-color_trc"), Some("bt709"));
+            assert_eq!(arg_value(&args, "-color_range"), Some("tv"));
+            assert_eq!(
+                arg_value(&args, "-bsf:v"),
+                Some(
+                    "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+                )
+            );
+        }
     }
 
     #[test]
