@@ -5239,12 +5239,7 @@ fn mp4_export_args(input: &Path, output: &Path, trim_seconds: Option<f64>) -> Ve
         "-movflags".to_string(),
         "+faststart".to_string(),
     ];
-    args.extend(h264_bt709_color_tag_args());
-    args.extend([
-        "-bsf:v".to_string(),
-        "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
-            .to_string(),
-    ]);
+    append_media_foundation_h264_color_metadata_args(&mut args);
     if let Some(trim_seconds) = trim_seconds {
         // Bound the stop tail: end the delivered file at the shorter stream.
         args.extend(["-t".to_string(), format!("{trim_seconds:.3}")]);
@@ -27253,30 +27248,38 @@ mod tests {
     }
 
     #[test]
+    fn mp4_export_includes_bt709_h264_metadata() {
+        let args = mp4_export_args(
+            Path::new("/tmp/videorc-test.mkv"),
+            Path::new("/tmp/videorc-test.mp4"),
+            None,
+        );
+
+        assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_primaries"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_trc"), Some("bt709"));
+        assert_eq!(arg_value(&args, "-color_range"), Some("tv"));
+        assert_eq!(
+            arg_value(&args, "-bsf:v"),
+            Some(
+                "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+            )
+        );
+    }
+
+    #[cfg(target_os = "windows")]
+    #[test]
     fn mp4_export_normalizes_windows_verbatim_paths() {
-        #[cfg(target_os = "windows")]
-        {
-            let args = mp4_export_args(
-                Path::new(r"\\?\C:\recordings\capture.mkv"),
-                Path::new(r"\\?\C:\recordings\.videorc-export.partial\export.mp4"),
-                None,
-            );
-            assert_eq!(arg_value(&args, "-i"), Some(r"C:\recordings\capture.mkv"));
-            assert_eq!(
-                args.last().map(String::as_str),
-                Some(r"C:\recordings\.videorc-export.partial\export.mp4")
-            );
-            assert_eq!(arg_value(&args, "-colorspace"), Some("bt709"));
-            assert_eq!(arg_value(&args, "-color_primaries"), Some("bt709"));
-            assert_eq!(arg_value(&args, "-color_trc"), Some("bt709"));
-            assert_eq!(arg_value(&args, "-color_range"), Some("tv"));
-            assert_eq!(
-                arg_value(&args, "-bsf:v"),
-                Some(
-                    "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
-                )
-            );
-        }
+        let args = mp4_export_args(
+            Path::new(r"\\?\C:\recordings\capture.mkv"),
+            Path::new(r"\\?\C:\recordings\.videorc-export.partial\export.mp4"),
+            None,
+        );
+        assert_eq!(arg_value(&args, "-i"), Some(r"C:\recordings\capture.mkv"));
+        assert_eq!(
+            args.last().map(String::as_str),
+            Some(r"C:\recordings\.videorc-export.partial\export.mp4")
+        );
     }
 
     #[test]
