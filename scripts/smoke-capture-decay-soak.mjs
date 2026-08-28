@@ -113,6 +113,19 @@ try {
       screenFreshFps: rate('compositorScreenSourceFreshServes'),
       cameraHeldFps: rate('compositorCameraSourceHeldServes'),
       screenHeldFps: rate('compositorScreenSourceHeldServes'),
+      // H1-camera discriminators (2026-08-28): device-level delivery vs
+      // pool starvation, and the retained-surface leak counters.
+      cameraSourceFps: stats.previewCameraSourceFps ?? null,
+      cameraCallbackFps: rate('previewCameraCaptureCallbackCount'),
+      cameraOutOfBuffersPerSec:
+        previous && windowSec > 0
+          ? (stats.previewCameraDropReasons.outOfBuffers -
+              previous.stats.previewCameraDropReasons.outOfBuffers) /
+            windowSec
+          : null,
+      cameraPoolLive: stats.previewCameraSurfaceBacking.liveCount,
+      cameraPoolPeak: stats.previewCameraSurfaceBacking.peakCount,
+      previewFrameAgeMs: stats.previewFrameAgeMs ?? null,
       degradedStage: stats.capturePipelineDegradedStage ?? null
     }
     samples.push(sample)
@@ -132,7 +145,9 @@ try {
   }
 
   const csvHeader =
-    'uptimeSec,renderFps,targetFps,cameraFreshFps,screenFreshFps,cameraHeldFps,screenHeldFps,degradedStage'
+    'uptimeSec,renderFps,targetFps,cameraFreshFps,screenFreshFps,cameraHeldFps,screenHeldFps,' +
+    'cameraSourceFps,cameraCallbackFps,cameraOutOfBuffersPerSec,cameraPoolLive,cameraPoolPeak,' +
+    'previewFrameAgeMs,degradedStage'
   const csv = [csvHeader]
     .concat(
       samples.map((sample) =>
@@ -144,6 +159,12 @@ try {
           sample.screenFreshFps?.toFixed?.(2) ?? '',
           sample.cameraHeldFps?.toFixed?.(2) ?? '',
           sample.screenHeldFps?.toFixed?.(2) ?? '',
+          sample.cameraSourceFps?.toFixed?.(2) ?? '',
+          sample.cameraCallbackFps?.toFixed?.(2) ?? '',
+          sample.cameraOutOfBuffersPerSec?.toFixed?.(2) ?? '',
+          sample.cameraPoolLive ?? '',
+          sample.cameraPoolPeak ?? '',
+          sample.previewFrameAgeMs ?? '',
           sample.degradedStage ?? ''
         ].join(',')
       )
