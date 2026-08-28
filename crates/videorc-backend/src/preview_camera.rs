@@ -109,6 +109,10 @@ pub type PreviewCameraSlot = Arc<tokio::sync::Mutex<PreviewCameraRuntime>>;
 #[derive(Debug)]
 pub struct PreviewCameraRuntime {
     pub status: PreviewCameraStatus,
+    /// The params of the most recent start, retained so capture-health can
+    /// restart the source with the user's exact configuration (auto-heal for
+    /// the 2026-08-28 quantized-6fps camera collapse).
+    last_start_params: Option<PreviewCameraStartParams>,
     /// Source-level ownership keeps surface-backed frames observable while a
     /// capture session replaces its per-session `FrameStore`.
     surface_backing_tracker: SurfaceBackingTrackerHandle,
@@ -396,6 +400,7 @@ fn max_sample(samples: &[f64]) -> Option<f64> {
 pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
     PreviewCameraRuntime {
         status: idle_status(Some("Native camera preview is not running.".to_string())),
+        last_start_params: None,
         surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
         source_key: None,
@@ -505,6 +510,7 @@ pub async fn start_preview_camera(
     };
 
     stop_current_camera_for_restart(&state).await;
+    state.preview_camera.lock().await.last_start_params = Some(params.clone());
 
     let run_id = Uuid::new_v4().to_string();
     let surface_backing_tracker = state
@@ -799,6 +805,29 @@ pub(crate) async fn finish_preview_camera_stop(mut stop: PreviewCameraStop) -> P
         let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
     }
     stop.status
+}
+
+/// Restarts the camera with its retained start parameters — the capture-health
+/// auto-heal path. Returns false when there is nothing to restart (no camera
+/// was started this run, or it was deliberately stopped).
+pub async fn restart_preview_camera_for_health(state: &AppState) -> bool {
+    let params = {
+        let slot = state.preview_camera.lock().await;
+        if slot.run_id.is_none() {
+            None
+        } else {
+            slot.last_start_params.clone()
+        }
+    };
+    let Some(params) = params else {
+        return false;
+    };
+    let status = start_preview_camera(state.clone(), params).await;
+    tracing::info!(
+        "Camera auto-restart requested by capture-health finished with state {:?}.",
+        status.state
+    );
+    true
 }
 
 pub async fn preview_camera_status(state: &AppState) -> PreviewCameraStatus {
@@ -2631,6 +2660,15 @@ mod macos {
                 unsafe { (range.minFrameRate(), range.maxFrameRate()) }
             })
             .collect::<Vec<_>>();
+        tracing::info!(
+            "Camera capture configured: {}x{} (requested {}x{}), advertised ranges {:?}, requesting {} fps",
+            format.format.width,
+            format.format.height,
+            format.requested_width,
+            format.requested_height,
+            range_bounds,
+            requested_fps,
+        );
         if let Some(resolution) = resolve_camera_frame_rate(requested_fps, &range_bounds) {
             let range = ranges.objectAtIndex(resolution.range_index);
             let frame_duration = match resolution.endpoint {
@@ -2651,11 +2689,16 @@ mod macos {
                     device.setActiveVideoMaxFrameDuration(frame_duration);
                 }))
             };
-            if let Err(exception) = frame_rate_result {
-                tracing::warn!(
+            match frame_rate_result {
+                Ok(()) => tracing::info!(
+                    "Camera frame duration set: {effective_fps:.3} fps ({:?} of range {})",
+                    resolution.endpoint,
+                    resolution.range_index,
+                ),
+                Err(exception) => tracing::warn!(
                     "Camera kept its native frame cadence ({effective_fps:.3} fps frame duration was rejected): {}",
                     describe_camera_exception(exception)
-                );
+                ),
             }
         }
 

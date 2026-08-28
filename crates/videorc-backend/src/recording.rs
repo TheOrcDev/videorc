@@ -6631,6 +6631,21 @@ fn enqueue_post_recording_gate(
         sleep(POST_RECORDING_GATE_IDLE_DELAY).await;
         let _maintenance = state.ffmpeg_work.begin_maintenance_when_idle().await;
         let cancel_token = _maintenance.cancel_token();
+        // A user deleting a test recording before the idle gate runs is
+        // routine, not a failure (2026-08-28: six WARNs in one second for
+        // deliberately deleted test files). Cancel quietly.
+        if !final_path.exists() {
+            job.cancel_with_reason(
+                "The recording was deleted before the quality check ran.".to_string(),
+                Utc::now().to_rfc3339(),
+            );
+            let _ = state.database.upsert_repair_job(&job);
+            state.emit_log(
+                "info",
+                format!("Skipped quality check for deleted recording {path_str}."),
+            );
+            return;
+        }
         job.mark_running(Utc::now().to_rfc3339());
         let _ = state.database.upsert_repair_job(&job);
 
@@ -6977,6 +6992,21 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
             sleep(POST_RECORDING_GATE_IDLE_DELAY).await;
             let _maintenance = state.ffmpeg_work.begin_maintenance_when_idle().await;
             let cancel_token = _maintenance.cancel_token();
+            if !std::path::Path::new(&job.file_path).exists() {
+                job.cancel_with_reason(
+                    "The recording was deleted before the quality check ran.".to_string(),
+                    Utc::now().to_rfc3339(),
+                );
+                let _ = state.database.upsert_repair_job(&job);
+                state.emit_log(
+                    "info",
+                    format!(
+                        "Skipped quality check for deleted recording {}.",
+                        job.file_path
+                    ),
+                );
+                return;
+            }
             job.mark_running(Utc::now().to_rfc3339());
             let _ = state.database.upsert_repair_job(&job);
 
