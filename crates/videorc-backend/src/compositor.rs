@@ -12,7 +12,10 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use uuid::Uuid;
 
-use crate::capture_health::{CaptureHealthMonitor, CaptureHealthSample, CaptureHealthTransition};
+use crate::capture_health::{
+    AutoHealAction, CameraAutoHealPolicy, CaptureHealthMonitor, CaptureHealthSample,
+    CaptureHealthTransition, CaptureStage,
+};
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 use crate::compositor_synthetic::SyntheticMovingSource;
 use crate::diagnostics::{
@@ -2105,6 +2108,7 @@ async fn run_synthetic_compositor_loop(
     // incident (33 idle minutes of silent decay to ~6 fresh fps) is exactly
     // the state every liveness-only watchdog ignores.
     let mut capture_health = CaptureHealthMonitor::new();
+    let mut camera_auto_heal = CameraAutoHealPolicy::new();
     let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
     let mut next_live_source_refresh_at = Instant::now() + COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL;
 
@@ -2288,6 +2292,26 @@ async fn run_synthetic_compositor_loop(
                     let elapsed = window_started_at.elapsed().as_secs_f64().max(0.001);
                     let measured_fps = frames_in_window as f64 / elapsed;
                     {
+                        // Device-level camera evidence (published continuously
+                        // by the camera poll task): discriminates a device that
+                        // stopped delivering from an app starving the camera's
+                        // zero-copy buffer pool (the 2026-08-28 6fps quantum).
+                        let (
+                            camera_source_fps,
+                            camera_callback_count,
+                            camera_out_of_buffers,
+                            camera_pool_live,
+                            camera_pool_peak,
+                        ) = {
+                            let diagnostics = state.diagnostics.lock().await;
+                            (
+                                diagnostics.preview_camera_source_fps,
+                                Some(diagnostics.preview_camera_capture_callback_count),
+                                Some(diagnostics.preview_camera_drop_reasons.out_of_buffers),
+                                Some(diagnostics.preview_camera_surface_backing.live_count),
+                                Some(diagnostics.preview_camera_surface_backing.peak_count),
+                            )
+                        };
                         let fetch = live_sources.fetch_stats();
                         let transition = capture_health.observe(CaptureHealthSample {
                             target_fps: f64::from(target_fps),
@@ -2297,6 +2321,11 @@ async fn run_synthetic_compositor_loop(
                             screen_present: live_sources.screen.is_some(),
                             screen_fresh_serves: fetch.screen_fresh_serves,
                             window_secs: elapsed,
+                            camera_source_fps,
+                            camera_callback_count,
+                            camera_out_of_buffers,
+                            camera_pool_live,
+                            camera_pool_peak,
                         });
                         match transition {
                             Some(CaptureHealthTransition::Degraded { stage, detail }) => {
@@ -2309,6 +2338,53 @@ async fn run_synthetic_compositor_loop(
                                 tracing::info!("[capture-health] pipeline recovered: {detail}");
                             }
                             None => {}
+                        }
+                        // Verified auto-heal: the restart is the known-good
+                        // manual cure; the policy bounds attempts and judges
+                        // recovery through the monitor's own verdict.
+                        let camera_degraded =
+                            capture_health.degraded_stage() == Some(CaptureStage::CameraDelivery);
+                        match camera_auto_heal.on_window(camera_degraded) {
+                            AutoHealAction::RestartCamera { attempt } => {
+                                tracing::warn!(
+                                    "[capture-health] auto-restarting the camera source (attempt {attempt}/{})",
+                                    crate::capture_health::AUTO_HEAL_MAX_ATTEMPTS
+                                );
+                                let heal_state = state.clone();
+                                tokio::spawn(async move {
+                                    if !crate::preview_camera::restart_preview_camera_for_health(
+                                        &heal_state,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            "[capture-health] camera auto-restart skipped: no retained start parameters"
+                                        );
+                                    }
+                                });
+                            }
+                            AutoHealAction::Escalate => {
+                                tracing::warn!(
+                                    "[capture-health] camera stayed degraded after {} automatic restarts; surfacing to the user",
+                                    crate::capture_health::AUTO_HEAL_MAX_ATTEMPTS
+                                );
+                                let escalate_state = state.clone();
+                                tokio::task::spawn_blocking(move || {
+                                    let _ = crate::recording::emit_health_event(
+                                        &escalate_state,
+                                        None,
+                                        crate::protocol::HealthLevel::Warn,
+                                        "camera-degraded-restart-failed",
+                                        "The camera is delivering frames far below its target rate and automatic restarts did not recover it. Check the camera connection, or restart Videorc.",
+                                    );
+                                });
+                            }
+                            AutoHealAction::None => {}
+                        }
+                        if camera_auto_heal.take_recovered_after_heal() {
+                            tracing::info!(
+                                "[capture-health] camera recovered after automatic restart"
+                            );
                         }
                     }
                     let (p50, p95, p99) = frame_time_percentiles(&frame_times_ms);
