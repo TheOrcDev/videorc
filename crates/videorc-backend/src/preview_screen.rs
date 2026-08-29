@@ -35,8 +35,9 @@ use crate::protocol::{
 #[cfg(target_os = "windows")]
 use crate::screen_capture::parse_windows_dxgi_source_id;
 use crate::screen_capture::{
-    is_windows_gdigrab_desktop_screen_id, parse_screencapturekit_display_id,
-    parse_screencapturekit_window_id, parse_windows_dxgi_output_index,
+    ScreenCaptureCallbackCadence, is_windows_gdigrab_desktop_screen_id,
+    parse_screencapturekit_display_id, parse_screencapturekit_window_id,
+    parse_windows_dxgi_output_index,
 };
 use crate::source_registry::{
     SourceConsumerReason, SourceIdentityConfidence, SourceKey, SourceKind,
@@ -263,6 +264,7 @@ pub(crate) struct PreviewScreenRecoveryEvidence {
     pub source_key: SourceKey,
     pub generation: u64,
     pub target_fps: u32,
+    pub callback_cadence: ScreenCaptureCallbackCadence,
     pub capture_callback_count: u64,
     pub frame_store_publications: u64,
     pub latest_sequence: Option<u64>,
@@ -1869,6 +1871,7 @@ pub(crate) async fn preview_screen_recovery_evidence(
         source_key: expected.source_key.clone(),
         generation: expected.generation,
         target_fps: expected.config.target_fps,
+        callback_cadence: expected.config.source.callback_cadence,
         capture_callback_count,
         frame_store_publications,
         latest_sequence,
@@ -2719,6 +2722,11 @@ pub(crate) async fn test_install_live_screen_generation(
     let source = SelectedScreenSource {
         source_id: source_id.to_string(),
         source_kind: PreviewScreenSourceKind::Screen,
+        callback_cadence: if source_id.starts_with("screen:screencapturekit:") {
+            ScreenCaptureCallbackCadence::Authoritative
+        } else {
+            ScreenCaptureCallbackCadence::DamageDriven
+        },
         display_id: None,
         window_id: None,
     };
@@ -2773,6 +2781,11 @@ pub(crate) async fn test_install_starting_screen_generation(
     let source = SelectedScreenSource {
         source_id: source_id.to_string(),
         source_kind: PreviewScreenSourceKind::Screen,
+        callback_cadence: if source_id.starts_with("screen:screencapturekit:") {
+            ScreenCaptureCallbackCadence::Authoritative
+        } else {
+            ScreenCaptureCallbackCadence::DamageDriven
+        },
         display_id: None,
         window_id: None,
     };
@@ -3133,6 +3146,7 @@ fn select_preview_screen_capture_request(
 struct SelectedScreenSource {
     source_id: String,
     source_kind: PreviewScreenSourceKind,
+    callback_cadence: ScreenCaptureCallbackCadence,
     display_id: Option<u32>,
     window_id: Option<u32>,
 }
@@ -3154,6 +3168,7 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
             SelectedScreenSource {
                 source_id: window_id,
                 source_kind: PreviewScreenSourceKind::Window,
+                callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                 display_id: None,
                 window_id: Some(native_window_id),
             }
@@ -3165,6 +3180,7 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
             return Some(SelectedScreenSource {
                 source_id: screen_id,
                 source_kind: PreviewScreenSourceKind::Screen,
+                callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                 display_id: Some(native_display_id),
                 window_id: None,
             });
@@ -3173,6 +3189,7 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
             return Some(SelectedScreenSource {
                 source_id: screen_id,
                 source_kind: PreviewScreenSourceKind::Screen,
+                callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
                 display_id: Some(output_index),
                 window_id: None,
             });
@@ -3181,6 +3198,7 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
             return Some(SelectedScreenSource {
                 source_id: screen_id,
                 source_kind: PreviewScreenSourceKind::Screen,
+                callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
                 display_id: None,
                 window_id: None,
             });
@@ -5969,6 +5987,7 @@ mod tests {
         let source = SelectedScreenSource {
             source_id: source_key.id.clone(),
             source_kind: PreviewScreenSourceKind::Screen,
+            callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
             display_id: Some(5),
             window_id: None,
         };
@@ -6049,6 +6068,7 @@ mod tests {
         let source = SelectedScreenSource {
             source_id: source_key.id.clone(),
             source_kind: PreviewScreenSourceKind::Screen,
+            callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
             display_id: Some(5),
             window_id: None,
         };
@@ -7475,6 +7495,7 @@ mod tests {
                 source: SelectedScreenSource {
                     source_id: old_source_key.id,
                     source_kind: PreviewScreenSourceKind::Screen,
+                    callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                     display_id: Some(4),
                     window_id: None,
                 },
@@ -7684,6 +7705,7 @@ mod tests {
         let selected = selected_screen_source(&params).unwrap();
 
         assert_eq!(selected.source_kind, PreviewScreenSourceKind::Window);
+        assert!(selected.callback_cadence.is_authoritative());
         assert_eq!(selected.window_id, Some(42));
         assert_eq!(selected.display_id, None);
     }
@@ -7695,6 +7717,7 @@ mod tests {
         let selected = selected_screen_source(&params).unwrap();
 
         assert_eq!(selected.source_kind, PreviewScreenSourceKind::Screen);
+        assert!(selected.callback_cadence.is_authoritative());
         assert_eq!(selected.display_id, Some(5));
     }
 
@@ -7705,6 +7728,10 @@ mod tests {
         let selected = selected_screen_source(&params).unwrap();
 
         assert_eq!(selected.source_kind, PreviewScreenSourceKind::Screen);
+        assert_eq!(
+            selected.callback_cadence,
+            ScreenCaptureCallbackCadence::DamageDriven
+        );
         assert_eq!(selected.source_id, "screen:dxgi:00000000000003f1:2");
         assert_eq!(selected.display_id, Some(2));
         assert_eq!(
@@ -7720,6 +7747,10 @@ mod tests {
         let selected = selected_screen_source(&params).unwrap();
 
         assert_eq!(selected.source_kind, PreviewScreenSourceKind::Screen);
+        assert_eq!(
+            selected.callback_cadence,
+            ScreenCaptureCallbackCadence::DamageDriven
+        );
         assert_eq!(selected.source_id, "screen:gdigrab:desktop");
         assert_eq!(selected.display_id, None);
         assert_eq!(
@@ -8308,6 +8339,7 @@ mod tests {
                 source: SelectedScreenSource {
                     source_id: source_key.id.clone(),
                     source_kind: PreviewScreenSourceKind::Screen,
+                    callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                     display_id: Some(5),
                     window_id: None,
                 },
@@ -8387,6 +8419,7 @@ mod tests {
                 source: SelectedScreenSource {
                     source_id: source_key.id.clone(),
                     source_kind: PreviewScreenSourceKind::Screen,
+                    callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                     display_id: Some(5),
                     window_id: None,
                 },

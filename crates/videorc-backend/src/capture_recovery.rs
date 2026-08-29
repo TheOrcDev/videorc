@@ -3725,6 +3725,7 @@ mod tests {
             source_key: SourceKey::screen(id),
             generation,
             target_fps: 30,
+            callback_cadence: crate::screen_capture::ScreenCaptureCallbackCadence::Authoritative,
             capture_callback_count: callbacks,
             frame_store_publications: publications,
             latest_sequence: Some(sequence),
@@ -6780,6 +6781,8 @@ mod tests {
                 screen_fresh_serves: stall.fresh_serves,
                 screen_producer: Some(crate::capture_health::CaptureHealthScreenProducerSample {
                     epoch: epoch.clone(),
+                    callback_cadence:
+                        crate::screen_capture::ScreenCaptureCallbackCadence::Authoritative,
                     capture_callbacks: stall.capture_callbacks,
                     frame_store_publications: stall.frame_store_publications,
                 }),

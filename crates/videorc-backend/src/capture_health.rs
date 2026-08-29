@@ -22,6 +22,7 @@
 
 use std::sync::{Arc, Mutex};
 
+use crate::screen_capture::ScreenCaptureCallbackCadence;
 use crate::source_registry::SourceKey;
 
 /// Fraction of the target rate below which a stage counts as degraded.
@@ -66,7 +67,11 @@ pub struct CaptureHealthScreenEpoch {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CaptureHealthScreenProducerSample {
     pub epoch: CaptureHealthScreenEpoch,
-    /// Cumulative ScreenCaptureKit callbacks, including idle/status frames.
+    /// Whether callback cadence can distinguish capture decay from a static,
+    /// damage-driven source.
+    pub callback_cadence: ScreenCaptureCallbackCadence,
+    /// Cumulative native capture callbacks. This cadence is a recovery
+    /// discriminator only when `callback_cadence` is authoritative.
     pub capture_callbacks: u64,
     /// Cumulative complete-frame publications into that generation's FrameStore.
     pub frame_store_publications: u64,
@@ -454,17 +459,22 @@ impl CaptureHealthMonitor {
             (Some(rate), Some(floor)) if rate < floor
         );
         // A static desktop legitimately has zero complete publications and
-        // fresh serves. Only an accompanying callback collapse distinguishes a
-        // stalled ScreenCaptureKit stream from damage-driven idleness.
-        let producer_screen_degraded = matches!(
-            (
-                screen_callback_fps,
-                screen_publication_fps,
-                screen_producer_floor
-            ),
-            (Some(callbacks), Some(publications), Some(floor))
-                if callbacks < floor && publications < floor
-        );
+        // fresh serves. Only a source with authoritative continuous callbacks
+        // can use callback collapse to distinguish a stalled stream from
+        // damage-driven idleness. Windows desktop duplication and gdigrab do
+        // not provide that discriminator and must never arm source recovery.
+        let producer_screen_degraded = sample.screen_producer.as_ref().is_some_and(|producer| {
+            producer.callback_cadence.is_authoritative()
+                && matches!(
+                    (
+                        screen_callback_fps,
+                        screen_publication_fps,
+                        screen_producer_floor
+                    ),
+                    (Some(callbacks), Some(publications), Some(floor))
+                        if callbacks < floor && publications < floor
+                )
+        });
         let degraded_stage = if consumer_camera_starved && producer_camera_degraded {
             Some(CaptureStage::CameraDelivery)
         } else if consumer_screen_starved && producer_screen_degraded {
@@ -816,7 +826,9 @@ mod tests {
     }
 
     /// A screen-only scene (notes-mode recording) with a static desktop must
-    /// never be declared degraded off screen numbers — SCK is damage-driven.
+    /// never be declared degraded off complete-frame counts. ScreenCaptureKit
+    /// publications are damage-driven while its idle/status callback cadence
+    /// remains authoritative.
     #[test]
     fn static_screen_without_camera_is_not_a_verdict() {
         let mut monitor = CaptureHealthMonitor::new();
@@ -831,6 +843,7 @@ mod tests {
                 source_key: SourceKey::screen("screen:static"),
                 generation: 3,
             },
+            callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
             capture_callbacks: 0,
             frame_store_publications: 0,
         });
@@ -862,6 +875,7 @@ mod tests {
                     source_key: SourceKey::screen("screen:test"),
                     generation: 7,
                 },
+                callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                 capture_callbacks,
                 frame_store_publications,
             });
@@ -888,6 +902,36 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn damage_driven_screen_cadence_never_arms_screen_delivery_recovery() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut counter = 60_u64;
+        let sample = |counter| {
+            let mut sample = healthy_sample(0, counter);
+            sample.camera_present = false;
+            sample.camera_target_fps = None;
+            sample.camera_producer = None;
+            sample.screen_target_fps = Some(30.0);
+            sample.screen_producer = Some(CaptureHealthScreenProducerSample {
+                epoch: CaptureHealthScreenEpoch {
+                    source_key: SourceKey::screen("screen:dxgi:00000000000003f1:0"),
+                    generation: 9,
+                },
+                callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
+                capture_callbacks: counter,
+                frame_store_publications: counter,
+            });
+            sample
+        };
+
+        assert_eq!(monitor.observe(sample(counter)), None);
+        for _ in 0..=DEGRADED_WINDOW_THRESHOLD {
+            counter += 4;
+            assert_eq!(monitor.observe(sample(counter)), None);
+            assert_eq!(monitor.degraded_stage(), None);
+        }
     }
 
     #[test]
@@ -1343,6 +1387,7 @@ mod tests {
             screen_fresh_serves: 120,
             screen_producer: Some(CaptureHealthScreenProducerSample {
                 epoch: epoch.clone(),
+                callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                 capture_callbacks: 120,
                 frame_store_publications: 120,
             }),

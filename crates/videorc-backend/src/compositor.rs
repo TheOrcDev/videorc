@@ -3234,6 +3234,7 @@ async fn run_synthetic_compositor_loop(
                                                 source_key: evidence.source_key,
                                                 generation: evidence.generation,
                                             },
+                                            callback_cadence: evidence.callback_cadence,
                                             capture_callbacks: evidence.capture_callback_count,
                                             frame_store_publications: evidence
                                                 .frame_store_publications,

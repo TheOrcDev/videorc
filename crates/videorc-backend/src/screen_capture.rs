@@ -8,6 +8,24 @@ const WINDOWS_DXGI_SCREEN_PREFIX: &str = "screen:dxgi:";
 const WINDOWS_GDIGRAB_DESKTOP_ID: &str = "screen:gdigrab:desktop";
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 
+/// Whether native capture callbacks provide a continuous cadence signal that
+/// can corroborate complete-frame and compositor-fresh rate decay.
+///
+/// ScreenCaptureKit reports idle/status callbacks even when a desktop is
+/// static. Windows desktop duplication and gdigrab are damage-driven here, so
+/// their callback/publication counters cannot prove a capture-rate collapse.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ScreenCaptureCallbackCadence {
+    Authoritative,
+    DamageDriven,
+}
+
+impl ScreenCaptureCallbackCadence {
+    pub(crate) fn is_authoritative(self) -> bool {
+        self == Self::Authoritative
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct WindowsDxgiSourceId {
     pub adapter_luid: u64,
@@ -728,6 +746,12 @@ mod tests {
             parse_screencapturekit_window_id("screen:screencapturekit:2"),
             None
         );
+    }
+
+    #[test]
+    fn callback_cadence_capability_distinguishes_continuous_and_damage_driven_sources() {
+        assert!(ScreenCaptureCallbackCadence::Authoritative.is_authoritative());
+        assert!(!ScreenCaptureCallbackCadence::DamageDriven.is_authoritative());
     }
 
     #[test]
