@@ -18,9 +18,7 @@ import {
   assertCaptureDecayD3PublicationMode,
   assertCaptureDecayD3PublicationTrackedTreeClean,
   assertCaptureDecayProtectedPublicationRef,
-  CaptureDecayPublicationRefError,
-  LOCAL_PUBLICATION_ACK_ENV,
-  LOCAL_PUBLICATION_ACK_VALUE
+  CaptureDecayPublicationRefError
 } from './capture-decay-publication-git.mjs'
 
 const execFileAsync = promisify(execFile)
@@ -489,7 +487,7 @@ async function gitHead(repository) {
   return stdout.trim()
 }
 
-describe('owner-acknowledged local publication bridge', () => {
+describe('regular publication is never blocked by the D3 ceremony', () => {
   const PENDING_RECORD = {
     schemaVersion: 2,
     profile: 'capture-decay-d3-acceptance-v2',
@@ -497,95 +495,74 @@ describe('owner-acknowledged local publication bridge', () => {
     blockingReason: 'fixture'
   }
 
-  async function withPendingRecord(repository, record = PENDING_RECORD) {
+  async function withRecord(repository, record = PENDING_RECORD) {
     const recordPath = join(repository, 'macos-capture-decay-d3.json')
     await writeFile(recordPath, `${JSON.stringify(record, null, 2)}\n`)
     return recordPath
   }
 
-  it('publishes a regular beta with the exact acknowledgment and clean main ancestry', async () => {
+  it('publishes a regular beta with a pending record, no Actions context required', async () => {
     await withGitRepository(async (repository) => {
-      const recordPath = await withPendingRecord(repository)
+      const recordPath = await withRecord(repository)
       const headCommit = await gitHead(repository)
       const gate = await assertCaptureDecayD3PublicationGate({
-        env: { [LOCAL_PUBLICATION_ACK_ENV]: LOCAL_PUBLICATION_ACK_VALUE },
+        env: {},
         recordPath,
-        repoRoot: repository,
-        requireProtectedRef: true
+        repoRoot: repository
       })
       assert.equal(gate.headCommit, headCommit)
       assert.equal(gate.record.status, 'pending')
-      assert.equal(gate.protectedRef.bridged, true)
+      assert.equal(gate.protectedRef, null)
     })
   })
 
-  it('rejects any acknowledgment value other than the exact one', async () => {
+  it('keeps the pending freeze for the strict exact-promotion path', async () => {
     await withGitRepository(async (repository) => {
-      const recordPath = await withPendingRecord(repository)
-      await assert.rejects(
-        assertCaptureDecayD3PublicationGate({
-          env: { [LOCAL_PUBLICATION_ACK_ENV]: '1' },
-          recordPath,
-          repoRoot: repository,
-          requireProtectedRef: true
-        }),
-        publicationRefCode('local-ack-invalid')
-      )
-    })
-  })
-
-  it('still requires the protected Actions context without the acknowledgment', async () => {
-    await withGitRepository(async (repository) => {
-      const recordPath = await withPendingRecord(repository)
+      const recordPath = await withRecord(repository)
       await assert.rejects(
         assertCaptureDecayD3PublicationGate({
           env: {},
           recordPath,
           repoRoot: repository,
-          requireProtectedRef: true
+          requireProtectedRef: true,
+          strict: true
         }),
         publicationRefCode('github-actions-required')
       )
     })
   })
 
-  it('refuses a bridged publication whose HEAD is not on origin/main', async () => {
+  it('never relaxes accepted-state validation for a regular beta', async () => {
     await withGitRepository(async (repository) => {
-      const recordPath = await withPendingRecord(repository)
-      await writeFile(join(repository, 'ahead.txt'), 'unpushed release code\n')
-      await execFileAsync('git', ['add', 'ahead.txt'], { cwd: repository })
-      await execFileAsync('git', ['commit', '--quiet', '-m', 'ahead of origin'], {
-        cwd: repository
-      })
-      await assert.rejects(
-        assertCaptureDecayD3PublicationGate({
-          env: { [LOCAL_PUBLICATION_ACK_ENV]: LOCAL_PUBLICATION_ACK_VALUE },
-          recordPath,
-          repoRoot: repository,
-          requireProtectedRef: true
-        }),
-        publicationRefCode('local-ack-ancestry')
-      )
-    })
-  })
-
-  it('never bridges past accepted-state strictness', async () => {
-    await withGitRepository(async (repository) => {
-      const recordPath = await withPendingRecord(repository, {
+      const recordPath = await withRecord(repository, {
         schemaVersion: 2,
         profile: 'capture-decay-d3-acceptance-v2',
         status: 'accepted'
       })
-      // An accepted record takes the full strict path even with the
-      // acknowledgment set: the bridge only overrides the pending freeze.
+      // An accepted record takes the full strict path even in a regular
+      // publication: only the pending freeze was lifted.
       await assert.rejects(
         assertCaptureDecayD3PublicationGate({
-          env: { [LOCAL_PUBLICATION_ACK_ENV]: LOCAL_PUBLICATION_ACK_VALUE },
+          env: {},
           recordPath,
-          repoRoot: repository,
-          requireProtectedRef: true
+          repoRoot: repository
         }),
         (error) => error?.code !== 'd3-pending' && error instanceof Error
+      )
+    })
+  })
+
+  it('still requires a clean tracked tree for every publication', async () => {
+    await withGitRepository(async (repository) => {
+      const recordPath = await withRecord(repository)
+      await writeFile(join(repository, 'tracked.txt'), 'mutated by a build step\n')
+      await assert.rejects(
+        assertCaptureDecayD3PublicationGate({
+          env: {},
+          recordPath,
+          repoRoot: repository
+        }),
+        /tracked source changes/
       )
     })
   })
