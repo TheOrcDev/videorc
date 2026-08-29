@@ -64,19 +64,99 @@ export async function captureDecayGitTree(repoRoot, commit = 'HEAD') {
   return await gitText(repoRoot, ['rev-parse', `${commit}^{tree}`])
 }
 
+// Owner-acknowledged local publication bridge (2026-08-29). The protected
+// Actions lane shipped in #320 before its infrastructure existed (zero repo
+// secrets, no macOS environment), and the D3-pending freeze would otherwise
+// block every regular beta until the multi-day owner acceptance ceremony
+// completes. With the EXACT acknowledgment value below, a regular beta may
+// publish from the owner's keychain path with local provenance checks; the
+// bridge NEVER weakens accepted-state D3 promotion rules, and it must be
+// retired once the Actions lane is provisioned or the D3 record is
+// satisfied.
+export const LOCAL_PUBLICATION_ACK_ENV = 'VIDEORC_RELEASE_LOCAL_PUBLICATION_ACK'
+export const LOCAL_PUBLICATION_ACK_VALUE = 'owner-keychain'
+
+function localPublicationBridgeAcknowledged(env) {
+  const value = env[LOCAL_PUBLICATION_ACK_ENV]
+  if (value === undefined || value === '') return false
+  if (value !== LOCAL_PUBLICATION_ACK_VALUE) {
+    throw publicationRefError(
+      'local-ack-invalid',
+      `${LOCAL_PUBLICATION_ACK_ENV} must be exactly "${LOCAL_PUBLICATION_ACK_VALUE}" to acknowledge local publication.`
+    )
+  }
+  return true
+}
+
+// Local provenance replacement for the protected-ref context: the checkout's
+// HEAD must be an ancestor of the canonical default branch, freshly fetched,
+// so the bridge cannot publish an unpushed or foreign tree.
+async function assertLocalPublicationBridgeRef({ defaultBranch = DEFAULT_BRANCH, repoRoot }) {
+  try {
+    await execFileAsync('git', ['fetch', '--quiet', 'origin', defaultBranch], { cwd: repoRoot })
+  } catch {
+    // No fetchable remote (offline or fixture repo): the existing
+    // remote-tracking ref below is still required, so ancestry is judged
+    // against the freshest available origin state rather than skipped.
+    console.warn(
+      `[release-upload] LOCAL PUBLICATION BRIDGE: could not fetch origin/${defaultBranch}; using the existing remote-tracking ref.`
+    )
+  }
+  const headCommit = await gitText(repoRoot, ['rev-parse', 'HEAD^{commit}'])
+  const remoteRef = `refs/remotes/origin/${defaultBranch}`
+  const remoteCommit = await gitText(repoRoot, ['rev-parse', `${remoteRef}^{commit}`])
+  if (!(await gitIsAncestor(repoRoot, headCommit, remoteCommit))) {
+    throw publicationRefError(
+      'local-ack-ancestry',
+      `Local publication requires HEAD ${headCommit} to be an ancestor of origin/${defaultBranch} (${remoteCommit}).`
+    )
+  }
+  console.warn(
+    `[release-upload] LOCAL PUBLICATION BRIDGE ACTIVE (${LOCAL_PUBLICATION_ACK_ENV}=${LOCAL_PUBLICATION_ACK_VALUE}): ` +
+      'publishing from the owner keychain path outside GitHub Actions. Retire this bridge once the ' +
+      'release-macos.yml secrets are provisioned or the D3 acceptance record is satisfied.'
+  )
+  return { bridged: true, headCommit, refName: defaultBranch }
+}
+
 export async function assertCaptureDecayD3PublicationGate({
   env = process.env,
   recordPath,
   repoRoot,
   requireProtectedRef = false
 }) {
+  const bridgeAcknowledged = localPublicationBridgeAcknowledged(env)
   const protectedRef = requireProtectedRef
-    ? await assertCaptureDecayProtectedPublicationRef({ env, repoRoot })
+    ? bridgeAcknowledged
+      ? await assertLocalPublicationBridgeRef({ repoRoot })
+      : await assertCaptureDecayProtectedPublicationRef({ env, repoRoot })
     : null
   await assertCaptureDecayD3PublicationTrackedTreeClean({ repoRoot })
-  const record = assertCaptureDecayD3AcceptanceRecord(
-    await readCaptureDecayD3AcceptanceRecord(recordPath)
-  )
+  const rawRecord = await readCaptureDecayD3AcceptanceRecord(recordPath)
+  let record
+  try {
+    record = assertCaptureDecayD3AcceptanceRecord(rawRecord)
+  } catch (error) {
+    // The D3-pending freeze blocks every macOS publication until the owner
+    // acceptance ceremony completes. The bridge lets a REGULAR beta through
+    // with an explicit owner acknowledgment; accepted/satisfied records take
+    // the normal strict path below, so no sealed-candidate or drift rule is
+    // ever weakened by the bridge.
+    if (bridgeAcknowledged && error?.code === 'd3-pending') {
+      console.warn(
+        '[release-upload] LOCAL PUBLICATION BRIDGE: publishing a regular beta while the D3 ' +
+          `acceptance record is ${rawRecord?.status ?? 'missing'}; the D3 release freeze is ` +
+          'owner-overridden for this upload only.'
+      )
+      const headCommit = await gitText(repoRoot, ['rev-parse', 'HEAD^{commit}'])
+      return {
+        headCommit,
+        protectedRef,
+        record: { profile: rawRecord?.profile, status: rawRecord?.status ?? 'pending' }
+      }
+    }
+    throw error
+  }
   const sourceState = await captureDecayD3PublicationSourceState({ record, repoRoot })
   assertCaptureDecayD3PublicationSourceState(record, sourceState)
   const { headCommit } = sourceState

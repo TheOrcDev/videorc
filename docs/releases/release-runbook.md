@@ -311,6 +311,27 @@ and incremental CSV, as well as the raw ordered recovery observations. A leftove
 MKV, a changed process/session identity, a missing screen recovery, an event gap,
 or a media-analysis failure is a hard failure.
 
+#### Owner-acknowledged local publication bridge (temporary)
+
+The protected Actions publication lane shipped before its infrastructure:
+`release-macos.yml` requires `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_*`, and
+`VIDEORC_DOWNLOAD_S3_*` secrets that are not yet provisioned, and the
+D3-pending freeze would otherwise block every regular beta until the
+multi-day owner acceptance ceremony completes. Until either the secrets
+exist or the D3 record is `satisfied`, the release owner may publish a
+regular beta from the established local keychain path by setting exactly:
+
+```sh
+VIDEORC_RELEASE_LOCAL_PUBLICATION_ACK=owner-keychain
+```
+
+The bridge still requires a clean tracked tree and a `HEAD` that is an
+ancestor of freshly fetched `origin/main`, logs a loud notice on every use,
+and never weakens `accepted`-state D3 promotion rules (sealed candidates,
+exact promotion, drift checks all take the strict path regardless of the
+acknowledgment). Retire this section, the env override, and its tests once
+the Actions lane is provisioned or the D3 record is satisfied.
+
 #### One-time D3 acceptance and publication
 
 The D3 acceptance record is a one-time fail-closed state machine:
