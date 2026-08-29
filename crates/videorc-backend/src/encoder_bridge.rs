@@ -1168,6 +1168,21 @@ fn encoder_bridge_recording_no_progress_timeout(
     }
 }
 
+fn refresh_raw_fifo_write_progress(
+    writer: Option<&RawVideoFifoWriter>,
+    observed_epoch: &mut u64,
+    last_output_progress_at: &mut Instant,
+) {
+    let Some(writer) = writer else {
+        return;
+    };
+    let current_epoch = writer.write_progress_epoch();
+    if current_epoch != *observed_epoch {
+        *observed_epoch = current_epoch;
+        *last_output_progress_at = Instant::now();
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum EncoderBridgeOverBudgetEscalation {
     /// Keep the stream output alive: drop pre-encode like coalescing and re-check.
@@ -3208,6 +3223,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let encoded_access_unit_dropped_frames = 0_u64;
     let mut output_pressure_active = false;
     let mut last_output_progress_at = Instant::now();
+    let mut observed_raw_fifo_write_progress_epoch = raw_fifo_writer
+        .as_ref()
+        .map_or(0, RawVideoFifoWriter::write_progress_epoch);
     // First instant the output queue went over its hard budget; cleared the
     // moment it recovers. Drives the sustained-violation escalation.
     let mut output_over_budget_since: Option<Instant> = None;
@@ -3595,6 +3613,15 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         } else {
             None
         };
+        // A raw frame is indivisible, but a progressing Windows pipe can need
+        // longer than the complete-frame accounting window to finish it. Byte
+        // progress therefore refreshes liveness while queue depth remains full;
+        // the writer's independent hard deadline still bounds the whole frame.
+        refresh_raw_fifo_write_progress(
+            raw_fifo_writer.as_ref(),
+            &mut observed_raw_fifo_write_progress_epoch,
+            &mut last_output_progress_at,
+        );
         #[cfg(target_os = "macos")]
         let mut pipeline_error = if video_output.uses_video_toolbox() {
             let writer = video_toolbox_fifo_writer
@@ -5015,6 +5042,7 @@ struct RawVideoFifoWriter {
     frame_sender: RawVideoFrameQueueSender,
     policy: EncoderBridgeOutputQueuePolicy,
     terminal_failure: Arc<StdMutex<Option<String>>>,
+    write_progress_epoch: Arc<AtomicU64>,
     result_rx: std_mpsc::Receiver<RawVideoFifoWriterResult>,
     join: Option<thread::JoinHandle<()>>,
     lifecycle: Option<EncoderBridgeWriterLifecycle>,
@@ -5270,17 +5298,20 @@ impl RawVideoFifoWriter {
         // Queue + one in-flight result + one terminal flush result.
         let (result_tx, result_rx) = std_mpsc::sync_channel(policy.max_frames + 2);
         let writer_terminal_failure = terminal_failure.clone();
+        let write_progress_epoch = Arc::new(AtomicU64::new(0));
+        let writer_progress_epoch = write_progress_epoch.clone();
         let join = spawn_registered_fifo_writer(
             lifecycle.clone(),
             thread::Builder::new().name(format!("videorc-{:?}-raw-video-fifo-writer", policy.role)),
             move || {
-                run_raw_video_fifo_writer_loop_with_receiver(
+                run_raw_video_fifo_writer_loop_with_receiver_and_progress(
                     fifo,
                     || frame_receiver.receive(),
                     result_tx,
                     stop,
                     writer_terminal_failure,
                     policy.role,
+                    writer_progress_epoch,
                 );
             },
         )
@@ -5289,6 +5320,7 @@ impl RawVideoFifoWriter {
             frame_sender,
             policy,
             terminal_failure,
+            write_progress_epoch,
             result_rx,
             join: Some(join),
             lifecycle,
@@ -5348,6 +5380,10 @@ impl RawVideoFifoWriter {
         self.result_rx.try_recv().ok()
     }
 
+    fn write_progress_epoch(&self) -> u64 {
+        self.write_progress_epoch.load(Ordering::Relaxed)
+    }
+
     fn close_and_join(&mut self) {
         const WRITER_CLOSE_JOIN_GRACE: Duration = Duration::from_secs(3);
         self.close_and_join_until(Instant::now() + WRITER_CLOSE_JOIN_GRACE);
@@ -5394,9 +5430,10 @@ fn run_raw_video_fifo_writer_loop<W: StdWrite>(
     );
 }
 
+#[cfg(test)]
 fn run_raw_video_fifo_writer_loop_with_receiver<W, F>(
-    mut sink: W,
-    mut receive: F,
+    sink: W,
+    receive: F,
     result_tx: std_mpsc::SyncSender<RawVideoFifoWriterResult>,
     stop: Arc<AtomicBool>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
@@ -5405,6 +5442,52 @@ fn run_raw_video_fifo_writer_loop_with_receiver<W, F>(
     W: StdWrite,
     F: FnMut() -> Option<QueuedRawVideoFrame>,
 {
+    run_raw_video_fifo_writer_loop_with_receiver_and_progress(
+        sink,
+        receive,
+        result_tx,
+        stop,
+        terminal_failure,
+        role,
+        Arc::new(AtomicU64::new(0)),
+    );
+}
+
+struct RawVideoWriteProgressSink<W> {
+    inner: W,
+    epoch: Arc<AtomicU64>,
+}
+
+impl<W: StdWrite> StdWrite for RawVideoWriteProgressSink<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        if written > 0 {
+            self.epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
+    sink: W,
+    mut receive: F,
+    result_tx: std_mpsc::SyncSender<RawVideoFifoWriterResult>,
+    stop: Arc<AtomicBool>,
+    terminal_failure: Arc<StdMutex<Option<String>>>,
+    role: EncoderBridgeOutputRole,
+    write_progress_epoch: Arc<AtomicU64>,
+) where
+    W: StdWrite,
+    F: FnMut() -> Option<QueuedRawVideoFrame>,
+{
+    let mut sink = RawVideoWriteProgressSink {
+        inner: sink,
+        epoch: write_progress_epoch,
+    };
     while let Some(frame) = receive() {
         let write_started_at = Instant::now();
         // The deadline anchors at WRITE START, not submit time: an admitted
@@ -6932,10 +7015,11 @@ fn parse_encoder_progress_line(line: &str) -> Option<EncoderProgressUpdate> {
 }
 
 fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
-    stat_value(line, label)?
+    let value = stat_value(line, label)?
         .trim_end_matches('x')
         .parse::<f64>()
-        .ok()
+        .ok()?;
+    (value.is_finite() && value >= 0.0).then_some(value)
 }
 
 fn parse_stat_u64(line: &str, label: &str) -> Option<u64> {
@@ -8355,6 +8439,81 @@ mod tests {
                 EncoderBridgePreEncodeAdmission::FailOutput
             );
         }
+    }
+
+    #[test]
+    fn partial_raw_fifo_bytes_refresh_full_recording_queue_liveness() {
+        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        let no_progress_timeout = Duration::from_millis(20);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut writer = RawVideoFifoWriter::start_with_sink(
+            ProgressThenPauseSink {
+                writes: 0,
+                pause: Duration::from_millis(100),
+            },
+            policy,
+            stop,
+            Arc::new(StdMutex::new(None)),
+            None,
+        );
+        writer
+            .enqueue_startup(QueuedRawVideoFrame::synthetic(vec![7; 3]))
+            .expect("queue progressing raw frame");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while writer.write_progress_epoch() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            writer.write_progress_epoch() > 0,
+            "the first positive byte write must publish progress before frame completion"
+        );
+        assert!(
+            writer.try_recv_result().is_none(),
+            "the frame must still be in flight while byte progress is observed"
+        );
+
+        let mut observed_epoch = 0;
+        let mut last_output_progress_at = Instant::now() - no_progress_timeout;
+        refresh_raw_fifo_write_progress(
+            Some(&writer),
+            &mut observed_epoch,
+            &mut last_output_progress_at,
+        );
+        assert_eq!(
+            encoder_bridge_progress_aware_pre_encode_admission(
+                policy,
+                policy.max_frames as u64,
+                Some(Duration::from_millis(528)),
+                last_output_progress_at.elapsed(),
+                no_progress_timeout,
+            ),
+            EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
+            "partial FIFO bytes must keep a full recording queue alive"
+        );
+
+        thread::sleep(no_progress_timeout + Duration::from_millis(5));
+        refresh_raw_fifo_write_progress(
+            Some(&writer),
+            &mut observed_epoch,
+            &mut last_output_progress_at,
+        );
+        assert_eq!(
+            encoder_bridge_progress_aware_pre_encode_admission(
+                policy,
+                policy.max_frames as u64,
+                Some(Duration::from_millis(528)),
+                last_output_progress_at.elapsed(),
+                no_progress_timeout,
+            ),
+            EncoderBridgePreEncodeAdmission::FailOutput,
+            "a full queue must fail after actual byte progress stops"
+        );
+
+        writer.close_and_join();
     }
 
     #[test]
@@ -10931,6 +11090,11 @@ mod tests {
         delay: Duration,
     }
 
+    struct ProgressThenPauseSink {
+        writes: usize,
+        pause: Duration,
+    }
+
     #[derive(Clone, Copy)]
     enum PipePressure {
         WouldBlock,
@@ -10974,6 +11138,20 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .extend_from_slice(&bytes[..written]);
             Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl StdWrite for ProgressThenPauseSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes = self.writes.saturating_add(1);
+            if self.writes == 2 {
+                thread::sleep(self.pause);
+            }
+            Ok(bytes.len().min(1))
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -11116,6 +11294,25 @@ mod tests {
         assert_eq!(progress.encoded_fps, Some(29.95));
         assert_eq!(progress.encoder_speed, Some(0.99));
         assert_eq!(progress.dropped_frames, Some(3));
+    }
+
+    #[test]
+    fn progress_parser_rejects_non_finite_and_negative_floats() {
+        for invalid in ["NaN", "inf", "-inf", "-0.01"] {
+            assert_eq!(
+                parse_stat_f64(&format!("fps={invalid}"), "fps="),
+                None,
+                "fps={invalid} must be rejected"
+            );
+            assert_eq!(
+                parse_stat_f64(&format!("speed={invalid}x"), "speed="),
+                None,
+                "speed={invalid}x must be rejected"
+            );
+        }
+
+        assert_eq!(parse_stat_f64("fps=0", "fps="), Some(0.0));
+        assert_eq!(parse_stat_f64("speed=0x", "speed="), Some(0.0));
     }
 
     #[test]

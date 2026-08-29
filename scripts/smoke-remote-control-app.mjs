@@ -19,6 +19,8 @@ import { join } from 'node:path'
 import WebSocket from 'ws'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
@@ -93,6 +95,7 @@ try {
   const launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      VIDEORC_SMOKE_PREVIEW_MOTION: '1',
       VIDEORC_USER_DATA_DIR: userDataDir
     },
     timeoutMs,
@@ -105,6 +108,7 @@ try {
   })
   stopApp = launch.stop
   const renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
+  const smoke = launch.connections['preview-motion-ready']
 
   // 1. Enable + discovery file contract.
   const status = await request(renderer, timeoutMs, 'remote.control.enable')
@@ -181,17 +185,17 @@ try {
   await micStatePromise
   console.log('remote-control smoke: micToggle ack + confirmed state OK')
 
-  // `remote.describe` becomes available before the initial preview sources have
-  // necessarily delivered a frame. A scene switch during that startup window
-  // is correctly NACKed; wait for the source required by the target layout so
-  // this step proves the steady-state scene round trip rather than a startup
-  // race.
+  // The isolated profile intentionally has no persisted capture source. Arm the
+  // same deterministic renderer-owned test pattern used by the other live app
+  // smokes, then prove the backend compositor is actually rendering it before
+  // asking the remote surface to commit a screen-backed layout.
+  const compositorBeforeSynthetic = await request(renderer, timeoutMs, 'compositor.status')
+  await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
   await waitForBackendState(
     renderer,
-    'preview.screen.status',
-    (screen) =>
-      screen?.state === 'live' && ((screen.framesCaptured ?? 0) > 0 || screen.sequence != null),
-    'initial screen preview readiness'
+    'compositor.status',
+    (compositor) => syntheticCompositorReady(compositor, compositorBeforeSynthetic),
+    'synthetic compositor readiness'
   )
 
   const sceneAckPromise = waitForRemoteEvent(remote, 'remote.ack')

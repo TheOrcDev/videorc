@@ -46,6 +46,7 @@ import {
   sourceSurfaceSnapshot
 } from './lib/capture-decay-soak.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
+import { assertFinalizedRecordingStop } from './lib/recording-smoke-guards.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import {
   launchScreenMotionStimulus,
@@ -249,6 +250,20 @@ async function recordSession({ ws, smoke, index, sources, backendEvents }) {
     ])
   )
   const stopped = await backendRequest(ws, 'session.stop', undefined, finalizationTimeoutMs)
+  await assertFinalizedRecordingStop({
+    scenarioLabel: `Session decay ${index + 1}/${sessionCount}`,
+    started,
+    stopped,
+    loadHealthEvents: async (sessionId) => {
+      const health = await backendRequest(
+        ws,
+        'sessions.healthEvents.list',
+        { sessionId, limit: 120 },
+        Math.min(rpcTimeoutMs, 5000)
+      )
+      return health?.events ?? []
+    }
+  })
   const terminalStatus = await waitForSessionTerminalStatus({
     events: backendEvents,
     sessionId: started.sessionId,

@@ -2737,11 +2737,11 @@ fn session_attaches_live_chat(params: &protocol::StartSessionParams) -> bool {
     params.output.stream_enabled && params.streaming.is_some()
 }
 
-async fn spawn_session_live_chat(
+async fn prepare_session_live_chat(
     state: &AppState,
     session_id: &str,
     streaming: &crate::streaming::StreamingSettings,
-) {
+) -> Option<live_chat::LiveChatStartParams> {
     use std::collections::HashSet;
     let enabled: HashSet<&str> = streaming
         .enabled_target_ids
@@ -2835,9 +2835,43 @@ async fn spawn_session_live_chat(
             StreamPlatform::Custom => {}
         }
     }
-    if !params.destinations.is_empty() {
-        live_chat::start_live_chat(state, params).await;
+    (!params.destinations.is_empty()).then_some(params)
+}
+
+/// Commit one fully-prepared Comments session only while the matching capture
+/// is still active. The recording guard is deliberately held through
+/// `start_live_chat`: that function installs the coordinator session and then
+/// attaches every provider task/sender in several lock transactions. The
+/// process monitor retires the recording under this same guard before it tears
+/// Comments down, so it can no longer stop an empty coordinator and then be
+/// overtaken by a late attachment from the already-terminal session.
+async fn attach_prepared_session_live_chat(
+    state: &AppState,
+    session_id: &str,
+    params: live_chat::LiveChatStartParams,
+) -> bool {
+    debug_assert_eq!(params.session_id, session_id);
+    let recording = state.recording.lock().await;
+    let session_is_active = recording
+        .as_ref()
+        .is_some_and(|active| active.session_id == session_id && !active.stop_requested);
+    if !session_is_active {
+        return false;
     }
+    live_chat::start_live_chat(state, params).await;
+    drop(recording);
+    true
+}
+
+async fn spawn_session_live_chat(
+    state: &AppState,
+    session_id: &str,
+    streaming: &crate::streaming::StreamingSettings,
+) -> bool {
+    let Some(params) = prepare_session_live_chat(state, session_id, streaming).await else {
+        return false;
+    };
+    attach_prepared_session_live_chat(state, session_id, params).await
 }
 
 /// Well-known loopback ports for the OAuth callback listener, tried in order.
@@ -17447,6 +17481,27 @@ mod tests {
         .expect("minimal session params")
     }
 
+    fn fake_live_chat_start_params(
+        session_id: &str,
+        target_id: &str,
+    ) -> live_chat::LiveChatStartParams {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": session_id,
+            "platforms": ["youtube"],
+            "destinations": [{
+                "targetId": target_id,
+                "platform": "youtube"
+            }],
+            "fake": {
+                "platform": "youtube",
+                "targetId": target_id,
+                "count": 1,
+                "intervalMs": 60_000
+            }
+        }))
+        .expect("fake live-chat start params")
+    }
+
     fn upsert_twitch_account(state: &AppState, scopes: Vec<String>) {
         state
             .database
@@ -17469,12 +17524,15 @@ mod tests {
     #[tokio::test]
     async fn manual_twitch_stream_starts_status_only_chat_session_without_oauth_account() {
         let state = test_state();
+        *state.recording.lock().await = Some(recording::test_active_recording_stub(
+            "manual-twitch-session",
+        ));
         let streaming = streaming_with_enabled_target(
             StreamPlatform::Twitch,
             crate::streaming::StreamAuthMode::ManualRtmp,
         );
 
-        spawn_session_live_chat(&state, "manual-twitch-session", &streaming).await;
+        assert!(spawn_session_live_chat(&state, "manual-twitch-session", &streaming).await);
 
         let snapshot = live_chat::current_status(&state).await;
         assert_eq!(
@@ -17499,6 +17557,9 @@ mod tests {
     #[tokio::test]
     async fn manual_twitch_stream_surfaces_reconnect_when_account_lacks_chat_scope() {
         let state = test_state();
+        *state.recording.lock().await = Some(recording::test_active_recording_stub(
+            "stale-twitch-session",
+        ));
         upsert_twitch_account(
             &state,
             vec![
@@ -17511,7 +17572,7 @@ mod tests {
             crate::streaming::StreamAuthMode::ManualRtmp,
         );
 
-        spawn_session_live_chat(&state, "stale-twitch-session", &streaming).await;
+        assert!(spawn_session_live_chat(&state, "stale-twitch-session", &streaming).await);
 
         let snapshot = live_chat::current_status(&state).await;
         assert_eq!(snapshot.session_id.as_deref(), Some("stale-twitch-session"));
@@ -17528,6 +17589,100 @@ mod tests {
         assert_eq!(twitch.read, live_chat::CommentsReadState::Unavailable);
         assert_eq!(twitch.write, live_chat::CommentsWriteState::MissingScope);
         assert!(twitch.message.contains("Reconnect Twitch"));
+    }
+
+    #[tokio::test]
+    async fn fast_terminal_cannot_resurrect_chat_or_contaminate_a_replacement_session() {
+        let terminal_state = test_state();
+        let terminal_session_id = "fast-terminal-chat-session";
+        let mut terminal_recording = terminal_state.recording.lock().await;
+        *terminal_recording = Some(recording::test_active_recording_stub(terminal_session_id));
+
+        let late_attach_state = terminal_state.clone();
+        let late_attach = tokio::spawn(async move {
+            attach_prepared_session_live_chat(
+                &late_attach_state,
+                terminal_session_id,
+                fake_live_chat_start_params(terminal_session_id, "late-terminal-target"),
+            )
+            .await
+        });
+
+        // Model the monitor's exact retirement edge while the already-returned
+        // session.start handler is waiting to attach Comments. The monitor then
+        // tears the session-owned coordinator down after releasing this lock.
+        terminal_recording.take();
+        drop(terminal_recording);
+        live_chat::stop_live_chat(&terminal_state).await;
+
+        assert!(!late_attach.await.expect("late Comments attachment task"));
+        let terminal_snapshot = live_chat::current_status(&terminal_state).await;
+        assert_eq!(terminal_snapshot.session_id, None);
+        assert_eq!(
+            terminal_state.live_chat.lock().await.runtime_ownership(),
+            (0, 0),
+            "terminal session must retain neither connector tasks nor send credentials"
+        );
+
+        let stopping_state = test_state();
+        let stopping_session_id = "stop-requested-before-chat-attachment";
+        let mut stopping_recording = recording::test_active_recording_stub(stopping_session_id);
+        stopping_recording.stop_requested = true;
+        *stopping_state.recording.lock().await = Some(stopping_recording);
+        assert!(
+            !attach_prepared_session_live_chat(
+                &stopping_state,
+                stopping_session_id,
+                fake_live_chat_start_params(stopping_session_id, "stopping-target"),
+            )
+            .await,
+            "an exact session already committed to Stop must not attach Comments"
+        );
+        assert_eq!(
+            stopping_state.live_chat.lock().await.runtime_ownership(),
+            (0, 0)
+        );
+
+        // A delayed attachment can also resume after the next capture is live.
+        // Keep the mutex continuously owned while replacing the recording so
+        // the stale task deterministically observes the replacement, not a
+        // scheduler-dependent intermediate None.
+        let replacement_state = test_state();
+        let stale_session_id = "retired-before-chat-attachment";
+        let replacement_session_id = "replacement-chat-session";
+        let mut replacement_recording = replacement_state.recording.lock().await;
+        *replacement_recording = Some(recording::test_active_recording_stub(stale_session_id));
+        let stale_attach_state = replacement_state.clone();
+        let stale_attach = tokio::spawn(async move {
+            attach_prepared_session_live_chat(
+                &stale_attach_state,
+                stale_session_id,
+                fake_live_chat_start_params(stale_session_id, "stale-target"),
+            )
+            .await
+        });
+        *replacement_recording = Some(recording::test_active_recording_stub(
+            replacement_session_id,
+        ));
+        live_chat::start_live_chat(
+            &replacement_state,
+            fake_live_chat_start_params(replacement_session_id, "replacement-target"),
+        )
+        .await;
+        drop(replacement_recording);
+
+        assert!(!stale_attach.await.expect("stale Comments attachment task"));
+        let replacement_snapshot = live_chat::current_status(&replacement_state).await;
+        assert_eq!(
+            replacement_snapshot.session_id.as_deref(),
+            Some(replacement_session_id)
+        );
+        assert_eq!(
+            replacement_state.live_chat.lock().await.runtime_ownership(),
+            (1, 1),
+            "stale attachment must not replace or append to the replacement connector set"
+        );
+        live_chat::stop_live_chat(&replacement_state).await;
     }
 
     #[test]

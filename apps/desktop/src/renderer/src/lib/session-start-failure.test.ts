@@ -1,12 +1,67 @@
 import { describe, expect, it, vi } from 'vitest'
 
 import {
+  reconcileSessionStartResponse,
   reduceSessionStartFailure,
   SESSION_START_FAILED_TOAST_ID,
   SESSION_START_FAILED_TOAST_TITLE,
   sessionStartFailureMessage,
   sessionStartFailureToastOptions
 } from './session-start-failure'
+
+describe('reconcileSessionStartResponse', () => {
+  it.each(['stopping', 'idle', 'failed'] as const)(
+    'keeps an exact-session %s event authoritative over a late active response',
+    (authoritativeState) => {
+      const authoritativeStatus = {
+        state: authoritativeState,
+        sessionId: 'session-raced',
+        message: 'The session ended while start was replying.'
+      } as const
+
+      expect(
+        reconcileSessionStartResponse(
+          { state: 'streaming', sessionId: 'session-raced', streamUrl: 'rtmp://example/live' },
+          authoritativeStatus
+        )
+      ).toEqual({
+        status: authoritativeStatus,
+        supersededByAuthoritativeEvent: true,
+        sessionActive: false
+      })
+    }
+  )
+
+  it('does not let another session terminal event suppress the returned session', () => {
+    const response = { state: 'recording', sessionId: 'session-current' } as const
+
+    expect(
+      reconcileSessionStartResponse(response, {
+        state: 'failed',
+        sessionId: 'session-previous'
+      })
+    ).toEqual({
+      status: response,
+      supersededByAuthoritativeEvent: false,
+      sessionActive: true
+    })
+  })
+
+  it('does not treat another active event as proof that the returned session is ending', () => {
+    const response = { state: 'recording', sessionId: 'session-current' } as const
+
+    expect(
+      reconcileSessionStartResponse(response, {
+        state: 'streaming',
+        sessionId: 'session-current'
+      })
+    ).toEqual({
+      status: response,
+      supersededByAuthoritativeEvent: false,
+      sessionActive: true
+    })
+  })
+})
 
 const BARRIER_MESSAGE =
   'Recording startup blocked before encoding: latest compositor frame gap 700ms exceeds startup cadence budget 200ms (recent gaps 700/690/710 ms; 4 fresh frame(s) in 2500ms); cadence budget 200ms.'

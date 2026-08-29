@@ -2752,6 +2752,10 @@ pub struct CaptionsCoordinator {
     status: Option<CaptionsStatus>,
     desired_enabled: bool,
     language: Option<String>,
+    /// Orders delayed capture auto-start against explicit stop/start, capture
+    /// stop, sign-out, and shutdown. A queued task may commit only the exact
+    /// generation reserved by its session.start request.
+    start_intent_generation: u64,
     /// Transcribed chunks awaiting the post-recording pass (drained +
     /// epoch-filtered at session stop).
     chunks: Vec<CaptionChunkRecord>,
@@ -2855,6 +2859,28 @@ pub async fn set_caption_session_style(
         output_width,
         output_height,
     };
+}
+
+fn advance_caption_start_intent(coordinator: &mut CaptionsCoordinator) -> u64 {
+    coordinator.start_intent_generation = coordinator.start_intent_generation.wrapping_add(1);
+    coordinator.start_intent_generation
+}
+
+/// Reserves one capture-owned caption auto-start generation. Explicit caption
+/// or privacy commands take the same control lane and invalidate this token.
+pub async fn reserve_caption_session_start(state: &AppState) -> Option<u64> {
+    if state.process_shutdown_requested() {
+        return None;
+    }
+    let _control = CAPTION_CONTROL.lock().await;
+    if state.process_shutdown_requested() {
+        return None;
+    }
+    let mut coordinator = state.captions.lock().await;
+    if coordinator.privacy_teardown_in_progress || coordinator.privacy_teardown_failed {
+        return None;
+    }
+    Some(advance_caption_start_intent(&mut coordinator))
 }
 
 pub async fn update_caption_style(
@@ -3180,15 +3206,55 @@ async fn publish_status(state: &AppState, status: CaptionsStatus) {
 }
 
 pub async fn start_captions(state: &AppState, language: Option<String>) -> Result<CaptionsStatus> {
-    start_captions_with_bearer(state, language, crate::account::stored_session_token).await
+    start_captions_with_bearer_for_session(
+        state,
+        None,
+        language,
+        crate::account::stored_session_token,
+    )
+    .await
+    .map(|status| status.expect("unscoped caption start always returns a status"))
 }
 
+#[cfg(test)]
 async fn start_captions_with_bearer(
     state: &AppState,
     language: Option<String>,
     resolve_bearer: impl FnOnce() -> Option<String> + Send,
 ) -> Result<CaptionsStatus> {
+    start_captions_with_bearer_for_session(state, None, language, resolve_bearer)
+        .await
+        .map(|status| status.expect("unscoped caption start always returns a status"))
+}
+
+/// Starts captions only while the exact recording generation that requested
+/// them still owns the capture slot. A stale queued task returns `None`
+/// without changing global caption state or attaching to a replacement run.
+pub async fn start_captions_for_session(
+    state: &AppState,
+    session_id: &str,
+    start_intent_generation: u64,
+    language: Option<String>,
+) -> Result<Option<CaptionsStatus>> {
+    start_captions_with_bearer_for_session(
+        state,
+        Some((session_id, start_intent_generation)),
+        language,
+        crate::account::stored_session_token,
+    )
+    .await
+}
+
+async fn start_captions_with_bearer_for_session(
+    state: &AppState,
+    expected_session: Option<(&str, u64)>,
+    language: Option<String>,
+    resolve_bearer: impl FnOnce() -> Option<String> + Send,
+) -> Result<Option<CaptionsStatus>> {
     if state.process_shutdown_requested() {
+        if expected_session.is_some() {
+            return Ok(None);
+        }
         bail!(CAPTION_START_SHUTDOWN_MESSAGE);
     }
     let _control = CAPTION_CONTROL.lock().await;
@@ -3196,17 +3262,80 @@ async fn start_captions_with_bearer(
     // start which was already queued must not recreate the tap/provider after
     // that drain releases the control lock.
     if state.process_shutdown_requested() {
+        if expected_session.is_some() {
+            return Ok(None);
+        }
         bail!(CAPTION_START_SHUTDOWN_MESSAGE);
     }
-    if state.captions.lock().await.privacy_teardown_in_progress {
-        bail!(CAPTION_START_SIGN_OUT_MESSAGE);
+    {
+        let mut coordinator = state.captions.lock().await;
+        if coordinator.privacy_teardown_in_progress || coordinator.privacy_teardown_failed {
+            if expected_session.is_some() {
+                return Ok(None);
+            }
+            bail!(CAPTION_START_SIGN_OUT_MESSAGE);
+        }
+        if let Some((_, expected_generation)) = expected_session {
+            if coordinator.start_intent_generation != expected_generation {
+                return Ok(None);
+            }
+        } else {
+            advance_caption_start_intent(&mut coordinator);
+        }
     }
-    let Some(bearer) = resolve_bearer() else {
-        bail!("Sign in to use live captions.");
+    // Hold the exact recording generation until the caption task is installed.
+    // The process monitor cannot retire session A (and session B therefore
+    // cannot replace it) between this check and the global caption commit.
+    let expected_recording = match expected_session {
+        Some((session_id, _)) => {
+            let recording = state.recording.lock().await;
+            if !recording
+                .as_ref()
+                .is_some_and(|active| active.session_id == session_id && !active.stop_requested)
+            {
+                return Ok(None);
+            }
+            Some(recording)
+        }
+        None => None,
     };
-    let client = VideorcApiClient::new()?;
+    let bearer = match resolve_bearer() {
+        Some(bearer) => bearer,
+        None => {
+            let error = anyhow::anyhow!("Sign in to use live captions.");
+            if expected_recording.is_some() {
+                block_captions_after_control(
+                    state,
+                    "captions-start-failed",
+                    format!("Live captions could not start: {error}"),
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
+    let client = match VideorcApiClient::new() {
+        Ok(client) => client,
+        Err(error) => {
+            if expected_recording.is_some() {
+                block_captions_after_control(
+                    state,
+                    "captions-start-failed",
+                    format!("Live captions could not start: {error}"),
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
     let language = normalize_caption_language(language);
-    let capture_elapsed_seconds = crate::recording::active_capture_elapsed_seconds(state).await;
+    let capture_elapsed_seconds = if let Some(recording) = expected_recording.as_ref() {
+        recording
+            .as_ref()
+            .map(crate::recording::ActiveRecording::capture_elapsed_seconds)
+    } else {
+        crate::recording::active_capture_elapsed_seconds(state).await
+    };
     let capture_active =
         capture_elapsed_seconds.is_some() || caption_contract_idle_session_enabled();
 
@@ -3221,7 +3350,7 @@ async fn start_captions_with_bearer(
         remove_tap();
         let status = CaptionsStatus::ready();
         set_status(state, &mut coordinator, status.clone());
-        return Ok(status);
+        return Ok(Some(status));
     }
     if let (Some(task), Some(status)) = (coordinator.task.as_ref(), coordinator.status.as_ref())
         && !task.is_finished()
@@ -3233,7 +3362,7 @@ async fn start_captions_with_bearer(
                 | CaptionsState::Degraded
         )
     {
-        return Ok(status.clone());
+        return Ok(Some(status.clone()));
     }
     if let Some(task) = coordinator.task.take() {
         task.abort();
@@ -3267,11 +3396,15 @@ async fn start_captions_with_bearer(
     })));
     coordinator.stop = Some(stop);
 
-    Ok(status)
+    Ok(Some(status))
 }
 
 pub async fn stop_captions(state: &AppState) -> CaptionsStatus {
     let _control = CAPTION_CONTROL.lock().await;
+    {
+        let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
+    }
     // Explicit opt-out is a privacy boundary: do not transcribe audio already
     // queued behind the user's click. Graceful draining is reserved for the
     // capture-finalization path below so its last settled cue can reach SRT.
@@ -3307,6 +3440,7 @@ pub async fn stop_captions_for_sign_out(
     ) = {
         let _control = CAPTION_CONTROL.lock().await;
         let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
         // A previous bounded attempt may have failed, but its durable ledger
         // and retained task handles remain authoritative cleanup ownership.
         // Every retry still detaches the provider/tap first and then retries
@@ -3443,6 +3577,10 @@ pub async fn shutdown_caption_runtime(state: &AppState) {
 }
 
 async fn shutdown_caption_runtime_after_control(state: &AppState) {
+    {
+        let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
+    }
     finish_caption_task(state, true, false).await;
     TAP_FRAMES_SEEN.store(0, Ordering::Release);
     TAP_FRAMES_DROPPED.store(0, Ordering::Release);
@@ -3485,6 +3623,7 @@ pub async fn finish_captions_for_capture(state: &AppState) -> CaptionsStatus {
     let _control = CAPTION_CONTROL.lock().await;
     {
         let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
         if coordinator.privacy_teardown_in_progress {
             // Sign-out already took the provider and advanced the artifact
             // generation. Capture finalization must remain non-blocking but
@@ -3577,6 +3716,14 @@ pub async fn block_captions_for_audio_path(state: &AppState, message: impl Into<
 
 pub async fn block_captions(state: &AppState, reason_code: &str, message: impl Into<String>) {
     let _control = CAPTION_CONTROL.lock().await;
+    block_captions_after_control(state, reason_code, message.into()).await;
+}
+
+async fn block_captions_after_control(state: &AppState, reason_code: &str, message: String) {
+    {
+        let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
+    }
     // A block is terminal for this runtime. Discard pending PCM just like an
     // explicit opt-out; only a normal capture end may drain final audio.
     finish_caption_task(state, true, false).await;
@@ -3586,7 +3733,7 @@ pub async fn block_captions(state: &AppState, reason_code: &str, message: impl I
         let mut status = CaptionsStatus::ready();
         status.state = CaptionsState::Blocked;
         status.reason_code = Some(reason_code.to_string());
-        status.message = Some(message.into());
+        status.message = Some(message);
         coordinator.status = Some(status.clone());
         status
     };
@@ -5400,6 +5547,189 @@ mod tests {
     fn test_caption_app_state_with_database(database: crate::storage::Database) -> AppState {
         let (events, _) = tokio::sync::broadcast::channel(16);
         AppState::new("test-token".to_string(), 0, events, database)
+    }
+
+    #[tokio::test]
+    async fn queued_caption_start_error_cannot_block_a_replacement_session() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "finished-session",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+
+        let caption_control = CAPTION_CONTROL.lock().await;
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+        let queued_state = state.clone();
+        let queued_start = tokio::spawn(async move {
+            queued_tx.send(()).expect("caption start queue signal");
+            start_captions_with_bearer_for_session(
+                &queued_state,
+                Some(("finished-session", start_intent_generation)),
+                Some("en".to_string()),
+                || None,
+            )
+            .await
+        });
+        queued_rx
+            .await
+            .expect("caption start reached control queue");
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "replacement-session",
+        ));
+        drop(caption_control);
+
+        let status = queued_start
+            .await
+            .expect("queued caption start task")
+            .expect("a stale generation is a quiet no-op");
+
+        assert!(status.is_none());
+        let coordinator = state.captions.lock().await;
+        assert!(!coordinator.desired_enabled);
+        assert!(coordinator.task.is_none());
+        assert!(coordinator.stop.is_none());
+    }
+
+    #[tokio::test]
+    async fn exact_session_caption_start_error_commits_blocked_before_replacement() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "caption-start-failure",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+
+        let error = start_captions_with_bearer_for_session(
+            &state,
+            Some(("caption-start-failure", start_intent_generation)),
+            Some("en".to_string()),
+            || None,
+        )
+        .await
+        .expect_err("missing credentials must reject captions");
+
+        assert_eq!(error.to_string(), "Sign in to use live captions.");
+        let coordinator = state.captions.lock().await;
+        let status = coordinator.status.as_ref().expect("blocked caption status");
+        assert_eq!(status.state, CaptionsState::Blocked);
+        assert_eq!(status.reason_code.as_deref(), Some("captions-start-failed"));
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("Sign in to use live captions"))
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_caption_stop_invalidates_queued_session_auto_start() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "caption-stop-wins",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+
+        let held_control = CAPTION_CONTROL.lock().await;
+        let (stop_queued_tx, stop_queued_rx) = tokio::sync::oneshot::channel();
+        let stop_state = state.clone();
+        let stop = tokio::spawn(async move {
+            stop_queued_tx.send(()).expect("caption stop queue signal");
+            stop_captions(&stop_state).await
+        });
+        stop_queued_rx.await.expect("caption stop reached queue");
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_captions_with_bearer_for_session(
+                &start_state,
+                Some(("caption-stop-wins", start_intent_generation)),
+                Some("en".to_string()),
+                || Some("must-not-be-used".to_string()),
+            )
+            .await
+        });
+        drop(held_control);
+
+        assert_eq!(
+            stop.await.expect("caption stop task").state,
+            CaptionsState::Idle
+        );
+        assert!(
+            start
+                .await
+                .expect("queued auto-start task")
+                .expect("invalidated auto-start is a quiet no-op")
+                .is_none()
+        );
+        let coordinator = state.captions.lock().await;
+        assert!(!coordinator.desired_enabled);
+        assert!(coordinator.task.is_none());
+    }
+
+    #[tokio::test]
+    async fn recording_stop_intent_invalidates_queued_caption_auto_start() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "recording-stop-wins",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+        state
+            .recording
+            .lock()
+            .await
+            .as_mut()
+            .expect("active recording")
+            .stop_requested = true;
+
+        let status = start_captions_with_bearer_for_session(
+            &state,
+            Some(("recording-stop-wins", start_intent_generation)),
+            Some("en".to_string()),
+            || None,
+        )
+        .await
+        .expect("stopping recording invalidates auto-start");
+
+        assert!(status.is_none());
+        assert!(!state.captions.lock().await.desired_enabled);
+    }
+
+    #[tokio::test]
+    async fn completed_sign_out_invalidates_queued_caption_auto_start() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "sign-out-wins",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+
+        let signed_out = stop_captions_for_sign_out(&state, || {}).await;
+        assert_eq!(signed_out.state, CaptionsState::Idle);
+        let status = start_captions_with_bearer_for_session(
+            &state,
+            Some(("sign-out-wins", start_intent_generation)),
+            Some("en".to_string()),
+            || None,
+        )
+        .await
+        .expect("completed sign-out invalidates auto-start");
+
+        assert!(status.is_none());
+        let coordinator = state.captions.lock().await;
+        assert!(!coordinator.desired_enabled);
+        assert!(coordinator.task.is_none());
     }
 
     #[tokio::test]

@@ -242,6 +242,7 @@ import type {
   StreamingSettings,
   StreamTargetRuntime,
   StreamTargetSettings,
+  StreamTargetStatus,
   StreamTargetsSnapshot,
   SupportBundleExportParams,
   SupportBundleExportResult,
@@ -329,6 +330,7 @@ import {
 } from '@/lib/native-preview-present-policy'
 import { isPremiumUpgradeMessage, premiumRequiredIssueMessage } from '@/lib/premium-upgrade'
 import {
+  reconcileSessionStartResponse,
   reduceSessionStartFailure,
   SESSION_START_FAILED_TOAST_ID,
   SESSION_START_FAILED_TOAST_TITLE,
@@ -381,11 +383,32 @@ type CaptionOverlayWork = {
   position: 'top' | 'bottom'
 }
 
+type PlatformLifecycleOwner = {
+  sessionId: string
+  streaming: StreamingSettings
+}
+
+type PlatformBroadcastCleanupResult = {
+  streaming: StreamingSettings
+  complete: boolean
+}
+
+type PlatformLifecycleSettlement = {
+  sessionId: string
+  promise: Promise<PlatformBroadcastCleanupResult>
+}
+
 const NATIVE_PREVIEW_SURFACE_PRESENT_REPORT_INTERVAL_MS = 250
+const PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX = 'prepared-platform:'
+const PLATFORM_CLEANUP_X_END_TIMEOUT_MS = 4000
 const WORKSPACE_NAVIGATE_EVENT = 'videorc:navigate-workspace'
 const AI_CONSENT_STORAGE_KEY = 'videorc.aiConsent'
 const RECORDING_STOPPED_UNEXPECTEDLY_TOAST_ID = 'recording-stopped-unexpectedly'
 const MICROPHONE_INPUT_LOST_TOAST_ID = 'microphone-input-lost'
+
+function isPreparedPlatformLifecycleOwner(sessionId: string): boolean {
+  return sessionId.startsWith(PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX)
+}
 
 function loadSessionRuntimeRecovery() {
   return import('@/lib/session-runtime-recovery')
@@ -1920,6 +1943,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [updateLiveChatSnapshot]
   )
+  const clearLiveChatForTerminalSession = useCallback(
+    (sessionId?: string): void => {
+      if (!sessionId || liveChatSnapshotRef.current.sessionId !== sessionId) {
+        return
+      }
+      const cleared = createEmptyLiveChatSnapshot(new Date().toISOString())
+      latestLiveChatSendOperationRef.current = undefined
+      liveChatSendOperationRevisionRef.current += 1
+      replaceLiveChatSnapshotState(cleared)
+      void window.videorc?.pushCommentsSnapshot?.({
+        mode: { kind: 'live' },
+        snapshot: cleared
+      })
+    },
+    [replaceLiveChatSnapshotState]
+  )
   const latestLiveChatSendOperationRef = useRef<CommentsSendOperation | undefined>(undefined)
   const liveChatSendOperationRevisionRef = useRef(0)
   const replaceLiveChatSendOperation = useCallback(
@@ -2906,6 +2945,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const previewCameraStatusRef = useRef<PreviewCameraStatus>(idlePreviewCameraStatus())
   const previewScreenStatusRef = useRef<PreviewScreenStatus>(idlePreviewScreenStatus())
   const recordingRef = useRef<RecordingStatus>({ state: 'idle', message: 'Ready.' })
+  const sessionStartLifecycleActiveRef = useRef(false)
+  const sessionStartLifecycleSessionIdRef = useRef<string | null>(null)
+  const sessionStartLifecycleInvalidatedSessionIdsRef = useRef<Set<string>>(new Set())
+  const sessionStartInFlightRef = useRef<{
+    captureConfig: CaptureConfig
+    sceneWithBackground: Scene | null
+    sceneEditMode: boolean
+    settings: SettingsState
+    streamingOverride?: StreamingSettings
+    suppressCaptionsForSession: boolean
+    promise: Promise<boolean>
+  } | null>(null)
+  const confirmGoLiveInFlightPromiseRef = useRef<Promise<void> | null>(null)
+  const stopSessionInFlightPromiseRef = useRef<Promise<boolean> | null>(null)
+  const sessionStartAuthoritativeStatusesRef = useRef<Map<string, RecordingStatus>>(new Map())
   // Late-bound mirror so applyRecordingStatus (declared earlier) can trigger the
   // consolidated frame-polling suppression defined with the preview window state.
   const syncFramePollingSuppressionRef = useRef<(() => void) | null>(null)
@@ -2948,7 +3002,39 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const automaticSourceFallbacks = useRef<AutomaticSourceFallbackEvent[]>([])
   const toastedFailedTargets = useRef<Set<string>>(new Set())
   const platformLifecycleRun = useRef(0)
-  const platformLifecycleStreamingRef = useRef<StreamingSettings | null>(null)
+  const platformLifecycleOwnerRef = useRef<PlatformLifecycleOwner | null>(null)
+  const preparedPlatformLifecycleOwnersRef = useRef<PlatformLifecycleOwner[]>([])
+  const preparedPlatformLifecycleOwnerSequenceRef = useRef(0)
+  const platformLifecycleMutationRef = useRef<{
+    sessionId: string
+    promise: Promise<StreamingSettings>
+  } | null>(null)
+  const platformLifecycleSettlementRef = useRef<PlatformLifecycleSettlement | null>(null)
+  const claimPlatformLifecycleOwner = useCallback((sessionId?: string) => {
+    if (!sessionId || platformLifecycleOwnerRef.current?.sessionId !== sessionId) {
+      return null
+    }
+    const owner = platformLifecycleOwnerRef.current
+    platformLifecycleOwnerRef.current = null
+    return owner
+  }, [])
+  const settleClaimedPlatformLifecycleOwnerRef = useRef<
+    | ((
+        owner: PlatformLifecycleOwner,
+        task?: (owner: PlatformLifecycleOwner) => Promise<PlatformBroadcastCleanupResult>
+      ) => Promise<PlatformBroadcastCleanupResult>)
+    | null
+  >(null)
+  const youtubeCompletionInFlightByBroadcastRef = useRef<
+    Map<string, { client: BackendClient; promise: Promise<YouTubeBroadcastTransitionResult> }>
+  >(new Map())
+  const youtubeCompletedBroadcastResultsRef = useRef<Map<string, YouTubeBroadcastTransitionResult>>(
+    new Map()
+  )
+  const xEndInFlightByBroadcastRef = useRef<
+    Map<string, { client: BackendClient; promise: Promise<XEndResult> }>
+  >(new Map())
+  const xEndedBroadcastResultsRef = useRef<Map<string, XEndResult>>(new Map())
   // One-shot playback toasts per broadcast+status (probe events may repeat).
   const xPlaybackToastsRef = useRef(new Set<string>())
   const [previewRefreshNonce, setPreviewRefreshNonce] = useState(0)
@@ -5153,10 +5239,53 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('recording.status', (payload) => {
         bootstrapGuard.mark('recording')
         bootstrapGuard.mark('sessions')
-        const status = payload as RecordingStatus
-        const previousState = lastRecordingStateRef.current ?? recordingRef.current.state
+        const incomingStatus = payload as RecordingStatus
+        const previousState = recordingRef.current.state ?? lastRecordingStateRef.current
         const previousSessionId =
-          lastRecordingSessionIdRef.current ?? recordingRef.current.sessionId
+          recordingRef.current.sessionId ?? lastRecordingSessionIdRef.current
+        const exactTerminalSessionId =
+          incomingStatus.sessionId ??
+          ((incomingStatus.state === 'idle' || incomingStatus.state === 'failed') &&
+          ['recording', 'streaming', 'stopping'].includes(previousState ?? '') &&
+          previousSessionId &&
+          platformLifecycleOwnerRef.current?.sessionId === previousSessionId
+            ? previousSessionId
+            : undefined)
+        // Some backend terminal pushes omit the session ID. Once the renderer
+        // owns an exact active-session provider snapshot, correlate that push
+        // before startup reconciliation as well as autonomous settlement.
+        const status =
+          exactTerminalSessionId && !incomingStatus.sessionId
+            ? { ...incomingStatus, sessionId: exactTerminalSessionId }
+            : incomingStatus
+        if (
+          sessionStartLifecycleActiveRef.current &&
+          status.sessionId &&
+          (status.state === 'stopping' || status.state === 'idle' || status.state === 'failed')
+        ) {
+          sessionStartAuthoritativeStatusesRef.current.set(status.sessionId, status)
+          if (
+            sessionStartLifecycleSessionIdRef.current === status.sessionId &&
+            !sessionStartLifecycleInvalidatedSessionIdsRef.current.has(status.sessionId)
+          ) {
+            sessionStartLifecycleInvalidatedSessionIdsRef.current.add(status.sessionId)
+            platformLifecycleRun.current += 1
+          }
+        }
+        if (
+          !sessionStartLifecycleActiveRef.current &&
+          exactTerminalSessionId &&
+          (status.state === 'idle' || status.state === 'failed')
+        ) {
+          const settleOwner = settleClaimedPlatformLifecycleOwnerRef.current
+          const owner = settleOwner ? claimPlatformLifecycleOwner(exactTerminalSessionId) : null
+          if (owner && settleOwner) {
+            platformLifecycleRun.current += 1
+            void settleOwner(owner).catch(reportError)
+          }
+          liveChatMessageBatcher.clear()
+          clearLiveChatForTerminalSession(exactTerminalSessionId)
+        }
         lastRecordingStateRef.current = status.state
         if (status.sessionId) {
           lastRecordingSessionIdRef.current = status.sessionId
@@ -6046,6 +6175,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     applyPreviewSurfaceStatus,
     applyPreviewSurfaceStatusThrottled,
     applyRecordingStatus,
+    claimPlatformLifecycleOwner,
+    clearLiveChatForTerminalSession,
     commitActiveScreen,
     commitCohostState,
     commitCaptureRecoveryStatus,
@@ -9500,7 +9631,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   })()
 
   const activatePreparedYouTubeBroadcasts = useCallback(
-    async (streamingForStart: StreamingSettings, runId: number) => {
+    async (streamingForStart: StreamingSettings, runId: number, sessionId?: string) => {
       if (!client) {
         return
       }
@@ -9542,6 +9673,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 streamId
               }
             )
+            if (platformLifecycleRun.current !== runId) {
+              return
+            }
             const statusSnapshot = lastStatus
             setCaptureConfig((current) =>
               bridgeStreamingToLegacy({
@@ -9567,15 +9701,38 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             return
           }
 
-          const transition = await client.request<YouTubeBroadcastTransitionResult>(
-            'streamTargets.youtube.transition',
-            {
+          const transitionRequest = client
+            .request<YouTubeBroadcastTransitionResult>('streamTargets.youtube.transition', {
               accountId: target.accountId,
               broadcastId,
               status: 'live'
+            })
+            .then((result) => {
+              assertYouTubeTransitionConfirmed(result, 'live')
+              return result
+            })
+          const mutationEntry = sessionId
+            ? {
+                sessionId,
+                promise: transitionRequest.then(
+                  () => streamingForStart,
+                  () => streamingForStart
+                )
+              }
+            : null
+          if (mutationEntry) {
+            platformLifecycleMutationRef.current = mutationEntry
+          }
+          try {
+            await transitionRequest
+          } finally {
+            if (platformLifecycleMutationRef.current === mutationEntry) {
+              platformLifecycleMutationRef.current = null
             }
-          )
-          assertYouTubeTransitionConfirmed(transition, 'live')
+          }
+          if (platformLifecycleRun.current !== runId) {
+            return
+          }
           setCaptureConfig((current) =>
             bridgeStreamingToLegacy({
               ...current,
@@ -9588,6 +9745,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             })
           )
         } catch (error) {
+          if (platformLifecycleRun.current !== runId) {
+            return
+          }
           const message = error instanceof Error ? error.message : String(error)
           setCaptureConfig((current) =>
             bridgeStreamingToLegacy({
@@ -9610,12 +9770,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const activatePreparedXBroadcasts = useCallback(
-    async (streamingForStart: StreamingSettings, runId: number, sessionId?: string) => {
+    async (
+      streamingForStart: StreamingSettings,
+      runId: number,
+      sessionId?: string
+    ): Promise<StreamingSettings> => {
       if (!client) {
-        return
+        return streamingForStart
       }
 
       const xTargets = preparedXActivationTargets(streamingForStart)
+      let nextStreaming = streamingForStart
 
       for (const target of xTargets) {
         const sourceId = target.platformStreamId
@@ -9624,7 +9789,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           continue
         }
         if (platformLifecycleRun.current !== runId) {
-          return
+          return nextStreaming
         }
 
         try {
@@ -9642,16 +9807,70 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
           // Metadata (title, announce-on-timeline) is derived backend-side
           // from the stream metadata draft — never hardcoded here.
-          const result = await client.request<XPublishResult>('streamTargets.x.publish', {
+          const publishRequest = client.request<XPublishResult>('streamTargets.x.publish', {
             accountId: target.accountId,
             sourceId,
             region,
             isLowLatency: true,
             sessionId
           })
+          const publishedStreamingPromise = publishRequest.then((result) =>
+            patchPreparedStreamTarget(nextStreaming, target.id, {
+              accountId: result.accountId,
+              platformBroadcastId: result.broadcastId,
+              platformStreamId: result.mediaKey,
+              status: {
+                state: 'live',
+                message: result.tweetError
+                  ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
+                  : `X broadcast is live: ${result.shareUrl}`,
+                redactedUrl: result.shareUrl,
+                ...(result.tweetError ? { lastError: result.tweetError } : {})
+              }
+            })
+          )
+          const mutationEntry = sessionId
+            ? {
+                sessionId,
+                promise: publishedStreamingPromise.then(
+                  (streaming) => streaming,
+                  () => nextStreaming
+                )
+              }
+            : null
+          if (mutationEntry) {
+            platformLifecycleMutationRef.current = mutationEntry
+          }
+          let result: XPublishResult
+          try {
+            result = await publishRequest
+            nextStreaming = await publishedStreamingPromise
+          } finally {
+            if (platformLifecycleMutationRef.current === mutationEntry) {
+              platformLifecycleMutationRef.current = null
+            }
+          }
+
+          const publishedBroadcastEndKey = JSON.stringify([result.accountId, result.broadcastId])
+          xEndInFlightByBroadcastRef.current.delete(publishedBroadcastEndKey)
+          xEndedBroadcastResultsRef.current.delete(publishedBroadcastEndKey)
+          const publishedStatus: StreamTargetStatus = {
+            state: 'live',
+            message: result.tweetError
+              ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
+              : `X broadcast is live: ${result.shareUrl}`,
+            redactedUrl: result.shareUrl,
+            ...(result.tweetError ? { lastError: result.tweetError } : {})
+          }
+          if (sessionId && platformLifecycleOwnerRef.current?.sessionId === sessionId) {
+            platformLifecycleOwnerRef.current = {
+              sessionId,
+              streaming: nextStreaming
+            }
+          }
 
           if (platformLifecycleRun.current !== runId) {
-            return
+            return nextStreaming
           }
 
           setCaptureConfig((current) =>
@@ -9661,13 +9880,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 accountId: result.accountId,
                 platformBroadcastId: result.broadcastId,
                 platformStreamId: result.mediaKey,
-                status: {
-                  state: result.tweetError ? 'warning' : 'live',
-                  message: result.tweetError
-                    ? `X broadcast is live, but the announcement post failed: ${result.tweetError}`
-                    : `X broadcast is live: ${result.shareUrl}`,
-                  redactedUrl: result.shareUrl
-                }
+                status: publishedStatus
               })
             })
           )
@@ -9690,6 +9903,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'warning',
+              message: `X go-live needs review: ${message}`
+            }
+          })
+          if (platformLifecycleRun.current !== runId) {
+            return nextStreaming
+          }
           setCaptureConfig((current) =>
             bridgeStreamingToLegacy({
               ...current,
@@ -9706,6 +9928,58 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           })
         }
       }
+      return nextStreaming
+    },
+    [client]
+  )
+
+  const endXBroadcastOnce = useCallback(
+    (
+      target: StreamTargetSettings,
+      broadcastId: string,
+      sessionId?: string
+    ): Promise<XEndResult> => {
+      if (!client) {
+        return Promise.reject(new Error('Backend socket is not connected.'))
+      }
+      const endKey = JSON.stringify([target.accountId ?? '', broadcastId])
+      const completed = xEndedBroadcastResultsRef.current.get(endKey)
+      if (completed) {
+        return Promise.resolve(completed)
+      }
+      const pending = xEndInFlightByBroadcastRef.current.get(endKey)
+      if (pending?.client === client) {
+        return pending.promise
+      }
+
+      const promise = client.request<XEndResult>('streamTargets.x.end', {
+        accountId: target.accountId,
+        broadcastId,
+        sessionId
+      })
+      const entry = { client, promise }
+      xEndInFlightByBroadcastRef.current.set(endKey, entry)
+      void promise.then(
+        (result) => {
+          if (xEndInFlightByBroadcastRef.current.get(endKey) !== entry) {
+            return
+          }
+          xEndInFlightByBroadcastRef.current.delete(endKey)
+          xEndedBroadcastResultsRef.current.set(endKey, result)
+          if (xEndedBroadcastResultsRef.current.size > 128) {
+            const oldestKey = xEndedBroadcastResultsRef.current.keys().next().value
+            if (oldestKey) {
+              xEndedBroadcastResultsRef.current.delete(oldestKey)
+            }
+          }
+        },
+        () => {
+          if (xEndInFlightByBroadcastRef.current.get(endKey) === entry) {
+            xEndInFlightByBroadcastRef.current.delete(endKey)
+          }
+        }
+      )
+      return promise
     },
     [client]
   )
@@ -9744,20 +10018,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          const endRequest = client.request<XEndResult>('streamTargets.x.end', {
-            accountId: target.accountId,
-            broadcastId,
-            sessionId
-          })
-          // Never hold the encoder stop hostage to a slow END: on timeout the
-          // target stays 'live' so the post-stop cleanup pass retries it.
+          const endRequest = endXBroadcastOnce(target, broadcastId, sessionId)
+          // Never hold capture settlement hostage to a slow END. Keep the
+          // underlying single-flight request registered, but bound every
+          // caller's wait and retain the exact owner for a later retry.
           const result = timeoutMs
-            ? await Promise.race([
-                endRequest,
-                new Promise<never>((_, reject) =>
-                  setTimeout(() => reject(new Error('x-end-timeout')), timeoutMs)
+            ? await new Promise<XEndResult>((resolve, reject) => {
+                const timeout = setTimeout(() => reject(new Error('x-end-timeout')), timeoutMs)
+                void endRequest.then(
+                  (value) => {
+                    clearTimeout(timeout)
+                    resolve(value)
+                  },
+                  (error) => {
+                    clearTimeout(timeout)
+                    reject(error)
+                  }
                 )
-              ])
+              })
             : await endRequest
           nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
             status: {
@@ -9779,13 +10057,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
           if (message === 'x-end-timeout') {
-            // Leave the target 'live'; the post-stop pass retries the END.
+            // Leave the target cleanup-eligible. The exact owner is retained
+            // and a later settlement can rejoin the same request for a bounded
+            // interval without issuing a duplicate END.
             continue
           }
           nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
             status: {
               state: 'warning',
-              message: `X cleanup needs review: ${message}`
+              message: `X cleanup needs review: ${message}`,
+              ...(target.status?.redactedUrl ? { redactedUrl: target.status.redactedUrl } : {})
             }
           })
           setCaptureConfig((current) =>
@@ -9794,7 +10075,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               streaming: patchPreparedStreamTarget(current.streaming, target.id, {
                 status: {
                   state: 'warning',
-                  message: `X cleanup needs review: ${message}`
+                  message: `X cleanup needs review: ${message}`,
+                  ...(target.status?.redactedUrl ? { redactedUrl: target.status.redactedUrl } : {})
                 }
               })
             })
@@ -9806,15 +10088,76 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       return nextStreaming
     },
+    [client, endXBroadcastOnce]
+  )
+
+  const completeYouTubeBroadcastOnce = useCallback(
+    (
+      target: StreamTargetSettings,
+      broadcastId: string
+    ): Promise<YouTubeBroadcastTransitionResult> => {
+      if (!client) {
+        return Promise.reject(new Error('Backend socket is not connected.'))
+      }
+      const completionKey = JSON.stringify([target.accountId ?? '', broadcastId])
+      const completed = youtubeCompletedBroadcastResultsRef.current.get(completionKey)
+      if (completed) {
+        return Promise.resolve(completed)
+      }
+      const pending = youtubeCompletionInFlightByBroadcastRef.current.get(completionKey)
+      if (pending?.client === client) {
+        return pending.promise
+      }
+
+      const promise = client
+        .request<YouTubeBroadcastTransitionResult>('streamTargets.youtube.transition', {
+          accountId: target.accountId,
+          broadcastId,
+          status: 'complete'
+        })
+        .then((result) => {
+          assertYouTubeTransitionConfirmed(result, 'complete')
+          return result
+        })
+      const entry = { client, promise }
+      youtubeCompletionInFlightByBroadcastRef.current.set(completionKey, entry)
+      void promise.then(
+        (result) => {
+          if (youtubeCompletionInFlightByBroadcastRef.current.get(completionKey) !== entry) {
+            return
+          }
+          youtubeCompletionInFlightByBroadcastRef.current.delete(completionKey)
+          youtubeCompletedBroadcastResultsRef.current.set(completionKey, result)
+          if (youtubeCompletedBroadcastResultsRef.current.size > 128) {
+            const oldestKey = youtubeCompletedBroadcastResultsRef.current.keys().next().value
+            if (oldestKey) {
+              youtubeCompletedBroadcastResultsRef.current.delete(oldestKey)
+            }
+          }
+        },
+        () => {
+          if (youtubeCompletionInFlightByBroadcastRef.current.get(completionKey) === entry) {
+            youtubeCompletionInFlightByBroadcastRef.current.delete(completionKey)
+          }
+        }
+      )
+      return promise
+    },
     [client]
   )
 
   const completePreparedPlatformBroadcasts = useCallback(
-    async (streamingForCleanup: StreamingSettings = captureConfig.streaming) => {
+    async (
+      streamingForCleanup: StreamingSettings,
+      sessionId?: string,
+      options?: { skipXCleanup?: boolean; xTimeoutMs?: number }
+    ): Promise<PlatformBroadcastCleanupResult> => {
       if (!client) {
-        return
+        return { streaming: streamingForCleanup, complete: false }
       }
 
+      let nextStreaming = streamingForCleanup
+      let complete = true
       const youtubeTargets = preparedYouTubeCompletionTargets(streamingForCleanup)
       for (const target of youtubeTargets) {
         const broadcastId = target.platformBroadcastId
@@ -9822,6 +10165,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           continue
         }
         try {
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'connecting',
+              message: 'Completing YouTube broadcast.'
+            }
+          })
           setCaptureConfig((current) =>
             bridgeStreamingToLegacy({
               ...current,
@@ -9833,15 +10182,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          const result = await client.request<YouTubeBroadcastTransitionResult>(
-            'streamTargets.youtube.transition',
-            {
-              accountId: target.accountId,
-              broadcastId,
-              status: 'complete'
+          await completeYouTubeBroadcastOnce(target, broadcastId)
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'stopped',
+              message: 'YouTube broadcast ended.'
             }
-          )
-          assertYouTubeTransitionConfirmed(result, 'complete')
+          })
           setCaptureConfig((current) =>
             bridgeStreamingToLegacy({
               ...current,
@@ -9855,6 +10202,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error)
+          complete = false
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'warning',
+              message: `YouTube cleanup needs review: ${message}`
+            }
+          })
           setCaptureConfig((current) =>
             bridgeStreamingToLegacy({
               ...current,
@@ -9872,177 +10226,526 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       }
 
-      await endPreparedXBroadcasts(streamingForCleanup)
+      if (!options?.skipXCleanup) {
+        nextStreaming = await endPreparedXBroadcasts(
+          nextStreaming,
+          sessionId,
+          options?.xTimeoutMs ?? PLATFORM_CLEANUP_X_END_TIMEOUT_MS
+        )
+      }
+      if (preparedXCompletionTargets(nextStreaming).length > 0) {
+        complete = false
+      }
+      return { streaming: nextStreaming, complete }
     },
-    [captureConfig.streaming, client, endPreparedXBroadcasts]
+    [client, completeYouTubeBroadcastOnce, endPreparedXBroadcasts]
   )
+  const retainPlatformLifecycleOwner = useCallback((owner: PlatformLifecycleOwner) => {
+    if (isPreparedPlatformLifecycleOwner(owner.sessionId)) {
+      const retained = preparedPlatformLifecycleOwnersRef.current
+      const existingIndex = retained.findIndex(
+        (candidate) => candidate.sessionId === owner.sessionId
+      )
+      if (existingIndex >= 0) {
+        retained[existingIndex] = owner
+      } else {
+        retained.push(owner)
+      }
+      return
+    }
+    if (
+      !platformLifecycleOwnerRef.current ||
+      platformLifecycleOwnerRef.current.sessionId === owner.sessionId
+    ) {
+      platformLifecycleOwnerRef.current = owner
+    }
+  }, [])
+  const createPreparedPlatformLifecycleOwner = useCallback(
+    (streaming: StreamingSettings): PlatformLifecycleOwner => {
+      preparedPlatformLifecycleOwnerSequenceRef.current += 1
+      return {
+        sessionId: `${PREPARED_PLATFORM_LIFECYCLE_OWNER_PREFIX}${preparedPlatformLifecycleOwnerSequenceRef.current}`,
+        streaming
+      }
+    },
+    []
+  )
+  const settleClaimedPlatformLifecycleOwner = useCallback(
+    (
+      owner: PlatformLifecycleOwner,
+      task?: (owner: PlatformLifecycleOwner) => Promise<PlatformBroadcastCleanupResult>
+    ): Promise<PlatformBroadcastCleanupResult> => {
+      const pending = platformLifecycleSettlementRef.current
+      if (pending?.sessionId === owner.sessionId) {
+        return pending.promise
+      }
+      if (pending) {
+        return Promise.reject(new Error('Another livestream provider lifecycle is still settling.'))
+      }
+
+      let resolvedOwner = owner
+      const settlement = {} as PlatformLifecycleSettlement
+      const promise = (async (): Promise<PlatformBroadcastCleanupResult> => {
+        try {
+          const mutation = platformLifecycleMutationRef.current
+          if (mutation?.sessionId === owner.sessionId) {
+            resolvedOwner = {
+              sessionId: owner.sessionId,
+              streaming: await mutation.promise
+            }
+          }
+          const result = task
+            ? await task(resolvedOwner)
+            : await completePreparedPlatformBroadcasts(
+                resolvedOwner.streaming,
+                isPreparedPlatformLifecycleOwner(resolvedOwner.sessionId)
+                  ? undefined
+                  : resolvedOwner.sessionId
+              )
+          if (!result.complete) {
+            retainPlatformLifecycleOwner({
+              sessionId: owner.sessionId,
+              streaming: result.streaming
+            })
+          }
+          return result
+        } catch (error) {
+          retainPlatformLifecycleOwner(resolvedOwner)
+          throw error
+        } finally {
+          if (platformLifecycleSettlementRef.current === settlement) {
+            platformLifecycleSettlementRef.current = null
+          }
+        }
+      })()
+      settlement.sessionId = owner.sessionId
+      settlement.promise = promise
+      platformLifecycleSettlementRef.current = settlement
+      return promise
+    },
+    [completePreparedPlatformBroadcasts, retainPlatformLifecycleOwner]
+  )
+  settleClaimedPlatformLifecycleOwnerRef.current = settleClaimedPlatformLifecycleOwner
+
+  const settleRetainedPreparedPlatformLifecycles = useCallback(async (): Promise<boolean> => {
+    const pending = platformLifecycleSettlementRef.current
+    if (pending) {
+      try {
+        await pending.promise
+      } catch (error) {
+        reportError(error)
+      }
+    }
+
+    while (preparedPlatformLifecycleOwnersRef.current.length > 0) {
+      const retainedOwner = preparedPlatformLifecycleOwnersRef.current.shift()
+      if (!retainedOwner) {
+        break
+      }
+      try {
+        const result = await settleClaimedPlatformLifecycleOwner(retainedOwner)
+        if (!result.complete) {
+          reportError(
+            new Error('Finish cleaning up the prepared livestream providers before starting again.')
+          )
+          return false
+        }
+      } catch (error) {
+        reportError(error)
+        return false
+      }
+    }
+    return true
+  }, [reportError, settleClaimedPlatformLifecycleOwner])
+
+  const settlePreparedPlatformLifecycle = useCallback(
+    async (streaming: StreamingSettings): Promise<PlatformBroadcastCleanupResult> => {
+      const owner = createPreparedPlatformLifecycleOwner(streaming)
+      if (!(await settleRetainedPreparedPlatformLifecycles())) {
+        retainPlatformLifecycleOwner(owner)
+        return { streaming, complete: false }
+      }
+      try {
+        return await settleClaimedPlatformLifecycleOwner(owner)
+      } catch (error) {
+        reportError(error)
+        return { streaming, complete: false }
+      }
+    },
+    [
+      createPreparedPlatformLifecycleOwner,
+      reportError,
+      retainPlatformLifecycleOwner,
+      settleClaimedPlatformLifecycleOwner,
+      settleRetainedPreparedPlatformLifecycles
+    ]
+  )
+
+  const settlePreviousPlatformLifecycle = useCallback(async (): Promise<boolean> => {
+    if (!(await settleRetainedPreparedPlatformLifecycles())) {
+      return false
+    }
+    const previousOwner = platformLifecycleOwnerRef.current
+    if (!previousOwner) {
+      return true
+    }
+    const claimedOwner = claimPlatformLifecycleOwner(previousOwner.sessionId)
+    if (!claimedOwner) {
+      return false
+    }
+    try {
+      const result = await settleClaimedPlatformLifecycleOwner(claimedOwner)
+      if (result.complete) {
+        return true
+      }
+      reportError(
+        new Error('Finish cleaning up the previous livestream providers before starting again.')
+      )
+      return false
+    } catch (error) {
+      reportError(error)
+      return false
+    }
+  }, [
+    claimPlatformLifecycleOwner,
+    reportError,
+    settleClaimedPlatformLifecycleOwner,
+    settleRetainedPreparedPlatformLifecycles
+  ])
 
   const runStartSessionRef = useRef<
     ((streamingOverride?: StreamingSettings) => Promise<boolean>) | null
   >(null)
   const runStartSession = useCallback(
-    async (streamingOverride?: StreamingSettings) => {
-      if (!client || startBlockedReason) {
-        if (startBlockedReason && !isSessionActive) {
-          reportError(new Error(startBlockedReason))
+    (streamingOverride?: StreamingSettings) => {
+      const requestSnapshot = {
+        captureConfig,
+        sceneWithBackground,
+        sceneEditMode,
+        settings,
+        streamingOverride,
+        suppressCaptionsForSession
+      }
+      const pendingStart = sessionStartInFlightRef.current
+      if (pendingStart) {
+        const sameRequest =
+          pendingStart.captureConfig === requestSnapshot.captureConfig &&
+          pendingStart.sceneWithBackground === requestSnapshot.sceneWithBackground &&
+          pendingStart.sceneEditMode === requestSnapshot.sceneEditMode &&
+          pendingStart.settings === requestSnapshot.settings &&
+          pendingStart.streamingOverride === requestSnapshot.streamingOverride &&
+          pendingStart.suppressCaptionsForSession === requestSnapshot.suppressCaptionsForSession
+        if (sameRequest) {
+          return pendingStart.promise
         }
-        return false
+        if (streamingOverride) {
+          return pendingStart.promise
+            .catch(() => false)
+            .then(() => settlePreparedPlatformLifecycle(streamingOverride))
+            .then(() => false)
+        }
+        return Promise.resolve(false)
       }
 
-      let streamingForStart: StreamingSettings | null = null
-      try {
-        setLastError(null)
-        noteSessionStartAttempt()
-        streamingForStart = streamingOverride ?? null
-        if (streamingForStart) {
-          await probeStreamOutputTopology(
-            buildStreamOutputTopologyProbeParams(
-              captureConfig,
-              streamingForStart,
-              suppressCaptionsForSession
-            )
-          )
+      const startPromise = (async (): Promise<boolean> => {
+        if (!client) {
+          return false
         }
-        setStreamHealth(null)
-        setStreamTargets([])
-        setStartRequestPending(true)
-        platformLifecycleStreamingRef.current = streamingForStart
-        const lifecycleRunId = platformLifecycleRun.current + 1
-        platformLifecycleRun.current = lifecycleRunId
-        const enabledOauthTargets =
-          streamingForStart?.targets.filter(
-            (target) => target.enabled && target.authMode === 'oauth'
-          ) ?? []
-        if (enabledOauthTargets.length) {
-          const validations = await validatePlatformAccountsForClient(client)
-          let unhealthy: StreamTargetSettings | null = null
-          let unhealthyMessage: string | null = null
-          for (const target of enabledOauthTargets) {
-            if (oauthUnavailableReason(target.platform)) {
-              // Feature-flagged-off OAuth (YouTube pending Google review) is a
-              // known product state: the go-live setup skips the target with an
-              // inline status, so it must not block or toast here either.
-              continue
-            }
-            if (target.platform === 'x') {
-              const capability = await client.request<XNativeLiveCapability>(
-                'streamTargets.x.capability',
-                {
-                  accountId: target.accountId
-                }
+        if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
+          return false
+        }
+        if (startBlockedReason) {
+          if (startBlockedReason && !isSessionActive) {
+            reportError(new Error(startBlockedReason))
+          }
+          return false
+        }
+
+        let streamingForStart: StreamingSettings | null = null
+        let platformSessionId: string | undefined
+        try {
+          setLastError(null)
+          noteSessionStartAttempt()
+          streamingForStart = streamingOverride ?? null
+          if (streamingForStart) {
+            await probeStreamOutputTopology(
+              buildStreamOutputTopologyProbeParams(
+                captureConfig,
+                streamingForStart,
+                suppressCaptionsForSession
               )
-              if (!capability.nativeAvailable) {
+            )
+          }
+          setStreamHealth(null)
+          setStreamTargets([])
+          setStartRequestPending(true)
+          const lifecycleRunId = platformLifecycleRun.current + 1
+          platformLifecycleRun.current = lifecycleRunId
+          const enabledOauthTargets =
+            streamingForStart?.targets.filter(
+              (target) => target.enabled && target.authMode === 'oauth'
+            ) ?? []
+          if (enabledOauthTargets.length) {
+            const validations = await validatePlatformAccountsForClient(client)
+            let unhealthy: StreamTargetSettings | null = null
+            let unhealthyMessage: string | null = null
+            for (const target of enabledOauthTargets) {
+              if (oauthUnavailableReason(target.platform)) {
+                // Feature-flagged-off OAuth (YouTube pending Google review) is a
+                // known product state: the go-live setup skips the target with an
+                // inline status, so it must not block or toast here either.
+                continue
+              }
+              if (target.platform === 'x') {
+                const capability = await client.request<XNativeLiveCapability>(
+                  'streamTargets.x.capability',
+                  {
+                    accountId: target.accountId
+                  }
+                )
+                if (!capability.nativeAvailable) {
+                  unhealthy = target
+                  unhealthyMessage = capability.message
+                  break
+                }
+                continue
+              }
+              const validation = validations.find((item) => item.platform === target.platform)
+              if (!validation || !['valid', 'refreshed'].includes(validation.state)) {
                 unhealthy = target
-                unhealthyMessage = capability.message
+                unhealthyMessage = `Reconnect ${target.label} before starting an OAuth livestream.`
                 break
               }
-              continue
             }
-            const validation = validations.find((item) => item.platform === target.platform)
-            if (!validation || !['valid', 'refreshed'].includes(validation.state)) {
-              unhealthy = target
-              unhealthyMessage = `Reconnect ${target.label} before starting an OAuth livestream.`
-              break
+            if (unhealthy) {
+              throw new Error(
+                unhealthyMessage ??
+                  `Reconnect ${unhealthy.label} before starting an OAuth livestream.`
+              )
             }
           }
-          if (unhealthy) {
+          const optimisticRecording = isActiveRecordingState(recordingRef.current.state)
+            ? recordingRef.current
+            : {
+                state: 'starting' as const,
+                message: streamingOverride ? 'Preparing livestream…' : 'Preparing recording…'
+              }
+          applyRecordingStatus(optimisticRecording)
+          const outputDirectory = settings.outputDirectoryHandle
+            ? await window.videorc?.authorizeOutputDirectory?.(settings.outputDirectoryHandle)
+            : null
+          if (settings.outputDirectoryHandle && !outputDirectory) {
             throw new Error(
-              unhealthyMessage ??
-                `Reconnect ${unhealthy.label} before starting an OAuth livestream.`
+              'The selected output folder is unavailable. Choose it again in Settings.'
             )
           }
-        }
-        const optimisticRecording = isActiveRecordingState(recordingRef.current.state)
-          ? recordingRef.current
-          : {
-              state: 'starting' as const,
-              message: streamingOverride ? 'Preparing livestream…' : 'Preparing recording…'
-            }
-        applyRecordingStatus(optimisticRecording)
-        const outputDirectory = settings.outputDirectoryHandle
-          ? await window.videorc?.authorizeOutputDirectory?.(settings.outputDirectoryHandle)
-          : null
-        if (settings.outputDirectoryHandle && !outputDirectory) {
-          throw new Error('The selected output folder is unavailable. Choose it again in Settings.')
-        }
-        const { buildStartSessionParams } = await import('@/lib/session-params')
-        const sessionParams = buildStartSessionParams({
-          captureConfig,
-          scene: sceneWithBackground,
-          sceneEditMode,
-          settings,
-          suppressCaptionsForSession
-        })
-        const authorizedOutput = {
-          ...sessionParams.output,
-          ...(outputDirectory ? { outputDirectoryCapability: outputDirectory.capabilityId } : {})
-        }
-        const nextSessionParams: StartSessionParams = streamingOverride
-          ? {
-              ...sessionParams,
-              output: { ...authorizedOutput, streamEnabled: true },
-              streaming: streamingOverride
-            }
-          : {
-              ...sessionParams,
-              output: { ...authorizedOutput, streamEnabled: false },
-              streaming: undefined
-            }
-        const startAudioSnapshot = nextSessionParams.audio
-          ? {
-              microphoneGainDb: nextSessionParams.audio.microphoneGainDb,
-              microphoneMuted: nextSessionParams.audio.microphoneMuted
-            }
-          : null
-        liveAudioProcessingStartSnapshotRef.current = null
-        liveAudioProcessingStartRequestInFlightRef.current = true
-        let status: RecordingStatus
-        try {
-          status = await client.requestTyped('session.start', nextSessionParams)
-        } finally {
-          liveAudioProcessingStartRequestInFlightRef.current = false
-        }
-        liveAudioProcessingStartSnapshotRef.current =
-          status.sessionId && startAudioSnapshot
-            ? { sessionId: status.sessionId, ...startAudioSnapshot }
+          const { buildStartSessionParams } = await import('@/lib/session-params')
+          const sessionParams = buildStartSessionParams({
+            captureConfig,
+            scene: sceneWithBackground,
+            sceneEditMode,
+            settings,
+            suppressCaptionsForSession
+          })
+          const authorizedOutput = {
+            ...sessionParams.output,
+            ...(outputDirectory ? { outputDirectoryCapability: outputDirectory.capabilityId } : {})
+          }
+          const nextSessionParams: StartSessionParams = streamingOverride
+            ? {
+                ...sessionParams,
+                output: { ...authorizedOutput, streamEnabled: true },
+                streaming: streamingOverride
+              }
+            : {
+                ...sessionParams,
+                output: { ...authorizedOutput, streamEnabled: false },
+                streaming: undefined
+              }
+          const startAudioSnapshot = nextSessionParams.audio
+            ? {
+                microphoneGainDb: nextSessionParams.audio.microphoneGainDb,
+                microphoneMuted: nextSessionParams.audio.microphoneMuted
+              }
             : null
-        applyRecordingStatus(status)
-        await refreshSessions(client)
-        if (streamingForStart) {
-          await activatePreparedYouTubeBroadcasts(streamingForStart, lifecycleRunId)
-          await activatePreparedXBroadcasts(
-            streamingForStart,
-            lifecycleRunId,
-            status.sessionId ?? recordingRef.current.sessionId
-          )
+          liveAudioProcessingStartSnapshotRef.current = null
+          liveAudioProcessingStartRequestInFlightRef.current = true
+          sessionStartAuthoritativeStatusesRef.current.clear()
+          sessionStartLifecycleInvalidatedSessionIdsRef.current.clear()
+          sessionStartLifecycleSessionIdRef.current = null
+          sessionStartLifecycleActiveRef.current = true
+          let status: RecordingStatus
+          try {
+            status = await client.requestTyped('session.start', nextSessionParams)
+          } finally {
+            liveAudioProcessingStartRequestInFlightRef.current = false
+          }
+          platformSessionId = status.sessionId
+          sessionStartLifecycleSessionIdRef.current = status.sessionId ?? null
+          const reconcileLatestStartStatus = () =>
+            reconcileSessionStartResponse(
+              status,
+              status.sessionId
+                ? sessionStartAuthoritativeStatusesRef.current.get(status.sessionId)
+                : undefined
+            )
+          const invalidateTerminalPlatformLifecycle = (terminalStatus: RecordingStatus) => {
+            const sessionId = terminalStatus.sessionId
+            if (
+              sessionId &&
+              !sessionStartLifecycleInvalidatedSessionIdsRef.current.has(sessionId)
+            ) {
+              sessionStartLifecycleInvalidatedSessionIdsRef.current.add(sessionId)
+              platformLifecycleRun.current += 1
+            }
+          }
+          const settleTerminalStart = async (
+            resolution: ReturnType<typeof reconcileSessionStartResponse>
+          ): Promise<boolean> => {
+            if (resolution.sessionActive) {
+              return false
+            }
+            status = resolution.status
+            invalidateTerminalPlatformLifecycle(status)
+            liveAudioProcessingStartSnapshotRef.current = null
+            applyRecordingStatus(status)
+            clearLiveChatForTerminalSession(status.sessionId)
+            const pendingSettlement =
+              status.sessionId &&
+              platformLifecycleSettlementRef.current?.sessionId === status.sessionId
+                ? platformLifecycleSettlementRef.current
+                : null
+            if (pendingSettlement) {
+              const pendingResult = await pendingSettlement.promise
+              if (pendingResult.complete) {
+                return true
+              }
+            }
+            const claimedOwner = status.sessionId
+              ? claimPlatformLifecycleOwner(status.sessionId)
+              : null
+            const ownerForCleanup =
+              claimedOwner ??
+              (status.sessionId && streamingForStart
+                ? { sessionId: status.sessionId, streaming: streamingForStart }
+                : null)
+            if (ownerForCleanup) {
+              await settleClaimedPlatformLifecycleOwner(ownerForCleanup)
+            } else if (streamingForStart) {
+              await settlePreparedPlatformLifecycle(streamingForStart)
+            }
+            return true
+          }
+          let startResolution = reconcileLatestStartStatus()
+          status = startResolution.status
+          liveAudioProcessingStartSnapshotRef.current =
+            startResolution.sessionActive && status.sessionId && startAudioSnapshot
+              ? { sessionId: status.sessionId, ...startAudioSnapshot }
+              : null
+          applyRecordingStatus(status)
+          if (startResolution.sessionActive && streamingForStart && status.sessionId) {
+            platformLifecycleOwnerRef.current = {
+              sessionId: status.sessionId,
+              streaming: streamingForStart
+            }
+          }
+          if (await settleTerminalStart(startResolution)) {
+            return false
+          }
+          await refreshSessions(client)
+          startResolution = reconcileLatestStartStatus()
+          if (await settleTerminalStart(startResolution)) {
+            return false
+          }
+          if (streamingForStart) {
+            startResolution = reconcileLatestStartStatus()
+            if (await settleTerminalStart(startResolution)) {
+              return false
+            }
+            await activatePreparedYouTubeBroadcasts(
+              streamingForStart,
+              lifecycleRunId,
+              status.sessionId ?? recordingRef.current.sessionId
+            )
+            startResolution = reconcileLatestStartStatus()
+            if (await settleTerminalStart(startResolution)) {
+              return false
+            }
+            streamingForStart = await activatePreparedXBroadcasts(
+              streamingForStart,
+              lifecycleRunId,
+              status.sessionId ?? recordingRef.current.sessionId
+            )
+            if (
+              status.sessionId &&
+              platformLifecycleRun.current === lifecycleRunId &&
+              platformLifecycleOwnerRef.current?.sessionId === status.sessionId
+            ) {
+              platformLifecycleOwnerRef.current = {
+                sessionId: status.sessionId,
+                streaming: streamingForStart
+              }
+            }
+            startResolution = reconcileLatestStartStatus()
+            if (await settleTerminalStart(startResolution)) {
+              return false
+            }
+          }
+          return true
+        } catch (error) {
+          if (streamingOverride && streamingForStart) {
+            const pendingSettlement =
+              platformSessionId &&
+              platformLifecycleSettlementRef.current?.sessionId === platformSessionId
+                ? platformLifecycleSettlementRef.current
+                : null
+            if (pendingSettlement) {
+              await pendingSettlement.promise
+            } else if (platformSessionId) {
+              const owned = claimPlatformLifecycleOwner(platformSessionId) ?? {
+                sessionId: platformSessionId,
+                streaming: streamingForStart
+              }
+              await settleClaimedPlatformLifecycleOwner(owned)
+            } else {
+              await settlePreparedPlatformLifecycle(streamingForStart)
+            }
+          }
+          // Every start rejection — the compositor startup barrier, topology
+          // probe, platform activation, the RPC itself — is unmissable: keyed
+          // persistent toast + Session-panel line, Retry re-runs this exact start.
+          reportSessionStartFailure(error, () => {
+            void runStartSessionRef.current?.(streamingOverride)
+          })
+          if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
+            applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
+          }
+          return false
+        } finally {
+          sessionStartLifecycleActiveRef.current = false
+          sessionStartLifecycleSessionIdRef.current = null
+          sessionStartLifecycleInvalidatedSessionIdsRef.current.clear()
+          sessionStartAuthoritativeStatusesRef.current.clear()
+          setStartRequestPending(false)
         }
-        return true
-      } catch (error) {
-        if (streamingOverride && streamingForStart) {
-          await completePreparedPlatformBroadcasts(streamingForStart)
+      })()
+      sessionStartInFlightRef.current = { ...requestSnapshot, promise: startPromise }
+      const clearStartPromise = () => {
+        if (sessionStartInFlightRef.current?.promise === startPromise) {
+          sessionStartInFlightRef.current = null
         }
-        platformLifecycleStreamingRef.current = null
-        // Every start rejection — the compositor startup barrier, topology
-        // probe, platform activation, the RPC itself — is unmissable: keyed
-        // persistent toast + Session-panel line, Retry re-runs this exact start.
-        reportSessionStartFailure(error, () => {
-          void runStartSessionRef.current?.(streamingOverride)
-        })
-        if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
-          applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
-        }
-        return false
-      } finally {
-        setStartRequestPending(false)
       }
+      void startPromise.then(clearStartPromise, clearStartPromise)
+      return startPromise
     },
     [
       activatePreparedYouTubeBroadcasts,
       activatePreparedXBroadcasts,
       applyRecordingStatus,
       captureConfig,
+      claimPlatformLifecycleOwner,
+      clearLiveChatForTerminalSession,
       client,
-      completePreparedPlatformBroadcasts,
       isSessionActive,
       noteSessionStartAttempt,
       probeStreamOutputTopology,
@@ -10052,6 +10755,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       sceneEditMode,
       sceneWithBackground,
       settings,
+      settleClaimedPlatformLifecycleOwner,
+      settlePreparedPlatformLifecycle,
+      settlePreviousPlatformLifecycle,
       startBlockedReason,
       suppressCaptionsForSession,
       validatePlatformAccountsForClient
@@ -10062,6 +10768,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const prepareOauthTargetsForGoLive = useCallback(async (): Promise<GoLivePartialSetup> => {
     if (!client) {
       throw new Error('Backend socket is not connected.')
+    }
+    if (!(await settlePreviousPlatformLifecycle())) {
+      throw new Error('The previous livestream providers still need cleanup before Go Live.')
     }
 
     let nextStreaming = captureConfig.streaming
@@ -10088,6 +10797,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               video: captureConfig.video
             }
           )
+          const completionKey = JSON.stringify([prepared.accountId, prepared.broadcastId])
+          youtubeCompletionInFlightByBroadcastRef.current.delete(completionKey)
+          youtubeCompletedBroadcastResultsRef.current.delete(completionKey)
           nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
             accountId: prepared.accountId,
             accountLabel: prepared.accountLabel,
@@ -10210,11 +10922,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.video,
     client,
     platformAccounts,
-    refreshPlatformAccountsForClient
+    refreshPlatformAccountsForClient,
+    settlePreviousPlatformLifecycle
   ])
 
   const openGoLiveConfirmation = useCallback(async () => {
-    if (!client || startBlockedReason) {
+    if (!client) {
+      return
+    }
+    if (!isSessionActive && !(await settlePreviousPlatformLifecycle())) {
+      return
+    }
+    if (startBlockedReason) {
       if (startBlockedReason && !isSessionActive) {
         reportError(new Error(startBlockedReason))
       }
@@ -10268,6 +10987,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     client,
     isSessionActive,
     reportError,
+    settlePreviousPlatformLifecycle,
     startBlockedReason,
     streamMetadataDraft
   ])
@@ -10290,88 +11010,102 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     if (decision.cleanupStreaming) {
-      void completePreparedPlatformBroadcasts(decision.cleanupStreaming)
+      void settlePreparedPlatformLifecycle(decision.cleanupStreaming)
     }
     setGoLivePartialSetup(null)
     setGoLiveConfirmationOpen(false)
     setSuppressCaptionsForSession(false)
   }, [
-    completePreparedPlatformBroadcasts,
     goLiveConfirmationPending,
     goLivePartialSetup,
+    settlePreparedPlatformLifecycle,
     startRequestPending
   ])
 
   const confirmGoLiveRef = useRef<(() => Promise<void>) | null>(null)
-  const confirmGoLive = useCallback(async () => {
+  const confirmGoLive = useCallback(() => {
+    const pendingConfirmation = confirmGoLiveInFlightPromiseRef.current
+    if (pendingConfirmation) {
+      return pendingConfirmation
+    }
     if (!client || goLiveConfirmationPending || startRequestPending) {
-      return
+      return Promise.resolve()
     }
     if (goLiveCaptionsReadiness.blocksStart) {
       toast.warning('Live captions are not ready.', {
         description: goLiveCaptionsReadiness.description
       })
-      return
+      return Promise.resolve()
     }
 
-    try {
-      setLastError(null)
-      setGoLiveConfirmationPending(true)
-      if (streamMetadataDraft) {
-        const saved = await client.request<StreamMetadataDraft>(
-          'streamTargets.metadata.update',
-          streamMetadataDraft
-        )
-        setStreamMetadataDraft(saved)
-        const validation = await client.request<StreamMetadataValidation>(
-          'streamTargets.metadata.validate',
-          saved
-        )
-        setStreamMetadataValidation(validation)
-      }
-      const preflight = await client.request<GoLivePreflight>(
-        'streamTargets.confirmation.validate',
-        {
-          streaming: captureConfig.streaming
-        }
-      )
-      setGoLivePreflight(preflight)
-      const preflightDecision = decideGoLivePreflight(preflight)
-      if (preflightDecision.kind === 'blocked') {
-        const premiumIssue = premiumRequiredIssueMessage(preflight)
-        if (premiumIssue) {
-          void loadSessionRuntimeRecovery().then((runtime) =>
-            runtime.showPremiumUpgrade('Premium required for this Go Live setup.', premiumIssue)
+    const confirmationPromise = (async (): Promise<void> => {
+      try {
+        setLastError(null)
+        setGoLiveConfirmationPending(true)
+        if (streamMetadataDraft) {
+          const saved = await client.request<StreamMetadataDraft>(
+            'streamTargets.metadata.update',
+            streamMetadataDraft
           )
-        } else {
-          toast.error('Resolve Go Live issues before starting.')
+          setStreamMetadataDraft(saved)
+          const validation = await client.request<StreamMetadataValidation>(
+            'streamTargets.metadata.validate',
+            saved
+          )
+          setStreamMetadataValidation(validation)
         }
-        return
-      }
-      const setup = await prepareOauthTargetsForGoLive()
-      const setupDecision = decidePreparedGoLiveSetup(setup)
-      if (setupDecision.kind === 'no-ready-destinations') {
-        throw new Error('No livestream destinations are ready after platform setup.')
-      }
-      if (setupDecision.kind === 'partial') {
-        setGoLivePartialSetup(setupDecision.setup)
-        toast.warning('Some destinations failed setup.', {
-          description: 'Continue with the ready destinations or cancel this Go Live.'
+        const preflight = await client.request<GoLivePreflight>(
+          'streamTargets.confirmation.validate',
+          {
+            streaming: captureConfig.streaming
+          }
+        )
+        setGoLivePreflight(preflight)
+        const preflightDecision = decideGoLivePreflight(preflight)
+        if (preflightDecision.kind === 'blocked') {
+          const premiumIssue = premiumRequiredIssueMessage(preflight)
+          if (premiumIssue) {
+            void loadSessionRuntimeRecovery().then((runtime) =>
+              runtime.showPremiumUpgrade('Premium required for this Go Live setup.', premiumIssue)
+            )
+          } else {
+            toast.error('Resolve Go Live issues before starting.')
+          }
+          return
+        }
+        const setup = await prepareOauthTargetsForGoLive()
+        const setupDecision = decidePreparedGoLiveSetup(setup)
+        if (setupDecision.kind === 'no-ready-destinations') {
+          throw new Error('No livestream destinations are ready after platform setup.')
+        }
+        if (setupDecision.kind === 'partial') {
+          setGoLivePartialSetup(setupDecision.setup)
+          toast.warning('Some destinations failed setup.', {
+            description: 'Continue with the ready destinations or cancel this Go Live.'
+          })
+          return
+        }
+        setGoLiveConfirmationOpen(false)
+        await runStartSession(setupDecision.streaming)
+      } catch (error) {
+        // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
+        // setup) is just as silent as a refused start: same persistent surface.
+        // The dialog stays open, so Retry re-runs the confirmation.
+        reportSessionStartFailure(error, () => {
+          void confirmGoLiveRef.current?.()
         })
-        return
+      } finally {
+        setGoLiveConfirmationPending(false)
       }
-      setGoLiveConfirmationOpen(false)
-      await runStartSession(setupDecision.streaming)
-    } catch (error) {
-      // A Go Live that dies BEFORE the start RPC (metadata, preflight, platform
-      // setup) is just as silent as a refused start: same persistent surface.
-      // The dialog stays open, so Retry re-runs the confirmation.
-      reportSessionStartFailure(error, () => {
-        void confirmGoLiveRef.current?.()
-      })
-    } finally {
-      setGoLiveConfirmationPending(false)
+    })()
+    confirmGoLiveInFlightPromiseRef.current = confirmationPromise
+    const clearConfirmationPromise = () => {
+      if (confirmGoLiveInFlightPromiseRef.current === confirmationPromise) {
+        confirmGoLiveInFlightPromiseRef.current = null
+      }
     }
+    void confirmationPromise.then(clearConfirmationPromise, clearConfirmationPromise)
+    return confirmationPromise
   }, [
     captureConfig.streaming,
     client,
@@ -10421,48 +11155,111 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     startRequestPending
   ])
 
-  const stopSession = useCallback(async () => {
+  const stopSession = useCallback(() => {
+    const pendingStop = stopSessionInFlightPromiseRef.current
+    if (pendingStop) {
+      return pendingStop
+    }
     if (!client || stopRequestPending) {
-      return false
+      return Promise.resolve(false)
     }
 
-    try {
-      setLastError(null)
-      platformLifecycleRun.current += 1
-      setStopRequestPending(true)
-      liveAudioProcessingSyncRef.current?.queue.stop()
-      const sessionHasStreamOutput =
-        platformLifecycleStreamingRef.current !== null || Boolean(recordingRef.current.streamUrl)
-      // Docs order for a real Go Live: END X while the feed is still up, THEN
-      // stop the encoder. A local recording must never inspect or mutate stale
-      // platform lifecycle state merely because saved destinations are enabled.
-      const cleaned = sessionHasStreamOutput
-        ? await endPreparedXBroadcasts(
-            captureConfig.streaming,
-            recordingRef.current.sessionId,
-            4000
-          )
-        : null
-      const status = await client.requestTyped('session.stop')
-      applyRecordingStatus(status)
-      if (cleaned) {
-        await completePreparedPlatformBroadcasts(cleaned)
+    let claimedOwner: PlatformLifecycleOwner | null = null
+    const stopPromise = (async (): Promise<boolean> => {
+      try {
+        setLastError(null)
+        platformLifecycleRun.current += 1
+        setStopRequestPending(true)
+        liveAudioProcessingSyncRef.current?.queue.stop()
+        const pendingStart = sessionStartInFlightRef.current
+        const currentSessionId = recordingRef.current.sessionId
+        const currentOwner = currentSessionId
+          ? platformLifecycleOwnerRef.current?.sessionId === currentSessionId
+          : false
+        if (pendingStart && !currentOwner) {
+          // Before session.start replies there is no exact backend session ID
+          // to claim. Join that bounded start flow; it installs ownership from
+          // the response even though this Stop invalidated provider activation.
+          await pendingStart.promise.catch(() => false)
+        }
+        claimedOwner = claimPlatformLifecycleOwner(recordingRef.current.sessionId)
+        if (claimedOwner) {
+          await settleClaimedPlatformLifecycleOwner(claimedOwner, async (resolvedOwner) => {
+            // Docs order for a real Go Live: wait for a provider mutation,
+            // END X while the feed is still up, THEN stop the encoder.
+            const cleaned = await endPreparedXBroadcasts(
+              resolvedOwner.streaming,
+              resolvedOwner.sessionId,
+              4000
+            )
+            const status = await client.requestTyped('session.stop')
+            if (
+              sessionStartLifecycleActiveRef.current &&
+              status.sessionId &&
+              (status.state === 'stopping' || status.state === 'idle' || status.state === 'failed')
+            ) {
+              sessionStartAuthoritativeStatusesRef.current.set(status.sessionId, status)
+            }
+            applyRecordingStatus(status)
+            clearLiveChatForTerminalSession(status.sessionId ?? resolvedOwner.sessionId)
+            return completePreparedPlatformBroadcasts(cleaned, resolvedOwner.sessionId, {
+              skipXCleanup: true
+            })
+          })
+          return true
+        }
+
+        const sessionId = recordingRef.current.sessionId
+        const pendingSettlement =
+          sessionId && platformLifecycleSettlementRef.current?.sessionId === sessionId
+            ? platformLifecycleSettlementRef.current
+            : null
+        if (pendingSettlement) {
+          await pendingSettlement.promise
+          if (!isActiveRecordingState(recordingRef.current.state)) {
+            clearLiveChatForTerminalSession(sessionId)
+            return true
+          }
+        }
+        if (!isActiveRecordingState(recordingRef.current.state)) {
+          clearLiveChatForTerminalSession(sessionId)
+          return true
+        }
+        const status = await client.requestTyped('session.stop')
+        if (
+          sessionStartLifecycleActiveRef.current &&
+          status.sessionId &&
+          (status.state === 'stopping' || status.state === 'idle' || status.state === 'failed')
+        ) {
+          sessionStartAuthoritativeStatusesRef.current.set(status.sessionId, status)
+        }
+        applyRecordingStatus(status)
+        clearLiveChatForTerminalSession(status.sessionId ?? sessionId)
+        return true
+      } catch (error) {
+        reportError(error)
+        return false
+      } finally {
+        setStopRequestPending(false)
       }
-      platformLifecycleStreamingRef.current = null
-      return true
-    } catch (error) {
-      reportError(error)
-      return false
-    } finally {
-      setStopRequestPending(false)
+    })()
+    stopSessionInFlightPromiseRef.current = stopPromise
+    const clearStopPromise = () => {
+      if (stopSessionInFlightPromiseRef.current === stopPromise) {
+        stopSessionInFlightPromiseRef.current = null
+      }
     }
+    void stopPromise.then(clearStopPromise, clearStopPromise)
+    return stopPromise
   }, [
     applyRecordingStatus,
-    captureConfig.streaming,
+    claimPlatformLifecycleOwner,
+    clearLiveChatForTerminalSession,
     client,
     completePreparedPlatformBroadcasts,
     endPreparedXBroadcasts,
     reportError,
+    settleClaimedPlatformLifecycleOwner,
     stopRequestPending
   ])
 

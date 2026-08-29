@@ -137,8 +137,13 @@ pub fn x_chat_readiness(has_x_account: bool) -> XChatReadiness {
     }
 }
 
-pub async fn run_x_chat_connector(state: AppState, session_id: String, config: XChatConfig) {
-    if let Err(error) = ensure_active_session(&state, &session_id).await {
+pub async fn run_x_chat_connector(
+    state: AppState,
+    session_id: String,
+    session_generation: u64,
+    config: XChatConfig,
+) {
+    if let Err(error) = ensure_active_session(&state, &session_id, session_generation).await {
         state.emit_log(
             "warn",
             format!("Rejected stale X live chat attachment: {error}"),
@@ -148,6 +153,8 @@ pub async fn run_x_chat_connector(state: AppState, session_id: String, config: X
 
     set_provider_and_emit(
         &state,
+        &session_id,
+        session_generation,
         StreamPlatform::X,
         config.target_id.as_deref(),
         LiveChatProviderConnectionState::Connecting,
@@ -159,13 +166,23 @@ pub async fn run_x_chat_connector(state: AppState, session_id: String, config: X
     let mut backoff_ms = MIN_RECONNECT_BACKOFF_MS;
     loop {
         let mut reached_ready = false;
-        let error = match run_x_chat_session(&state, &session_id, &config, &mut reached_ready).await
+        let error = match run_x_chat_session(
+            &state,
+            &session_id,
+            session_generation,
+            &config,
+            &mut reached_ready,
+        )
+        .await
         {
             Ok(()) => anyhow::anyhow!("X live chat WebSocket ended."),
             Err(error) => error,
         };
 
-        if ensure_active_session(&state, &session_id).await.is_err() {
+        if ensure_active_session(&state, &session_id, session_generation)
+            .await
+            .is_err()
+        {
             state.emit_log(
                 "info",
                 format!("Stopped stale X live chat connector for session {session_id}."),
@@ -178,6 +195,8 @@ pub async fn run_x_chat_connector(state: AppState, session_id: String, config: X
         {
             set_provider_and_emit(
                 &state,
+                &session_id,
+                session_generation,
                 StreamPlatform::X,
                 config.target_id.as_deref(),
                 LiveChatProviderConnectionState::Failed,
@@ -209,6 +228,8 @@ pub async fn run_x_chat_connector(state: AppState, session_id: String, config: X
             );
             set_provider_and_emit(
                 &state,
+                &session_id,
+                session_generation,
                 StreamPlatform::X,
                 config.target_id.as_deref(),
                 LiveChatProviderConnectionState::Failed,
@@ -220,6 +241,8 @@ pub async fn run_x_chat_connector(state: AppState, session_id: String, config: X
 
         set_provider_and_emit(
             &state,
+            &session_id,
+            session_generation,
             StreamPlatform::X,
             config.target_id.as_deref(),
             LiveChatProviderConnectionState::Reconnecting,
@@ -234,15 +257,16 @@ pub async fn run_x_chat_connector(state: AppState, session_id: String, config: X
 async fn run_x_chat_session(
     state: &AppState,
     session_id: &str,
+    session_generation: u64,
     config: &XChatConfig,
     reached_ready: &mut bool,
 ) -> Result<()> {
-    ensure_active_session(state, session_id).await?;
+    ensure_active_session(state, session_id, session_generation).await?;
     let client = reqwest::Client::new();
     let chat_token = fetch_chat_token_with_retry(&client, config).await?;
-    ensure_active_session(state, session_id).await?;
+    ensure_active_session(state, session_id, session_generation).await?;
     let access = access_chat(&client, config, &chat_token).await?;
-    ensure_active_session(state, session_id).await?;
+    ensure_active_session(state, session_id, session_generation).await?;
     let (endpoint, access_token) = select_chat_access_pair(access)?;
     let ws_url = chat_ws_url(&endpoint)?;
     let (mut ws, _response) = timeout(WEBSOCKET_HANDSHAKE_TIMEOUT, connect_async(&ws_url))
@@ -273,6 +297,7 @@ async fn run_x_chat_session(
                 mark_connected(
                     state,
                     session_id,
+                    session_generation,
                     config.target_id.as_deref(),
                     &mut connected,
                     reached_ready,
@@ -280,7 +305,7 @@ async fn run_x_chat_session(
                 .await?;
             }
             message = timeout(WEBSOCKET_IDLE_TIMEOUT, ws.next()) => {
-                ensure_active_session(state, session_id).await?;
+                ensure_active_session(state, session_id, session_generation).await?;
                 let message = message.context(
                     "X live chat WebSocket exceeded the idle liveness deadline.",
                 )?;
@@ -296,6 +321,7 @@ async fn run_x_chat_session(
                             mark_connected(
                                 state,
                                 session_id,
+                                session_generation,
                                 config.target_id.as_deref(),
                                 &mut connected,
                                 reached_ready,
@@ -304,7 +330,13 @@ async fn run_x_chat_session(
                             let mut persistence_backoff_ms = MIN_RECONNECT_BACKOFF_MS;
                             let mut waited_for_storage = false;
                             loop {
-                                match try_deliver_message(state, chat_message.clone()).await {
+                                match try_deliver_message(
+                                    state,
+                                    session_generation,
+                                    chat_message.clone(),
+                                )
+                                .await
+                                {
                                     Ok(()) => break,
                                     Err(error) if error.is_terminal() => {
                                         return Err(error.into());
@@ -317,6 +349,8 @@ async fn run_x_chat_session(
                                         waited_for_storage = true;
                                         set_provider_and_emit(
                                             state,
+                                            session_id,
+                                            session_generation,
                                             StreamPlatform::X,
                                             config.target_id.as_deref(),
                                             LiveChatProviderConnectionState::Waiting,
@@ -328,13 +362,20 @@ async fn run_x_chat_session(
                                         sleep(Duration::from_millis(persistence_backoff_ms)).await;
                                         persistence_backoff_ms =
                                             next_reconnect_backoff_ms(persistence_backoff_ms);
-                                        ensure_active_session(state, session_id).await?;
+                                        ensure_active_session(
+                                            state,
+                                            session_id,
+                                            session_generation,
+                                        )
+                                        .await?;
                                     }
                                 }
                             }
                             if waited_for_storage {
                                 set_provider_and_emit(
                                     state,
+                                    session_id,
+                                    session_generation,
                                     StreamPlatform::X,
                                     config.target_id.as_deref(),
                                     LiveChatProviderConnectionState::Connected,
@@ -374,6 +415,7 @@ fn select_chat_access_pair(access: XChatAccessResponse) -> Result<(String, Strin
 async fn mark_connected(
     state: &AppState,
     session_id: &str,
+    session_generation: u64,
     target_id: Option<&str>,
     connected: &mut bool,
     reached_ready: &mut bool,
@@ -381,9 +423,11 @@ async fn mark_connected(
     if *connected {
         return Ok(());
     }
-    ensure_active_session(state, session_id).await?;
+    ensure_active_session(state, session_id, session_generation).await?;
     set_provider_and_emit(
         state,
+        session_id,
+        session_generation,
         StreamPlatform::X,
         target_id,
         LiveChatProviderConnectionState::Connected,
@@ -395,14 +439,21 @@ async fn mark_connected(
     Ok(())
 }
 
-async fn ensure_active_session(state: &AppState, expected_session_id: &str) -> Result<()> {
-    let active_session_id = crate::live_chat::current_status(state).await.session_id;
-    if active_session_id.as_deref() == Some(expected_session_id) {
+async fn ensure_active_session(
+    state: &AppState,
+    expected_session_id: &str,
+    expected_generation: u64,
+) -> Result<()> {
+    let coordinator = state.live_chat.lock().await;
+    if coordinator.session_id() == Some(expected_session_id)
+        && coordinator.session_generation() == expected_generation
+    {
         return Ok(());
     }
     anyhow::bail!(
-        "X live chat expected session {expected_session_id}, but the active session is {}.",
-        active_session_id.as_deref().unwrap_or("none")
+        "X live chat expected session {expected_session_id} generation {expected_generation}, but the active owner is {} generation {}.",
+        coordinator.session_id().unwrap_or("none"),
+        coordinator.session_generation(),
     )
 }
 
@@ -860,16 +911,14 @@ mod tests {
         }
     }
 
-    async fn start_test_session(state: &AppState, session_id: &str) {
+    async fn start_test_session(state: &AppState, session_id: &str) -> u64 {
         state
             .database
             .ensure_fake_live_chat_session(session_id)
             .unwrap();
-        state
-            .live_chat
-            .lock()
-            .await
-            .start_session(session_id.to_string(), vec![x_provider_row()]);
+        let mut coordinator = state.live_chat.lock().await;
+        coordinator.start_session(session_id.to_string(), vec![x_provider_row()]);
+        coordinator.session_generation()
     }
 
     fn mock_config(server: &MockXServer) -> XChatConfig {
@@ -1113,11 +1162,12 @@ mod tests {
     async fn token_access_socket_flow_authenticates_subscribes_and_delivers() {
         let server = spawn_mock_x_server(MockSocketMode::Deliver).await;
         let state = test_state();
-        start_test_session(&state, "session-1").await;
+        let session_generation = start_test_session(&state, "session-1").await;
 
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         let message = wait_for_message(&state, "message-1").await;
@@ -1167,11 +1217,12 @@ mod tests {
     async fn socket_loss_reconnects_and_refreshes_chat_access() {
         let server = spawn_mock_x_server(MockSocketMode::DropFirstThenDeliver).await;
         let state = test_state();
-        start_test_session(&state, "session-1").await;
+        let session_generation = start_test_session(&state, "session-1").await;
 
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         let message = wait_for_message(&state, "message-1").await;
@@ -1198,15 +1249,16 @@ mod tests {
     async fn persistence_rejection_retries_retained_x_message_without_server_replay() {
         let server = spawn_mock_x_server(MockSocketMode::DeliverOnce).await;
         let state = test_state();
-        state
-            .live_chat
-            .lock()
-            .await
-            .start_session("session-1".to_string(), vec![x_provider_row()]);
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![x_provider_row()]);
+            coordinator.session_generation()
+        };
 
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         wait_for_persistence_rejection(&state).await;
@@ -1239,11 +1291,12 @@ mod tests {
         let server =
             spawn_mock_x_server_with_http(MockSocketMode::StayOpen, MockHttpMode::HangToken).await;
         let state = test_state();
-        start_test_session(&state, "session-1").await;
+        let session_generation = start_test_session(&state, "session-1").await;
 
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         wait_for_count(&server.state.token_calls, 2, "X chat token requests").await;
@@ -1259,11 +1312,12 @@ mod tests {
         let server =
             spawn_mock_x_server_with_http(MockSocketMode::StayOpen, MockHttpMode::HangAccess).await;
         let state = test_state();
-        start_test_session(&state, "session-1").await;
+        let session_generation = start_test_session(&state, "session-1").await;
 
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         wait_for_count(&server.state.token_calls, 2, "X chat token requests").await;
@@ -1281,11 +1335,12 @@ mod tests {
     async fn hanging_websocket_handshake_reconnects_after_deadline() {
         let server = spawn_mock_x_server(MockSocketMode::HangHandshake).await;
         let state = test_state();
-        start_test_session(&state, "session-1").await;
+        let session_generation = start_test_session(&state, "session-1").await;
 
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         wait_for_count(
@@ -1305,11 +1360,12 @@ mod tests {
     async fn half_open_socket_reconnects_after_idle_deadline() {
         let server = spawn_mock_x_server(MockSocketMode::StayOpen).await;
         let state = test_state();
-        start_test_session(&state, "session-1").await;
+        let session_generation = start_test_session(&state, "session-1").await;
 
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         wait_for_count(
@@ -1331,11 +1387,12 @@ mod tests {
     async fn open_socket_uses_bounded_grace_before_reporting_read_only_connected() {
         let server = spawn_mock_x_server(MockSocketMode::StayOpen).await;
         let state = test_state();
-        start_test_session(&state, "session-1").await;
+        let session_generation = start_test_session(&state, "session-1").await;
 
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         wait_for_socket_frames(&server.state, 2).await;
@@ -1355,15 +1412,16 @@ mod tests {
     async fn late_socket_traffic_cannot_attach_to_a_different_session() {
         let server = spawn_mock_x_server(MockSocketMode::WaitForRelease).await;
         let state = test_state();
-        start_test_session(&state, "session-1").await;
+        let session_generation = start_test_session(&state, "session-1").await;
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             mock_config(&server),
         ));
         wait_for_socket_frames(&server.state, 2).await;
 
-        start_test_session(&state, "session-2").await;
+        let _ = start_test_session(&state, "session-2").await;
         server.state.release_message.notify_one();
         tokio::time::timeout(Duration::from_secs(1), connector)
             .await

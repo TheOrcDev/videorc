@@ -1276,7 +1276,9 @@ pub fn apply_stream_health(
     if let Some(duplicated_frames) = health.duplicated_frames {
         stats.stream_duplicated_frames = stats.stream_duplicated_frames.max(duplicated_frames);
     }
-    stats.encoder_speed = health.speed;
+    stats.encoder_speed = health
+        .speed
+        .filter(|speed| speed.is_finite() && *speed >= 0.0);
     stats.bottleneck = classify_bottleneck(
         stats.capture_fps,
         stats.render_fps,
@@ -1290,7 +1292,7 @@ pub fn apply_stream_health(
     stats
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EncoderBridgeDiagnosticSnapshot {
     pub queue_depth: u64,
     pub output_queue_high_water_frames: u64,
@@ -1385,11 +1387,22 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub error: Option<String>,
 }
 
+fn finite_non_negative_encoder_stat(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
 pub fn apply_encoder_bridge_stats(
     mut stats: DiagnosticStats,
     bridge: EncoderBridgeDiagnosticSnapshot,
     target_fps: u32,
 ) -> DiagnosticStats {
+    let input_fps = finite_non_negative_encoder_stat(bridge.input_fps);
+    let encoder_speed = finite_non_negative_encoder_stat(bridge.encoder_speed);
+    let recording_encoder_speed = finite_non_negative_encoder_stat(bridge.recording_encoder_speed);
+    let stream_encoder_speed = finite_non_negative_encoder_stat(bridge.stream_encoder_speed);
+    let recording_input_fps = finite_non_negative_encoder_stat(bridge.recording_input_fps);
+    let stream_input_fps = finite_non_negative_encoder_stat(bridge.stream_input_fps);
+
     stats.encoder_bridge_queue_depth = bridge.queue_depth;
     stats.encoder_bridge_output_queue_high_water_frames = bridge.output_queue_high_water_frames;
     stats.encoder_bridge_output_queue_oldest_frame_age_ms = bridge.output_queue_oldest_frame_age_ms;
@@ -1411,12 +1424,12 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_stream_output_pressure = bridge.stream_output_pressure;
     stats.encoder_bridge_recording_role_diagnostics = bridge.recording_role_diagnostics;
     stats.encoder_bridge_stream_role_diagnostics = bridge.stream_role_diagnostics;
-    stats.encoder_bridge_input_fps = bridge.input_fps;
+    stats.encoder_bridge_input_fps = input_fps;
     stats.encoder_bridge_dropped_frames = bridge.dropped_frames;
     stats.encoder_bridge_recording_dropped_frames = bridge.recording_dropped_frames;
     stats.encoder_bridge_stream_dropped_frames = bridge.stream_dropped_frames;
-    stats.encoder_bridge_recording_encoder_speed = bridge.recording_encoder_speed;
-    stats.encoder_bridge_stream_encoder_speed = bridge.stream_encoder_speed;
+    stats.encoder_bridge_recording_encoder_speed = recording_encoder_speed;
+    stats.encoder_bridge_stream_encoder_speed = stream_encoder_speed;
     stats.encoder_bridge_repeated_frames = bridge.repeated_fed_frames;
     stats.encoder_bridge_repeated_frame_bursts = bridge.repeated_frame_bursts;
     stats.encoder_bridge_max_repeated_frame_run = bridge.max_repeated_frame_run;
@@ -1485,8 +1498,8 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_deadline_lag_max_ms = bridge.deadline_lag_max_ms;
     stats.encoder_bridge_late_deadline_ticks = bridge.late_deadline_ticks;
     stats.encoder_bridge_schedule_skipped_ms = bridge.schedule_skipped_ms;
-    stats.encoder_bridge_recording_input_fps = bridge.recording_input_fps;
-    stats.encoder_bridge_stream_input_fps = bridge.stream_input_fps;
+    stats.encoder_bridge_recording_input_fps = recording_input_fps;
+    stats.encoder_bridge_stream_input_fps = stream_input_fps;
     stats.encoder_bridge_recording_queue_depth = bridge.recording_queue_depth;
     stats.encoder_bridge_recording_queue_oldest_frame_age_ms =
         bridge.recording_queue_oldest_frame_age_ms;
@@ -1514,8 +1527,9 @@ pub fn apply_encoder_bridge_stats(
     stats.capture_fps = stats.encoder_bridge_input_fps;
     stats.dropped_frames = bridge.dropped_frames;
     stats.skipped_frames = bridge.dropped_frames;
+    stats.encoder_speed = finite_non_negative_encoder_stat(stats.encoder_speed);
     if bridge.encoder_speed.is_some() {
-        stats.encoder_speed = bridge.encoder_speed;
+        stats.encoder_speed = encoder_speed;
     }
     stats.bottleneck = classify_bottleneck(
         stats.capture_fps,
@@ -2358,6 +2372,27 @@ mod tests {
         assert_eq!(stats.stream_output_total_bytes, 1_024);
         assert_eq!(stats.stream_duplicated_frames, 2);
         assert_eq!(stats.bottleneck, DiagnosticBottleneck::Encoder);
+    }
+
+    #[test]
+    fn stream_health_never_publishes_non_finite_encoder_speed() {
+        for speed in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            let stats = apply_stream_health(
+                idle_diagnostics(),
+                &StreamHealth {
+                    session_id: "session".to_string(),
+                    fps: None,
+                    dropped_frames: None,
+                    speed: Some(speed),
+                    bitrate_kbps: None,
+                    total_bytes: None,
+                    duplicated_frames: None,
+                    created_at: "now".to_string(),
+                },
+                30,
+            );
+            assert_eq!(stats.encoder_speed, None);
+        }
     }
 
     #[test]
@@ -3434,6 +3469,49 @@ mod tests {
         assert_eq!(wire["encoderBridgeOutputPressureRecoveryEvents"], 0);
         assert_eq!(wire["encoderBridgeOutputPreEncodeSkippedFrames"], 0);
         assert_eq!(wire["encoderBridgeEncodedAccessUnitDroppedFrames"], 0);
+    }
+
+    #[test]
+    fn encoder_bridge_stats_filter_invalid_speed_and_fps_before_wire() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            let stats = apply_encoder_bridge_stats(
+                starting_diagnostics("invalid-bridge", 30, "encoder-bridge"),
+                EncoderBridgeDiagnosticSnapshot {
+                    input_fps: Some(invalid),
+                    encoder_speed: Some(invalid),
+                    recording_encoder_speed: Some(invalid),
+                    stream_encoder_speed: Some(invalid),
+                    recording_input_fps: Some(invalid),
+                    stream_input_fps: Some(invalid),
+                    ..Default::default()
+                },
+                30,
+            );
+
+            assert_eq!(stats.capture_fps, None);
+            assert_eq!(stats.encoder_speed, None);
+            assert_eq!(stats.encoder_bridge_input_fps, None);
+            assert_eq!(stats.encoder_bridge_recording_encoder_speed, None);
+            assert_eq!(stats.encoder_bridge_stream_encoder_speed, None);
+            assert_eq!(stats.encoder_bridge_recording_input_fps, None);
+            assert_eq!(stats.encoder_bridge_stream_input_fps, None);
+
+            let wire = serde_json::to_value(stats).expect("finite diagnostics serialize");
+            for field in [
+                "captureFps",
+                "encoderSpeed",
+                "encoderBridgeInputFps",
+                "encoderBridgeRecordingEncoderSpeed",
+                "encoderBridgeStreamEncoderSpeed",
+                "encoderBridgeRecordingInputFps",
+                "encoderBridgeStreamInputFps",
+            ] {
+                assert!(
+                    wire[field].is_null(),
+                    "invalid encoder statistic {field} must not reach the wire"
+                );
+            }
+        }
     }
 
     #[test]
