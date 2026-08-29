@@ -10,6 +10,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { QuickSettings } from '@/components/studio/quick-settings'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SessionPanel } from '@/components/studio/session-panel'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
@@ -230,10 +231,23 @@ function StudioPreviewPanel(): ReactElement {
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const { previewLiveStatus } = useStudioPreview()
-  const { diagnosticStats, previewSurfaceStatus } = useStudioDiagnostics()
+  const {
+    captureRecoveryRetryPending,
+    captureRecoveryStatus,
+    diagnosticStats,
+    previewSurfaceStatus,
+    retryCaptureRecovery
+  } = useStudioDiagnostics()
   const active = isSessionTransportActive(recording.state)
   const previewHealth = studioHealth(
-    diagnosticStats,
+    {
+      ...diagnosticStats,
+      captureRecoveryLastError: captureRecoveryStatus.lastError,
+      captureRecoveryPhase:
+        captureRecoveryStatus.phase === 'idle' ? undefined : captureRecoveryStatus.phase,
+      captureRecoveryStage: captureRecoveryStatus.stage,
+      captureRecoverySource: captureRecoveryStatus.source
+    },
     active,
     runtimeInfo?.platform,
     previewSurfaceStatus.nativePreviewHostKind
@@ -253,6 +267,11 @@ function StudioPreviewPanel(): ReactElement {
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
+      {captureRecoveryStatus.phase === 'idle' ? null : (
+        <span data-videorc-capture-recovery-status>
+          <StatusBadge tone={previewHealth.tone} value={previewHealth.value} />
+        </span>
+      )}
       <span data-videorc-session-status>
         <StatusBadge
           tone={sessionStatusTone(recording.state, wsStatus)}
@@ -264,10 +283,28 @@ function StudioPreviewPanel(): ReactElement {
 
   const healthErrorRow =
     previewHealth.tone === 'error' && previewHealth.detail ? (
-      <div className="flex items-center gap-2 rounded-row border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
-        <AlertIcon className="size-4 shrink-0" weight="fill" />
-        <span className="min-w-0">{previewHealth.detail}</span>
-      </div>
+      <Alert data-testid="capture-health-alert" variant="destructive">
+        <AlertIcon weight="fill" />
+        <AlertTitle>{previewHealth.value}</AlertTitle>
+        <AlertDescription className="min-w-0">
+          <p className="line-clamp-3" title={previewHealth.detail}>
+            {previewHealth.detail}
+          </p>
+          {captureRecoveryStatus.phase === 'failed' && captureRecoveryStatus.retryable ? (
+            <div className="flex flex-wrap gap-1 pt-2">
+              <Button
+                disabled={captureRecoveryRetryPending || wsStatus !== 'connected'}
+                size="xs"
+                type="button"
+                variant="destructive"
+                onClick={() => void retryCaptureRecovery()}
+              >
+                {captureRecoveryRetryPending ? 'Restarting…' : 'Restart capture'}
+              </Button>
+            </div>
+          ) : null}
+        </AlertDescription>
+      </Alert>
     ) : null
 
   const previewStage = (

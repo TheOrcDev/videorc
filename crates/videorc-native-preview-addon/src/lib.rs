@@ -50,17 +50,23 @@ mod macos {
         pub iosurface_imports: u32,
         pub iosurface_invalidations: u32,
         pub iosurface_import_failures: u32,
+        pub iosurface_import_live_count: u32,
+        pub iosurface_import_peak_count: u32,
+        pub iosurface_import_ceiling: u32,
         pub drawable_width: f64,
         pub drawable_height: f64,
         pub contents_scale: f64,
     }
 
-    #[derive(Debug, Clone, Copy, Default)]
+    #[derive(Debug, Clone, Copy)]
     struct NativePreviewMetricState {
         iosurface_cache_hits: u32,
         iosurface_imports: u32,
         iosurface_invalidations: u32,
         iosurface_import_failures: u32,
+        iosurface_import_live_count: u32,
+        iosurface_import_peak_count: u32,
+        iosurface_import_ceiling: u32,
     }
 
     impl NativePreviewMetricState {
@@ -70,6 +76,9 @@ mod macos {
                 iosurface_imports: 0,
                 iosurface_invalidations: 0,
                 iosurface_import_failures: 0,
+                iosurface_import_live_count: 0,
+                iosurface_import_peak_count: 0,
+                iosurface_import_ceiling: IMPORTED_TEXTURE_CACHE_SIZE as u32,
             }
         }
 
@@ -87,6 +96,21 @@ mod macos {
 
         fn record_import_failure(&mut self) {
             self.iosurface_import_failures = self.iosurface_import_failures.saturating_add(1);
+        }
+
+        fn record_cache_state(&mut self, cached_entry_count: usize) {
+            self.iosurface_import_live_count =
+                u32::try_from(cached_entry_count).unwrap_or(u32::MAX);
+            self.iosurface_import_peak_count = self
+                .iosurface_import_peak_count
+                .max(self.iosurface_import_live_count);
+            debug_assert!(self.iosurface_import_live_count <= self.iosurface_import_ceiling);
+        }
+    }
+
+    impl Default for NativePreviewMetricState {
+        fn default() -> Self {
+            Self::new()
         }
     }
 
@@ -238,6 +262,7 @@ mod macos {
                         self.cached_textures.remove(0);
                     }
                     self.cached_textures.push(imported);
+                    metrics.record_cache_state(self.cached_textures.len());
                     self.cached_textures.len() - 1
                 }
             };
@@ -290,9 +315,13 @@ mod macos {
         )?;
         HOST.with(|slot| {
             let previous = slot.borrow_mut().replace(host);
-            if previous.is_some() {
-                METRICS.with(|metrics| metrics.borrow_mut().record_invalidation());
-            }
+            METRICS.with(|metrics| {
+                let mut metrics = metrics.borrow_mut();
+                if previous.is_some() {
+                    metrics.record_invalidation();
+                }
+                metrics.record_cache_state(0);
+            });
         });
         Ok(())
     }
@@ -351,7 +380,11 @@ mod macos {
     pub fn destroy_native_preview() {
         HOST.with(|slot| {
             if slot.borrow_mut().take().is_some() {
-                METRICS.with(|metrics| metrics.borrow_mut().record_invalidation());
+                METRICS.with(|metrics| {
+                    let mut metrics = metrics.borrow_mut();
+                    metrics.record_invalidation();
+                    metrics.record_cache_state(0);
+                });
             }
         });
     }
@@ -382,6 +415,9 @@ mod macos {
             iosurface_imports: metrics.iosurface_imports,
             iosurface_invalidations: metrics.iosurface_invalidations,
             iosurface_import_failures: metrics.iosurface_import_failures,
+            iosurface_import_live_count: metrics.iosurface_import_live_count,
+            iosurface_import_peak_count: metrics.iosurface_import_peak_count,
+            iosurface_import_ceiling: metrics.iosurface_import_ceiling,
             drawable_width,
             drawable_height,
             contents_scale,
@@ -440,11 +476,16 @@ mod macos {
             metrics.record_import();
             metrics.record_invalidation();
             metrics.record_import_failure();
+            metrics.record_cache_state(3);
+            metrics.record_cache_state(0);
 
             assert_eq!(metrics.iosurface_cache_hits, 1);
             assert_eq!(metrics.iosurface_imports, 1);
             assert_eq!(metrics.iosurface_invalidations, 1);
             assert_eq!(metrics.iosurface_import_failures, 1);
+            assert_eq!(metrics.iosurface_import_live_count, 0);
+            assert_eq!(metrics.iosurface_import_peak_count, 3);
+            assert_eq!(metrics.iosurface_import_ceiling, 3);
         }
 
         #[test]

@@ -13,6 +13,8 @@ use thiserror::Error;
 use tokio::sync::Mutex;
 
 use crate::captions::CaptionOverlayPosition;
+use crate::live_chat::HighlightMessageEligibility;
+#[cfg(test)]
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 use crate::protocol::CompositorState;
 use crate::state::AppState;
@@ -73,6 +75,94 @@ pub struct SetCommentHighlightParams {
     pub png_base64: String,
     #[serde(default = "default_highlight_position")]
     pub position: CaptionOverlayPosition,
+    #[cfg(test)]
+    #[serde(skip)]
+    preparation_blocker: Option<CommentHighlightPreparationBlocker>,
+    #[cfg(test)]
+    #[serde(skip)]
+    commit_blocker: Option<CommentHighlightCommitBlocker>,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct CommentHighlightPreparationBlocker {
+    entered: Arc<std::sync::atomic::AtomicBool>,
+    release: Arc<(std::sync::Mutex<bool>, std::sync::Condvar)>,
+}
+
+#[cfg(test)]
+impl CommentHighlightPreparationBlocker {
+    fn new() -> Self {
+        Self {
+            entered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            release: Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new())),
+        }
+    }
+
+    fn block(&self) {
+        use std::sync::atomic::Ordering;
+
+        self.entered.store(true, Ordering::Release);
+        let (release, condition) = &*self.release;
+        let mut released = release
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*released {
+            released = condition
+                .wait(released)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    fn entered(&self) -> bool {
+        self.entered.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn release(&self) {
+        let (release, condition) = &*self.release;
+        *release
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        condition.notify_all();
+    }
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+struct CommentHighlightCommitBlocker {
+    entered: Arc<std::sync::atomic::AtomicBool>,
+    released: Arc<std::sync::atomic::AtomicBool>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[cfg(test)]
+impl CommentHighlightCommitBlocker {
+    fn new() -> Self {
+        Self {
+            entered: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            released: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            release: Arc::new(tokio::sync::Notify::new()),
+        }
+    }
+
+    async fn block(&self) {
+        use std::sync::atomic::Ordering;
+
+        self.entered.store(true, Ordering::Release);
+        while !self.released.load(Ordering::Acquire) {
+            self.release.notified().await;
+        }
+    }
+
+    fn entered(&self) -> bool {
+        self.entered.load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn release(&self) {
+        self.released
+            .store(true, std::sync::atomic::Ordering::Release);
+        self.release.notify_waiters();
+    }
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -114,18 +204,14 @@ struct HighlightEligibility {
     recording_stopping: bool,
     viewer_overlay_available: bool,
     compositor_live: bool,
-    chat_session_id: Option<String>,
-    message: Option<LiveChatMessage>,
+    message: HighlightMessageEligibility,
 }
 
 fn validate_eligibility(
     params: &SetCommentHighlightParams,
     eligibility: &HighlightEligibility,
 ) -> Result<(), CommentHighlightError> {
-    if params.session_id.trim().is_empty()
-        || params.message_id.trim().is_empty()
-        || params.png_base64.trim().is_empty()
-    {
+    if params.session_id.trim().is_empty() || params.message_id.trim().is_empty() {
         return Err(CommentHighlightError::InvalidParams);
     }
 
@@ -146,23 +232,17 @@ fn validate_eligibility(
     if !eligibility.viewer_overlay_available || !eligibility.compositor_live {
         return Err(CommentHighlightError::UnsupportedOutput);
     }
-    if eligibility.chat_session_id.as_deref() != Some(params.session_id.as_str()) {
-        return Err(CommentHighlightError::WrongSession);
-    }
-
-    let Some(message) = eligibility.message.as_ref() else {
-        return Err(CommentHighlightError::MessageNotFound);
-    };
-    if message.id != params.message_id || message.session_id != params.session_id {
-        return Err(CommentHighlightError::WrongSession);
-    }
-    if message.is_deleted
-        || matches!(
-            message.event_type,
-            LiveChatEventType::Deleted | LiveChatEventType::System | LiveChatEventType::Moderation
-        )
-    {
-        return Err(CommentHighlightError::IneligibleMessage);
+    match eligibility.message {
+        HighlightMessageEligibility::Eligible => {}
+        HighlightMessageEligibility::WrongSession => {
+            return Err(CommentHighlightError::WrongSession);
+        }
+        HighlightMessageEligibility::Missing => {
+            return Err(CommentHighlightError::MessageNotFound);
+        }
+        HighlightMessageEligibility::Ineligible => {
+            return Err(CommentHighlightError::IneligibleMessage);
+        }
     }
     Ok(())
 }
@@ -188,7 +268,7 @@ pub async fn set_comment_highlight(
 
 async fn set_comment_highlight_with_ttl(
     state: &AppState,
-    params: SetCommentHighlightParams,
+    mut params: SetCommentHighlightParams,
     ttl: Duration,
 ) -> Result<CommentHighlightState, CommentHighlightError> {
     if params.session_id.trim().is_empty()
@@ -198,18 +278,47 @@ async fn set_comment_highlight_with_ttl(
         return Err(CommentHighlightError::InvalidParams);
     }
 
-    let compositor_live = state.compositor.lock().await.status.state == CompositorState::Live;
-    let chat = crate::live_chat::current_status(state).await;
-    let message = chat
-        .messages
-        .iter()
-        .find(|message| message.id == params.message_id)
-        .cloned();
+    let png_base64 = std::mem::take(&mut params.png_base64);
+    #[cfg(test)]
+    let preparation_blocker = params.preparation_blocker.take();
+    #[cfg(test)]
+    let commit_blocker = params.commit_blocker.take();
+    // Decode and BGRA conversion are the only unbounded-CPU portion of this
+    // command. They must finish before recording -> highlight lifecycle locks
+    // are acquired, otherwise Stop cannot publish its finalization intent.
+    let prepared = tokio::task::spawn_blocking(move || {
+        #[cfg(test)]
+        if let Some(blocker) = preparation_blocker.as_ref() {
+            blocker.block();
+        }
+        crate::captions::prepare_caption_overlay(&png_base64)
+    })
+    .await
+    .map_err(|error| {
+        CommentHighlightError::InvalidImage(format!("overlay preparation task stopped: {error}"))
+    })?
+    .map_err(|error| CommentHighlightError::InvalidImage(error.to_string()))?;
 
-    // Keep the recording guard through installation. stop_recording takes the
-    // same recording -> highlight lock order, so a stop cannot clear the old
+    #[cfg(test)]
+    if let Some(blocker) = commit_blocker.as_ref() {
+        blocker.block().await;
+    }
+
+    // Keep the recording guard through the bounded commit fence and Arc swap.
+    // Stop takes recording -> highlight-commit too, so it cannot clear the old
     // card and then race a new install onto a stopping session.
     let recording = state.recording.lock().await;
+    let _commit = state.comment_highlight_commit.lock().await;
+    // Hold compositor authority through the install itself. A Live ->
+    // non-Live transition can therefore either happen first (and reject this
+    // request) or happen afterward and clear it through the same commit fence.
+    let compositor = state.compositor.lock().await;
+    let compositor_live = compositor.status.state == CompositorState::Live;
+    let message = state
+        .live_chat
+        .lock()
+        .await
+        .highlight_message_eligibility(&params.session_id, &params.message_id);
     let eligibility = HighlightEligibility {
         recording_session_id: recording.as_ref().map(|active| active.session_id.clone()),
         recording_mode: recording.as_ref().map(|active| active.mode.clone()),
@@ -220,38 +329,38 @@ async fn set_comment_highlight_with_ttl(
             .as_ref()
             .is_some_and(|active| active.comment_highlight_available),
         compositor_live,
-        chat_session_id: chat.session_id,
         message,
     };
     validate_eligibility(&params, &eligibility)?;
 
     let mut highlight = state.comment_highlight.lock().await;
-    let snapshot = install_validated_highlight(state, &mut highlight, params, ttl)?;
+    let snapshot = install_validated_highlight(state, &mut highlight, params, prepared, ttl);
     let generation = snapshot.generation;
+    emit_state(state, &snapshot);
     drop(highlight);
+    drop(compositor);
+    drop(_commit);
     drop(recording);
 
-    emit_state(state, &snapshot);
     schedule_expiry(state.clone(), generation, ttl);
     Ok(snapshot)
 }
 
-/// Install and publish the next live state as one synchronous critical
-/// section. `install_caption_overlay` preserves the old pixels on decode
-/// failure; returning before state mutation preserves the matching old
-/// generation/state as well.
+/// Install and publish the already-decoded overlay as one bounded synchronous
+/// critical section. Preparation failure returned before these locks preserves
+/// both the old pixels and the matching generation/state.
 fn install_validated_highlight(
     state: &AppState,
     highlight: &mut CommentHighlightState,
     params: SetCommentHighlightParams,
+    prepared: crate::captions::PreparedCaptionOverlay,
     ttl: Duration,
-) -> Result<CommentHighlightState, CommentHighlightError> {
-    crate::captions::install_caption_overlay(
+) -> CommentHighlightState {
+    crate::captions::install_prepared_caption_overlay(
         &state.highlight_overlay,
-        &params.png_base64,
+        prepared,
         params.position,
-    )
-    .map_err(|error| CommentHighlightError::InvalidImage(error.to_string()))?;
+    );
 
     let generation = next_generation(highlight.generation);
     let expires_at =
@@ -264,7 +373,7 @@ fn install_validated_highlight(
         expires_at: Some(expires_at.to_rfc3339()),
         reason: None,
     };
-    Ok(highlight.clone())
+    highlight.clone()
 }
 
 fn schedule_expiry(state: AppState, generation: u64, ttl: Duration) -> tokio::task::JoinHandle<()> {
@@ -275,6 +384,7 @@ fn schedule_expiry(state: AppState, generation: u64, ttl: Duration) -> tokio::ta
 }
 
 async fn expire_generation(state: &AppState, generation: u64) -> bool {
+    let _commit = state.comment_highlight_commit.lock().await;
     let mut highlight = state.comment_highlight.lock().await;
     if highlight.phase != CommentHighlightPhase::Live || highlight.generation != generation {
         return false;
@@ -293,6 +403,16 @@ async fn expire_generation(state: &AppState, generation: u64) -> bool {
 }
 
 async fn clear_internal(
+    state: &AppState,
+    expected_session_id: Option<&str>,
+    expected_message_id: Option<&str>,
+    reason: &str,
+) -> CommentHighlightState {
+    let _commit = state.comment_highlight_commit.lock().await;
+    clear_internal_under_commit_fence(state, expected_session_id, expected_message_id, reason).await
+}
+
+async fn clear_internal_under_commit_fence(
     state: &AppState,
     expected_session_id: Option<&str>,
     expected_message_id: Option<&str>,
@@ -348,14 +468,29 @@ pub async fn clear_comment_highlight_for_session_end(
     clear_internal(state, Some(session_id), None, "session-ended").await
 }
 
-/// Provider deletion event: remove the overlay only when it still represents
-/// this exact message. A late tombstone must not clear a newer selection.
-pub async fn clear_comment_highlight_for_message(
+/// Tombstone delivery already owns `comment_highlight_commit` while it checks
+/// the authoritative live-chat generation. Re-entering the mutex here would
+/// deadlock, so this narrow helper makes the required ownership explicit.
+pub(crate) async fn clear_comment_highlight_for_message_under_commit_fence(
     state: &AppState,
     session_id: &str,
     message_id: &str,
 ) -> CommentHighlightState {
-    clear_internal(state, Some(session_id), Some(message_id), "message-deleted").await
+    clear_internal_under_commit_fence(state, Some(session_id), Some(message_id), "message-deleted")
+        .await
+}
+
+/// Clear a viewer card only when the compositor is authoritatively non-Live.
+/// A stale stop completion cannot clear a card installed on a replacement run.
+pub(crate) async fn invalidate_comment_highlight_for_compositor_non_live(
+    state: &AppState,
+    reason: &str,
+) -> CommentHighlightState {
+    let _commit = state.comment_highlight_commit.lock().await;
+    if state.compositor.lock().await.status.state == CompositorState::Live {
+        return state.comment_highlight.lock().await.clone();
+    }
+    clear_internal_under_commit_fence(state, None, None, reason).await
 }
 
 #[cfg(test)]
@@ -377,6 +512,36 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    fn persist_session(state: &AppState, session_id: &str) {
+        state
+            .database
+            .create_session(&crate::storage::NewSession {
+                id: session_id.to_string(),
+                title: "Comment highlight test".to_string(),
+                started_at: "2026-07-10T10:00:00Z".to_string(),
+                mode: "record+stream".to_string(),
+                output_path: None,
+                container: Some("mkv".to_string()),
+                stream_preset: None,
+                sources: serde_json::from_str("{}").unwrap(),
+                layout: crate::protocol::default_layout_settings(),
+                output: serde_json::from_value(serde_json::json!({
+                    "recordEnabled": true,
+                    "streamEnabled": true,
+                    "video": {
+                        "preset": "tutorial-1080p30",
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30,
+                        "bitrateKbps": 6000
+                    },
+                    "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
     }
 
     fn message(event_type: LiveChatEventType, is_deleted: bool) -> LiveChatMessage {
@@ -408,17 +573,34 @@ mod tests {
             message_id: "session-1:x:x-target:message-1".to_string(),
             png_base64: TEST_PNG.to_string(),
             position: CaptionOverlayPosition::Top,
+            preparation_blocker: None,
+            commit_blocker: None,
         }
     }
 
-    fn eligibility(message: Option<LiveChatMessage>) -> HighlightEligibility {
+    struct PreparationReleaseGuard(CommentHighlightPreparationBlocker);
+
+    impl Drop for PreparationReleaseGuard {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    struct CommitReleaseGuard(CommentHighlightCommitBlocker);
+
+    impl Drop for CommitReleaseGuard {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    fn eligibility(message: HighlightMessageEligibility) -> HighlightEligibility {
         HighlightEligibility {
             recording_session_id: Some("session-1".to_string()),
             recording_mode: Some("record+stream".to_string()),
             recording_stopping: false,
             viewer_overlay_available: true,
             compositor_live: true,
-            chat_session_id: Some("session-1".to_string()),
             message,
         }
     }
@@ -428,26 +610,26 @@ mod tests {
         assert!(
             validate_eligibility(
                 &params(),
-                &eligibility(Some(message(LiveChatEventType::Message, false)))
+                &eligibility(HighlightMessageEligibility::Eligible)
             )
             .is_ok()
         );
 
-        let mut case = eligibility(Some(message(LiveChatEventType::Message, false)));
+        let mut case = eligibility(HighlightMessageEligibility::Eligible);
         case.recording_mode = Some("record".to_string());
         assert_eq!(
             validate_eligibility(&params(), &case),
             Err(CommentHighlightError::NotStreaming)
         );
 
-        let mut case = eligibility(Some(message(LiveChatEventType::Message, false)));
+        let mut case = eligibility(HighlightMessageEligibility::Eligible);
         case.recording_session_id = Some("session-2".to_string());
         assert_eq!(
             validate_eligibility(&params(), &case),
             Err(CommentHighlightError::WrongSession)
         );
 
-        let mut case = eligibility(Some(message(LiveChatEventType::Message, false)));
+        let mut case = eligibility(HighlightMessageEligibility::Eligible);
         case.viewer_overlay_available = false;
         assert_eq!(
             validate_eligibility(&params(), &case),
@@ -458,14 +640,14 @@ mod tests {
             "highlight-unavailable"
         );
 
-        let mut case = eligibility(Some(message(LiveChatEventType::Message, false)));
+        let mut case = eligibility(HighlightMessageEligibility::Eligible);
         case.compositor_live = false;
         assert_eq!(
             validate_eligibility(&params(), &case),
             Err(CommentHighlightError::UnsupportedOutput)
         );
 
-        let case = eligibility(None);
+        let case = eligibility(HighlightMessageEligibility::Missing);
         assert_eq!(
             validate_eligibility(&params(), &case),
             Err(CommentHighlightError::MessageNotFound)
@@ -474,17 +656,13 @@ mod tests {
 
     #[test]
     fn eligibility_rejects_deleted_system_and_moderation_rows() {
-        for (event_type, deleted) in [
-            (LiveChatEventType::Message, true),
-            (LiveChatEventType::Deleted, false),
-            (LiveChatEventType::System, false),
-            (LiveChatEventType::Moderation, false),
-        ] {
-            assert_eq!(
-                validate_eligibility(&params(), &eligibility(Some(message(event_type, deleted)))),
-                Err(CommentHighlightError::IneligibleMessage)
-            );
-        }
+        assert_eq!(
+            validate_eligibility(
+                &params(),
+                &eligibility(HighlightMessageEligibility::Ineligible)
+            ),
+            Err(CommentHighlightError::IneligibleMessage)
+        );
     }
 
     #[tokio::test]
@@ -525,11 +703,9 @@ mod tests {
         let mut replacement = params();
         replacement.message_id = "message-new".to_string();
         replacement.png_base64 = "not-an-image".to_string();
-        let error = {
-            let mut highlight = state.comment_highlight.lock().await;
-            install_validated_highlight(&state, &mut highlight, replacement, COMMENT_HIGHLIGHT_TTL)
-                .unwrap_err()
-        };
+        let error = set_comment_highlight(&state, replacement)
+            .await
+            .unwrap_err();
 
         assert!(matches!(error, CommentHighlightError::InvalidImage(_)));
         assert_eq!(comment_highlight_status(&state).await, previous);
@@ -539,6 +715,168 @@ mod tests {
         assert_eq!(surviving_overlay.width, previous_overlay.width);
         assert_eq!(surviving_overlay.height, previous_overlay.height);
         assert_eq!(surviving_overlay.rgba, previous_overlay.rgba);
+    }
+
+    #[tokio::test]
+    async fn highlight_image_preparation_does_not_block_recording_finalization_intent() {
+        let state = test_state();
+        state.compositor.lock().await.status.state = CompositorState::Live;
+        {
+            let mut chat = state.live_chat.lock().await;
+            chat.start_session("session-1".to_string(), Vec::new());
+            chat.ingest(message(LiveChatEventType::Message, false));
+        }
+        let mut active = crate::recording::test_active_recording_stub("session-1");
+        active.mode = "record+stream".to_string();
+        active.comment_highlight_available = true;
+        *state.recording.lock().await = Some(active);
+
+        let blocker = CommentHighlightPreparationBlocker::new();
+        let _release_on_panic = PreparationReleaseGuard(blocker.clone());
+        let mut request = params();
+        request.preparation_blocker = Some(blocker.clone());
+        let set_state = state.clone();
+        let setting = tokio::spawn(async move {
+            set_comment_highlight_with_ttl(&set_state, request, COMMENT_HIGHLIGHT_TTL).await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !blocker.entered() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("highlight preparation must reach the deterministic blocker");
+
+        let stop_state = state.clone();
+        let stopping =
+            tokio::spawn(async move { crate::recording::stop_recording(stop_state).await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let recording = state.recording.lock().await;
+                if recording.as_ref().is_some_and(|active| {
+                    active.stop_requested
+                        && active.pipeline.status().finalization
+                            == crate::protocol::RecordingFinalizationState::Finalizing
+                }) {
+                    break;
+                }
+                drop(recording);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Stop must publish finalization intent before image preparation is released");
+
+        blocker.release();
+        let error = tokio::time::timeout(Duration::from_secs(1), setting)
+            .await
+            .expect("highlight request must settle after preparation is released")
+            .expect("highlight task")
+            .expect_err("a request prepared across Stop must be rejected");
+        assert_eq!(error, CommentHighlightError::NotStreaming);
+        assert!(crate::captions::current_caption_overlay(&state.highlight_overlay).is_none());
+
+        stopping.abort();
+        let _ = stopping.await;
+        state.recording.lock().await.take();
+    }
+
+    #[tokio::test]
+    async fn tombstone_between_decode_and_commit_prevents_stale_highlight_install() {
+        let state = test_state();
+        persist_session(&state, "session-1");
+        state.compositor.lock().await.status.state = CompositorState::Live;
+        {
+            let mut chat = state.live_chat.lock().await;
+            chat.start_session("session-1".to_string(), Vec::new());
+            chat.ingest(message(LiveChatEventType::Message, false));
+        }
+        let mut active = crate::recording::test_active_recording_stub("session-1");
+        active.mode = "record+stream".to_string();
+        active.comment_highlight_available = true;
+        *state.recording.lock().await = Some(active);
+
+        let blocker = CommentHighlightCommitBlocker::new();
+        let _release_on_panic = CommitReleaseGuard(blocker.clone());
+        let mut request = params();
+        request.commit_blocker = Some(blocker.clone());
+        let set_state = state.clone();
+        let setting = tokio::spawn(async move {
+            set_comment_highlight_with_ttl(&set_state, request, COMMENT_HIGHLIGHT_TTL).await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !blocker.entered() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("decoded highlight must reach the pre-commit seam");
+
+        assert!(
+            crate::live_chat::deliver_message(&state, message(LiveChatEventType::Deleted, true),)
+                .await,
+            "the authoritative tombstone must commit while image installation is paused"
+        );
+        blocker.release();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), setting)
+            .await
+            .expect("highlight request must settle after commit release")
+            .expect("highlight task")
+            .expect_err("a tombstoned message cannot become viewer-visible");
+        assert_eq!(error, CommentHighlightError::IneligibleMessage);
+        assert!(crate::captions::current_caption_overlay(&state.highlight_overlay).is_none());
+        assert_eq!(
+            comment_highlight_status(&state).await.phase,
+            CommentHighlightPhase::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn compositor_non_live_between_decode_and_commit_prevents_install() {
+        let state = test_state();
+        state.compositor.lock().await.status.state = CompositorState::Live;
+        {
+            let mut chat = state.live_chat.lock().await;
+            chat.start_session("session-1".to_string(), Vec::new());
+            chat.ingest(message(LiveChatEventType::Message, false));
+        }
+        let mut active = crate::recording::test_active_recording_stub("session-1");
+        active.mode = "record+stream".to_string();
+        active.comment_highlight_available = true;
+        *state.recording.lock().await = Some(active);
+
+        let blocker = CommentHighlightCommitBlocker::new();
+        let _release_on_panic = CommitReleaseGuard(blocker.clone());
+        let mut request = params();
+        request.commit_blocker = Some(blocker.clone());
+        let set_state = state.clone();
+        let setting = tokio::spawn(async move {
+            set_comment_highlight_with_ttl(&set_state, request, COMMENT_HIGHLIGHT_TTL).await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !blocker.entered() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("decoded highlight must reach the pre-commit seam");
+
+        state.compositor.lock().await.status.state = CompositorState::Stopped;
+        invalidate_comment_highlight_for_compositor_non_live(&state, "compositor-stopped").await;
+        blocker.release();
+
+        let error = tokio::time::timeout(Duration::from_secs(1), setting)
+            .await
+            .expect("highlight request must settle after commit release")
+            .expect("highlight task")
+            .expect_err("a non-Live compositor cannot receive a highlight");
+        assert_eq!(error, CommentHighlightError::UnsupportedOutput);
+        assert!(crate::captions::current_caption_overlay(&state.highlight_overlay).is_none());
+        assert_eq!(
+            comment_highlight_status(&state).await.phase,
+            CommentHighlightPhase::Idle
+        );
     }
 
     #[tokio::test]

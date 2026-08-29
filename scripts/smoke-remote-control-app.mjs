@@ -19,6 +19,8 @@ import { join } from 'node:path'
 import WebSocket from 'ws'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
@@ -77,23 +79,36 @@ function waitForRemoteEvent(ws, event, predicate = () => true) {
   })
 }
 
+async function waitForBackendState(connection, method, predicate, label) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    last = await request(connection, timeoutMs, method)
+    if (predicate(last)) return last
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 100))
+  }
+  fail(`timed out waiting for ${label}; last ${method}: ${JSON.stringify(last)}`)
+}
+
 let stopApp = async () => {}
 try {
   const launch = await launchDevApp({
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      VIDEORC_SMOKE_PREVIEW_MOTION: '1',
       VIDEORC_USER_DATA_DIR: userDataDir
     },
     timeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: (line) => {
-      if (process.env.VIDEORC_REMOTE_SMOKE_DEBUG === '1' && /DEBUG-/.test(line)) {
+      if (process.env.VIDEORC_REMOTE_SMOKE_DEBUG === '1') {
         console.log('[app]', line)
       }
     }
   })
   stopApp = launch.stop
   const renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
+  const smoke = launch.connections['preview-motion-ready']
 
   // 1. Enable + discovery file contract.
   const status = await request(renderer, timeoutMs, 'remote.control.enable')
@@ -144,14 +159,18 @@ try {
     renderer.addEventListener('message', (raw) => {
       const message = JSON.parse(String(raw.data ?? raw))
       if (message.event?.startsWith('remote.')) {
-        console.log('[DEBUG-rc] renderer saw event:', message.event, JSON.stringify(message.payload).slice(0, 120))
+        console.log(
+          '[DEBUG-rc] renderer saw event:',
+          message.event,
+          JSON.stringify(message.payload).slice(0, 120)
+        )
       }
     })
     remote.on('message', (raw) => {
       console.log('[DEBUG-rc] remote saw:', String(raw).slice(0, 160))
     })
   }
-  const micAckPromise = waitForRemoteEvent(remote, 'remote.ack', (ack) => ack?.ok === true)
+  const micAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const micStatePromise = waitForRemoteEvent(
     remote,
     'remote.state',
@@ -159,11 +178,27 @@ try {
   )
   const micTicket = await remoteRequest(remote, 'remote.intent', { kind: 'micToggle' })
   if (!micTicket.payload?.accepted) fail('micToggle intent was not accepted')
-  await micAckPromise
+  const micAck = await micAckPromise
+  if (micAck?.intentId !== micTicket.payload.intentId || micAck?.ok !== true) {
+    fail(`micToggle was not acknowledged successfully: ${JSON.stringify(micAck)}`)
+  }
   await micStatePromise
   console.log('remote-control smoke: micToggle ack + confirmed state OK')
 
-  const sceneAckPromise = waitForRemoteEvent(remote, 'remote.ack', (ack) => ack?.ok === true)
+  // The isolated profile intentionally has no persisted capture source. Arm the
+  // same deterministic renderer-owned test pattern used by the other live app
+  // smokes, then prove the backend compositor is actually rendering it before
+  // asking the remote surface to commit a screen-backed layout.
+  const compositorBeforeSynthetic = await request(renderer, timeoutMs, 'compositor.status')
+  await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
+  await waitForBackendState(
+    renderer,
+    'compositor.status',
+    (compositor) => syntheticCompositorReady(compositor, compositorBeforeSynthetic),
+    'synthetic compositor readiness'
+  )
+
+  const sceneAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const sceneStatePromise = waitForRemoteEvent(
     remote,
     'remote.state',
@@ -184,7 +219,10 @@ try {
   if (bounced.payload?.accepted !== false) fail('immediate same-kind intent was not debounced')
   console.log('remote-control smoke: debounce OK')
 
-  await sceneAckPromise
+  const sceneAck = await sceneAckPromise
+  if (sceneAck?.intentId !== sceneTicket.payload.intentId || sceneAck?.ok !== true) {
+    fail(`sceneApply was not acknowledged successfully: ${JSON.stringify(sceneAck)}`)
+  }
   await sceneStatePromise
   console.log('remote-control smoke: sceneApply ack + confirmed state OK')
 

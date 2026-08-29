@@ -3,6 +3,7 @@ import { describe, it } from 'node:test'
 
 import {
   countTransientFifoPauseMarkers,
+  evaluateSharedRecordStreamPressure,
   evaluateTransientFifoPressure,
   missingRecordingMatrixResultFailures
 } from './transient-fifo-pressure-gates.mjs'
@@ -193,6 +194,66 @@ describe('transient VideoToolbox FIFO pressure gate', () => {
     assert.ok(failures.some((failure) => failure.includes('bridge frames')))
     assert.ok(failures.some((failure) => failure.includes('encoded output errors')))
     assert.ok(failures.some((failure) => failure.includes('encoder bridge error')))
+  })
+
+  it('accepts one shared encoded output whose RTMP target stayed live through pressure', () => {
+    assert.deepEqual(
+      evaluateSharedRecordStreamPressure({
+        sessionId: 'session-1',
+        diagnostics: {
+          encoderBridgeEffectiveVideoOutput: 'videotoolbox-h264-mpegts',
+          encoderBridgeSeparateOutputEncodersActive: false,
+          encoderBridgeActiveEncodedOutputEncoders: 1,
+          streamOutputTotalBytes: 123_456
+        },
+        streamTargetsSnapshot: {
+          sessionId: 'session-1',
+          targets: [{ targetId: 'custom', state: 'live' }]
+        },
+        lifecycleEntries: [
+          {
+            code: 'encoder-bridge-writer-lifecycle',
+            message: 'sequence=1 writerId=w role=shared state=started'
+          }
+        ],
+        streamArtifactBytes: 98_765
+      }),
+      []
+    )
+  })
+
+  it('rejects a split role, dead RTMP target, or missing stream evidence', () => {
+    const failures = evaluateSharedRecordStreamPressure({
+      sessionId: 'session-1',
+      diagnostics: {
+        encoderBridgeEffectiveVideoOutput: 'videotoolbox-h264-mpegts',
+        encoderBridgeSeparateOutputEncodersActive: true,
+        encoderBridgeActiveEncodedOutputEncoders: 2,
+        streamOutputTotalBytes: 0
+      },
+      streamTargetsSnapshot: {
+        sessionId: 'session-2',
+        targets: [{ targetId: 'custom', state: 'failed' }]
+      },
+      lifecycleEntries: [
+        {
+          code: 'encoder-bridge-writer-lifecycle',
+          message: 'sequence=1 writerId=w role=recording state=started'
+        },
+        {
+          code: 'encoder-bridge-writer-lifecycle',
+          message: 'sequence=2 writerId=w2 role=stream state=started'
+        }
+      ],
+      streamArtifactBytes: 0
+    })
+
+    assert.ok(failures.some((failure) => failure.includes('separate recording and stream')))
+    assert.ok(failures.some((failure) => failure.includes('expected exactly one')))
+    assert.ok(failures.some((failure) => failure.includes('expected only shared')))
+    assert.ok(failures.some((failure) => failure.includes('not live')))
+    assert.ok(failures.some((failure) => failure.includes('no emitted stream bytes')))
+    assert.ok(failures.some((failure) => failure.includes('listener received no')))
   })
 
   it('turns a skipped required pass into an explicit matrix failure result', () => {

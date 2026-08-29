@@ -29,22 +29,30 @@ use tokio::time::{Instant, sleep};
 
 use crate::compositor::update_compositor_scene;
 use crate::live_scene::{ApplyMode, MutationContext, MutationKind, classify_mutation};
+#[cfg(test)]
+use crate::preview_camera::preview_camera_status_and_starting_identity;
 use crate::preview_camera::{
-    PreviewCameraFrameInfo, begin_preview_camera_stop, camera_capture_geometry_is_stale,
+    PreviewCameraFrameInfo, PreviewCameraStartingIdentity,
+    begin_capture_recovery_explicit_camera_configuration_mutation, begin_preview_camera_stop,
+    begin_preview_camera_stop_if_starting, camera_capture_geometry_is_stale,
     finish_preview_camera_stop, preview_camera_latest_frame_info, preview_camera_status,
-    start_preview_camera,
+    reconcile_explicit_camera_configuration_change, start_preview_camera_for_layout,
+    start_preview_camera_for_layout_until_transition_complete,
 };
-use crate::preview_screen::{PreviewScreenFrameInfo, preview_screen_latest_frame_info};
 use crate::preview_screen::{
-    begin_preview_screen_stop, finish_preview_screen_stop, preview_screen_status,
+    PreviewScreenFrameInfo, PreviewScreenStartingIdentity, preview_screen_latest_frame_info,
+};
+use crate::preview_screen::{
+    acquire_preview_screen_transition, begin_preview_screen_stop_if_starting_with_transition,
+    begin_preview_screen_stop_with_transition, finish_preview_screen_stop, preview_screen_status,
     start_preview_screen_for_live_switch,
 };
 use crate::protocol::default_layout_settings;
 use crate::protocol::{
-    CompositorSceneUpdateParams, CompositorStatus, LayoutPreset, PreviewCameraStartParams,
-    PreviewCameraState, PreviewCameraStatus, PreviewScreenStartParams, PreviewScreenState,
-    PreviewScreenStatus, Scene, SceneCommitStatus, SceneConfigParams, SceneLayoutApplyParams,
-    SceneSourceKind, SourceSelection,
+    CompositorSceneUpdateParams, CompositorStatus, LayoutPreset, LayoutSettings,
+    PreviewCameraStartParams, PreviewCameraState, PreviewCameraStatus, PreviewScreenStartParams,
+    PreviewScreenState, PreviewScreenStatus, Scene, SceneCommitStatus, SceneConfigParams,
+    SceneLayoutApplyParams, SceneSourceKind, SourceSelection, VideoSettings,
 };
 use crate::scene::{scene_from_capture_config, validate_scene_background};
 use crate::screen_capture::{
@@ -73,10 +81,18 @@ const UNUSED_CAMERA_STOP_GRACE: Duration = Duration::from_secs(1);
 /// capturer must not be swapped onto program output.
 const SOURCE_FRESH_FRAME_MAX_AGE_MS: u64 = 1_500;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct SourceReadinessDeadlines {
     camera: Option<Instant>,
     screen: Option<Instant>,
+    camera_admission: Option<PreviewCameraStartingIdentity>,
+    screen_admission: Option<PreviewScreenStartingIdentity>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceStartAdmission {
+    camera: Option<PreviewCameraStartingIdentity>,
+    screen: Option<PreviewScreenStartingIdentity>,
 }
 
 #[derive(Debug, Clone)]
@@ -84,6 +100,7 @@ struct SourceReadinessGuard {
     source_label: &'static str,
     deadline: Instant,
     target_sources: SourceSelection,
+    admission: SourceStartAdmission,
 }
 
 impl SourceReadinessDeadlines {
@@ -96,6 +113,8 @@ impl SourceReadinessDeadlines {
             screen: needs
                 .screen
                 .then(|| now + warm_source_start_timeout("screen")),
+            camera_admission: None,
+            screen_admission: None,
         }
     }
 }
@@ -469,78 +488,99 @@ async fn apply_scene_transaction(
         }
     }
 
-    let live = source_liveness(state, target_sources).await;
-    match plan_live_swap(mutation_kind, needs, live) {
-        ApplyMode::Hot => {
-            let status = commit_scene_for_intent(
-                state,
-                intent_id,
-                &scene,
-                params.layout.clone(),
-                None,
-                params.transition_ms,
-            )
-            .await?;
-            retire_unused_sources_after_commit(state, intent_id, needs).await;
-            resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
-            Ok(layout_apply_status(
-                intent_id,
-                if session_active { "hot" } else { "idle" },
-                scene,
-                status,
-                None,
-            ))
-        }
-        ApplyMode::Warm => {
-            let missing = missing_sources(needs, live);
-            let deadlines =
-                start_missing_sources(state, intent_id, &params, needs, &missing, action_label)
-                    .await?;
-            ensure_layout_intent_current(state, intent_id).await?;
-            wait_for_sources_ready(
-                state,
-                intent_id,
-                deadlines,
-                needs,
-                target_sources,
-                action_label,
-            )
-            .await?;
-            // Swap-on-ready: the old layout rendered until this exact commit; the new
-            // sources are already delivering fresh frames, so the swap is seamless.
-            let message = if missing.is_empty() {
-                format!("Applied live {action_label}.")
-            } else {
-                format!(
-                    "Started {} mid-session, swapped on first fresh frames.",
-                    missing.join(" + ")
+    // This explicit scene/config intent owns camera-recovery supersession from
+    // this point, including a same-generation Hot layout commit that never
+    // crosses preview-camera start/stop admission. The later async coordinator
+    // reconciliation publishes Idle truth; this edge shares the preview-camera
+    // mutation authority with final native installation so a queued recovery
+    // driver cannot cross the physical boundary in the meantime.
+    run_explicit_camera_configuration_transaction(state, async {
+        let live = source_liveness(state, target_sources).await;
+        match plan_live_swap(mutation_kind, needs, live) {
+            ApplyMode::Hot => {
+                let status = commit_scene_for_intent(
+                    state,
+                    intent_id,
+                    &scene,
+                    params.layout.clone(),
+                    None,
+                    params.transition_ms,
                 )
-            };
-            let status = commit_scene_for_intent(
-                state,
-                intent_id,
-                &scene,
-                params.layout.clone(),
-                Some(message.clone()),
-                params.transition_ms,
-            )
-            .await?;
-            retire_unused_sources_after_commit(state, intent_id, needs).await;
-            resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
-            Ok(layout_apply_status(
-                intent_id,
-                "warm",
-                scene,
-                status,
-                Some(message),
-            ))
+                .await?;
+                retire_unused_sources_after_commit(state, intent_id, needs).await;
+                resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
+                Ok(layout_apply_status(
+                    intent_id,
+                    if session_active { "hot" } else { "idle" },
+                    scene,
+                    status,
+                    None,
+                ))
+            }
+            ApplyMode::Warm => {
+                let missing = missing_sources(needs, live);
+                let deadlines =
+                    start_missing_sources(state, intent_id, &params, needs, &missing, action_label)
+                        .await?;
+                ensure_layout_intent_current(state, intent_id).await?;
+                wait_for_sources_ready(
+                    state,
+                    intent_id,
+                    deadlines,
+                    needs,
+                    target_sources,
+                    action_label,
+                )
+                .await?;
+                // Swap-on-ready: the old layout rendered until this exact commit; the new
+                // sources are already delivering fresh frames, so the swap is seamless.
+                let message = if missing.is_empty() {
+                    format!("Applied live {action_label}.")
+                } else {
+                    format!(
+                        "Started {} mid-session, swapped on first fresh frames.",
+                        missing.join(" + ")
+                    )
+                };
+                let status = commit_scene_for_intent(
+                    state,
+                    intent_id,
+                    &scene,
+                    params.layout.clone(),
+                    Some(message.clone()),
+                    params.transition_ms,
+                )
+                .await?;
+                retire_unused_sources_after_commit(state, intent_id, needs).await;
+                resync_camera_capture_geometry_after_commit(state, intent_id, &params, needs).await;
+                Ok(layout_apply_status(
+                    intent_id,
+                    "warm",
+                    scene,
+                    status,
+                    Some(message),
+                ))
+            }
+            ApplyMode::Cold => {
+                // classify_mutation never returns Cold for LayoutSetPreset; keep the
+                // honest failure anyway rather than silently doing nothing.
+                bail!("Layout preset change classified cold during an active session.");
+            }
         }
-        ApplyMode::Cold => {
-            // classify_mutation never returns Cold for LayoutSetPreset; keep the
-            // honest failure anyway rather than silently doing nothing.
-            bail!("Layout preset change classified cold during an active session.");
-        }
-    }
+    })
+    .await
+}
+
+async fn run_explicit_camera_configuration_transaction<T>(
+    state: &AppState,
+    transaction: impl std::future::Future<Output = T>,
+) -> T {
+    let explicit_camera_mutation =
+        begin_capture_recovery_explicit_camera_configuration_mutation(state).await;
+    let result = transaction.await;
+    explicit_camera_mutation.finish();
+    reconcile_explicit_camera_configuration_change(state).await;
+    result
 }
 
 async fn begin_layout_intent(
@@ -557,9 +597,14 @@ async fn begin_layout_intent(
             intents.latest_intent_id
         );
     }
+    let _source_admission = state.lock_layout_source_admission();
     intents.latest_intent_id = intent_id;
     intents.latest_needs_camera = needs.camera;
     intents.latest_needs_screen = needs.screen;
+    // Publish the registration linearization point before releasing the
+    // mutex. Detached source workers use this mirror to reject an older
+    // intent without taking the intent mutex under a preview-runtime lock.
+    state.publish_latest_layout_intent_id(intent_id);
     Ok(intent_id)
 }
 
@@ -581,12 +626,43 @@ async fn wait_for_layout_intent_superseded(state: &AppState, intent_id: u64) -> 
     }
 }
 
+async fn await_layout_source_admission<T: Send + 'static, R: Send + 'static>(
+    state: &AppState,
+    intent_id: u64,
+    source_label: &'static str,
+    source_task: &mut tokio::task::JoinHandle<R>,
+    mut admission_ready: oneshot::Receiver<Option<T>>,
+) -> Result<Option<T>> {
+    tokio::select! {
+        biased;
+        result = &mut admission_ready => result.map_err(|_| {
+            anyhow::anyhow!("{source_label} source startup ended before publishing admission ownership")
+        }),
+        _ = wait_for_layout_intent_superseded(state, intent_id) => {
+            let latest = reconcile_superseded_source_start(
+                state,
+                source_label,
+                source_task,
+                &SourceStartAdmission::default(),
+            )
+            .await;
+            bail!("Layout intent {intent_id} was superseded by newer intent {latest}.")
+        }
+    }
+}
+
+// Each argument is an independent part of the source-start race (intent,
+// transition readiness, guarded peer readiness, and the owned task). Bundling
+// them would hide those cancellation boundaries without reducing complexity.
+#[allow(clippy::too_many_arguments)]
 async fn await_layout_source_start<T: Send + 'static>(
     state: &AppState,
     intent_id: u64,
     timeout: Duration,
+    source_task_owns_transition_timeout: bool,
     source_label: &'static str,
     restart_ready: Option<oneshot::Receiver<()>>,
+    source_admission: SourceStartAdmission,
     readiness_guard: Option<SourceReadinessGuard>,
     mut source_task: tokio::task::JoinHandle<T>,
 ) -> Result<(T, Instant)> {
@@ -599,13 +675,17 @@ async fn await_layout_source_start<T: Send + 'static>(
                     .map_err(|error| anyhow::anyhow!("{source_label} source startup task failed: {error}"));
             },
             _ = wait_for_layout_intent_superseded(state, intent_id) => {
-                let latest = reconcile_superseded_source_start(state, source_label, &mut source_task).await;
+                let latest = reconcile_superseded_source_start(
+                    state,
+                    source_label,
+                    &mut source_task,
+                    &source_admission,
+                ).await;
                 bail!("Layout intent {intent_id} was superseded by newer intent {latest}.")
             },
             _ = &mut restart_ready => {}
         }
     }
-    let deadline = Instant::now() + timeout;
     let guarded_source_label = readiness_guard.as_ref().map(|guard| guard.source_label);
     let guarded_readiness_failure = async {
         match readiness_guard.as_ref() {
@@ -614,18 +694,79 @@ async fn await_layout_source_start<T: Send + 'static>(
         }
     };
     tokio::pin!(guarded_readiness_failure);
+    if source_task_owns_transition_timeout {
+        return tokio::select! {
+            result = &mut source_task => result
+                // A camera transition owns its bounded command response. Its
+                // layout first-frame budget starts only after that response;
+                // racing it with another identical 15s timer aborted a valid
+                // operator generation while it waited behind stale recovery.
+                .map(|value| (value, Instant::now() + timeout))
+                .map_err(|error| anyhow::anyhow!("{source_label} source startup task failed: {error}")),
+            _ = wait_for_layout_intent_superseded(state, intent_id) => {
+                let latest = reconcile_superseded_source_start(
+                    state,
+                    source_label,
+                    &mut source_task,
+                    &source_admission,
+                ).await;
+                bail!("Layout intent {intent_id} was superseded by newer intent {latest}.")
+            }
+            failure = &mut guarded_readiness_failure => {
+                source_task.abort();
+                cancel_pending_source_start_for_intent(
+                    state,
+                    intent_id,
+                    source_label,
+                    source_admission.camera.as_ref(),
+                    source_admission.screen.as_ref(),
+                )
+                .await;
+                if let Some(guarded_source_label) = guarded_source_label
+                    && guarded_source_label != source_label
+                {
+                    cancel_pending_source_start_for_intent(
+                        state,
+                        intent_id,
+                        guarded_source_label,
+                        readiness_guard
+                            .as_ref()
+                            .and_then(|guard| guard.admission.camera.as_ref()),
+                        readiness_guard
+                            .as_ref()
+                            .and_then(|guard| guard.admission.screen.as_ref()),
+                    )
+                    .await;
+                }
+                bail!(failure)
+            }
+        };
+    }
+    let deadline = Instant::now() + timeout;
     tokio::select! {
         result = &mut source_task => result
             .map(|value| (value, deadline))
             .map_err(|error| anyhow::anyhow!("{source_label} source startup task failed: {error}")),
         _ = wait_for_layout_intent_superseded(state, intent_id) => {
-            let latest = reconcile_superseded_source_start(state, source_label, &mut source_task).await;
+            let latest = reconcile_superseded_source_start(
+                state,
+                source_label,
+                &mut source_task,
+                &source_admission,
+            ).await;
             bail!("Layout intent {intent_id} was superseded by newer intent {latest}.")
         }
         _ = tokio::time::sleep_until(deadline) => {
             let failure_detail = source_start_failure_detail(state, source_label).await;
             source_task.abort();
-            cancel_pending_source_start_for_intent(state, intent_id, source_label).await;
+            cancel_pending_source_start_for_intent(
+                state,
+                intent_id,
+                source_label,
+                source_admission.camera.as_ref(),
+                source_admission.screen.as_ref(),
+            )
+            .await;
             bail!(
                 "Layout intent {intent_id} timed out while starting {source_label} within {}s.{failure_detail}",
                 timeout.as_secs(),
@@ -633,11 +774,29 @@ async fn await_layout_source_start<T: Send + 'static>(
         }
         failure = &mut guarded_readiness_failure => {
             source_task.abort();
-            cancel_pending_source_start_for_intent(state, intent_id, source_label).await;
+            cancel_pending_source_start_for_intent(
+                state,
+                intent_id,
+                source_label,
+                source_admission.camera.as_ref(),
+                source_admission.screen.as_ref(),
+            )
+            .await;
             if let Some(guarded_source_label) = guarded_source_label
                 && guarded_source_label != source_label
             {
-                cancel_pending_source_start_for_intent(state, intent_id, guarded_source_label).await;
+                cancel_pending_source_start_for_intent(
+                    state,
+                    intent_id,
+                    guarded_source_label,
+                    readiness_guard
+                        .as_ref()
+                        .and_then(|guard| guard.admission.camera.as_ref()),
+                    readiness_guard
+                        .as_ref()
+                        .and_then(|guard| guard.admission.screen.as_ref()),
+                )
+                .await;
             }
             bail!(failure)
         }
@@ -692,55 +851,62 @@ async fn reconcile_superseded_source_start<T: Send + 'static>(
     state: &AppState,
     source_label: &'static str,
     source_task: &mut tokio::task::JoinHandle<T>,
+    admission: &SourceStartAdmission,
 ) -> u64 {
-    let intents = state.layout_intents.lock().await;
-    let latest = intents.latest_intent_id;
-    let latest_needs_source = match source_label {
-        "camera" => intents.latest_needs_camera,
-        "screen" => intents.latest_needs_screen,
-        _ => false,
-    };
-    if !latest_needs_source {
-        // Do not detach a startup that can register after the winner's retirement
-        // edge has already run. Abort it while intent registration is blocked, then
-        // invalidate any lease it created before observing cancellation. A winner
-        // that still needs this source keeps the detached task and can join its lease.
-        source_task.abort();
-        let _ = source_task.await;
-        match source_label {
-            "camera"
-                if preview_camera_status(state).await.state == PreviewCameraState::Starting =>
-            {
-                let stop = begin_preview_camera_stop(state).await;
+    // The command task is only a disposable waiter. Every admitted native
+    // generation already has a detached process owner, so aborting here cannot
+    // orphan physical handles. Exact identity then invalidates only work still
+    // owned by the superseded intent; a same-key newer intent transfers the
+    // owner first and makes this CAS harmlessly miss.
+    source_task.abort();
+    match source_label {
+        "camera" => {
+            if let Some(stop) = match admission.camera.as_ref() {
+                Some(expected) => begin_preview_camera_stop_if_starting(state, expected).await,
+                None => None,
+            } {
                 let _ = finish_preview_camera_stop(stop).await;
             }
-            "screen"
-                if preview_screen_status(state).await.state == PreviewScreenState::Starting =>
-            {
-                let stop = begin_preview_screen_stop(state).await;
-                let _ = finish_preview_screen_stop(stop).await;
-            }
-            _ => {}
         }
+        "screen" => {
+            if let Some(expected) = admission.screen.as_ref() {
+                let transition = acquire_preview_screen_transition(state).await;
+                if let Some(stop) = begin_preview_screen_stop_if_starting_with_transition(
+                    state, transition, expected,
+                )
+                .await
+                {
+                    let _ = finish_preview_screen_stop(stop).await;
+                }
+            }
+        }
+        _ => {}
     }
-    latest
+    state.latest_layout_intent_id()
 }
 
 async fn cancel_pending_source_start_for_intent(
     state: &AppState,
     intent_id: u64,
     source_label: &'static str,
+    expected_camera: Option<&PreviewCameraStartingIdentity>,
+    expected_screen: Option<&PreviewScreenStartingIdentity>,
 ) {
     match source_label {
         "camera" => {
+            let Some(expected_camera) = expected_camera else {
+                // A disposable command waiter cannot prove which camera
+                // generation it owns. Its persistent transition supervisor
+                // remains responsible; only readiness cleanup carrying an
+                // exact sampled identity may invalidate a camera generation.
+                return;
+            };
             let stop = {
                 let intents = state.layout_intents.lock().await;
-                if intents.latest_intent_id != intent_id
-                    || preview_camera_status(state).await.state != PreviewCameraState::Starting
-                {
+                if intents.latest_intent_id != intent_id {
                     None
                 } else {
-                    Some(begin_preview_camera_stop(state).await)
+                    begin_preview_camera_stop_if_starting(state, expected_camera).await
                 }
             };
             if let Some(stop) = stop {
@@ -748,14 +914,24 @@ async fn cancel_pending_source_start_for_intent(
             }
         }
         "screen" => {
+            let Some(expected_screen) = expected_screen else {
+                // As with camera, only a caller carrying the exact admitted
+                // screen generation may cancel it. A public start or newer
+                // layout can otherwise race the timeout sample.
+                return;
+            };
+            let transition = acquire_preview_screen_transition(state).await;
             let stop = {
                 let intents = state.layout_intents.lock().await;
-                if intents.latest_intent_id != intent_id
-                    || preview_screen_status(state).await.state != PreviewScreenState::Starting
-                {
+                if intents.latest_intent_id != intent_id {
                     None
                 } else {
-                    Some(begin_preview_screen_stop(state).await)
+                    begin_preview_screen_stop_if_starting_with_transition(
+                        state,
+                        transition,
+                        expected_screen,
+                    )
+                    .await
                 }
             };
             if let Some(stop) = stop {
@@ -764,6 +940,26 @@ async fn cancel_pending_source_start_for_intent(
         }
         _ => {}
     }
+}
+
+async fn cancel_expired_source_starts_and_refresh_readiness(
+    state: &AppState,
+    intent_id: u64,
+    needs: SceneSourceNeeds,
+    sampled_readiness: &SourceReadiness,
+    camera_admission: Option<&PreviewCameraStartingIdentity>,
+    screen_admission: Option<&PreviewScreenStartingIdentity>,
+    target_sources: &SourceSelection,
+) -> SourceReadiness {
+    if needs.camera && !sampled_readiness.live.camera {
+        cancel_pending_source_start_for_intent(state, intent_id, "camera", camera_admission, None)
+            .await;
+    }
+    if needs.screen && !sampled_readiness.live.screen {
+        cancel_pending_source_start_for_intent(state, intent_id, "screen", None, screen_admission)
+            .await;
+    }
+    source_readiness(state, target_sources).await
 }
 
 async fn commit_scene_for_intent(
@@ -829,13 +1025,13 @@ async fn start_missing_sources(
         ensure_layout_intent_current(state, intent_id).await?;
         match *source {
             "camera" => {
-                let current = preview_camera_status(state).await;
-                if current.state == PreviewCameraState::Starting
-                    && current.camera_id == params.sources.camera_id
-                {
-                    continue;
-                }
-                let start = tokio::spawn(start_preview_camera(
+                // Always cross camera admission, even when the same device is
+                // already Starting. Ordinary same-key starts join there, while
+                // a recovery-owned Starting generation is superseded by this
+                // operator intent. Skipping the call stranded the layout wait
+                // when recovery was invalidated between native stop and spawn.
+                let (admission_ready_tx, admission_ready_rx) = oneshot::channel();
+                let mut start = tokio::spawn(start_preview_camera_for_layout(
                     state.clone(),
                     PreviewCameraStartParams {
                         sources: params.sources.clone(),
@@ -843,24 +1039,47 @@ async fn start_missing_sources(
                         video: params.video.clone().unwrap_or_else(fallback_video_settings),
                         ffmpeg_path: ffmpeg_path.clone(),
                     },
+                    intent_id,
+                    admission_ready_tx,
                 ));
-                let (status, deadline) = await_layout_source_start(
+                let camera_admission = await_layout_source_admission(
+                    state,
+                    intent_id,
+                    "camera",
+                    &mut start,
+                    admission_ready_rx,
+                )
+                .await?;
+                let source_admission = SourceStartAdmission {
+                    camera: camera_admission.clone(),
+                    screen: None,
+                };
+                let (start, deadline) = await_layout_source_start(
                     state,
                     intent_id,
                     warm_source_start_timeout("camera"),
+                    true,
                     "camera",
                     None,
+                    source_admission,
                     missing.contains(&"screen").then(|| SourceReadinessGuard {
                         source_label: "screen",
                         deadline: readiness_deadlines
                             .screen
                             .expect("needed screen source must have a readiness deadline"),
                         target_sources: params.sources.clone(),
+                        admission: SourceStartAdmission {
+                            camera: None,
+                            screen: readiness_deadlines.screen_admission.clone(),
+                        },
                     }),
                     start,
                 )
                 .await?;
                 readiness_deadlines.camera = Some(deadline);
+                readiness_deadlines.camera_admission =
+                    camera_admission.or(start.admitted_starting_identity);
+                let status = start.status;
                 if matches!(
                     status.state,
                     PreviewCameraState::Failed
@@ -875,14 +1094,13 @@ async fn start_missing_sources(
                 }
             }
             "screen" => {
-                let current = preview_screen_status(state).await;
-                if current.state == PreviewScreenState::Starting
-                    && current.source_id.as_deref() == selected_screen_source_id(&params.sources)
-                {
-                    continue;
-                }
+                // Always cross screen admission. A same-key layout join must
+                // transfer timeout ownership to the newest intent, while a
+                // stale different-key task must be rejected without changing
+                // the generation.
                 let (restart_ready_tx, restart_ready_rx) = oneshot::channel();
-                let start = tokio::spawn(start_preview_screen_for_live_switch(
+                let (admission_ready_tx, admission_ready_rx) = oneshot::channel();
+                let mut start = tokio::spawn(start_preview_screen_for_live_switch(
                     state.clone(),
                     PreviewScreenStartParams {
                         sources: params.sources.clone(),
@@ -891,18 +1109,37 @@ async fn start_missing_sources(
                         ffmpeg_path: ffmpeg_path.clone(),
                     },
                     restart_ready_tx,
+                    intent_id,
+                    admission_ready_tx,
                 ));
-                let (status, deadline) = await_layout_source_start(
+                let screen_admission = await_layout_source_admission(
+                    state,
+                    intent_id,
+                    "screen",
+                    &mut start,
+                    admission_ready_rx,
+                )
+                .await?;
+                let source_admission = SourceStartAdmission {
+                    camera: None,
+                    screen: screen_admission.clone(),
+                };
+                let (start, deadline) = await_layout_source_start(
                     state,
                     intent_id,
                     warm_source_start_timeout("screen"),
+                    false,
                     "screen",
                     Some(restart_ready_rx),
+                    source_admission,
                     None,
                     start,
                 )
                 .await?;
                 readiness_deadlines.screen = Some(deadline);
+                readiness_deadlines.screen_admission =
+                    screen_admission.or(start.admitted_starting_identity);
+                let status = start.status;
                 if matches!(
                     status.state,
                     PreviewScreenState::Failed
@@ -966,14 +1203,25 @@ async fn wait_for_sources_ready(
             ));
         }
         if !expired.is_empty() {
+            // A native source may publish Live after the sample above but
+            // before timeout cancellation reaches preview admission. The
+            // conditional stop CAS preserves that Live owner; accept it here
+            // instead of returning an error after the target became ready.
+            let readiness = cancel_expired_source_starts_and_refresh_readiness(
+                state,
+                intent_id,
+                needs,
+                &readiness,
+                deadlines.camera_admission.as_ref(),
+                deadlines.screen_admission.as_ref(),
+                target_sources,
+            )
+            .await;
+            if missing_sources(needs, readiness.live).is_empty() {
+                return Ok(());
+            }
             let still_missing =
                 missing_readiness_messages(needs, &readiness, Some(target_sources)).join("; ");
-            if needs.camera && !readiness.live.camera {
-                cancel_pending_source_start_for_intent(state, intent_id, "camera").await;
-            }
-            if needs.screen && !readiness.live.screen {
-                cancel_pending_source_start_for_intent(state, intent_id, "screen").await;
-            }
             bail!(
                 "Live {action_label} blocked after {} exceeded its source-start/readiness budget: {still_missing}. The previous layout is still live.",
                 expired.join(" + ")
@@ -1021,7 +1269,7 @@ async fn resync_camera_capture_geometry_after_commit(
         ffmpeg_path: active_recording_ffmpeg_path(state).await,
     };
     let resync_state = state.clone();
-    tokio::spawn(async move {
+    state.spawn_process_task(async move {
         // Settle first: browsing scenes fires a commit per click, and an
         // immediate restart per click stacks camera restarts on top of each
         // other — overlapping warm-ups misread renegotiation buffers as color
@@ -1037,17 +1285,70 @@ async fn resync_camera_capture_geometry_after_commit(
         if !still_current {
             return;
         }
-        // Re-check the world after the settle window: a session may have
-        // started (resync must stay inert mid-recording), or a newer commit
-        // may have restarted the camera into matching geometry already.
-        if resync_state.recording.lock().await.is_some() {
-            return;
-        }
-        if !camera_capture_geometry_is_stale(&resync_state, &layout, &video).await {
-            return;
-        }
-        let _ = start_preview_camera(resync_state, start_params).await;
+        run_camera_geometry_resync_after_settle(
+            resync_state,
+            start_params,
+            layout,
+            video,
+            intent_id,
+        )
+        .await;
     });
+}
+
+async fn run_camera_geometry_resync_after_settle(
+    state: AppState,
+    params: PreviewCameraStartParams,
+    layout: LayoutSettings,
+    video: VideoSettings,
+    layout_intent_id: u64,
+) {
+    // Recording startup owns this fence from admission until `recording` is
+    // published. Owning the same edge makes the decision and the complete
+    // camera restart atomic with respect to startup: either resync finishes
+    // first, or startup publishes recording truth and resync stands down.
+    let _session_start_fence = state
+        .session_start_source_transition_fence
+        .clone()
+        .lock_owned()
+        .await;
+
+    // Re-check every prerequisite after waiting for the fence. A session,
+    // shutdown, or newer scene may have become authoritative while queued,
+    // or another owner may already have installed matching geometry.
+    if state.process_shutdown_requested() || state.recording.lock().await.is_some() {
+        return;
+    }
+    let still_current = {
+        let intents = state.layout_intents.lock().await;
+        intents.latest_intent_id == layout_intent_id && intents.latest_needs_camera
+    };
+    if !still_current || !camera_capture_geometry_is_stale(&state, &layout, &video).await {
+        return;
+    }
+
+    let _ = start_camera_geometry_resync_for_layout(state, params, layout_intent_id).await;
+}
+
+async fn start_camera_geometry_resync_for_layout(
+    state: AppState,
+    params: PreviewCameraStartParams,
+    layout_intent_id: u64,
+) -> crate::protocol::PreviewCameraStatus {
+    // Geometry resync is delayed layout work, not an independent operator
+    // command. Carry the originating intent through camera admission so a
+    // newer scene that registers after the settle checks still wins at the
+    // final source-registry/native-install linearization points.
+    let (admission_ready, discarded_admission) = oneshot::channel();
+    drop(discarded_admission);
+    start_preview_camera_for_layout_until_transition_complete(
+        state,
+        params,
+        layout_intent_id,
+        admission_ready,
+    )
+    .await
+    .status
 }
 
 async fn retire_unused_sources_after_commit(
@@ -1056,13 +1357,11 @@ async fn retire_unused_sources_after_commit(
     needs: SceneSourceNeeds,
 ) {
     if !needs.screen {
-        // Keep intent registration and runtime detachment on one atomic edge.
-        // The capture thread is signalled here, but its potentially slow join is
-        // deliberately finished after releasing the intent mutex.
+        let transition = acquire_preview_screen_transition(state).await;
         let stop = {
             let intents = state.layout_intents.lock().await;
             if intents.latest_intent_id == intent_id && !intents.latest_needs_screen {
-                Some(begin_preview_screen_stop(state).await)
+                Some(begin_preview_screen_stop_with_transition(state, transition).await)
             } else {
                 None
             }
@@ -1076,7 +1375,7 @@ async fn retire_unused_sources_after_commit(
     }
 
     let grace_state = state.clone();
-    tokio::spawn(async move {
+    state.spawn_process_task(async move {
         sleep(UNUSED_CAMERA_STOP_GRACE).await;
         let stop = {
             let intents = grace_state.layout_intents.lock().await;
@@ -1373,7 +1672,7 @@ mod tests {
     use crate::storage::Database;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, Ordering};
-    use tokio::sync::{Barrier, Notify, broadcast};
+    use tokio::sync::{Barrier, broadcast};
 
     fn test_state() -> AppState {
         let (events, _) = broadcast::channel(16);
@@ -1534,6 +1833,144 @@ mod tests {
             status.frames_captured, 42,
             "the live session must be untouched"
         );
+    }
+
+    #[tokio::test]
+    async fn geometry_resync_start_carries_its_layout_intent_through_camera_admission() {
+        let state = test_state();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation-native:0",
+            &default_layout_settings(),
+            &fallback_video_settings(),
+        )
+        .await;
+        begin_layout_intent(
+            &state,
+            Some(9),
+            SceneSourceNeeds {
+                camera: true,
+                screen: false,
+            },
+        )
+        .await
+        .expect("newer layout intent must register");
+
+        let mut stale_sources = sources(true, false);
+        // If delayed resync accidentally re-enters through the public camera
+        // command, this unsupported source stops the current camera and
+        // publishes Failed. Intent-owned admission rejects it before either
+        // mutation, without touching real hardware.
+        stale_sources.camera_id = Some("camera:unsupported:stale-resync".to_string());
+        let status = start_camera_geometry_resync_for_layout(
+            state.clone(),
+            PreviewCameraStartParams {
+                sources: stale_sources,
+                layout: default_layout_settings(),
+                video: fallback_video_settings(),
+                ffmpeg_path: None,
+            },
+            8,
+        )
+        .await;
+
+        assert_eq!(status.state, PreviewCameraState::Live);
+        assert_eq!(
+            status.camera_id.as_deref(),
+            Some("camera:avfoundation-native:0")
+        );
+        assert_eq!(status.frames_captured, 42);
+        let current = preview_camera_status(&state).await;
+        assert_eq!(
+            current, status,
+            "stale resync must leave public camera truth untouched"
+        );
+    }
+
+    #[tokio::test]
+    async fn geometry_resync_waits_for_session_start_publication_before_touching_camera() {
+        let state = test_state();
+        let installed_video = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Stream1080p60,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 6000,
+        };
+        let target_video = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Tutorial1440p30,
+            width: 2560,
+            height: 1440,
+            fps: 30,
+            bitrate_kbps: 8000,
+        };
+        let target_layout = {
+            let mut layout = default_layout_settings();
+            layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+            layout
+        };
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation-native:0",
+            &default_layout_settings(),
+            &installed_video,
+        )
+        .await;
+        assert!(
+            camera_capture_geometry_is_stale(&state, &target_layout, &target_video).await,
+            "the test must arm a real geometry resync"
+        );
+
+        let needs = SceneSourceNeeds {
+            camera: true,
+            screen: false,
+        };
+        let intent_id = begin_layout_intent(&state, Some(10), needs)
+            .await
+            .expect("layout intent must register");
+        let mut stale_sources = sources(true, false);
+        stale_sources.camera_id = Some("camera:unsupported:must-not-start".to_string());
+
+        // Simulate session.start after admission but before it publishes
+        // `state.recording`. Without the shared fence, the delayed resync wins
+        // this gap and the unsupported source turns the live camera Failed.
+        let session_start_fence = state
+            .session_start_source_transition_fence
+            .clone()
+            .lock_owned()
+            .await;
+        let mut resync = tokio::spawn(run_camera_geometry_resync_after_settle(
+            state.clone(),
+            PreviewCameraStartParams {
+                sources: stale_sources,
+                layout: target_layout.clone(),
+                video: target_video.clone(),
+                ffmpeg_path: None,
+            },
+            target_layout,
+            target_video,
+            intent_id,
+        ));
+
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut resync)
+                .await
+                .is_err(),
+            "geometry resync must wait while session startup owns admission"
+        );
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "starting-session",
+        ));
+        drop(session_start_fence);
+        resync.await.expect("geometry resync task must finish");
+
+        let status = preview_camera_status(&state).await;
+        assert_eq!(status.state, PreviewCameraState::Live);
+        assert_eq!(
+            status.camera_id.as_deref(),
+            Some("camera:avfoundation-native:0")
+        );
+        assert_eq!(status.frames_captured, 42);
     }
 
     fn sources(camera: bool, screen: bool) -> SourceSelection {
@@ -2014,6 +2451,111 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn screen_retirement_waiting_for_transition_does_not_hold_layout_intents() {
+        let state = test_state();
+        let intent_id = begin_layout_intent(
+            &state,
+            Some(1),
+            SceneSourceNeeds {
+                camera: true,
+                screen: false,
+            },
+        )
+        .await
+        .expect("first intent");
+        let held_transition =
+            crate::preview_screen::acquire_preview_screen_transition(&state).await;
+        let retirement_state = state.clone();
+        let retirement = tokio::spawn(async move {
+            retire_unused_sources_after_commit(
+                &retirement_state,
+                intent_id,
+                SceneSourceNeeds {
+                    camera: true,
+                    screen: false,
+                },
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        let winner = tokio::time::timeout(
+            Duration::from_millis(100),
+            begin_layout_intent(
+                &state,
+                Some(2),
+                SceneSourceNeeds {
+                    camera: false,
+                    screen: true,
+                },
+            ),
+        )
+        .await
+        .expect("native transition wait must not block a newer layout intent")
+        .expect("newer intent");
+        assert_eq!(winner, 2);
+
+        drop(held_transition);
+        retirement.await.expect("retirement task");
+    }
+
+    #[tokio::test]
+    async fn camera_start_cancellation_waiting_for_transition_does_not_hold_layout_intents() {
+        let state = test_state();
+        let intent_id = begin_layout_intent(
+            &state,
+            Some(10),
+            SceneSourceNeeds {
+                camera: true,
+                screen: false,
+            },
+        )
+        .await
+        .expect("camera intent");
+        let camera_identity = crate::preview_camera::test_install_starting_camera_generation(
+            &state,
+            "camera:avfoundation:test",
+            &default_layout_settings(),
+            &fallback_video_settings(),
+            Some(intent_id),
+        )
+        .await;
+        let held_transition =
+            crate::preview_camera::acquire_preview_camera_transition(&state).await;
+        let cancel_state = state.clone();
+        let cancellation = tokio::spawn(async move {
+            cancel_pending_source_start_for_intent(
+                &cancel_state,
+                intent_id,
+                "camera",
+                Some(&camera_identity),
+                None,
+            )
+            .await;
+        });
+        tokio::task::yield_now().await;
+
+        let winner = tokio::time::timeout(
+            Duration::from_millis(100),
+            begin_layout_intent(
+                &state,
+                Some(11),
+                SceneSourceNeeds {
+                    camera: false,
+                    screen: true,
+                },
+            ),
+        )
+        .await
+        .expect("camera transition wait must not block a newer layout intent")
+        .expect("newer intent");
+        assert_eq!(winner, 11);
+
+        drop(held_transition);
+        cancellation.await.expect("cancellation task");
+    }
+
+    #[tokio::test]
     async fn screen_retirement_serializes_new_intent_and_preserves_winner() {
         let state = test_state();
         let intent_id = begin_layout_intent(
@@ -2027,10 +2569,10 @@ mod tests {
         .await
         .expect("first layout intent should register");
 
-        // Hold the runtime slot so retirement reaches the detach edge but cannot
-        // complete it. A newer intent must remain blocked until that edge finishes;
-        // otherwise it can register between the old check and the old stop.
-        let screen = state.preview_screen.lock().await;
+        // Hold the registry so retirement can acquire transition -> intent ->
+        // preview runtime, but cannot commit the atomic consumer-release/detach
+        // edge. A newer intent must remain blocked until that edge finishes.
+        let registry = state.source_registry.lock().await;
         let retirement_state = state.clone();
         let retirement = tokio::spawn(async move {
             retire_unused_sources_after_commit(
@@ -2043,12 +2585,16 @@ mod tests {
             )
             .await;
         });
-        tokio::time::sleep(Duration::from_millis(25)).await;
-
-        assert!(
-            state.layout_intents.try_lock().is_err(),
-            "retirement released the intent guard before detaching the screen source"
-        );
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.layout_intents.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("retirement must hold the intent guard at the detach edge");
 
         let winner_state = state.clone();
         let winner = tokio::spawn(async move {
@@ -2077,7 +2623,7 @@ mod tests {
             "newer screen intent registered before old retirement detached"
         );
 
-        drop(screen);
+        drop(registry);
         retirement.await.expect("screen retirement task");
         let (winner_id, winner_target) = winner.await.expect("newer screen intent task");
 
@@ -2101,15 +2647,15 @@ mod tests {
         )
         .await
         .expect("stale screen intent should register");
-        let release_start = Arc::new(Notify::new());
-        let start_finished = Arc::new(AtomicBool::new(false));
+        let source_waiter_started = Arc::new(Barrier::new(2));
+        let source_waiter_dropped = Arc::new(AtomicBool::new(false));
         let source_task = {
-            let release_start = Arc::clone(&release_start);
-            let start_finished = Arc::clone(&start_finished);
+            let source_waiter_started = Arc::clone(&source_waiter_started);
+            let source_waiter_dropped = Arc::clone(&source_waiter_dropped);
             tokio::spawn(async move {
-                release_start.notified().await;
-                start_finished.store(true, Ordering::Release);
-                42_u64
+                let _drop_flag = DropFlag(source_waiter_dropped);
+                source_waiter_started.wait().await;
+                std::future::pending::<u64>().await
             })
         };
         let waiter_state = state.clone();
@@ -2118,14 +2664,16 @@ mod tests {
                 &waiter_state,
                 stale_intent,
                 Duration::from_secs(5),
+                false,
                 "screen",
                 None,
+                SourceStartAdmission::default(),
                 None,
                 source_task,
             )
             .await
         });
-        tokio::time::sleep(Duration::from_millis(25)).await;
+        source_waiter_started.wait().await;
 
         begin_layout_intent(
             &state,
@@ -2148,18 +2696,17 @@ mod tests {
                 .to_string()
                 .contains("superseded")
         );
-        assert!(
-            !start_finished.load(Ordering::Acquire),
-            "superseding the layout should detach, not destroy, a source start the winner may reuse"
-        );
-        release_start.notify_one();
+        // `source_task` is only the command-facing waiter. The physical
+        // transition was already queued under a process-owned supervisor, so
+        // supersession must cancel this wrapper promptly; queued supervisor
+        // continuation and owner transfer have dedicated preview source tests.
         tokio::time::timeout(Duration::from_millis(500), async {
-            while !start_finished.load(Ordering::Acquire) {
+            while !source_waiter_dropped.load(Ordering::Acquire) {
                 tokio::task::yield_now().await;
             }
         })
         .await
-        .expect("detached source start should still be able to finish for the winner");
+        .expect("supersession must cancel the disposable source-start waiter");
     }
 
     #[tokio::test]
@@ -2189,8 +2736,10 @@ mod tests {
                 &waiter_state,
                 stale_intent,
                 Duration::from_secs(5),
+                false,
                 "screen",
                 None,
+                SourceStartAdmission::default(),
                 None,
                 source_task,
             )
@@ -2238,11 +2787,13 @@ mod tests {
         )
         .await
         .expect("screen intent should register");
-        {
-            let mut screen = state.preview_screen.lock().await;
-            screen.status.state = PreviewScreenState::Starting;
-            screen.status.source_id = Some("screen:screencapturekit:pending".to_string());
-        }
+        let pending = crate::preview_screen::test_install_starting_screen_generation(
+            &state,
+            "screen:screencapturekit:pending",
+            &fallback_video_settings(),
+            Some(intent_id),
+        )
+        .await;
         let source_task = tokio::spawn(async { std::future::pending::<u64>().await });
 
         let result = tokio::time::timeout(
@@ -2251,8 +2802,13 @@ mod tests {
                 &state,
                 intent_id,
                 Duration::from_millis(50),
+                false,
                 "screen",
                 None,
+                SourceStartAdmission {
+                    camera: None,
+                    screen: Some(pending),
+                },
                 None,
                 source_task,
             ),
@@ -2269,10 +2825,365 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn late_camera_live_between_expiry_sample_and_cancel_is_preserved() {
+        let state = test_state();
+        let target = sources(true, false);
+        let needs = SceneSourceNeeds {
+            camera: true,
+            screen: false,
+        };
+        let intent_id = begin_layout_intent(&state, Some(201), needs)
+            .await
+            .expect("camera intent");
+        let expired = crate::preview_camera::test_install_starting_camera_generation(
+            &state,
+            target.camera_id.as_deref().expect("target camera"),
+            &default_layout_settings(),
+            &fallback_video_settings(),
+            Some(intent_id),
+        )
+        .await;
+        let sampled = source_readiness(&state, &target).await;
+        assert!(!sampled.live.camera, "expiry sample must see Starting");
+
+        crate::preview_camera::test_publish_starting_camera_live(
+            &state,
+            &expired,
+            target.camera_id.as_deref().expect("target camera"),
+            &default_layout_settings(),
+            &fallback_video_settings(),
+        )
+        .await;
+        let refreshed = cancel_expired_source_starts_and_refresh_readiness(
+            &state,
+            intent_id,
+            needs,
+            &sampled,
+            Some(&expired),
+            None,
+            &target,
+        )
+        .await;
+
+        assert!(refreshed.live.camera);
+        assert_eq!(
+            preview_camera_status(&state).await.state,
+            PreviewCameraState::Live,
+            "stale timeout cancellation must not stop a camera which already published Live"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_camera_generation_cannot_cancel_a_newer_starting_generation() {
+        let state = test_state();
+        let target = sources(true, false);
+        let needs = SceneSourceNeeds {
+            camera: true,
+            screen: false,
+        };
+        let intent_id = begin_layout_intent(&state, Some(203), needs)
+            .await
+            .expect("camera intent");
+        let expired = crate::preview_camera::test_install_starting_camera_generation(
+            &state,
+            target.camera_id.as_deref().expect("target camera"),
+            &default_layout_settings(),
+            &fallback_video_settings(),
+            Some(intent_id),
+        )
+        .await;
+        let winner = crate::preview_camera::test_install_starting_camera_generation(
+            &state,
+            "camera:avfoundation:newer-public-command",
+            &default_layout_settings(),
+            &fallback_video_settings(),
+            None,
+        )
+        .await;
+        // The independently admitted winner is already current when the old
+        // layout reaches its expiry sample. Cleanup must still carry G1 from
+        // layout admission rather than discovering and cancelling G2 here.
+        let sampled = source_readiness(&state, &target).await;
+        let refreshed = cancel_expired_source_starts_and_refresh_readiness(
+            &state,
+            intent_id,
+            needs,
+            &sampled,
+            Some(&expired),
+            None,
+            &target,
+        )
+        .await;
+
+        assert!(!refreshed.live.camera);
+        let (status, identity) = preview_camera_status_and_starting_identity(&state).await;
+        assert_eq!(status.state, PreviewCameraState::Starting);
+        assert_eq!(
+            identity.as_ref(),
+            Some(&winner),
+            "G1 timeout cleanup must not invalidate the independently admitted G2"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_expired_camera_generation_is_invalidated() {
+        let state = test_state();
+        let target = sources(true, false);
+        let needs = SceneSourceNeeds {
+            camera: true,
+            screen: false,
+        };
+        let intent_id = begin_layout_intent(&state, Some(204), needs)
+            .await
+            .expect("camera intent");
+        let expired = crate::preview_camera::test_install_starting_camera_generation(
+            &state,
+            target.camera_id.as_deref().expect("target camera"),
+            &default_layout_settings(),
+            &fallback_video_settings(),
+            Some(intent_id),
+        )
+        .await;
+        let sampled = source_readiness(&state, &target).await;
+
+        let refreshed = cancel_expired_source_starts_and_refresh_readiness(
+            &state,
+            intent_id,
+            needs,
+            &sampled,
+            Some(&expired),
+            None,
+            &target,
+        )
+        .await;
+
+        assert!(!refreshed.live.camera);
+        let (status, identity) = preview_camera_status_and_starting_identity(&state).await;
+        assert_ne!(status.state, PreviewCameraState::Starting);
+        assert!(identity.is_none());
+    }
+
+    #[tokio::test]
+    async fn late_screen_live_between_expiry_sample_and_cancel_is_preserved() {
+        let state = test_state();
+        let target = sources(false, true);
+        let needs = SceneSourceNeeds {
+            camera: false,
+            screen: true,
+        };
+        let intent_id = begin_layout_intent(&state, Some(202), needs)
+            .await
+            .expect("screen intent");
+        let expired = crate::preview_screen::test_install_starting_screen_generation(
+            &state,
+            selected_screen_source_id(&target).expect("target screen"),
+            &fallback_video_settings(),
+            Some(intent_id),
+        )
+        .await;
+        let sampled = source_readiness(&state, &target).await;
+        assert!(!sampled.live.screen, "expiry sample must see Starting");
+
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            selected_screen_source_id(&target).expect("target screen"),
+            expired.generation,
+            1,
+            &fallback_video_settings(),
+        )
+        .await;
+        let refreshed = cancel_expired_source_starts_and_refresh_readiness(
+            &state,
+            intent_id,
+            needs,
+            &sampled,
+            None,
+            Some(&expired),
+            &target,
+        )
+        .await;
+
+        assert!(refreshed.live.screen);
+        assert_eq!(
+            preview_screen_status(&state).await.state,
+            PreviewScreenState::Live,
+            "stale timeout cancellation must not stop a screen which already published Live"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_screen_generation_cannot_cancel_a_newer_starting_generation() {
+        let state = test_state();
+        let target = sources(false, true);
+        let needs = SceneSourceNeeds {
+            camera: false,
+            screen: true,
+        };
+        let intent_id = begin_layout_intent(&state, Some(205), needs)
+            .await
+            .expect("screen intent");
+        let expired = crate::preview_screen::test_install_starting_screen_generation(
+            &state,
+            selected_screen_source_id(&target).expect("target screen"),
+            &fallback_video_settings(),
+            Some(intent_id),
+        )
+        .await;
+        let winner = crate::preview_screen::test_install_starting_screen_generation(
+            &state,
+            "screen:screencapturekit:newer-public-command",
+            &fallback_video_settings(),
+            None,
+        )
+        .await;
+        let sampled = source_readiness(&state, &target).await;
+
+        let refreshed = cancel_expired_source_starts_and_refresh_readiness(
+            &state,
+            intent_id,
+            needs,
+            &sampled,
+            None,
+            Some(&expired),
+            &target,
+        )
+        .await;
+
+        assert!(!refreshed.live.screen);
+        let (status, identity) =
+            crate::preview_screen::preview_screen_status_and_starting_identity(&state).await;
+        assert_eq!(status.state, PreviewScreenState::Starting);
+        assert_eq!(identity.as_ref(), Some(&winner));
+    }
+
+    #[tokio::test]
+    async fn exact_expired_screen_generation_is_invalidated() {
+        let state = test_state();
+        let target = sources(false, true);
+        let needs = SceneSourceNeeds {
+            camera: false,
+            screen: true,
+        };
+        let intent_id = begin_layout_intent(&state, Some(206), needs)
+            .await
+            .expect("screen intent");
+        let expired = crate::preview_screen::test_install_starting_screen_generation(
+            &state,
+            selected_screen_source_id(&target).expect("target screen"),
+            &fallback_video_settings(),
+            Some(intent_id),
+        )
+        .await;
+        let sampled = source_readiness(&state, &target).await;
+
+        let refreshed = cancel_expired_source_starts_and_refresh_readiness(
+            &state,
+            intent_id,
+            needs,
+            &sampled,
+            None,
+            Some(&expired),
+            &target,
+        )
+        .await;
+
+        assert!(!refreshed.live.screen);
+        let (status, identity) =
+            crate::preview_screen::preview_screen_status_and_starting_identity(&state).await;
+        assert_ne!(status.state, PreviewScreenState::Starting);
+        assert!(identity.is_none());
+    }
+
     #[test]
     fn live_source_start_budgets_are_source_specific() {
         assert_eq!(warm_source_start_timeout("camera"), Duration::from_secs(15));
         assert_eq!(warm_source_start_timeout("screen"), Duration::from_secs(15));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn camera_transition_supervisor_owns_timeout_while_blocked_behind_recovery_gate() {
+        let state = test_state();
+        let intent_id = begin_layout_intent(
+            &state,
+            Some(21),
+            SceneSourceNeeds {
+                camera: true,
+                screen: false,
+            },
+        )
+        .await
+        .expect("camera layout intent");
+        let held_transition =
+            crate::preview_camera::acquire_preview_camera_transition(&state).await;
+        let start_dropped = Arc::new(AtomicBool::new(false));
+        let source_state = state.clone();
+        let source_task = {
+            let start_dropped = Arc::clone(&start_dropped);
+            tokio::spawn(async move {
+                let _drop_flag = DropFlag(start_dropped);
+                let _transition =
+                    crate::preview_camera::acquire_preview_camera_transition(&source_state).await;
+                42_u64
+            })
+        };
+        let waiter_state = state.clone();
+        let waiter = tokio::spawn(async move {
+            run_explicit_camera_configuration_transaction(&waiter_state, async {
+                await_layout_source_start(
+                    &waiter_state,
+                    intent_id,
+                    WARM_CAMERA_START_TIMEOUT,
+                    true,
+                    "camera",
+                    None,
+                    SourceStartAdmission::default(),
+                    None,
+                    source_task,
+                )
+                .await
+            })
+            .await
+        });
+
+        sleep(WARM_CAMERA_START_TIMEOUT + Duration::from_secs(1)).await;
+        assert!(
+            !waiter.is_finished(),
+            "layout must not race the camera supervisor with another 15s timeout"
+        );
+        assert!(
+            !start_dropped.load(Ordering::Acquire),
+            "the admitted operator generation must remain owned while recovery releases the gate"
+        );
+        let in_flight_mutation_epoch = state.capture_recovery_camera_mutation_epoch();
+        assert!(
+            state
+                .lock_capture_recovery_admission_gate()
+                .explicit_camera_mutation_is_active(),
+            "the layout mutation must reject health admission while camera start is gate-blocked"
+        );
+
+        drop(held_transition);
+        let (value, first_frame_deadline) = waiter
+            .await
+            .expect("layout waiter task")
+            .expect("camera supervisor completion remains authoritative");
+        assert_eq!(value, 42);
+        assert_eq!(
+            first_frame_deadline.saturating_duration_since(Instant::now()),
+            WARM_CAMERA_START_TIMEOUT,
+            "the first-frame budget starts after the transition response"
+        );
+        assert!(
+            !state
+                .lock_capture_recovery_admission_gate()
+                .explicit_camera_mutation_is_active(),
+            "layout completion must release its explicit camera mutation lease"
+        );
+        assert!(
+            state.capture_recovery_camera_mutation_epoch() > in_flight_mutation_epoch,
+            "layout completion must stale health sampled inside the transaction"
+        );
     }
 
     #[test]
@@ -2310,8 +3221,10 @@ mod tests {
             &state,
             intent_id,
             warm_source_start_timeout("screen"),
+            false,
             "screen",
             None,
+            SourceStartAdmission::default(),
             None,
             source_task,
         )
@@ -2350,8 +3263,10 @@ mod tests {
             &state,
             intent_id,
             warm_source_start_timeout("screen"),
+            false,
             "screen",
             Some(restart_ready_rx),
+            SourceStartAdmission::default(),
             None,
             source_task,
         )
@@ -2391,8 +3306,10 @@ mod tests {
             &state,
             intent_id,
             Duration::from_millis(1),
+            false,
             "screen",
             None,
+            SourceStartAdmission::default(),
             None,
             source_task,
         )
@@ -2440,6 +3357,8 @@ mod tests {
             SourceReadinessDeadlines {
                 camera: None,
                 screen: Some(Instant::now()),
+                camera_admission: None,
+                screen_admission: None,
             },
             SceneSourceNeeds {
                 camera: false,
@@ -2479,12 +3398,15 @@ mod tests {
             &state,
             intent_id,
             Duration::from_secs(20),
+            true,
             "camera",
             None,
+            SourceStartAdmission::default(),
             Some(SourceReadinessGuard {
                 source_label: "screen",
                 deadline: started + WARM_SCREEN_START_TIMEOUT,
                 target_sources: target,
+                admission: SourceStartAdmission::default(),
             }),
             camera_start,
         )

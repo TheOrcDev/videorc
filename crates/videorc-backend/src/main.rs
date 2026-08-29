@@ -15,6 +15,7 @@ mod captions;
 mod capture_health;
 mod capture_input;
 mod capture_interruption;
+mod capture_recovery;
 mod cohost;
 mod color;
 mod comment_highlight;
@@ -118,7 +119,7 @@ use compositor::{compositor_status, update_compositor_active_screen, update_comp
 #[cfg(debug_assertions)]
 use encoder_bridge::run_synthetic_encoder_bridge;
 use futures_util::stream;
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use preview_camera::{
     latest_preview_camera_bmp, latest_preview_camera_png, preview_camera_status,
     start_preview_camera, stop_preview_camera,
@@ -220,8 +221,69 @@ impl std::io::Write for FailSilentStderr {
     }
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+/// Sleep, then terminate without allocating, locking, logging, or writing.
+/// This is the final edge used when a supervisor or graceful runtime is
+/// already unresponsive; even best-effort stderr can block on a full pipe.
+fn hard_abort_after_delay(grace: Duration) -> ! {
+    std::thread::sleep(grace);
+    // `process::exit` runs Rust/C runtime cleanup and registered exit handlers;
+    // either can wait on the same wedged stdio/runtime state. `abort` skips
+    // those paths and is the actual unconditional process-termination edge.
+    std::process::abort();
+}
+
+fn backend_runtime_worker_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(2)
+        .max(2)
+}
+
+const PROCESS_RUNTIME_BLOCKING_TASK_SHUTDOWN_GRACE: Duration = Duration::from_secs(3);
+const BACKEND_PROCESS_OWNERSHIP_ENV: &str = "VIDEORC_BACKEND_OWNERSHIP_TOKEN";
+const BACKEND_PROCESS_OWNERSHIP_PREFIX: &str = "OWNERSHIP ";
+
+fn main() -> Result<()> {
+    publish_backend_process_ownership()?;
+    // Live-control handlers are third-party/platform integration boundaries.
+    // Keep at least one runtime worker available for the process-owned shutdown
+    // and recording-finalization path even if a handler accidentally blocks its
+    // worker forever. Build explicitly so TOKIO_WORKER_THREADS=1 inherited from
+    // a shell or launcher cannot disable that containment guarantee.
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(backend_runtime_worker_threads())
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run_backend());
+    // `spawn_blocking` tasks cannot be aborted. Bound runtime destruction so
+    // an already-safe backend can still exit if a device driver or render
+    // owner ignores its cooperative shutdown signal.
+    runtime.shutdown_timeout(PROCESS_RUNTIME_BLOCKING_TASK_SHUTDOWN_GRACE);
+    result
+}
+
+fn backend_process_ownership_marker(token: &str) -> Result<String> {
+    let token = Uuid::parse_str(token.trim()).context("invalid backend ownership token")?;
+    Ok(format!(
+        "{BACKEND_PROCESS_OWNERSHIP_PREFIX}{}",
+        serde_json::json!({
+            "token": token.to_string(),
+            "pid": std::process::id(),
+            "parentPid": current_parent_pid(),
+        })
+    ))
+}
+
+fn publish_backend_process_ownership() -> Result<()> {
+    let Some(token) = std::env::var(BACKEND_PROCESS_OWNERSHIP_ENV).ok() else {
+        return Ok(());
+    };
+    println!("{}", backend_process_ownership_marker(&token)?);
+    std::io::stdout().flush()?;
+    Ok(())
+}
+
+async fn run_backend() -> Result<()> {
     // One JSON line on stderr per panic so the supervisor's crash record
     // (backend-crashes.json) names the cause; see panic_hook.rs.
     panic_hook::install();
@@ -324,6 +386,10 @@ async fn main() -> Result<()> {
         .route("/sessions/{id}/poster", get(session_poster_handler))
         .route("/compositor/status", get(compositor_status_handler))
         .route(
+            "/process/shutdown/prepare",
+            post(process_shutdown_prepare_handler),
+        )
+        .route(
             "/interruption/lease",
             post(acquire_interruption_lease_handler),
         )
@@ -407,6 +473,104 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+async fn prepare_capture_finalization_for_process_shutdown(state: &AppState) -> Result<()> {
+    state.request_process_shutdown();
+    // A start which reached admission before the latch either fails its final
+    // pre-publication check or finishes publishing every process owner before
+    // this guard is acquired. Recovery and native source-transition waits use
+    // a different fence, so they can never strand shutdown here.
+    let _session_start_publication_fence = state
+        .session_start_publication_fence
+        .clone()
+        .lock_owned()
+        .await;
+    // Finalize exactly once after publication ownership is closed. This must
+    // use the ordinary stop path so the process monitor retains the recording
+    // slot through MKV flush, MP4 export, persistence, and terminal status.
+    recording::finalize_active_recording_for_shutdown(state).await
+}
+
+async fn prepare_and_publish_capture_finalization_for_process_shutdown(
+    state: &AppState,
+) -> Result<()> {
+    let preparation = prepare_capture_finalization_for_process_shutdown(state).await;
+    state.publish_process_shutdown_preparation(
+        preparation
+            .as_ref()
+            .map(|_| ())
+            .map_err(|error| format!("{error:#}")),
+    );
+    preparation
+}
+
+#[cfg(not(test))]
+const PROCESS_SHUTDOWN_POST_FINALIZATION_HARD_EXIT_GRACE: Duration = Duration::from_secs(30);
+const PROCESS_SHUTDOWN_CLEANUP_GRACE: Duration = Duration::from_secs(10);
+
+/// Once recording finalization has published success, remaining device and
+/// socket cleanup is no longer allowed to strand the process indefinitely.
+/// Electron uses the same 30-second post-receipt kill grace for an intentional
+/// quit. This backend-owned copy also covers autonomous recovery, where there
+/// is no HTTP receipt owner available to send SIGKILL.
+fn arm_post_finalization_hard_exit() {
+    #[cfg(not(test))]
+    std::thread::spawn(|| {
+        hard_abort_after_delay(PROCESS_SHUTDOWN_POST_FINALIZATION_HARD_EXIT_GRACE)
+    });
+}
+
+async fn arm_hard_exit_after_safe_preparation<Preparation, Arm>(
+    preparation: Preparation,
+    arm: Arm,
+) -> Result<()>
+where
+    Preparation: std::future::Future<Output = Result<()>>,
+    Arm: FnOnce(),
+{
+    preparation.await?;
+    arm();
+    Ok(())
+}
+
+async fn run_process_cleanup_with_deadline<Cleanup>(cleanup: Cleanup, deadline: Duration) -> bool
+where
+    Cleanup: std::future::Future<Output = ()> + Send + 'static,
+{
+    let mut cleanup = tokio::spawn(cleanup);
+    matches!(
+        tokio::time::timeout(deadline, &mut cleanup).await,
+        Ok(Ok(()))
+    )
+}
+
+async fn cleanup_process_owners_after_finalization(state: AppState) {
+    if let Some(path) = crate::remote_control::discovery_path(state.database.path()) {
+        crate::remote_control::remove_discovery(&path);
+    }
+    captions::shutdown_caption_runtime(&state).await;
+    state.noise_cleanup.interrupt_all_for_shutdown();
+    if !compositor::shutdown_compositor(&state).await {
+        state.emit_log(
+            "warn",
+            "Compositor teardown exceeded the graceful-shutdown deadline; the post-finalization hard-exit guard remains armed.",
+        );
+    }
+    shutdown_capture_processes(state.clone()).await;
+    {
+        let mut windows_media = state
+            .windows_d3d11_media
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Err(error) = windows_media.shutdown() {
+            state.emit_log(
+                "warn",
+                format!("Could not drain the Windows D3D11 media authority: {error}"),
+            );
+        }
+    }
+    captions::shutdown_caption_artifacts(&state).await;
+}
+
 async fn shutdown_signal(state: AppState) {
     #[cfg(unix)]
     {
@@ -432,42 +596,61 @@ async fn shutdown_signal(state: AppState) {
                     "Parent process exited; shutting down so capture devices (camera/mic/screen) are released.",
                 );
             }
+            _ = state.wait_for_process_shutdown_request() => {}
         }
     }
 
     #[cfg(not(unix))]
     {
-        if let Err(error) = tokio::signal::ctrl_c().await {
-            state.emit_log(
-                "warn",
-                format!("Could not listen for shutdown signal: {error}"),
-            );
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    state.emit_log(
+                        "warn",
+                        format!("Could not listen for shutdown signal: {error}"),
+                    );
+                }
+            }
+            _ = state.wait_for_process_shutdown_request() => {}
         }
     }
 
+    let preparation = arm_hard_exit_after_safe_preparation(
+        prepare_and_publish_capture_finalization_for_process_shutdown(&state),
+        arm_post_finalization_hard_exit,
+    )
+    .await;
+    if let Err(error) = preparation {
+        state.emit_log(
+            "error",
+            format!(
+                "Backend shutdown is paused because the active recording did not reach a safe terminal state: {error:#}"
+            ),
+        );
+        // Returning would let Electron/the OS tear down the process while the
+        // recording lifecycle is still authoritative. Remain alive so normal
+        // app quit cannot convert a recoverable MKV into silent data loss.
+        std::future::pending::<()>().await;
+        return;
+    }
     state.emit_log(
         "info",
-        "Backend shutdown requested; stopping caption, capture, and artifact processes.",
+        "Backend recording finalization is safe; stopping caption, capture, and artifact processes.",
     );
-    if let Some(path) = crate::remote_control::discovery_path(state.database.path()) {
-        crate::remote_control::remove_discovery(&path);
-    }
-    captions::shutdown_caption_runtime(&state).await;
-    state.noise_cleanup.interrupt_all_for_shutdown();
-    shutdown_capture_processes(state.clone()).await;
+    if !run_process_cleanup_with_deadline(
+        cleanup_process_owners_after_finalization(state.clone()),
+        PROCESS_SHUTDOWN_CLEANUP_GRACE,
+    )
+    .await
     {
-        let mut windows_media = state
-            .windows_d3d11_media
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Err(error) = windows_media.shutdown() {
-            state.emit_log(
-                "warn",
-                format!("Could not drain the Windows D3D11 media authority: {error}"),
-            );
-        }
+        state.emit_log(
+            "warn",
+            format!(
+                "Backend post-finalization cleanup exceeded {}ms; runtime teardown is continuing under its bounded shutdown contract.",
+                PROCESS_SHUTDOWN_CLEANUP_GRACE.as_millis()
+            ),
+        );
     }
-    captions::shutdown_caption_artifacts(&state).await;
 }
 
 /// A dedicated OS thread that kills this process when its parent dies. This MUST be
@@ -504,16 +687,7 @@ fn spawn_orphan_watchdog_thread() {
                     // Give the async graceful path a moment, then exit
                     // unconditionally; process teardown releases every capture
                     // device.
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    eprintln!(
-                        "{} died; exiting so capture devices are released.",
-                        if orphaned {
-                            "Parent process"
-                        } else {
-                            "Supervisor process"
-                        }
-                    );
-                    std::process::exit(1);
+                    hard_abort_after_delay(std::time::Duration::from_secs(5));
                 }
                 std::thread::sleep(std::time::Duration::from_secs(2));
             }
@@ -541,11 +715,7 @@ fn spawn_orphan_watchdog_thread() {
                 // The supervisor is already gone (or unwaitable): treat it as
                 // dead rather than running unsupervised with live devices.
                 Err(_) => {
-                    std::thread::sleep(std::time::Duration::from_secs(5));
-                    eprintln!(
-                        "Supervisor process {supervisor_pid} is not waitable; exiting so capture devices are released."
-                    );
-                    std::process::exit(1);
+                    hard_abort_after_delay(std::time::Duration::from_secs(5));
                 }
             };
             let wait = unsafe { WaitForSingleObject(handle, INFINITE) };
@@ -553,9 +723,7 @@ fn spawn_orphan_watchdog_thread() {
                 // Give the async graceful path a moment, then exit
                 // unconditionally; process teardown releases every capture
                 // device and drops the Job Object holding the ffmpeg children.
-                std::thread::sleep(std::time::Duration::from_secs(5));
-                eprintln!("Supervisor process died; exiting so capture devices are released.");
-                std::process::exit(1);
+                hard_abort_after_delay(std::time::Duration::from_secs(5));
             }
         });
     }
@@ -605,11 +773,7 @@ fn current_parent_pid() -> Option<u32> {
 async fn orphaned_by_parent_exit() {
     loop {
         if std::os::unix::process::parent_id() == 1 {
-            std::thread::spawn(|| {
-                std::thread::sleep(std::time::Duration::from_secs(10));
-                eprintln!("Orphaned backend cleanup overran its grace period; exiting hard.");
-                std::process::exit(1);
-            });
+            std::thread::spawn(|| hard_abort_after_delay(std::time::Duration::from_secs(10)));
             return;
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
@@ -629,6 +793,13 @@ struct WsQuery {
     /// PNG endpoints are retained only as an explicit developer/debug fallback.
     #[serde(default)]
     debug: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProcessShutdownPrepareQuery {
+    token: String,
+    request_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -683,6 +854,40 @@ struct OAuthCallbackQuery {
 
 fn http_backend_role(state: &AppState, token: &str) -> Option<BackendRole> {
     authenticate_backend_token(token, &state.token, &state.admin_token)
+}
+
+async fn process_shutdown_prepare_handler(
+    State(state): State<AppState>,
+    Query(query): Query<ProcessShutdownPrepareQuery>,
+) -> Response {
+    if http_backend_role(&state, &query.token) != Some(BackendRole::Admin) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if Uuid::parse_str(&query.request_id).is_err() {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let backend_pid = std::process::id();
+    state.request_process_shutdown();
+    match state.wait_for_process_shutdown_preparation().await {
+        Ok(()) => Json(serde_json::json!({
+            "shutdownLatched": true,
+            "captureFinalizationComplete": true,
+            "requestId": query.request_id,
+            "backendPid": backend_pid,
+        }))
+        .into_response(),
+        Err(error) => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({
+                "shutdownLatched": state.process_shutdown_requested(),
+                "captureFinalizationComplete": false,
+                "requestId": query.request_id,
+                "backendPid": backend_pid,
+                "error": error,
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn health_handler(State(state): State<AppState>, Query(query): Query<WsQuery>) -> Response {
@@ -2532,11 +2737,11 @@ fn session_attaches_live_chat(params: &protocol::StartSessionParams) -> bool {
     params.output.stream_enabled && params.streaming.is_some()
 }
 
-async fn spawn_session_live_chat(
+async fn prepare_session_live_chat(
     state: &AppState,
     session_id: &str,
     streaming: &crate::streaming::StreamingSettings,
-) {
+) -> Option<live_chat::LiveChatStartParams> {
     use std::collections::HashSet;
     let enabled: HashSet<&str> = streaming
         .enabled_target_ids
@@ -2630,9 +2835,43 @@ async fn spawn_session_live_chat(
             StreamPlatform::Custom => {}
         }
     }
-    if !params.destinations.is_empty() {
-        live_chat::start_live_chat(state, params).await;
+    (!params.destinations.is_empty()).then_some(params)
+}
+
+/// Commit one fully-prepared Comments session only while the matching capture
+/// is still active. The recording guard is deliberately held through
+/// `start_live_chat`: that function installs the coordinator session and then
+/// attaches every provider task/sender in several lock transactions. The
+/// process monitor retires the recording under this same guard before it tears
+/// Comments down, so it can no longer stop an empty coordinator and then be
+/// overtaken by a late attachment from the already-terminal session.
+async fn attach_prepared_session_live_chat(
+    state: &AppState,
+    session_id: &str,
+    params: live_chat::LiveChatStartParams,
+) -> bool {
+    debug_assert_eq!(params.session_id, session_id);
+    let recording = state.recording.lock().await;
+    let session_is_active = recording
+        .as_ref()
+        .is_some_and(|active| active.session_id == session_id && !active.stop_requested);
+    if !session_is_active {
+        return false;
     }
+    live_chat::start_live_chat(state, params).await;
+    drop(recording);
+    true
+}
+
+async fn spawn_session_live_chat(
+    state: &AppState,
+    session_id: &str,
+    streaming: &crate::streaming::StreamingSettings,
+) -> bool {
+    let Some(params) = prepare_session_live_chat(state, session_id, streaming).await else {
+        return false;
+    };
+    attach_prepared_session_live_chat(state, session_id, params).await
 }
 
 /// Well-known loopback ports for the OAuth callback listener, tried in order.
@@ -3473,17 +3712,150 @@ const WEBSOCKET_STOP_LANE_QUEUE_CAPACITY: usize = 4;
 const WEBSOCKET_OBSERVATION_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_ACCOUNT_MAINTENANCE_MAX_QUEUE_AGE: Duration = Duration::from_secs(15);
 const WEBSOCKET_LIVE_CONTROL_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
+// Once dispatched, operator controls must either complete or LATCH a clean
+// backend recycle before the renderer's 30s request deadline. Recording
+// finalization remains fail-closed and the post-finalization teardown has its
+// own deadline, so a generation change itself is intentionally not promised
+// inside this execution window. Queue age alone cannot catch a RUNNING command,
+// which is how one wedged screens.activate blocked captions, takeover, and
+// highlights in the 2026-08-27 live incident.
+const WEBSOCKET_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(10);
+// Warm layout transactions can legitimately spend 15 seconds starting a
+// source and another 15 proving its first fresh frame. Keep that complete
+// backend transaction below the renderer's 45-second envelope while retaining
+// the 10-second watchdog for unrelated live controls.
+const WEBSOCKET_LIVE_LAYOUT_MAX_EXECUTION_AGE: Duration = Duration::from_secs(30);
+const WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(30);
+const WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(25);
+const WEBSOCKET_MEDIA_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(9 * 60);
+const WEBSOCKET_AI_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(29 * 60);
+const WEBSOCKET_PROBE_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(110);
+#[cfg(not(test))]
+const WEBSOCKET_MUTATION_EXECUTOR_THREADS: usize = 4;
+// Backend tests run concurrently and several intentionally hold a watched
+// mutation open. Keep their shared process-global executor roomy; the focused
+// starvation regression uses its own two-worker executor and saturates it
+// deterministically.
+#[cfg(test)]
+const WEBSOCKET_MUTATION_EXECUTOR_THREADS: usize = 16;
 const WEBSOCKET_DURABLE_CHAT_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_STOP_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const WEBSOCKET_ORDERED_MAX_QUEUE_AGE: Duration = Duration::from_secs(5);
 const COMMAND_LANE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.accountMaintenance.block";
+const LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD: &str = "test.commandLanes.liveControl.block";
 const COMMAND_LANE_SMOKE_STATUS_METHOD: &str = "test.commandLanes.accountMaintenance.status";
 const COMMAND_LANE_SMOKE_RELEASE_METHOD: &str = "test.commandLanes.accountMaintenance.release";
+const CAPTURE_RECOVERY_SMOKE_INJECT_METHOD: &str =
+    "test.captureRecovery.injectCameraDeliveryDegradation";
+const CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD: &str =
+    "test.captureRecovery.injectScreenDeliveryDegradation";
+const CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD: &str =
+    "test.captureRecovery.cameraCadenceEvidence";
+const CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD: &str =
+    "test.captureRecovery.screenCadenceEvidence";
 const WEBSOCKET_RELIABLE_BURST_LIMIT: usize = 8;
 // The desktop clients are loopback peers. Five seconds is deliberately far
 // above normal socket jitter while still bounding the lifetime of queued
 // responses when a reader or writer stalls.
 const WEBSOCKET_RELIABLE_MAX_OLDEST_AGE: Duration = Duration::from_secs(5);
+
+/// Watched mutations never run on the process-owned Tokio runtime. A platform
+/// handler is allowed to block every worker here: the ordinary runtime still
+/// owns shutdown notification and recording finalization. The runtime is
+/// intentionally leaked for process lifetime so shutdown can never wait while
+/// dropping a runtime whose mutation worker is blocked in foreign code.
+#[derive(Clone)]
+struct WebSocketMutationExecutor {
+    handle: tokio::runtime::Handle,
+}
+
+impl WebSocketMutationExecutor {
+    fn new(worker_threads: usize) -> std::io::Result<Self> {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(worker_threads.max(1))
+            .thread_name("videorc-mutation-worker")
+            .enable_all()
+            .build()?;
+        let runtime = Box::leak(Box::new(runtime));
+        Ok(Self {
+            handle: runtime.handle().clone(),
+        })
+    }
+
+    fn spawn<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.handle.spawn(future)
+    }
+}
+
+fn websocket_mutation_executor() -> Result<WebSocketMutationExecutor, &'static str> {
+    static EXECUTOR: std::sync::OnceLock<Result<WebSocketMutationExecutor, String>> =
+        std::sync::OnceLock::new();
+    EXECUTOR
+        .get_or_init(|| {
+            WebSocketMutationExecutor::new(WEBSOCKET_MUTATION_EXECUTOR_THREADS)
+                .map_err(|error| error.to_string())
+        })
+        .as_ref()
+        .cloned()
+        .map_err(String::as_str)
+}
+
+/// Arm the dispatched-mutation deadline outside Tokio. Live controls, durable
+/// chat sends, and authoritative scene/source changes cross platform, provider,
+/// or native-capture boundaries and can perform an outcome-unknown mutation
+/// before they stop replying. Putting both that work and its deadline on the
+/// same runtime recreates the exact failure the deadline is meant to contain.
+///
+/// The returned sender belongs to the handler task. Sending means the handler
+/// reached a terminal outcome. A timeout or an unexpectedly dropped sender
+/// latches process shutdown without logging, allocating, or waiting on a
+/// renderer response queue.
+fn arm_runtime_independent_mutation_deadline(
+    state: AppState,
+    max_execution_age: Duration,
+) -> Option<std::sync::mpsc::Sender<()>> {
+    arm_runtime_independent_mutation_deadline_with(state, max_execution_age, |deadline| {
+        std::thread::Builder::new()
+            .name("videorc-mutation-deadline".to_string())
+            .spawn(deadline)
+            .map(|_| ())
+    })
+}
+
+fn arm_runtime_independent_mutation_deadline_with<Spawn>(
+    state: AppState,
+    max_execution_age: Duration,
+    spawn: Spawn,
+) -> Option<std::sync::mpsc::Sender<()>>
+where
+    Spawn: FnOnce(Box<dyn FnOnce() + Send + 'static>) -> std::io::Result<()>,
+{
+    let (completion_tx, completion_rx) = std::sync::mpsc::channel();
+    let deadline_state = state.clone();
+    match spawn(Box::new(move || {
+        use std::sync::mpsc::RecvTimeoutError;
+
+        match completion_rx.recv_timeout(max_execution_age) {
+            Ok(()) => {}
+            Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => {
+                deadline_state.request_process_shutdown();
+            }
+        }
+    })) {
+        Ok(_) => Some(completion_tx),
+        Err(_) => {
+            // Thread exhaustion is itself an unsafe execution environment for
+            // an operator mutation. Fail closed and let the existing process
+            // shutdown owner preserve any active recording before teardown.
+            state.request_process_shutdown();
+            None
+        }
+    }
+}
 
 #[derive(Clone)]
 struct WebSocketSlowPressureSignal {
@@ -3541,6 +3913,41 @@ async fn queue_websocket_response(
         }
         Err(error) => {
             tracing::error!("Could not serialize response: {error}");
+            reliable_metrics.record_rejected_or_dropped();
+            false
+        }
+    }
+}
+
+/// Best-effort terminal response used only when a command watchdog has already
+/// decided the connection/process must recycle. It cannot await queue capacity:
+/// shutdown must latch immediately even when the renderer itself is wedged.
+fn try_queue_websocket_response(
+    outgoing: &mpsc::Sender<Message>,
+    reliable_metrics: &TrackedWebSocketQueueMetrics,
+    slow_pressure: &WebSocketSlowPressureSignal,
+    response: ServerResponse,
+) -> bool {
+    let text = match serde_json::to_string(&response) {
+        Ok(text) => text,
+        Err(error) => {
+            tracing::error!("Could not serialize watchdog response: {error}");
+            reliable_metrics.record_rejected_or_dropped();
+            return false;
+        }
+    };
+    match outgoing.try_reserve() {
+        Ok(permit) => {
+            reliable_metrics.record_enqueue();
+            permit.send(Message::Text(text.into()));
+            true
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+            reliable_metrics.record_rejected_or_dropped();
+            slow_pressure.signal();
+            false
+        }
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
             reliable_metrics.record_rejected_or_dropped();
             false
         }
@@ -3966,40 +4373,41 @@ fn production_websocket_command_handler(role: BackendRole) -> WebSocketCommandHa
     })
 }
 
-/// Pure state reads that must never queue behind a multi-second stateful
-/// command (`session.start`/`session.stop` awaits the MP4 export inline). The
-/// serial dispatcher starved `preview.surface.status` behind exactly that,
-/// and the renderer's 5s budget turned every recording stop into "Backend
-/// request timed out" toasts (2026-07-16 owner incident). Each method here is
-/// verified read-only: it locks, clones, and answers.
+/// Pure observations never queue behind a multi-second stateful command. The
+/// exhaustive execution-policy inventory is the single authority: a mutator
+/// cannot accidentally join this fast path through a second hand-written list.
 fn websocket_command_is_read_only(text: &str) -> bool {
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        websocket_method_execution_policy(command.method.as_str())
+            == Some(WebSocketMethodExecutionPolicy::Observation)
+    })
+}
+
+fn websocket_command_is_authoritative_scene_mutation(text: &str) -> bool {
     serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
         matches!(
             command.method.as_str(),
-            "preview.surface.status"
-                | "compositor.status"
-                | "diagnostics.stats"
-                | "health.ping"
-                | "account.get"
-                | "captions.status.get"
-                | "comments.highlight.status"
-                | "scene.get"
-                | "liveChat.status"
-                | "liveChat.sendOperations.list"
-                | "liveChat.sendOperations.latest"
-                | "screens.list"
-                | "screens.active"
-                | "recording.status"
-                | COMMAND_LANE_SMOKE_STATUS_METHOD
+            "scene.load_from_capture_config"
+                | "scene.layout.apply_live"
+                | "scene.layout.apply_preview"
+                | "scene.source.device.switch"
+                | "scene.source.transform.update"
+                | "scene.source.transform.reset"
+                | "scene.source.visibility.update"
+                | "scene.source.nudge"
+                | "scene.sources.reorder"
         )
     })
 }
 
-fn websocket_command_is_layout_mutation(text: &str) -> bool {
+fn websocket_command_is_authoritative_source_mutation(text: &str) -> bool {
     serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
         matches!(
             command.method.as_str(),
-            "scene.layout.apply_live" | "scene.layout.apply_preview"
+            "preview.camera.start"
+                | "preview.camera.stop"
+                | "preview.screen.start"
+                | "preview.screen.stop"
         )
     })
 }
@@ -4010,9 +4418,11 @@ fn websocket_observation_requires_operator_fence(text: &str) -> bool {
             command.method.as_str(),
             "scene.get"
                 | "compositor.status"
-                | "screens.active"
+                | "capture.recovery.status"
                 | "captions.status.get"
                 | "comments.highlight.status"
+                | CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD
+                | CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD
         )
     })
 }
@@ -4047,6 +4457,243 @@ fn websocket_command_is_session_start(text: &str) -> bool {
         .is_ok_and(|command| command.method == "session.start")
 }
 
+/// These commands already own stricter process-lifecycle contracts than a
+/// generic mutation deadline. Start owns an atomic publication fence. Both stop
+/// spellings may legitimately await unbounded, fail-closed MKV flush and MP4
+/// export; timing them out must never release or replace that ownership.
+#[cfg(test)]
+fn websocket_command_has_session_lifecycle_policy(text: &str) -> bool {
+    serde_json::from_str::<ClientCommand>(text).is_ok_and(|command| {
+        matches!(
+            command.method.as_str(),
+            "session.start" | "session.stop" | "recording.stop" | "recording.start_test"
+        )
+    })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebSocketMethodExecutionPolicy {
+    Observation,
+    Mutation { max_execution_age: Duration },
+    SessionLifecycle,
+}
+
+const DEFAULT_MUTATION_POLICY: WebSocketMethodExecutionPolicy =
+    WebSocketMethodExecutionPolicy::Mutation {
+        max_execution_age: WEBSOCKET_MUTATION_MAX_EXECUTION_AGE,
+    };
+
+/// Explicit inventory for every top-level RPC arm in
+/// `handle_text_message_with_role`. The source-derived regression below fails
+/// when an arm is added without choosing one of these policies.
+fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExecutionPolicy> {
+    use WebSocketMethodExecutionPolicy::{Mutation, Observation, SessionLifecycle};
+
+    match method {
+        COMMAND_LANE_SMOKE_RELEASE_METHOD
+        | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD
+        | CAPTURE_RECOVERY_SMOKE_INJECT_METHOD
+        | CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD
+        | "resource.capability.issue"
+        | "resource.capability.revoke"
+        | "resource.capability.register_background"
+        | "account.auth.begin_intent"
+        | "account.sign_out"
+        | "captions.start"
+        | "captions.stop"
+        | "captions.style.set"
+        | "captions.test.inject-audio"
+        | "captions.overlay.set"
+        | "comments.highlight.set"
+        | "comments.highlight.clear"
+        | "cohost.start"
+        | "cohost.stop"
+        | "cohost.question.answered"
+        | "cohost.question.dismiss"
+        | "cohost.flag.dismiss"
+        | "cohost.settings.set"
+        | "captions.overlay.clear"
+        | "captions.cues.submit"
+        | "capture.recovery.retry"
+        | "diagnostics.preview_baseline.record"
+        | "diagnostics.preview_surface.resize"
+        | "preview.surface.create"
+        | "preview.surface.update_bounds"
+        | "preview.surface.present"
+        | "preview.surface.destroy"
+        | "preview.surface.take_native_host_commands"
+        | "resource.admin.preview_surface_bounds"
+        | "remote.control.enable"
+        | "remote.control.disable"
+        | "remote.control.regenerate"
+        | "remote.surface.publish"
+        | "remote.intent.ack"
+        | "remote.intent"
+        | "compositor.scene.update"
+        | "preview.camera.start"
+        | "preview.camera.stop"
+        | "preview.screen.start"
+        | "preview.screen.stop"
+        | "audio.meter.sample"
+        | "audio.processing.update"
+        | "audio.test.disconnect"
+        | "audio.test.inject-pcm"
+        | "scene.load_from_capture_config"
+        | "scene.source.transform.update"
+        | "scene.source.transform.reset"
+        | "scene.source.visibility.update"
+        | "scene.source.nudge"
+        | "scene.sources.reorder"
+        | "sessions.rename"
+        | "sessions.duplicate"
+        | "liveChat.start"
+        | "liveChat.x.start"
+        | "liveChat.stop"
+        | "liveChat.send"
+        | "liveChat.clearLocal"
+        | "platformAccounts.oauth.providerCredentials"
+        | "streamTargets.metadata.update"
+        | "streamTargets.manualKey.store"
+        | "streamTargets.manualKey.restorePrevious"
+        | "platformAccounts.youtube.selectChannel"
+        | "screens.rename"
+        | "screens.delete"
+        | "screens.reorder"
+        | "screens.activate"
+        | "screens.clear"
+        | "preview.live.start"
+        | "preview.live.stop" => Some(DEFAULT_MUTATION_POLICY),
+
+        "scene.layout.apply_live" | "scene.layout.apply_preview" | "scene.source.device.switch" => {
+            Some(Mutation {
+                max_execution_age: WEBSOCKET_LIVE_LAYOUT_MAX_EXECUTION_AGE,
+            })
+        }
+
+        "sessions.delete" | "sessions.delete.complete" | "screens.importImage" => Some(Mutation {
+            max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        "account.complete_sign_in"
+        | "account.refresh"
+        | "entitlements.refresh"
+        | "diagnostics.supportBundle.export"
+        | "sessions.poster"
+        | "platformAccounts.oauth.start"
+        | "platformAccounts.oauth.startProvider"
+        | "platformAccounts.oauth.complete"
+        | "platformAccounts.disconnect"
+        | "platformAccounts.validate"
+        | "platformAccounts.refresh"
+        | "streamTargets.youtube.prepare"
+        | "streamTargets.youtube.transition"
+        | "streamTargets.twitch.prepare"
+        | "streamTargets.twitch.applyMetadata"
+        | "streamTargets.x.startLiveAuthorization"
+        | "streamTargets.x.prepare"
+        | "streamTargets.x.publish"
+        | "streamTargets.x.end"
+        | "repair.restore_file"
+        | "ai.clips.suggest"
+        | "ai.clip.export"
+        | "preview.snapshot" => Some(Mutation {
+            max_execution_age: WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        "session.remux_mp4" | "sessions.import" | "repair.repair_file" => Some(Mutation {
+            max_execution_age: WEBSOCKET_MEDIA_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        "ai.run_post_recording" | "ai.publish_pack.export" => Some(Mutation {
+            max_execution_age: WEBSOCKET_AI_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        "encoder_bridge.synthetic_record" => Some(Mutation {
+            max_execution_age: WEBSOCKET_PROBE_MUTATION_MAX_EXECUTION_AGE,
+        }),
+
+        COMMAND_LANE_SMOKE_BLOCK_METHOD | "noiseCleanup.start" | "noiseCleanup.cancel" => {
+            Some(DEFAULT_MUTATION_POLICY)
+        }
+
+        "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
+            Some(SessionLifecycle)
+        }
+
+        COMMAND_LANE_SMOKE_STATUS_METHOD
+        | CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD
+        | CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD
+        | "resource.admin.resolve_session_path"
+        | "resource.admin.resolve_screen_path"
+        | "resource.admin.resolve_background_path"
+        | "health.ping"
+        | "account.get"
+        | "entitlements.get"
+        | "captions.status.get"
+        | "captions.test.snapshot"
+        | "comments.highlight.status"
+        | "cohost.status"
+        | "cohost.settings.get"
+        | "ai.capabilities.get"
+        | "ai.quota.get"
+        | "ai.jobs.get"
+        | "devices.list"
+        | "diagnostics.stats"
+        | "capture.recovery.status"
+        | "preview.surface.status"
+        | "remote.control.status"
+        | "remote.describe"
+        | "compositor.status"
+        | "preview.camera.status"
+        | "preview.screen.status"
+        | "audio.meter.probeNative"
+        | "scene.get"
+        | "stream.output.topology.probe"
+        | "sessions.list"
+        | "sessions.healthEvents.list"
+        | "sessions.logs.list"
+        | "sessions.aiArtifacts.list"
+        | "sessions.delete.resolve"
+        | "sessions.delete.pending"
+        | "sessions.storage"
+        | "sessions.comments.list"
+        | "platformAccounts.list"
+        | "liveChat.capability"
+        | "liveChat.status"
+        | "liveChat.diagnostics"
+        | "liveChat.sendOperations.list"
+        | "liveChat.sendOperations.latest"
+        | "liveChat.xCommentsReadiness"
+        | "streamTargets.metadata.get"
+        | "streamTargets.metadata.validate"
+        | "streamTargets.manualKey.inspect"
+        | "streamTargets.confirmation.validate"
+        | "streamTargets.youtube.streamStatus"
+        | "platformAccounts.youtube.channels"
+        | "streamTargets.twitch.searchCategories"
+        | "streamTargets.x.capability"
+        | "screens.list"
+        | "repair.assess_file"
+        | "noiseCleanup.list"
+        | "ai.artifacts.list"
+        | "preview.live.status"
+        | "recording.status"
+        | "stream.targets.snapshot" => Some(Observation),
+
+        "screens.active" => Some(DEFAULT_MUTATION_POLICY),
+        _ => None,
+    }
+}
+
+fn websocket_command_mutation_max_execution_age(text: &str) -> Option<Duration> {
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    match websocket_method_execution_policy(command.method.as_str())? {
+        WebSocketMethodExecutionPolicy::Mutation { max_execution_age } => Some(max_execution_age),
+        WebSocketMethodExecutionPolicy::Observation
+        | WebSocketMethodExecutionPolicy::SessionLifecycle => None,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WebSocketIsolatedCommandLaneKind {
     Observation,
@@ -4067,9 +4714,14 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
             Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance)
         }
         "liveChat.send" => Some(WebSocketIsolatedCommandLaneKind::DurableChat),
-        "screens.activate"
+        "screens.active"
+        | "screens.activate"
         | "screens.clear"
         | "screens.delete"
+        | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD
+        | "capture.recovery.retry"
+        | CAPTURE_RECOVERY_SMOKE_INJECT_METHOD
+        | CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD
         | "captions.start"
         | "captions.stop"
         | "captions.style.set"
@@ -4217,8 +4869,9 @@ fn accept_websocket_command(state: &AppState, text: String) -> WebSocketAccepted
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let live_control = lane_kind == Some(WebSocketIsolatedCommandLaneKind::LiveControl);
-    let operator_mutation_command =
-        live_control || websocket_command_is_layout_mutation(text.as_str());
+    let operator_mutation_command = live_control
+        || websocket_command_is_authoritative_scene_mutation(text.as_str())
+        || websocket_command_is_authoritative_source_mutation(text.as_str());
     let session_start_command = websocket_command_is_session_start(text.as_str());
     let operator_mutation = operator_mutation_command.then(|| state.operator_command_fence.begin());
     let live_control_order = live_control.then(|| state.live_control_command_order.begin());
@@ -4394,6 +5047,267 @@ impl WebSocketRunningStatefulCommand {
     }
 }
 
+/// Clears the diagnostic owner only when the mutation executor really releases
+/// the handler future. Keeping this guard inside the detached executor task is
+/// what makes a timed-out command remain truthfully visible as still running.
+struct WebSocketMutationTrackerRetention(Option<WebSocketRunningStatefulCommand>);
+
+impl Drop for WebSocketMutationTrackerRetention {
+    fn drop(&mut self) {
+        if let Some(tracker) = self.0.as_ref() {
+            tracker.clear();
+        }
+    }
+}
+
+enum WebSocketMutationExecutionOutcome {
+    Completed(ServerResponse),
+    Panicked,
+    NotInvokedAfterShutdown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebSocketMutationStartFailure {
+    ExecutorUnavailable,
+    DeadlineUnavailable,
+}
+
+/// Transfer an admitted mutation and every completion owner it retains to the
+/// process-lifetime mutation runtime. The OS-thread deadline is armed before
+/// `spawn`, and the queued task checks the shutdown latch at the last possible
+/// edge before it invokes the handler. Therefore an executor backlog can never
+/// start stale work after its own deadline has already retired the generation.
+fn spawn_websocket_mutation_execution<Retention>(
+    executor: Result<WebSocketMutationExecutor, &'static str>,
+    state: AppState,
+    text: String,
+    handler: WebSocketCommandHandler,
+    retention: Retention,
+    stateful_tracker: Option<WebSocketRunningStatefulCommand>,
+    max_execution_age: Duration,
+) -> Result<tokio::task::JoinHandle<WebSocketMutationExecutionOutcome>, WebSocketMutationStartFailure>
+where
+    Retention: Send + 'static,
+{
+    let executor = match executor {
+        Ok(executor) => executor,
+        Err(_) => {
+            // Runtime construction includes spawning its worker threads. Any
+            // failure means there is no isolated execution boundary, so fail
+            // closed before the handler can be invoked.
+            state.request_process_shutdown();
+            if let Some(tracker) = stateful_tracker.as_ref() {
+                tracker.clear();
+            }
+            drop(retention);
+            return Err(WebSocketMutationStartFailure::ExecutorUnavailable);
+        }
+    };
+    let Some(execution_deadline_completion) =
+        arm_runtime_independent_mutation_deadline(state.clone(), max_execution_age)
+    else {
+        if let Some(tracker) = stateful_tracker.as_ref() {
+            tracker.clear();
+        }
+        drop(retention);
+        return Err(WebSocketMutationStartFailure::DeadlineUnavailable);
+    };
+
+    let restart_state = state.clone();
+    Ok(executor.spawn(async move {
+        // These owners live in the mutation task, not in its JoinHandle. A
+        // caller which drops the JoinHandle on timeout merely detaches; it
+        // cannot cancel the handler or release reconciliation ordering early.
+        let _retention = retention;
+        let _tracker_retention = WebSocketMutationTrackerRetention(stateful_tracker);
+
+        // This task may have spent its entire budget queued behind blocking
+        // mutation workers. Recheck at the invocation edge and never apply it
+        // in the generation its OS deadline has already retired.
+        if restart_state.process_shutdown_requested() {
+            let _ = execution_deadline_completion.send(());
+            return WebSocketMutationExecutionOutcome::NotInvokedAfterShutdown;
+        }
+
+        let response = std::panic::AssertUnwindSafe(handler(state, text))
+            .catch_unwind()
+            .await;
+        match response {
+            Ok(response) => {
+                let _ = execution_deadline_completion.send(());
+                WebSocketMutationExecutionOutcome::Completed(response)
+            }
+            Err(_panic) => {
+                // Latch before disarming the independent deadline or dropping
+                // any retained ordering owner.
+                restart_state.request_process_shutdown();
+                let _ = execution_deadline_completion.send(());
+                WebSocketMutationExecutionOutcome::Panicked
+            }
+        }
+    }))
+}
+
+struct WebSocketMutationDispatchResult {
+    response_queued: bool,
+    handler_terminal: bool,
+}
+
+/// Execute an already-admitted authoritative mutation behind both the Tokio
+/// timer and the runtime-independent OS-thread deadline. The handler owns its
+/// completion guards until it really terminates; a timeout detaches the join
+/// handle instead of cancelling outcome-unknown work.
+#[allow(clippy::too_many_arguments)]
+async fn run_websocket_mutation_with_deadline(
+    mutation_executor: Result<WebSocketMutationExecutor, &'static str>,
+    state: AppState,
+    text: String,
+    outgoing: mpsc::Sender<Message>,
+    reliable_metrics: TrackedWebSocketQueueMetrics,
+    slow_pressure: WebSocketSlowPressureSignal,
+    handler: WebSocketCommandHandler,
+    max_execution_age: Duration,
+    operator_mutation: Option<WebSocketOperatorMutationGuard>,
+    session_start: Option<WebSocketOperatorMutationGuard>,
+    stateful_tracker: Option<WebSocketRunningStatefulCommand>,
+) -> WebSocketMutationDispatchResult {
+    let command_id = websocket_command_id(text.as_str());
+    let method = websocket_command_method(text.as_str());
+    let restart_state = state.clone();
+    let mut execution = match spawn_websocket_mutation_execution(
+        mutation_executor,
+        state,
+        text,
+        handler,
+        (operator_mutation, session_start),
+        stateful_tracker,
+        max_execution_age,
+    ) {
+        Ok(execution) => execution,
+        Err(_failure) => {
+            let response_queued = try_queue_websocket_response(
+                &outgoing,
+                &reliable_metrics,
+                &slow_pressure,
+                ServerResponse::error(
+                    command_id,
+                    "command-not-applied",
+                    "Videorc could not arm the mutation safety deadline. The command was not applied and the backend is restarting.",
+                ),
+            );
+            return WebSocketMutationDispatchResult {
+                response_queued,
+                handler_terminal: true,
+            };
+        }
+    };
+
+    tokio::select! {
+        biased;
+        completed = &mut execution => {
+            match completed {
+                Ok(WebSocketMutationExecutionOutcome::Completed(response)) => {
+                    WebSocketMutationDispatchResult {
+                        response_queued: queue_websocket_response(
+                            &outgoing,
+                            &reliable_metrics,
+                            &slow_pressure,
+                            response,
+                        ).await,
+                        handler_terminal: true,
+                    }
+                }
+                Ok(WebSocketMutationExecutionOutcome::Panicked) => {
+                    restart_state.request_process_shutdown();
+                    restart_state.emit_log(
+                        "error",
+                        format!(
+                            "Mutating command {method} panicked after dispatch; its outcome is unknown and the backend is restarting after safe recording finalization."
+                        ),
+                    );
+                    WebSocketMutationDispatchResult {
+                        response_queued: try_queue_websocket_response(
+                            &outgoing,
+                            &reliable_metrics,
+                            &slow_pressure,
+                            ServerResponse::error(
+                                command_id,
+                                "request-outcome-unknown",
+                                "The mutating command panicked after dispatch. Its outcome is unknown; Videorc is restarting the backend and will reconcile authoritative state.",
+                            ),
+                        ),
+                        handler_terminal: true,
+                    }
+                }
+                Ok(WebSocketMutationExecutionOutcome::NotInvokedAfterShutdown) => {
+                    WebSocketMutationDispatchResult {
+                        response_queued: try_queue_websocket_response(
+                            &outgoing,
+                            &reliable_metrics,
+                            &slow_pressure,
+                            ServerResponse::error(
+                                command_id,
+                                "command-not-applied",
+                                "Backend shutdown began while the command waited for mutation execution; it was not applied.",
+                            ),
+                        ),
+                        handler_terminal: true,
+                    }
+                }
+                Err(error) => {
+                    restart_state.request_process_shutdown();
+                    restart_state.emit_log(
+                        "error",
+                        format!(
+                            "Mutating command {method} task failed after dispatch ({error}); its outcome is unknown and the backend is restarting after safe recording finalization."
+                        ),
+                    );
+                    WebSocketMutationDispatchResult {
+                        response_queued: try_queue_websocket_response(
+                            &outgoing,
+                            &reliable_metrics,
+                            &slow_pressure,
+                            ServerResponse::error(
+                                command_id,
+                                "request-outcome-unknown",
+                                "The mutating command task failed after dispatch. Its outcome is unknown; Videorc is restarting the backend and will reconcile authoritative state.",
+                            ),
+                        ),
+                        handler_terminal: true,
+                    }
+                }
+            }
+        }
+        _ = tokio::time::sleep(max_execution_age) => {
+            restart_state.request_process_shutdown();
+            restart_state.emit_log(
+                "error",
+                format!(
+                    "Mutating command {method} exceeded its {}ms execution contract; its outcome is unknown and the backend is restarting after safe recording finalization.",
+                    max_execution_age.as_millis()
+                ),
+            );
+            let response_queued = try_queue_websocket_response(
+                &outgoing,
+                &reliable_metrics,
+                &slow_pressure,
+                ServerResponse::error(
+                    command_id,
+                    "request-outcome-unknown",
+                    "The mutating command stopped replying after dispatch. Its outcome is unknown; Videorc is restarting the backend and will reconcile authoritative state.",
+                ),
+            );
+            // Dropping a JoinHandle detaches. The handler task still owns both
+            // completion guards and the stateful tracker until real completion.
+            drop(execution);
+            WebSocketMutationDispatchResult {
+                response_queued,
+                handler_terminal: false,
+            }
+        }
+    }
+}
+
 async fn drain_websocket_layout_commands(tasks: &mut tokio::task::JoinSet<()>) {
     while let Some(completed) = tasks.join_next().await {
         if let Err(error) = completed {
@@ -4521,6 +5435,8 @@ async fn run_websocket_command_lane_worker(
     max_concurrency: usize,
     metrics: TrackedWebSocketCommandLaneMetrics,
     context: WebSocketCommandLaneWorkerContext,
+    mutation_executor: Result<WebSocketMutationExecutor, &'static str>,
+    mutation_max_execution_age_override: Option<Duration>,
 ) {
     let mut pending = std::collections::VecDeque::<WebSocketQueuedLaneCommand>::new();
     let mut active = tokio::task::JoinSet::new();
@@ -4531,6 +5447,31 @@ async fn run_websocket_command_lane_worker(
             let Some(front) = pending.front() else {
                 break;
             };
+            if context.state.process_shutdown_requested() {
+                let rejected = pending.pop_front().expect("lane front exists");
+                let WebSocketQueuedLaneCommand {
+                    command_id,
+                    queue_ticket,
+                    _admission,
+                    ..
+                } = rejected;
+                metrics.record_dispatch(queue_ticket);
+                metrics.record_expired_before_dispatch();
+                let response = ServerResponse::error(
+                    command_id,
+                    "command-expired-before-dispatch",
+                    "Backend shutdown began before this command dispatched; it was not applied.",
+                );
+                drop(_admission);
+                let _ = queue_websocket_response(
+                    &context.outgoing,
+                    &context.reliable_metrics,
+                    &context.slow_pressure,
+                    response,
+                )
+                .await;
+                continue;
+            }
             if front.dispatch_deadline <= tokio::time::Instant::now() {
                 let expired = pending.pop_front().expect("lane front exists");
                 let WebSocketQueuedLaneCommand {
@@ -4565,6 +5506,7 @@ async fn run_websocket_command_lane_worker(
             let response_pressure = context.slow_pressure.clone();
             let handler = context.command_handler.clone();
             let lane_metrics = metrics.clone();
+            let mutation_executor = mutation_executor.clone();
             active.spawn(async move {
                 let WebSocketQueuedLaneCommand {
                     command_id,
@@ -4587,16 +5529,179 @@ async fn run_websocket_command_lane_worker(
                 } else {
                     false
                 };
-                let response = if fence_ready {
-                    handler(command_state, text).await
-                } else {
+                if !fence_ready {
                     lane_metrics.record_expired_before_dispatch();
-                    ServerResponse::error(
+                    let response = ServerResponse::error(
                         command_id,
                         "command-expired-before-dispatch",
                         "The command expired while awaiting its reconciliation fence and was not applied.",
+                    );
+                    drop(_admission);
+                    let _ = queue_websocket_response(
+                        &response_tx,
+                        &response_metrics,
+                        &response_pressure,
+                        response,
                     )
-                };
+                    .await;
+                    return;
+                }
+                // Shutdown may latch while this command waits for a prior-order
+                // or source/session fence. Recheck at the final dispatch edge so
+                // accepted work cannot start inside the recycling generation.
+                if command_state.process_shutdown_requested() {
+                    lane_metrics.record_expired_before_dispatch();
+                    let response = ServerResponse::error(
+                        command_id,
+                        "command-expired-before-dispatch",
+                        "Backend shutdown began before this command dispatched; it was not applied.",
+                    );
+                    drop(_admission);
+                    let _ = queue_websocket_response(
+                        &response_tx,
+                        &response_metrics,
+                        &response_pressure,
+                        response,
+                    )
+                    .await;
+                    return;
+                }
+
+                if let Some(max_execution_age) =
+                    websocket_command_mutation_max_execution_age(text.as_str())
+                {
+                    let max_execution_age =
+                        mutation_max_execution_age_override.unwrap_or(max_execution_age);
+                    let method = websocket_command_method(text.as_str());
+                    let restart_state = command_state.clone();
+                    let mut execution = match spawn_websocket_mutation_execution(
+                        mutation_executor,
+                        command_state,
+                        text,
+                        handler,
+                        _admission,
+                        None,
+                        max_execution_age,
+                    ) {
+                        Ok(execution) => execution,
+                        Err(_failure) => {
+                            // The helper already latched shutdown and released
+                            // admission. No handler was invoked.
+                            let _ = try_queue_websocket_response(
+                                &response_tx,
+                                &response_metrics,
+                                &response_pressure,
+                                ServerResponse::error(
+                                    command_id,
+                                    "command-not-applied",
+                                    "Videorc could not arm isolated mutation execution. The command was not applied and the backend is restarting.",
+                                ),
+                            );
+                            return;
+                        }
+                    };
+                    tokio::select! {
+                        biased;
+                        completed = &mut execution => {
+                            match completed {
+                                Ok(WebSocketMutationExecutionOutcome::Completed(response)) => {
+                                    // Application completion, rather than a slow peer's response
+                                    // queue, is the fence edge observed by Stop/reconciliation.
+                                    let _ = queue_websocket_response(
+                                        &response_tx,
+                                        &response_metrics,
+                                        &response_pressure,
+                                        response,
+                                    )
+                                    .await;
+                                }
+                                Ok(WebSocketMutationExecutionOutcome::Panicked) => {
+                                    // The latch is the recovery authority; diagnostics
+                                    // are never allowed ahead of it because stderr/log
+                                    // storage can itself be saturated.
+                                    restart_state.request_process_shutdown();
+                                    restart_state.emit_log(
+                                        "error",
+                                        format!(
+                                            "Mutating command {method} panicked after dispatch; its outcome is unknown and the backend is restarting after safe recording finalization."
+                                        ),
+                                    );
+                                    let _ = try_queue_websocket_response(
+                                        &response_tx,
+                                        &response_metrics,
+                                        &response_pressure,
+                                        ServerResponse::error(
+                                            command_id,
+                                            "request-outcome-unknown",
+                                            "The mutating command panicked after dispatch. Its outcome is unknown; Videorc is restarting the backend and will reconcile authoritative state.",
+                                        ),
+                                    );
+                                }
+                                Ok(WebSocketMutationExecutionOutcome::NotInvokedAfterShutdown) => {
+                                    let _ = try_queue_websocket_response(
+                                        &response_tx,
+                                        &response_metrics,
+                                        &response_pressure,
+                                        ServerResponse::error(
+                                            command_id,
+                                            "command-not-applied",
+                                            "Backend shutdown began while the command waited for mutation execution; it was not applied.",
+                                        ),
+                                    );
+                                }
+                                Err(error) => {
+                                    restart_state.request_process_shutdown();
+                                    restart_state.emit_log(
+                                        "error",
+                                        format!(
+                                            "Mutating command {method} task failed after dispatch ({error}); its outcome is unknown and the backend is restarting after safe recording finalization."
+                                        ),
+                                    );
+                                    let _ = try_queue_websocket_response(
+                                        &response_tx,
+                                        &response_metrics,
+                                        &response_pressure,
+                                        ServerResponse::error(
+                                            command_id,
+                                            "request-outcome-unknown",
+                                            "The mutating command task failed after dispatch. Its outcome is unknown; Videorc is restarting the backend and will reconcile authoritative state.",
+                                        ),
+                                    );
+                                }
+                            }
+                        }
+                        _ = tokio::time::sleep(max_execution_age) => {
+                            // Latch recycle before diagnostics or response work.
+                            restart_state.request_process_shutdown();
+                            restart_state.emit_log(
+                                "error",
+                                format!(
+                                    "Mutating command {method} exceeded its {}ms execution contract; its outcome is unknown and the backend is restarting after safe recording finalization.",
+                                    max_execution_age.as_millis()
+                                ),
+                            );
+                            // The response queue may itself be full; socket close
+                            // still conveys outcome-unknown to the renderer.
+                            let _ = try_queue_websocket_response(
+                                &response_tx,
+                                &response_metrics,
+                                &response_pressure,
+                                ServerResponse::error(
+                                    command_id,
+                                    "request-outcome-unknown",
+                                    "The mutating command stopped replying after dispatch. Its outcome is unknown; Videorc is restarting the backend and will reconcile authoritative state.",
+                                ),
+                            );
+                            // Drop detaches this JoinHandle. The handler task retains
+                            // the admission/fence guards through actual completion or
+                            // process death; it is never cancelled by the watchdog.
+                            drop(execution);
+                        }
+                    }
+                    return;
+                }
+
+                let response = handler(command_state, text).await;
                 // Application completion, rather than a slow peer's response
                 // queue, is the fence edge observed by Stop/reconciliation.
                 drop(_admission);
@@ -4666,11 +5771,33 @@ fn spawn_websocket_command_lane_worker(
     metrics: TrackedWebSocketCommandLaneMetrics,
     context: &WebSocketCommandLaneWorkerContext,
 ) {
+    spawn_websocket_command_lane_worker_with_mutation_executor(
+        workers,
+        commands,
+        max_concurrency,
+        metrics,
+        context,
+        websocket_mutation_executor(),
+        None,
+    );
+}
+
+fn spawn_websocket_command_lane_worker_with_mutation_executor(
+    workers: &mut tokio::task::JoinSet<()>,
+    commands: mpsc::Receiver<WebSocketQueuedLaneCommand>,
+    max_concurrency: usize,
+    metrics: TrackedWebSocketCommandLaneMetrics,
+    context: &WebSocketCommandLaneWorkerContext,
+    mutation_executor: Result<WebSocketMutationExecutor, &'static str>,
+    mutation_max_execution_age_override: Option<Duration>,
+) {
     workers.spawn(run_websocket_command_lane_worker(
         commands,
         max_concurrency,
         metrics,
         context.clone(),
+        mutation_executor,
+        mutation_max_execution_age_override,
     ));
 }
 
@@ -4864,12 +5991,36 @@ async fn run_websocket_command_dispatcher(
 
 async fn run_websocket_ordered_command_dispatcher(
     state: AppState,
+    commands: mpsc::Receiver<WebSocketOrderedCommand>,
+    outgoing: mpsc::Sender<Message>,
+    reliable_metrics: TrackedWebSocketQueueMetrics,
+    slow_pressure: WebSocketSlowPressureSignal,
+    command_handler: WebSocketCommandHandler,
+    running_stateful: WebSocketRunningStatefulCommand,
+) {
+    run_websocket_ordered_command_dispatcher_with_mutation_executor(
+        state,
+        commands,
+        outgoing,
+        reliable_metrics,
+        slow_pressure,
+        command_handler,
+        running_stateful,
+        websocket_mutation_executor(),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_websocket_ordered_command_dispatcher_with_mutation_executor(
+    state: AppState,
     mut commands: mpsc::Receiver<WebSocketOrderedCommand>,
     outgoing: mpsc::Sender<Message>,
     reliable_metrics: TrackedWebSocketQueueMetrics,
     slow_pressure: WebSocketSlowPressureSignal,
     command_handler: WebSocketCommandHandler,
     running_stateful: WebSocketRunningStatefulCommand,
+    mutation_executor: Result<WebSocketMutationExecutor, &'static str>,
 ) {
     let mut layout_tasks = tokio::task::JoinSet::new();
     let mut audio_processing_tasks = tokio::task::JoinSet::new();
@@ -4919,6 +6070,21 @@ async fn run_websocket_ordered_command_dispatcher(
             }
             continue;
         }
+        if state.process_shutdown_requested() {
+            let response = ServerResponse::error(
+                websocket_command_id(text.as_str()),
+                "command-expired-before-dispatch",
+                "Backend shutdown began before this command dispatched; it was not applied.",
+            );
+            drop(_operator_mutation);
+            drop(_session_start);
+            if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                .await
+            {
+                break;
+            }
+            continue;
+        }
         reap_websocket_audio_processing_commands(&mut audio_processing_tasks);
         while read_only_tasks.try_join_next().is_some() {}
         // Read-only queries answer concurrently with ANY in-flight command —
@@ -4957,20 +6123,45 @@ async fn run_websocket_ordered_command_dispatcher(
             {
                 tracing::warn!("WebSocket layout command task failed: {error}");
             }
+            // The prior stateful command or the layout task reaped above may
+            // have crossed its mutation deadline while this command waited.
+            // Never dispatch fresh work inside the retiring generation.
+            if state.process_shutdown_requested() {
+                let response = ServerResponse::error(
+                    websocket_command_id(text.as_str()),
+                    "command-expired-before-dispatch",
+                    "Backend shutdown began before this command dispatched; it was not applied.",
+                );
+                drop(_operator_mutation);
+                drop(_session_start);
+                if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                    .await
+                {
+                    break;
+                }
+                continue;
+            }
             let command_state = state.clone();
             let response_tx = outgoing.clone();
             let response_metrics = reliable_metrics.clone();
             let response_pressure = slow_pressure.clone();
             let handler = command_handler.clone();
+            let mutation_executor = mutation_executor.clone();
             layout_tasks.spawn(async move {
-                let response = handler(command_state, text).await;
-                drop(_operator_mutation);
-                drop(_session_start);
-                let _ = queue_websocket_response(
-                    &response_tx,
-                    &response_metrics,
-                    &response_pressure,
-                    response,
+                let max_execution_age = websocket_command_mutation_max_execution_age(text.as_str())
+                    .expect("overlapping layout commands are inventoried mutations");
+                let _ = run_websocket_mutation_with_deadline(
+                    mutation_executor,
+                    command_state,
+                    text,
+                    response_tx,
+                    response_metrics,
+                    response_pressure,
+                    handler,
+                    max_execution_age,
+                    _operator_mutation,
+                    _session_start,
+                    None,
                 )
                 .await;
             });
@@ -4979,6 +6170,21 @@ async fn run_websocket_ordered_command_dispatcher(
 
         if let Some(command_id) = websocket_audio_processing_command_id(text.as_str()) {
             await_websocket_stateful_barrier(&mut stateful_task).await;
+            if state.process_shutdown_requested() {
+                let response = ServerResponse::error(
+                    command_id,
+                    "command-expired-before-dispatch",
+                    "Backend shutdown began before this command dispatched; it was not applied.",
+                );
+                drop(_operator_mutation);
+                drop(_session_start);
+                if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                    .await
+                {
+                    break;
+                }
+                continue;
+            }
             // Audio gain/mute is independent from scene layout. Do not hold the
             // dispatcher during FFmpeg's acknowledgement cadence; a following
             // session.stop must be able to publish its stopping marker.
@@ -5001,15 +6207,22 @@ async fn run_websocket_ordered_command_dispatcher(
             let response_metrics = reliable_metrics.clone();
             let response_pressure = slow_pressure.clone();
             let handler = command_handler.clone();
+            let mutation_executor = mutation_executor.clone();
             audio_processing_tasks.spawn(async move {
-                let response = handler(command_state, text).await;
-                drop(_operator_mutation);
-                drop(_session_start);
-                let _ = queue_websocket_response(
-                    &response_tx,
-                    &response_metrics,
-                    &response_pressure,
-                    response,
+                let max_execution_age = websocket_command_mutation_max_execution_age(text.as_str())
+                    .expect("audio processing is an inventoried mutation");
+                let _ = run_websocket_mutation_with_deadline(
+                    mutation_executor,
+                    command_state,
+                    text,
+                    response_tx,
+                    response_metrics,
+                    response_pressure,
+                    handler,
+                    max_execution_age,
+                    _operator_mutation,
+                    _session_start,
+                    None,
                 )
                 .await;
             });
@@ -5026,12 +6239,30 @@ async fn run_websocket_ordered_command_dispatcher(
         if !websocket_command_is_session_stop(text.as_str()) {
             drain_websocket_audio_processing_commands(&mut audio_processing_tasks).await;
         }
+        if state.process_shutdown_requested() {
+            let response = ServerResponse::error(
+                websocket_command_id(text.as_str()),
+                "command-expired-before-dispatch",
+                "Backend shutdown began before this command dispatched; it was not applied.",
+            );
+            drop(_operator_mutation);
+            drop(_session_start);
+            if !queue_websocket_response(&outgoing, &reliable_metrics, &slow_pressure, response)
+                .await
+            {
+                break;
+            }
+            continue;
+        }
+        let mutation_max_execution_age =
+            websocket_command_mutation_max_execution_age(text.as_str());
         let command_state = state.clone();
         let response_tx = outgoing.clone();
         let response_metrics = reliable_metrics.clone();
         let response_pressure = slow_pressure.clone();
         let handler = command_handler.clone();
         let stateful_tracker = running_stateful.clone();
+        let mutation_executor = mutation_executor.clone();
         stateful_task = Some(tokio::spawn(async move {
             let method = websocket_command_method(text.as_str());
             let started = std::time::Instant::now();
@@ -5047,25 +6278,51 @@ async fn run_websocket_ordered_command_dispatcher(
                     WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD.as_millis()
                 );
             });
-            let response = handler(command_state, text).await;
-            slow_watch.abort();
-            let elapsed = started.elapsed();
-            if elapsed >= WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD {
-                tracing::warn!(
-                    "[command-lane] stateful command {method} completed after {}ms",
-                    elapsed.as_millis()
-                );
+            if let Some(max_execution_age) = mutation_max_execution_age {
+                let result = run_websocket_mutation_with_deadline(
+                    mutation_executor,
+                    command_state,
+                    text,
+                    response_tx,
+                    response_metrics,
+                    response_pressure,
+                    handler,
+                    max_execution_age,
+                    _operator_mutation,
+                    _session_start,
+                    Some(stateful_tracker.clone()),
+                )
+                .await;
+                slow_watch.abort();
+                let elapsed = started.elapsed();
+                if result.handler_terminal && elapsed >= WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD {
+                    tracing::warn!(
+                        "[command-lane] stateful command {method} completed after {}ms",
+                        elapsed.as_millis()
+                    );
+                }
+                result.response_queued
+            } else {
+                let response = handler(command_state, text).await;
+                slow_watch.abort();
+                let elapsed = started.elapsed();
+                if elapsed >= WEBSOCKET_SLOW_STATEFUL_COMMAND_THRESHOLD {
+                    tracing::warn!(
+                        "[command-lane] stateful command {method} completed after {}ms",
+                        elapsed.as_millis()
+                    );
+                }
+                stateful_tracker.clear();
+                drop(_operator_mutation);
+                drop(_session_start);
+                queue_websocket_response(
+                    &response_tx,
+                    &response_metrics,
+                    &response_pressure,
+                    response,
+                )
+                .await
             }
-            stateful_tracker.clear();
-            drop(_operator_mutation);
-            drop(_session_start);
-            queue_websocket_response(
-                &response_tx,
-                &response_metrics,
-                &response_pressure,
-                response,
-            )
-            .await
         }));
     }
 
@@ -5231,7 +6488,12 @@ struct EventsLaggedPayload {
     occurred_at: String,
 }
 
+// The relay owns distinct reliability, pressure, telemetry, filtering, and
+// redaction channels. Keeping them explicit makes the connection contract and
+// task ownership visible at its only production call site.
+#[allow(clippy::too_many_arguments)]
 async fn relay_websocket_events(
+    state: AppState,
     mut events: broadcast::Receiver<ServerEvent>,
     reliable_tx: mpsc::Sender<Message>,
     reliable_metrics: TrackedWebSocketQueueMetrics,
@@ -5292,6 +6554,34 @@ async fn relay_websocket_events(
                 .await
                 {
                     break;
+                }
+
+                if is_recovery {
+                    // The broadcast ring may have dropped a terminal recovery
+                    // event while this socket was backpressured. Follow the
+                    // lag marker with the coordinator's authoritative latest
+                    // snapshot so a renderer cannot remain stuck on an older
+                    // Restarting/Verifying revision indefinitely.
+                    let repair = ServerEvent::new(
+                        "capture.recovery.status",
+                        capture_recovery::capture_recovery_status(&state).await,
+                    );
+                    let repair_allowed = event_filter
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .allows(&repair.event);
+                    if repair_allowed
+                        && let Ok(text) = serde_json::to_string(&repair)
+                        && !send_tracked_reliable_websocket_item(
+                            &reliable_tx,
+                            &reliable_metrics,
+                            Message::Text(text.into()),
+                            &slow_pressure,
+                        )
+                        .await
+                    {
+                        break;
+                    }
                 }
             }
             Err(error) => tracing::error!("Could not serialize event: {error}"),
@@ -5422,6 +6712,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     }
 
     let event_task = tokio::spawn(relay_websocket_events(
+        state.clone(),
         events,
         event_tx,
         reliable_metrics.clone(),
@@ -5451,6 +6742,13 @@ async fn websocket_session_with_handler_role_and_redaction(
     loop {
         let incoming = tokio::select! {
             incoming = receiver.next() => incoming,
+            _ = state.wait_for_process_shutdown_request() => {
+                // Axum's `on_upgrade` callback is detached from the graceful-shutdown
+                // connection tracker, so server shutdown will not close this session for us.
+                // Observe the process latch explicitly to stop socket I/O, abort auxiliary
+                // tasks, and release per-connection state during bounded shutdown.
+                break;
+            }
             _ = pressure_rx.recv() => {
                 break;
             }
@@ -5550,14 +6848,37 @@ async fn apply_active_screen_output(
     state: &AppState,
     active_screen: Option<protocol::StreamScreen>,
 ) -> Result<()> {
-    {
+    let legacy_overlay_preparation = {
         let recording = state.recording.lock().await;
-        if let Some(recording) = recording.as_ref() {
-            recording.set_active_screen_path(
-                active_screen
-                    .as_ref()
-                    .map(|screen| screen.image_path.as_str()),
-            )?;
+        recording
+            .as_ref()
+            .and_then(recording::ActiveRecording::active_screen_overlay_preparation)
+    };
+    if let Some(preparation) = legacy_overlay_preparation {
+        let image_path = active_screen
+            .as_ref()
+            .map(|screen| screen.image_path.clone());
+        // Image decode/resize and transparent-frame allocation can be tens of
+        // milliseconds for a 4K takeover. Keep both off the async worker and,
+        // critically, outside `state.recording` so Stop can enter finalization.
+        let prepared = tokio::task::spawn_blocking(move || preparation.prepare(image_path))
+            .await
+            .context("Legacy Screen overlay preparation task stopped")??;
+        let commit = {
+            let recording = state.recording.lock().await;
+            recording.as_ref().map_or(
+                recording::PreparedScreenOverlayCommit::Retired,
+                |recording| recording.commit_prepared_active_screen(prepared),
+            )
+        };
+        match commit {
+            recording::PreparedScreenOverlayCommit::Applied
+            | recording::PreparedScreenOverlayCommit::Retired => {}
+            recording::PreparedScreenOverlayCommit::Superseded => {
+                anyhow::bail!(
+                    "The active recording changed while the Screen image was prepared; retry the takeover."
+                );
+            }
         }
     }
     // Standby preview uses the same compositor. Publish the takeover there
@@ -5798,6 +7119,44 @@ fn session_deletion_handle(
     }
 }
 
+async fn prepare_session_deletions_exclusively(
+    state: &AppState,
+    session_ids: &[String],
+) -> Result<Vec<storage::PendingSessionDeletion>> {
+    let _file_mutation = state
+        .ffmpeg_work
+        .begin_recording_file_mutation_when_available()
+        .await;
+    state.database.prepare_session_deletions(session_ids)
+}
+
+async fn complete_session_deletion_exclusively(
+    state: &AppState,
+    operation_id: &str,
+    failed_paths: &[String],
+) -> Result<storage::SessionDeletionCompletion> {
+    let _file_mutation = state
+        .ffmpeg_work
+        .begin_recording_file_mutation_when_available()
+        .await;
+    state
+        .database
+        .complete_session_deletion(operation_id, failed_paths)
+}
+
+async fn pending_session_deletions_exclusively(
+    state: &AppState,
+) -> Result<Vec<storage::PendingSessionDeletion>> {
+    if !state.database.has_pending_session_deletions()? {
+        return Ok(Vec::new());
+    }
+    let _file_mutation = state
+        .ffmpeg_work
+        .begin_recording_file_mutation_when_available()
+        .await;
+    state.database.pending_session_deletions()
+}
+
 fn session_recording_path(state: &AppState, session_id: &str) -> Result<String> {
     if session_id.is_empty() {
         anyhow::bail!("sessionId is required.");
@@ -5913,7 +7272,7 @@ async fn handle_text_message_with_role(
 
     let mut response = match command.method.as_str() {
         #[cfg(debug_assertions)]
-        COMMAND_LANE_SMOKE_BLOCK_METHOD => {
+        COMMAND_LANE_SMOKE_BLOCK_METHOD | LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD => {
             if !rpc_params_are_empty(&command.params) {
                 ServerResponse::error(
                     command.id,
@@ -5974,6 +7333,71 @@ async fn handle_text_message_with_role(
                         "generation": released_generation,
                     }),
                 )
+            }
+        }
+        #[cfg(debug_assertions)]
+        CAPTURE_RECOVERY_SMOKE_INJECT_METHOD => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The capture-recovery smoke injection does not accept parameters.",
+                )
+            } else {
+                match capture_recovery::arm_camera_delivery_degradation(state).await {
+                    Ok(ack) => ServerResponse::ok(command.id, ack),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "capture-recovery-smoke-arm-failed",
+                        error,
+                    ),
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The capture-recovery smoke injection does not accept parameters.",
+                )
+            } else {
+                match capture_recovery::arm_screen_delivery_degradation(state).await {
+                    Ok(ack) => ServerResponse::ok(command.id, ack),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "capture-recovery-smoke-arm-failed",
+                        error,
+                    ),
+                }
+            }
+        }
+        #[cfg(debug_assertions)]
+        CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD
+        | CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "The capture-recovery cadence evidence request does not accept parameters.",
+                )
+            } else {
+                let source =
+                    if command.method == CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD {
+                        protocol::CaptureRecoverySource::Camera
+                    } else {
+                        protocol::CaptureRecoverySource::Screen
+                    };
+                match capture_recovery::capture_recovery_smoke_cadence_evidence(state, source).await
+                {
+                    Ok(evidence) => ServerResponse::ok(command.id, evidence),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "capture-recovery-smoke-evidence-unavailable",
+                        error,
+                    ),
+                }
             }
         }
         "resource.capability.issue" => {
@@ -6130,7 +7554,7 @@ async fn handle_text_message_with_role(
         "account.sign_out" => {
             let account_transition = state.account_auth_transition.lock().await;
             let mut clear_result = None;
-            clear_account_credentials_after_caption_shutdown(state, || {
+            let caption_shutdown = clear_account_credentials_after_caption_shutdown(state, || {
                 clear_result = Some(clear_account_credentials_fail_closed(
                     || {
                         if entitlements::clear_account_entitlements() {
@@ -6144,6 +7568,13 @@ async fn handle_text_message_with_role(
                 ));
             })
             .await;
+            if let Err(message) = caption_sign_out_cleanup_result(&caption_shutdown) {
+                return ServerResponse::error(
+                    command.id,
+                    "account-sign-out-caption-cleanup-failed",
+                    message,
+                );
+            }
             if let Some(Err(error)) = clear_result {
                 return ServerResponse::error(
                     command.id,
@@ -6572,6 +8003,24 @@ async fn handle_text_message_with_role(
         }
         "diagnostics.stats" => {
             ServerResponse::ok(command.id, current_diagnostics_stats(state).await)
+        }
+        "capture.recovery.status" => ServerResponse::ok(
+            command.id,
+            capture_recovery::capture_recovery_status(state).await,
+        ),
+        "capture.recovery.retry" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "Capture recovery retry does not accept parameters.",
+                )
+            } else {
+                ServerResponse::ok(
+                    command.id,
+                    capture_recovery::retry_capture_recovery(state.clone()).await,
+                )
+            }
         }
         "diagnostics.preview_baseline.record" => {
             match serde_json::from_value::<protocol::PreviewBaselineParams>(command.params) {
@@ -7408,23 +8857,22 @@ async fn handle_text_message_with_role(
                         "This recording cannot be deleted while Noise Cleanup is active.",
                     )
                 }
-                Ok(params) => match state
-                    .database
-                    .prepare_session_deletions(&params.session_ids)
-                {
-                    Ok(operations) => ServerResponse::ok(
-                        command.id,
-                        operations
-                            .iter()
-                            .map(session_deletion_handle)
-                            .collect::<Vec<_>>(),
-                    ),
-                    Err(error) => ServerResponse::error(
-                        command.id,
-                        "session-delete-failed",
-                        error.to_string(),
-                    ),
-                },
+                Ok(params) => {
+                    match prepare_session_deletions_exclusively(state, &params.session_ids).await {
+                        Ok(operations) => ServerResponse::ok(
+                            command.id,
+                            operations
+                                .iter()
+                                .map(session_deletion_handle)
+                                .collect::<Vec<_>>(),
+                        ),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "session-delete-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -7437,9 +8885,12 @@ async fn handle_text_message_with_role(
                     "session-delete-complete-invalid",
                     "A delete operation id is required.",
                 ),
-                Ok(params) => match state
-                    .database
-                    .complete_session_deletion(&params.operation_id, &params.failed_paths)
+                Ok(params) => match complete_session_deletion_exclusively(
+                    state,
+                    &params.operation_id,
+                    &params.failed_paths,
+                )
+                .await
                 {
                     Ok(completion) => {
                         if completion.deleted {
@@ -7471,7 +8922,7 @@ async fn handle_text_message_with_role(
                     "A delete operation id is required.",
                 )
             } else {
-                match state.database.pending_session_deletions() {
+                match pending_session_deletions_exclusively(state).await {
                     Ok(operations) => match operations
                         .into_iter()
                         .find(|operation| operation.operation_id == operation_id)
@@ -7491,7 +8942,7 @@ async fn handle_text_message_with_role(
                 }
             }
         }
-        "sessions.delete.pending" => match state.database.pending_session_deletions() {
+        "sessions.delete.pending" => match pending_session_deletions_exclusively(state).await {
             Ok(operations) => ServerResponse::ok(
                 command.id,
                 operations
@@ -8418,7 +9869,7 @@ async fn handle_text_message_with_role(
                     "This recording cannot be restored while Noise Cleanup is active.",
                 )
             }
-            Ok(params) => match repair_service::restore_file(params).await {
+            Ok(params) => match repair_service::restore_file(state.clone(), params).await {
                 Ok(restored) => {
                     ServerResponse::ok(command.id, serde_json::json!({ "restored": restored }))
                 }
@@ -8630,8 +10081,21 @@ async fn handle_text_message_with_role(
 async fn clear_account_credentials_after_caption_shutdown(
     state: &AppState,
     clear_credentials: impl FnOnce(),
-) {
-    captions::stop_captions_for_sign_out(state, clear_credentials).await;
+) -> captions::CaptionsStatus {
+    captions::stop_captions_for_sign_out(state, clear_credentials).await
+}
+
+fn caption_sign_out_cleanup_result(
+    status: &captions::CaptionsStatus,
+) -> std::result::Result<(), String> {
+    if status.reason_code.as_deref() == Some("captions-privacy-cleanup-failed") {
+        Err(status.message.clone().unwrap_or_else(|| {
+            "Private caption artifacts could not be removed; credentials and account state were preserved."
+                .to_string()
+        }))
+    } else {
+        Ok(())
+    }
 }
 
 fn clear_account_credentials_fail_closed<T>(
@@ -8855,6 +10319,8 @@ async fn backend_health(state: &AppState, ffmpeg_path: &str) -> BackendHealth {
 
 async fn current_diagnostics_stats(state: &AppState) -> protocol::DiagnosticStats {
     let stats = state.diagnostics.lock().await.clone();
+    let recovery = capture_recovery::capture_recovery_status(state).await;
+    let stats = diagnostics::apply_capture_recovery_status(stats, &recovery);
     let scene_revision = state.compositor.lock().await.status.scene_revision;
     let stats = diagnostics::apply_active_scene_revision(stats, scene_revision);
     let source_registry = state.source_registry.lock().await.snapshot();
@@ -8966,7 +10432,558 @@ mod tests {
     use std::time::Instant;
     use tokio::sync::broadcast;
 
-    static CAPTION_LIFECYCLE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    const HARD_EXIT_CHILD_ENV: &str = "VIDEORC_TEST_ZERO_IO_HARD_EXIT";
+
+    struct ScreenOverlayPreparationReleaseGuard(recording::ScreenOverlayPreparationBlocker);
+
+    impl Drop for ScreenOverlayPreparationReleaseGuard {
+        fn drop(&mut self) {
+            self.0.release();
+        }
+    }
+
+    fn parse_websocket_rpc_arm_methods(
+        source: &str,
+    ) -> Result<std::collections::BTreeSet<String>, String> {
+        fn resolve_pattern(token: &str) -> Option<&'static str> {
+            match token {
+                "COMMAND_LANE_SMOKE_BLOCK_METHOD" => Some(COMMAND_LANE_SMOKE_BLOCK_METHOD),
+                "COMMAND_LANE_SMOKE_STATUS_METHOD" => Some(COMMAND_LANE_SMOKE_STATUS_METHOD),
+                "COMMAND_LANE_SMOKE_RELEASE_METHOD" => Some(COMMAND_LANE_SMOKE_RELEASE_METHOD),
+                "LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD" => {
+                    Some(LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD)
+                }
+                "CAPTURE_RECOVERY_SMOKE_INJECT_METHOD" => {
+                    Some(CAPTURE_RECOVERY_SMOKE_INJECT_METHOD)
+                }
+                "CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD" => {
+                    Some(CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD)
+                }
+                "CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD" => {
+                    Some(CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD)
+                }
+                "CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD" => {
+                    Some(CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD)
+                }
+                _ => None,
+            }
+        }
+
+        let mut methods = std::collections::BTreeSet::new();
+        let mut pending_pattern = String::new();
+        for line in source.lines() {
+            let Some(top_level) = line.strip_prefix("        ") else {
+                continue;
+            };
+            if top_level.starts_with(' ') || top_level.starts_with('\t') {
+                continue;
+            }
+            let candidate = top_level.trim();
+            if candidate.is_empty()
+                || candidate.starts_with("#[")
+                || candidate.starts_with("//")
+                || matches!(candidate, "}" | "},")
+            {
+                continue;
+            }
+
+            if pending_pattern.is_empty() {
+                if candidate.starts_with('"')
+                    || candidate.starts_with('|')
+                    || candidate
+                        .chars()
+                        .next()
+                        .is_some_and(|first| first.is_ascii_uppercase())
+                {
+                    pending_pattern.push_str(candidate);
+                } else if candidate.contains("=>") {
+                    return Err(format!(
+                        "unparsed top-level websocket RPC arm pattern: {candidate}"
+                    ));
+                } else {
+                    continue;
+                }
+            } else if candidate.starts_with('|') {
+                pending_pattern.push(' ');
+                pending_pattern.push_str(candidate);
+            } else {
+                return Err(format!(
+                    "unterminated websocket RPC arm pattern `{pending_pattern}` before `{candidate}`"
+                ));
+            }
+
+            let Some((patterns, _body)) = pending_pattern.split_once("=>") else {
+                continue;
+            };
+            for raw_pattern in patterns.split('|') {
+                let token = raw_pattern.trim();
+                let method = if let Some(literal) = token
+                    .strip_prefix('"')
+                    .and_then(|literal| literal.strip_suffix('"'))
+                {
+                    literal.to_string()
+                } else {
+                    resolve_pattern(token)
+                        .ok_or_else(|| format!("unknown websocket RPC arm pattern `{token}`"))?
+                        .to_string()
+                };
+                if !methods.insert(method.clone()) {
+                    return Err(format!("duplicate websocket RPC arm `{method}`"));
+                }
+            }
+            pending_pattern.clear();
+        }
+        if pending_pattern.is_empty() {
+            Ok(methods)
+        } else {
+            Err(format!(
+                "unterminated websocket RPC arm pattern `{pending_pattern}`"
+            ))
+        }
+    }
+
+    #[test]
+    fn websocket_rpc_inventory_parser_covers_combined_and_multiline_arms() {
+        let parsed = parse_websocket_rpc_arm_methods(concat!(
+            "        \"one\" | \"two\" => {}\n",
+            "        \"three\"\n",
+            "        | \"four\" => {}\n",
+            "        COMMAND_LANE_SMOKE_BLOCK_METHOD\n",
+            "        | CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD => {}\n",
+        ))
+        .expect("combined and multiline RPC arm parser");
+        assert_eq!(
+            parsed,
+            [
+                "one",
+                "two",
+                "three",
+                "four",
+                COMMAND_LANE_SMOKE_BLOCK_METHOD,
+                CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect()
+        );
+        assert!(
+            parse_websocket_rpc_arm_methods("        future_guard if enabled => {}").is_err(),
+            "a new top-level arm shape must fail closed instead of evading inventory"
+        );
+    }
+
+    #[test]
+    fn backend_runtime_reserves_a_worker_for_shutdown_progress() {
+        assert!(
+            backend_runtime_worker_threads() >= 2,
+            "one blocked live-control worker must not starve shutdown/finalization"
+        );
+    }
+
+    #[test]
+    fn backend_publishes_authenticated_process_ownership_before_ready() {
+        let token = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+        let marker = backend_process_ownership_marker(token).expect("ownership marker");
+        assert!(marker.starts_with(BACKEND_PROCESS_OWNERSHIP_PREFIX));
+        let payload: serde_json::Value = serde_json::from_str(
+            marker
+                .strip_prefix(BACKEND_PROCESS_OWNERSHIP_PREFIX)
+                .expect("ownership prefix"),
+        )
+        .expect("ownership JSON");
+        assert_eq!(payload["token"], token);
+        assert_eq!(payload["pid"], std::process::id());
+        assert!(backend_process_ownership_marker("not-a-uuid").is_err());
+    }
+
+    #[test]
+    fn backend_runtime_shutdown_does_not_wait_forever_for_a_blocking_owner() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("test runtime");
+        let gate = std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+        let blocked_gate = gate.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let (finished_tx, finished_rx) = std::sync::mpsc::sync_channel(1);
+        runtime.spawn_blocking(move || {
+            entered_tx.send(()).expect("publish blocking owner entry");
+            let (released, wake) = &*blocked_gate;
+            let mut released = released.lock().expect("blocking owner gate");
+            while !*released {
+                released = wake.wait(released).expect("blocking owner wait");
+            }
+            finished_tx.send(()).expect("publish blocking owner exit");
+        });
+        entered_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("blocking owner entered");
+
+        let started = Instant::now();
+        runtime.shutdown_timeout(Duration::from_millis(20));
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "runtime shutdown must remain bounded around an uncooperative blocking owner"
+        );
+
+        let (released, wake) = &*gate;
+        *released.lock().expect("release blocking owner gate") = true;
+        wake.notify_all();
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("detached blocking owner exits after release");
+    }
+
+    #[tokio::test]
+    async fn post_finalization_cleanup_deadline_detaches_without_cancelling_ownership() {
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let cleanup_entered = entered.clone();
+        let cleanup_release = release.clone();
+        let cleanup = async move {
+            cleanup_entered.add_permits(1);
+            cleanup_release
+                .acquire()
+                .await
+                .expect("cleanup release semaphore")
+                .forget();
+            let _ = finished_tx.send(());
+        };
+        let deadline = tokio::spawn(run_process_cleanup_with_deadline(
+            cleanup,
+            Duration::from_millis(20),
+        ));
+        entered
+            .acquire()
+            .await
+            .expect("cleanup task entered")
+            .forget();
+
+        assert!(
+            !deadline.await.expect("cleanup deadline task"),
+            "an unfinished cleanup must report its bounded deadline"
+        );
+        release.add_permits(1);
+        tokio::time::timeout(Duration::from_secs(1), finished_rx)
+            .await
+            .expect("detached cleanup retains ownership after caller timeout")
+            .expect("detached cleanup completion signal");
+    }
+
+    #[tokio::test]
+    async fn post_finalization_cleanup_deadline_starts_before_compositor_admission() {
+        let state = test_state();
+        let compositor_admission = state.compositor_lifecycle.clone().lock_owned().await;
+        let (finished_tx, finished_rx) = tokio::sync::oneshot::channel();
+        let cleanup_state = state.clone();
+        let cleanup = async move {
+            cleanup_process_owners_after_finalization(cleanup_state).await;
+            let _ = finished_tx.send(());
+        };
+
+        assert!(
+            !run_process_cleanup_with_deadline(cleanup, Duration::from_millis(20)).await,
+            "the total cleanup deadline must include compositor lifecycle admission"
+        );
+        drop(compositor_admission);
+        tokio::time::timeout(Duration::from_secs(1), finished_rx)
+            .await
+            .expect("detached production cleanup completes after admission release")
+            .expect("detached production cleanup completion signal");
+    }
+
+    #[test]
+    fn hard_exit_child_helper() {
+        if std::env::var(HARD_EXIT_CHILD_ENV).as_deref() != Ok("1") {
+            return;
+        }
+        std::thread::spawn(|| hard_abort_after_delay(Duration::from_millis(150)));
+        // The parent deliberately never drains this pipe. Hold stderr's lock
+        // and fill the OS buffer so any logging in the exit thread would block
+        // behind either this lock or pipe backpressure forever.
+        let stderr = std::io::stderr();
+        let mut stderr = stderr.lock();
+        let bytes = [b'x'; 64 * 1024];
+        loop {
+            let _ = stderr.write_all(&bytes);
+        }
+    }
+
+    #[test]
+    fn hard_exit_deadline_does_not_depend_on_a_writable_stderr_pipe() {
+        let mut child = std::process::Command::new(std::env::current_exe().expect("test binary"))
+            .args(["--exact", "tests::hard_exit_child_helper", "--nocapture"])
+            .env(HARD_EXIT_CHILD_ENV, "1")
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn hard-exit child");
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let status = loop {
+            if let Some(status) = child.try_wait().expect("poll hard-exit child") {
+                break status;
+            }
+            if Instant::now() >= deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("hard-exit child remained blocked on its full stderr pipe");
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        };
+        assert!(
+            !status.success(),
+            "hard-abort child must terminate abnormally"
+        );
+    }
+
+    #[test]
+    fn live_control_deadline_latches_while_the_only_tokio_worker_is_blocked() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("single-worker Tokio runtime");
+        runtime.block_on(async {
+            let state = test_state();
+            let blocker_state = state.clone();
+            tokio::spawn(async move {
+                let completion = arm_runtime_independent_mutation_deadline(
+                    blocker_state,
+                    Duration::from_millis(25),
+                )
+                .expect("deadline thread");
+                // Deliberately block the runtime's only worker. A Tokio timer
+                // cannot run here; the OS-thread deadline still must latch.
+                std::thread::sleep(Duration::from_millis(150));
+                let _ = completion.send(());
+            })
+            .await
+            .expect("blocking handler task");
+            assert!(
+                state.process_shutdown_requested(),
+                "live-control recovery must not depend on Tokio making progress"
+            );
+        });
+    }
+
+    #[test]
+    fn live_control_completion_disarms_the_runtime_independent_deadline() {
+        let state = test_state();
+        let completion =
+            arm_runtime_independent_mutation_deadline(state.clone(), Duration::from_millis(75))
+                .expect("deadline thread");
+        completion.send(()).expect("completion signal");
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(
+            !state.process_shutdown_requested(),
+            "a completed live-control command must not trigger a later recycle"
+        );
+    }
+
+    #[test]
+    fn live_control_deadline_thread_failure_latches_shutdown_before_dispatch() {
+        let state = test_state();
+        let deadline = arm_runtime_independent_mutation_deadline_with(
+            state.clone(),
+            Duration::from_secs(10),
+            |_| Err(std::io::Error::other("simulated thread exhaustion")),
+        );
+        assert!(deadline.is_none());
+        assert!(
+            state.process_shutdown_requested(),
+            "failure to arm the safety boundary must fail closed"
+        );
+    }
+
+    #[test]
+    fn mutation_executor_creation_failure_latches_without_invoking_handler() {
+        let state = test_state();
+        let invoked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler: WebSocketCommandHandler = {
+            let invoked = invoked.clone();
+            std::sync::Arc::new(move |_state, _text| {
+                invoked.store(true, std::sync::atomic::Ordering::Release);
+                Box::pin(async { ServerResponse::ok("unexpected", json!({})) })
+            })
+        };
+
+        let execution = spawn_websocket_mutation_execution(
+            Err("simulated mutation-runtime worker creation failure"),
+            state.clone(),
+            json!({ "id": "must-not-run", "method": "screens.activate", "params": {} }).to_string(),
+            handler,
+            (),
+            None,
+            Duration::from_secs(10),
+        );
+
+        assert!(matches!(
+            execution,
+            Err(WebSocketMutationStartFailure::ExecutorUnavailable)
+        ));
+        assert!(state.process_shutdown_requested());
+        assert!(
+            !invoked.load(std::sync::atomic::Ordering::Acquire),
+            "an operator handler must never run without an isolated mutation executor"
+        );
+    }
+
+    #[test]
+    fn saturated_mutation_executor_cannot_starve_process_owned_finalization() {
+        struct RetentionProbe(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+        impl Drop for RetentionProbe {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            }
+        }
+
+        let process_runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("process-owned test runtime");
+        process_runtime.block_on(async {
+            let state = test_state();
+            let executor =
+                WebSocketMutationExecutor::new(2).expect("dedicated two-worker mutation executor");
+            let (entered_tx, entered_rx) = std::sync::mpsc::channel::<String>();
+            let release =
+                std::sync::Arc::new((std::sync::Mutex::new(false), std::sync::Condvar::new()));
+            let retained = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let handler: WebSocketCommandHandler = {
+                let entered_tx = entered_tx.clone();
+                let release = release.clone();
+                std::sync::Arc::new(move |_state, text| {
+                    let entered_tx = entered_tx.clone();
+                    let release = release.clone();
+                    Box::pin(async move {
+                        entered_tx
+                            .send(
+                                std::thread::current()
+                                    .name()
+                                    .unwrap_or("unnamed")
+                                    .to_string(),
+                            )
+                            .expect("publish mutation worker entry");
+                        let (released, released_signal) = &*release;
+                        let mut released = released
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        while !*released {
+                            released = released_signal
+                                .wait(released)
+                                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        }
+                        ServerResponse::ok(websocket_command_id(text.as_str()), json!({}))
+                    })
+                })
+            };
+            let command =
+                json!({ "id": "blocked", "method": "screens.activate", "params": {} }).to_string();
+            let first = spawn_websocket_mutation_execution(
+                Ok(executor.clone()),
+                state.clone(),
+                command.clone(),
+                handler.clone(),
+                RetentionProbe(retained.clone()),
+                None,
+                Duration::from_secs(2),
+            )
+            .expect("first isolated mutation");
+            let second = spawn_websocket_mutation_execution(
+                Ok(executor.clone()),
+                state.clone(),
+                command.clone(),
+                handler.clone(),
+                RetentionProbe(retained.clone()),
+                None,
+                Duration::from_secs(2),
+            )
+            .expect("second isolated mutation");
+            for _ in 0..2 {
+                let worker_name = entered_rx
+                    .recv_timeout(Duration::from_secs(1))
+                    .expect("both mutation workers must enter the blocking handler");
+                assert_eq!(worker_name, "videorc-mutation-worker");
+            }
+            // Occupy both workers before submitting the third task. Submitting
+            // all three first made the executor free to choose any two, while
+            // the assertions incorrectly assumed the third JoinHandle was the
+            // queued one.
+            let third = spawn_websocket_mutation_execution(
+                Ok(executor),
+                state.clone(),
+                command,
+                handler,
+                RetentionProbe(retained.clone()),
+                None,
+                Duration::from_secs(2),
+            )
+            .expect("queued isolated mutation");
+            assert_eq!(
+                retained.load(std::sync::atomic::Ordering::Acquire),
+                0,
+                "blocked mutation tasks must retain their completion owners"
+            );
+
+            let finalization_advanced =
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let process_state = state.clone();
+            let process_finalization_advanced = finalization_advanced.clone();
+            let process_finalization = tokio::spawn(async move {
+                process_state.wait_for_process_shutdown_request().await;
+                // This yield models the first process-owned asynchronous edge
+                // of recording finalization after observing the recycle latch.
+                tokio::task::yield_now().await;
+                process_finalization_advanced.store(true, std::sync::atomic::Ordering::Release);
+            });
+            timeout(Duration::from_secs(3), process_finalization)
+                .await
+                .expect("OS deadline must wake process-owned finalization")
+                .expect("process-owned finalization sentinel task");
+            assert!(state.process_shutdown_requested());
+            assert!(
+                finalization_advanced.load(std::sync::atomic::Ordering::Acquire),
+                "the process runtime must advance while every mutation worker is blocked"
+            );
+            assert!(!first.is_finished());
+            assert!(!second.is_finished());
+            assert!(!third.is_finished());
+
+            let (released, released_signal) = &*release;
+            *released
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            released_signal.notify_all();
+            assert!(matches!(
+                timeout(Duration::from_secs(1), first)
+                    .await
+                    .expect("first mutation release")
+                    .expect("first mutation task"),
+                WebSocketMutationExecutionOutcome::Completed(_)
+            ));
+            assert!(matches!(
+                timeout(Duration::from_secs(1), second)
+                    .await
+                    .expect("second mutation release")
+                    .expect("second mutation task"),
+                WebSocketMutationExecutionOutcome::Completed(_)
+            ));
+            assert!(matches!(
+                timeout(Duration::from_secs(1), third)
+                    .await
+                    .expect("queued mutation release")
+                    .expect("queued mutation task"),
+                WebSocketMutationExecutionOutcome::NotInvokedAfterShutdown
+            ));
+            assert_eq!(
+                retained.load(std::sync::atomic::Ordering::Acquire),
+                3,
+                "completion owners release only after their blocked handlers really terminate"
+            );
+        });
+    }
 
     #[test]
     fn no_param_rpc_accepts_omitted_or_empty_params_only() {
@@ -9197,6 +11214,158 @@ mod tests {
         assert_eq!(*entered.lock().await, ["first", "second"]);
     }
 
+    async fn assert_session_start_waits_for_source_tail_after_response(across_reconnect: bool) {
+        let source_transition = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let session_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let source_transition = source_transition.clone();
+            let session_entered = session_entered.clone();
+            std::sync::Arc::new(move |state, text| {
+                let source_transition = source_transition.clone();
+                let session_entered = session_entered.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    match command.id.as_str() {
+                        "source" => {
+                            *source_transition.lock().await =
+                                Some(state.source_transition_fence.begin());
+                        }
+                        "session" => {
+                            crate::recording::test_admit_session_start_and_release(&state)
+                                .await
+                                .expect("test session-start admission");
+                            session_entered.add_permits(1);
+                        }
+                        _ => unreachable!("unexpected source-tail test command"),
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+
+        let (first_tx, first_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (second_tx, second_rx) = mpsc::channel(WEBSOCKET_COMMAND_QUEUE_CAPACITY);
+        let (first_outgoing_tx, mut first_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let (second_outgoing_tx, mut second_outgoing_rx) =
+            mpsc::channel(WEBSOCKET_RELIABLE_QUEUE_CAPACITY);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let first_connection = transport.register_connection();
+        let first_metrics = first_connection.incoming_command_queue;
+        let first_reliable_metrics = first_connection.reliable_response_queue;
+        let second_connection = transport.register_connection();
+        let second_metrics = second_connection.incoming_command_queue;
+        let second_reliable_metrics = second_connection.reliable_response_queue;
+        let (first_pressure_tx, _first_pressure_rx) = mpsc::channel(1);
+        let first_pressure = WebSocketSlowPressureSignal::new(first_pressure_tx, transport.clone());
+        let (second_pressure_tx, _second_pressure_rx) = mpsc::channel(1);
+        let second_pressure = WebSocketSlowPressureSignal::new(second_pressure_tx, transport);
+        let state = test_state();
+        let first_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            first_rx,
+            first_metrics.clone(),
+            first_outgoing_tx,
+            first_reliable_metrics.clone(),
+            first_pressure,
+            handler.clone(),
+        ));
+        let second_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
+            state.clone(),
+            second_rx,
+            second_metrics.clone(),
+            second_outgoing_tx,
+            second_reliable_metrics.clone(),
+            second_pressure,
+            handler,
+        ));
+
+        assert!(
+            send_test_websocket_command(
+                &state,
+                &first_tx,
+                &first_metrics,
+                json!({ "id": "source", "method": "preview.camera.start", "params": {} })
+                    .to_string(),
+            )
+            .await
+        );
+        let (session_tx, session_metrics) = if across_reconnect {
+            (&second_tx, &second_metrics)
+        } else {
+            (&first_tx, &first_metrics)
+        };
+        assert!(
+            send_test_websocket_command(
+                &state,
+                session_tx,
+                session_metrics,
+                json!({ "id": "session", "method": "session.start", "params": {} }).to_string(),
+            )
+            .await
+        );
+
+        let source_response = timeout(
+            Duration::from_secs(1),
+            receive_tracked_json(&mut first_outgoing_rx, &first_reliable_metrics),
+        )
+        .await
+        .expect("the bounded source command response must complete");
+        assert_eq!(source_response["id"], "source");
+        assert_eq!(source_response["ok"], true);
+        assert!(
+            timeout(Duration::from_millis(50), session_entered.acquire())
+                .await
+                .is_err(),
+            "session.start must remain behind the process-owned source tail after its command response"
+        );
+
+        drop(
+            source_transition
+                .lock()
+                .await
+                .take()
+                .expect("source transition guard"),
+        );
+        timeout(Duration::from_secs(1), session_entered.acquire())
+            .await
+            .expect("session.start should enter after exact source completion")
+            .unwrap()
+            .forget();
+        let session_response = if across_reconnect {
+            timeout(
+                Duration::from_secs(1),
+                receive_tracked_json(&mut second_outgoing_rx, &second_reliable_metrics),
+            )
+            .await
+            .expect("reconnected session.start response")
+        } else {
+            timeout(
+                Duration::from_secs(1),
+                receive_tracked_json(&mut first_outgoing_rx, &first_reliable_metrics),
+            )
+            .await
+            .expect("same-socket session.start response")
+        };
+        assert_eq!(session_response["id"], "session");
+        assert_eq!(session_response["ok"], true);
+
+        drop(first_tx);
+        drop(second_tx);
+        first_dispatcher.await.unwrap();
+        second_dispatcher.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn websocket_same_socket_session_start_waits_for_source_tail_after_response() {
+        assert_session_start_waits_for_source_tail_after_response(false).await;
+    }
+
+    #[tokio::test]
+    async fn websocket_reconnected_session_start_waits_for_source_tail_after_response() {
+        assert_session_start_waits_for_source_tail_after_response(true).await;
+    }
+
     async fn assert_active_screen_output_failure_prevents_persist(operation: &str) {
         let persisted = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let rollback_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -9242,6 +11411,91 @@ mod tests {
     #[tokio::test]
     async fn screens_delete_active_output_failure_cannot_leave_database_ahead_of_output() {
         assert_active_screen_output_failure_prevents_persist("delete-active").await;
+    }
+
+    #[tokio::test]
+    async fn legacy_screen_decode_does_not_block_recording_finalization_intent() {
+        let state = test_state();
+        let blocker = recording::ScreenOverlayPreparationBlocker::new();
+        let _release_on_panic = ScreenOverlayPreparationReleaseGuard(blocker.clone());
+        let mut active = recording::test_active_recording_stub("screen-decode-stop");
+        active.screen_overlay = Some(recording::ScreenOverlaySession::test_stub(
+            2,
+            2,
+            blocker.clone(),
+        ));
+        *state.recording.lock().await = Some(active);
+
+        let image_path =
+            std::env::temp_dir().join(format!("videorc-screen-decode-stop-{}.png", Uuid::new_v4()));
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255]))
+            .save(&image_path)
+            .expect("write takeover test image");
+        let active_screen = protocol::StreamScreen {
+            id: "screen-decode-stop".to_string(),
+            name: "Stop-safe takeover".to_string(),
+            image_path: image_path.display().to_string(),
+            thumbnail_path: None,
+            sort_order: 0,
+            status: protocol::StreamScreenStatus::Ready,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let apply_state = state.clone();
+        let applying = tokio::spawn(async move {
+            apply_active_screen_output(&apply_state, Some(active_screen)).await
+        });
+        timeout(Duration::from_secs(1), async {
+            while !blocker.entered() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Screen preparation must reach the deterministic blocker");
+
+        let stop_state = state.clone();
+        let stopping = tokio::spawn(async move { stop_recording(stop_state).await });
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let recording = state.recording.lock().await;
+                if recording.as_ref().is_some_and(|active| {
+                    active.stop_requested
+                        && active.pipeline.status().finalization
+                            == protocol::RecordingFinalizationState::Finalizing
+                }) {
+                    break;
+                }
+                drop(recording);
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Stop must publish finalization intent before Screen decode is released");
+
+        {
+            let recording = state.recording.lock().await;
+            let frame = recording
+                .as_ref()
+                .and_then(|active| active.screen_overlay.as_ref())
+                .expect("legacy overlay remains installed until finalization")
+                .test_current_frame();
+            assert!(
+                frame.iter().all(|byte| *byte == 0),
+                "the frame prepared for a stopping generation must not commit"
+            );
+        }
+
+        blocker.release();
+        timeout(Duration::from_secs(1), applying)
+            .await
+            .expect("Screen apply must settle after preparation is released")
+            .expect("Screen apply task")
+            .expect("a retired legacy target should not block standby takeover state");
+
+        stopping.abort();
+        let _ = stopping.await;
+        state.recording.lock().await.take();
+        std::fs::remove_file(image_path).expect("remove takeover test image");
     }
 
     #[tokio::test]
@@ -10056,8 +12310,10 @@ mod tests {
             "liveChat.sendOperations.list",
             "liveChat.sendOperations.latest",
             "screens.list",
-            "screens.active",
             "recording.status",
+            "capture.recovery.status",
+            CAPTURE_RECOVERY_SMOKE_CAMERA_CADENCE_EVIDENCE_METHOD,
+            CAPTURE_RECOVERY_SMOKE_SCREEN_CADENCE_EVIDENCE_METHOD,
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert!(
@@ -10065,21 +12321,41 @@ mod tests {
                 "{method} must reconcile independently from mutations"
             );
         }
-        assert!(!websocket_command_is_read_only(
-            json!({ "id": "screen", "method": "screens.activate", "params": {} })
-                .to_string()
-                .as_str()
-        ));
+        let recovery_status =
+            json!({ "id": "recovery", "method": "capture.recovery.status", "params": {} })
+                .to_string();
+        assert!(
+            websocket_observation_requires_operator_fence(recovery_status.as_str()),
+            "recovery status must reconcile after accepted operator retries"
+        );
+        for method in ["screens.active", "screens.activate"] {
+            assert!(
+                !websocket_command_is_read_only(
+                    json!({ "id": method, "method": method, "params": {} })
+                        .to_string()
+                        .as_str()
+                ),
+                "{method} can change authoritative takeover state and must use mutation execution"
+            );
+        }
     }
 
     #[test]
-    fn websocket_operator_commands_use_the_live_control_lane() {
+    fn websocket_handler_execution_policy_inventory_is_exhaustive() {
         for method in [
+            "screens.active",
             "screens.activate",
             "screens.clear",
             "screens.delete",
             "captions.start",
             "captions.stop",
+            "captions.style.set",
+            "comments.highlight.set",
+            "comments.highlight.clear",
+            "capture.recovery.retry",
+            CAPTURE_RECOVERY_SMOKE_INJECT_METHOD,
+            CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD,
+            LIVE_CONTROL_RECYCLE_SMOKE_BLOCK_METHOD,
         ] {
             let command = json!({ "id": method, "method": method, "params": {} }).to_string();
             assert_eq!(
@@ -10087,7 +12363,19 @@ mod tests {
                 Some(WebSocketIsolatedCommandLaneKind::LiveControl),
                 "{method} must not wait behind maintenance or background mutations"
             );
+            assert!(
+                websocket_command_mutation_max_execution_age(command.as_str()).is_some(),
+                "{method} must recycle a generation that stops replying after dispatch"
+            );
         }
+
+        let durable_chat =
+            json!({ "id": "chat", "method": "liveChat.send", "params": {} }).to_string();
+        assert_eq!(
+            websocket_isolated_command_lane(durable_chat.as_str()),
+            Some(WebSocketIsolatedCommandLaneKind::DurableChat)
+        );
+        assert!(websocket_command_mutation_max_execution_age(durable_chat.as_str()).is_some());
 
         for method in ["scene.layout.apply_live", "scene.layout.apply_preview"] {
             let command = json!({
@@ -10102,10 +12390,183 @@ mod tests {
                 "{method} must retain the ordered dispatcher's latest-wins overlap path"
             );
             assert!(
+                websocket_command_is_authoritative_scene_mutation(command.as_str()),
+                "{method} must fence authoritative observations and session starts"
+            );
+            assert!(
                 websocket_command_may_overlap(command.as_str()),
                 "{method} with an intentId must be eligible for concurrent latest-wins dispatch"
             );
+            assert_eq!(
+                websocket_command_mutation_max_execution_age(command.as_str()),
+                Some(WEBSOCKET_LIVE_LAYOUT_MAX_EXECUTION_AGE),
+                "{method} must retain its complete warm-source budget behind an independent execution deadline"
+            );
         }
+
+        for method in [
+            "scene.load_from_capture_config",
+            "scene.source.device.switch",
+            "scene.source.transform.update",
+            "scene.source.transform.reset",
+            "scene.source.visibility.update",
+            "scene.source.nudge",
+            "scene.sources.reorder",
+        ] {
+            let command = json!({
+                "id": method,
+                "method": method,
+                "params": { "intentId": 1 }
+            })
+            .to_string();
+            assert!(
+                websocket_command_is_authoritative_scene_mutation(command.as_str()),
+                "{method} must fence authoritative observations and session starts"
+            );
+            assert!(
+                !websocket_command_may_overlap(command.as_str()),
+                "{method} must remain serialized even if an unrelated intentId is present"
+            );
+            let expected_execution_age = if method == "scene.source.device.switch" {
+                WEBSOCKET_LIVE_LAYOUT_MAX_EXECUTION_AGE
+            } else {
+                WEBSOCKET_MUTATION_MAX_EXECUTION_AGE
+            };
+            assert_eq!(
+                websocket_command_mutation_max_execution_age(command.as_str()),
+                Some(expected_execution_age),
+                "{method} must recycle only after its legitimate execution budget"
+            );
+        }
+
+        for method in [
+            "preview.camera.start",
+            "preview.camera.stop",
+            "preview.screen.start",
+            "preview.screen.stop",
+        ] {
+            let command = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert!(
+                websocket_command_is_authoritative_source_mutation(command.as_str()),
+                "{method} must order native source ownership against session.start"
+            );
+            assert_eq!(
+                websocket_isolated_command_lane(command.as_str()),
+                None,
+                "{method} must retain its ordered command lane"
+            );
+            assert!(
+                websocket_command_mutation_max_execution_age(command.as_str()).is_some(),
+                "{method} must recycle a generation that stops replying after dispatch"
+            );
+        }
+
+        let audio_processing =
+            json!({ "id": "audio", "method": "audio.processing.update", "params": {} }).to_string();
+        assert!(websocket_command_mutation_max_execution_age(audio_processing.as_str()).is_some());
+        let account_refresh =
+            json!({ "id": "account", "method": "account.refresh", "params": {} }).to_string();
+        assert_eq!(
+            websocket_command_mutation_max_execution_age(account_refresh.as_str()),
+            Some(WEBSOCKET_PROVIDER_MUTATION_MAX_EXECUTION_AGE),
+            "bounded provider maintenance is stateful and must use isolated mutation execution"
+        );
+
+        for method in [
+            "screens.importImage",
+            "sessions.delete",
+            "sessions.delete.complete",
+        ] {
+            assert_eq!(
+                websocket_method_execution_policy(method),
+                Some(WebSocketMethodExecutionPolicy::Mutation {
+                    max_execution_age: WEBSOCKET_FILE_MUTATION_MAX_EXECUTION_AGE,
+                }),
+                "{method} must finish or become outcome-unknown before the renderer's 45-second envelope"
+            );
+        }
+        for method in ["sessions.delete.resolve", "sessions.delete.pending"] {
+            assert_eq!(
+                websocket_method_execution_policy(method),
+                Some(WebSocketMethodExecutionPolicy::Observation),
+                "{method} only observes a durable deletion operation"
+            );
+        }
+
+        // Inventory the actual top-level RPC arms rather than maintaining a
+        // second hand-copied list which could silently miss a future method.
+        // The parser handles literal and named-constant alternatives, including
+        // multiline arms, and fails closed on every unknown top-level arm shape.
+        let source = include_str!("main.rs");
+        let handler_source = source
+            .split_once("let mut response = match command.method.as_str() {")
+            .expect("websocket RPC dispatch start")
+            .1
+            .split_once("\n        method => ServerResponse::error(")
+            .expect("websocket RPC fallback arm")
+            .0;
+        let methods = parse_websocket_rpc_arm_methods(handler_source)
+            .expect("every top-level websocket RPC arm must be inventory-readable");
+        assert!(
+            methods.len() >= 175,
+            "the source-derived RPC inventory unexpectedly shrank: {methods:?}"
+        );
+
+        let mut lifecycle_exemptions = Vec::new();
+        for method in methods {
+            let command = json!({ "id": method, "method": method, "params": {} }).to_string();
+            let policy = websocket_method_execution_policy(method.as_str())
+                .unwrap_or_else(|| panic!("RPC {method} has no execution policy"));
+            match policy {
+                WebSocketMethodExecutionPolicy::Mutation { max_execution_age } => {
+                    assert!(
+                        !websocket_command_is_read_only(command.as_str()),
+                        "state-changing RPC {method} must not bypass mutation execution through the observation fast path"
+                    );
+                    assert_eq!(
+                        websocket_command_mutation_max_execution_age(command.as_str()),
+                        Some(max_execution_age),
+                        "state-changing RPC {method} must use its inventoried isolated execution deadline"
+                    );
+                }
+                WebSocketMethodExecutionPolicy::Observation => {
+                    assert!(
+                        websocket_command_is_read_only(command.as_str()),
+                        "observation RPC {method} must use the concurrent observation path"
+                    );
+                    assert_eq!(
+                        websocket_command_mutation_max_execution_age(command.as_str()),
+                        None,
+                        "observation RPC {method} must not arm an outcome-unknown mutation deadline"
+                    );
+                }
+                WebSocketMethodExecutionPolicy::SessionLifecycle => {
+                    assert!(
+                        websocket_command_has_session_lifecycle_policy(command.as_str()),
+                        "{method} must document its stronger session lifecycle ownership"
+                    );
+                    assert_eq!(
+                        websocket_command_mutation_max_execution_age(command.as_str()),
+                        None,
+                        "{method} must retain its stronger fail-closed lifecycle contract"
+                    );
+                    lifecycle_exemptions.push(method);
+                }
+            }
+        }
+        lifecycle_exemptions.sort_unstable();
+        assert_eq!(
+            lifecycle_exemptions,
+            [
+                "recording.start_test",
+                "recording.stop",
+                "session.start",
+                "session.stop",
+            ]
+            .map(str::to_string)
+            .to_vec(),
+            "only atomic Start and fail-closed recording finalization may bypass generic mutation deadlines"
+        );
     }
 
     #[test]
@@ -10123,6 +12584,277 @@ mod tests {
                 Some(WebSocketIsolatedCommandLaneKind::AccountMaintenance),
                 "{method} must not block operator commands"
             );
+        }
+    }
+
+    #[test]
+    fn capture_recovery_rpc_authority_matches_renderer_operator_surface() {
+        for role in [BackendRole::Renderer, BackendRole::Admin] {
+            for method in ["capture.recovery.status", "capture.recovery.retry"] {
+                assert_eq!(
+                    authorize_backend_method(role, method, false),
+                    Ok(()),
+                    "{method} must be available to the trusted desktop operator"
+                );
+            }
+        }
+        for method in ["capture.recovery.status", "capture.recovery.retry"] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Remote, method, false),
+                Err(backend_authority::MethodAdmissionError::AdminOnly),
+                "remote-control peers must not gain capture-recovery authority"
+            );
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn capture_recovery_smoke_injection_is_trusted_debug_smoke_only() {
+        for method in [
+            CAPTURE_RECOVERY_SMOKE_INJECT_METHOD,
+            CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD,
+        ] {
+            for role in [BackendRole::Admin, BackendRole::Renderer] {
+                assert_eq!(authorize_backend_method(role, method, true), Ok(()));
+                assert_eq!(
+                    authorize_backend_method(role, method, false),
+                    Err(backend_authority::MethodAdmissionError::SmokeDisabled)
+                );
+            }
+            assert_eq!(
+                authorize_backend_method(BackendRole::Remote, method, true),
+                Err(backend_authority::MethodAdmissionError::AdminOnly)
+            );
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn capture_recovery_smoke_injection_arms_natural_generation_bound_detector() {
+        let mut state = test_state();
+        state.smoke_rpc_enabled = true;
+        let rejected = handle_text_message_with_role(
+            &state,
+            &json!({
+                "id": "inject-with-params",
+                "method": CAPTURE_RECOVERY_SMOKE_INJECT_METHOD,
+                "params": { "source": "camera" }
+            })
+            .to_string(),
+            BackendRole::Renderer,
+        )
+        .await;
+        assert!(!rejected.ok);
+        assert_eq!(rejected.error.unwrap().code, "invalid-params");
+
+        let no_camera = handle_text_message_with_role(
+            &state,
+            &json!({
+                "id": "inject",
+                "method": CAPTURE_RECOVERY_SMOKE_INJECT_METHOD,
+                "params": {}
+            })
+            .to_string(),
+            BackendRole::Renderer,
+        )
+        .await;
+        assert!(!no_camera.ok);
+        assert_eq!(
+            no_camera.error.unwrap().code,
+            "capture-recovery-smoke-arm-failed"
+        );
+
+        let layout = protocol::default_layout_settings();
+        let video = protocol::VideoSettings {
+            preset: protocol::VideoPreset::Custom,
+            width: 8,
+            height: 4,
+            fps: 30,
+            bitrate_kbps: 2_000,
+        };
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:test",
+            &layout,
+            &video,
+        )
+        .await;
+        let camera = crate::preview_camera::preview_camera_restart_snapshot(&state)
+            .await
+            .expect("test camera generation");
+        let camera_epoch = crate::capture_health::CaptureHealthCameraEpoch {
+            source_key: camera.source_key,
+            generation: camera.generation,
+        };
+        let arm_state = state.clone();
+        let arm = tokio::spawn(async move {
+            handle_text_message_with_role(
+                &arm_state,
+                &json!({
+                    "id": "inject-live",
+                    "method": CAPTURE_RECOVERY_SMOKE_INJECT_METHOD,
+                    "params": {}
+                })
+                .to_string(),
+                BackendRole::Renderer,
+            )
+            .await
+        });
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if capture_recovery::apply_camera_delivery_smoke_fault(
+                    &state,
+                    &camera_epoch,
+                    1,
+                    1,
+                    1,
+                )
+                .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("smoke RPC must arm the exact camera generation");
+        let armed = arm.await.expect("capture-recovery smoke RPC task");
+        assert!(armed.ok);
+        let payload = armed.payload.unwrap();
+        assert_eq!(payload["armed"], true);
+        assert!(payload["faultId"].as_u64().unwrap() > 0);
+        assert!(payload["sourceGeneration"].as_u64().unwrap() > 0);
+    }
+
+    #[cfg(debug_assertions)]
+    #[tokio::test]
+    async fn screen_capture_recovery_smoke_injection_arms_natural_generation_bound_detector() {
+        let mut state = test_state();
+        state.smoke_rpc_enabled = true;
+        let rejected = handle_text_message_with_role(
+            &state,
+            &json!({
+                "id": "inject-screen-with-params",
+                "method": CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD,
+                "params": { "source": "screen" }
+            })
+            .to_string(),
+            BackendRole::Renderer,
+        )
+        .await;
+        assert!(!rejected.ok);
+        assert_eq!(rejected.error.unwrap().code, "invalid-params");
+
+        let no_screen = handle_text_message_with_role(
+            &state,
+            &json!({
+                "id": "inject-screen",
+                "method": CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD,
+                "params": {}
+            })
+            .to_string(),
+            BackendRole::Renderer,
+        )
+        .await;
+        assert!(!no_screen.ok);
+        assert_eq!(
+            no_screen.error.unwrap().code,
+            "capture-recovery-smoke-arm-failed"
+        );
+
+        let video = protocol::VideoSettings {
+            preset: protocol::VideoPreset::Custom,
+            width: 8,
+            height: 4,
+            fps: 30,
+            bitrate_kbps: 2_000,
+        };
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            "screen:screencapturekit:test",
+            41,
+            1,
+            &video,
+        )
+        .await;
+        let screen = crate::preview_screen::preview_screen_restart_snapshot(&state)
+            .await
+            .expect("test ScreenCaptureKit generation");
+        let screen_epoch = crate::capture_health::CaptureHealthScreenEpoch {
+            source_key: screen.source_key,
+            generation: screen.generation,
+        };
+        let arm_state = state.clone();
+        let arm = tokio::spawn(async move {
+            handle_text_message_with_role(
+                &arm_state,
+                &json!({
+                    "id": "inject-screen-live",
+                    "method": CAPTURE_RECOVERY_SMOKE_INJECT_SCREEN_METHOD,
+                    "params": {}
+                })
+                .to_string(),
+                BackendRole::Renderer,
+            )
+            .await
+        });
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if capture_recovery::apply_screen_delivery_smoke_fault(
+                    &state,
+                    &screen_epoch,
+                    1,
+                    1,
+                    1,
+                )
+                .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("smoke RPC must arm the exact ScreenCaptureKit generation");
+        let armed = arm.await.expect("screen capture-recovery smoke RPC task");
+        assert!(armed.ok);
+        let payload = armed.payload.unwrap();
+        assert_eq!(payload["armed"], true);
+        assert!(payload["faultId"].as_u64().unwrap() > 0);
+        assert_eq!(payload["sourceGeneration"], 41);
+    }
+
+    #[tokio::test]
+    async fn capture_recovery_retry_is_parameterless_and_idle_idempotent() {
+        let state = test_state();
+        let rejected = handle_text_message_with_role(
+            &state,
+            &json!({
+                "id": "retry-with-params",
+                "method": "capture.recovery.retry",
+                "params": { "generation": 9 }
+            })
+            .to_string(),
+            BackendRole::Renderer,
+        )
+        .await;
+        assert!(!rejected.ok);
+        assert_eq!(rejected.error.unwrap().code, "invalid-params");
+
+        for id in ["retry-idle-a", "retry-idle-b"] {
+            let response = handle_text_message_with_role(
+                &state,
+                &json!({
+                    "id": id,
+                    "method": "capture.recovery.retry",
+                    "params": {}
+                })
+                .to_string(),
+                BackendRole::Renderer,
+            )
+            .await;
+            assert!(response.ok);
+            assert_eq!(response.payload.unwrap()["phase"], "idle");
         }
     }
 
@@ -10934,7 +13666,38 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn websocket_reconciliation_fence_waits_for_prior_layout_commit_across_reconnect() {
+    async fn websocket_session_start_waits_for_prior_authoritative_scene_mutations_across_reconnect()
+     {
+        for mutation_method in [
+            "scene.load_from_capture_config",
+            "scene.layout.apply_live",
+            "scene.layout.apply_preview",
+            "scene.source.device.switch",
+            "scene.source.transform.update",
+            "scene.source.transform.reset",
+            "scene.source.visibility.update",
+            "scene.source.nudge",
+            "scene.sources.reorder",
+        ] {
+            assert_cross_connection_websocket_command_order(mutation_method, "session.start").await;
+        }
+    }
+
+    #[tokio::test]
+    async fn websocket_session_start_waits_for_prior_raw_source_mutations_across_reconnect() {
+        for mutation_method in [
+            "preview.camera.start",
+            "preview.camera.stop",
+            "preview.screen.start",
+            "preview.screen.stop",
+        ] {
+            assert_cross_connection_websocket_command_order(mutation_method, "session.start").await;
+        }
+    }
+
+    async fn assert_websocket_reconciliation_fence_waits_for_prior_scene_mutation(
+        mutation_method: &'static str,
+    ) {
         let mutation_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
         let release_mutation = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
         let read_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
@@ -10954,7 +13717,7 @@ mod tests {
                 let read_saw_commit = read_saw_commit.clone();
                 Box::pin(async move {
                     let command: ClientCommand = serde_json::from_str(&text).unwrap();
-                    if command.method == "scene.layout.apply_live" {
+                    if command.method == mutation_method {
                         mutation_entered.add_permits(1);
                         release_mutation.acquire().await.unwrap().forget();
                         committed.store(true, std::sync::atomic::Ordering::Release);
@@ -10997,8 +13760,8 @@ mod tests {
             &mutation_tx,
             &mutation_metrics,
             json!({
-                "id": "layout",
-                "method": "scene.layout.apply_live",
+                "id": "mutation",
+                "method": mutation_method,
                 "params": { "intentId": 1 }
             })
             .to_string(),
@@ -11025,7 +13788,7 @@ mod tests {
             timeout(Duration::from_millis(50), read_entered.acquire())
                 .await
                 .is_err(),
-            "authoritative read must not overtake a prior layout still queued on the old socket"
+            "authoritative read must not overtake prior {mutation_method} still queued on the old socket"
         );
 
         let mutation_dispatcher = tokio::spawn(run_websocket_command_dispatcher(
@@ -11039,7 +13802,7 @@ mod tests {
         ));
         timeout(Duration::from_secs(1), mutation_entered.acquire())
             .await
-            .expect("layout mutation should dispatch once its old dispatcher starts")
+            .expect("scene mutation should dispatch once its old dispatcher starts")
             .unwrap()
             .forget();
 
@@ -11068,6 +13831,22 @@ mod tests {
             response_count += 1;
         }
         assert_eq!(response_count, 2);
+    }
+
+    #[tokio::test]
+    async fn websocket_reconciliation_fence_waits_for_prior_layout_commit_across_reconnect() {
+        assert_websocket_reconciliation_fence_waits_for_prior_scene_mutation(
+            "scene.layout.apply_live",
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn websocket_reconciliation_fence_waits_for_prior_device_switch_across_reconnect() {
+        assert_websocket_reconciliation_fence_waits_for_prior_scene_mutation(
+            "scene.source.device.switch",
+        )
+        .await;
     }
 
     #[tokio::test(start_paused = true)]
@@ -11173,7 +13952,6 @@ mod tests {
         ));
         start_entered.acquire().await.unwrap().forget();
         tokio::time::advance(WEBSOCKET_STOP_MAX_QUEUE_AGE + Duration::from_secs(1)).await;
-        tokio::task::yield_now().await;
         assert!(
             stop_entered.try_acquire().is_err(),
             "session.stop must keep waiting after its ordinary lane deadline"
@@ -11204,6 +13982,847 @@ mod tests {
         }
         assert_eq!(response_count, 2);
         assert_eq!(*entered.lock().await, ["session.start", "session.stop"]);
+    }
+
+    #[tokio::test]
+    async fn screens_active_unavailable_hang_restarts_without_cancelling_or_overtaking_activation()
+    {
+        const TEST_MUTATION_MAX_EXECUTION_AGE: Duration = Duration::from_secs(3);
+
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let executed = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler_future_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler: WebSocketCommandHandler = {
+            let first_entered = first_entered.clone();
+            let release_first = release_first.clone();
+            let executed = executed.clone();
+            let handler_future_dropped = handler_future_dropped.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let first_entered = first_entered.clone();
+                let release_first = release_first.clone();
+                let executed = executed.clone();
+                let handler_future_dropped = handler_future_dropped.clone();
+                Box::pin(async move {
+                    let _drop_probe = DropProbe(handler_future_dropped);
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    executed.lock().await.push(command.id.clone());
+                    if command.id == "wedged" {
+                        resolve_active_screen_read(
+                            storage::ActiveStreamScreenSelection::Unavailable {
+                                screen_id: "missing-screen".to_string(),
+                            },
+                            async move {
+                                first_entered.add_permits(1);
+                                release_first.acquire().await.unwrap().forget();
+                                Ok(())
+                            },
+                            || Ok(()),
+                        )
+                        .await
+                        .expect("released unavailable selection should retire")
+                        .is_none()
+                        .then_some(())
+                        .expect("unavailable selection resolves inactive");
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(4);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (active_lane, active_lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::LiveControl,
+            1,
+            Duration::from_secs(60),
+            transport.register_command_lane("activeScreenRead"),
+        );
+        let (activation_lane, activation_lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::LiveControl,
+            1,
+            Duration::from_secs(60),
+            transport.register_command_lane("activeScreenActivation"),
+        );
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let slow_pressure = WebSocketSlowPressureSignal::new(pressure_tx, transport);
+        let state = test_state();
+        let mut workers = tokio::task::JoinSet::new();
+        let worker_context = WebSocketCommandLaneWorkerContext {
+            state: state.clone(),
+            outgoing: outgoing_tx.clone(),
+            reliable_metrics: reliable_metrics.clone(),
+            slow_pressure,
+            command_handler: handler,
+        };
+        spawn_websocket_command_lane_worker_with_mutation_executor(
+            &mut workers,
+            active_lane_rx,
+            1,
+            active_lane.metrics.clone(),
+            &worker_context,
+            Ok(WebSocketMutationExecutor::new(2).expect("isolated live-control mutation executor")),
+            Some(TEST_MUTATION_MAX_EXECUTION_AGE),
+        );
+        spawn_websocket_command_lane_worker_with_mutation_executor(
+            &mut workers,
+            activation_lane_rx,
+            1,
+            activation_lane.metrics.clone(),
+            &worker_context,
+            Ok(WebSocketMutationExecutor::new(2).expect("isolated activation mutation executor")),
+            Some(TEST_MUTATION_MAX_EXECUTION_AGE),
+        );
+
+        let first_order = state.live_control_command_order.begin();
+        let first_completion = state.live_control_command_order.observe();
+        let first_operator = state.operator_command_fence.begin();
+        let first_operator_completion = state.operator_command_fence.observe();
+        try_enqueue_websocket_lane_command(
+            &active_lane,
+            json!({ "id": "wedged", "method": "screens.active", "params": {} }).to_string(),
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            Some(first_operator),
+            Some(first_order),
+            None,
+        )
+        .unwrap();
+        timeout(Duration::from_secs(5), first_entered.acquire())
+            .await
+            .expect("live-control command should dispatch")
+            .unwrap()
+            .forget();
+        try_enqueue_websocket_lane_command(
+            &activation_lane,
+            json!({ "id": "later", "method": "screens.activate", "params": {} }).to_string(),
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            None,
+            Some(state.live_control_command_order.begin()),
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            timeout(Duration::from_millis(50), outgoing_rx.recv())
+                .await
+                .is_err(),
+            "the mutation must not time out before its execution contract"
+        );
+        assert!(!state.process_shutdown_requested());
+
+        let unknown = timeout(
+            Duration::from_secs(10),
+            receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
+        )
+        .await
+        .expect("the real-time mutation watchdog must publish outcome-unknown");
+        assert_eq!(unknown["id"], "wedged");
+        assert_eq!(unknown["ok"], false);
+        assert_eq!(unknown["error"]["code"], "request-outcome-unknown");
+        assert!(state.process_shutdown_requested());
+        assert_eq!(*executed.lock().await, ["wedged"]);
+        assert!(
+            !handler_future_dropped.load(std::sync::atomic::Ordering::Acquire),
+            "the watchdog must detach, not cancel, the outcome-unknown handler future"
+        );
+
+        let mut first_completion_wait = Box::pin(first_completion.wait());
+        assert!(
+            futures_util::poll!(&mut first_completion_wait).is_pending(),
+            "the unknown mutation must retain its global order guard"
+        );
+        let mut first_operator_completion_wait = Box::pin(first_operator_completion.wait());
+        assert!(
+            futures_util::poll!(&mut first_operator_completion_wait).is_pending(),
+            "the unknown mutation must retain its operator reconciliation fence"
+        );
+
+        release_first.add_permits(1);
+        first_completion_wait.await;
+        first_operator_completion_wait.await;
+        assert!(handler_future_dropped.load(std::sync::atomic::Ordering::Acquire));
+        drop(active_lane);
+        drop(activation_lane);
+        while workers.join_next().await.is_some() {}
+        let rejected = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+        assert_eq!(rejected["id"], "later");
+        assert_eq!(rejected["error"]["code"], "command-expired-before-dispatch");
+        assert_eq!(
+            *executed.lock().await,
+            ["wedged"],
+            "concurrent activation must not overtake an outcome-unknown active-screen retirement"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_ordered_stateful_mutation_timeout_restarts_without_cancelling_or_overtaking()
+    {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let executed = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let handler_future_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler: WebSocketCommandHandler = {
+            let first_entered = first_entered.clone();
+            let release_first = release_first.clone();
+            let executed = executed.clone();
+            let handler_future_dropped = handler_future_dropped.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let first_entered = first_entered.clone();
+                let release_first = release_first.clone();
+                let executed = executed.clone();
+                let handler_future_dropped = handler_future_dropped.clone();
+                Box::pin(async move {
+                    let _drop_probe = DropProbe(handler_future_dropped);
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    executed.lock().await.push(command.id.clone());
+                    if command.id == "wedged-source" {
+                        first_entered.add_permits(1);
+                        release_first.acquire().await.unwrap().forget();
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(2);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(4);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let running_stateful = WebSocketRunningStatefulCommand::default();
+        let dispatcher = tokio::spawn(
+            run_websocket_ordered_command_dispatcher_with_mutation_executor(
+                state.clone(),
+                command_rx,
+                outgoing_tx,
+                reliable_metrics.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler,
+                running_stateful.clone(),
+                Ok(WebSocketMutationExecutor::new(2).expect("isolated stateful mutation executor")),
+            ),
+        );
+
+        let first_operator = state.operator_command_fence.begin();
+        let first_operator_completion = state.operator_command_fence.observe();
+        command_tx
+            .send(WebSocketOrderedCommand {
+                text: json!({
+                    "id": "wedged-source",
+                    "method": "scene.source.device.switch",
+                    "params": {}
+                })
+                .to_string(),
+                dispatch_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
+                dispatch_fence: None,
+                _operator_mutation: Some(first_operator),
+                _session_start: None,
+            })
+            .await
+            .unwrap();
+        // The handler runs on the deliberately separate mutation runtime. A
+        // paused Tokio clock would auto-advance this timeout before that OS
+        // worker gets scheduled under a parallel test load, so use real time
+        // only for the explicit dispatch-readiness handshake.
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), first_entered.acquire())
+            .await
+            .expect("stateful source mutation should dispatch")
+            .unwrap()
+            .forget();
+        tokio::time::pause();
+        command_tx
+            .send(WebSocketOrderedCommand {
+                text: json!({
+                    "id": "later-source",
+                    "method": "scene.source.visibility.update",
+                    "params": {}
+                })
+                .to_string(),
+                dispatch_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
+                dispatch_fence: None,
+                _operator_mutation: Some(state.operator_command_fence.begin()),
+                _session_start: None,
+            })
+            .await
+            .unwrap();
+
+        tokio::time::advance(WEBSOCKET_MUTATION_MAX_EXECUTION_AGE).await;
+        let unknown = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+        assert_eq!(unknown["id"], "wedged-source");
+        assert_eq!(unknown["error"]["code"], "request-outcome-unknown");
+        assert!(state.process_shutdown_requested());
+        assert_eq!(*executed.lock().await, ["wedged-source"]);
+        assert!(
+            !handler_future_dropped.load(std::sync::atomic::Ordering::Acquire),
+            "the ordered watchdog must detach, not cancel, the source mutation"
+        );
+        assert_eq!(
+            running_stateful.snapshot().map(|(method, _)| method),
+            Some("scene.source.device.switch".to_string()),
+            "the detached mutation remains the truthful running stateful owner"
+        );
+        let mut first_operator_wait = Box::pin(first_operator_completion.wait());
+        assert!(
+            futures_util::poll!(&mut first_operator_wait).is_pending(),
+            "the detached mutation must retain its operator reconciliation fence"
+        );
+
+        let rejected = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+        assert_eq!(rejected["id"], "later-source");
+        assert_eq!(rejected["error"]["code"], "command-expired-before-dispatch");
+        assert_eq!(*executed.lock().await, ["wedged-source"]);
+
+        release_first.add_permits(1);
+        first_operator_wait.await;
+        assert!(handler_future_dropped.load(std::sync::atomic::Ordering::Acquire));
+        assert!(running_stateful.snapshot().is_none());
+        drop(command_tx);
+        dispatcher.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_latest_wins_layout_timeout_restarts_without_cancelling_the_old_intent() {
+        struct DropProbe(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+        impl Drop for DropProbe {
+            fn drop(&mut self) {
+                self.0.store(true, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let latest_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let executed = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
+        let first_future_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let handler: WebSocketCommandHandler = {
+            let first_entered = first_entered.clone();
+            let latest_entered = latest_entered.clone();
+            let release_first = release_first.clone();
+            let executed = executed.clone();
+            let first_future_dropped = first_future_dropped.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let first_entered = first_entered.clone();
+                let latest_entered = latest_entered.clone();
+                let release_first = release_first.clone();
+                let executed = executed.clone();
+                let first_future_dropped = first_future_dropped.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    let _drop_probe =
+                        (command.id == "wedged-layout").then(|| DropProbe(first_future_dropped));
+                    executed.lock().await.push(command.id.clone());
+                    if command.id == "wedged-layout" {
+                        first_entered.add_permits(1);
+                        release_first.acquire().await.unwrap().forget();
+                    } else if command.id == "later-layout" {
+                        latest_entered.add_permits(1);
+                    }
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (command_tx, command_rx) = mpsc::channel(2);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(4);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let dispatcher = tokio::spawn(
+            run_websocket_ordered_command_dispatcher_with_mutation_executor(
+                state.clone(),
+                command_rx,
+                outgoing_tx,
+                reliable_metrics.clone(),
+                WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                handler,
+                WebSocketRunningStatefulCommand::default(),
+                Ok(WebSocketMutationExecutor::new(2)
+                    .expect("isolated latest-wins mutation executor")),
+            ),
+        );
+
+        let first_operator = state.operator_command_fence.begin();
+        let first_operator_completion = state.operator_command_fence.observe();
+        command_tx
+            .send(WebSocketOrderedCommand {
+                text: json!({
+                    "id": "wedged-layout",
+                    "method": "scene.layout.apply_live",
+                    "params": { "intentId": 1 }
+                })
+                .to_string(),
+                dispatch_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
+                dispatch_fence: None,
+                _operator_mutation: Some(first_operator),
+                _session_start: None,
+            })
+            .await
+            .unwrap();
+        // This readiness signal crosses into the isolated mutation runtime;
+        // keep its bounded wait on real time before returning to the paused
+        // clock used to drive the execution-contract deadline deterministically.
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), first_entered.acquire())
+            .await
+            .expect("first layout intent should dispatch")
+            .unwrap()
+            .forget();
+        tokio::time::pause();
+        command_tx
+            .send(WebSocketOrderedCommand {
+                text: json!({
+                    "id": "later-layout",
+                    "method": "scene.layout.apply_live",
+                    "params": { "intentId": 2 }
+                })
+                .to_string(),
+                dispatch_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
+                dispatch_fence: None,
+                _operator_mutation: Some(state.operator_command_fence.begin()),
+                _session_start: None,
+            })
+            .await
+            .unwrap();
+
+        // The latest-wins handler also runs on the isolated mutation runtime.
+        // Prove it has started and receive its completion while real time is
+        // active so a paused-clock receive cannot auto-advance the old intent's
+        // watchdog before the cross-runtime completion is delivered.
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), latest_entered.acquire())
+            .await
+            .expect("latest layout intent should dispatch")
+            .unwrap()
+            .forget();
+        let latest = timeout(
+            Duration::from_secs(5),
+            receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
+        )
+        .await
+        .expect("latest layout response should arrive");
+        tokio::time::pause();
+        assert_eq!(latest["id"], "later-layout");
+        assert_eq!(latest["ok"], true);
+        assert_eq!(
+            *executed.lock().await,
+            ["wedged-layout", "later-layout"],
+            "the watchdog wrapper must preserve concurrent latest-wins layout dispatch"
+        );
+
+        tokio::time::advance(WEBSOCKET_MUTATION_MAX_EXECUTION_AGE).await;
+        let unknown = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+        assert_eq!(unknown["id"], "wedged-layout");
+        assert_eq!(unknown["error"]["code"], "request-outcome-unknown");
+        assert!(state.process_shutdown_requested());
+        assert!(
+            !first_future_dropped.load(std::sync::atomic::Ordering::Acquire),
+            "the timed-out old layout intent must remain owned until real completion"
+        );
+        let mut first_operator_wait = Box::pin(first_operator_completion.wait());
+        assert!(
+            futures_util::poll!(&mut first_operator_wait).is_pending(),
+            "the detached layout must retain its operator reconciliation fence"
+        );
+
+        release_first.add_permits(1);
+        first_operator_wait.await;
+        assert!(first_future_dropped.load(std::sync::atomic::Ordering::Acquire));
+        drop(command_tx);
+        dispatcher.await.unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn websocket_durable_chat_timeout_latches_shutdown_even_when_response_queue_is_full() {
+        let entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let handler: WebSocketCommandHandler = {
+            let entered = entered.clone();
+            let release = release.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let entered = entered.clone();
+                let release = release.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    entered.add_permits(1);
+                    release.acquire().await.unwrap().forget();
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(1);
+        outgoing_tx
+            .try_send(Message::Text("occupied".into()))
+            .expect("prefill response queue");
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (lane, lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::DurableChat,
+            1,
+            Duration::from_secs(60),
+            transport.register_command_lane("durableChat"),
+        );
+        let connection = transport.register_connection();
+        let (pressure_tx, mut pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let mut workers = tokio::task::JoinSet::new();
+        spawn_websocket_command_lane_worker(
+            &mut workers,
+            lane_rx,
+            1,
+            lane.metrics.clone(),
+            &WebSocketCommandLaneWorkerContext {
+                state: state.clone(),
+                outgoing: outgoing_tx,
+                reliable_metrics: connection.reliable_response_queue,
+                slow_pressure: WebSocketSlowPressureSignal::new(pressure_tx, transport),
+                command_handler: handler,
+            },
+        );
+        try_enqueue_websocket_lane_command(
+            &lane,
+            json!({ "id": "wedged", "method": "liveChat.send", "params": {} }).to_string(),
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        // The handler runs on the deliberately separate mutation runtime. A
+        // paused Tokio clock can auto-advance the execution deadline before
+        // that OS worker is scheduled, rejecting the command before it can
+        // publish this readiness signal. Use real time only for the
+        // cross-runtime dispatch handshake, then return to the paused clock to
+        // drive the watchdog deterministically.
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), entered.acquire())
+            .await
+            .expect("durable chat mutation should dispatch")
+            .unwrap()
+            .forget();
+        tokio::time::pause();
+
+        // Observe the actual latch with a later virtual-time guard. Moving the
+        // clock to the watchdog deadline is not enough: the test task and the
+        // watchdog can wake together, and the test may otherwise assert before
+        // the watchdog processes its wake-up.
+        timeout(
+            WEBSOCKET_MUTATION_MAX_EXECUTION_AGE + Duration::from_secs(1),
+            state.wait_for_process_shutdown_request(),
+        )
+        .await
+        .expect("durable chat watchdog should latch process shutdown");
+        assert!(state.process_shutdown_requested());
+        assert_eq!(
+            timeout(Duration::from_secs(1), pressure_rx.recv())
+                .await
+                .expect("full response queue should signal slow-peer pressure"),
+            Some(())
+        );
+        assert!(matches!(
+            outgoing_rx.try_recv(),
+            Ok(Message::Text(text)) if text == "occupied"
+        ));
+
+        release.add_permits(1);
+        drop(lane);
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), async {
+            while workers.join_next().await.is_some() {}
+        })
+        .await
+        .expect("durable chat lane worker should stop after its sender closes");
+    }
+
+    #[tokio::test]
+    async fn screens_active_unavailable_panic_latches_before_releasing_cross_socket_order() {
+        let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let second_executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: WebSocketCommandHandler = {
+            let first_entered = first_entered.clone();
+            let release_first = release_first.clone();
+            let second_executed = second_executed.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let first_entered = first_entered.clone();
+                let release_first = release_first.clone();
+                let second_executed = second_executed.clone();
+                Box::pin(async move {
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    if command.id == "panic" {
+                        let _ = resolve_active_screen_read(
+                            storage::ActiveStreamScreenSelection::Unavailable {
+                                screen_id: "missing-screen".to_string(),
+                            },
+                            async move {
+                                first_entered.add_permits(1);
+                                release_first.acquire().await.unwrap().forget();
+                                Ok(())
+                            },
+                            || -> Result<()> {
+                                panic!("simulated active-screen retirement panic after dispatch")
+                            },
+                        )
+                        .await;
+                    }
+                    second_executed.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(4);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (first_lane, first_lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::LiveControl,
+            1,
+            Duration::from_secs(60),
+            transport.register_command_lane("liveControlPanicFirst"),
+        );
+        let (second_lane, second_lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::LiveControl,
+            1,
+            Duration::from_secs(60),
+            transport.register_command_lane("liveControlPanicSecond"),
+        );
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let context = WebSocketCommandLaneWorkerContext {
+            state: state.clone(),
+            outgoing: outgoing_tx,
+            reliable_metrics: reliable_metrics.clone(),
+            slow_pressure: WebSocketSlowPressureSignal::new(pressure_tx, transport),
+            command_handler: handler,
+        };
+        let mut workers = tokio::task::JoinSet::new();
+        spawn_websocket_command_lane_worker(
+            &mut workers,
+            first_lane_rx,
+            1,
+            first_lane.metrics.clone(),
+            &context,
+        );
+        spawn_websocket_command_lane_worker(
+            &mut workers,
+            second_lane_rx,
+            1,
+            second_lane.metrics.clone(),
+            &context,
+        );
+
+        try_enqueue_websocket_lane_command(
+            &first_lane,
+            json!({ "id": "panic", "method": "screens.active", "params": {} }).to_string(),
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            Some(state.operator_command_fence.begin()),
+            Some(state.live_control_command_order.begin()),
+            None,
+        )
+        .unwrap();
+        first_entered.acquire().await.unwrap().forget();
+        try_enqueue_websocket_lane_command(
+            &second_lane,
+            json!({ "id": "later", "method": "captions.start", "params": {} }).to_string(),
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            Some(state.operator_command_fence.begin()),
+            Some(state.live_control_command_order.begin()),
+            None,
+        )
+        .unwrap();
+        release_first.add_permits(1);
+
+        let mut responses = std::collections::HashMap::new();
+        timeout(Duration::from_secs(1), async {
+            while responses.len() < 2 {
+                let response = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+                responses.insert(response["id"].as_str().unwrap().to_string(), response);
+            }
+        })
+        .await
+        .expect("panic and queued-command terminal responses");
+        assert_eq!(
+            responses["panic"]["error"]["code"],
+            "request-outcome-unknown"
+        );
+        assert_eq!(
+            responses["later"]["error"]["code"],
+            "command-expired-before-dispatch"
+        );
+        assert!(state.process_shutdown_requested());
+        assert_eq!(
+            second_executed.load(std::sync::atomic::Ordering::Acquire),
+            0
+        );
+
+        drop(first_lane);
+        drop(second_lane);
+        while workers.join_next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn websocket_lane_rechecks_shutdown_after_waiting_for_dispatch_fence() {
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: WebSocketCommandHandler = {
+            let executed = executed.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let executed = executed.clone();
+                Box::pin(async move {
+                    executed.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(2);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let (lane, lane_rx) = WebSocketIsolatedCommandLane::new(
+            WebSocketIsolatedCommandLaneKind::LiveControl,
+            1,
+            Duration::from_secs(60),
+            transport.register_command_lane("liveControl"),
+        );
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let state = test_state();
+        let prior_session_start = state.session_start_command_fence.begin();
+        let dispatch_fence = state.session_start_command_fence.observe();
+        let mut workers = tokio::task::JoinSet::new();
+        spawn_websocket_command_lane_worker(
+            &mut workers,
+            lane_rx,
+            1,
+            lane.metrics.clone(),
+            &WebSocketCommandLaneWorkerContext {
+                state: state.clone(),
+                outgoing: outgoing_tx,
+                reliable_metrics: reliable_metrics.clone(),
+                slow_pressure: WebSocketSlowPressureSignal::new(pressure_tx, transport.clone()),
+                command_handler: handler,
+            },
+        );
+        try_enqueue_websocket_lane_command(
+            &lane,
+            json!({ "id": "blocked", "method": "screens.activate", "params": {} }).to_string(),
+            tokio::time::Instant::now() + Duration::from_secs(60),
+            None,
+            Some(state.live_control_command_order.begin()),
+            Some(WebSocketCommandDispatchFence::Bounded(dispatch_fence)),
+        )
+        .unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(
+            transport.snapshot().command_lanes["liveControl"]
+                .queue
+                .current_depth,
+            0
+        );
+        assert_eq!(executed.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        state.request_process_shutdown();
+        drop(prior_session_start);
+        let response = timeout(
+            Duration::from_secs(1),
+            receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
+        )
+        .await
+        .expect("shutdown rejection after fence release");
+        assert_eq!(response["id"], "blocked");
+        assert_eq!(response["error"]["code"], "command-expired-before-dispatch");
+        assert_eq!(executed.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        drop(lane);
+        while workers.join_next().await.is_some() {}
+    }
+
+    #[tokio::test]
+    async fn websocket_ordered_dispatcher_rechecks_shutdown_after_waiting_for_fence() {
+        let executed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let handler: WebSocketCommandHandler = {
+            let executed = executed.clone();
+            std::sync::Arc::new(move |_state, text| {
+                let executed = executed.clone();
+                Box::pin(async move {
+                    executed.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                    ServerResponse::ok(command.id, json!({}))
+                })
+            })
+        };
+        let state = test_state();
+        let prior_operator_mutation = state.operator_command_fence.begin();
+        let dispatch_fence = state.operator_command_fence.observe();
+        let (command_tx, command_rx) = mpsc::channel(1);
+        let (outgoing_tx, mut outgoing_rx) = mpsc::channel(2);
+        let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
+        let connection = transport.register_connection();
+        let reliable_metrics = connection.reliable_response_queue;
+        let (pressure_tx, _pressure_rx) = mpsc::channel(1);
+        let dispatcher = tokio::spawn(run_websocket_ordered_command_dispatcher(
+            state.clone(),
+            command_rx,
+            outgoing_tx,
+            reliable_metrics.clone(),
+            WebSocketSlowPressureSignal::new(pressure_tx, transport),
+            handler,
+            WebSocketRunningStatefulCommand::default(),
+        ));
+        command_tx
+            .send(WebSocketOrderedCommand {
+                text: json!({
+                    "id": "ordered-blocked",
+                    "method": "test.mutation.ordered",
+                    "params": {}
+                })
+                .to_string(),
+                dispatch_deadline: tokio::time::Instant::now() + Duration::from_secs(60),
+                dispatch_fence: Some(WebSocketCommandDispatchFence::Bounded(dispatch_fence)),
+                _operator_mutation: None,
+                _session_start: None,
+            })
+            .await
+            .unwrap();
+        for _ in 0..8 {
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(executed.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        state.request_process_shutdown();
+        drop(prior_operator_mutation);
+        let response = timeout(
+            Duration::from_secs(1),
+            receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
+        )
+        .await
+        .expect("ordered shutdown rejection after fence release");
+        assert_eq!(response["id"], "ordered-blocked");
+        assert_eq!(response["error"]["code"], "command-expired-before-dispatch");
+        assert_eq!(executed.load(std::sync::atomic::Ordering::Acquire), 0);
+
+        drop(command_tx);
+        dispatcher.await.unwrap();
     }
 
     #[tokio::test]
@@ -11450,6 +15069,12 @@ mod tests {
     #[tokio::test]
     async fn websocket_event_relay_bounds_slow_clients_and_reports_backpressure_lag() {
         let (events_tx, events_rx) = broadcast::channel(2);
+        let relay_state = AppState::new(
+            "lag-repair-token".to_string(),
+            0,
+            events_tx.clone(),
+            Database::open_in_memory_for_tests(),
+        );
         let (outgoing_tx, mut outgoing_rx) = mpsc::channel(1);
         let transport = std::sync::Arc::new(WebSocketTransportMetrics::default());
         let connection = transport.register_connection();
@@ -11465,6 +15090,7 @@ mod tests {
             included: None,
         }));
         let relay = tokio::spawn(relay_websocket_events(
+            relay_state.clone(),
             events_rx,
             outgoing_tx,
             reliable_metrics.clone(),
@@ -11498,6 +15124,12 @@ mod tests {
         .await
         .expect("relay did not block on the full outbound queue");
 
+        let terminal = capture_recovery::seed_terminal_capture_recovery_failure_for_transport_test(
+            &relay_state,
+        )
+        .await;
+        assert_eq!(terminal.phase, protocol::CaptureRecoveryPhase::Failed);
+
         for sequence in 2..64 {
             events_tx
                 .send(ServerEvent::new(
@@ -11526,6 +15158,11 @@ mod tests {
                 .is_ok()
         );
 
+        let recovery = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+        assert_eq!(recovery["event"], "capture.recovery.status");
+        assert_eq!(recovery["payload"]["phase"], "failed");
+        assert_eq!(recovery["payload"]["revision"], terminal.revision);
+
         // The two newest broadcast events survive the ring overrun. Once consumed, the
         // same bounded relay remains live and carries subsequent incremental events.
         for expected in [62, 63] {
@@ -11545,7 +15182,15 @@ mod tests {
         assert_eq!(after_lag["payload"]["alive"], true);
 
         drop(events_tx);
-        relay.await.unwrap();
+        relay.abort();
+        let relay_error = timeout(Duration::from_secs(1), relay)
+            .await
+            .expect("event relay did not stop after production-mirrored cancellation")
+            .expect_err("cancelled event relay unexpectedly completed normally");
+        assert!(
+            relay_error.is_cancelled(),
+            "event relay teardown returned a non-cancellation join error: {relay_error}"
+        );
     }
 
     #[tokio::test]
@@ -11722,6 +15367,457 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn library_delete_cancels_repair_and_quarantines_before_repair_can_resume() {
+        let state = test_state();
+        let directory =
+            std::env::temp_dir().join(format!("videorc-delete-repair-race-{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&directory).unwrap();
+        let recording = directory.join("recording.mp4");
+        std::fs::write(&recording, b"original recording").unwrap();
+        let session_id = "delete-repair-race";
+        state
+            .database
+            .create_session(&crate::storage::NewSession {
+                id: session_id.to_string(),
+                title: "Delete repair race".to_string(),
+                started_at: "2026-08-28T00:00:00Z".to_string(),
+                mode: "record".to_string(),
+                output_path: Some(recording.display().to_string()),
+                container: None,
+                stream_preset: None,
+                sources: serde_json::from_str("{}").unwrap(),
+                layout: protocol::default_layout_settings(),
+                output: serde_json::from_value(serde_json::json!({
+                    "recordEnabled": true,
+                    "streamEnabled": false,
+                    "video": {
+                        "preset": "tutorial-1080p30",
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30,
+                        "bitrateKbps": 6000
+                    },
+                    "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
+        state
+            .database
+            .finish_session(
+                session_id,
+                "completed",
+                None,
+                Some(recording.display().to_string()),
+                Some(1_000),
+            )
+            .unwrap();
+
+        // The maintenance permit models a repair between its initial existence
+        // check and safe_replace. Deletion must cancel it and cannot touch the
+        // file until that exact mutation owner has exited.
+        let repair = state.ffmpeg_work.try_begin_maintenance().unwrap();
+        let repair_cancel = repair.cancel_token();
+        let deletion = tokio::spawn({
+            let state = state.clone();
+            async move { prepare_session_deletions_exclusively(&state, &[session_id.to_string()]).await }
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !repair_cancel.is_cancelled() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("delete must request repair cancellation");
+        assert!(repair_cancel.is_cancelled());
+        assert!(!deletion.is_finished());
+        assert!(recording.exists());
+
+        drop(repair);
+        let operations = tokio::time::timeout(Duration::from_secs(1), deletion)
+            .await
+            .expect("delete must acquire the mutation boundary after repair exits")
+            .expect("delete task")
+            .expect("delete preparation");
+        assert_eq!(operations.len(), 1);
+        assert!(!recording.exists(), "the visible path must stay absent");
+        assert_eq!(operations[0].paths.len(), 1);
+        let quarantine = PathBuf::from(&operations[0].paths[0]);
+        assert!(quarantine.exists());
+
+        // A resumed background repair enters only after deletion and therefore
+        // observes the missing original instead of recreating it from a temp.
+        let resumed_repair = state.ffmpeg_work.try_begin_maintenance().unwrap();
+        assert!(!recording.exists());
+        drop(resumed_repair);
+
+        std::fs::remove_file(quarantine).unwrap();
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn empty_pending_deletion_poll_does_not_cancel_active_maintenance() {
+        let state = test_state();
+        let maintenance = state.ffmpeg_work.try_begin_maintenance().unwrap();
+        let cancel = maintenance.cancel_token();
+
+        let pending = pending_session_deletions_exclusively(&state)
+            .await
+            .expect("empty pending deletion poll");
+
+        assert!(pending.is_empty());
+        assert!(!cancel.is_cancelled());
+        assert!(!state.ffmpeg_work.snapshot().maintenance_cancel_requested);
+        drop(maintenance);
+    }
+
+    fn spawn_test_process_shutdown_preparation_owner(
+        state: AppState,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::spawn(async move {
+            state.wait_for_process_shutdown_request().await;
+            prepare_and_publish_capture_finalization_for_process_shutdown(&state).await
+        })
+    }
+
+    #[tokio::test]
+    async fn hard_exit_arms_once_and_only_after_recording_finalization_is_safe() {
+        let state = test_state();
+        let finalizing = state.ffmpeg_work.begin_finalizing();
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_state = state.clone();
+        let task_armed = armed.clone();
+        let preparation = tokio::spawn(async move {
+            arm_hard_exit_after_safe_preparation(
+                prepare_and_publish_capture_finalization_for_process_shutdown(&task_state),
+                move || {
+                    task_armed.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                },
+            )
+            .await
+        });
+
+        timeout(
+            Duration::from_secs(1),
+            state.wait_for_process_shutdown_request(),
+        )
+        .await
+        .expect("shutdown latch before recording finalization");
+        tokio::task::yield_now().await;
+        assert_eq!(armed.load(std::sync::atomic::Ordering::Acquire), 0);
+        assert!(
+            !preparation.is_finished(),
+            "the hard-exit deadline must not arm while FFmpeg finalization is owned"
+        );
+
+        drop(finalizing);
+        timeout(Duration::from_secs(1), preparation)
+            .await
+            .expect("safe finalization completion")
+            .expect("preparation task")
+            .expect("safe preparation");
+        assert_eq!(
+            armed.load(std::sync::atomic::Ordering::Acquire),
+            1,
+            "successful finalization arms exactly one hard-exit deadline"
+        );
+    }
+
+    #[tokio::test]
+    async fn hard_exit_never_arms_after_recording_finalization_error() {
+        let armed = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_armed = armed.clone();
+        let result = arm_hard_exit_after_safe_preparation(
+            async { Err(anyhow::anyhow!("simulated unsafe recording finalization")) },
+            move || {
+                task_armed.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            armed.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "unsafe recording finalization must remain alive for recovery"
+        );
+    }
+
+    #[tokio::test]
+    async fn shutdown_prepare_is_admin_only_generation_bound_and_waits_for_publication() {
+        let state = test_state();
+        let renderer_response = process_shutdown_prepare_handler(
+            State(state.clone()),
+            Query(ProcessShutdownPrepareQuery {
+                token: state.token.clone(),
+                request_id: Uuid::new_v4().to_string(),
+            }),
+        )
+        .await;
+        assert_eq!(renderer_response.status(), StatusCode::UNAUTHORIZED);
+        assert!(!state.process_shutdown_requested());
+
+        let publication = state
+            .session_start_publication_fence
+            .clone()
+            .lock_owned()
+            .await;
+        let preparation_owner = spawn_test_process_shutdown_preparation_owner(state.clone());
+        let request_id = Uuid::new_v4().to_string();
+        let request_state = state.clone();
+        let request_token = state.admin_token.clone();
+        let request_id_for_task = request_id.clone();
+        let request = tokio::spawn(async move {
+            process_shutdown_prepare_handler(
+                State(request_state),
+                Query(ProcessShutdownPrepareQuery {
+                    token: request_token,
+                    request_id: request_id_for_task,
+                }),
+            )
+            .await
+        });
+
+        timeout(
+            Duration::from_secs(1),
+            state.wait_for_process_shutdown_request(),
+        )
+        .await
+        .expect("shutdown request notification must be lossless");
+        assert!(state.process_shutdown_requested());
+        assert!(
+            !request.is_finished(),
+            "receipt cannot precede the accepted-start publication fence"
+        );
+
+        drop(publication);
+        let response = timeout(Duration::from_secs(1), request)
+            .await
+            .expect("shutdown preparation response")
+            .expect("shutdown preparation task");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("shutdown preparation body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("shutdown preparation JSON");
+        assert_eq!(payload["shutdownLatched"], true);
+        assert_eq!(payload["captureFinalizationComplete"], true);
+        assert_eq!(payload["requestId"], request_id);
+        assert_eq!(payload["backendPid"], std::process::id());
+        timeout(Duration::from_secs(1), preparation_owner)
+            .await
+            .expect("process-owned preparation completion")
+            .expect("process-owned preparation task")
+            .expect("process-owned preparation result");
+    }
+
+    #[tokio::test]
+    async fn shutdown_prepare_receipt_flushes_through_real_axum_graceful_shutdown() {
+        let state = test_state();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(
+                "/process/shutdown/prepare",
+                post(process_shutdown_prepare_handler),
+            )
+            .with_state(state.clone());
+        let graceful_state = state.clone();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app)
+                .with_graceful_shutdown(async move {
+                    graceful_state.wait_for_process_shutdown_request().await;
+                    prepare_and_publish_capture_finalization_for_process_shutdown(&graceful_state)
+                        .await
+                        .expect("test process-owned shutdown preparation");
+                })
+                .await
+                .expect("test Axum server");
+        });
+
+        let request_id = Uuid::new_v4().to_string();
+        let response = timeout(
+            Duration::from_secs(2),
+            reqwest::Client::new()
+                .post(format!(
+                    "http://{address}/process/shutdown/prepare?token={}&requestId={request_id}",
+                    state.admin_token
+                ))
+                .send(),
+        )
+        .await
+        .expect("shutdown preparation HTTP response")
+        .expect("shutdown preparation HTTP request");
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let payload: serde_json::Value = response
+            .json()
+            .await
+            .expect("shutdown preparation HTTP JSON");
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "shutdownLatched": true,
+                "captureFinalizationComplete": true,
+                "requestId": request_id,
+                "backendPid": std::process::id(),
+            })
+        );
+        timeout(Duration::from_secs(2), server)
+            .await
+            .expect("graceful Axum server completion")
+            .expect("graceful Axum server task");
+    }
+
+    #[tokio::test]
+    async fn shutdown_prepare_waits_for_recording_finalization_before_safe_receipt() {
+        let state = test_state();
+        let finalizing = state.ffmpeg_work.begin_finalizing();
+        let preparation_owner = spawn_test_process_shutdown_preparation_owner(state.clone());
+        let request_id = Uuid::new_v4().to_string();
+        let request_state = state.clone();
+        let request_token = state.admin_token.clone();
+        let request_id_for_task = request_id.clone();
+        let request = tokio::spawn(async move {
+            process_shutdown_prepare_handler(
+                State(request_state),
+                Query(ProcessShutdownPrepareQuery {
+                    token: request_token,
+                    request_id: request_id_for_task,
+                }),
+            )
+            .await
+        });
+
+        timeout(
+            Duration::from_secs(1),
+            state.wait_for_process_shutdown_request(),
+        )
+        .await
+        .expect("shutdown preparation must latch before waiting for finalization");
+        assert!(
+            !request.is_finished(),
+            "safe receipt cannot precede the authoritative finalization lease"
+        );
+
+        drop(finalizing);
+        let response = timeout(Duration::from_secs(1), request)
+            .await
+            .expect("shutdown preparation response after finalization")
+            .expect("shutdown preparation task");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+            .await
+            .expect("shutdown preparation body");
+        let payload: serde_json::Value =
+            serde_json::from_slice(&body).expect("shutdown preparation JSON");
+        assert_eq!(
+            payload,
+            serde_json::json!({
+                "shutdownLatched": true,
+                "captureFinalizationComplete": true,
+                "requestId": request_id,
+                "backendPid": std::process::id(),
+            })
+        );
+        timeout(Duration::from_secs(1), preparation_owner)
+            .await
+            .expect("process-owned preparation completion")
+            .expect("process-owned preparation task")
+            .expect("process-owned preparation result");
+    }
+
+    #[tokio::test]
+    async fn cancelling_shutdown_http_request_cannot_cancel_process_owned_finalization() {
+        let state = test_state();
+        let finalizing = state.ffmpeg_work.begin_finalizing();
+        let preparation_owner = spawn_test_process_shutdown_preparation_owner(state.clone());
+        let request_state = state.clone();
+        let request_token = state.admin_token.clone();
+        let request = tokio::spawn(async move {
+            process_shutdown_prepare_handler(
+                State(request_state),
+                Query(ProcessShutdownPrepareQuery {
+                    token: request_token,
+                    request_id: Uuid::new_v4().to_string(),
+                }),
+            )
+            .await
+        });
+
+        timeout(
+            Duration::from_secs(1),
+            state.wait_for_process_shutdown_request(),
+        )
+        .await
+        .expect("shutdown request latch");
+        assert!(!preparation_owner.is_finished());
+        request.abort();
+        request
+            .await
+            .expect_err("HTTP request task must be cancelled");
+
+        drop(finalizing);
+        timeout(Duration::from_secs(1), preparation_owner)
+            .await
+            .expect("process-owned preparation survives request cancellation")
+            .expect("process-owned preparation task")
+            .expect("process-owned preparation result");
+        timeout(
+            Duration::from_secs(1),
+            state.wait_for_process_shutdown_preparation(),
+        )
+        .await
+        .expect("shared preparation result")
+        .expect("safe shared preparation result");
+    }
+
+    #[tokio::test]
+    async fn process_shutdown_notification_wakes_waiter_registered_before_request() {
+        let state = test_state();
+        let waiter_state = state.clone();
+        let (registered_sender, registered_receiver) = tokio::sync::oneshot::channel();
+        let waiter = tokio::spawn(async move {
+            let mut shutdown_request = Box::pin(waiter_state.wait_for_process_shutdown_request());
+            assert!(
+                futures_util::poll!(&mut shutdown_request).is_pending(),
+                "a waiter registered before shutdown must initially remain pending"
+            );
+            registered_sender
+                .send(())
+                .expect("publish shutdown waiter registration");
+            shutdown_request.await;
+        });
+
+        timeout(Duration::from_secs(1), registered_receiver)
+            .await
+            .expect("shutdown waiter registration")
+            .expect("shutdown waiter registration sender");
+        assert!(state.request_process_shutdown());
+        timeout(Duration::from_secs(1), waiter)
+            .await
+            .expect("registered shutdown waiter must receive the request")
+            .expect("shutdown waiter task");
+        assert!(state.process_shutdown_requested());
+    }
+
+    #[tokio::test]
+    async fn shutdown_prepare_rejects_malformed_request_identity_without_latching() {
+        let state = test_state();
+        let response = process_shutdown_prepare_handler(
+            State(state.clone()),
+            Query(ProcessShutdownPrepareQuery {
+                token: state.admin_token.clone(),
+                request_id: "not-a-uuid".to_string(),
+            }),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(!state.process_shutdown_requested());
+    }
+
+    #[tokio::test]
     async fn renderer_support_bundle_export_rejects_a_raw_output_directory() {
         let state = test_state();
         let response = handle_text_message_with_role(
@@ -11873,9 +15969,29 @@ mod tests {
         assert!(!credentials_present.get());
     }
 
+    #[test]
+    fn account_sign_out_rejects_failed_caption_privacy_cleanup_before_account_mutation() {
+        let mut status = captions::CaptionsStatus::idle();
+        status.state = captions::CaptionsState::Blocked;
+        status.reason_code = Some("captions-privacy-cleanup-failed".to_string());
+        status.message = Some("injected private cleanup failure".to_string());
+        let account_still_signed_in = std::cell::Cell::new(true);
+
+        let result = caption_sign_out_cleanup_result(&status);
+        if result.is_ok() {
+            account_still_signed_in.set(false);
+        }
+
+        assert_eq!(result, Err("injected private cleanup failure".to_string()));
+        assert!(
+            account_still_signed_in.get(),
+            "a failed caption privacy boundary must preserve the in-memory account"
+        );
+    }
+
     #[tokio::test]
     async fn account_sign_out_stops_active_captions_before_credentials_are_cleared() {
-        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let _caption_test_guard = captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         let probe = captions::install_caption_sign_out_test_session(&state).await;
         let mut events = state.events.subscribe();
@@ -11954,7 +16070,7 @@ mod tests {
 
     #[tokio::test]
     async fn backend_shutdown_joins_active_captions_and_removes_the_audio_tap() {
-        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let _caption_test_guard = captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         let probe = captions::install_caption_sign_out_test_session(&state).await;
         let frame = audio::AudioFrame {
@@ -12015,7 +16131,7 @@ mod tests {
 
     #[tokio::test]
     async fn caption_stop_and_block_clear_backend_overlays_and_reset_renderer() {
-        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let _caption_test_guard = captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
 
         let _stop_probe = captions::install_caption_sign_out_test_session(&state).await;
@@ -12054,7 +16170,7 @@ mod tests {
 
     #[tokio::test]
     async fn explicit_caption_opt_out_discards_audio_already_queued_for_transcription() {
-        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let _caption_test_guard = captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         let probe = captions::install_caption_queued_audio_test_session(&state).await;
         timeout(Duration::from_secs(1), async {
@@ -12099,7 +16215,7 @@ mod tests {
 
     #[tokio::test]
     async fn terminal_caption_failure_clears_backend_overlays_and_resets_renderer() {
-        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let _caption_test_guard = captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         let _probe = captions::install_caption_sign_out_test_session(&state).await;
         let mut events = state.events.subscribe();
@@ -12114,7 +16230,7 @@ mod tests {
 
     #[tokio::test]
     async fn capture_end_resets_live_caption_presentation_but_retains_artifact_cues() {
-        let _caption_test_guard = CAPTION_LIFECYCLE_TEST_LOCK.lock().await;
+        let _caption_test_guard = captions::caption_lifecycle_test_lock().lock().await;
         let state = test_state();
         let _probe = captions::install_caption_sign_out_test_session(&state).await;
         let mut events = state.events.subscribe();
@@ -12289,6 +16405,63 @@ mod tests {
                 .await
                 .unwrap();
         (socket, server, session_finished)
+    }
+
+    #[tokio::test]
+    async fn websocket_session_finishes_when_process_shutdown_is_latched() {
+        let handler: WebSocketCommandHandler = std::sync::Arc::new(|_state, text| {
+            Box::pin(async move {
+                let command: ClientCommand = serde_json::from_str(&text).unwrap();
+                ServerResponse::ok(command.id, json!({}))
+            })
+        });
+        let state = test_state();
+        let token = state.token.clone();
+        let session_finished = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server_state = TestWebSocketState {
+            app: state.clone(),
+            command_handler: handler,
+            session_finished: session_finished.clone(),
+        };
+        let server = tokio::spawn(async move {
+            let _ = axum::serve(
+                listener,
+                Router::new()
+                    .route("/ws", get(test_ws_handler))
+                    .with_state(server_state),
+            )
+            .await;
+        });
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={token}"))
+                .await
+                .unwrap();
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                let tokio_tungstenite::tungstenite::Message::Text(text) = message else {
+                    continue;
+                };
+                let event: serde_json::Value = serde_json::from_str(&text).unwrap();
+                if event["event"] == "backend.ready" {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("backend.ready confirms the upgraded session is active");
+
+        state.request_process_shutdown();
+        timeout(Duration::from_secs(1), session_finished.acquire())
+            .await
+            .expect("shutdown must finish the WebSocket session")
+            .unwrap()
+            .forget();
+
+        let _ = socket.close(None).await;
+        server.abort();
     }
 
     #[tokio::test]
@@ -12803,6 +16976,16 @@ mod tests {
         server.abort();
     }
 
+    fn preview_layout_video_settings() -> protocol::VideoSettings {
+        protocol::VideoSettings {
+            preset: protocol::VideoPreset::Tutorial1440p30,
+            width: 2560,
+            height: 1440,
+            fps: 30,
+            bitrate_kbps: 8000,
+        }
+    }
+
     fn preview_layout_params(intent_id: u64, preset: protocol::LayoutPreset) -> serde_json::Value {
         let mut layout = protocol::default_layout_settings();
         layout.layout_preset = preset;
@@ -12946,14 +17129,6 @@ mod tests {
             camera.status.frames_captured = 1;
             camera.status.sequence = Some(1);
         }
-        {
-            let mut screen = state.preview_screen.lock().await;
-            screen.status.state = protocol::PreviewScreenState::Starting;
-            screen.status.source_id = Some("screen:screencapturekit:1".to_string());
-            screen.status.frames_captured = 0;
-            screen.status.sequence = None;
-        }
-
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(
@@ -12997,6 +17172,13 @@ mod tests {
         .await
         .expect("initial scene command should return over /ws");
         assert_eq!(initial["ok"], true);
+        crate::preview_screen::test_install_starting_screen_generation(
+            &state,
+            "screen:screencapturekit:1",
+            &preview_layout_video_settings(),
+            None,
+        )
+        .await;
 
         let started = Instant::now();
         for (id, intent_id, preset) in [
@@ -13147,14 +17329,6 @@ mod tests {
             camera.status.frames_captured = 1;
             camera.status.sequence = Some(1);
         }
-        {
-            let mut screen = state.preview_screen.lock().await;
-            screen.status.state = protocol::PreviewScreenState::Starting;
-            screen.status.source_id = Some("screen:screencapturekit:1".to_string());
-            screen.status.frames_captured = 0;
-            screen.status.sequence = None;
-        }
-
         let initial = request_for_test(
             &state,
             "initial-warm",
@@ -13165,6 +17339,14 @@ mod tests {
         let initial_revision = initial.payload.expect("initial scene status")["sceneRevision"]
             .as_u64()
             .expect("initial revision");
+        let screen_video = preview_layout_video_settings();
+        let pending_screen = crate::preview_screen::test_install_starting_screen_generation(
+            &state,
+            "screen:screencapturekit:1",
+            &screen_video,
+            None,
+        )
+        .await;
 
         let warm_state = state.clone();
         let pending = tokio::spawn(async move {
@@ -13187,12 +17369,14 @@ mod tests {
             "warm-up must not publish target metadata ahead of target pixels"
         );
 
-        {
-            let mut screen = state.preview_screen.lock().await;
-            screen.status.state = protocol::PreviewScreenState::Live;
-            screen.status.frames_captured = 1;
-            screen.status.sequence = Some(1);
-        }
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            "screen:screencapturekit:1",
+            pending_screen.generation,
+            1,
+            &screen_video,
+        )
+        .await;
 
         let applied = pending.await.expect("warm request task");
         assert!(applied.ok, "{:?}", applied.error);
@@ -13216,12 +17400,6 @@ mod tests {
             camera.status.frames_captured = 1;
             camera.status.sequence = Some(1);
         }
-        {
-            let mut screen = state.preview_screen.lock().await;
-            screen.status.state = protocol::PreviewScreenState::Starting;
-            screen.status.source_id = Some("screen:screencapturekit:1".to_string());
-        }
-
         let initial = request_for_test(
             &state,
             "initial-cancel",
@@ -13230,6 +17408,13 @@ mod tests {
         )
         .await;
         assert!(initial.ok);
+        crate::preview_screen::test_install_starting_screen_generation(
+            &state,
+            "screen:screencapturekit:1",
+            &preview_layout_video_settings(),
+            None,
+        )
+        .await;
 
         let stale_state = state.clone();
         let stale_pending = tokio::spawn(async move {
@@ -13344,6 +17529,27 @@ mod tests {
         .expect("minimal session params")
     }
 
+    fn fake_live_chat_start_params(
+        session_id: &str,
+        target_id: &str,
+    ) -> live_chat::LiveChatStartParams {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": session_id,
+            "platforms": ["youtube"],
+            "destinations": [{
+                "targetId": target_id,
+                "platform": "youtube"
+            }],
+            "fake": {
+                "platform": "youtube",
+                "targetId": target_id,
+                "count": 1,
+                "intervalMs": 60_000
+            }
+        }))
+        .expect("fake live-chat start params")
+    }
+
     fn upsert_twitch_account(state: &AppState, scopes: Vec<String>) {
         state
             .database
@@ -13366,12 +17572,15 @@ mod tests {
     #[tokio::test]
     async fn manual_twitch_stream_starts_status_only_chat_session_without_oauth_account() {
         let state = test_state();
+        *state.recording.lock().await = Some(recording::test_active_recording_stub(
+            "manual-twitch-session",
+        ));
         let streaming = streaming_with_enabled_target(
             StreamPlatform::Twitch,
             crate::streaming::StreamAuthMode::ManualRtmp,
         );
 
-        spawn_session_live_chat(&state, "manual-twitch-session", &streaming).await;
+        assert!(spawn_session_live_chat(&state, "manual-twitch-session", &streaming).await);
 
         let snapshot = live_chat::current_status(&state).await;
         assert_eq!(
@@ -13396,6 +17605,9 @@ mod tests {
     #[tokio::test]
     async fn manual_twitch_stream_surfaces_reconnect_when_account_lacks_chat_scope() {
         let state = test_state();
+        *state.recording.lock().await = Some(recording::test_active_recording_stub(
+            "stale-twitch-session",
+        ));
         upsert_twitch_account(
             &state,
             vec![
@@ -13408,7 +17620,7 @@ mod tests {
             crate::streaming::StreamAuthMode::ManualRtmp,
         );
 
-        spawn_session_live_chat(&state, "stale-twitch-session", &streaming).await;
+        assert!(spawn_session_live_chat(&state, "stale-twitch-session", &streaming).await);
 
         let snapshot = live_chat::current_status(&state).await;
         assert_eq!(snapshot.session_id.as_deref(), Some("stale-twitch-session"));
@@ -13425,6 +17637,100 @@ mod tests {
         assert_eq!(twitch.read, live_chat::CommentsReadState::Unavailable);
         assert_eq!(twitch.write, live_chat::CommentsWriteState::MissingScope);
         assert!(twitch.message.contains("Reconnect Twitch"));
+    }
+
+    #[tokio::test]
+    async fn fast_terminal_cannot_resurrect_chat_or_contaminate_a_replacement_session() {
+        let terminal_state = test_state();
+        let terminal_session_id = "fast-terminal-chat-session";
+        let mut terminal_recording = terminal_state.recording.lock().await;
+        *terminal_recording = Some(recording::test_active_recording_stub(terminal_session_id));
+
+        let late_attach_state = terminal_state.clone();
+        let late_attach = tokio::spawn(async move {
+            attach_prepared_session_live_chat(
+                &late_attach_state,
+                terminal_session_id,
+                fake_live_chat_start_params(terminal_session_id, "late-terminal-target"),
+            )
+            .await
+        });
+
+        // Model the monitor's exact retirement edge while the already-returned
+        // session.start handler is waiting to attach Comments. The monitor then
+        // tears the session-owned coordinator down after releasing this lock.
+        terminal_recording.take();
+        drop(terminal_recording);
+        live_chat::stop_live_chat(&terminal_state).await;
+
+        assert!(!late_attach.await.expect("late Comments attachment task"));
+        let terminal_snapshot = live_chat::current_status(&terminal_state).await;
+        assert_eq!(terminal_snapshot.session_id, None);
+        assert_eq!(
+            terminal_state.live_chat.lock().await.runtime_ownership(),
+            (0, 0),
+            "terminal session must retain neither connector tasks nor send credentials"
+        );
+
+        let stopping_state = test_state();
+        let stopping_session_id = "stop-requested-before-chat-attachment";
+        let mut stopping_recording = recording::test_active_recording_stub(stopping_session_id);
+        stopping_recording.stop_requested = true;
+        *stopping_state.recording.lock().await = Some(stopping_recording);
+        assert!(
+            !attach_prepared_session_live_chat(
+                &stopping_state,
+                stopping_session_id,
+                fake_live_chat_start_params(stopping_session_id, "stopping-target"),
+            )
+            .await,
+            "an exact session already committed to Stop must not attach Comments"
+        );
+        assert_eq!(
+            stopping_state.live_chat.lock().await.runtime_ownership(),
+            (0, 0)
+        );
+
+        // A delayed attachment can also resume after the next capture is live.
+        // Keep the mutex continuously owned while replacing the recording so
+        // the stale task deterministically observes the replacement, not a
+        // scheduler-dependent intermediate None.
+        let replacement_state = test_state();
+        let stale_session_id = "retired-before-chat-attachment";
+        let replacement_session_id = "replacement-chat-session";
+        let mut replacement_recording = replacement_state.recording.lock().await;
+        *replacement_recording = Some(recording::test_active_recording_stub(stale_session_id));
+        let stale_attach_state = replacement_state.clone();
+        let stale_attach = tokio::spawn(async move {
+            attach_prepared_session_live_chat(
+                &stale_attach_state,
+                stale_session_id,
+                fake_live_chat_start_params(stale_session_id, "stale-target"),
+            )
+            .await
+        });
+        *replacement_recording = Some(recording::test_active_recording_stub(
+            replacement_session_id,
+        ));
+        live_chat::start_live_chat(
+            &replacement_state,
+            fake_live_chat_start_params(replacement_session_id, "replacement-target"),
+        )
+        .await;
+        drop(replacement_recording);
+
+        assert!(!stale_attach.await.expect("stale Comments attachment task"));
+        let replacement_snapshot = live_chat::current_status(&replacement_state).await;
+        assert_eq!(
+            replacement_snapshot.session_id.as_deref(),
+            Some(replacement_session_id)
+        );
+        assert_eq!(
+            replacement_state.live_chat.lock().await.runtime_ownership(),
+            (1, 1),
+            "stale attachment must not replace or append to the replacement connector set"
+        );
+        live_chat::stop_live_chat(&replacement_state).await;
     }
 
     #[test]

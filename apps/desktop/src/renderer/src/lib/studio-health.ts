@@ -1,5 +1,5 @@
 import type { StatusTone } from '@/components/status-badge'
-import type { DiagnosticStats, HealthEvent } from '@/lib/backend'
+import type { CaptureRecoveryStage, DiagnosticStats, HealthEvent } from '@/lib/backend'
 import {
   SESSION_START_FAILED_TOAST_ID,
   SESSION_START_FAILED_TOAST_TITLE
@@ -67,11 +67,16 @@ export type StudioHealthInput = Pick<
   | 'compositorBackend'
   | 'compositorCpuFallbackFrames'
   | 'compositorFallbackReason'
+  | 'captureRecoveryLastError'
+  | 'captureRecoveryPhase'
+  | 'captureRecoverySource'
   | 'previewInputToPresentLatencyP95Ms'
   | 'previewInputToPresentLatencyP99Ms'
   | 'previewSurfaceBacking'
   | 'previewTransport'
->
+> & {
+  captureRecoveryStage?: CaptureRecoveryStage | null
+}
 
 export interface StudioHealth {
   tone: StatusTone
@@ -105,6 +110,83 @@ export function studioHealth(
   platform?: string,
   nativePreviewHostKind?: NativePreviewHostKind
 ): StudioHealth {
+  const recoverySource =
+    stats.captureRecoverySource ??
+    (stats.captureRecoveryStage === 'screen-delivery'
+      ? 'screen'
+      : stats.captureRecoveryStage === 'camera-delivery'
+        ? 'camera'
+        : undefined)
+
+  if (stats.captureRecoveryPhase === 'failed') {
+    const sourceName =
+      recoverySource === 'screen'
+        ? 'screen capture'
+        : recoverySource === 'camera'
+          ? 'camera'
+          : 'capture source'
+    return {
+      tone: 'error',
+      value: 'Capture stalled',
+      detail:
+        stats.captureRecoveryLastError?.trim() ||
+        `Automatic capture repair did not restore the ${sourceName}.`
+    }
+  }
+
+  if (
+    stats.captureRecoveryPhase === 'degraded' ||
+    stats.captureRecoveryPhase === 'restarting' ||
+    stats.captureRecoveryPhase === 'verifying'
+  ) {
+    if (
+      stats.captureRecoveryPhase === 'degraded' &&
+      stats.captureRecoveryStage === 'compositor-render'
+    ) {
+      return {
+        tone: 'warn',
+        value: 'Capture degraded',
+        detail: 'Video rendering slowed. Videorc left the capture sources unchanged.'
+      }
+    }
+    return {
+      tone: 'warn',
+      value: 'Repairing capture',
+      detail:
+        stats.captureRecoveryPhase === 'verifying'
+          ? recoverySource === 'screen'
+            ? 'Screen capture restarted. Checking that live video is moving normally.'
+            : recoverySource === 'camera'
+              ? 'Camera restarted. Checking that live video is moving normally.'
+              : 'Capture restarted. Checking that live video is moving normally.'
+          : recoverySource === 'screen'
+            ? 'Screen capture stalled. Videorc is restarting it without stopping your session.'
+            : recoverySource === 'camera'
+              ? 'The camera stalled. Videorc is restarting capture without stopping your session.'
+              : 'Capture stalled. Videorc is restarting it without stopping your session.'
+    }
+  }
+
+  if (stats.captureRecoveryPhase === 'recovered') {
+    if (stats.captureRecoveryStage === 'compositor-render') {
+      return {
+        tone: 'good',
+        value: 'Video recovered',
+        detail: 'Video rendering recovered. Capture sources were left unchanged.'
+      }
+    }
+    return {
+      tone: 'good',
+      value: 'Capture recovered',
+      detail:
+        recoverySource === 'screen'
+          ? 'Screen capture recovered without restarting your session.'
+          : recoverySource === 'camera'
+            ? 'Camera capture recovered without restarting your session.'
+            : 'Capture recovered without restarting your session.'
+    }
+  }
+
   const effectivePlatform = platform ?? 'darwin'
   const nativePreviewExpected = effectivePlatform === 'darwin' || effectivePlatform === 'win32'
   const nativePreviewLive = isNativePreviewCapability(

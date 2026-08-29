@@ -71,14 +71,14 @@ export interface RemoteIntentContext {
   client: RemoteSurfaceClient
   sessionActive: boolean
   streamEnabled: boolean
-  startSession: () => Promise<unknown>
-  stopSession: () => Promise<unknown>
-  setMicrophoneMuted: (mode: 'mute' | 'unmute' | 'toggle') => void
+  startSession: () => Promise<boolean>
+  stopSession: () => Promise<boolean>
+  setMicrophoneMuted: (mode: 'mute' | 'unmute' | 'toggle') => Promise<boolean>
   knownLayoutPresets: readonly LayoutPreset[]
-  applyLayoutPreset: (layoutPreset: LayoutPreset) => void
+  applyLayoutPreset: (layoutPreset: LayoutPreset) => Promise<boolean>
   hasTakeover: (assetId: string) => boolean
-  activateTakeover: (assetId: string) => Promise<unknown>
-  clearTakeover: () => Promise<unknown>
+  activateTakeover: (assetId: string) => Promise<boolean>
+  clearTakeover: () => Promise<boolean>
   openWindow: (name: string) => Promise<boolean>
 }
 
@@ -214,31 +214,45 @@ export async function executeRemoteIntent(
     switch (intent.kind) {
       case 'recordStart':
         if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
-        await context.startSession()
-        return void (await ack(true))
+        return void ((await context.startSession())
+          ? await ack(true)
+          : await ack(false, 'The capture session did not start. Check Studio for details.'))
       case 'recordStop':
       case 'streamStop':
         if (!context.sessionActive) return void (await ack(false, 'No active session.'))
-        await context.stopSession()
-        return void (await ack(true))
-      case 'recordToggle':
-        if (context.sessionActive) await context.stopSession()
-        else await context.startSession()
-        return void (await ack(true))
+        return void ((await context.stopSession())
+          ? await ack(true)
+          : await ack(false, 'The active session did not stop. Check Studio for details.'))
+      case 'recordToggle': {
+        const committed = context.sessionActive
+          ? await context.stopSession()
+          : await context.startSession()
+        return void (committed
+          ? await ack(true)
+          : await ack(false, 'The session toggle was not committed. Check Studio for details.'))
+      }
       case 'streamStart':
         if (!context.streamEnabled) {
           return void (await ack(false, 'Enable streaming in the Studio first.'))
         }
         if (context.sessionActive) return void (await ack(false, 'A session is already active.'))
-        await context.startSession()
-        return void (await ack(true))
+        return void ((await context.startSession())
+          ? await ack(true)
+          : await ack(
+              false,
+              'The stream did not start. Complete any required confirmation in Studio.'
+            ))
       case 'micMute':
       case 'micUnmute':
-      case 'micToggle':
-        context.setMicrophoneMuted(
+      case 'micToggle': {
+        const applied = await context.setMicrophoneMuted(
           intent.kind === 'micToggle' ? 'toggle' : intent.kind === 'micMute' ? 'mute' : 'unmute'
         )
+        if (!applied) {
+          return void (await ack(false, 'The microphone change was not applied.'))
+        }
         return void (await ack(true))
+      }
       case 'sceneApply': {
         const layoutPreset = intent.layoutPreset as LayoutPreset | undefined
         if (!layoutPreset) {
@@ -247,7 +261,10 @@ export async function executeRemoteIntent(
         if (!(context.knownLayoutPresets as readonly string[]).includes(layoutPreset)) {
           return void (await ack(false, `Unknown layout preset "${layoutPreset}".`))
         }
-        context.applyLayoutPreset(layoutPreset)
+        const committed = await context.applyLayoutPreset(layoutPreset)
+        if (!committed) {
+          return void (await ack(false, 'The layout change was not committed.'))
+        }
         return void (await ack(true))
       }
       case 'takeoverShow': {
@@ -255,12 +272,19 @@ export async function executeRemoteIntent(
         if (!assetId || !context.hasTakeover(assetId)) {
           return void (await ack(false, 'No takeover with that id.'))
         }
-        await context.activateTakeover(assetId)
+        const activated = await context.activateTakeover(assetId)
+        if (!activated) {
+          return void (await ack(false, 'The takeover was not activated.'))
+        }
         return void (await ack(true))
       }
-      case 'takeoverHide':
-        await context.clearTakeover()
+      case 'takeoverHide': {
+        const cleared = await context.clearTakeover()
+        if (!cleared) {
+          return void (await ack(false, 'The takeover was not cleared.'))
+        }
         return void (await ack(true))
+      }
       case 'windowFront': {
         const windowName = intent.window as string | undefined
         if (!windowName || !(await context.openWindow(windowName))) {

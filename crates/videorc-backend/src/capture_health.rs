@@ -13,12 +13,17 @@
 //! - `camera-delivery`: the camera fetch stopped yielding fresh frames at
 //!   rate. Webcams stream continuously, so a collapsed fresh-serve rate is
 //!   decay, full stop.
+//! - `screen-delivery`: ScreenCaptureKit callbacks, complete-frame
+//!   publications, and compositor fresh serves all collapsed for the same
+//!   generation. Requiring all three preserves static-screen correctness:
+//!   ScreenCaptureKit idle callbacks continue while damage-driven complete
+//!   frames and fresh serves legitimately remain at zero.
 //! - `compositor-render`: the snapshot loop itself fell below cadence.
-//!
-//! The screen source is deliberately NOT a verdict stage: ScreenCaptureKit
-//! delivers frames on display damage, so a static desktop legitimately
-//! produces ~0 fresh screen frames. Screen numbers ride along in the detail
-//! string as evidence, never as a judgment.
+
+use std::sync::{Arc, Mutex};
+
+use crate::screen_capture::ScreenCaptureCallbackCadence;
+use crate::source_registry::SourceKey;
 
 /// Fraction of the target rate below which a stage counts as degraded.
 pub const DEGRADED_RATE_FRACTION: f64 = 0.6;
@@ -29,7 +34,50 @@ pub const DEGRADED_WINDOW_THRESHOLD: u32 = 3;
 pub const RECOVERED_WINDOW_THRESHOLD: u32 = 3;
 
 /// One diagnostics window of pipeline rates, cumulative counters included.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureHealthCameraEpoch {
+    pub source_key: SourceKey,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureHealthCameraProducerSample {
+    pub epoch: CaptureHealthCameraEpoch,
+    /// Device-level delivery fps measured at the capture callback.
+    pub source_fps: Option<f64>,
+    /// Cumulative callbacks delivered by the native capture session.
+    pub capture_callbacks: u64,
+    /// Cumulative successful publications into that generation's FrameStore.
+    pub frame_store_publications: u64,
+    /// Cumulative AVFoundation didDrop callbacks for this generation.
+    pub did_drop_callback_count: u64,
+    /// Cumulative AVFoundation out-of-buffers drops for this generation.
+    pub out_of_buffers: u64,
+    /// Current and peak retained camera-backed surfaces.
+    pub surface_backing_live_count: u64,
+    pub surface_backing_peak_count: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureHealthScreenEpoch {
+    pub source_key: SourceKey,
+    pub generation: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CaptureHealthScreenProducerSample {
+    pub epoch: CaptureHealthScreenEpoch,
+    /// Whether callback cadence can distinguish capture decay from a static,
+    /// damage-driven source.
+    pub callback_cadence: ScreenCaptureCallbackCadence,
+    /// Cumulative native capture callbacks. This cadence is a recovery
+    /// discriminator only when `callback_cadence` is authoritative.
+    pub capture_callbacks: u64,
+    /// Cumulative complete-frame publications into that generation's FrameStore.
+    pub frame_store_publications: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct CaptureHealthSample {
     /// The session/preview target fps; a sample with a non-positive target is
     /// ignored (no cadence to judge against).
@@ -38,34 +86,35 @@ pub struct CaptureHealthSample {
     pub render_fps: f64,
     /// Whether a camera source is attached to the scene this window.
     pub camera_present: bool,
+    /// Capture cadence requested from the active camera source. This is kept
+    /// separate from the compositor cadence: a healthy 30fps camera feeding a
+    /// 60fps compositor must not be diagnosed as a 50% delivery collapse.
+    pub camera_target_fps: Option<f64>,
     /// CUMULATIVE fresh camera serves (compositor fetch counter).
     pub camera_fresh_serves: u64,
+    /// Generation-bound producer truth sampled directly from the native
+    /// camera runtime. A low compositor fresh-serve rate is never allowed to
+    /// trigger a source restart unless these counters corroborate producer
+    /// decay for this exact source generation.
+    pub camera_producer: Option<CaptureHealthCameraProducerSample>,
     /// Whether a screen source is attached to the scene this window.
     pub screen_present: bool,
-    /// CUMULATIVE fresh screen serves (advisory only — see module docs).
+    /// Capture cadence requested from the active screen/window source.
+    pub screen_target_fps: Option<f64>,
+    /// CUMULATIVE fresh screen serves. Damage-driven zero is actionable only
+    /// when exact-generation producer callbacks also collapse.
     pub screen_fresh_serves: u64,
+    /// Generation-bound ScreenCaptureKit callback/publication truth.
+    pub screen_producer: Option<CaptureHealthScreenProducerSample>,
     /// Window length in seconds (non-positive samples are ignored).
     pub window_secs: f64,
-    /// Device-level camera delivery fps as measured at the capture callback
-    /// (already computed by the camera poll task). Discriminates "the device
-    /// stopped delivering" from "the app is starving its buffer pool".
-    pub camera_source_fps: Option<f64>,
-    /// CUMULATIVE capture callbacks (device deliveries incl. dropped ones).
-    pub camera_callback_count: Option<u64>,
-    /// CUMULATIVE frames the capture output dropped for want of a free
-    /// buffer. A rate here ≈ (device fps − fresh fps) is the pool-exhaustion
-    /// signature (H1-camera): the app retains zero-copy pool buffers until
-    /// the camera can only deliver as buffers trickle back.
-    pub camera_out_of_buffers: Option<u64>,
-    /// Live / peak retained camera-backed surfaces (the leak counter).
-    pub camera_pool_live: Option<u64>,
-    pub camera_pool_peak: Option<u64>,
 }
 
 /// The stage a degradation verdict names, most-upstream first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureStage {
     CameraDelivery,
+    ScreenDelivery,
     CompositorRender,
 }
 
@@ -73,31 +122,93 @@ impl CaptureStage {
     pub fn label(self) -> &'static str {
         match self {
             CaptureStage::CameraDelivery => "camera-delivery",
+            CaptureStage::ScreenDelivery => "screen-delivery",
             CaptureStage::CompositorRender => "compositor-render",
         }
     }
+}
+
+pub(crate) type CaptureHealthStageLatchesSlot = Arc<Mutex<CaptureHealthStageLatches>>;
+
+#[derive(Debug, Default)]
+pub(crate) struct CaptureHealthStageLatches {
+    camera_delivery: bool,
+    screen_delivery: bool,
+    compositor_render: bool,
+}
+
+impl CaptureHealthStageLatches {
+    pub(crate) fn set(&mut self, stage: CaptureStage, degraded: bool) {
+        match stage {
+            CaptureStage::CameraDelivery => self.camera_delivery = degraded,
+            CaptureStage::ScreenDelivery => self.screen_delivery = degraded,
+            CaptureStage::CompositorRender => self.compositor_render = degraded,
+        }
+    }
+
+    pub(crate) fn current(&self) -> Option<CaptureStage> {
+        if self.camera_delivery {
+            Some(CaptureStage::CameraDelivery)
+        } else if self.screen_delivery {
+            Some(CaptureStage::ScreenDelivery)
+        } else if self.compositor_render {
+            Some(CaptureStage::CompositorRender)
+        } else {
+            None
+        }
+    }
+
+    pub(crate) fn clear_all(&mut self) {
+        self.camera_delivery = false;
+        self.screen_delivery = false;
+        self.compositor_render = false;
+    }
+}
+
+pub(crate) fn new_capture_health_stage_latches_slot() -> CaptureHealthStageLatchesSlot {
+    Arc::new(Mutex::new(CaptureHealthStageLatches::default()))
 }
 
 /// A state transition worth telling somebody about. Emitted once per edge —
 /// steady states (healthy or degraded) stay quiet.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CaptureHealthTransition {
-    Degraded { stage: CaptureStage, detail: String },
-    Recovered { detail: String },
+    Degraded {
+        stage: CaptureStage,
+        detail: String,
+        camera_epoch: Option<CaptureHealthCameraEpoch>,
+        screen_epoch: Option<CaptureHealthScreenEpoch>,
+    },
+    Recovered {
+        stage: CaptureStage,
+        detail: String,
+        camera_epoch: Option<CaptureHealthCameraEpoch>,
+        screen_epoch: Option<CaptureHealthScreenEpoch>,
+    },
+    /// Consumer-side starvation without matching producer decay. This is
+    /// useful diagnostics, but it is deliberately not a recovery command.
+    Advisory { detail: String },
 }
 
 #[derive(Debug, Default)]
 pub struct CaptureHealthMonitor {
     last_camera_fresh: Option<u64>,
-    last_screen_fresh: Option<u64>,
     last_camera_callbacks: Option<u64>,
+    last_camera_publications: Option<u64>,
+    last_camera_did_drop_callbacks: Option<u64>,
     last_camera_out_of_buffers: Option<u64>,
+    camera_epoch: Option<CaptureHealthCameraEpoch>,
+    last_screen_fresh: Option<u64>,
+    last_screen_callbacks: Option<u64>,
+    last_screen_publications: Option<u64>,
+    screen_epoch: Option<CaptureHealthScreenEpoch>,
     degraded_streak: u32,
     healthy_streak: u32,
     /// The currently-declared degraded stage, if any.
     current: Option<CaptureStage>,
     /// The stage the running degraded streak is accumulating toward.
     pending_stage: Option<CaptureStage>,
+    consumer_starvation_advisory_active: bool,
 }
 
 impl CaptureHealthMonitor {
@@ -110,10 +221,118 @@ impl CaptureHealthMonitor {
         self.current
     }
 
+    fn reset_camera_epoch_state(&mut self, epoch: Option<CaptureHealthCameraEpoch>) {
+        self.last_camera_fresh = None;
+        self.last_camera_callbacks = None;
+        self.last_camera_publications = None;
+        self.last_camera_did_drop_callbacks = None;
+        self.last_camera_out_of_buffers = None;
+        self.camera_epoch = epoch;
+        self.consumer_starvation_advisory_active = false;
+        if self.current == Some(CaptureStage::CameraDelivery) {
+            self.current = None;
+            self.healthy_streak = 0;
+        }
+        if self.pending_stage == Some(CaptureStage::CameraDelivery) {
+            self.pending_stage = None;
+            self.degraded_streak = 0;
+        }
+    }
+
+    /// Start camera-delivery accounting from a clean baseline when the
+    /// compositor adopts a different camera generation. A verified restart is
+    /// a new incident boundary: if that generation immediately decays, it must
+    /// be able to emit a fresh degradation instead of remaining hidden behind
+    /// the previous generation's declared state.
+    ///
+    /// Compositor-render incidents are deliberately preserved. Camera source
+    /// churn cannot certify that the render loop recovered.
+    pub fn rearm_camera_source_epoch(&mut self) {
+        self.reset_camera_epoch_state(None);
+    }
+
+    fn reset_screen_epoch_state(&mut self, epoch: Option<CaptureHealthScreenEpoch>) {
+        self.last_screen_fresh = None;
+        self.last_screen_callbacks = None;
+        self.last_screen_publications = None;
+        self.screen_epoch = epoch;
+        if self.current == Some(CaptureStage::ScreenDelivery) {
+            self.current = None;
+            self.healthy_streak = 0;
+        }
+        if self.pending_stage == Some(CaptureStage::ScreenDelivery) {
+            self.pending_stage = None;
+            self.degraded_streak = 0;
+        }
+    }
+
+    /// Start screen-delivery accounting from a clean exact-generation baseline.
+    pub fn rearm_screen_source_epoch(&mut self) {
+        self.reset_screen_epoch_state(None);
+    }
+
+    /// Establish an exact baseline for the maintained debug producer-stall
+    /// smoke. The following frozen sample counts as the first real degraded
+    /// 2-second window, making the detector's three-window (<=6s) contract
+    /// directly testable without fabricating a transition.
+    #[cfg(debug_assertions)]
+    pub fn arm_camera_producer_stall(
+        &mut self,
+        epoch: CaptureHealthCameraEpoch,
+        camera_fresh_serves: u64,
+        capture_callbacks: u64,
+        frame_store_publications: u64,
+    ) {
+        self.reset_camera_epoch_state(Some(epoch));
+        self.last_camera_fresh = Some(camera_fresh_serves);
+        self.last_camera_callbacks = Some(capture_callbacks);
+        self.last_camera_publications = Some(frame_store_publications);
+    }
+
+    /// Establish an exact ScreenCaptureKit baseline for the maintained debug
+    /// producer-stall smoke. This is deliberately separate from the camera
+    /// baseline because screen delivery requires callback, complete-frame
+    /// publication, and compositor-fresh evidence to collapse together.
+    #[cfg(debug_assertions)]
+    pub fn arm_screen_producer_stall(
+        &mut self,
+        epoch: CaptureHealthScreenEpoch,
+        screen_fresh_serves: u64,
+        capture_callbacks: u64,
+        frame_store_publications: u64,
+    ) {
+        self.reset_screen_epoch_state(Some(epoch));
+        self.last_screen_fresh = Some(screen_fresh_serves);
+        self.last_screen_callbacks = Some(capture_callbacks);
+        self.last_screen_publications = Some(frame_store_publications);
+    }
+
     /// Feed one diagnostics window; returns a transition when an edge fires.
     pub fn observe(&mut self, sample: CaptureHealthSample) -> Option<CaptureHealthTransition> {
-        if sample.window_secs <= 0.0 || sample.target_fps <= 0.0 {
+        if !sample.window_secs.is_finite()
+            || sample.window_secs <= 0.0
+            || !sample.target_fps.is_finite()
+            || sample.target_fps <= 0.0
+        {
             return None;
+        }
+
+        let sample_camera_epoch = sample
+            .camera_producer
+            .as_ref()
+            .map(|producer| producer.epoch.clone());
+        if sample_camera_epoch != self.camera_epoch {
+            // No camera-delivery verdict or streak is transferable across a
+            // source generation. Preserve only an already-declared render
+            // incident, which camera churn cannot certify as recovered.
+            self.reset_camera_epoch_state(sample_camera_epoch.clone());
+        }
+        let sample_screen_epoch = sample
+            .screen_producer
+            .as_ref()
+            .map(|producer| producer.epoch.clone());
+        if sample_screen_epoch != self.screen_epoch {
+            self.reset_screen_epoch_state(sample_screen_epoch.clone());
         }
 
         let camera_fresh_fps = if sample.camera_present {
@@ -126,6 +345,47 @@ impl CaptureHealthMonitor {
             self.last_camera_fresh = None;
             None
         };
+        let (
+            camera_callback_fps,
+            camera_publication_fps,
+            camera_did_drop_rate,
+            camera_out_of_buffers_rate,
+        ) = if sample.camera_present {
+            sample
+                .camera_producer
+                .as_ref()
+                .map_or((None, None, None, None), |producer| {
+                    (
+                        delta_rate(
+                            &mut self.last_camera_callbacks,
+                            producer.capture_callbacks,
+                            sample.window_secs,
+                        ),
+                        delta_rate(
+                            &mut self.last_camera_publications,
+                            producer.frame_store_publications,
+                            sample.window_secs,
+                        ),
+                        delta_rate(
+                            &mut self.last_camera_did_drop_callbacks,
+                            producer.did_drop_callback_count,
+                            sample.window_secs,
+                        ),
+                        delta_rate(
+                            &mut self.last_camera_out_of_buffers,
+                            producer.out_of_buffers,
+                            sample.window_secs,
+                        ),
+                    )
+                })
+        } else {
+            self.last_camera_callbacks = None;
+            self.last_camera_publications = None;
+            self.last_camera_did_drop_callbacks = None;
+            self.last_camera_out_of_buffers = None;
+            self.camera_epoch = None;
+            (None, None, None, None)
+        };
         let screen_fresh_fps = if sample.screen_present {
             delta_rate(
                 &mut self.last_screen_fresh,
@@ -136,60 +396,159 @@ impl CaptureHealthMonitor {
             self.last_screen_fresh = None;
             None
         };
-
-        let camera_callback_fps = match sample.camera_callback_count {
-            Some(count) if sample.camera_present => {
-                delta_rate(&mut self.last_camera_callbacks, count, sample.window_secs)
-            }
-            _ => {
-                self.last_camera_callbacks = None;
-                None
-            }
+        let (screen_callback_fps, screen_publication_fps) = if sample.screen_present {
+            sample
+                .screen_producer
+                .as_ref()
+                .map_or((None, None), |producer| {
+                    (
+                        delta_rate(
+                            &mut self.last_screen_callbacks,
+                            producer.capture_callbacks,
+                            sample.window_secs,
+                        ),
+                        delta_rate(
+                            &mut self.last_screen_publications,
+                            producer.frame_store_publications,
+                            sample.window_secs,
+                        ),
+                    )
+                })
+        } else {
+            self.last_screen_callbacks = None;
+            self.last_screen_publications = None;
+            self.screen_epoch = None;
+            (None, None)
         };
-        let camera_out_of_buffers_rate = match sample.camera_out_of_buffers {
-            Some(count) if sample.camera_present => delta_rate(
-                &mut self.last_camera_out_of_buffers,
-                count,
-                sample.window_secs,
-            ),
-            _ => {
-                self.last_camera_out_of_buffers = None;
-                None
-            }
-        };
 
-        let floor = sample.target_fps * DEGRADED_RATE_FRACTION;
+        let render_floor = sample.target_fps * DEGRADED_RATE_FRACTION;
+        let camera_consumer_floor = sample
+            .camera_target_fps
+            .filter(|fps| fps.is_finite() && *fps > 0.0)
+            .map(|fps| fps.min(sample.target_fps) * DEGRADED_RATE_FRACTION);
+        let camera_producer_floor = sample
+            .camera_target_fps
+            .filter(|fps| fps.is_finite() && *fps > 0.0)
+            .map(|fps| fps * DEGRADED_RATE_FRACTION);
+        let screen_consumer_floor = sample
+            .screen_target_fps
+            .filter(|fps| fps.is_finite() && *fps > 0.0)
+            .map(|fps| fps.min(sample.target_fps) * DEGRADED_RATE_FRACTION);
+        let screen_producer_floor = sample
+            .screen_target_fps
+            .filter(|fps| fps.is_finite() && *fps > 0.0)
+            .map(|fps| fps * DEGRADED_RATE_FRACTION);
         // Upstream before downstream: a starving camera fetch is the cause
         // even when the render loop is dutifully re-serving held frames at
         // full cadence (the exact 2026-08-27 signature).
-        let degraded_stage = match camera_fresh_fps {
-            Some(rate) if rate < floor => Some(CaptureStage::CameraDelivery),
-            _ if sample.render_fps < floor => Some(CaptureStage::CompositorRender),
-            _ => None,
+        let consumer_camera_starved = matches!(
+            (camera_fresh_fps, camera_consumer_floor),
+            (Some(rate), Some(floor)) if rate < floor
+        );
+        let producer_camera_degraded = matches!(
+            (
+                camera_callback_fps,
+                camera_publication_fps,
+                camera_producer_floor
+            ),
+            (Some(callbacks), Some(publications), Some(floor))
+                if callbacks < floor || publications < floor
+        );
+        let consumer_screen_starved = matches!(
+            (screen_fresh_fps, screen_consumer_floor),
+            (Some(rate), Some(floor)) if rate < floor
+        );
+        // A static desktop legitimately has zero complete publications and
+        // fresh serves. Only a source with authoritative continuous callbacks
+        // can use callback collapse to distinguish a stalled stream from
+        // damage-driven idleness. Windows desktop duplication and gdigrab do
+        // not provide that discriminator and must never arm source recovery.
+        let producer_screen_degraded = sample.screen_producer.as_ref().is_some_and(|producer| {
+            producer.callback_cadence.is_authoritative()
+                && matches!(
+                    (
+                        screen_callback_fps,
+                        screen_publication_fps,
+                        screen_producer_floor
+                    ),
+                    (Some(callbacks), Some(publications), Some(floor))
+                        if callbacks < floor && publications < floor
+                )
+        });
+        let degraded_stage = if consumer_camera_starved && producer_camera_degraded {
+            Some(CaptureStage::CameraDelivery)
+        } else if consumer_screen_starved && producer_screen_degraded {
+            Some(CaptureStage::ScreenDelivery)
+        } else if sample.render_fps < render_floor {
+            Some(CaptureStage::CompositorRender)
+        } else {
+            None
         };
 
-        let optional_rate = |rate: Option<f64>| {
-            rate.map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps"))
-        };
         let detail = format!(
-            "target={:.1}fps render={:.1}fps camera_fresh={} screen_fresh={} camera_dev={} camera_cb={} camera_oob={} camera_pool={}/{}",
+            "target={:.1}fps render={:.1}fps camera_target={} camera_fresh={} camera_callbacks={} camera_publications={} camera_dev={} camera_did_drop={} camera_oob={} camera_pool={}/{} camera_epoch={} screen_target={} screen_fresh={} screen_callbacks={} screen_publications={} screen_epoch={}",
             sample.target_fps,
             sample.render_fps,
-            optional_rate(camera_fresh_fps),
-            optional_rate(screen_fresh_fps),
-            optional_rate(sample.camera_source_fps),
-            optional_rate(camera_callback_fps),
+            sample
+                .camera_target_fps
+                .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            camera_fresh_fps.map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            camera_callback_fps.map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            camera_publication_fps
+                .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            sample
+                .camera_producer
+                .as_ref()
+                .and_then(|producer| producer.source_fps)
+                .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            camera_did_drop_rate.map_or_else(|| "n/a".to_string(), |rate| format!("+{rate:.1}/s")),
             camera_out_of_buffers_rate
                 .map_or_else(|| "n/a".to_string(), |rate| format!("+{rate:.1}/s")),
+            sample.camera_producer.as_ref().map_or_else(
+                || "?".to_string(),
+                |producer| producer.surface_backing_live_count.to_string(),
+            ),
+            sample.camera_producer.as_ref().map_or_else(
+                || "?".to_string(),
+                |producer| producer.surface_backing_peak_count.to_string(),
+            ),
+            sample_camera_epoch.as_ref().map_or_else(
+                || "n/a".to_string(),
+                |epoch| format!("{}@{}", epoch.source_key.id, epoch.generation),
+            ),
             sample
-                .camera_pool_live
-                .map_or_else(|| "?".to_string(), |live| live.to_string()),
-            sample
-                .camera_pool_peak
-                .map_or_else(|| "?".to_string(), |peak| peak.to_string()),
+                .screen_target_fps
+                .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            screen_fresh_fps.map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            screen_callback_fps.map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            screen_publication_fps
+                .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
+            sample_screen_epoch.as_ref().map_or_else(
+                || "n/a".to_string(),
+                |epoch| format!("{}@{}", epoch.source_key.id, epoch.generation),
+            ),
         );
 
-        match degraded_stage {
+        let advisory = if consumer_camera_starved
+            && !producer_camera_degraded
+            && degraded_stage.is_none()
+        {
+            if !self.consumer_starvation_advisory_active {
+                self.consumer_starvation_advisory_active = true;
+                Some(CaptureHealthTransition::Advisory {
+                    detail: format!(
+                        "Camera consumer starvation was not corroborated by generation-bound producer decay; no source restart was admitted. {detail}"
+                    ),
+                })
+            } else {
+                None
+            }
+        } else {
+            self.consumer_starvation_advisory_active = false;
+            None
+        };
+
+        let transition = match degraded_stage {
             Some(stage) => {
                 self.healthy_streak = 0;
                 if self.pending_stage == Some(stage) {
@@ -201,9 +560,19 @@ impl CaptureHealthMonitor {
                 if self.degraded_streak >= DEGRADED_WINDOW_THRESHOLD && self.current != Some(stage)
                 {
                     self.current = Some(stage);
-                    return Some(CaptureHealthTransition::Degraded { stage, detail });
+                    Some(CaptureHealthTransition::Degraded {
+                        stage,
+                        detail,
+                        camera_epoch: (stage == CaptureStage::CameraDelivery)
+                            .then_some(sample_camera_epoch)
+                            .flatten(),
+                        screen_epoch: (stage == CaptureStage::ScreenDelivery)
+                            .then_some(sample_screen_epoch)
+                            .flatten(),
+                    })
+                } else {
+                    None
                 }
-                None
             }
             None => {
                 self.pending_stage = None;
@@ -211,14 +580,35 @@ impl CaptureHealthMonitor {
                 if self.current.is_some() {
                     self.healthy_streak = self.healthy_streak.saturating_add(1);
                     if self.healthy_streak >= RECOVERED_WINDOW_THRESHOLD {
+                        let stage = self
+                            .current
+                            .expect("a recovery streak requires a declared degraded stage");
+                        let camera_epoch = (stage == CaptureStage::CameraDelivery)
+                            .then_some(sample_camera_epoch)
+                            .flatten();
+                        let screen_epoch = (stage == CaptureStage::ScreenDelivery)
+                            .then_some(sample_screen_epoch)
+                            .flatten();
                         self.current = None;
                         self.healthy_streak = 0;
-                        return Some(CaptureHealthTransition::Recovered { detail });
+                        Some(CaptureHealthTransition::Recovered {
+                            stage,
+                            detail,
+                            camera_epoch,
+                            screen_epoch,
+                        })
+                    } else {
+                        None
                     }
+                } else {
+                    None
                 }
-                None
             }
-        }
+        };
+        // State transitions carry authority and take priority when the same
+        // window also crosses a one-shot advisory edge. Otherwise publish the
+        // advisory without interrupting degradation/recovery accounting.
+        transition.or(advisory)
     }
 }
 
@@ -234,198 +624,119 @@ fn delta_rate(last: &mut Option<u64>, current: u64, window_secs: f64) -> Option<
     rate
 }
 
-/// Windows to wait after an auto-restart before judging it (camera warm-up
-/// plus monitor hysteresis; 2s windows → ≈16s of grace).
-pub const AUTO_HEAL_RECOVERY_GRACE_WINDOWS: u64 = 8;
-/// Attempts per degradation episode before escalating to the user.
-pub const AUTO_HEAL_MAX_ATTEMPTS: u32 = 2;
-
-/// What the auto-heal driver should do this window.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AutoHealAction {
-    None,
-    /// Restart the camera source now (attempt number for the log).
-    RestartCamera {
-        attempt: u32,
-    },
-    /// Both restarts failed to restore cadence: tell the user, once.
-    Escalate,
-}
-
-/// Decides camera auto-restarts from the monitor's camera-delivery verdict.
-///
-/// The restart is the known-good manual cure for the quantized ~6fps camera
-/// collapse (2026-08-28 field data): the process-restart the owner performs
-/// tears down the capture session and its buffer pool. This policy automates
-/// exactly that at source scope, with hysteresis so a restart is judged only
-/// after the camera has had time to warm up and the monitor to recover, and
-/// a hard attempt ceiling so a broken camera cannot cause a restart loop.
-#[derive(Debug, Default)]
-pub struct CameraAutoHealPolicy {
-    window: u64,
-    attempts: u32,
-    last_attempt_window: Option<u64>,
-    escalated: bool,
-    /// Attempts were made in the episode that most recently recovered —
-    /// lets the driver log "recovered after automatic restart" once.
-    recovered_after_heal: bool,
-}
-
-impl CameraAutoHealPolicy {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Feed one diagnostics window; `camera_degraded` is whether the monitor
-    /// currently declares camera-delivery degraded.
-    pub fn on_window(&mut self, camera_degraded: bool) -> AutoHealAction {
-        self.window = self.window.wrapping_add(1);
-        if !camera_degraded {
-            if self.attempts > 0 {
-                self.recovered_after_heal = true;
-            }
-            self.attempts = 0;
-            self.last_attempt_window = None;
-            self.escalated = false;
-            return AutoHealAction::None;
-        }
-        self.recovered_after_heal = false;
-        let in_grace = self
-            .last_attempt_window
-            .is_some_and(|at| self.window.saturating_sub(at) < AUTO_HEAL_RECOVERY_GRACE_WINDOWS);
-        if in_grace {
-            return AutoHealAction::None;
-        }
-        if self.attempts < AUTO_HEAL_MAX_ATTEMPTS {
-            self.attempts += 1;
-            self.last_attempt_window = Some(self.window);
-            return AutoHealAction::RestartCamera {
-                attempt: self.attempts,
-            };
-        }
-        if !self.escalated {
-            self.escalated = true;
-            return AutoHealAction::Escalate;
-        }
-        AutoHealAction::None
-    }
-
-    /// True exactly once after an episode that needed restarts recovers.
-    pub fn take_recovered_after_heal(&mut self) -> bool {
-        std::mem::take(&mut self.recovered_after_heal)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_stage_latches_are_camera_first_and_stage_scoped() {
+        let mut latches = CaptureHealthStageLatches::default();
+        latches.set(CaptureStage::CameraDelivery, true);
+        latches.set(CaptureStage::CompositorRender, true);
+        assert_eq!(latches.current(), Some(CaptureStage::CameraDelivery));
+
+        latches.set(CaptureStage::CompositorRender, false);
+        assert_eq!(
+            latches.current(),
+            Some(CaptureStage::CameraDelivery),
+            "render recovery must never clear a latched camera incident"
+        );
+        latches.set(CaptureStage::CameraDelivery, false);
+        assert_eq!(latches.current(), None);
+    }
 
     fn healthy_sample(camera_fresh: u64, screen_fresh: u64) -> CaptureHealthSample {
         CaptureHealthSample {
             target_fps: 30.0,
             render_fps: 30.0,
             camera_present: true,
+            camera_target_fps: Some(30.0),
             camera_fresh_serves: camera_fresh,
+            camera_producer: Some(CaptureHealthCameraProducerSample {
+                epoch: CaptureHealthCameraEpoch {
+                    source_key: SourceKey::camera("camera:test"),
+                    generation: 1,
+                },
+                source_fps: Some(30.0),
+                capture_callbacks: camera_fresh,
+                frame_store_publications: camera_fresh,
+                did_drop_callback_count: 0,
+                out_of_buffers: 0,
+                surface_backing_live_count: 1,
+                surface_backing_peak_count: 1,
+            }),
             screen_present: true,
+            screen_target_fps: None,
             screen_fresh_serves: screen_fresh,
+            screen_producer: None,
             window_secs: 2.0,
-            camera_source_fps: None,
-            camera_callback_count: None,
-            camera_out_of_buffers: None,
-            camera_pool_live: None,
-            camera_pool_peak: None,
         }
     }
 
-    /// The 2026-08-28 pool-exhaustion signature must be readable from the
-    /// degrade detail: device delivering ~30, out-of-buffers eating ~24/s.
     #[test]
-    fn degrade_detail_carries_the_pool_discriminators() {
+    fn degradation_detail_carries_generation_bound_camera_discriminators() {
         let mut monitor = CaptureHealthMonitor::new();
-        let mut camera = 0_u64;
-        let mut callbacks = 0_u64;
-        let mut oob = 0_u64;
-        let mut sample = |camera: u64, callbacks: u64, oob: u64| CaptureHealthSample {
-            camera_source_fps: Some(29.9),
-            camera_callback_count: Some(callbacks),
-            camera_out_of_buffers: Some(oob),
-            camera_pool_live: Some(14),
-            camera_pool_peak: Some(16),
-            ..healthy_sample(camera, 0)
+        let mut camera_fresh = 60_u64;
+        let mut callbacks = 60_u64;
+        let mut publications = 60_u64;
+        let mut did_drop = 0_u64;
+        let mut out_of_buffers = 0_u64;
+        let sample = |camera_fresh, callbacks, publications, did_drop, out_of_buffers| {
+            let mut sample = healthy_sample(camera_fresh, 0);
+            sample.screen_present = false;
+            sample.camera_producer = Some(CaptureHealthCameraProducerSample {
+                epoch: CaptureHealthCameraEpoch {
+                    source_key: SourceKey::camera("camera:test"),
+                    generation: 7,
+                },
+                source_fps: Some(29.9),
+                capture_callbacks: callbacks,
+                frame_store_publications: publications,
+                did_drop_callback_count: did_drop,
+                out_of_buffers,
+                surface_backing_live_count: 14,
+                surface_backing_peak_count: 16,
+            });
+            sample
         };
-        camera += 60;
-        callbacks += 60;
-        monitor.observe(sample(camera, callbacks, oob));
+        assert!(
+            monitor
+                .observe(sample(
+                    camera_fresh,
+                    callbacks,
+                    publications,
+                    did_drop,
+                    out_of_buffers,
+                ))
+                .is_none()
+        );
+
         let mut transition = None;
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            camera += 12; // ~6 fresh fps
-            callbacks += 60; // device still delivering 30
-            oob += 48; // ~24/s starved
-            transition = monitor.observe(sample(camera, callbacks, oob));
+            camera_fresh += 12;
+            callbacks += 60;
+            publications += 12;
+            did_drop += 48;
+            out_of_buffers += 48;
+            transition = monitor.observe(sample(
+                camera_fresh,
+                callbacks,
+                publications,
+                did_drop,
+                out_of_buffers,
+            ));
         }
-        match transition {
-            Some(CaptureHealthTransition::Degraded { detail, .. }) => {
-                assert!(detail.contains("camera_dev=29.9fps"), "{detail}");
-                assert!(detail.contains("camera_cb=30.0fps"), "{detail}");
-                assert!(detail.contains("camera_oob=+24.0/s"), "{detail}");
-                assert!(detail.contains("camera_pool=14/16"), "{detail}");
-            }
-            other => panic!("expected degrade, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn auto_heal_restarts_twice_with_grace_then_escalates_once() {
-        let mut policy = CameraAutoHealPolicy::new();
-        assert_eq!(policy.on_window(false), AutoHealAction::None);
-        // Degradation begins: first restart immediately.
-        assert_eq!(
-            policy.on_window(true),
-            AutoHealAction::RestartCamera { attempt: 1 }
-        );
-        // Grace: no second attempt while the restart warms up.
-        for _ in 0..(AUTO_HEAL_RECOVERY_GRACE_WINDOWS - 1) {
-            assert_eq!(policy.on_window(true), AutoHealAction::None);
-        }
-        assert_eq!(
-            policy.on_window(true),
-            AutoHealAction::RestartCamera { attempt: 2 }
-        );
-        for _ in 0..(AUTO_HEAL_RECOVERY_GRACE_WINDOWS - 1) {
-            assert_eq!(policy.on_window(true), AutoHealAction::None);
-        }
-        assert_eq!(policy.on_window(true), AutoHealAction::Escalate);
-        // Escalation fires once; the episode then stays quiet.
-        for _ in 0..5 {
-            assert_eq!(policy.on_window(true), AutoHealAction::None);
-        }
-        assert!(!policy.take_recovered_after_heal());
-    }
-
-    #[test]
-    fn auto_heal_reports_recovery_after_a_restart_and_rearms() {
-        let mut policy = CameraAutoHealPolicy::new();
-        assert_eq!(
-            policy.on_window(true),
-            AutoHealAction::RestartCamera { attempt: 1 }
-        );
-        // The restart worked: monitor recovers inside the grace period.
-        assert_eq!(policy.on_window(false), AutoHealAction::None);
-        assert!(policy.take_recovered_after_heal());
-        assert!(!policy.take_recovered_after_heal(), "reported once");
-        // A fresh episode gets a fresh attempt budget.
-        assert_eq!(
-            policy.on_window(true),
-            AutoHealAction::RestartCamera { attempt: 1 }
-        );
-    }
-
-    #[test]
-    fn auto_heal_never_fires_while_healthy() {
-        let mut policy = CameraAutoHealPolicy::new();
-        for _ in 0..50 {
-            assert_eq!(policy.on_window(false), AutoHealAction::None);
-        }
+        let CaptureHealthTransition::Degraded { detail, .. } =
+            transition.expect("sustained producer and consumer decay degrades")
+        else {
+            panic!("expected a degradation transition")
+        };
+        assert!(detail.contains("camera_dev=29.9fps"), "{detail}");
+        assert!(detail.contains("camera_callbacks=30.0fps"), "{detail}");
+        assert!(detail.contains("camera_did_drop=+24.0/s"), "{detail}");
+        assert!(detail.contains("camera_oob=+24.0/s"), "{detail}");
+        assert!(detail.contains("camera_pool=14/16"), "{detail}");
+        assert!(detail.contains("camera_epoch=camera:test@7"), "{detail}");
     }
 
     /// Replays the measured 2026-08-27 decay shape: healthy windows, then the
@@ -452,9 +763,15 @@ mod tests {
             transition = monitor.observe(sample);
         }
         match transition {
-            Some(CaptureHealthTransition::Degraded { stage, detail }) => {
+            Some(CaptureHealthTransition::Degraded {
+                stage,
+                detail,
+                camera_epoch,
+                ..
+            }) => {
                 assert_eq!(stage, CaptureStage::CameraDelivery);
                 assert!(detail.contains("camera_fresh=6.5fps"), "detail: {detail}");
+                assert_eq!(camera_epoch.unwrap().generation, 1);
             }
             other => panic!("expected a camera-delivery degradation, got {other:?}"),
         }
@@ -496,7 +813,11 @@ mod tests {
         }
         assert!(matches!(
             recovered,
-            Some(CaptureHealthTransition::Recovered { .. })
+            Some(CaptureHealthTransition::Recovered {
+                stage: CaptureStage::CameraDelivery,
+                camera_epoch: Some(_),
+                ..
+            })
         ));
         assert_eq!(monitor.degraded_stage(), None);
         // Steady health after recovery stays quiet.
@@ -505,15 +826,111 @@ mod tests {
     }
 
     /// A screen-only scene (notes-mode recording) with a static desktop must
-    /// never be declared degraded off screen numbers — SCK is damage-driven.
+    /// never be declared degraded off complete-frame counts. ScreenCaptureKit
+    /// publications are damage-driven while its idle/status callback cadence
+    /// remains authoritative.
     #[test]
     fn static_screen_without_camera_is_not_a_verdict() {
         let mut monitor = CaptureHealthMonitor::new();
         let mut sample = healthy_sample(0, 0);
         sample.camera_present = false;
+        sample.camera_target_fps = None;
+        sample.camera_producer = None;
         sample.screen_fresh_serves = 0;
+        sample.screen_target_fps = Some(30.0);
+        sample.screen_producer = Some(CaptureHealthScreenProducerSample {
+            epoch: CaptureHealthScreenEpoch {
+                source_key: SourceKey::screen("screen:static"),
+                generation: 3,
+            },
+            callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+            capture_callbacks: 0,
+            frame_store_publications: 0,
+        });
         for _ in 0..10 {
-            assert_eq!(monitor.observe(sample), None);
+            sample
+                .screen_producer
+                .as_mut()
+                .expect("static screen producer")
+                .capture_callbacks += 60;
+            assert_eq!(monitor.observe(sample.clone()), None);
+        }
+    }
+
+    #[test]
+    fn screen_delivery_decay_requires_generation_bound_producer_corroboration() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut screen = 60_u64;
+        let mut callbacks = 60_u64;
+        let mut publications = 60_u64;
+
+        let screen_sample = |screen_fresh_serves, capture_callbacks, frame_store_publications| {
+            let mut sample = healthy_sample(0, screen_fresh_serves);
+            sample.camera_present = false;
+            sample.camera_target_fps = None;
+            sample.camera_producer = None;
+            sample.screen_target_fps = Some(30.0);
+            sample.screen_producer = Some(CaptureHealthScreenProducerSample {
+                epoch: CaptureHealthScreenEpoch {
+                    source_key: SourceKey::screen("screen:test"),
+                    generation: 7,
+                },
+                callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+                capture_callbacks,
+                frame_store_publications,
+            });
+            sample
+        };
+
+        assert_eq!(
+            monitor.observe(screen_sample(screen, callbacks, publications)),
+            None
+        );
+        let mut transition = None;
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            screen += 4;
+            callbacks += 4;
+            publications += 4;
+            transition = monitor.observe(screen_sample(screen, callbacks, publications));
+        }
+
+        assert!(matches!(
+            transition,
+            Some(CaptureHealthTransition::Degraded {
+                stage: CaptureStage::ScreenDelivery,
+                screen_epoch: Some(CaptureHealthScreenEpoch { generation: 7, .. }),
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn damage_driven_screen_cadence_never_arms_screen_delivery_recovery() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut counter = 60_u64;
+        let sample = |counter| {
+            let mut sample = healthy_sample(0, counter);
+            sample.camera_present = false;
+            sample.camera_target_fps = None;
+            sample.camera_producer = None;
+            sample.screen_target_fps = Some(30.0);
+            sample.screen_producer = Some(CaptureHealthScreenProducerSample {
+                epoch: CaptureHealthScreenEpoch {
+                    source_key: SourceKey::screen("screen:dxgi:00000000000003f1:0"),
+                    generation: 9,
+                },
+                callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
+                capture_callbacks: counter,
+                frame_store_publications: counter,
+            });
+            sample
+        };
+
+        assert_eq!(monitor.observe(sample(counter)), None);
+        for _ in 0..=DEGRADED_WINDOW_THRESHOLD {
+            counter += 4;
+            assert_eq!(monitor.observe(sample(counter)), None);
+            assert_eq!(monitor.degraded_stage(), None);
         }
     }
 
@@ -537,6 +954,467 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn render_collapse_is_not_masked_by_consumer_starvation_advisory() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut consumer = 0_u64;
+        let mut producer = 0_u64;
+        let mut transition = None;
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            consumer += 4;
+            producer += 60;
+            let mut sample = healthy_sample(consumer, 0);
+            sample.render_fps = 6.0;
+            let evidence = sample.camera_producer.as_mut().unwrap();
+            evidence.capture_callbacks = producer;
+            evidence.frame_store_publications = producer;
+            transition = monitor.observe(sample);
+        }
+        assert!(matches!(
+            transition,
+            Some(CaptureHealthTransition::Degraded {
+                stage: CaptureStage::CompositorRender,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn consumer_starvation_advisory_does_not_block_compositor_recovery() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut consumer = 60_u64;
+        let mut producer = 60_u64;
+        monitor.observe(healthy_sample(consumer, 0));
+
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            consumer += 60;
+            producer += 60;
+            let mut sample = healthy_sample(consumer, 0);
+            sample.render_fps = 6.0;
+            let evidence = sample.camera_producer.as_mut().unwrap();
+            evidence.capture_callbacks = producer;
+            evidence.frame_store_publications = producer;
+            monitor.observe(sample);
+        }
+        assert_eq!(
+            monitor.degraded_stage(),
+            Some(CaptureStage::CompositorRender)
+        );
+
+        let mut advisory_count = 0;
+        let mut recovered = None;
+        for _ in 0..RECOVERED_WINDOW_THRESHOLD {
+            consumer += 4;
+            producer += 60;
+            let mut sample = healthy_sample(consumer, 0);
+            let evidence = sample.camera_producer.as_mut().unwrap();
+            evidence.capture_callbacks = producer;
+            evidence.frame_store_publications = producer;
+            match monitor.observe(sample) {
+                Some(CaptureHealthTransition::Advisory { .. }) => advisory_count += 1,
+                transition @ Some(CaptureHealthTransition::Recovered { .. }) => {
+                    recovered = transition
+                }
+                None => {}
+                other => panic!("unexpected recovery-window transition: {other:?}"),
+            }
+        }
+
+        assert_eq!(advisory_count, 1);
+        assert!(matches!(
+            recovered,
+            Some(CaptureHealthTransition::Recovered {
+                stage: CaptureStage::CompositorRender,
+                camera_epoch: None,
+                ..
+            })
+        ));
+        assert_eq!(monitor.degraded_stage(), None);
+    }
+
+    #[test]
+    fn healthy_30fps_camera_under_60fps_compositor_is_not_degraded() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut camera = 0_u64;
+        for _ in 0..8 {
+            camera += 60;
+            let mut sample = healthy_sample(camera, 0);
+            sample.target_fps = 60.0;
+            sample.render_fps = 60.0;
+            sample.camera_target_fps = Some(30.0);
+            assert_eq!(monitor.observe(sample), None);
+        }
+        assert_eq!(monitor.degraded_stage(), None);
+    }
+
+    #[test]
+    fn producer_floor_uses_60fps_camera_cadence_under_30fps_compositor() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut consumer = 20_u64;
+        let mut producer = 40_u64;
+        let mut baseline = healthy_sample(consumer, 0);
+        baseline.camera_target_fps = Some(60.0);
+        let evidence = baseline.camera_producer.as_mut().unwrap();
+        evidence.capture_callbacks = producer;
+        evidence.frame_store_publications = producer;
+        assert_eq!(monitor.observe(baseline), None);
+
+        let mut transition = None;
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            // Consumer delivery is 10fps (below the compositor-visible 18fps
+            // floor) and the native producer is 20fps (below the camera's
+            // negotiated 36fps floor, but above the old incorrect 18fps one).
+            consumer += 20;
+            producer += 40;
+            let mut sample = healthy_sample(consumer, 0);
+            sample.camera_target_fps = Some(60.0);
+            let evidence = sample.camera_producer.as_mut().unwrap();
+            evidence.capture_callbacks = producer;
+            evidence.frame_store_publications = producer;
+            transition = monitor.observe(sample);
+        }
+
+        assert!(matches!(
+            transition,
+            Some(CaptureHealthTransition::Degraded {
+                stage: CaptureStage::CameraDelivery,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn camera_generation_change_discards_partial_and_declared_camera_state() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut old_counter = 60_u64;
+        monitor.observe(healthy_sample(old_counter, 0));
+        for _ in 0..(DEGRADED_WINDOW_THRESHOLD - 1) {
+            old_counter += 5;
+            assert_eq!(monitor.observe(healthy_sample(old_counter, 0)), None);
+        }
+        assert_eq!(monitor.pending_stage, Some(CaptureStage::CameraDelivery));
+        assert_eq!(monitor.degraded_streak, DEGRADED_WINDOW_THRESHOLD - 1);
+
+        let mut replacement = healthy_sample(5, 0);
+        let replacement_epoch = CaptureHealthCameraEpoch {
+            source_key: SourceKey::camera("camera:test"),
+            generation: 2,
+        };
+        let evidence = replacement.camera_producer.as_mut().unwrap();
+        evidence.epoch = replacement_epoch.clone();
+        evidence.capture_callbacks = 5;
+        evidence.frame_store_publications = 5;
+        assert_eq!(monitor.observe(replacement), None);
+        assert_eq!(monitor.pending_stage, None);
+        assert_eq!(monitor.degraded_streak, 0);
+        assert_eq!(monitor.healthy_streak, 0);
+
+        // Two degraded windows on generation N plus one on N+1 must not
+        // satisfy the three-window threshold for the replacement source.
+        let mut first_new_degraded = healthy_sample(10, 0);
+        let evidence = first_new_degraded.camera_producer.as_mut().unwrap();
+        evidence.epoch = replacement_epoch.clone();
+        evidence.capture_callbacks = 10;
+        evidence.frame_store_publications = 10;
+        assert_eq!(monitor.observe(first_new_degraded), None);
+        assert_eq!(monitor.degraded_streak, 1);
+        assert_eq!(monitor.degraded_stage(), None);
+
+        // A declared old-generation camera incident is also generation-bound,
+        // while an active compositor-render incident is covered separately.
+        let mut declared = CaptureHealthMonitor::new();
+        let mut counter = 60_u64;
+        declared.observe(healthy_sample(counter, 0));
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            counter += 5;
+            declared.observe(healthy_sample(counter, 0));
+        }
+        assert_eq!(
+            declared.degraded_stage(),
+            Some(CaptureStage::CameraDelivery)
+        );
+        let mut next_generation = healthy_sample(5, 0);
+        let evidence = next_generation.camera_producer.as_mut().unwrap();
+        evidence.epoch = replacement_epoch;
+        evidence.capture_callbacks = 5;
+        evidence.frame_store_publications = 5;
+        assert_eq!(declared.observe(next_generation), None);
+        assert_eq!(declared.degraded_stage(), None);
+    }
+
+    #[test]
+    fn camera_generation_rearm_allows_a_second_degradation_incident() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut camera = 60_u64;
+        monitor.observe(healthy_sample(camera, 0));
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            camera += 5;
+            monitor.observe(healthy_sample(camera, 0));
+        }
+        assert_eq!(monitor.degraded_stage(), Some(CaptureStage::CameraDelivery));
+
+        monitor.rearm_camera_source_epoch();
+        assert_eq!(monitor.degraded_stage(), None);
+
+        // The replacement generation resets its cumulative fetch counter. Its
+        // first window establishes a baseline; sustained decay then produces a
+        // new edge without waiting for the old generation to recover.
+        camera = 5;
+        assert_eq!(monitor.observe(healthy_sample(camera, 0)), None);
+        let mut transition = None;
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            camera += 5;
+            transition = monitor.observe(healthy_sample(camera, 0));
+        }
+        assert!(matches!(
+            transition,
+            Some(CaptureHealthTransition::Degraded {
+                stage: CaptureStage::CameraDelivery,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn same_generation_explicit_mutation_rearm_allows_persistent_decay_to_emit_again() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut camera = 60_u64;
+        monitor.observe(healthy_sample(camera, 0));
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            camera += 5;
+            monitor.observe(healthy_sample(camera, 0));
+        }
+        assert_eq!(monitor.degraded_stage(), Some(CaptureStage::CameraDelivery));
+
+        monitor.rearm_camera_source_epoch();
+        assert_eq!(monitor.degraded_stage(), None);
+
+        // The explicit mutation may reuse the same native generation and its
+        // cumulative counters. Rearming must still establish a new baseline
+        // and allow persistent post-boundary decay to declare a new incident.
+        camera += 5;
+        assert_eq!(monitor.observe(healthy_sample(camera, 0)), None);
+        let mut transition = None;
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            camera += 5;
+            transition = monitor.observe(healthy_sample(camera, 0));
+        }
+        assert!(matches!(
+            transition,
+            Some(CaptureHealthTransition::Degraded {
+                stage: CaptureStage::CameraDelivery,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn camera_generation_rearm_does_not_clear_compositor_render_incident() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut camera = 60_u64;
+        monitor.observe(healthy_sample(camera, 0));
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            camera += 60;
+            let mut sample = healthy_sample(camera, 0);
+            sample.render_fps = 6.0;
+            monitor.observe(sample);
+        }
+        assert_eq!(
+            monitor.degraded_stage(),
+            Some(CaptureStage::CompositorRender)
+        );
+
+        monitor.rearm_camera_source_epoch();
+
+        assert_eq!(
+            monitor.degraded_stage(),
+            Some(CaptureStage::CompositorRender)
+        );
+    }
+
+    #[test]
+    fn camera_generation_change_preserves_compositor_render_streaks() {
+        let replacement_epoch = CaptureHealthCameraEpoch {
+            source_key: SourceKey::camera("camera:test"),
+            generation: 2,
+        };
+
+        let mut pending = CaptureHealthMonitor::new();
+        let mut camera = 60_u64;
+        pending.observe(healthy_sample(camera, 0));
+        for _ in 0..(DEGRADED_WINDOW_THRESHOLD - 1) {
+            camera += 60;
+            let mut sample = healthy_sample(camera, 0);
+            sample.render_fps = 6.0;
+            assert_eq!(pending.observe(sample), None);
+        }
+        assert_eq!(pending.pending_stage, Some(CaptureStage::CompositorRender));
+        assert_eq!(pending.degraded_streak, DEGRADED_WINDOW_THRESHOLD - 1);
+
+        camera += 60;
+        let mut replacement = healthy_sample(camera, 0);
+        replacement.render_fps = 6.0;
+        replacement.camera_producer.as_mut().unwrap().epoch = replacement_epoch.clone();
+        assert!(matches!(
+            pending.observe(replacement),
+            Some(CaptureHealthTransition::Degraded {
+                stage: CaptureStage::CompositorRender,
+                ..
+            })
+        ));
+
+        let mut recovering = pending;
+        let mut recovered = None;
+        for window in 1..=RECOVERED_WINDOW_THRESHOLD {
+            camera += 60;
+            let mut sample = healthy_sample(camera, 0);
+            sample.camera_producer.as_mut().unwrap().epoch = replacement_epoch.clone();
+            if window == RECOVERED_WINDOW_THRESHOLD {
+                // A camera-only generation edge cannot restart the render
+                // recovery streak accumulated by the preceding windows.
+                sample.camera_producer.as_mut().unwrap().epoch.generation = 3;
+            }
+            recovered = recovering.observe(sample);
+        }
+        assert!(matches!(
+            recovered,
+            Some(CaptureHealthTransition::Recovered {
+                stage: CaptureStage::CompositorRender,
+                camera_epoch: None,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn camera_without_a_credible_target_is_advisory_only() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut camera = 0_u64;
+        for _ in 0..8 {
+            camera += 2;
+            let mut sample = healthy_sample(camera, 0);
+            sample.camera_target_fps = None;
+            assert_eq!(monitor.observe(sample), None);
+        }
+        assert_eq!(monitor.degraded_stage(), None);
+    }
+
+    #[test]
+    fn healthy_generation_bound_producer_does_not_restart_for_consumer_starvation() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut fresh_serves = 0_u64;
+        let mut producer = 0_u64;
+        let mut advisory_count = 0;
+
+        for _ in 0..6 {
+            // The compositor keeps re-serving a held frame at ~2fps while the
+            // exact camera generation continues callbacks/publications at
+            // 30fps. This is consumer contention, not a sick capture source.
+            fresh_serves += 4;
+            producer += 60;
+            let mut sample = healthy_sample(fresh_serves, 0);
+            let evidence = sample.camera_producer.as_mut().unwrap();
+            evidence.capture_callbacks = producer;
+            evidence.frame_store_publications = producer;
+            match monitor.observe(sample) {
+                Some(CaptureHealthTransition::Advisory { detail }) => {
+                    advisory_count += 1;
+                    assert!(detail.contains("no source restart was admitted"));
+                }
+                None => {}
+                other => panic!("consumer starvation must stay advisory, got {other:?}"),
+            }
+        }
+
+        assert_eq!(advisory_count, 1, "the diagnostic edge must not spam");
+        assert_eq!(monitor.degraded_stage(), None);
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn armed_producer_stall_uses_three_real_windows_and_exact_generation() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let sample = healthy_sample(120, 0);
+        let producer = sample.camera_producer.clone().unwrap();
+        monitor.arm_camera_producer_stall(
+            producer.epoch.clone(),
+            sample.camera_fresh_serves,
+            producer.capture_callbacks,
+            producer.frame_store_publications,
+        );
+
+        for window in 1..=DEGRADED_WINDOW_THRESHOLD {
+            let transition = monitor.observe(sample.clone());
+            if window < DEGRADED_WINDOW_THRESHOLD {
+                assert_eq!(transition, None, "window {window} must not fire early");
+            } else {
+                assert!(matches!(
+                    transition,
+                    Some(CaptureHealthTransition::Degraded {
+                        stage: CaptureStage::CameraDelivery,
+                        camera_epoch: Some(ref epoch),
+                        ..
+                    }) if epoch == &producer.epoch
+                ));
+            }
+        }
+        assert_eq!(
+            f64::from(DEGRADED_WINDOW_THRESHOLD) * sample.window_secs,
+            6.0,
+            "maintained smoke must exercise the <=6s detector contract"
+        );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn armed_screen_producer_stall_uses_three_real_windows_and_exact_generation() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let epoch = CaptureHealthScreenEpoch {
+            source_key: SourceKey::screen("screen:screencapturekit:test"),
+            generation: 7,
+        };
+        let sample = CaptureHealthSample {
+            target_fps: 30.0,
+            render_fps: 30.0,
+            camera_present: false,
+            camera_target_fps: None,
+            camera_fresh_serves: 0,
+            camera_producer: None,
+            screen_present: true,
+            screen_target_fps: Some(30.0),
+            screen_fresh_serves: 120,
+            screen_producer: Some(CaptureHealthScreenProducerSample {
+                epoch: epoch.clone(),
+                callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+                capture_callbacks: 120,
+                frame_store_publications: 120,
+            }),
+            window_secs: 2.0,
+        };
+        monitor.arm_screen_producer_stall(epoch.clone(), 120, 120, 120);
+
+        for window in 1..=DEGRADED_WINDOW_THRESHOLD {
+            let transition = monitor.observe(sample.clone());
+            if window < DEGRADED_WINDOW_THRESHOLD {
+                assert_eq!(transition, None, "window {window} must not fire early");
+            } else {
+                assert!(matches!(
+                    transition,
+                    Some(CaptureHealthTransition::Degraded {
+                        stage: CaptureStage::ScreenDelivery,
+                        screen_epoch: Some(ref observed_epoch),
+                        ..
+                    }) if observed_epoch == &epoch
+                ));
+            }
+        }
+        assert_eq!(
+            f64::from(DEGRADED_WINDOW_THRESHOLD) * sample.window_secs,
+            6.0,
+            "maintained screen smoke must exercise the <=6s detector contract"
+        );
     }
 
     /// A cumulative counter that moves backward (compositor swap) re-arms the
@@ -565,5 +1443,82 @@ mod tests {
         let mut sample = healthy_sample(0, 0);
         sample.window_secs = 0.0;
         assert_eq!(monitor.observe(sample), None);
+    }
+
+    #[test]
+    fn non_finite_target_or_window_is_ignored_without_mutating_state() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut counter = 60_u64;
+        monitor.observe(healthy_sample(counter, 0));
+        for _ in 0..(DEGRADED_WINDOW_THRESHOLD - 1) {
+            counter += 5;
+            assert_eq!(monitor.observe(healthy_sample(counter, 0)), None);
+        }
+        let before = (
+            (
+                monitor.last_camera_fresh,
+                monitor.last_camera_callbacks,
+                monitor.last_camera_publications,
+                monitor.camera_epoch.clone(),
+            ),
+            (
+                monitor.last_screen_fresh,
+                monitor.last_screen_callbacks,
+                monitor.last_screen_publications,
+                monitor.screen_epoch.clone(),
+            ),
+            (
+                monitor.degraded_streak,
+                monitor.healthy_streak,
+                monitor.current,
+                monitor.pending_stage,
+            ),
+            monitor.consumer_starvation_advisory_active,
+        );
+
+        for (target_fps, window_secs) in [
+            (f64::NAN, 2.0),
+            (f64::INFINITY, 2.0),
+            (30.0, f64::NAN),
+            (30.0, f64::INFINITY),
+        ] {
+            let mut invalid = healthy_sample(10_000, 10_000);
+            invalid.target_fps = target_fps;
+            invalid.window_secs = window_secs;
+            invalid.camera_producer.as_mut().unwrap().epoch.generation = 99;
+            assert_eq!(monitor.observe(invalid), None);
+        }
+
+        let after = (
+            (
+                monitor.last_camera_fresh,
+                monitor.last_camera_callbacks,
+                monitor.last_camera_publications,
+                monitor.camera_epoch.clone(),
+            ),
+            (
+                monitor.last_screen_fresh,
+                monitor.last_screen_callbacks,
+                monitor.last_screen_publications,
+                monitor.screen_epoch.clone(),
+            ),
+            (
+                monitor.degraded_streak,
+                monitor.healthy_streak,
+                monitor.current,
+                monitor.pending_stage,
+            ),
+            monitor.consumer_starvation_advisory_active,
+        );
+        assert_eq!(after, before);
+
+        counter += 5;
+        assert!(matches!(
+            monitor.observe(healthy_sample(counter, 0)),
+            Some(CaptureHealthTransition::Degraded {
+                stage: CaptureStage::CameraDelivery,
+                ..
+            })
+        ));
     }
 }

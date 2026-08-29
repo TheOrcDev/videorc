@@ -1547,6 +1547,80 @@ pub struct PreviewSourceSurfaceBackingStats {
     pub oldest_age_ms: Option<u64>,
 }
 
+/// Authoritative lifecycle for one capture-recovery incident. `Failed` is a
+/// latched terminal state: the backend never loops automatic restarts, and a
+/// new attempt requires the explicit `capture.recovery.retry` command.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryPhase {
+    #[default]
+    Idle,
+    Degraded,
+    Restarting,
+    Verifying,
+    Recovered,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryStage {
+    CameraDelivery,
+    ScreenDelivery,
+    CompositorRender,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoverySource {
+    Camera,
+    Screen,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryTrigger {
+    Automatic,
+    Manual,
+}
+
+/// Renderer-safe capture-recovery truth. Optional values are omitted, never
+/// serialized as `null`, so a healthy/idle backend remains compatible with
+/// strict optional schemas.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureRecoveryStatus {
+    /// Monotonic process-local publication revision. Consumers must ignore a
+    /// status whose revision is older than the newest revision they have
+    /// already accepted.
+    pub revision: u64,
+    pub phase: CaptureRecoveryPhase,
+    pub retryable: bool,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<CaptureRecoveryStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CaptureRecoverySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<CaptureRecoveryTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "optional_duration_ms_is_unavailable")]
+    pub last_duration_ms: Option<f64>,
+}
+
+fn optional_duration_ms_is_unavailable(value: &Option<f64>) -> bool {
+    value.is_none_or(|value| !value.is_finite() || value < 0.0)
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct EncoderBridgeRoleOutputPressureStats {
     pub output_queue_high_water_frames: u64,
@@ -2043,6 +2117,35 @@ pub struct DiagnosticStats {
     /// Completed-command boundaries that flushed the CoreVideo Metal texture cache.
     #[serde(default)]
     pub compositor_source_texture_cache_flushes: u64,
+    /// Cached capture-source CVMetalTexture/IOSurface imports currently retained.
+    /// Absent off macOS, where the Metal ownership path does not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_ceiling: Option<u64>,
+    /// IOSurface-backed Metal compositor target-ring slots retained process-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_ceiling: Option<u64>,
+    /// Encoder completion guards still retaining an IOSurface target frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_ceiling: Option<u64>,
+    /// Native presenter cache lifetime accounting reported by Electron main.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
     /// Cumulative live-source zero-copy import attempts that fell back to byte upload.
     #[serde(default)]
     pub compositor_source_import_failures: u64,
@@ -2158,6 +2261,19 @@ pub struct DiagnosticStats {
     /// defect class of 0.9.68 and 0.9.79 ([[videorc-serde-null-contract-trap]]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capture_pipeline_degraded_stage: Option<String>,
+    /// Recovery fields are absent while idle. This is intentionally separate
+    /// from `capturePipelineDegradedStage`: health detects the fault, while
+    /// recovery owns restart/verification authority and its failure latch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_phase: Option<CaptureRecoveryPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_source: Option<CaptureRecoverySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "optional_duration_ms_is_unavailable")]
+    pub capture_recovery_last_duration_ms: Option<f64>,
     pub preview_repeated_frames: u64,
     pub preview_surface_resize_count: u64,
     pub preview_latency_ms: Option<u64>,
@@ -2594,6 +2710,12 @@ pub struct PreviewSurfacePresentParams {
     pub native_preview_main_last_skipped_scene_revision: Option<u64>,
     #[serde(default)]
     pub native_preview_main_last_skipped_frame_scene_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
@@ -2687,6 +2809,12 @@ pub struct PreviewSurfaceStatus {
     pub native_preview_main_last_skipped_scene_revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_preview_main_last_skipped_frame_scene_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
     #[serde(default)]
     pub frame_polling_suppressed: bool,
     #[serde(default)]
@@ -4043,6 +4171,79 @@ impl ServerEvent {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn capture_recovery_status_omits_unavailable_and_non_finite_fields() {
+        let status = super::CaptureRecoveryStatus {
+            revision: 7,
+            phase: super::CaptureRecoveryPhase::Idle,
+            retryable: false,
+            attempts: 0,
+            stage: None,
+            source: None,
+            trigger: None,
+            source_generation: None,
+            detected_at: None,
+            updated_at: None,
+            message: None,
+            last_error: None,
+            last_duration_ms: Some(f64::NAN),
+        };
+        let wire = serde_json::to_value(status).expect("recovery status serializes");
+        assert_eq!(wire["revision"], 7);
+        assert_eq!(wire["phase"], "idle");
+        assert_eq!(wire["retryable"], false);
+        assert_eq!(wire["attempts"], 0);
+        for field in [
+            "stage",
+            "source",
+            "trigger",
+            "sourceGeneration",
+            "detectedAt",
+            "updatedAt",
+            "message",
+            "lastError",
+            "lastDurationMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unavailable recovery field {field} must be omitted"
+            );
+        }
+
+        let missing_revision = serde_json::json!({
+            "phase": "idle",
+            "retryable": false,
+            "attempts": 0
+        });
+        assert!(
+            serde_json::from_value::<super::CaptureRecoveryStatus>(missing_revision).is_err(),
+            "strict recovery consumers need an explicit ordering revision"
+        );
+    }
+
+    #[test]
+    fn screen_capture_recovery_scope_has_stable_wire_labels() {
+        let status = super::CaptureRecoveryStatus {
+            revision: 8,
+            phase: super::CaptureRecoveryPhase::Verifying,
+            retryable: false,
+            attempts: 1,
+            stage: Some(super::CaptureRecoveryStage::ScreenDelivery),
+            source: Some(super::CaptureRecoverySource::Screen),
+            trigger: Some(super::CaptureRecoveryTrigger::Automatic),
+            source_generation: Some(12),
+            detected_at: None,
+            updated_at: None,
+            message: Some("Verifying replacement screen generation.".to_string()),
+            last_error: None,
+            last_duration_ms: None,
+        };
+        let wire = serde_json::to_value(status).expect("screen recovery status serializes");
+        assert_eq!(wire["stage"], "screen-delivery");
+        assert_eq!(wire["source"], "screen");
+        assert_eq!(wire["sourceGeneration"], 12);
+    }
+
+    #[test]
     fn mf_input_credit_wait_p95_is_absent_when_none() {
         // 0.9.68 regression: serde emitted `"encoderBridgeMfInputCreditWaitP95Ms": null`
         // and the renderer contract (optional finite number) rejected every
@@ -4835,6 +5036,18 @@ mod tests {
             "previewCameraCapturePixelFormat",
             "previewScreenCaptureCallbackAgeMs",
             "previewScreenLatestSequence",
+            "compositorMetalCachedCaptureSourceImportsLiveCount",
+            "compositorMetalCachedCaptureSourceImportsPeakCount",
+            "compositorMetalCachedCaptureSourceImportsCeiling",
+            "compositorMetalTargetRingSlotsLiveCount",
+            "compositorMetalTargetRingSlotsPeakCount",
+            "compositorMetalTargetRingSlotsCeiling",
+            "encoderBridgeMetalTargetRefsInFlightLiveCount",
+            "encoderBridgeMetalTargetRefsInFlightPeakCount",
+            "encoderBridgeMetalTargetRefsInFlightCeiling",
+            "nativePreviewIosurfaceImportLiveCount",
+            "nativePreviewIosurfaceImportPeakCount",
+            "nativePreviewIosurfaceImportCeiling",
         ] {
             assert!(
                 wire.get(field).is_none(),

@@ -39,6 +39,8 @@ import {
   normalizeVideoSettings,
   parseAudioSyncRecommendationJson,
   parseMicrophoneSyncOffsetInput,
+  preparedXCompletionTargets,
+  preparedYouTubeCompletionTargets,
   previewDeviceRefreshSignature,
   persistableCaptureConfig,
   reconcileSourceSelection,
@@ -1342,6 +1344,89 @@ describe('persistable capture settings', () => {
       microphoneMuted: true
     })
   })
+})
+
+describe('prepared YouTube completion targets', () => {
+  const streamingWithPreparedYouTube = (
+    status: 'ready' | 'connecting' | 'live' | 'warning' | 'failed' | 'stopped' | undefined,
+    enabled = true
+  ) => ({
+    ...defaultCaptureConfig.streaming,
+    targets: defaultCaptureConfig.streaming.targets.map((target) =>
+      target.platform === 'youtube'
+        ? {
+            ...target,
+            enabled,
+            authMode: 'oauth' as const,
+            platformBroadcastId: 'broadcast-1',
+            platformStreamId: 'stream-1',
+            ...(status ? { status: { state: status } } : { status: undefined })
+          }
+        : target
+    )
+  })
+
+  it.each(['ready', 'connecting', 'live', 'warning', 'failed', undefined] as const)(
+    'includes a prepared broadcast in %s state',
+    (status) => {
+      expect(preparedYouTubeCompletionTargets(streamingWithPreparedYouTube(status))).toHaveLength(1)
+    }
+  )
+
+  it('includes disabled prepared broadcasts but excludes already stopped broadcasts', () => {
+    expect(
+      preparedYouTubeCompletionTargets(streamingWithPreparedYouTube('connecting', false))
+    ).toHaveLength(1)
+    expect(
+      preparedYouTubeCompletionTargets(streamingWithPreparedYouTube('stopped', false))
+    ).toHaveLength(0)
+  })
+})
+
+describe('prepared X completion targets', () => {
+  const streamingWithPreparedX = (
+    state: 'ready' | 'connecting' | 'live' | 'warning',
+    options: { enabled?: boolean; redactedUrl?: string } = {}
+  ) => ({
+    ...defaultCaptureConfig.streaming,
+    targets: defaultCaptureConfig.streaming.targets.map((target) =>
+      target.platform === 'x'
+        ? {
+            ...target,
+            enabled: options.enabled ?? true,
+            authMode: 'oauth' as const,
+            platformBroadcastId: 'x-identifier-1',
+            platformStreamId: 'x-media-key-1',
+            status: {
+              state,
+              ...(options.redactedUrl ? { redactedUrl: options.redactedUrl } : {})
+            }
+          }
+        : target
+    )
+  })
+
+  it('includes live X broadcasts even after the destination is disabled', () => {
+    expect(
+      preparedXCompletionTargets(streamingWithPreparedX('live', { enabled: false }))
+    ).toHaveLength(1)
+  })
+
+  it('keeps legacy published-warning cleanup when a share URL proves publish returned', () => {
+    expect(
+      preparedXCompletionTargets(
+        streamingWithPreparedX('warning', { redactedUrl: 'https://x.com/i/broadcasts/actual' })
+      )
+    ).toHaveLength(1)
+    expect(preparedXCompletionTargets(streamingWithPreparedX('warning'))).toHaveLength(0)
+  })
+
+  it.each(['ready', 'connecting'] as const)(
+    'does not mistake a prepared %s region identifier for a broadcast ID',
+    (state) => {
+      expect(preparedXCompletionTargets(streamingWithPreparedX(state))).toHaveLength(0)
+    }
+  )
 })
 
 describe('legacy stream key migration', () => {

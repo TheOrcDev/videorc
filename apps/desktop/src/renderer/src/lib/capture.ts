@@ -1842,11 +1842,10 @@ export function preparedYouTubeCompletionTargets(
 ): StreamTargetSettings[] {
   return streaming.targets.filter(
     (target) =>
-      target.enabled &&
       target.authMode === 'oauth' &&
       target.platform === 'youtube' &&
       isPlatformOAuthAvailable(target.platform) &&
-      target.status?.state === 'live' &&
+      target.status?.state !== 'stopped' &&
       Boolean(target.platformBroadcastId)
   )
 }
@@ -1866,10 +1865,10 @@ export function preparedXActivationTargets(streaming: StreamingSettings): Stream
 export function preparedXCompletionTargets(streaming: StreamingSettings): StreamTargetSettings[] {
   return streaming.targets.filter(
     (target) =>
-      target.enabled &&
       target.authMode === 'oauth' &&
       target.platform === 'x' &&
-      target.status?.state === 'live' &&
+      (target.status?.state === 'live' ||
+        (target.status?.state === 'warning' && Boolean(target.status.redactedUrl))) &&
       Boolean(target.platformBroadcastId)
   )
 }

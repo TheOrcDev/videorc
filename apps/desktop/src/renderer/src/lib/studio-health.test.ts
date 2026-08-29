@@ -33,6 +33,138 @@ describe('studioHealth', () => {
     expect(studioHealth(stats(), false)).toMatchObject({ tone: 'good', value: 'Ready' })
   })
 
+  it.each(['degraded', 'restarting', 'verifying'] as const)(
+    'shows a stable repairing chip during %s recovery',
+    (captureRecoveryPhase) => {
+      expect(studioHealth(stats({ captureRecoveryPhase }), true)).toMatchObject({
+        tone: 'warn',
+        value: 'Repairing capture'
+      })
+    }
+  )
+
+  it('latches a failed recovery as Capture stalled with the backend reason', () => {
+    expect(
+      studioHealth(
+        stats({
+          captureRecoveryPhase: 'failed',
+          captureRecoveryLastError: 'Camera cadence stayed below 18fps.'
+        }),
+        true
+      )
+    ).toEqual({
+      tone: 'error',
+      value: 'Capture stalled',
+      detail: 'Camera cadence stayed below 18fps.'
+    })
+  })
+
+  it('briefly confirms verified recovery before returning to ordinary health', () => {
+    expect(studioHealth(stats({ captureRecoveryPhase: 'recovered' }), true)).toMatchObject({
+      tone: 'good',
+      value: 'Capture recovered'
+    })
+  })
+
+  it('names screen capture while repairing and after verified recovery', () => {
+    expect(
+      studioHealth(
+        stats({
+          captureRecoveryPhase: 'verifying',
+          captureRecoveryStage: 'screen-delivery',
+          captureRecoverySource: 'screen'
+        }),
+        true
+      )
+    ).toEqual({
+      tone: 'warn',
+      value: 'Repairing capture',
+      detail: 'Screen capture restarted. Checking that live video is moving normally.'
+    })
+    expect(
+      studioHealth(
+        stats({
+          captureRecoveryPhase: 'recovered',
+          captureRecoveryStage: 'screen-delivery',
+          captureRecoverySource: 'screen'
+        }),
+        true
+      )
+    ).toEqual({
+      tone: 'good',
+      value: 'Capture recovered',
+      detail: 'Screen capture recovered without restarting your session.'
+    })
+  })
+
+  it('infers screen recovery from its stage when no source scope is available', () => {
+    expect(
+      studioHealth(
+        stats({
+          captureRecoveryPhase: 'failed',
+          captureRecoveryStage: 'screen-delivery'
+        }),
+        true
+      )
+    ).toEqual({
+      tone: 'error',
+      value: 'Capture stalled',
+      detail: 'Automatic capture repair did not restore the screen capture.'
+    })
+    expect(
+      studioHealth(
+        stats({
+          captureRecoveryPhase: 'verifying',
+          captureRecoveryStage: 'screen-delivery'
+        }),
+        true
+      )
+    ).toMatchObject({
+      detail: 'Screen capture restarted. Checking that live video is moving normally.'
+    })
+  })
+
+  it('uses generic copy when a recovery has neither source nor source stage', () => {
+    expect(studioHealth(stats({ captureRecoveryPhase: 'failed' }), true)).toMatchObject({
+      detail: 'Automatic capture repair did not restore the capture source.'
+    })
+  })
+
+  it('does not claim camera recovery after compositor-only recovery', () => {
+    expect(
+      studioHealth(
+        stats({ captureRecoveryPhase: 'recovered', captureRecoveryStage: 'compositor-render' }),
+        true
+      )
+    ).toEqual({
+      tone: 'good',
+      value: 'Video recovered',
+      detail: 'Video rendering recovered. Capture sources were left unchanged.'
+    })
+  })
+
+  it('keeps recovery state above unrelated preview fallback signals', () => {
+    expect(
+      studioHealth(
+        stats({
+          captureRecoveryPhase: 'restarting',
+          previewTransport: 'latest-jpeg-polling',
+          compositorBackend: 'cpu-fallback'
+        }),
+        true
+      )
+    ).toMatchObject({ tone: 'warn', value: 'Repairing capture' })
+  })
+
+  it('does not claim to restart a source for compositor-only degradation', () => {
+    expect(
+      studioHealth(
+        stats({ captureRecoveryPhase: 'degraded', captureRecoveryStage: 'compositor-render' }),
+        true
+      )
+    ).toMatchObject({ tone: 'warn', value: 'Capture degraded' })
+  })
+
   it('degrades to "Preview may not match recording" on CPU fallback', () => {
     const result = studioHealth(stats({ compositorBackend: 'cpu-fallback' }), false)
     expect(result.tone).toBe('error')

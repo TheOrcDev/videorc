@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 2,
+  "profile": "capture-decay-d3-evidence-v2",
+  "candidate": {
+    "sourceCommit": "REPLACE_WITH_40_CHARACTER_LOWERCASE_COMMIT",
+    "sourceTree": "REPLACE_WITH_FULL_GIT_TREE_OBJECT_ID",
+    "executableSha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "executableSizeBytes": 0,
+    "dmgSha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "dmgSizeBytes": 0,
+    "executableFilename": "Videorc",
+    "dmgFilename": "Videorc.dmg",
+    "appBundle": {
+      "profile": "capture-decay-app-bundle-v1",
+      "bundleFilename": "Videorc.app",
+      "executableRelativePath": "Contents/MacOS/Videorc",
+      "manifestSha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+      "entryCount": 0,
+      "regularFileCount": 0,
+      "totalRegularFileSizeBytes": 0
+    }
+  },
+  "sealedCandidate": {
+    "sealReceipt": {
+      "relativePath": "candidate-seal-receipt.json",
+      "sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+      "sizeBytes": 0
+    }
+  },
+  "attemptLedger": {
+    "schemaVersion": 2,
+    "profile": "capture-decay-attempt-ledger-manifest-v2",
+    "ceremonyId": "REPLACE_WITH_STABLE_CEREMONY_ID",
+    "candidateCanonicalSha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "hostId": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "sealedCandidateBindingSha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "ledgerDirectory": "attempt-ledger",
+    "entryCount": 8,
+    "headEntrySha256": "REPLACE_WITH_ENTRY_8_SHA256",
+    "entries": [
+      {
+        "sequence": 1,
+        "entryType": "start",
+        "attemptId": "REPLACE_WITH_SOAK_1_ATTEMPT_ID",
+        "relativePath": "attempt-ledger/entry-000001.json",
+        "sha256": "REPLACE_WITH_ENTRY_1_SHA256",
+        "sizeBytes": 0
+      },
+      {
+        "sequence": 2,
+        "entryType": "result",
+        "attemptId": "REPLACE_WITH_SOAK_1_ATTEMPT_ID",
+        "relativePath": "attempt-ledger/entry-000002.json",
+        "sha256": "REPLACE_WITH_ENTRY_2_SHA256",
+        "sizeBytes": 0
+      },
+      {
+        "sequence": 3,
+        "entryType": "start",
+        "attemptId": "REPLACE_WITH_SOAK_2_ATTEMPT_ID",
+        "relativePath": "attempt-ledger/entry-000003.json",
+        "sha256": "REPLACE_WITH_ENTRY_3_SHA256",
+        "sizeBytes": 0
+      },
+      {
+        "sequence": 4,
+        "entryType": "result",
+        "attemptId": "REPLACE_WITH_SOAK_2_ATTEMPT_ID",
+        "relativePath": "attempt-ledger/entry-000004.json",
+        "sha256": "REPLACE_WITH_ENTRY_4_SHA256",
+        "sizeBytes": 0
+      },
+      {
+        "sequence": 5,
+        "entryType": "start",
+        "attemptId": "REPLACE_WITH_SOAK_3_ATTEMPT_ID",
+        "relativePath": "attempt-ledger/entry-000005.json",
+        "sha256": "REPLACE_WITH_ENTRY_5_SHA256",
+        "sizeBytes": 0
+      },
+      {
+        "sequence": 6,
+        "entryType": "result",
+        "attemptId": "REPLACE_WITH_SOAK_3_ATTEMPT_ID",
+        "relativePath": "attempt-ledger/entry-000006.json",
+        "sha256": "REPLACE_WITH_ENTRY_6_SHA256",
+        "sizeBytes": 0
+      },
+      {
+        "sequence": 7,
+        "entryType": "start",
+        "attemptId": "REPLACE_WITH_RECOVERY_ATTEMPT_ID",
+        "relativePath": "attempt-ledger/entry-000007.json",
+        "sha256": "REPLACE_WITH_ENTRY_7_SHA256",
+        "sizeBytes": 0
+      },
+      {
+        "sequence": 8,
+        "entryType": "result",
+        "attemptId": "REPLACE_WITH_RECOVERY_ATTEMPT_ID",
+        "relativePath": "attempt-ledger/entry-000008.json",
+        "sha256": "REPLACE_WITH_ENTRY_8_SHA256",
+        "sizeBytes": 0
+      }
+    ]
+  },
+  "soaks": [
+    {
+      "attestation": "run-1/capture-decay-real-release-attestation.json",
+      "sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+      "sizeBytes": 0
+    },
+    {
+      "attestation": "run-2/capture-decay-real-release-attestation.json",
+      "sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+      "sizeBytes": 0
+    },
+    {
+      "attestation": "run-3/capture-decay-real-release-attestation.json",
+      "sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+      "sizeBytes": 0
+    }
+  ],
+  "recovery": {
+    "attestation": "run-4/capture-decay-real-release-attestation.json",
+    "sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "sizeBytes": 0
+  }
+}

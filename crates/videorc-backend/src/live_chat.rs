@@ -636,6 +636,9 @@ pub struct LiveChatCoordinator {
     /// Monotonic lifecycle ticket. Provider deliveries capture it before
     /// persistence and must still own it before emitting into the renderer.
     generation: u64,
+    /// Connector ownership ticket. Unlike `generation`, this remains stable
+    /// when only the local transcript view is cleared.
+    session_generation: u64,
     providers: Vec<LiveChatProviderState>,
     messages: VecDeque<LiveChatMessage>,
     /// Ids currently in `messages` — the de-duplication set, kept in lock-step with the
@@ -656,6 +659,17 @@ pub struct LiveChatCoordinator {
     /// removed after terminal persistence; SQLite remains the durable idempotency
     /// authority afterward.
     send_operations_in_flight: HashMap<String, InFlightSendOperation>,
+}
+
+/// Minimal authoritative answer needed at the comment-card commit edge. Do
+/// not clone the full 5,000-row chat snapshot (or even one rich message) while
+/// the bounded highlight fence is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HighlightMessageEligibility {
+    Eligible,
+    WrongSession,
+    Missing,
+    Ineligible,
 }
 
 struct ReversibleIngest {
@@ -710,6 +724,7 @@ impl LiveChatCoordinator {
         Self {
             session_id: None,
             generation: 0,
+            session_generation: 0,
             providers: Vec::new(),
             messages: VecDeque::new(),
             seen: HashSet::new(),
@@ -731,6 +746,37 @@ impl LiveChatCoordinator {
 
     pub fn sender(&self, destination_id: &str) -> Option<ChatSenderConfig> {
         self.senders.get(destination_id).cloned()
+    }
+
+    pub(crate) fn highlight_message_eligibility(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> HighlightMessageEligibility {
+        if self.session_id.as_deref() != Some(session_id) {
+            return HighlightMessageEligibility::WrongSession;
+        }
+        let Some(message) = self
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+        else {
+            return HighlightMessageEligibility::Missing;
+        };
+        if message.session_id != session_id {
+            return HighlightMessageEligibility::WrongSession;
+        }
+        if message.is_deleted
+            || matches!(
+                message.event_type,
+                LiveChatEventType::Deleted
+                    | LiveChatEventType::System
+                    | LiveChatEventType::Moderation
+            )
+        {
+            return HighlightMessageEligibility::Ineligible;
+        }
+        HighlightMessageEligibility::Eligible
     }
 
     #[allow(dead_code)]
@@ -772,6 +818,10 @@ impl LiveChatCoordinator {
         self.session_id.as_deref()
     }
 
+    pub(crate) fn session_generation(&self) -> u64 {
+        self.session_generation
+    }
+
     pub fn has_session_view(&self) -> bool {
         self.session_id.is_some() || !self.messages.is_empty() || !self.providers.is_empty()
     }
@@ -781,6 +831,7 @@ impl LiveChatCoordinator {
     pub fn start_session(&mut self, session_id: String, providers: Vec<LiveChatProviderState>) {
         self.abort_tasks();
         self.generation = self.generation.wrapping_add(1);
+        self.session_generation = self.session_generation.wrapping_add(1);
         self.session_id = Some(session_id);
         self.providers = providers;
         self.messages.clear();
@@ -798,6 +849,7 @@ impl LiveChatCoordinator {
     pub fn stop_session(&mut self) {
         self.abort_tasks();
         self.generation = self.generation.wrapping_add(1);
+        self.session_generation = self.session_generation.wrapping_add(1);
         for provider in &mut self.providers {
             if provider.state != LiveChatProviderConnectionState::Unsupported {
                 provider.state = LiveChatProviderConnectionState::Ended;
@@ -1021,6 +1073,11 @@ impl LiveChatCoordinator {
         self.tasks.push(task);
     }
 
+    #[cfg(test)]
+    pub(crate) fn runtime_ownership(&self) -> (usize, usize) {
+        (self.tasks.len(), self.senders.len())
+    }
+
     fn abort_tasks(&mut self) {
         for task in self.tasks.drain(..) {
             task.abort();
@@ -1208,6 +1265,25 @@ fn default_fake_interval_ms() -> u64 {
 /// Start a chat session: install provider rows, optionally spawn the fake connector, and
 /// emit the initial snapshot. Returns the snapshot for the command response.
 pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> LiveChatSnapshot {
+    start_live_chat_after_install(
+        state,
+        params,
+        std::future::ready(()),
+        std::future::ready(()),
+    )
+    .await
+}
+
+async fn start_live_chat_after_install<F, G>(
+    state: &AppState,
+    params: LiveChatStartParams,
+    after_install: F,
+    before_snapshot_emit: G,
+) -> LiveChatSnapshot
+where
+    F: std::future::Future<Output = ()>,
+    G: std::future::Future<Output = ()>,
+{
     if (params.fake.is_some() || !params.fakes.is_empty())
         && let Err(error) = state
             .database
@@ -1260,19 +1336,28 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
             provider.message = "Waiting for X broadcast context.".to_string();
         }
     }
-    // A new chat session replaces any co-host session; a late tick for the
-    // old one must not publish into this stream.
-    crate::cohost::stop_cohost_for_session_end(state).await;
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    {
+    // A new chat session replaces any co-host session; keep that retirement
+    // in the same lifecycle transaction as the coordinator replacement so a
+    // concurrent start/stop cannot apply an older operation to the new engine.
+    crate::cohost::stop_cohost_for_session_end_under_lifecycle_fence(state, &lifecycle_delivery)
+        .await;
+    let session_generation = {
         let mut coordinator = state.live_chat.lock().await;
         coordinator.start_session(params.session_id.clone(), providers);
-    }
-    drop(lifecycle_delivery);
+        coordinator.session_generation()
+    };
+    // The coordinator session and every connector/sender handle are one
+    // lifecycle transaction. A stop that observes this session must wait for
+    // all of its runtime ownership to be attached so stop_session can retire
+    // it completely; otherwise a half-finished explicit start can attach a
+    // task after the monitor already returned from teardown.
+    after_install.await;
     if let Some(fake) = params.fake.clone() {
         let handle = tokio::spawn(run_fake_connector(
             state.clone(),
             params.session_id.clone(),
+            session_generation,
             fake.clone(),
         ));
         let mut coordinator = state.live_chat.lock().await;
@@ -1297,6 +1382,7 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
         let handle = tokio::spawn(run_fake_connector(
             state.clone(),
             params.session_id.clone(),
+            session_generation,
             fake.clone(),
         ));
         let mut coordinator = state.live_chat.lock().await;
@@ -1333,6 +1419,7 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
         let handle = tokio::spawn(crate::youtube_chat::run_youtube_chat_connector(
             state.clone(),
             params.session_id.clone(),
+            session_generation,
             youtube,
         ));
         state.live_chat.lock().await.attach_task(handle);
@@ -1376,6 +1463,7 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
         let handle = tokio::spawn(crate::twitch_chat::run_twitch_chat_connector(
             state.clone(),
             params.session_id.clone(),
+            session_generation,
             twitch.clone(),
         ));
         let mut coordinator = state.live_chat.lock().await;
@@ -1396,13 +1484,16 @@ pub async fn start_live_chat(state: &AppState, params: LiveChatStartParams) -> L
         let handle = tokio::spawn(crate::x_chat::run_x_chat_connector(
             state.clone(),
             params.session_id.clone(),
+            session_generation,
             x,
         ));
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(handle);
     }
     let snapshot = current_status(state).await;
+    before_snapshot_emit.await;
     state.emit_event("liveChat.snapshot", snapshot.clone());
+    drop(lifecycle_delivery);
     snapshot
 }
 
@@ -1410,6 +1501,17 @@ pub async fn start_x_live_chat(
     state: &AppState,
     params: StartXLiveChatParams,
 ) -> Result<LiveChatSnapshot> {
+    start_x_live_chat_before_snapshot_emit(state, params, std::future::ready(())).await
+}
+
+async fn start_x_live_chat_before_snapshot_emit<F>(
+    state: &AppState,
+    params: StartXLiveChatParams,
+    before_snapshot_emit: F,
+) -> Result<LiveChatSnapshot>
+where
+    F: std::future::Future<Output = ()>,
+{
     let accounts = state.database.list_platform_accounts().unwrap_or_default();
     let mut provider = session_provider_rows(&accounts, &[StreamPlatform::X], &[])
         .into_iter()
@@ -1431,7 +1533,8 @@ pub async fn start_x_live_chat(
     provider.target_id = params.target_id.clone();
     provider.id = comments_destination_id(StreamPlatform::X, provider.target_id.as_deref());
 
-    {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let session_generation = {
         let mut coordinator = state.live_chat.lock().await;
         if let Some(active_session_id) = coordinator.session_id.as_deref() {
             if active_session_id != params.session_id {
@@ -1444,7 +1547,8 @@ pub async fn start_x_live_chat(
         } else {
             coordinator.start_session(params.session_id.clone(), vec![provider]);
         }
-    }
+        coordinator.session_generation()
+    };
 
     let config = crate::x_chat::XChatConfig {
         broadcast_id: params.broadcast_id,
@@ -1472,6 +1576,7 @@ pub async fn start_x_live_chat(
     let handle = tokio::spawn(crate::x_chat::run_x_chat_connector(
         state.clone(),
         params.session_id,
+        session_generation,
         config,
     ));
     {
@@ -1487,7 +1592,9 @@ pub async fn start_x_live_chat(
     }
 
     let snapshot = current_status(state).await;
+    before_snapshot_emit.await;
     state.emit_event("liveChat.snapshot", snapshot.clone());
+    drop(lifecycle_delivery);
     Ok(snapshot)
 }
 
@@ -1495,16 +1602,50 @@ pub async fn start_x_live_chat(
 /// start; fill it into the sender so sends work without a second resolve.
 pub async fn set_youtube_send_chat_id(
     state: &AppState,
+    expected_session_id: &str,
+    expected_generation: u64,
     target_id: Option<&str>,
     live_chat_id: &str,
-) {
+) -> bool {
+    set_youtube_send_chat_id_before_mutation(
+        state,
+        expected_session_id,
+        expected_generation,
+        target_id,
+        live_chat_id,
+        std::future::ready(()),
+    )
+    .await
+}
+
+async fn set_youtube_send_chat_id_before_mutation<F>(
+    state: &AppState,
+    expected_session_id: &str,
+    expected_generation: u64,
+    target_id: Option<&str>,
+    live_chat_id: &str,
+    before_mutation: F,
+) -> bool
+where
+    F: std::future::Future<Output = ()>,
+{
+    before_mutation.await;
+    let _lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let mut coordinator = state.live_chat.lock().await;
+    if coordinator.session_id.as_deref() != Some(expected_session_id)
+        || coordinator.session_generation() != expected_generation
+    {
+        return false;
+    }
     let destination_id = comments_destination_id(StreamPlatform::Youtube, target_id);
     if let Some(ChatSenderConfig::YouTube {
         live_chat_id: slot, ..
     }) = coordinator.senders.get_mut(&destination_id)
     {
         *slot = Some(live_chat_id.to_string());
+        true
+    } else {
+        false
     }
 }
 
@@ -1931,28 +2072,103 @@ async fn send_to_destination(
 
 /// Stop the active chat session, aborting connectors and marking providers ended.
 pub async fn stop_live_chat(state: &AppState) -> LiveChatSnapshot {
+    stop_live_chat_before_snapshot_emit(state, std::future::ready(())).await
+}
+
+async fn stop_live_chat_before_snapshot_emit<F>(
+    state: &AppState,
+    before_snapshot_emit: F,
+) -> LiveChatSnapshot
+where
+    F: std::future::Future<Output = ()>,
+{
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     {
         let mut coordinator = state.live_chat.lock().await;
         coordinator.stop_session();
     }
+    crate::cohost::stop_cohost_for_session_end_under_lifecycle_fence(state, &lifecycle_delivery)
+        .await;
+    let snapshot = current_status(state).await;
+    before_snapshot_emit.await;
+    state.emit_event("liveChat.snapshot", snapshot.clone());
     drop(lifecycle_delivery);
-    crate::cohost::stop_cohost_for_session_end(state).await;
+    snapshot
+}
+
+/// Stop only the chat runtime owned by `expected_session_id`. Recording
+/// monitors call this after retiring their exact recording slot, so a late
+/// monitor can never tear down a replacement session. The lifecycle delivery
+/// fence also waits out any explicit start that is still attaching connector
+/// handles and send credentials before the exact-session check commits.
+pub(crate) async fn stop_live_chat_for_session(
+    state: &AppState,
+    expected_session_id: &str,
+) -> Option<LiveChatSnapshot> {
+    stop_live_chat_for_session_before_cohost_emit(
+        state,
+        expected_session_id,
+        std::future::ready(()),
+    )
+    .await
+}
+
+async fn stop_live_chat_for_session_before_cohost_emit<F>(
+    state: &AppState,
+    expected_session_id: &str,
+    before_cohost_emit: F,
+) -> Option<LiveChatSnapshot>
+where
+    F: std::future::Future<Output = ()>,
+{
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let stopped = {
+        let mut coordinator = state.live_chat.lock().await;
+        if coordinator.session_id() == Some(expected_session_id) {
+            coordinator.stop_session();
+            true
+        } else {
+            false
+        }
+    };
+    if !stopped {
+        return None;
+    }
+
+    crate::cohost::stop_cohost_for_session_end_if_matching_before_emit(
+        state,
+        expected_session_id,
+        &lifecycle_delivery,
+        before_cohost_emit,
+    )
+    .await;
     let snapshot = current_status(state).await;
     state.emit_event("liveChat.snapshot", snapshot.clone());
-    snapshot
+    drop(lifecycle_delivery);
+    Some(snapshot)
 }
 
 /// Clear the local message view (not platform messages) and emit `liveChat.cleared`.
 pub async fn clear_local_live_chat(state: &AppState) -> LiveChatSnapshot {
+    clear_local_live_chat_before_snapshot_emit(state, std::future::ready(())).await
+}
+
+async fn clear_local_live_chat_before_snapshot_emit<F>(
+    state: &AppState,
+    before_snapshot_emit: F,
+) -> LiveChatSnapshot
+where
+    F: std::future::Future<Output = ()>,
+{
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     {
         let mut coordinator = state.live_chat.lock().await;
         coordinator.clear_local();
     }
-    drop(lifecycle_delivery);
     let snapshot = current_status(state).await;
+    before_snapshot_emit.await;
     state.emit_event("liveChat.cleared", snapshot.clone());
+    drop(lifecycle_delivery);
     snapshot
 }
 
@@ -1980,16 +2196,21 @@ pub async fn current_diagnostics(state: &AppState) -> LiveChatDiagnostics {
     state.live_chat.lock().await.diagnostics()
 }
 
-/// Lock the coordinator, ingest one message, and emit it when it is new or tombstoned.
+/// Test convenience for injecting a message from the currently owned connector session.
+#[cfg(test)]
 pub(crate) async fn deliver_message(state: &AppState, message: LiveChatMessage) -> bool {
-    try_deliver_message(state, message).await.is_ok()
+    let session_generation = state.live_chat.lock().await.session_generation();
+    try_deliver_message(state, session_generation, message)
+        .await
+        .is_ok()
 }
 
 pub(crate) async fn try_deliver_message(
     state: &AppState,
+    expected_session_generation: u64,
     message: LiveChatMessage,
 ) -> std::result::Result<(), LiveChatPersistenceFailure> {
-    try_deliver_messages(state, vec![message]).await
+    try_deliver_messages(state, expected_session_generation, vec![message]).await
 }
 
 /// Persist and emit one sequential provider delivery as one atomic transaction. The
@@ -1998,6 +2219,7 @@ pub(crate) async fn try_deliver_message(
 /// database failures remain inside the worker and apply backpressure.
 pub(crate) async fn try_deliver_messages(
     state: &AppState,
+    expected_session_generation: u64,
     messages: Vec<LiveChatMessage>,
 ) -> std::result::Result<(), LiveChatPersistenceFailure> {
     if messages.is_empty() {
@@ -2005,12 +2227,21 @@ pub(crate) async fn try_deliver_messages(
     }
     let _delivery = state.live_chat_persistence.begin_delivery().await;
     let (delivery_generation, delivery_session_id, undos, authoritative_messages) = {
+        // Coordinator ingest can turn an eligible message into a tombstone.
+        // Publish that authority under the same short fence used by the final
+        // highlight install; persistence remains outside the fence below.
+        let _highlight_commit = state.comment_highlight_commit.lock().await;
         let mut coordinator = state.live_chat.lock().await;
         let Some(delivery_session_id) = coordinator.session_id.clone() else {
             return Err(LiveChatPersistenceFailure::terminal(
                 "Live-chat delivery arrived after its session ended.",
             ));
         };
+        if coordinator.session_generation() != expected_session_generation {
+            return Err(LiveChatPersistenceFailure::terminal(
+                "Live-chat delivery came from a replaced connector session.",
+            ));
+        }
         if messages
             .iter()
             .any(|message| message.session_id != delivery_session_id)
@@ -2047,6 +2278,7 @@ pub(crate) async fn try_deliver_messages(
         .persist_batch(authoritative_messages.clone())
         .await
     {
+        let _highlight_commit = state.comment_highlight_commit.lock().await;
         let mut coordinator = state.live_chat.lock().await;
         for undo in undos.into_iter().rev() {
             coordinator.rollback_ingest(undo);
@@ -2061,6 +2293,7 @@ pub(crate) async fn try_deliver_messages(
         );
         return Err(error);
     }
+    let _highlight_commit = state.comment_highlight_commit.lock().await;
     let delivery_still_current = {
         let coordinator = state.live_chat.lock().await;
         coordinator.generation == delivery_generation
@@ -2077,7 +2310,7 @@ pub(crate) async fn try_deliver_messages(
     }
     for message in &authoritative_messages {
         if message.is_deleted {
-            crate::comment_highlight::clear_comment_highlight_for_message(
+            crate::comment_highlight::clear_comment_highlight_for_message_under_commit_fence(
                 state,
                 &message.session_id,
                 &message.id,
@@ -2086,21 +2319,68 @@ pub(crate) async fn try_deliver_messages(
         }
         state.emit_event("liveChat.message", message);
     }
-    crate::cohost::note_messages(state, &authoritative_messages).await;
+    drop(_highlight_commit);
+    crate::cohost::note_messages_under_lifecycle_fence(state, &_delivery, &authoritative_messages)
+        .await;
     Ok(())
 }
 
 /// Set a provider's connection state and emit `liveChat.providerStatus`.
 pub(crate) async fn set_provider_and_emit(
     state: &AppState,
+    expected_session_id: &str,
+    expected_generation: u64,
     platform: StreamPlatform,
     target_id: Option<&str>,
     connection: LiveChatProviderConnectionState,
     message: &str,
-) {
+) -> bool {
+    set_provider_and_emit_with_hooks(
+        state,
+        (expected_session_id, expected_generation),
+        platform,
+        target_id,
+        connection,
+        message,
+        (std::future::ready(()), std::future::ready(())),
+    )
+    .await
+}
+
+async fn set_provider_and_emit_with_hooks<F, G>(
+    state: &AppState,
+    expected_owner: (&str, u64),
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+    connection: LiveChatProviderConnectionState,
+    message: &str,
+    hooks: (F, G),
+) -> bool
+where
+    F: std::future::Future<Output = ()>,
+    G: std::future::Future<Output = ()>,
+{
+    let (expected_session_id, expected_generation) = expected_owner;
+    let (before_mutation, before_emit) = hooks;
+    before_mutation.await;
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let now = chrono::Utc::now().to_rfc3339();
     let provider = {
         let mut coordinator = state.live_chat.lock().await;
+        if coordinator.session_id.as_deref() != Some(expected_session_id)
+            || coordinator.session_generation() != expected_generation
+        {
+            return false;
+        }
+        let provider_exists = coordinator.providers.iter().any(|provider| {
+            provider.platform == platform
+                && target_id
+                    .map(|target_id| provider.target_id.as_deref() == Some(target_id))
+                    .unwrap_or(true)
+        });
+        if !provider_exists {
+            return false;
+        }
         coordinator.set_provider_status(platform, target_id, connection, message, &now);
         coordinator
             .providers
@@ -2113,17 +2393,29 @@ pub(crate) async fn set_provider_and_emit(
             })
             .cloned()
     };
+    before_emit.await;
     if let Some(provider) = provider {
         state.emit_event("liveChat.providerStatus", provider);
+        drop(lifecycle_delivery);
+        true
+    } else {
+        false
     }
 }
 
 /// The fake connector task: marks its platform connected, delivers `count` messages at
 /// `interval_ms`, optionally re-sending the first to exercise de-dup, then marks ended.
-async fn run_fake_connector(state: AppState, session_id: String, config: FakeChatConfig) {
+async fn run_fake_connector(
+    state: AppState,
+    session_id: String,
+    session_generation: u64,
+    config: FakeChatConfig,
+) {
     let platform = config.platform;
     set_provider_and_emit(
         &state,
+        &session_id,
+        session_generation,
         platform,
         config.target_id.as_deref(),
         LiveChatProviderConnectionState::Connected,
@@ -2136,6 +2428,8 @@ async fn run_fake_connector(state: AppState, session_id: String, config: FakeCha
         if config.reconnect_at == Some(seq) {
             set_provider_and_emit(
                 &state,
+                &session_id,
+                session_generation,
                 platform,
                 config.target_id.as_deref(),
                 LiveChatProviderConnectionState::Reconnecting,
@@ -2145,6 +2439,8 @@ async fn run_fake_connector(state: AppState, session_id: String, config: FakeCha
             sleep(interval).await;
             set_provider_and_emit(
                 &state,
+                &session_id,
+                session_generation,
                 platform,
                 config.target_id.as_deref(),
                 LiveChatProviderConnectionState::Connected,
@@ -2158,10 +2454,11 @@ async fn run_fake_connector(state: AppState, session_id: String, config: FakeCha
             message.published_at = earlier.clone();
             message.received_at = earlier;
         }
-        deliver_message(&state, message).await;
+        let _ = try_deliver_message(&state, session_generation, message).await;
         if config.include_duplicate && seq == 0 {
-            deliver_message(
+            let _ = try_deliver_message(
                 &state,
+                session_generation,
                 fake_message(&session_id, platform, config.target_id.as_deref(), 0),
             )
             .await;
@@ -2169,6 +2466,8 @@ async fn run_fake_connector(state: AppState, session_id: String, config: FakeCha
     }
     set_provider_and_emit(
         &state,
+        &session_id,
+        session_generation,
         platform,
         config.target_id.as_deref(),
         LiveChatProviderConnectionState::Ended,
@@ -2214,6 +2513,68 @@ mod tests {
     use crate::storage::Database;
     use crate::streaming::PlatformAccountStatus;
     use tokio::sync::broadcast;
+
+    fn test_state() -> AppState {
+        let (events, _) = broadcast::channel(64);
+        AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        )
+    }
+
+    fn empty_start_params(session_id: &str) -> LiveChatStartParams {
+        serde_json::from_value(serde_json::json!({
+            "sessionId": session_id,
+            "platforms": []
+        }))
+        .expect("empty live-chat start params")
+    }
+
+    async fn poll_future_once<F>(mut future: std::pin::Pin<&mut F>) -> Option<F::Output>
+    where
+        F: std::future::Future,
+    {
+        std::future::poll_fn(|context| {
+            std::task::Poll::Ready(match future.as_mut().poll(context) {
+                std::task::Poll::Ready(output) => Some(output),
+                std::task::Poll::Pending => None,
+            })
+        })
+        .await
+    }
+
+    fn drain_live_chat_publications(
+        events: &mut broadcast::Receiver<crate::protocol::ServerEvent>,
+    ) -> Vec<(String, Option<String>)> {
+        let mut publications = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == "liveChat.snapshot" || event.event == "liveChat.cleared" {
+                publications.push((
+                    event.event,
+                    event
+                        .payload
+                        .get("sessionId")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string),
+                ));
+            }
+        }
+        publications
+    }
+
+    fn drain_live_chat_state_publication_names(
+        events: &mut broadcast::Receiver<crate::protocol::ServerEvent>,
+    ) -> Vec<String> {
+        let mut publications = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == "liveChat.snapshot" || event.event == "liveChat.providerStatus" {
+                publications.push(event.event);
+            }
+        }
+        publications
+    }
 
     fn account(platform: StreamPlatform, scopes: &[&str]) -> PlatformAccount {
         PlatformAccount {
@@ -2564,6 +2925,68 @@ mod tests {
         assert!(receiver.try_recv().is_err());
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_connector_delivery_cannot_mutate_same_session_replacement() {
+        let state = send_test_state(
+            "shared-session",
+            vec![connected_provider("shared-target", StreamPlatform::Youtube)],
+            Vec::new(),
+        )
+        .await;
+        let original_session_generation = state.live_chat.lock().await.session_generation();
+        let mut events = state.events.subscribe();
+
+        let replacement_session_generation = {
+            let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session(
+                "shared-session".to_string(),
+                vec![connected_provider("shared-target", StreamPlatform::Youtube)],
+            );
+            let generation = coordinator.session_generation();
+            drop(coordinator);
+            drop(lifecycle_delivery);
+            generation
+        };
+        assert_ne!(replacement_session_generation, original_session_generation);
+
+        let result = try_deliver_message(
+            &state,
+            original_session_generation,
+            fake_message(
+                "shared-session",
+                StreamPlatform::Youtube,
+                Some("shared-target"),
+                77,
+            ),
+        )
+        .await;
+        let snapshot = current_status(&state).await;
+        let persisted = state
+            .database
+            .list_live_chat_messages_recent("shared-session", 10)
+            .unwrap()
+            .len();
+        let mut message_events = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "liveChat.message" {
+                message_events += 1;
+            }
+        }
+
+        assert_eq!(
+            (
+                result.is_ok(),
+                snapshot.messages.len(),
+                persisted,
+                snapshot.providers[0].last_message_at.clone(),
+                message_events,
+            ),
+            (false, 0, 0, None, 0),
+            "an old connector owner must not mutate memory, persistence, provider activity, or events",
+        );
+    }
+
     #[tokio::test]
     async fn session_replacement_waits_for_persistence_and_cannot_receive_the_old_message() {
         use std::sync::atomic::{AtomicBool, Ordering};
@@ -2590,16 +3013,17 @@ mod tests {
                 }
                 Ok(())
             }));
-        state
-            .live_chat
-            .lock()
-            .await
-            .start_session("old-session".to_string(), Vec::new());
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("old-session".to_string(), Vec::new());
+            coordinator.session_generation()
+        };
 
         let delivery_state = state.clone();
         let delivery = tokio::spawn(async move {
             try_deliver_message(
                 &delivery_state,
+                session_generation,
                 fake_message("old-session", StreamPlatform::Twitch, None, 1),
             )
             .await
@@ -2673,10 +3097,12 @@ mod tests {
             "s1".to_string(),
             vec![provider_row(StreamPlatform::Youtube)],
         );
+        let session_generation = coordinator.session_generation();
         coordinator.ingest(fake_message("s1", StreamPlatform::Youtube, None, 0));
         coordinator.clear_local();
         let snapshot = coordinator.snapshot("now".to_string());
         assert!(coordinator.is_active());
+        assert_eq!(coordinator.session_generation(), session_generation);
         assert_eq!(snapshot.session_id.as_deref(), Some("s1"));
         assert!(snapshot.messages.is_empty());
         assert_eq!(snapshot.unread_count, 0);
@@ -2766,8 +3192,18 @@ mod tests {
                 .collect(),
         )
         .await;
+        let session_generation = state.live_chat.lock().await.session_generation();
 
-        set_youtube_send_chat_id(&state, Some("youtube-backup"), "chat-backup").await;
+        assert!(
+            set_youtube_send_chat_id(
+                &state,
+                "s1",
+                session_generation,
+                Some("youtube-backup"),
+                "chat-backup",
+            )
+            .await
+        );
 
         let coordinator = state.live_chat.lock().await;
         let resolved = |target_id: &str| match coordinator.sender(target_id).unwrap() {
@@ -2776,6 +3212,78 @@ mod tests {
         };
         assert_eq!(resolved("youtube-primary"), None);
         assert_eq!(resolved("youtube-backup").as_deref(), Some("chat-backup"));
+    }
+
+    #[tokio::test]
+    async fn clearing_local_view_keeps_connector_owner_valid() {
+        let state = send_test_state(
+            "s1",
+            vec![connected_provider(
+                "youtube-target",
+                StreamPlatform::Youtube,
+            )],
+            vec![(
+                "youtube-target".to_string(),
+                ChatSenderConfig::YouTube {
+                    access_token: "token".to_string(),
+                    api_base_url: None,
+                    live_chat_id: None,
+                },
+            )],
+        )
+        .await;
+        let session_generation = state.live_chat.lock().await.session_generation();
+
+        clear_local_live_chat(&state).await;
+
+        assert!(
+            set_youtube_send_chat_id(
+                &state,
+                "s1",
+                session_generation,
+                Some("youtube-target"),
+                "chat-after-clear",
+            )
+            .await
+        );
+        assert!(
+            set_provider_and_emit(
+                &state,
+                "s1",
+                session_generation,
+                StreamPlatform::Youtube,
+                Some("youtube-target"),
+                LiveChatProviderConnectionState::Reconnecting,
+                "Reconnect after local clear.",
+            )
+            .await
+        );
+        assert!(
+            try_deliver_message(
+                &state,
+                session_generation,
+                fake_message("s1", StreamPlatform::Youtube, Some("youtube-target"), 88,),
+            )
+            .await
+            .is_ok(),
+            "clearing the local view must not retire connector message ownership",
+        );
+
+        let coordinator = state.live_chat.lock().await;
+        assert_eq!(coordinator.messages.len(), 1);
+        assert_eq!(
+            coordinator.providers[0].state,
+            LiveChatProviderConnectionState::Reconnecting
+        );
+        match coordinator
+            .sender("youtube-target")
+            .expect("YouTube sender remains registered")
+        {
+            ChatSenderConfig::YouTube { live_chat_id, .. } => {
+                assert_eq!(live_chat_id.as_deref(), Some("chat-after-clear"));
+            }
+            _ => panic!("expected YouTube sender"),
+        }
     }
 
     #[tokio::test]
@@ -3126,6 +3634,728 @@ mod tests {
         .await
         .expect("same-platform fake target states did not diverge");
         stop_live_chat(&state).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_live_chat_snapshot_emission_order_survives_replacement() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_live_chat_after_install(
+                &start_state,
+                empty_start_params("session-a"),
+                std::future::ready(()),
+                async move {
+                    let _ = captured_tx.send(());
+                    let _ = resume_rx.await;
+                },
+            )
+            .await
+        });
+        captured_rx
+            .await
+            .expect("original start captures its live-chat snapshot");
+
+        let mut replacement = Box::pin(start_live_chat(&state, empty_start_params("session-b")));
+        let completed_during_emit_gap = poll_future_once(replacement.as_mut()).await;
+        resume_tx.send(()).expect("resume original snapshot emit");
+        assert_eq!(
+            start
+                .await
+                .expect("original start task")
+                .session_id
+                .as_deref(),
+            Some("session-a")
+        );
+        let replacement = match completed_during_emit_gap {
+            Some(snapshot) => snapshot,
+            None => replacement.await,
+        };
+        assert_eq!(replacement.session_id.as_deref(), Some("session-b"));
+        assert_eq!(
+            current_status(&state).await.session_id.as_deref(),
+            Some("session-b")
+        );
+        assert_eq!(
+            drain_live_chat_publications(&mut events).last(),
+            Some(&(
+                "liveChat.snapshot".to_string(),
+                Some("session-b".to_string())
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_x_live_chat_snapshot_emission_order_survives_replacement() {
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        let mut events = state.events.subscribe();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_x_live_chat_before_snapshot_emit(
+                &start_state,
+                StartXLiveChatParams {
+                    session_id: "session-a".to_string(),
+                    broadcast_id: "broadcast-a".to_string(),
+                    media_key: "media-key-a".to_string(),
+                    target_id: Some("x-a".to_string()),
+                    status_base_url: Some("http://127.0.0.1:9".to_string()),
+                    access_url: Some("http://127.0.0.1:9".to_string()),
+                },
+                async move {
+                    let _ = captured_tx.send(());
+                    let _ = resume_rx.await;
+                },
+            )
+            .await
+        });
+        captured_rx
+            .await
+            .expect("X start captures its original live-chat snapshot");
+
+        let mut replacement = Box::pin(start_live_chat(&state, empty_start_params("session-b")));
+        let completed_during_emit_gap = poll_future_once(replacement.as_mut()).await;
+        resume_tx.send(()).expect("resume X snapshot emit");
+        assert_eq!(
+            start
+                .await
+                .expect("X start task")
+                .expect("X start result")
+                .session_id
+                .as_deref(),
+            Some("session-a")
+        );
+        let replacement = match completed_during_emit_gap {
+            Some(snapshot) => snapshot,
+            None => replacement.await,
+        };
+        assert_eq!(replacement.session_id.as_deref(), Some("session-b"));
+        assert_eq!(
+            current_status(&state).await.session_id.as_deref(),
+            Some("session-b")
+        );
+        assert_eq!(
+            drain_live_chat_publications(&mut events).last(),
+            Some(&(
+                "liveChat.snapshot".to_string(),
+                Some("session-b".to_string())
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stop_live_chat_snapshot_emission_order_survives_replacement() {
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        let mut events = state.events.subscribe();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let stop_state = state.clone();
+        let stop = tokio::spawn(async move {
+            stop_live_chat_before_snapshot_emit(&stop_state, async move {
+                let _ = captured_tx.send(());
+                let _ = resume_rx.await;
+            })
+            .await
+        });
+        captured_rx
+            .await
+            .expect("stop captures its retired live-chat snapshot");
+
+        let mut replacement = Box::pin(start_live_chat(&state, empty_start_params("session-b")));
+        let completed_during_emit_gap = poll_future_once(replacement.as_mut()).await;
+        resume_tx.send(()).expect("resume stopped snapshot emit");
+        assert!(
+            stop.await.expect("stop task").session_id.is_none(),
+            "original stop result must be retired"
+        );
+        let replacement = match completed_during_emit_gap {
+            Some(snapshot) => snapshot,
+            None => replacement.await,
+        };
+        assert_eq!(replacement.session_id.as_deref(), Some("session-b"));
+        assert_eq!(
+            current_status(&state).await.session_id.as_deref(),
+            Some("session-b")
+        );
+        assert_eq!(
+            drain_live_chat_publications(&mut events).last(),
+            Some(&(
+                "liveChat.snapshot".to_string(),
+                Some("session-b".to_string())
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn clear_live_chat_snapshot_emission_order_survives_replacement() {
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        let mut events = state.events.subscribe();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let clear_state = state.clone();
+        let clear = tokio::spawn(async move {
+            clear_local_live_chat_before_snapshot_emit(&clear_state, async move {
+                let _ = captured_tx.send(());
+                let _ = resume_rx.await;
+            })
+            .await
+        });
+        captured_rx
+            .await
+            .expect("clear captures its original live-chat snapshot");
+
+        let mut replacement = Box::pin(start_live_chat(&state, empty_start_params("session-b")));
+        let completed_during_emit_gap = poll_future_once(replacement.as_mut()).await;
+        resume_tx.send(()).expect("resume cleared snapshot emit");
+        assert_eq!(
+            clear.await.expect("clear task").session_id.as_deref(),
+            Some("session-a")
+        );
+        let replacement = match completed_during_emit_gap {
+            Some(snapshot) => snapshot,
+            None => replacement.await,
+        };
+        assert_eq!(replacement.session_id.as_deref(), Some("session-b"));
+        assert_eq!(
+            current_status(&state).await.session_id.as_deref(),
+            Some("session-b")
+        );
+        assert_eq!(
+            drain_live_chat_publications(&mut events).last(),
+            Some(&(
+                "liveChat.snapshot".to_string(),
+                Some("session-b".to_string())
+            ))
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn provider_status_emission_order_survives_stop_snapshot() {
+        let state = send_test_state(
+            "session-a",
+            vec![connected_provider("shared-target", StreamPlatform::Youtube)],
+            Vec::new(),
+        )
+        .await;
+        let session_generation = state.live_chat.lock().await.session_generation();
+        let mut events = state.events.subscribe();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let update_state = state.clone();
+        let update = tokio::spawn(async move {
+            set_provider_and_emit_with_hooks(
+                &update_state,
+                ("session-a", session_generation),
+                StreamPlatform::Youtube,
+                Some("shared-target"),
+                LiveChatProviderConnectionState::Reconnecting,
+                "Transient connection loss.",
+                (std::future::ready(()), async move {
+                    let _ = captured_tx.send(());
+                    let _ = resume_rx.await;
+                }),
+            )
+            .await
+        });
+        captured_rx
+            .await
+            .expect("provider update captures its state before publication");
+
+        let mut stop = Box::pin(stop_live_chat(&state));
+        let completed_during_emit_gap = poll_future_once(stop.as_mut()).await;
+        let stop_waited_for_publication = completed_during_emit_gap.is_none();
+        resume_tx.send(()).expect("resume provider publication");
+        assert!(update.await.expect("provider update task"));
+        let stopped = match completed_during_emit_gap {
+            Some(snapshot) => snapshot,
+            None => stop.await,
+        };
+
+        assert!(
+            stop_waited_for_publication,
+            "stop must wait for the earlier provider publication"
+        );
+        assert!(stopped.session_id.is_none());
+        assert_eq!(
+            current_status(&state).await.providers[0].state,
+            LiveChatProviderConnectionState::Ended
+        );
+        assert_eq!(
+            drain_live_chat_state_publication_names(&mut events).last(),
+            Some(&"liveChat.snapshot".to_string())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_provider_status_cannot_mutate_same_session_replacement() {
+        let state = send_test_state(
+            "shared-session",
+            vec![connected_provider("shared-target", StreamPlatform::Youtube)],
+            Vec::new(),
+        )
+        .await;
+        let original_generation = state.live_chat.lock().await.session_generation();
+        let mut events = state.events.subscribe();
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let update_state = state.clone();
+        let update = tokio::spawn(async move {
+            set_provider_and_emit_with_hooks(
+                &update_state,
+                ("shared-session", original_generation),
+                StreamPlatform::Youtube,
+                Some("shared-target"),
+                LiveChatProviderConnectionState::Reconnecting,
+                "Old connector retry.",
+                (
+                    async move {
+                        let _ = paused_tx.send(());
+                        let _ = resume_rx.await;
+                    },
+                    std::future::ready(()),
+                ),
+            )
+            .await
+        });
+        paused_rx
+            .await
+            .expect("old provider update pauses before mutation");
+
+        let replacement_generation = {
+            let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session(
+                "shared-session".to_string(),
+                vec![connected_provider("shared-target", StreamPlatform::Youtube)],
+            );
+            let generation = coordinator.session_generation();
+            drop(coordinator);
+            drop(lifecycle_delivery);
+            generation
+        };
+        assert_ne!(replacement_generation, original_generation);
+
+        resume_tx.send(()).expect("resume stale provider update");
+        assert!(
+            !update.await.expect("stale provider update task"),
+            "stale owner must be rejected"
+        );
+        let snapshot = current_status(&state).await;
+        assert_eq!(
+            snapshot.providers[0].state,
+            LiveChatProviderConnectionState::Connected
+        );
+        assert_eq!(current_diagnostics(&state).await.reconnect_count, 0);
+        assert!(
+            drain_live_chat_state_publication_names(&mut events).is_empty(),
+            "stale owner must not publish provider state"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stale_youtube_chat_id_cannot_update_same_session_replacement_sender() {
+        let state = send_test_state(
+            "shared-session",
+            vec![connected_provider("shared-target", StreamPlatform::Youtube)],
+            vec![(
+                "shared-target".to_string(),
+                ChatSenderConfig::YouTube {
+                    access_token: "old-token".to_string(),
+                    api_base_url: None,
+                    live_chat_id: None,
+                },
+            )],
+        )
+        .await;
+        let original_generation = state.live_chat.lock().await.session_generation();
+        let (paused_tx, paused_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let update_state = state.clone();
+        let update = tokio::spawn(async move {
+            set_youtube_send_chat_id_before_mutation(
+                &update_state,
+                "shared-session",
+                original_generation,
+                Some("shared-target"),
+                "old-live-chat-id",
+                async move {
+                    let _ = paused_tx.send(());
+                    let _ = resume_rx.await;
+                },
+            )
+            .await
+        });
+        paused_rx
+            .await
+            .expect("old YouTube resolver pauses before sender mutation");
+
+        let replacement_generation = {
+            let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session(
+                "shared-session".to_string(),
+                vec![connected_provider("shared-target", StreamPlatform::Youtube)],
+            );
+            coordinator.register_sender(
+                "shared-target".to_string(),
+                ChatSenderConfig::YouTube {
+                    access_token: "replacement-token".to_string(),
+                    api_base_url: None,
+                    live_chat_id: None,
+                },
+            );
+            let generation = coordinator.session_generation();
+            drop(coordinator);
+            drop(lifecycle_delivery);
+            generation
+        };
+        assert_ne!(replacement_generation, original_generation);
+
+        resume_tx.send(()).expect("resume stale YouTube resolver");
+        assert!(
+            !update.await.expect("stale YouTube resolver task"),
+            "stale resolver must be rejected"
+        );
+        let coordinator = state.live_chat.lock().await;
+        match coordinator
+            .sender("shared-target")
+            .expect("replacement sender")
+        {
+            ChatSenderConfig::YouTube {
+                access_token,
+                live_chat_id,
+                ..
+            } => {
+                assert_eq!(access_token, "replacement-token");
+                assert!(live_chat_id.is_none());
+            }
+            _ => panic!("expected YouTube replacement sender"),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn scoped_stop_waits_for_explicit_start_attachments_and_preserves_replacement() {
+        let (events, _) = broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("retired-session".to_string(), Vec::new());
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("enable co-host");
+        crate::cohost::start_cohost(
+            &state,
+            crate::protocol::CohostStartParams {
+                session_id: "retired-session".to_string(),
+                consent_to_process_chat: true,
+                stream_title: None,
+            },
+        )
+        .await
+        .expect("start retired co-host");
+        let params: LiveChatStartParams = serde_json::from_value(serde_json::json!({
+            "sessionId": "replacement-session",
+            "platforms": ["youtube"],
+            "fake": { "platform": "youtube", "count": 0 }
+        }))
+        .unwrap();
+        let (installed_tx, installed_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_live_chat_after_install(
+                &start_state,
+                params,
+                async move {
+                    let _ = installed_tx.send(());
+                    let _ = resume_rx.await;
+                },
+                std::future::ready(()),
+            )
+            .await
+        });
+        installed_rx
+            .await
+            .expect("replacement session installed before attachment pause");
+        assert_eq!(
+            state.live_chat.lock().await.runtime_ownership(),
+            (0, 0),
+            "the injected pause must precede all replacement runtime attachment"
+        );
+        assert!(
+            crate::cohost::cohost_status(&state)
+                .await
+                .session_id
+                .is_none(),
+            "replacement start retires the old co-host inside its lifecycle transaction"
+        );
+        let cohost_start_state = state.clone();
+        let mut cohost_start = tokio::spawn(async move {
+            crate::cohost::start_cohost(
+                &cohost_start_state,
+                crate::protocol::CohostStartParams {
+                    session_id: "replacement-session".to_string(),
+                    consent_to_process_chat: true,
+                    stream_title: None,
+                },
+            )
+            .await
+        });
+        assert!(
+            timeout(Duration::from_millis(50), &mut cohost_start)
+                .await
+                .is_err(),
+            "co-host start must join the replacement lifecycle transaction"
+        );
+
+        let stop_state = state.clone();
+        let mut old_monitor_stop = tokio::spawn(async move {
+            stop_live_chat_for_session(&stop_state, "retired-session").await
+        });
+        assert!(
+            timeout(Duration::from_millis(50), &mut old_monitor_stop)
+                .await
+                .is_err(),
+            "the old monitor must wait for the full replacement-start transaction"
+        );
+
+        resume_tx.send(()).expect("resume replacement start");
+        let started = start.await.expect("replacement start task");
+        assert_eq!(started.session_id.as_deref(), Some("replacement-session"));
+        let cohost_started = cohost_start
+            .await
+            .expect("replacement co-host start task")
+            .expect("start replacement co-host");
+        assert_eq!(
+            cohost_started.session_id.as_deref(),
+            Some("replacement-session")
+        );
+        assert!(
+            old_monitor_stop
+                .await
+                .expect("old monitor stop task")
+                .is_none(),
+            "the old monitor must reject the replacement session"
+        );
+        let coordinator = state.live_chat.lock().await;
+        assert_eq!(coordinator.session_id(), Some("replacement-session"));
+        assert_eq!(coordinator.runtime_ownership(), (1, 1));
+        drop(coordinator);
+        assert_eq!(
+            crate::cohost::cohost_status(&state)
+                .await
+                .session_id
+                .as_deref(),
+            Some("replacement-session"),
+            "the retired monitor must preserve the replacement co-host"
+        );
+        stop_live_chat(&state).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scoped_stop_cohost_emission_order_survives_replacement() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let (events, _) = broadcast::channel(32);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        crate::cohost::set_cohost_settings(
+            &state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("enable co-host");
+        crate::cohost::start_cohost(
+            &state,
+            crate::protocol::CohostStartParams {
+                session_id: "session-a".to_string(),
+                consent_to_process_chat: true,
+                stream_title: None,
+            },
+        )
+        .await
+        .expect("start original co-host");
+        let mut events = state.events.subscribe();
+
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let stop_state = state.clone();
+        let stop = tokio::spawn(async move {
+            stop_live_chat_for_session_before_cohost_emit(&stop_state, "session-a", async move {
+                let _ = captured_tx.send(());
+                let _ = resume_rx.await;
+            })
+            .await
+        });
+        captured_rx
+            .await
+            .expect("scoped stop captures the original co-host off state");
+
+        let replacement_params: LiveChatStartParams = serde_json::from_value(serde_json::json!({
+            "sessionId": "session-b",
+            "platforms": []
+        }))
+        .expect("replacement live-chat params");
+        let mut replacement = Box::pin(async {
+            let chat = start_live_chat(&state, replacement_params).await;
+            let cohost = crate::cohost::start_cohost(
+                &state,
+                crate::protocol::CohostStartParams {
+                    session_id: "session-b".to_string(),
+                    consent_to_process_chat: true,
+                    stream_title: None,
+                },
+            )
+            .await
+            .expect("start replacement co-host");
+            (chat, cohost)
+        });
+        let completed_during_emit_gap = std::future::poll_fn(|context| {
+            Poll::Ready(match replacement.as_mut().poll(context) {
+                Poll::Ready(snapshots) => Some(snapshots),
+                Poll::Pending => None,
+            })
+        })
+        .await;
+
+        resume_tx.send(()).expect("resume old co-host off emit");
+        assert!(
+            stop.await.expect("scoped stop task").is_some(),
+            "scoped stop must retire the original session"
+        );
+        let (chat, started) = match completed_during_emit_gap {
+            Some(snapshots) => snapshots,
+            None => replacement.await,
+        };
+        assert_eq!(chat.session_id.as_deref(), Some("session-b"));
+        assert_eq!(started.session_id.as_deref(), Some("session-b"));
+        assert_eq!(
+            crate::cohost::cohost_status(&state)
+                .await
+                .session_id
+                .as_deref(),
+            Some("session-b")
+        );
+
+        let mut states = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == crate::cohost::COHOST_STATE_EVENT {
+                states.push(event.payload);
+            }
+        }
+        let final_event = states.last().expect("co-host state events");
+        assert_eq!(final_event["status"], "listening");
+        assert_eq!(final_event["sessionId"], "session-b");
+        stop_live_chat(&state).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn duplicate_stops_cannot_finish_before_explicit_start_attaches_its_runtime() {
+        let (events, _) = broadcast::channel(16);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            Database::open_in_memory_for_tests(),
+        );
+        let params: LiveChatStartParams = serde_json::from_value(serde_json::json!({
+            "sessionId": "starting-session",
+            "platforms": ["youtube"],
+            "fake": { "platform": "youtube", "count": 0 }
+        }))
+        .unwrap();
+        let (installed_tx, installed_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_live_chat_after_install(
+                &start_state,
+                params,
+                async move {
+                    let _ = installed_tx.send(());
+                    let _ = resume_rx.await;
+                },
+                std::future::ready(()),
+            )
+            .await
+        });
+        installed_rx
+            .await
+            .expect("session installed before attachment pause");
+
+        let scoped_state = state.clone();
+        let mut scoped_stop = tokio::spawn(async move {
+            stop_live_chat_for_session(&scoped_state, "starting-session").await
+        });
+        let explicit_state = state.clone();
+        let mut explicit_stop = tokio::spawn(async move { stop_live_chat(&explicit_state).await });
+        assert!(
+            timeout(Duration::from_millis(50), &mut scoped_stop)
+                .await
+                .is_err()
+        );
+        assert!(
+            timeout(Duration::from_millis(50), &mut explicit_stop)
+                .await
+                .is_err()
+        );
+
+        resume_tx.send(()).expect("resume explicit start");
+        start.await.expect("explicit start task");
+        scoped_stop.await.expect("scoped stop task");
+        explicit_stop.await.expect("explicit stop task");
+        let coordinator = state.live_chat.lock().await;
+        assert_eq!(coordinator.session_id(), None);
+        assert_eq!(
+            coordinator.runtime_ownership(),
+            (0, 0),
+            "neither start nor a duplicate stop may leave late runtime ownership"
+        );
     }
 
     #[test]

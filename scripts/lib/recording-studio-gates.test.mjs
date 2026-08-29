@@ -25,11 +25,13 @@ describe('buildRecordingStudioGateSteps', () => {
       'live captions mute/gain and record+stream artifact smoke',
       'noise cleanup final-artifact smoke',
       'dev app all-layout recording artifact smoke',
+      'app quit during recording finalization smoke',
       'imported screen image recording smoke',
       'real-user launch first-frame contract smoke',
       'layout/source preview liveness smoke',
       'active-session live layout switch recording smoke',
       'comment highlight stream artifact smoke',
+      'detached Comments command relay probe',
       'backend-owned preview scene commit smoke',
       'preview main pump diagnostics smoke',
       'preview click/focus continuity smoke',
@@ -60,15 +62,17 @@ describe('buildRecordingStudioGateSteps', () => {
     ])
     assert.deepEqual(steps[1].args, ['test:scripts'])
     assert.deepEqual(steps[2].args, ['probe:live-audio-controls'])
-    assert.deepEqual(steps.at(-18).args, ['smoke:captions-contract'])
-    assert.deepEqual(steps.at(-17).args, ['smoke:captions-live'])
-    assert.deepEqual(steps.at(-16).args, ['smoke:noise-cleanup'])
-    assert.deepEqual(steps.at(-15).args, ['smoke:dev'])
-    assert.deepEqual(steps.at(-14).args, ['smoke:screens'])
-    assert.deepEqual(steps.at(-13).args, ['smoke:preview-real-launch'])
-    assert.deepEqual(steps.at(-12).args, ['smoke:layout-source-loop'])
-    assert.deepEqual(steps.at(-11).args, ['smoke:live-layout-switch-recording'])
-    assert.deepEqual(steps.at(-10).args, ['smoke:comment-highlight-stream'])
+    assert.deepEqual(steps.at(-20).args, ['smoke:captions-contract'])
+    assert.deepEqual(steps.at(-19).args, ['smoke:captions-live'])
+    assert.deepEqual(steps.at(-18).args, ['smoke:noise-cleanup'])
+    assert.deepEqual(steps.at(-17).args, ['smoke:dev'])
+    assert.deepEqual(steps.at(-16).args, ['smoke:app-quit-recording'])
+    assert.deepEqual(steps.at(-15).args, ['smoke:screens'])
+    assert.deepEqual(steps.at(-14).args, ['smoke:preview-real-launch'])
+    assert.deepEqual(steps.at(-13).args, ['smoke:layout-source-loop'])
+    assert.deepEqual(steps.at(-12).args, ['smoke:live-layout-switch-recording'])
+    assert.deepEqual(steps.at(-11).args, ['smoke:comment-highlight-stream'])
+    assert.deepEqual(steps.at(-10).args, ['probe:comments-window'])
     assert.deepEqual(steps.at(-9).args, ['smoke:preview-scene-commit'])
     assert.deepEqual(steps.at(-8).args, ['smoke:preview-pump-diagnostics'])
     assert.deepEqual(steps.at(-7).args, ['smoke:preview-click-focus'])
@@ -122,10 +126,12 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /noise_cleanup::tests::/)
     assert.match(report, /smoke:noise-cleanup/)
     assert.match(report, /smoke:dev/)
+    assert.match(report, /smoke:app-quit-recording/)
     assert.match(report, /smoke:screens/)
     assert.match(report, /smoke:layout-source-loop/)
     assert.match(report, /smoke:live-layout-switch-recording/)
     assert.match(report, /smoke:comment-highlight-stream/)
+    assert.match(report, /probe:comments-window/)
     assert.match(report, /smoke:preview-scene-commit/)
     assert.match(report, /smoke:preview-pump-diagnostics/)
     assert.match(report, /smoke:preview-click-focus/)
@@ -159,6 +165,10 @@ describe('buildRecordingStudioGateSteps', () => {
     )
     assert.equal(packageJson.scripts['smoke:noise-cleanup'], 'node scripts/smoke-noise-cleanup.mjs')
     assert.equal(
+      packageJson.scripts['smoke:app-quit-recording'],
+      'node scripts/smoke-app-quit-recording-finalization.mjs'
+    )
+    assert.equal(
       packageJson.scripts['probe:live-audio-controls'],
       'node scripts/probe-live-audio-controls.mjs'
     )
@@ -176,6 +186,28 @@ describe('buildRecordingStudioGateSteps', () => {
       assert.match(source, /--require-bundled/)
       assert.match(source, /pcm_s16le/)
     }
+  })
+
+  it('keeps the live app-quit finalization barrier and terminal artifact checks maintained', () => {
+    const source = readFileSync(
+      new URL('../smoke-app-quit-recording-finalization.mjs', import.meta.url),
+      'utf8'
+    )
+
+    assert.match(source, /const MINIMUM_HOLD_MS = 30_000/)
+    assert.match(source, /'authorize-smoke-resource'/)
+    assert.match(source, /outputDirectoryCapability/)
+    assert.match(source, /'session\.start'/)
+    assert.match(source, /requestSmokeCommand\(smoke, 'app-quit'/)
+    assert.match(source, /Electron begins teardown/)
+    assert.match(source, /recovery\.value\.status, 'completed'/)
+    assert.match(source, /heldDatabaseRow\.status, 'running'/)
+    assert.match(source, /completedRow\.status, 'completed'/)
+    assert.match(source, /remainingRecoveryRecords/)
+    assert.match(source, /analyzeRecording\(mp4Path/)
+    assert.match(source, /ffprobePath: realFfprobe/)
+    assert.match(source, /expectAudio: true/)
+    assert.match(source, /waitForCleanProcessState/)
   })
 
   it('runs the live audio control probe against bundled FFmpeg on hosted Windows', () => {

@@ -11,7 +11,9 @@ use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use sha2::{Digest, Sha256};
 use tokio::fs;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::io::{
+    AsyncBufRead, AsyncBufReadExt, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader,
+};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout, Command};
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, mpsc, oneshot};
 use tokio::time::{Duration, sleep, timeout};
@@ -31,6 +33,7 @@ use crate::capture_input::{
     append_microphone_input, append_windows_dshow_video_input, append_windows_screen_video_input,
     microphone_channels, microphone_needs_graph_gain,
 };
+use crate::capture_interruption::SessionStartAdmission;
 use crate::compositor::{
     CompositorAuxiliaryOutput, CompositorFrameConsumer, CompositorStartParams,
     CompositorStartupBarrierParams, CompositorStartupBarrierResult,
@@ -139,6 +142,8 @@ use crate::windows_media_foundation_encoder::{
 
 const PREVIEW_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(5);
 const PREVIEW_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const SESSION_START_SHUTDOWN_MESSAGE: &str =
+    "Capture session start rejected because backend shutdown is already in progress.";
 /// How often the live mic-stats sampler reads CoreAudio counters during a recording.
 const NATIVE_AUDIO_SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
 /// Silent-mic health check (plan 021 F3): how deep into a recording the mic may
@@ -159,10 +164,13 @@ const TRANSIENT_FIFO_TEST_PAUSE_MS_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_MS";
 const ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS: usize = 64;
 const SPLIT_STREAM_INPUT_THREAD_QUEUE_PACKETS: usize = 8;
 /// FFmpeg starts per-input demux threads only after `avformat_find_stream_info`.
-/// A 65,536-byte probe on a low-complexity H.264 test pattern can therefore
-/// leave the sibling FIFO unread for seconds, before either thread queue can
-/// help. MPEG-TS PAT/PMT plus the first SPS/IDR fit in this split-only bound.
-const SPLIT_ENCODED_INPUT_PROBE_BYTES: usize = 4_096;
+/// Its default multi-megabyte MPEG-TS probe can therefore hold an entire short
+/// recording without ever opening the output muxer. MPEG-TS PAT/PMT plus the
+/// first SPS/IDR fit in this bounded probe; it is already proven on split FIFOs
+/// and also closes the record-only short-session hole. Shared live output keeps
+/// its established 64 KiB posture because changing that path is unrelated.
+const MINIMAL_ENCODED_MPEGTS_INPUT_PROBE_BYTES: usize = 4_096;
+const SHARED_STREAM_ENCODED_MPEGTS_INPUT_PROBE_BYTES: usize = 65_536;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SilentMicKind {
@@ -190,6 +198,152 @@ fn silent_mic_verdict(captured_frames: u64, session_peak: f32) -> Option<SilentM
 /// post-controls native microphone bus has actually opened and warmed up.
 #[derive(Debug)]
 struct SessionStartPublicationPermit;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PublishedSessionStartFailureOrigin {
+    FfmpegSpawn,
+    FfmpegOutputStartup,
+    LiveAudioControlStdin,
+    EncoderBridge,
+    ScreenOverlay,
+}
+
+impl PublishedSessionStartFailureOrigin {
+    fn pipeline_stage(self) -> RecordingPipelineStage {
+        match self {
+            Self::LiveAudioControlStdin => RecordingPipelineStage::AudioEncoder,
+            Self::EncoderBridge => RecordingPipelineStage::VideoEncoder,
+            Self::ScreenOverlay => RecordingPipelineStage::Render,
+            Self::FfmpegSpawn | Self::FfmpegOutputStartup => RecordingPipelineStage::Muxer,
+        }
+    }
+}
+
+fn published_output_startup_failure(
+    encoder_bridge_terminal_failure: Option<String>,
+    ffmpeg_output_startup_result: Result<()>,
+) -> Option<(PublishedSessionStartFailureOrigin, anyhow::Error)> {
+    // A bridge that dies during priming usually also makes FFmpeg close before
+    // publishing its first media clock. Preserve the originating bridge error
+    // instead of misreporting that secondary readiness symptom as a muxer fault.
+    encoder_bridge_terminal_failure
+        .map(|failure| {
+            (
+                PublishedSessionStartFailureOrigin::EncoderBridge,
+                anyhow::anyhow!(failure).context("Encoder bridge failed during startup"),
+            )
+        })
+        .or_else(|| {
+            ffmpeg_output_startup_result.err().map(|error| {
+                (
+                    PublishedSessionStartFailureOrigin::FfmpegOutputStartup,
+                    error.context("FFmpeg output startup failed"),
+                )
+            })
+        })
+}
+
+/// Once Starting is observable, every uncommitted exit must publish a
+/// terminal replacement for that exact session. Otherwise the renderer keeps
+/// the backend-owned session id and cannot clear its Starting state when the
+/// start RPC rejects. Before FFmpeg exists this guard owns the terminal. Once
+/// spawned, ownership moves into `UncommittedCaptureProcess`, so even future
+/// cancellation publishes Idle only after the exact child is reaped and its
+/// empty startup output has been cleaned.
+struct PublishedSessionStartGuard {
+    terminal: Option<PublishedSessionStartTerminal>,
+}
+
+struct PublishedSessionStartTerminal {
+    state: AppState,
+    session_id: String,
+    output_path: Option<PathBuf>,
+    pipeline: RecordingPipeline,
+    failed_stage: RecordingPipelineStage,
+    message: String,
+    session_start_admission: Option<SessionStartAdmission>,
+}
+
+impl PublishedSessionStartTerminal {
+    fn set_failure(&mut self, origin: PublishedSessionStartFailureOrigin, message: &str) {
+        self.failed_stage = origin.pipeline_stage();
+        self.message = message.to_string();
+    }
+
+    fn publish(mut self) {
+        self.pipeline
+            .mark_failed(self.failed_stage.clone(), &self.message);
+        self.state.emit_event(
+            "recording.status",
+            recording_start_rejected_status(
+                &self.session_id,
+                self.output_path.as_deref(),
+                &self.pipeline,
+                &self.message,
+            ),
+        );
+        // Keep SessionStarting authoritative through the terminal event. A
+        // replacement start cannot be admitted on another runtime worker and
+        // then be overwritten by this old session's delayed Idle push.
+        drop(self.session_start_admission.take());
+    }
+
+    fn take_session_start_admission(mut self) -> SessionStartAdmission {
+        self.session_start_admission
+            .take()
+            .expect("published session start owns its admission")
+    }
+}
+
+impl PublishedSessionStartGuard {
+    fn unarmed() -> Self {
+        Self { terminal: None }
+    }
+
+    fn arm(
+        &mut self,
+        state: AppState,
+        session_id: &str,
+        output_path: Option<PathBuf>,
+        pipeline: &RecordingPipeline,
+        session_start_admission: SessionStartAdmission,
+    ) {
+        debug_assert!(self.terminal.is_none(), "Starting is published only once");
+        self.terminal = Some(PublishedSessionStartTerminal {
+            state,
+            session_id: session_id.to_string(),
+            output_path,
+            pipeline: pipeline.clone(),
+            failed_stage: RecordingPipelineStage::Muxer,
+            message: "Session start did not reach a running capture pipeline.".to_string(),
+            session_start_admission: Some(session_start_admission),
+        });
+    }
+
+    fn set_failure(&mut self, origin: PublishedSessionStartFailureOrigin, message: &str) {
+        let terminal = self
+            .terminal
+            .as_mut()
+            .expect("published Starting owns its terminal guard");
+        terminal.set_failure(origin, message);
+    }
+
+    fn take_terminal(&mut self) -> Option<PublishedSessionStartTerminal> {
+        self.terminal.take()
+    }
+
+    fn disarm(&mut self) {
+        self.terminal = None;
+    }
+}
+
+impl Drop for PublishedSessionStartGuard {
+    fn drop(&mut self) {
+        if let Some(terminal) = self.terminal.take() {
+            terminal.publish();
+        }
+    }
+}
 
 fn live_captions_requested(params: &StartSessionParams) -> bool {
     params
@@ -238,6 +392,71 @@ fn spawn_authorized_capture_process(
     spawn_owned_tokio(command)
 }
 
+fn ensure_session_start_process_live(state: &AppState) -> Result<()> {
+    if state.process_shutdown_requested() {
+        bail!(SESSION_START_SHUTDOWN_MESSAGE);
+    }
+    Ok(())
+}
+
+async fn admit_session_start(
+    state: &AppState,
+) -> Result<(
+    SessionStartAdmission,
+    OwnedMutexGuard<()>,
+    OwnedMutexGuard<()>,
+)> {
+    // Avoid reserving SessionStarting after shutdown is already authoritative.
+    ensure_session_start_process_live(state)?;
+    let admission = state
+        .capture_interruption
+        .try_begin_session_start()
+        .map_err(|blocker| anyhow::anyhow!(blocker.to_string()))?;
+
+    // Recovery and idle geometry resync use this short admission edge to
+    // register their persistent source-transition guards. Keep it while
+    // snapshotting and draining those exact transitions so no newer physical
+    // source mutation can enter the observe/wait gap.
+    let source_transition_admission = state
+        .session_start_source_transition_fence
+        .clone()
+        .lock_owned()
+        .await;
+    ensure_session_start_process_live(state)?;
+
+    // WebSocket intake has already waited for every older authoritative source
+    // command before it can call this admission seam. Snapshot only after
+    // owning the source-admission mutex: geometry resync and automatic recovery
+    // use that same mutex, so neither can begin a new physical transition in
+    // the observe/wait gap. The source fence outlives bounded command replies
+    // and therefore drains the exact camera/screen supervisors admitted by
+    // those older commands before capture ownership can be published.
+    let prior_source_transitions = state.source_transition_fence.observe();
+    prior_source_transitions.wait().await;
+    ensure_session_start_process_live(state)?;
+
+    // Native transition waits deliberately never own the publication/shutdown
+    // fence. Acquire it only after those waits finish, but before releasing the
+    // admission edge, so recovery cannot enter between the source snapshot and
+    // observable recording publication. Shutdown sets its monotonic latch,
+    // takes this independent fence, and can therefore drain even if a native
+    // transition remains wedged forever.
+    let publication_fence = state
+        .session_start_publication_fence
+        .clone()
+        .lock_owned()
+        .await;
+    ensure_session_start_process_live(state)?;
+    Ok((admission, publication_fence, source_transition_admission))
+}
+
+#[cfg(test)]
+pub(crate) async fn test_admit_session_start_and_release(state: &AppState) -> Result<()> {
+    let (_admission, _publication_fence, _source_transition_admission) =
+        admit_session_start(state).await?;
+    Ok(())
+}
+
 /// Owns every FIFO created while a capture session is still being assembled.
 /// Startup has many fallible steps before FFmpeg is spawned; keeping the FIFO
 /// paths in a guard from the moment they are created prevents an early return
@@ -267,19 +486,106 @@ impl Drop for CaptureStartupResources {
     }
 }
 
+/// Deletes only the empty MKV reserved for this exact session when a
+/// post-spawn start is rejected. The owner runs it only after FFmpeg has been
+/// reaped, so Windows never races an open output handle and nonempty recovery
+/// media is never discarded.
+struct PostSpawnRejectedStartCleanup {
+    state: AppState,
+    session_id: String,
+    output_path: Option<PathBuf>,
+}
+
+impl PostSpawnRejectedStartCleanup {
+    fn new(state: AppState, session_id: &str, output_path: Option<PathBuf>) -> Self {
+        Self {
+            state,
+            session_id: session_id.to_string(),
+            output_path,
+        }
+    }
+
+    async fn run(self) {
+        let Some(output_path) = self.output_path.as_deref() else {
+            return;
+        };
+        match remove_zero_byte_startup_output(&self.session_id, output_path).await {
+            Ok(true) => {
+                let _ = emit_session_log(
+                    &self.state,
+                    &self.session_id,
+                    HealthLevel::Info,
+                    "empty-startup-output-removed",
+                    "Removed the zero-byte MKV created by the rejected session start.",
+                    None,
+                );
+            }
+            Ok(false) => {}
+            Err(error) => {
+                let _ = emit_health_event(
+                    &self.state,
+                    Some(&self.session_id),
+                    HealthLevel::Warn,
+                    "empty-startup-output-cleanup-failed",
+                    &format!("{error:#}"),
+                );
+            }
+        }
+    }
+}
+
 /// Owns FFmpeg until its startup resources become part of an active recording.
 /// Any early error drops this guard, which terminates/reaps the child and
 /// removes its startup FIFOs before another capture can reuse those resources.
 struct UncommittedCaptureProcess {
     child: Option<tokio::process::Child>,
-    startup_resources: CaptureStartupResources,
+    startup_resources: Option<CaptureStartupResources>,
+    rejected_start_cleanup: Option<PostSpawnRejectedStartCleanup>,
+    rejected_start_terminal: Option<PublishedSessionStartTerminal>,
 }
 
 impl UncommittedCaptureProcess {
     fn new(child: tokio::process::Child, startup_resources: CaptureStartupResources) -> Self {
         Self {
             child: Some(child),
-            startup_resources,
+            startup_resources: Some(startup_resources),
+            rejected_start_cleanup: None,
+            rejected_start_terminal: None,
+        }
+    }
+
+    fn with_rejected_start_cleanup(
+        mut self,
+        state: AppState,
+        session_id: &str,
+        output_path: Option<PathBuf>,
+    ) -> Self {
+        self.rejected_start_cleanup = Some(PostSpawnRejectedStartCleanup::new(
+            state,
+            session_id,
+            output_path,
+        ));
+        self
+    }
+
+    fn with_rejected_start_terminal(
+        mut self,
+        terminal: Option<PublishedSessionStartTerminal>,
+    ) -> Self {
+        self.rejected_start_terminal = terminal;
+        self
+    }
+
+    fn set_failure(&mut self, origin: PublishedSessionStartFailureOrigin, message: &str) {
+        self.rejected_start_terminal
+            .as_mut()
+            .expect("uncommitted capture process owns its terminal guard")
+            .set_failure(origin, message);
+    }
+
+    fn publish_rejected_start_terminal(&mut self) {
+        if let Some(terminal) = self.rejected_start_terminal.take() {
+            terminal.publish();
         }
     }
 
@@ -289,31 +595,77 @@ impl UncommittedCaptureProcess {
     /// early return if the audio session is dropped while FFmpeg still owns
     /// the read end but is stalled on another startup input.
     async fn terminate_and_reap_before_fifo_writer_join(&mut self) {
-        let Some(mut child) = self.child.take() else {
-            return;
-        };
-        let _ = child.start_kill();
-        let _ = child.wait().await;
+        if let Some(mut child) = self.child.take() {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+        }
+        // FIFO names and registrations remain owned until the child has
+        // closed every read handle. This is especially important on Windows,
+        // where deleting a named-pipe registration before reap can let a new
+        // session collide with the retiring process.
+        drop(self.startup_resources.take());
+        if let Some(cleanup) = self.rejected_start_cleanup.take() {
+            cleanup.run().await;
+        }
+        self.publish_rejected_start_terminal();
     }
 
-    fn commit(mut self) -> tokio::process::Child {
-        self.startup_resources.commit();
-        self.child
+    fn commit(mut self) -> (tokio::process::Child, SessionStartAdmission) {
+        self.startup_resources
+            .as_mut()
+            .expect("uncommitted capture process owns startup resources")
+            .commit();
+        self.startup_resources = None;
+        self.rejected_start_cleanup = None;
+        let session_start_admission = self
+            .rejected_start_terminal
             .take()
-            .expect("uncommitted capture process must own its child")
+            .expect("committed capture process owns its published terminal")
+            .take_session_start_admission();
+        let child = self
+            .child
+            .take()
+            .expect("uncommitted capture process must own its child");
+        (child, session_start_admission)
     }
 }
 
 impl Drop for UncommittedCaptureProcess {
     fn drop(&mut self) {
-        let Some(mut child) = self.child.take() else {
+        let mut child = self.child.take();
+        // Request termination synchronously, before Rust continues dropping
+        // later locals such as the native-audio FIFO owner. Deferring even the
+        // signal to a spawned task can deadlock cancellation on that writer's
+        // join while FFmpeg still owns the FIFO read end.
+        if let Some(child) = child.as_mut() {
+            let _ = child.start_kill();
+        }
+        let startup_resources = self.startup_resources.take();
+        let cleanup = self.rejected_start_cleanup.take();
+        let terminal = self.rejected_start_terminal.take();
+        if child.is_none() && startup_resources.is_none() && cleanup.is_none() && terminal.is_none()
+        {
             return;
-        };
-        let _ = child.start_kill();
+        }
         if let Ok(runtime) = tokio::runtime::Handle::try_current() {
             runtime.spawn(async move {
-                let _ = child.wait().await;
+                if let Some(mut child) = child {
+                    let _ = child.wait().await;
+                }
+                drop(startup_resources);
+                if let Some(cleanup) = cleanup {
+                    cleanup.run().await;
+                }
+                if let Some(terminal) = terminal {
+                    terminal.publish();
+                }
             });
+        } else if let Some(mut child) = child {
+            // No async runtime means the exact reap/cleanup ordering cannot be
+            // completed safely. Still request termination; process shutdown is
+            // already terminal, and the current-session output remains
+            // recoverable for the next startup repair pass.
+            let _ = child.start_kill();
         }
     }
 }
@@ -347,7 +699,6 @@ const STOP_KILL_DELAY: Duration = Duration::from_secs(3);
 // suspect for X sources going playback-dead on reuse (2026-07-08 incident).
 const STOP_TERM_DELAY_STREAMING: Duration = Duration::from_secs(8);
 const STOP_KILL_DELAY_STREAMING: Duration = Duration::from_secs(5);
-const SHUTDOWN_GRACE_DELAY: Duration = Duration::from_millis(1200);
 const CAPTURE_AUDIO_FILTER: &str = "aresample=async=1:first_pts=0";
 const MONO_TO_STEREO_FILTER: &str = "pan=stereo|c0=c0|c1=c0";
 const DSHOW_AUDIO_OUTPUT_NORMALIZATION_FILTER: &str =
@@ -444,15 +795,26 @@ fn emit_unverified_frozen_recording_health(
 // blocking the bridge and starving both recording and preview.
 const ENCODER_BRIDGE_RAW_VIDEO_INPUT_QUEUE_FRAMES: u32 = 16;
 const ENCODER_BRIDGE_VIDEO_OUTPUT_ENV: &str = "VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT";
+const TEST_FORCE_SHARED_ENCODER_OUTPUT_ENV: &str = "VIDEORC_TEST_FORCE_SHARED_ENCODER_OUTPUT";
+const ENABLE_SMOKE_RPC_ENV: &str = "VIDEORC_ENABLE_SMOKE_RPC";
 const FFMPEG_LIVE_MIC_FILTER_TARGET: &str = "videorc_live_mic";
-const FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS: u64 = 2;
+// Startup truth rides FFmpeg's progress stream, so the first report must arrive
+// quickly enough that the UI does not hide seconds of already-recorded media in
+// Starting. The long-lived diagnostics publisher below remains throttled to its
+// established two-second cadence.
+const FFMPEG_PROGRESS_REPORT_PERIOD: Duration = Duration::from_millis(500);
+const FFMPEG_DIAGNOSTICS_PUBLISH_PERIOD: Duration = Duration::from_secs(2);
+const FFMPEG_OUTPUT_STARTUP_TIMEOUT: Duration = Duration::from_secs(8);
+// Once the child exits, stderr is already closed and its reader should drain
+// immediately. Keep the final snapshot behind a short bounded join so fatal
+// lines and the last progress sample belong to this session, never the next.
+const FFMPEG_STDERR_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
+const FFMPEG_STDERR_ABORT_JOIN_TIMEOUT: Duration = Duration::from_millis(100);
 const MAX_CAPTURE_MEDIA_CLOCK_SECONDS: f64 = 7.0 * 24.0 * 60.0 * 60.0;
-// Readiness normally arrives on the first two-second progress report. Keep
-// four complete report periods for slow physical-device startup while still
-// finishing well before the renderer's 30-second RPC deadline. This timeout
-// is separate from the per-command acknowledgement budget below.
-const FFMPEG_LIVE_AUDIO_READY_TIMEOUT: Duration =
-    Duration::from_secs(FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS * 4);
+// Physical devices still get generous startup headroom even though progress
+// now reports every 500ms. This remains separate from the per-command reply
+// budget below and finishes well before the renderer's 30-second RPC deadline.
+const FFMPEG_LIVE_AUDIO_READY_TIMEOUT: Duration = Duration::from_secs(8);
 // FFmpeg only polls stdin for filter commands on its progress-report cadence.
 // Keep a full extra reporting interval plus scheduling headroom so a command
 // written just after a report cannot time out after FFmpeg has applied it.
@@ -466,6 +828,118 @@ const FFMPEG_LIVE_AUDIO_REPLY_SETTLE_TIMEOUT: Duration = Duration::from_millis(1
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FfmpegFilterCommandReply {
     return_code: i32,
+}
+
+#[derive(Debug)]
+enum FfmpegStderrEvent {
+    Line(String),
+    ReadFailed,
+    Eof,
+}
+
+/// Starts draining FFmpeg stderr immediately after spawn. Encoder-bridge
+/// startup can spend seconds opening/probing FIFOs; deferring the reader until
+/// Running both risks filling the pipe and makes it impossible to prove that
+/// FFmpeg has entered its media loop before publication.
+fn spawn_ffmpeg_stderr_reader(
+    stderr: Option<ChildStderr>,
+    mut startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
+) -> Option<mpsc::UnboundedReceiver<FfmpegStderrEvent>> {
+    let Some(stderr) = stderr else {
+        if let Some(sender) = startup_ready.take() {
+            let _ = sender.send(Err(
+                "FFmpeg stderr was unavailable before output startup could be confirmed"
+                    .to_string(),
+            ));
+        }
+        return None;
+    };
+    let (sender, receiver) = mpsc::unbounded_channel();
+    tokio::spawn(relay_ffmpeg_stderr(
+        BufReader::new(stderr).lines(),
+        sender,
+        startup_ready,
+    ));
+    Some(receiver)
+}
+
+async fn relay_ffmpeg_stderr<R>(
+    mut lines: tokio::io::Lines<R>,
+    sender: mpsc::UnboundedSender<FfmpegStderrEvent>,
+    mut startup_ready: Option<oneshot::Sender<std::result::Result<(), String>>>,
+) where
+    R: AsyncBufRead + Unpin,
+{
+    loop {
+        match lines.next_line().await {
+            Ok(Some(line)) => {
+                if let Some(category) = classify_ffmpeg_fatal_line(&line)
+                    && let Some(ready) = startup_ready.take()
+                {
+                    let _ = ready.send(Err(format!(
+                        "FFmpeg reported a fatal {category} error before output startup"
+                    )));
+                } else if ffmpeg_output_startup_media_seconds(&line).is_some()
+                    && let Some(ready) = startup_ready.take()
+                {
+                    let _ = ready.send(Ok(()));
+                }
+                if sender.send(FfmpegStderrEvent::Line(line)).is_err() {
+                    break;
+                }
+            }
+            Ok(None) => {
+                if let Some(ready) = startup_ready.take() {
+                    let _ = ready.send(Err(
+                        "FFmpeg stopped before confirming its first output media clock".to_string(),
+                    ));
+                }
+                let _ = sender.send(FfmpegStderrEvent::Eof);
+                break;
+            }
+            Err(_) => {
+                if let Some(ready) = startup_ready.take() {
+                    let _ = ready.send(Err(
+                        "FFmpeg diagnostics failed before output startup was confirmed".to_string(),
+                    ));
+                }
+                let _ = sender.send(FfmpegStderrEvent::ReadFailed);
+                break;
+            }
+        }
+    }
+}
+
+async fn wait_for_ffmpeg_output_startup(
+    mut receiver: oneshot::Receiver<std::result::Result<(), String>>,
+    started_at: Instant,
+) -> Result<()> {
+    // A bridge can finish its own first-frame proof after FFmpeg has already
+    // reported output progress. Observe that completed ACK before applying the
+    // absolute deadline so a ready receiver cannot lose a zero-duration race.
+    match receiver.try_recv() {
+        Ok(Ok(())) => return Ok(()),
+        Ok(Err(message)) => return Err(anyhow::anyhow!(message)),
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+            return Err(anyhow::anyhow!(
+                "FFmpeg output startup monitor stopped before confirming media progress"
+            ));
+        }
+        Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {}
+    }
+
+    let remaining = FFMPEG_OUTPUT_STARTUP_TIMEOUT.saturating_sub(started_at.elapsed());
+    match timeout(remaining, receiver).await {
+        Ok(Ok(Ok(()))) => Ok(()),
+        Ok(Ok(Err(message))) => Err(anyhow::anyhow!(message)),
+        Ok(Err(_)) => Err(anyhow::anyhow!(
+            "FFmpeg output startup monitor stopped before confirming media progress"
+        )),
+        Err(_) => Err(anyhow::anyhow!(
+            "FFmpeg did not confirm positive output media progress within {}ms of process spawn",
+            FFMPEG_OUTPUT_STARTUP_TIMEOUT.as_millis()
+        )),
+    }
 }
 
 #[derive(Debug)]
@@ -1189,9 +1663,105 @@ pub struct ScreenOverlaySession {
     fifo_path: PathBuf,
     width: u32,
     height: u32,
+    /// Process-local identity for this exact legacy overlay writer. A prepared
+    /// frame may outlive the short recording-lock snapshot which described
+    /// it, so installation must compare this token before touching pixels.
+    generation_token: Arc<()>,
     current_frame: Arc<StdMutex<Vec<u8>>>,
     stop: Arc<AtomicBool>,
     writer: Option<JoinHandle<()>>,
+    #[cfg(test)]
+    preparation_blocker: Option<ScreenOverlayPreparationBlocker>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ScreenOverlayPreparationTicket {
+    session_id: String,
+    generation_token: Arc<()>,
+    width: u32,
+    height: u32,
+    #[cfg(test)]
+    blocker: Option<ScreenOverlayPreparationBlocker>,
+}
+
+#[derive(Debug)]
+pub(crate) struct PreparedScreenOverlayFrame {
+    session_id: String,
+    generation_token: Arc<()>,
+    width: u32,
+    height: u32,
+    frame: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PreparedScreenOverlayCommit {
+    Applied,
+    Retired,
+    Superseded,
+}
+
+#[cfg(test)]
+#[derive(Debug, Clone)]
+pub(crate) struct ScreenOverlayPreparationBlocker {
+    entered: Arc<AtomicBool>,
+    release: Arc<(StdMutex<bool>, std::sync::Condvar)>,
+}
+
+#[cfg(test)]
+impl ScreenOverlayPreparationBlocker {
+    pub(crate) fn new() -> Self {
+        Self {
+            entered: Arc::new(AtomicBool::new(false)),
+            release: Arc::new((StdMutex::new(false), std::sync::Condvar::new())),
+        }
+    }
+
+    fn block(&self) {
+        self.entered.store(true, Ordering::Release);
+        let (release, condition) = &*self.release;
+        let mut released = release
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        while !*released {
+            released = condition
+                .wait(released)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+    }
+
+    pub(crate) fn entered(&self) -> bool {
+        self.entered.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn release(&self) {
+        let (release, condition) = &*self.release;
+        *release
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+        condition.notify_all();
+    }
+}
+
+impl ScreenOverlayPreparationTicket {
+    pub(crate) fn prepare(self, path: Option<String>) -> Result<PreparedScreenOverlayFrame> {
+        #[cfg(test)]
+        if let Some(blocker) = self.blocker.as_ref() {
+            blocker.block();
+        }
+        let frame = match path {
+            Some(path) => {
+                screen_overlay_frame_from_path(Path::new(&path), self.width, self.height)?
+            }
+            None => transparent_overlay_frame(self.width, self.height),
+        };
+        Ok(PreparedScreenOverlayFrame {
+            session_id: self.session_id,
+            generation_token: self.generation_token,
+            width: self.width,
+            height: self.height,
+            frame,
+        })
+    }
 }
 
 impl ScreenOverlaySession {
@@ -1220,21 +1790,64 @@ impl ScreenOverlaySession {
             fifo_path,
             width,
             height,
+            generation_token: Arc::new(()),
             current_frame,
             stop,
             writer: Some(writer),
+            #[cfg(test)]
+            preparation_blocker: None,
         })
     }
 
-    pub fn set_image_path(&self, path: Option<&str>) -> Result<()> {
-        let next_frame = match path {
-            Some(path) => screen_overlay_frame_from_path(Path::new(path), self.width, self.height)?,
-            None => transparent_overlay_frame(self.width, self.height),
-        };
-        if let Ok(mut current) = self.current_frame.lock() {
-            *current = next_frame;
+    fn preparation_ticket(&self, session_id: String) -> ScreenOverlayPreparationTicket {
+        ScreenOverlayPreparationTicket {
+            session_id,
+            generation_token: self.generation_token.clone(),
+            width: self.width,
+            height: self.height,
+            #[cfg(test)]
+            blocker: self.preparation_blocker.clone(),
         }
-        Ok(())
+    }
+
+    fn install_prepared_frame(&self, prepared: PreparedScreenOverlayFrame) -> bool {
+        if !Arc::ptr_eq(&self.generation_token, &prepared.generation_token)
+            || self.width != prepared.width
+            || self.height != prepared.height
+        {
+            return false;
+        }
+        if let Ok(mut current) = self.current_frame.lock() {
+            *current = prepared.frame;
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_stub(
+        width: u32,
+        height: u32,
+        blocker: ScreenOverlayPreparationBlocker,
+    ) -> Self {
+        Self {
+            fifo_path: std::env::temp_dir()
+                .join(format!("videorc-screen-overlay-test-{}", Uuid::new_v4())),
+            width,
+            height,
+            generation_token: Arc::new(()),
+            current_frame: Arc::new(StdMutex::new(transparent_overlay_frame(width, height))),
+            stop: Arc::new(AtomicBool::new(false)),
+            writer: None,
+            preparation_blocker: Some(blocker),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_current_frame(&self) -> Vec<u8> {
+        self.current_frame
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 }
 
@@ -1266,6 +1879,17 @@ pub struct ActiveLivePreview {
 }
 
 impl ActiveRecording {
+    pub(crate) fn capture_elapsed_seconds(&self) -> f64 {
+        let origin = self
+            .capture_epoch
+            .get()
+            .copied()
+            .unwrap_or(self.capture_started_fallback);
+        Instant::now()
+            .saturating_duration_since(origin)
+            .as_secs_f64()
+    }
+
     pub fn status(&self, state: RecordingState, message: Option<String>) -> RecordingStatus {
         RecordingStatus {
             state,
@@ -1283,11 +1907,37 @@ impl ActiveRecording {
         }
     }
 
-    pub fn set_active_screen_path(&self, path: Option<&str>) -> Result<()> {
-        if let Some(overlay) = &self.screen_overlay {
-            overlay.set_image_path(path)?;
+    pub(crate) fn active_screen_overlay_preparation(
+        &self,
+    ) -> Option<ScreenOverlayPreparationTicket> {
+        if self.stop_requested {
+            return None;
         }
-        Ok(())
+        self.screen_overlay
+            .as_ref()
+            .map(|overlay| overlay.preparation_ticket(self.session_id.clone()))
+    }
+
+    pub(crate) fn commit_prepared_active_screen(
+        &self,
+        prepared: PreparedScreenOverlayFrame,
+    ) -> PreparedScreenOverlayCommit {
+        if self.stop_requested {
+            return PreparedScreenOverlayCommit::Retired;
+        }
+        let Some(overlay) = self.screen_overlay.as_ref() else {
+            // Modern compositor/encoder-bridge sessions consume the active
+            // Screen directly; the legacy FIFO has no pixels to update.
+            return PreparedScreenOverlayCommit::Retired;
+        };
+        if self.session_id != prepared.session_id {
+            return PreparedScreenOverlayCommit::Superseded;
+        }
+        if overlay.install_prepared_frame(prepared) {
+            PreparedScreenOverlayCommit::Applied
+        } else {
+            PreparedScreenOverlayCommit::Superseded
+        }
     }
 
     fn recording_bridge_terminal_failure(&self) -> Option<String> {
@@ -1331,16 +1981,7 @@ pub async fn current_stream_targets_snapshot(state: &AppState) -> Result<StreamT
 pub async fn active_capture_elapsed_seconds(state: &AppState) -> Option<f64> {
     let recording = state.recording.lock().await;
     let active = recording.as_ref()?;
-    let origin = active
-        .capture_epoch
-        .get()
-        .copied()
-        .unwrap_or(active.capture_started_fallback);
-    Some(
-        Instant::now()
-            .saturating_duration_since(origin)
-            .as_secs_f64(),
-    )
+    Some(active.capture_elapsed_seconds())
 }
 
 /// Applies renderer mic controls to the active CoreAudio or FFmpeg-owned
@@ -1469,8 +2110,10 @@ fn begin_idle_preview_start(preview: &mut LivePreviewState) -> u64 {
 fn reserve_idle_preview_start(
     preview: &mut LivePreviewState,
     capture_admission_idle: bool,
+    process_shutdown_requested: bool,
 ) -> Option<u64> {
-    capture_admission_idle.then(|| begin_idle_preview_start(preview))
+    (capture_admission_idle && !process_shutdown_requested)
+        .then(|| begin_idle_preview_start(preview))
 }
 
 fn cancel_idle_preview_start(preview: &mut LivePreviewState) {
@@ -1483,8 +2126,10 @@ fn idle_preview_start_is_current(
     params: &PreviewLiveParams,
     recording_active: bool,
     capture_admission_idle: bool,
+    process_shutdown_requested: bool,
 ) -> bool {
     capture_admission_idle
+        && !process_shutdown_requested
         && !recording_active
         && preview.generation == generation
         && preview.desired_params.as_ref() == Some(params)
@@ -1503,6 +2148,7 @@ async fn idle_preview_start_is_current_for_state(
         params,
         recording_active,
         state.capture_interruption.capture_admission_is_idle(),
+        state.process_shutdown_requested(),
     )
 }
 
@@ -1587,14 +2233,57 @@ fn recording_output_path(
     started_at: &DateTime<Utc>,
     session_id: &str,
 ) -> PathBuf {
-    let safe_session_id = session_id
-        .chars()
-        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
-        .collect::<String>();
+    let safe_session_id = safe_session_file_component(session_id);
     output_directory.join(format!(
         "videorc-session-{}-{safe_session_id}.mkv",
         started_at.format("%Y%m%d-%H%M%S")
     ))
+}
+
+fn safe_session_file_component(session_id: &str) -> String {
+    session_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || *character == '-')
+        .collect()
+}
+
+fn startup_output_belongs_to_session(session_id: &str, output_path: &Path) -> bool {
+    let safe_session_id = safe_session_file_component(session_id);
+    !safe_session_id.is_empty()
+        && output_path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            == Some("mkv")
+        && output_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.ends_with(&format!("-{safe_session_id}.mkv")))
+}
+
+async fn remove_zero_byte_startup_output(session_id: &str, output_path: &Path) -> Result<bool> {
+    if !startup_output_belongs_to_session(session_id, output_path) {
+        return Ok(false);
+    }
+    let metadata = match fs::metadata(output_path).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(anyhow::Error::new(error).context(format!(
+                "Could not inspect failed startup output {}",
+                output_path.display()
+            )));
+        }
+    };
+    if !metadata.is_file() || metadata.len() != 0 {
+        return Ok(false);
+    }
+    fs::remove_file(output_path).await.with_context(|| {
+        format!(
+            "Could not remove zero-byte failed startup output {}",
+            output_path.display()
+        )
+    })?;
+    Ok(true)
 }
 
 fn default_video_settings() -> VideoSettings {
@@ -1618,6 +2307,29 @@ pub fn idle_status() -> RecordingStatus {
         pipeline: None,
         duration_ms: None,
         message: Some("Ready to start a capture session.".to_string()),
+    }
+}
+
+fn recording_start_rejected_status(
+    session_id: &str,
+    output_path: Option<&Path>,
+    pipeline: &RecordingPipeline,
+    message: &str,
+) -> RecordingStatus {
+    RecordingStatus {
+        // The rejected RPC owns the single persistent "Could not start" UX.
+        // Idle is the authoritative terminal replacement for Starting; using
+        // Failed here would also trigger the mid-recording "stopped
+        // unexpectedly" notice even though no running session existed.
+        state: RecordingState::Idle,
+        session_id: Some(session_id.to_string()),
+        output_path: output_path.map(|path| path.display().to_string()),
+        stream_url: None,
+        started_at: None,
+        audio_tracks: Vec::new(),
+        pipeline: Some(pipeline.status()),
+        duration_ms: None,
+        message: Some(message.to_string()),
     }
 }
 
@@ -1666,14 +2378,20 @@ pub async fn start_session(
     state: AppState,
     mut params: StartSessionParams,
 ) -> Result<RecordingStatus> {
+    // Once armed at the Starting edge this guard owns the admission itself, so
+    // every uncommitted return publishes the exact-session terminal replacement
+    // before another start can be admitted.
+    let mut published_session_start = PublishedSessionStartGuard::unarmed();
     // This backend-owned edge closes the gap between Electron's last sampled
     // status and the first Starting event. A permission restart or updater
     // install that already owns the interruption lease rejects this start; a
     // start that wins first makes interruption admission fail immediately.
-    let session_start_admission = state
-        .capture_interruption
-        .try_begin_session_start()
-        .map_err(|blocker| anyhow::anyhow!(blocker.to_string()))?;
+    let (
+        session_start_admission,
+        _session_start_publication_fence,
+        _session_start_source_transition_fence,
+    ) = admit_session_start(&state).await?;
+    let mut session_start_admission = Some(session_start_admission);
     // SessionStarting becomes authoritative before `state.recording` is
     // populated. Invalidate any reserved fallback child under the same lock
     // used to reserve/install it, closing that startup window immediately.
@@ -1693,6 +2411,11 @@ pub async fn start_session(
     hydrate_stream_key_secret_refs(&state, &mut params)?;
     normalize_stream_only_output_video(&mut params)?;
     validate_session_entitlements(&params, &entitlements::current_entitlements())?;
+    let caption_start_intent_generation = if live_captions_requested(&params) {
+        crate::captions::reserve_caption_session_start(&state).await
+    } else {
+        None
+    };
 
     // Admission belongs before capture permits, output creation, compositor,
     // native audio, or FFmpeg. A detached writer remains visible until its
@@ -1815,7 +2538,7 @@ pub async fn start_session(
         emit_disk_space_health_event(&state, &session_id, &output_dir).await?;
     }
 
-    stop_idle_live_preview_for_recording(state.clone()).await;
+    let recording_preview_generation = stop_idle_live_preview_for_recording(state.clone()).await;
 
     let mut startup_resources = CaptureStartupResources::default();
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &params).await;
@@ -2816,6 +3539,13 @@ pub async fn start_session(
         (None, None, None)
     };
 
+    // This is the final cancellation-free check before any Starting status or
+    // FFmpeg child becomes observable. If shutdown latched while startup was
+    // assembling inputs, fail closed. If it latches after this check, shutdown
+    // is blocked on `_session_start_publication_fence` until the child, monitor,
+    // and `state.recording` owner are all published and therefore drainable.
+    ensure_session_start_process_live(&state)?;
+
     publish_authorized_session_start(
         &state,
         RecordingStatus {
@@ -2831,6 +3561,15 @@ pub async fn start_session(
         },
         &session_start_publication_permit,
     );
+    published_session_start.arm(
+        state.clone(),
+        &session_id,
+        output_path.clone(),
+        &pipeline,
+        session_start_admission
+            .take()
+            .expect("session start admission is transferred at publication"),
+    );
 
     let mut command = ffmpeg_command(&ffmpeg_path);
     command
@@ -2843,17 +3582,48 @@ pub async fn start_session(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child =
-        spawn_authorized_capture_process(&mut command, session_start_publication_permit)
-            .with_context(|| format!("Could not start {ffmpeg_path}"))?;
+        match spawn_authorized_capture_process(&mut command, session_start_publication_permit)
+            .with_context(|| format!("Could not start {ffmpeg_path}"))
+        {
+            Ok(child) => child,
+            Err(error) => {
+                published_session_start.set_failure(
+                    PublishedSessionStartFailureOrigin::FfmpegSpawn,
+                    &format!("{error:#}"),
+                );
+                return Err(error);
+            }
+        };
 
     let stderr = child.stderr.take();
     let stdout = child.stdout.take();
     let mut stdin = retain_ffmpeg_stdin.then(|| child.stdin.take()).flatten();
     let ffmpeg_live_audio_session = match pending_ffmpeg_live_audio_control {
         Some(control) => {
-            let control_stdin = stdin
+            let control_stdin = match stdin
                 .take()
-                .context("FFmpeg live microphone control stdin was unavailable")?;
+                .context("FFmpeg live microphone control stdin was unavailable")
+            {
+                Ok(stdin) => stdin,
+                Err(error) => {
+                    published_session_start.set_failure(
+                        PublishedSessionStartFailureOrigin::LiveAudioControlStdin,
+                        &format!("{error:#}"),
+                    );
+                    let mut uncommitted_capture_process =
+                        UncommittedCaptureProcess::new(child, startup_resources)
+                            .with_rejected_start_cleanup(
+                                state.clone(),
+                                &session_id,
+                                output_path.clone(),
+                            )
+                            .with_rejected_start_terminal(published_session_start.take_terminal());
+                    uncommitted_capture_process
+                        .terminate_and_reap_before_fifo_writer_join()
+                        .await;
+                    return Err(error);
+                }
+            };
             Some(Arc::new(FfmpegLiveAudioSessionHandle::new(
                 control_stdin,
                 control,
@@ -2869,6 +3639,11 @@ pub async fn start_session(
     // or FFmpeg can block opening audio while the bridge waits for video bytes
     // to be consumed. The writer already waits on `video_epoch`, so pre-roll is
     // still trimmed at the completed priming frame.
+    // Declared before the process guard even though it is initialized later.
+    // Rust therefore drops the process guard first on cancellation at either
+    // await between construction and publication, synchronously signalling
+    // FFmpeg before this active value joins its native-audio FIFO writer.
+    let pending_active: ActiveRecording;
     let attached_native_audio = native_audio_source.take().map(|prepared| {
         attach_fifo_writer(
             prepared.source,
@@ -2881,7 +3656,17 @@ pub async fn start_session(
     // a future unhandled early return starts terminating FFmpeg before native
     // audio can join its writer. Known fallible branches below additionally
     // await reaping, guaranteeing the FIFO read end is closed before return.
-    let mut uncommitted_capture_process = UncommittedCaptureProcess::new(child, startup_resources);
+    let mut uncommitted_capture_process = UncommittedCaptureProcess::new(child, startup_resources)
+        .with_rejected_start_cleanup(state.clone(), &session_id, output_path.clone())
+        .with_rejected_start_terminal(published_session_start.take_terminal());
+    let ffmpeg_output_startup_started_at = Instant::now();
+    let (ffmpeg_output_startup_sender, mut ffmpeg_output_startup_receiver) = if use_encoder_bridge {
+        let (sender, receiver) = oneshot::channel();
+        (Some(sender), Some(receiver))
+    } else {
+        (None, None)
+    };
+    let mut ffmpeg_stderr_events = spawn_ffmpeg_stderr_reader(stderr, ffmpeg_output_startup_sender);
     #[cfg(target_os = "windows")]
     let windows_d3d11_primary_input = windows_d3d11_media
         .as_ref()
@@ -2897,6 +3682,10 @@ pub async fn start_session(
         {
             Ok(path) => path,
             Err(error) => {
+                uncommitted_capture_process.set_failure(
+                    PublishedSessionStartFailureOrigin::EncoderBridge,
+                    &format!("{error:#}"),
+                );
                 uncommitted_capture_process
                     .terminate_and_reap_before_fifo_writer_join()
                     .await;
@@ -2939,6 +3728,10 @@ pub async fn start_session(
         ) {
             Ok(bridge) => Some(bridge),
             Err(error) => {
+                uncommitted_capture_process.set_failure(
+                    PublishedSessionStartFailureOrigin::EncoderBridge,
+                    &format!("{error:#}"),
+                );
                 uncommitted_capture_process
                     .terminate_and_reap_before_fifo_writer_join()
                     .await;
@@ -2996,18 +3789,25 @@ pub async fn start_session(
                 }
                 _ => None,
             };
-            recording_bridge
+            let recording_bridge = recording_bridge
                 .as_mut()
-                .expect("recording bridge was just started")
-                .wait_until_ready()
-                .await?;
+                .expect("recording bridge was just started");
             if let Some(stream_bridge) = stream_bridge.as_mut() {
-                stream_bridge.wait_until_ready().await?;
+                let _ = tokio::try_join!(
+                    recording_bridge.wait_until_ready(),
+                    stream_bridge.wait_until_ready()
+                )?;
+            } else {
+                recording_bridge.wait_until_ready().await?;
             }
             Ok(())
         }
         .await;
         if let Err(error) = bridge_startup_result {
+            uncommitted_capture_process.set_failure(
+                PublishedSessionStartFailureOrigin::EncoderBridge,
+                &format!("{error:#}"),
+            );
             let batch = begin_recording_encoder_bridge_teardown(
                 &mut recording_bridge,
                 &mut stream_bridge,
@@ -3025,6 +3825,68 @@ pub async fn start_session(
     } else {
         (None, None)
     };
+    let ffmpeg_output_startup_result: Result<()> = match ffmpeg_output_startup_receiver.take() {
+        Some(receiver) => {
+            wait_for_ffmpeg_output_startup(receiver, ffmpeg_output_startup_started_at).await
+        }
+        None => Ok(()),
+    };
+    let encoder_bridge_terminal_failure = encoder_bridge
+        .as_ref()
+        .and_then(EncoderBridgeRecordingSession::terminal_failure)
+        .or_else(|| {
+            encoder_bridge_stream
+                .as_ref()
+                .and_then(EncoderBridgeRecordingSession::terminal_failure)
+        });
+    let startup_failure = published_output_startup_failure(
+        encoder_bridge_terminal_failure,
+        ffmpeg_output_startup_result,
+    );
+    if let Some((origin, error)) = startup_failure {
+        let message = format!("{error:#}");
+        uncommitted_capture_process.set_failure(origin, &message);
+        let (health_code, teardown_origin) = match origin {
+            PublishedSessionStartFailureOrigin::EncoderBridge => (
+                "encoder-bridge-startup-failed",
+                "encoder-bridge-startup-failure",
+            ),
+            _ => (
+                "ffmpeg-output-startup-failed",
+                "ffmpeg-output-startup-failure",
+            ),
+        };
+        let _ = emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Error,
+            health_code,
+            &message,
+        );
+        let batch = begin_recording_encoder_bridge_teardown(
+            &mut encoder_bridge,
+            &mut encoder_bridge_stream,
+            ENCODER_BRIDGE_TEARDOWN_GRACE,
+        );
+        uncommitted_capture_process
+            .terminate_and_reap_before_fifo_writer_join()
+            .await;
+        let _ = finish_recording_encoder_bridge_teardown(&state, batch, teardown_origin).await;
+        return Err(error);
+    }
+    if use_encoder_bridge {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Info,
+            "ffmpeg-output-startup-ready",
+            &format!(
+                "FFmpeg confirmed positive output media progress after {}ms.",
+                ffmpeg_output_startup_started_at.elapsed().as_millis()
+            ),
+            None,
+        );
+    }
     if let Some(result) = startup_barrier_result.as_ref() {
         publish_recording_startup_barrier_diagnostics(
             &state,
@@ -3070,6 +3932,10 @@ pub async fn start_session(
         ) {
             Ok(screen_overlay) => Some(screen_overlay),
             Err(error) => {
+                uncommitted_capture_process.set_failure(
+                    PublishedSessionStartFailureOrigin::ScreenOverlay,
+                    &format!("{error:#}"),
+                );
                 let batch = begin_recording_encoder_bridge_teardown(
                     &mut encoder_bridge,
                     &mut encoder_bridge_stream,
@@ -3089,7 +3955,7 @@ pub async fn start_session(
         },
         None => None,
     };
-    let active = ActiveRecording {
+    pending_active = ActiveRecording {
         session_id: session_id.clone(),
         pid,
         stdin,
@@ -3125,7 +3991,6 @@ pub async fn start_session(
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
     };
-    let child = uncommitted_capture_process.commit();
     // The fully-constructed pipeline is now committed to becoming an active
     // capture. Advance the caption epoch only here, after every fallible startup
     // step, so an early start failure cannot create an orphan caption session.
@@ -3148,9 +4013,16 @@ pub async fn start_session(
     } else {
         RecordingState::Recording
     };
-    let running_status = active.status(running_state, Some(format!("Running {mode} session.")));
+    let running_status =
+        pending_active.status(running_state, Some(format!("Running {mode} session.")));
 
-    *state.recording.lock().await = Some(active);
+    // Acquire the final owner slot while the uncommitted child guard is still
+    // armed. From `commit` through monitor spawn there are no await points, so
+    // cancellation can leave neither an orphan FFmpeg child nor an active
+    // recording without its reaper.
+    let mut recording = state.recording.lock().await;
+    let (child, session_start_admission) = uncommitted_capture_process.commit();
+    *recording = Some(pending_active);
     session_start_admission.commit();
     // A delayed idle capture-config reload that was queued before session start
     // may resume only after `recording` is authoritative; the idle-only commit
@@ -3188,11 +4060,21 @@ pub async fn start_session(
             }
         });
     }
-    publish_recording_live_preview_status(&state, use_encoder_bridge, None).await;
-    if let Some(captions) = params
+    let preview_status_state = state.clone();
+    tokio::spawn(async move {
+        publish_recording_live_preview_status(
+            &preview_status_state,
+            use_encoder_bridge,
+            recording_preview_generation,
+            None,
+        )
+        .await;
+    });
+    if let Some((captions, caption_start_intent_generation)) = params
         .captions
         .as_ref()
         .filter(|captions| captions.enabled && !captions.suppressed_for_session)
+        .zip(caption_start_intent_generation)
     {
         debug_assert!(
             has_native_audio,
@@ -3201,17 +4083,27 @@ pub async fn start_session(
         let language = (!captions.language.trim().is_empty()
             && !captions.language.eq_ignore_ascii_case("auto"))
         .then(|| captions.language.clone());
-        if let Err(error) = crate::captions::start_captions(&state, language).await {
-            let message = format!("Live captions could not start: {error}");
-            crate::captions::block_captions(&state, "captions-start-failed", message.clone()).await;
-            let _ = emit_health_event(
-                &state,
-                Some(&session_id),
-                HealthLevel::Warn,
-                "captions-start-failed",
-                &message,
-            );
-        }
+        let captions_state = state.clone();
+        let captions_session_id = session_id.clone();
+        tokio::spawn(async move {
+            if let Err(error) = crate::captions::start_captions_for_session(
+                &captions_state,
+                &captions_session_id,
+                caption_start_intent_generation,
+                language,
+            )
+            .await
+            {
+                let message = format!("Live captions could not start: {error}");
+                let _ = emit_health_event(
+                    &captions_state,
+                    Some(&captions_session_id),
+                    HealthLevel::Warn,
+                    "captions-start-failed",
+                    &message,
+                );
+            }
+        });
     }
     if has_native_audio {
         tokio::spawn(sample_native_audio_during_recording(
@@ -3228,13 +4120,13 @@ pub async fn start_session(
         state.emit_event("stream.targets", initial_stream_targets_snapshot);
     }
 
-    if let Some(stderr) = stderr {
+    let ffmpeg_stderr_monitor = if let Some(mut stderr_events) = ffmpeg_stderr_events.take() {
         let log_state = state.clone();
         let log_session_id = session_id.clone();
         let target_fps = params.output.video.fps;
         let ffmpeg_audio_reply_sender = ffmpeg_audio_reply_sender;
         let ffmpeg_live_audio_session = ffmpeg_live_audio_stderr_session;
-        tokio::spawn(async move {
+        Some(tokio::spawn(async move {
             let mut capture_media_clock_logged = false;
             let mut first_fatal_ffmpeg_line_logged = false;
             // This monitor owns exactly one FFmpeg process generation. A replacement
@@ -3243,12 +4135,13 @@ pub async fn start_session(
             let process_generation = 0_u64;
             let mut stream_health_accumulator =
                 StreamHealthAccumulator::new(&log_session_id, process_generation);
-            let mut lines = BufReader::new(stderr).lines();
+            let mut pending_stream_health = ParsedStreamHealthDelta::default();
+            let mut last_stream_health_published_at = Instant::now();
             let stderr_reached_eof = loop {
-                let line = match lines.next_line().await {
-                    Ok(Some(line)) => line,
-                    Ok(None) => break true,
-                    Err(_) => {
+                let line = match stderr_events.recv().await {
+                    Some(FfmpegStderrEvent::Line(line)) => line,
+                    Some(FfmpegStderrEvent::Eof) | None => break true,
+                    Some(FfmpegStderrEvent::ReadFailed) => {
                         let _ = emit_session_log(
                             &log_state,
                             &log_session_id,
@@ -3266,7 +4159,7 @@ pub async fn start_session(
                 }
 
                 if !capture_media_clock_logged
-                    && let Some(message) = capture_media_clock_log_message(trimmed)
+                    && let Some(seconds) = ffmpeg_output_startup_media_seconds(trimmed)
                 {
                     capture_media_clock_logged = true;
                     let _ = emit_session_log(
@@ -3274,7 +4167,7 @@ pub async fn start_session(
                         &log_session_id,
                         HealthLevel::Info,
                         "capture-media-clock-ready",
-                        &message,
+                        &format!("mediaSeconds={seconds:.3}"),
                         None,
                     );
                 }
@@ -3332,47 +4225,29 @@ pub async fn start_session(
                     log_state.emit_log("warn", trimmed);
                 }
                 if let Some(delta) = parse_ffmpeg_stream_health(trimmed) {
-                    let stream_health =
-                        stream_health_accumulator.apply(&log_session_id, process_generation, delta);
-                    let scene_revision = current_compositor_scene_revision(&log_state).await;
-                    let diagnostic_stats = {
-                        let mut diagnostics = log_state.diagnostics.lock().await;
-                        let next = apply_active_scene_revision(
-                            apply_stream_health(diagnostics.clone(), &stream_health, target_fps),
-                            scene_revision,
-                        );
-                        *diagnostics = next.clone();
-                        next
-                    };
-                    log_state.emit_event(
-                        "diagnostics.stats",
-                        apply_runtime_diagnostics_snapshot(
-                            diagnostic_stats,
-                            log_state.ffmpeg_work.snapshot(),
-                        ),
-                    );
-                    if stream_health.dropped_frames.unwrap_or_default() > 0 {
-                        let _ = emit_health_event(
-                            &log_state,
-                            Some(&log_session_id),
-                            HealthLevel::Warn,
-                            "stream-dropped-frames",
-                            &format!(
-                                "FFmpeg reports {} dropped frames.",
-                                stream_health.dropped_frames.unwrap_or_default()
-                            ),
-                        );
-                    }
-                    log_state.emit_event("stream.health", stream_health);
+                    pending_stream_health.merge(delta);
+                }
+                let progress_report_ended = is_ffmpeg_progress_report_boundary(trimmed);
+                let publish_stream_health = progress_report_ended
+                    && (trimmed == "progress=end"
+                        || last_stream_health_published_at.elapsed()
+                            >= FFMPEG_DIAGNOSTICS_PUBLISH_PERIOD);
+                if publish_stream_health
+                    && publish_pending_ffmpeg_stream_health(
+                        &log_state,
+                        &log_session_id,
+                        process_generation,
+                        target_fps,
+                        &mut stream_health_accumulator,
+                        &mut pending_stream_health,
+                    )
+                    .await
+                {
+                    last_stream_health_published_at = Instant::now();
                 }
                 if looks_like_ffmpeg_health_event(trimmed) {
-                    let _ = emit_health_event(
-                        &log_state,
-                        Some(&log_session_id),
-                        HealthLevel::Warn,
-                        "ffmpeg-warning",
-                        trimmed,
-                    );
+                    publish_ffmpeg_health_event_if_active(&log_state, &log_session_id, trimmed)
+                        .await;
                 }
                 // A `tee` slave dropping mid-session (onfail=ignore keeps the rest
                 // running) — attribute it to the specific target and re-emit the
@@ -3389,20 +4264,14 @@ pub async fn start_session(
                     } else {
                         failure.reason.clone()
                     };
-                    if let Some((label, snapshot)) = mark_stream_target_failed(
+                    publish_stream_target_failure_if_active(
+                        &log_state,
+                        &log_session_id,
                         &stream_targets_snapshot,
                         position,
-                        reason.clone(),
-                    ) {
-                        let _ = emit_health_event(
-                            &log_state,
-                            Some(&log_session_id),
-                            HealthLevel::Warn,
-                            "stream-target-failed",
-                            &format!("Streaming to {label} stopped: {reason}"),
-                        );
-                        log_state.emit_event("stream.targets", snapshot);
-                    }
+                        reason,
+                    )
+                    .await;
                 }
                 if let Some(failure) = parse_tee_slave_failure(trimmed)
                     && let Some(Some(position)) = slave_positions.get(failure.slave_index).copied()
@@ -3412,22 +4281,28 @@ pub async fn start_session(
                     } else {
                         failure.reason.clone()
                     };
-                    if let Some((label, snapshot)) = mark_stream_target_failed(
+                    publish_stream_target_failure_if_active(
+                        &log_state,
+                        &log_session_id,
                         &stream_targets_snapshot,
                         position,
-                        reason.clone(),
-                    ) {
-                        let _ = emit_health_event(
-                            &log_state,
-                            Some(&log_session_id),
-                            HealthLevel::Warn,
-                            "stream-target-failed",
-                            &format!("Streaming to {label} stopped: {reason}"),
-                        );
-                        log_state.emit_event("stream.targets", snapshot);
-                    }
+                        reason,
+                    )
+                    .await;
                 }
             };
+            // A short capture or abrupt stderr end may not include a final
+            // `progress=end` boundary. Publish the last finite sample instead
+            // of silently losing it when the diagnostics cadence is throttled.
+            let _ = publish_pending_ffmpeg_stream_health(
+                &log_state,
+                &log_session_id,
+                process_generation,
+                target_fps,
+                &mut stream_health_accumulator,
+                &mut pending_stream_health,
+            )
+            .await;
             if stderr_reached_eof
                 && let Some(session) = ffmpeg_live_audio_session.as_ref()
                 && session.mark_terminal()
@@ -3441,25 +4316,37 @@ pub async fn start_session(
                     None,
                 );
             }
-        });
+        }))
     } else if let Some(session) = ffmpeg_live_audio_stderr_session.as_ref() {
         session.mark_terminal();
-    }
+        None
+    } else {
+        None
+    };
 
+    // Transfer the child, diagnostic reader, and database row to the
+    // production monitor in one cancellation-free publication edge. The
+    // reader is already running, so a fast post-readiness exit cannot finalize
+    // before its fatal line and last progress sample are consumed.
     tokio::spawn(monitor_session(
         state.clone(),
         child,
         stop_intent_receiver,
-        ffmpeg_live_audio_monitor_session,
-        session_id,
-        output_path,
-        PostRecordingGate {
-            intended_fps: gate_intended_fps,
-            expect_audio: gate_expect_audio,
+        session_id.clone(),
+        SessionMonitorContext {
+            ffmpeg_live_audio_session: ffmpeg_live_audio_monitor_session,
+            ffmpeg_stderr_monitor,
+            output_path: output_path.clone(),
+            post_recording_gate: PostRecordingGate {
+                intended_fps: gate_intended_fps,
+                expect_audio: gate_expect_audio,
+            },
         },
     ));
-    // The pipeline owns the row from here; monitor_session finishes it.
     session_row_guard.disarm();
+    published_session_start.disarm();
+    drop(recording);
+
     Ok(running_status)
 }
 
@@ -3581,6 +4468,25 @@ fn hydrate_stream_key_secret_refs_from_credentials(
 }
 
 pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
+    // A direct stop caller must observe the same publication ordering as the
+    // WebSocket stop lane. During startup, `state.recording` is intentionally
+    // empty until FFmpeg has proven output progress; waiting on this fence
+    // prevents an early Idle acknowledgement followed by a late Running
+    // publication. Publication precedes the stop fence in the global lock
+    // order, matching shutdown's publication -> finalization sequence.
+    let _session_start_publication_fence = state
+        .session_start_publication_fence
+        .clone()
+        .lock_owned()
+        .await;
+    let _stop_fence = state.recording_stop_fence.clone().lock_owned().await;
+    stop_recording_serialized(state).await
+}
+
+/// Execute one operator stop/force-stop transaction while the caller owns the
+/// process-wide recording-stop fence. Shutdown uses the same serialization to
+/// join an existing graceful stop without accidentally turning it into Force.
+async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     let mut final_status_events = state.events.subscribe();
     let mut guard = state.recording.lock().await;
     let Some(active) = guard.as_mut() else {
@@ -3769,23 +4675,31 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
         None,
     );
 
+    let mut stop_io_error = None;
     if let Some((session, stop_mode)) = ffmpeg_live_audio_stop_session {
         match stop_mode {
-            FfmpegLiveAudioStopMode::Quit => session.quit().await?,
+            FfmpegLiveAudioStopMode::Quit => {
+                if let Err(error) = session.quit().await {
+                    stop_io_error =
+                        Some(error.context("Could not send quit to FFmpeg audio control"));
+                }
+            }
             FfmpegLiveAudioStopMode::CloseCommandPipe => {
                 if let Err(error) = session.close_stdin().await {
                     state.emit_log(
                         "warn",
                         format!("Could not close FFmpeg live microphone command pipe: {error:#}"),
                     );
+                    stop_io_error =
+                        Some(error.context("Could not close FFmpeg live microphone command pipe"));
                 }
             }
         }
     } else if let Some(mut stdin) = legacy_ffmpeg_stdin {
-        stdin
-            .write_all(b"q\n")
-            .await
-            .context("Could not send stop command to FFmpeg")?;
+        if let Err(error) = stdin.write_all(b"q\n").await {
+            stop_io_error =
+                Some(anyhow::Error::new(error).context("Could not send stop command to FFmpeg"));
+        }
         let _ = stdin.shutdown().await;
     }
 
@@ -3804,7 +4718,17 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
     }
 
     match wait_for_final_recording_status(&mut final_status_events, &wait_session_id).await {
-        Some(final_status) => Ok(final_status),
+        Some(final_status) => {
+            if let Some(error) = stop_io_error {
+                state.emit_log(
+                    "warn",
+                    format!(
+                        "The graceful FFmpeg stop command failed, but fallback shutdown still reached terminal finalization: {error:#}"
+                    ),
+                );
+            }
+            Ok(final_status)
+        }
         None => {
             // The escalation ladder (quit -> TERM -> KILL) overran the finalize
             // window — almost always a stream endpoint that stopped responding.
@@ -3817,6 +4741,10 @@ pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
                 "recording-stop-finalize-overrun",
                 "Stopping is taking longer than expected — a stream endpoint is not responding. The session is being shut down in the background; Force stop ends it immediately.",
             );
+            if let Some(error) = stop_io_error {
+                return Err(error
+                    .context("FFmpeg stop I/O failed; the escalation fallback is still running"));
+            }
             let mut status = status;
             status.message = Some(
                 "A stream endpoint is not responding; finishing the stop in the background."
@@ -4452,34 +5380,105 @@ pub fn preview_file_path(preview_id: &str) -> PathBuf {
     default_preview_dir().join(format!("{preview_id}.jpg"))
 }
 
+fn shutdown_live_preview_status() -> PreviewLiveStatus {
+    unavailable_live_preview_status(Some(
+        "Backend is shutting down; live preview cannot start.".to_string(),
+    ))
+}
+
+async fn reject_live_preview_start_if_shutting_down(state: &AppState) -> Option<PreviewLiveStatus> {
+    if !state.process_shutdown_requested() {
+        return None;
+    }
+    let status = shutdown_live_preview_status();
+    {
+        let mut preview = state.live_preview.lock().await;
+        // The graceful-shutdown snapshot normally invalidates an in-flight
+        // token first. If this request wins the lock just before that snapshot,
+        // invalidate it here too; repeated post-drain requests do not advance a
+        // fresh generation.
+        if preview.desired_params.is_some() || preview.idle_process.is_some() {
+            cancel_idle_preview_start(&mut preview);
+        }
+        preview.desired_params = None;
+        preview.status = status.clone();
+    }
+    state.emit_event("preview.live.status", status.clone());
+    Some(status)
+}
+
+async fn commit_recording_live_preview_start(
+    state: &AppState,
+    params: PreviewLiveParams,
+) -> PreviewLiveStatus {
+    let mut preview = state.live_preview.lock().await;
+    if state.process_shutdown_requested() {
+        let status = shutdown_live_preview_status();
+        if preview.desired_params.is_some() || preview.idle_process.is_some() {
+            cancel_idle_preview_start(&mut preview);
+        }
+        preview.desired_params = None;
+        preview.status = status.clone();
+        return status;
+    }
+
+    let status = recording_live_preview_status(state, None);
+    cancel_idle_preview_start(&mut preview);
+    preview.desired_params = Some(params);
+    preview.status = status.clone();
+    status
+}
+
 pub async fn start_live_preview(
     state: AppState,
     params: PreviewLiveParams,
 ) -> Result<PreviewLiveStatus> {
-    if state.recording.lock().await.is_some() {
-        let status = recording_live_preview_status(&state, None);
-        {
-            let mut guard = state.live_preview.lock().await;
-            cancel_idle_preview_start(&mut guard);
-            guard.desired_params = Some(params);
-            guard.status = status.clone();
-        }
+    if let Some(status) = reject_live_preview_start_if_shutting_down(&state).await {
+        return Ok(status);
+    }
+    let recording_active = state.recording.lock().await.is_some();
+    if let Some(status) = reject_live_preview_start_if_shutting_down(&state).await {
+        return Ok(status);
+    }
+    if recording_active {
+        let status = commit_recording_live_preview_start(&state, params).await;
         state.emit_event("preview.live.status", status.clone());
         return Ok(status);
     }
 
     if let Some(status) = reusable_idle_live_preview_status(&state, &params).await {
+        if let Some(shutdown_status) = reject_live_preview_start_if_shutting_down(&state).await {
+            return Ok(shutdown_status);
+        }
         return Ok(status);
     }
 
-    let reserved_generation = {
+    let (reserved_generation, rejected_status) = {
         let mut preview = state.live_preview.lock().await;
-        preview.desired_params = Some(params.clone());
-        reserve_idle_preview_start(
-            &mut preview,
-            state.capture_interruption.capture_admission_is_idle(),
-        )
+        if state.process_shutdown_requested() {
+            let status = shutdown_live_preview_status();
+            if preview.desired_params.is_some() || preview.idle_process.is_some() {
+                cancel_idle_preview_start(&mut preview);
+            }
+            preview.desired_params = None;
+            preview.status = status.clone();
+            (None, Some(status))
+        } else {
+            preview.desired_params = Some(params.clone());
+            (
+                reserve_idle_preview_start(
+                    &mut preview,
+                    state.capture_interruption.capture_admission_is_idle(),
+                    state.process_shutdown_requested(),
+                ),
+                None,
+            )
+        }
     };
+    if let Some(status) = rejected_status {
+        state.emit_event("preview.live.status", status.clone());
+        return Ok(status);
+    }
     let Some(reserved_generation) = reserved_generation else {
         return Ok(live_preview_status(&state).await);
     };
@@ -4591,11 +5590,76 @@ pub async fn shutdown_capture_processes(state: AppState) {
     };
     stop_live_preview_process(idle_process).await;
 
-    let recording = {
-        let mut guard = state.recording.lock().await;
-        guard.take()
+    // Camera and screen preview sessions are native capture owners too. Drain
+    // them explicitly after recording consumers are gone; otherwise graceful
+    // backend shutdown drops their senders/JoinHandles without proving the
+    // device sessions released. Both waits are bounded and run concurrently.
+    let (camera_joined, screen_joined) = tokio::join!(
+        crate::preview_camera::shutdown_preview_camera(&state),
+        crate::preview_screen::shutdown_preview_screen(&state),
+    );
+    if !camera_joined {
+        state.emit_log(
+            "warn",
+            "Native camera preview teardown exceeded the graceful-shutdown deadline; its process-lifetime supervisor still owns the join.",
+        );
+    }
+    if !screen_joined {
+        state.emit_log(
+            "warn",
+            "Native screen preview teardown exceeded the graceful-shutdown deadline; its process-lifetime supervisor still owns the join.",
+        );
+    }
+}
+
+/// Finalize an already-published recording without waiting for the
+/// session-start/shutdown fence. The normal stop path deliberately leaves the
+/// authoritative slot installed until `monitor_session` has flushed MKV,
+/// exported/published MP4, persisted terminal metadata, and emitted the final
+/// status. Taking the slot here would make the monitor treat the FFmpeg exit as
+/// stale and silently skip all of those steps.
+pub async fn finalize_active_recording_for_shutdown(state: &AppState) -> Result<()> {
+    let _stop_fence = state.recording_stop_fence.clone().lock_owned().await;
+    let should_request_stop = state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active| !active.stop_requested);
+    let stop_result = if should_request_stop {
+        // The shutdown-only path owns the stop fence, so no user Stop can race
+        // this check and make this call look like a second/Force request.
+        Some(stop_recording_serialized(state.clone()).await)
+    } else {
+        None
     };
-    stop_recording_process_for_shutdown(&state, recording).await;
+
+    // A stop RPC may return its bounded "still stopping" status while the
+    // monitor continues MP4 export. The coordinator deliberately bridges the
+    // capture-permit -> finalizing-permit handoff without an idle gap; wait for
+    // the terminal persistence/event edge rather than taking the recording
+    // slot away from that monitor.
+    state
+        .ffmpeg_work
+        .wait_for_capture_and_finalization_idle()
+        .await;
+    if state.recording.lock().await.is_some() {
+        bail!("Recording lifecycle became idle while an active recording slot remained");
+    }
+    if let Some(Err(error)) = stop_result {
+        // Stop-command I/O can fail even though TERM/KILL fallback and the
+        // production monitor still reach the exact terminal edge. Once both
+        // lifecycle permits are idle and the authoritative slot is gone, the
+        // recording is safe; retain the warning without denying Electron's
+        // shutdown acknowledgement forever.
+        state.emit_log(
+            "warn",
+            format!(
+                "Recording reached terminal shutdown finalization after stop-command I/O failed: {error:#}"
+            ),
+        );
+    }
+    Ok(())
 }
 
 enum IdlePreviewChildInstall {
@@ -4629,6 +5693,7 @@ async fn install_or_reap_idle_preview_child(
             params,
             recording_active,
             state.capture_interruption.capture_admission_is_idle(),
+            state.process_shutdown_requested(),
         ) {
             let stdout = child.stdout.take();
             let stderr = child.stderr.take();
@@ -4676,6 +5741,7 @@ async fn start_idle_live_preview(
             &params,
             false,
             state.capture_interruption.capture_admission_is_idle(),
+            state.process_shutdown_requested(),
         ) {
             return Ok(guard.status.clone());
         }
@@ -4733,6 +5799,7 @@ async fn start_idle_live_preview(
                     &params,
                     recording_active,
                     state.capture_interruption.capture_admission_is_idle(),
+                    state.process_shutdown_requested(),
                 ) {
                     guard.status = status.clone();
                     guard.idle_process = None;
@@ -4803,10 +5870,11 @@ fn live_preview_video_settings(mut video: VideoSettings) -> VideoSettings {
     video
 }
 
-async fn stop_idle_live_preview_for_recording(state: AppState) {
-    let process = {
+async fn stop_idle_live_preview_for_recording(state: AppState) -> u64 {
+    let (process, recording_generation) = {
         let mut guard = state.live_preview.lock().await;
         cancel_idle_preview_start(&mut guard);
+        let recording_generation = guard.generation;
         let process = guard.idle_process.take();
         if guard.desired_params.is_some() || process.is_some() {
             guard.status = PreviewLiveStatus {
@@ -4824,18 +5892,20 @@ async fn stop_idle_live_preview_for_recording(state: AppState) {
                 ),
             };
         }
-        process
+        (process, recording_generation)
     };
     clear_latest_preview_frame(&state).await;
     if process.is_some() {
         state.emit_event("preview.live.status", live_preview_status(&state).await);
     }
     stop_live_preview_process(process).await;
+    recording_generation
 }
 
 async fn publish_recording_live_preview_status(
     state: &AppState,
     use_native_surface: bool,
+    expected_generation: u64,
     message: Option<String>,
 ) {
     let status = if use_native_surface {
@@ -4845,9 +5915,15 @@ async fn publish_recording_live_preview_status(
     };
     {
         let mut guard = state.live_preview.lock().await;
+        if guard.generation != expected_generation {
+            return;
+        }
         guard.status = status.clone();
+        // Mutation and broadcast are one synchronous serialization edge. A
+        // terminal preview transition cannot publish first and then be
+        // overwritten in the renderer by this older recording event.
+        state.emit_event("preview.live.status", status);
     }
-    state.emit_event("preview.live.status", status);
 }
 
 async fn clear_latest_preview_frame(state: &AppState) {
@@ -4862,10 +5938,14 @@ async fn clear_latest_preview_frame(state: &AppState) {
 async fn restart_idle_live_preview_if_desired(state: AppState) {
     let restart_snapshot = {
         let mut guard = state.live_preview.lock().await;
+        // Invalidate any recording-status lookup that was still awaiting the
+        // native presenter when this session reached a terminal state.
+        cancel_idle_preview_start(&mut guard);
         let restart_snapshot = guard.desired_params.clone().and_then(|params| {
             reserve_idle_preview_start(
                 &mut guard,
                 state.capture_interruption.capture_admission_is_idle(),
+                state.process_shutdown_requested(),
             )
             .map(|reserved_generation| (reserved_generation, params))
         });
@@ -4882,8 +5962,11 @@ async fn restart_idle_live_preview_if_desired(state: AppState) {
                 message: Some("Restarting explicit JPEG polling fallback preview.".to_string()),
             };
         } else {
-            guard.status =
-                unavailable_live_preview_status(Some("No live preview requested.".to_string()));
+            guard.status = if state.process_shutdown_requested() {
+                shutdown_live_preview_status()
+            } else {
+                unavailable_live_preview_status(Some("No live preview requested.".to_string()))
+            };
         }
         restart_snapshot
     };
@@ -5204,81 +6287,6 @@ async fn stop_live_preview_process(process: Option<ActiveLivePreview>) {
     }
 }
 
-async fn stop_recording_process_for_shutdown(
-    _state: &AppState,
-    recording: Option<ActiveRecording>,
-) {
-    let Some(mut recording) = recording else {
-        return;
-    };
-
-    let had_encoder_bridge =
-        recording.encoder_bridge.is_some() || recording.encoder_bridge_stream.is_some();
-    #[cfg(not(target_os = "windows"))]
-    let bridge_teardown = begin_recording_encoder_bridge_teardown(
-        &mut recording.encoder_bridge,
-        &mut recording.encoder_bridge_stream,
-        ENCODER_BRIDGE_TEARDOWN_GRACE,
-    );
-    #[cfg(target_os = "windows")]
-    let bridge_persistence_gate = gate_encoder_bridge_lifecycle_persistence(
-        recording
-            .encoder_bridge
-            .iter()
-            .chain(recording.encoder_bridge_stream.iter()),
-    );
-    #[cfg(target_os = "windows")]
-    {
-        // Preserve the Windows finalization path; it performs its platform
-        // specific writer join when ActiveRecording drops.
-        if let Some(stream) = recording.encoder_bridge_stream.as_ref() {
-            stream.stop();
-        }
-        if let Some(primary) = recording.encoder_bridge.as_ref() {
-            primary.stop();
-        }
-    }
-
-    let ffmpeg_live_audio_session = recording.ffmpeg_live_audio_session.take();
-    if let Some(session) = ffmpeg_live_audio_session.as_ref() {
-        session.begin_stop();
-    }
-    if had_encoder_bridge {
-        if let Some(session) = ffmpeg_live_audio_session {
-            let _ = session.close_stdin().await;
-        }
-    } else if let Some(session) = ffmpeg_live_audio_session {
-        let _ = session.quit().await;
-    } else if let Some(mut stdin) = recording.stdin.take() {
-        let _ = stdin.write_all(b"q\n").await;
-        let _ = stdin.shutdown().await;
-    }
-    if let Some(native_audio) = recording.native_audio.as_ref() {
-        native_audio.request_stop();
-    }
-
-    if recording.pid != 0 {
-        sleep(SHUTDOWN_GRACE_DELAY).await;
-        if process_is_running(recording.pid).await {
-            let _ = send_process_signal(recording.pid, "TERM").await;
-            sleep(SHUTDOWN_GRACE_DELAY).await;
-            if process_is_running(recording.pid).await {
-                let _ = send_process_signal(recording.pid, "KILL").await;
-            }
-        }
-    }
-
-    #[cfg(not(target_os = "windows"))]
-    let _ =
-        finish_recording_encoder_bridge_teardown(_state, bridge_teardown, "application-shutdown")
-            .await;
-    #[cfg(target_os = "windows")]
-    {
-        drop(recording);
-        drop(bridge_persistence_gate);
-    }
-}
-
 fn recording_live_preview_status(state: &AppState, message: Option<String>) -> PreviewLiveStatus {
     PreviewLiveStatus {
         state: PreviewLiveState::Live,
@@ -5370,7 +6378,7 @@ async fn stop_fallback(
 
     state.emit_log(
         "warn",
-        "FFmpeg did not stop promptly after stdin quit command; sending SIGTERM.",
+        "FFmpeg did not stop promptly after the graceful shutdown request; sending SIGTERM.",
     );
     let _ = send_process_signal(pid, "TERM").await;
     stop_kill_fallback(state, pid, session_id, output_path, streaming).await;
@@ -5441,6 +6449,9 @@ async fn wait_for_final_recording_status(
 }
 
 async fn send_process_signal(pid: u32, signal: &str) -> Result<()> {
+    if pid == 0 {
+        bail!("Refusing to signal reserved process id 0");
+    }
     terminate_process(pid, signal.eq_ignore_ascii_case("KILL"))
         .with_context(|| format!("Could not send {signal} termination to FFmpeg process {pid}"))
 }
@@ -5465,6 +6476,13 @@ async fn wait_for_process_exit(pid: u32, wait: Duration) -> bool {
 struct PostRecordingGate {
     intended_fps: Option<f64>,
     expect_audio: bool,
+}
+
+struct SessionMonitorContext {
+    ffmpeg_live_audio_session: Option<SharedFfmpegLiveAudioSession>,
+    ffmpeg_stderr_monitor: Option<tokio::task::JoinHandle<()>>,
+    output_path: Option<PathBuf>,
+    post_recording_gate: PostRecordingGate,
 }
 
 /// Live mic-stats sampler: while this session is the active recording, periodically read
@@ -5809,17 +6827,51 @@ where
     }
 }
 
+async fn drain_ffmpeg_stderr_monitor(
+    monitor: Option<tokio::task::JoinHandle<()>>,
+    max_wait: Duration,
+) -> bool {
+    let Some(mut monitor) = monitor else {
+        return true;
+    };
+    match timeout(max_wait, &mut monitor).await {
+        Ok(Ok(())) => true,
+        Ok(Err(_)) => false,
+        Err(_) => {
+            // Never let a stale process-generation task publish diagnostics or
+            // target state after finalization admits a replacement session.
+            monitor.abort();
+            let _ = timeout(FFMPEG_STDERR_ABORT_JOIN_TIMEOUT, monitor).await;
+            false
+        }
+    }
+}
+
 async fn monitor_session(
     state: AppState,
     mut child: tokio::process::Child,
     stop_intent: oneshot::Receiver<()>,
-    ffmpeg_live_audio_session: Option<SharedFfmpegLiveAudioSession>,
     session_id: String,
-    output_path: Option<PathBuf>,
-    gate: PostRecordingGate,
+    context: SessionMonitorContext,
 ) {
+    let SessionMonitorContext {
+        ffmpeg_live_audio_session,
+        ffmpeg_stderr_monitor,
+        output_path,
+        post_recording_gate: gate,
+    } = context;
     let (status, stop_intent_preceded_exit) =
         wait_for_process_exit_ordered(child.wait(), stop_intent).await;
+    if !drain_ffmpeg_stderr_monitor(ffmpeg_stderr_monitor, FFMPEG_STDERR_DRAIN_TIMEOUT).await {
+        let _ = emit_session_log(
+            &state,
+            &session_id,
+            HealthLevel::Warn,
+            "ffmpeg-stderr-drain-incomplete",
+            "FFmpeg diagnostics did not finish draining before the bounded finalization deadline.",
+            None,
+        );
+    }
     #[cfg(target_os = "macos")]
     if std::env::var_os(TRANSIENT_FIFO_TEST_PAUSE_MS_ENV).is_some()
         && status
@@ -5893,6 +6945,11 @@ async fn monitor_session(
     let Some(mut monitored_recording) = monitored_recording else {
         return;
     };
+    // Chat runtime belongs to the exact recording generation, not to the stop
+    // RPC or to the much longer media-finalization tail. Retire it as soon as
+    // this monitor has successfully removed its own recording slot. The
+    // expected-session check preserves a replacement capture's chat/co-host.
+    let _ = crate::live_chat::stop_live_chat_for_session(&state, &session_id).await;
     let mut encoder_bridge_lifecycle = EncoderBridgeLifecycleSnapshot::default();
     let mut encoder_bridge_teardown_duration_ms = 0_u64;
     let mut encoder_bridge_detached_writers = 0_usize;
@@ -6575,23 +7632,14 @@ async fn monitor_session(
             terminal_status
         }
     };
-    drop(finalizing_permit);
-    // Live chat and the co-host belong to the SESSION, not to the stop RPC.
-    // They used to be torn down only by `session.stop`, so a capture that
-    // ended on its own — an RTMP timeout, an encoder-bridge failure, FFmpeg
-    // exiting early: all shipped incidents in this repo — left the chat
-    // connector delivering messages and the co-host scheduler ticking against
-    // a session that no longer existed. It kept reading the user's chat and
-    // spending cloud-AI quota, and would carry straight through into the next
-    // record-only session. Terminal is terminal, whoever declared it.
-    crate::live_chat::stop_live_chat(&state).await;
-
     // The terminal event is the desktop updater/restart gate. Publish it only
     // after MP4 export, caption ownership, duration probing, metadata commit,
-    // and post-recording maintenance scheduling are complete and the backend's
-    // authoritative finalizing lease has been released.
+    // and post-recording maintenance scheduling are complete. Keep the
+    // finalizing lease through publication so process shutdown's lifecycle
+    // join cannot return before this exact terminal contract is observable.
     state.capture_interruption.capture_finished();
     state.emit_event("recording.status", terminal_status);
+    drop(finalizing_permit);
 
     restart_idle_live_preview_if_desired(state).await;
 }
@@ -6599,6 +7647,17 @@ async fn monitor_session(
 /// Queues the post-recording quality gate through the idle-only maintenance coordinator.
 /// The job is persisted immediately, but FFmpeg analysis/repair only starts after capture
 /// and finalization are idle.
+fn cancel_deleted_quality_check(job: &mut RepairJob, path: &Path, now: String) -> bool {
+    if path.exists() {
+        return false;
+    }
+    job.cancel_with_reason(
+        "The recording was deleted before the quality check ran.".to_string(),
+        now,
+    );
+    true
+}
+
 fn enqueue_post_recording_gate(
     state: AppState,
     session_id: String,
@@ -6634,11 +7693,7 @@ fn enqueue_post_recording_gate(
         // A user deleting a test recording before the idle gate runs is
         // routine, not a failure (2026-08-28: six WARNs in one second for
         // deliberately deleted test files). Cancel quietly.
-        if !final_path.exists() {
-            job.cancel_with_reason(
-                "The recording was deleted before the quality check ran.".to_string(),
-                Utc::now().to_rfc3339(),
-            );
+        if cancel_deleted_quality_check(&mut job, &final_path, Utc::now().to_rfc3339()) {
             let _ = state.database.upsert_repair_job(&job);
             state.emit_log(
                 "info",
@@ -6992,11 +8047,9 @@ pub async fn resume_pending_repair_jobs(state: AppState) {
             sleep(POST_RECORDING_GATE_IDLE_DELAY).await;
             let _maintenance = state.ffmpeg_work.begin_maintenance_when_idle().await;
             let cancel_token = _maintenance.cancel_token();
-            if !std::path::Path::new(&job.file_path).exists() {
-                job.cancel_with_reason(
-                    "The recording was deleted before the quality check ran.".to_string(),
-                    Utc::now().to_rfc3339(),
-                );
+            let job_path = job.file_path.clone();
+            if cancel_deleted_quality_check(&mut job, Path::new(&job_path), Utc::now().to_rfc3339())
+            {
                 let _ = state.database.upsert_repair_job(&job);
                 state.emit_log(
                     "info",
@@ -11992,7 +13045,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
         "warning".to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
-        FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS.to_string(),
+        FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
         "-progress".to_string(),
         "pipe:2".to_string(),
     ];
@@ -12288,7 +13341,7 @@ fn bridge_ffmpeg_base_args() -> Vec<String> {
         "warning".to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
-        FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS.to_string(),
+        FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
         "-progress".to_string(),
         "pipe:2".to_string(),
     ]
@@ -12368,22 +13421,24 @@ fn append_bridge_recording_input_args(
         }
         EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
         | EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs => {
-            // Minimal probing ONLY when streaming: default (~5MB) probing on a
-            // low-bitrate FIFO delays first bytes by many seconds, which
-            // starves RTMP targets (LVF2 "no bytes", plan 023 L1). Record-only
-            // keeps the default — shrinking it shifted A/V start alignment in
-            // smoke:dev, and a startup delay doesn't hurt a local file. Do not
-            // add `-fflags nobuffer`: on a non-seekable H.264 MPEG-TS FIFO it
-            // discards the packets consumed during probing, including the first
-            // keyframe, so video begins at the next GOP while audio begins at 0.
-            if params.output.stream_enabled {
-                args.extend([
-                    "-probesize".to_string(),
-                    "65536".to_string(),
-                    "-analyzeduration".to_string(),
-                    "0".to_string(),
-                ]);
-            }
+            // Every MPEG-TS input here is an owned, live FIFO. Default (~5MB)
+            // probing can retain a complete short recording before FFmpeg opens
+            // its output muxer; the 2026-08-29 failure delivered 61 valid access
+            // units and still left a zero-byte MKV. Record-only therefore uses
+            // the proven 4 KiB split-FIFO bound, while shared streaming preserves
+            // its established 64 KiB posture. Do not add `-fflags nobuffer`: on
+            // a non-seekable FIFO it discards the first keyframe during probing.
+            let probe_bytes = if params.output.stream_enabled {
+                SHARED_STREAM_ENCODED_MPEGTS_INPUT_PROBE_BYTES
+            } else {
+                MINIMAL_ENCODED_MPEGTS_INPUT_PROBE_BYTES
+            };
+            args.extend([
+                "-probesize".to_string(),
+                probe_bytes.to_string(),
+                "-analyzeduration".to_string(),
+                "0".to_string(),
+            ]);
             args.extend([
                 "-thread_queue_size".to_string(),
                 ENCODED_RECORDING_INPUT_THREAD_QUEUE_PACKETS.to_string(),
@@ -12445,7 +13500,7 @@ fn append_bridge_encoded_video_input_args(
                 // is deliberately absent because it discards the first GOP on
                 // these non-seekable FIFOs and creates a deterministic A/V gap.
                 "-probesize".to_string(),
-                SPLIT_ENCODED_INPUT_PROBE_BYTES.to_string(),
+                MINIMAL_ENCODED_MPEGTS_INPUT_PROBE_BYTES.to_string(),
                 "-analyzeduration".to_string(),
                 "0".to_string(),
                 "-f".to_string(),
@@ -12647,7 +13702,7 @@ fn ffmpeg_args_with_encoder(
         "warning".to_string(),
         "-stats".to_string(),
         "-stats_period".to_string(),
-        FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS.to_string(),
+        FFMPEG_PROGRESS_REPORT_PERIOD.as_secs_f64().to_string(),
         "-progress".to_string(),
         "pipe:2".to_string(),
     ];
@@ -13337,8 +14392,22 @@ fn is_ffmpeg_live_audio_command_ready_evidence(line: &str) -> bool {
         || line.starts_with("progress=")
 }
 
+#[cfg(test)]
 fn capture_media_clock_log_message(line: &str) -> Option<String> {
     parse_ffmpeg_progress_media_seconds(line).map(|seconds| format!("mediaSeconds={seconds:.3}"))
+}
+
+/// A FIFO write only proves that the kernel accepted bytes; the 2026-08-29
+/// failure buffered 61 complete access units while FFmpeg stayed in probing.
+/// A strictly positive media clock is FFmpeg's authoritative proof that it has
+/// left stream discovery and entered the output loop. Zero and malformed values
+/// must never publish Running.
+fn ffmpeg_output_startup_media_seconds(line: &str) -> Option<f64> {
+    parse_ffmpeg_progress_media_seconds(line).filter(|seconds| *seconds > 0.0)
+}
+
+fn is_ffmpeg_progress_report_boundary(line: &str) -> bool {
+    matches!(line.trim(), "progress=continue" | "progress=end")
 }
 
 fn parse_ffmpeg_progress_media_seconds(line: &str) -> Option<f64> {
@@ -14495,8 +15564,12 @@ fn recording_compositor_stream_output(
     {
         return Ok(None);
     }
-    let provider_plan =
-        resolve_provider_stream_output_plan_for_effective_bridge(params, video_output)?;
+    // This test seam receives the effective bridge explicitly so platform-
+    // independent topology tests can exercise VideoToolbox and Media
+    // Foundation plans from any CI host. Production resolves the bridge from
+    // the host capability probe before it builds this plan.
+    let provider_plan = resolve_provider_stream_output_plan_with_separate_roles(params, true)?;
+    validate_provider_plan_against_effective_bridge(&provider_plan, video_output)?;
     recording_compositor_stream_output_with_plan(params, video_output, Some(&provider_plan))
 }
 
@@ -14868,6 +15941,7 @@ fn validate_stream_profile_for_provider(
 fn separate_encoded_provider_output_role_available(params: &StartSessionParams) -> bool {
     if !params.output.record_enabled
         || !params.output.stream_enabled
+        || test_force_shared_encoder_output_from_env()
         || compositor_encoder_bridge_disabled(
             params.output.record_enabled,
             params.output.stream_enabled,
@@ -14880,6 +15954,26 @@ fn separate_encoded_provider_output_role_available(params: &StartSessionParams) 
         params.output.stream_enabled,
     ))
     .is_ok()
+}
+
+fn test_force_shared_encoder_output_from_env() -> bool {
+    test_force_shared_encoder_output_setting(
+        std::env::var(TEST_FORCE_SHARED_ENCODER_OUTPUT_ENV)
+            .ok()
+            .as_deref(),
+        std::env::var(ENABLE_SMOKE_RPC_ENV).ok().as_deref(),
+    )
+}
+
+fn test_force_shared_encoder_output_setting(
+    requested: Option<&str>,
+    smoke_rpc_enabled: Option<&str>,
+) -> bool {
+    // This selector exists only to keep the production shared record+stream
+    // fallback under deterministic FIFO-pressure coverage. It must not let a
+    // packaged/release app collapse the isolated output topology merely
+    // because an inherited environment variable was set.
+    cfg!(debug_assertions) && requested == Some("1") && smoke_rpc_enabled == Some("1")
 }
 
 fn separate_provider_roles_fit_bridge_envelope(
@@ -15606,6 +16700,55 @@ fn mark_stream_target_failed(
     Some((label, snapshot.clone()))
 }
 
+async fn publish_stream_target_failure_if_active(
+    state: &AppState,
+    session_id: &str,
+    targets: &SharedStreamTargetsSnapshot,
+    position: usize,
+    reason: String,
+) {
+    // Hold session ownership across mutation + synchronous broadcasts. A
+    // timed-out, aborted stderr consumer can never publish its old target
+    // generation after the process monitor admits a replacement session.
+    let recording = state.recording.lock().await;
+    if !recording
+        .as_ref()
+        .is_some_and(|active| active.session_id == session_id)
+    {
+        return;
+    }
+    if let Some((label, snapshot)) = mark_stream_target_failed(targets, position, reason.clone()) {
+        let _ = emit_health_event(
+            state,
+            Some(session_id),
+            HealthLevel::Warn,
+            "stream-target-failed",
+            &format!("Streaming to {label} stopped: {reason}"),
+        );
+        state.emit_event("stream.targets", snapshot);
+    }
+}
+
+async fn publish_ffmpeg_health_event_if_active(state: &AppState, session_id: &str, message: &str) {
+    // The stderr consumer has a bounded abort join. Keep its final persistent
+    // health write and broadcast behind exact-session ownership in case an
+    // uncooperative task outlives that bound.
+    let recording = state.recording.lock().await;
+    if !recording
+        .as_ref()
+        .is_some_and(|active| active.session_id == session_id)
+    {
+        return;
+    }
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Warn,
+        "ffmpeg-warning",
+        message,
+    );
+}
+
 /// Builds the initial per-target runtime snapshot — ready destinations as `Live`,
 /// skipped ones as `NotConfigured` with their reason — plus a map from tee slave
 /// index to snapshot position so a per-slave stderr failure can be attributed to the
@@ -16025,6 +17168,17 @@ struct ParsedStreamHealthDelta {
     duplicated_frames: Option<u64>,
 }
 
+impl ParsedStreamHealthDelta {
+    fn merge(&mut self, update: Self) {
+        self.fps = update.fps.or(self.fps);
+        self.dropped_frames = update.dropped_frames.or(self.dropped_frames);
+        self.speed = update.speed.or(self.speed);
+        self.bitrate_kbps = update.bitrate_kbps.or(self.bitrate_kbps);
+        self.total_bytes = update.total_bytes.or(self.total_bytes);
+        self.duplicated_frames = update.duplicated_frames.or(self.duplicated_frames);
+    }
+}
+
 #[derive(Debug, Clone)]
 struct StreamHealthAccumulator {
     session_id: String,
@@ -16056,29 +17210,88 @@ impl StreamHealthAccumulator {
         session_id: &str,
         process_generation: u64,
         delta: ParsedStreamHealthDelta,
-    ) -> StreamHealth {
+    ) -> (StreamHealth, bool) {
         if self.session_id != session_id || self.process_generation != process_generation {
             *self = Self::new(session_id, process_generation);
         }
 
+        let previous_dropped_frames = self.dropped_frames.unwrap_or_default();
         self.fps = delta.fps.or(self.fps);
         self.speed = delta.speed.or(self.speed);
         self.bitrate_kbps = delta.bitrate_kbps.or(self.bitrate_kbps);
         self.dropped_frames = monotonic_counter(self.dropped_frames, delta.dropped_frames);
         self.total_bytes = monotonic_counter(self.total_bytes, delta.total_bytes);
         self.duplicated_frames = monotonic_counter(self.duplicated_frames, delta.duplicated_frames);
+        let dropped_frames_increased =
+            self.dropped_frames.unwrap_or_default() > previous_dropped_frames;
 
-        StreamHealth {
-            session_id: self.session_id.clone(),
-            fps: self.fps,
-            dropped_frames: self.dropped_frames,
-            speed: self.speed,
-            bitrate_kbps: self.bitrate_kbps,
-            total_bytes: self.total_bytes,
-            duplicated_frames: self.duplicated_frames,
-            created_at: Utc::now().to_rfc3339(),
-        }
+        (
+            StreamHealth {
+                session_id: self.session_id.clone(),
+                fps: self.fps,
+                dropped_frames: self.dropped_frames,
+                speed: self.speed,
+                bitrate_kbps: self.bitrate_kbps,
+                total_bytes: self.total_bytes,
+                duplicated_frames: self.duplicated_frames,
+                created_at: Utc::now().to_rfc3339(),
+            },
+            dropped_frames_increased,
+        )
     }
+}
+
+async fn publish_pending_ffmpeg_stream_health(
+    state: &AppState,
+    session_id: &str,
+    process_generation: u64,
+    target_fps: u32,
+    accumulator: &mut StreamHealthAccumulator,
+    pending: &mut ParsedStreamHealthDelta,
+) -> bool {
+    if *pending == ParsedStreamHealthDelta::default() {
+        return false;
+    }
+    let scene_revision = current_compositor_scene_revision(state).await;
+    // Serialize the final global diagnostics/health publication with session
+    // retirement. If an aborted stderr task outlives its bounded join, it can
+    // neither mutate the next generation nor emit a stale global snapshot.
+    let recording = state.recording.lock().await;
+    if !recording
+        .as_ref()
+        .is_some_and(|active| active.session_id == session_id)
+    {
+        return false;
+    }
+    let (stream_health, dropped_frames_increased) =
+        accumulator.apply(session_id, process_generation, std::mem::take(pending));
+    let diagnostic_stats = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        let next = apply_active_scene_revision(
+            apply_stream_health(diagnostics.clone(), &stream_health, target_fps),
+            scene_revision,
+        );
+        *diagnostics = next.clone();
+        next
+    };
+    state.emit_event(
+        "diagnostics.stats",
+        apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
+    );
+    if dropped_frames_increased {
+        let _ = emit_health_event(
+            state,
+            Some(session_id),
+            HealthLevel::Warn,
+            "stream-dropped-frames",
+            &format!(
+                "FFmpeg reports {} dropped frames.",
+                stream_health.dropped_frames.unwrap_or_default()
+            ),
+        );
+    }
+    state.emit_event("stream.health", stream_health);
+    true
 }
 
 fn monotonic_counter(current: Option<u64>, update: Option<u64>) -> Option<u64> {
@@ -16108,10 +17321,11 @@ fn parse_ffmpeg_stream_health(line: &str) -> Option<ParsedStreamHealthDelta> {
 }
 
 fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
-    stat_value(line, label)?
+    let value = stat_value(line, label)?
         .trim_end_matches('x')
         .parse::<f64>()
-        .ok()
+        .ok()?;
+    (value.is_finite() && value >= 0.0).then_some(value)
 }
 
 fn parse_stat_u64(line: &str, label: &str) -> Option<u64> {
@@ -16133,7 +17347,7 @@ fn parse_stat_bitrate_kbps(line: &str, label: &str) -> Option<f64> {
         (value, 1.0)
     };
     let bitrate = number.parse::<f64>().ok()? * multiplier;
-    bitrate.is_finite().then_some(bitrate)
+    (bitrate.is_finite() && bitrate >= 0.0).then_some(bitrate)
 }
 
 fn stat_value<'a>(line: &'a str, label: &str) -> Option<&'a str> {
@@ -16296,7 +17510,7 @@ mod tests {
             assert!(is_ffmpeg_progress_noise(line), "should filter: {line}");
         }
         for line in [
-            "FFmpeg did not stop promptly after stdin quit command; sending SIGTERM.",
+            "FFmpeg did not stop promptly after the graceful shutdown request; sending SIGTERM.",
             "[rtmp @ 0x7f8] Connection refused",
             "Error writing trailer: Broken pipe",
             "Conversion failed!",
@@ -16485,6 +17699,131 @@ mod tests {
         .expect("uncommitted capture child terminates");
     }
 
+    #[tokio::test]
+    async fn cancelled_post_spawn_start_publishes_terminal_only_after_reap_and_cleanup() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let session_id = format!("cancelled-post-spawn-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(&session_id);
+        std::fs::create_dir_all(&directory).unwrap();
+        let started_at = DateTime::parse_from_rfc3339("2026-08-29T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let output_path = recording_output_path(&directory, &started_at, &session_id);
+        std::fs::write(&output_path, []).unwrap();
+
+        let pipeline = RecordingPipeline::new(true, false, &[]);
+        let mut terminal_guard = PublishedSessionStartGuard::unarmed();
+        let session_start_admission = state
+            .capture_interruption
+            .try_begin_session_start()
+            .expect("admit cancelled test start");
+        terminal_guard.arm(
+            state.clone(),
+            &session_id,
+            Some(output_path.clone()),
+            &pipeline,
+            session_start_admission,
+        );
+
+        let mut command = long_running_capture_command();
+        command.kill_on_drop(true);
+        let child = spawn_owned_tokio(&mut command).expect("spawn capture child");
+        let pid = child.id().expect("capture child pid");
+        let process = UncommittedCaptureProcess::new(child, CaptureStartupResources::default())
+            .with_rejected_start_cleanup(state.clone(), &session_id, Some(output_path.clone()))
+            .with_rejected_start_terminal(terminal_guard.take_terminal());
+
+        // Models cancellation or panic after FFmpeg became observable: Drop
+        // must hand cleanup and the terminal event to one ordered task.
+        drop(process);
+        drop(terminal_guard);
+        assert!(
+            state
+                .capture_interruption
+                .try_begin_session_start()
+                .is_err(),
+            "replacement start must remain blocked until old cleanup publishes its terminal event"
+        );
+
+        let status = timeout(Duration::from_secs(3), async {
+            loop {
+                let event = events.recv().await.expect("startup terminal event");
+                if event.event == "recording.status" {
+                    break serde_json::from_value::<RecordingStatus>(event.payload).unwrap();
+                }
+            }
+        })
+        .await
+        .expect("terminal startup event after cleanup");
+
+        assert!(matches!(status.state, RecordingState::Idle));
+        assert_eq!(status.session_id.as_deref(), Some(session_id.as_str()));
+        assert!(
+            !crate::process_job::process_is_running(pid).expect("probe reaped capture child"),
+            "terminal Idle must not race a still-running rejected FFmpeg child"
+        );
+        assert!(
+            !output_path.exists(),
+            "terminal Idle must follow exact-session zero-byte output cleanup"
+        );
+        drop(
+            state
+                .capture_interruption
+                .try_begin_session_start()
+                .expect("terminal publication releases replacement start admission"),
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[tokio::test]
+    async fn bridge_readiness_rejection_cleans_only_zero_byte_output_after_reap() {
+        let state = test_state();
+        let session_id = format!("bridge-readiness-cleanup-{}", Uuid::new_v4());
+        let directory = std::env::temp_dir().join(&session_id);
+        let started_at = DateTime::parse_from_rfc3339("2026-08-29T12:34:56Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        for (case, contents, should_remain) in [
+            ("empty", &[][..], false),
+            ("nonempty", &b"recoverable media"[..], true),
+        ] {
+            let case_directory = directory.join(case);
+            std::fs::create_dir_all(&case_directory).unwrap();
+            let output_path = recording_output_path(&case_directory, &started_at, &session_id);
+            std::fs::write(&output_path, contents).unwrap();
+
+            let mut command = long_running_capture_command();
+            command.kill_on_drop(true);
+            let child = spawn_owned_tokio(&mut command).expect("spawn capture child");
+            let pid = child.id().expect("capture child pid");
+            let mut process =
+                UncommittedCaptureProcess::new(child, CaptureStartupResources::default())
+                    .with_rejected_start_cleanup(
+                        state.clone(),
+                        &session_id,
+                        Some(output_path.clone()),
+                    );
+
+            // Encoder-bridge readiness/start/prime failures use this exact
+            // rejection path before returning their original startup error.
+            process.terminate_and_reap_before_fifo_writer_join().await;
+
+            assert!(
+                !crate::process_job::process_is_running(pid).expect("probe reaped capture child"),
+                "cleanup must run only after the capture process is reaped"
+            );
+            assert_eq!(output_path.exists(), should_remain, "case={case}");
+            if should_remain {
+                assert_eq!(std::fs::read(&output_path).unwrap(), contents);
+            }
+        }
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
     #[cfg(unix)]
     #[tokio::test]
     async fn startup_abort_reaps_fifo_reader_before_blocking_writer_join() {
@@ -16670,6 +18009,36 @@ mod tests {
         assert!(wrote_frame);
         assert_eq!(std::fs::read(&path).unwrap(), frame);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn prepared_screen_frame_cannot_cross_overlay_generation() {
+        let blocker = ScreenOverlayPreparationBlocker::new();
+        let old_overlay = ScreenOverlaySession::test_stub(2, 2, blocker.clone());
+        let prepared = PreparedScreenOverlayFrame {
+            session_id: "reused-session-id".to_string(),
+            generation_token: old_overlay.generation_token.clone(),
+            width: 2,
+            height: 2,
+            frame: vec![7; 16],
+        };
+        let mut replacement = test_active_recording_stub("reused-session-id");
+        replacement.screen_overlay = Some(ScreenOverlaySession::test_stub(2, 2, blocker));
+
+        assert_eq!(
+            replacement.commit_prepared_active_screen(prepared),
+            PreparedScreenOverlayCommit::Superseded
+        );
+        assert!(
+            replacement
+                .screen_overlay
+                .as_ref()
+                .unwrap()
+                .test_current_frame()
+                .iter()
+                .all(|byte| *byte == 0),
+            "a prepared frame must not enter a successor overlay generation"
+        );
     }
 
     #[derive(Debug)]
@@ -17777,7 +19146,8 @@ mod tests {
         params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
         params.streaming = None;
 
-        let topology = encoder_output_topology_plan_from_session(&params).unwrap();
+        let topology = encoder_output_topology_plan_from_session_with_separate_roles(&params, true)
+            .expect("encoded split topology");
         assert_eq!(
             topology.output_roles,
             vec![
@@ -17826,6 +19196,23 @@ mod tests {
         .expect("same-profile runtime raw fallback remains valid");
         assert!(!provider_plan.separate_encoded_output_role);
         assert_eq!(provider_plan.stream_video, params.output.video);
+    }
+
+    #[test]
+    fn force_shared_encoder_output_test_selector_requires_smoke_rpc_authority() {
+        assert!(!test_force_shared_encoder_output_setting(Some("1"), None));
+        assert!(!test_force_shared_encoder_output_setting(
+            Some("1"),
+            Some("0")
+        ));
+        assert!(!test_force_shared_encoder_output_setting(
+            Some("0"),
+            Some("1")
+        ));
+        assert!(test_force_shared_encoder_output_setting(
+            Some("1"),
+            Some("1")
+        ));
     }
 
     #[test]
@@ -18515,6 +19902,592 @@ mod tests {
         )
     }
 
+    #[tokio::test(flavor = "current_thread")]
+    async fn session_start_admission_waits_for_prior_physical_source_transition() {
+        let state = test_state();
+        let source_transition = state.source_transition_fence.begin();
+
+        // Model the public command's bounded response completing while its
+        // process-owned camera/screen supervisor is still running.
+        let command_application = state.operator_command_fence.begin();
+        let command_response = state.operator_command_fence.observe();
+        drop(command_application);
+        command_response.wait().await;
+
+        let start_state = state.clone();
+        let (admitted_tx, mut admitted_rx) = oneshot::channel();
+        let start = tokio::spawn(async move {
+            let result = admit_session_start(&start_state).await;
+            let _ = admitted_tx.send(result.is_ok());
+            result
+        });
+
+        timeout(Duration::from_secs(1), async {
+            while state.capture_interruption.capture_admission_is_idle() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session.start must reach backend admission");
+        assert!(
+            timeout(Duration::from_millis(50), &mut admitted_rx)
+                .await
+                .is_err(),
+            "session.start must not enter while the command's native source transition is pending"
+        );
+
+        drop(source_transition);
+        assert!(
+            timeout(Duration::from_secs(1), &mut admitted_rx)
+                .await
+                .expect("session.start must enter after exact source completion")
+                .expect("session-start admission sender"),
+            "session-start admission should succeed"
+        );
+        let (admission, publication_fence, source_transition_admission) = start
+            .await
+            .expect("session-start admission task")
+            .expect("session-start admission result");
+        drop(admission);
+        drop(publication_fence);
+        drop(source_transition_admission);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_latched_after_session_starting_wins_the_drain_fence() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let held_source_admission_fence = state
+            .session_start_source_transition_fence
+            .clone()
+            .lock_owned()
+            .await;
+        let start_state = state.clone();
+        let start = tokio::spawn(async move { admit_session_start(&start_state).await });
+
+        timeout(Duration::from_secs(1), async {
+            while state.capture_interruption.capture_admission_is_idle() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("start must publish SessionStarting before waiting for the drain fence");
+        assert!(state.request_process_shutdown());
+        drop(held_source_admission_fence);
+
+        let error = match start.await.expect("session-start admission task") {
+            Ok(_) => panic!("a start admitted before the latch must still fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), SESSION_START_SHUTDOWN_MESSAGE);
+        assert!(state.capture_interruption.capture_admission_is_idle());
+        assert!(state.recording.lock().await.is_none());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event.event != "recording.status"),
+            "shutdown must win before any Starting/Recording status publication"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn wedged_source_transition_never_owns_the_shutdown_publication_fence() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let wedged_source_transition = state.source_transition_fence.begin();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move { admit_session_start(&start_state).await });
+
+        timeout(Duration::from_secs(1), async {
+            while state.capture_interruption.capture_admission_is_idle() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("session.start must be waiting on the source transition");
+
+        let shutdown_publication_fence = timeout(
+            Duration::from_secs(1),
+            state.session_start_publication_fence.clone().lock_owned(),
+        )
+        .await
+        .expect("shutdown publication fence must stay independent of native source waits");
+        assert!(state.request_process_shutdown());
+        drop(wedged_source_transition);
+        tokio::task::yield_now().await;
+
+        drop(shutdown_publication_fence);
+        let error = match timeout(Duration::from_secs(1), start)
+            .await
+            .expect("latched start must settle after shutdown releases publication")
+            .expect("session-start task")
+        {
+            Ok(_) => panic!("shutdown-latched start must fail closed"),
+            Err(error) => error,
+        };
+        assert_eq!(error.to_string(), SESSION_START_SHUTDOWN_MESSAGE);
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event.event != "recording.status"),
+            "shutdown-latched admission must never publish a recording status"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn direct_stop_waits_for_session_start_publication_before_observing_idle() {
+        let state = test_state();
+        let publication = state
+            .session_start_publication_fence
+            .clone()
+            .lock_owned()
+            .await;
+        let stop_state = state.clone();
+        let mut stop = tokio::spawn(async move { stop_recording(stop_state).await });
+
+        assert!(
+            timeout(Duration::from_millis(50), &mut stop).await.is_err(),
+            "stop must not acknowledge Idle while session startup still owns publication"
+        );
+
+        drop(publication);
+        let status = timeout(Duration::from_secs(1), stop)
+            .await
+            .expect("stop should resume after startup publication settles")
+            .expect("stop task")
+            .expect("idle stop status");
+        assert!(matches!(status.state, RecordingState::Idle));
+    }
+
+    async fn install_test_live_chat_and_cohost(state: &AppState, session_id: &str) {
+        let connector = tokio::spawn(std::future::pending::<()>());
+        {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session(session_id.to_string(), Vec::new());
+            coordinator.register_sender(
+                "test-destination".to_string(),
+                crate::live_chat::ChatSenderConfig::Fake(
+                    crate::live_chat::FakeChatSendBehavior::Sent,
+                ),
+            );
+            coordinator.attach_task(connector);
+            assert_eq!(coordinator.runtime_ownership(), (1, 1));
+        }
+        crate::cohost::set_cohost_settings(
+            state,
+            crate::protocol::CohostSettingsPatch {
+                enabled: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("enable test co-host");
+        crate::cohost::start_cohost(
+            state,
+            crate::protocol::CohostStartParams {
+                session_id: session_id.to_string(),
+                consent_to_process_chat: true,
+                stream_title: None,
+            },
+        )
+        .await
+        .expect("start test co-host");
+    }
+
+    async fn spawn_exited_session_monitor(
+        state: &AppState,
+        session_id: &str,
+    ) -> tokio::task::JoinHandle<()> {
+        let (child, stdin) = spawn_test_stdin_sink().await;
+        let pid = child.id().expect("owned stdin-sink pid");
+        drop(stdin);
+        let (stop_intent_sender, stop_intent_receiver) = oneshot::channel();
+        let mut active = test_active_recording_stub(session_id);
+        active.pid = pid;
+        active.stop_intent_sender = Some(stop_intent_sender);
+        active._capture_permit = Some(state.ffmpeg_work.begin_capture_when_available().await);
+        *state.recording.lock().await = Some(active);
+        let monitor_state = state.clone();
+        let monitor_session_id = session_id.to_string();
+        tokio::spawn(async move {
+            monitor_session(
+                monitor_state,
+                child,
+                stop_intent_receiver,
+                monitor_session_id,
+                SessionMonitorContext {
+                    ffmpeg_live_audio_session: None,
+                    ffmpeg_stderr_monitor: None,
+                    output_path: None,
+                    post_recording_gate: PostRecordingGate {
+                        intended_fps: None,
+                        expect_audio: false,
+                    },
+                },
+            )
+            .await;
+        })
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn monitor_retires_exact_chat_runtime_before_later_finalization_unblocks() {
+        let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
+        let state = test_state();
+        let session_id = "terminal-chat-before-finalization";
+        install_test_live_chat_and_cohost(&state, session_id).await;
+        let captions = state.captions.clone();
+        let caption_finalization_block = captions.lock_owned().await;
+        let mut monitor = spawn_exited_session_monitor(&state, session_id).await;
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                let recording_retired = state.recording.lock().await.is_none();
+                let (chat_session, runtime_ownership) = {
+                    let coordinator = state.live_chat.lock().await;
+                    (
+                        coordinator.session_id().map(str::to_string),
+                        coordinator.runtime_ownership(),
+                    )
+                };
+                let cohost_session = crate::cohost::cohost_status(&state).await.session_id;
+                if recording_retired
+                    && chat_session.is_none()
+                    && runtime_ownership == (0, 0)
+                    && cohost_session.is_none()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("exact chat and co-host teardown must follow recording retirement");
+        assert!(
+            !monitor.is_finished(),
+            "the held caption coordinator must keep later finalization blocked"
+        );
+
+        drop(caption_finalization_block);
+        timeout(Duration::from_secs(1), &mut monitor)
+            .await
+            .expect("monitor completes after caption finalization resumes")
+            .expect("monitor task");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn old_monitor_preserves_replacement_chat_and_cohost_through_finalization() {
+        let _caption_test_guard = crate::captions::caption_lifecycle_test_lock().lock().await;
+        let state = test_state();
+        let retired_session_id = "retired-recording-chat";
+        let replacement_session_id = "replacement-recording-chat";
+        install_test_live_chat_and_cohost(&state, replacement_session_id).await;
+        let captions = state.captions.clone();
+        let caption_finalization_block = captions.lock_owned().await;
+        let mut monitor = spawn_exited_session_monitor(&state, retired_session_id).await;
+
+        timeout(Duration::from_secs(1), async {
+            while state.recording.lock().await.is_some() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("old recording slot retires");
+        assert!(!monitor.is_finished());
+        drop(caption_finalization_block);
+        timeout(Duration::from_secs(1), &mut monitor)
+            .await
+            .expect("old monitor completes")
+            .expect("old monitor task");
+
+        let coordinator = state.live_chat.lock().await;
+        assert_eq!(coordinator.session_id(), Some(replacement_session_id));
+        assert_eq!(coordinator.runtime_ownership(), (1, 1));
+        drop(coordinator);
+        assert_eq!(
+            crate::cohost::cohost_status(&state)
+                .await
+                .session_id
+                .as_deref(),
+            Some(replacement_session_id)
+        );
+        crate::live_chat::stop_live_chat(&state).await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn published_recording_shutdown_finalizes_without_waiting_for_wedged_recovery_fence() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-shutdown-finalization-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).expect("create shutdown finalization test directory");
+        let database_path = directory.join("videorc.sqlite3");
+        let recovery_directory = directory.join("session-finalization-recovery");
+        let state = test_state_with_file_database(&directory);
+        let session_id = format!("recording-during-wedged-camera-recovery-{}", Uuid::new_v4());
+        let params = base_params(false, true);
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.clone(),
+                title: "Shutdown finalization test".to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                mode: "stream".to_string(),
+                output_path: None,
+                container: None,
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .expect("create running session row");
+        let (child, stdin) = spawn_test_stdin_sink().await;
+        let pid = child.id().expect("owned stdin-sink pid");
+        let (stop_intent_sender, stop_intent_receiver) = oneshot::channel();
+        let mut active = test_active_recording_with_stream_targets(StreamTargetsSnapshot {
+            session_id: session_id.clone(),
+            targets: Vec::new(),
+        });
+        active.pid = pid;
+        active.stdin = Some(stdin);
+        active.stop_intent_sender = Some(stop_intent_sender);
+        active._capture_permit = Some(state.ffmpeg_work.begin_capture_when_available().await);
+        *state.recording.lock().await = Some(active);
+        let mut terminal_events = state.events.subscribe();
+        let monitor_state = state.clone();
+        let monitor_session_id = session_id.clone();
+        let monitor = tokio::spawn(async move {
+            monitor_session(
+                monitor_state,
+                child,
+                stop_intent_receiver,
+                monitor_session_id,
+                SessionMonitorContext {
+                    ffmpeg_live_audio_session: None,
+                    ffmpeg_stderr_monitor: None,
+                    output_path: None,
+                    post_recording_gate: PostRecordingGate {
+                        intended_fps: None,
+                        expect_audio: false,
+                    },
+                },
+            )
+            .await;
+        });
+
+        // Model automatic recovery owning a durable physical source transition
+        // while native AVCaptureSession::stopRunning never returns. The short
+        // session-start admission mutex is intentionally not involved here.
+        let wedged_recovery_fence = state.source_transition_fence.begin();
+        let wedged_recovery_tail = state.source_transition_fence.observe();
+        let finalize_state = state.clone();
+        let finalize =
+            tokio::spawn(
+                async move { finalize_active_recording_for_shutdown(&finalize_state).await },
+            );
+
+        timeout(Duration::from_secs(1), async {
+            loop {
+                if state
+                    .recording
+                    .lock()
+                    .await
+                    .as_ref()
+                    .is_some_and(|active| active.stop_requested)
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("ordinary shutdown finalization must begin without the recovery fence");
+
+        timeout(Duration::from_secs(1), finalize)
+            .await
+            .expect("shutdown finalization must join the production monitor")
+            .expect("shutdown finalization task")
+            .expect("ordinary recording stop");
+        timeout(Duration::from_secs(1), monitor)
+            .await
+            .expect("production monitor completion")
+            .expect("production monitor task");
+
+        assert!(state.recording.lock().await.is_none());
+        let terminal = timeout(Duration::from_secs(1), async {
+            loop {
+                let event = terminal_events.recv().await.expect("recording event");
+                if event.event != "recording.status" {
+                    continue;
+                }
+                let status: RecordingStatus =
+                    serde_json::from_value(event.payload).expect("recording status payload");
+                if status.session_id.as_deref() == Some(&session_id)
+                    && matches!(status.state, RecordingState::Idle | RecordingState::Failed)
+                {
+                    break status;
+                }
+            }
+        })
+        .await
+        .expect("terminal monitor event");
+        assert!(matches!(terminal.state, RecordingState::Idle));
+        assert_eq!(terminal.session_id.as_deref(), Some(session_id.as_str()));
+        assert!(terminal.output_path.is_none());
+        assert!(!state.ffmpeg_work.snapshot().capture_active);
+        assert!(!state.ffmpeg_work.snapshot().finalizing_active);
+
+        let persisted = state
+            .database
+            .session_finalization_snapshot(&session_id)
+            .expect("read finalized session row");
+        assert_eq!(persisted.status, "completed");
+        assert!(persisted.ended_at.is_some());
+        assert!(persisted.mp4_path.is_none());
+        assert_eq!(
+            state
+                .database
+                .session_recording_path(&session_id)
+                .expect("read session recording path"),
+            None
+        );
+        assert!(recovery_directory.is_dir());
+        assert!(
+            recovery_directory
+                .read_dir()
+                .expect("read finalization recovery directory")
+                .next()
+                .is_none(),
+            "successful terminal persistence must not leak a recovery artifact"
+        );
+
+        let mut recovery_tail_wait = Box::pin(wedged_recovery_tail.wait());
+        assert!(
+            futures_util::poll!(&mut recovery_tail_wait).is_pending(),
+            "the test must keep modelling a physical recovery transition which is still wedged"
+        );
+        drop(wedged_recovery_fence);
+        recovery_tail_wait.await;
+
+        // The graceful-stop fallback owns a state clone until its bounded
+        // signal delay elapses. Let it observe the retired slot before closing
+        // and removing the file-backed database on Windows.
+        sleep(STOP_TERM_DELAY + Duration::from_millis(10)).await;
+        drop(terminal_events);
+        drop(state);
+
+        let reopened = Database::open_file_for_tests(&database_path);
+        let persisted = reopened
+            .session_finalization_snapshot(&session_id)
+            .expect("reopen persisted finalized session row");
+        assert_eq!(persisted.status, "completed");
+        assert!(persisted.ended_at.is_some());
+        drop(reopened);
+        std::fs::remove_dir_all(directory).expect("remove shutdown finalization test directory");
+    }
+
+    #[tokio::test]
+    async fn send_process_signal_rejects_zero_pid_without_signaling() {
+        let error = send_process_signal(0, "TERM")
+            .await
+            .expect_err("reserved process id 0 must never reach the platform signal API");
+
+        assert_eq!(
+            error.to_string(),
+            "Refusing to signal reserved process id 0"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_joins_an_existing_user_stop_without_escalating_to_force() {
+        let state = test_state();
+        let mut active = test_active_recording_with_stream_targets(StreamTargetsSnapshot {
+            session_id: "recording-with-user-stop-in-flight".to_string(),
+            targets: Vec::new(),
+        });
+        active.stop_requested = true;
+        active._capture_permit = Some(state.ffmpeg_work.begin_capture_when_available().await);
+        *state.recording.lock().await = Some(active);
+        let mut events = state.events.subscribe();
+
+        let finalize_state = state.clone();
+        let finalize =
+            tokio::spawn(
+                async move { finalize_active_recording_for_shutdown(&finalize_state).await },
+            );
+        tokio::task::yield_now().await;
+        assert!(!finalize.is_finished());
+        assert!(state.recording.lock().await.is_some());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event.event != "recording.status"),
+            "shutdown must not issue a second stop/force transition"
+        );
+
+        let finalizing = state.ffmpeg_work.begin_finalizing();
+        let terminal = {
+            let mut recording = state.recording.lock().await;
+            let terminal = recording.as_ref().unwrap().status(
+                RecordingState::Idle,
+                Some("Existing user stop finalized.".to_string()),
+            );
+            recording.take();
+            terminal
+        };
+        state.capture_interruption.capture_finished();
+        state.emit_event("recording.status", terminal);
+        drop(finalizing);
+
+        timeout(Duration::from_secs(1), finalize)
+            .await
+            .expect("shutdown must join the existing finalization")
+            .expect("shutdown finalization task")
+            .expect("shutdown finalization result");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_latched_after_drain_fence_is_rechecked_before_publication() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let (admission, start_fence, source_transition_admission) = admit_session_start(&state)
+            .await
+            .expect("start owns SessionStarting and the drain fence");
+        assert!(state.request_process_shutdown());
+
+        let shutdown_state = state.clone();
+        let (cleanup_entered_tx, mut cleanup_entered_rx) = oneshot::channel();
+        let cleanup = tokio::spawn(async move {
+            let _drain_fence = shutdown_state
+                .session_start_publication_fence
+                .clone()
+                .lock_owned()
+                .await;
+            let _ = cleanup_entered_tx.send(());
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            cleanup_entered_rx.try_recv().is_err(),
+            "cleanup must wait while the admitted start owns the drain fence"
+        );
+
+        let error = ensure_session_start_process_live(&state)
+            .expect_err("the final pre-publication edge must observe the shutdown latch");
+        assert_eq!(error.to_string(), SESSION_START_SHUTDOWN_MESSAGE);
+        drop(admission);
+        drop(start_fence);
+        drop(source_transition_admission);
+        timeout(Duration::from_secs(1), &mut cleanup_entered_rx)
+            .await
+            .expect("cleanup must acquire the released drain fence")
+            .expect("cleanup fence notification");
+        cleanup.await.expect("cleanup fence task");
+
+        assert!(state.capture_interruption.capture_admission_is_idle());
+        assert!(state.recording.lock().await.is_none());
+        assert!(
+            std::iter::from_fn(|| events.try_recv().ok())
+                .all(|event| event.event != "recording.status"),
+            "a final shutdown rejection must not publish recording state"
+        );
+    }
+
     fn test_active_recording_with_stream_targets(
         snapshot: StreamTargetsSnapshot,
     ) -> ActiveRecording {
@@ -19081,6 +21054,24 @@ mod tests {
         let reason = stale_repair_job_reason(&job).expect("missing file is stale");
 
         assert!(reason.contains("missing"));
+    }
+
+    #[test]
+    fn deleted_recording_cancels_quality_check_before_it_can_run() {
+        let path = std::env::temp_dir().join(format!("videorc-deleted-{}.mp4", Uuid::new_v4()));
+        let mut job = repair_job_for_path(path.display().to_string());
+
+        assert!(cancel_deleted_quality_check(
+            &mut job,
+            &path,
+            "t1".to_string()
+        ));
+        assert_eq!(job.status.as_str(), "cancelled");
+        assert_eq!(
+            job.reason.as_deref(),
+            Some("The recording was deleted before the quality check ran.")
+        );
+        assert_eq!(job.updated_at, "t1");
     }
 
     #[test]
@@ -20886,6 +22877,20 @@ mod tests {
         assert_eq!(
             input_arg_value(&args, &fifo_path.display().to_string(), "-f"),
             Some("mpegts")
+        );
+        assert_eq!(
+            input_arg_value(&args, &fifo_path.display().to_string(), "-probesize"),
+            Some("4096"),
+            "an owned record-only MPEG-TS FIFO must not retain a complete short recording inside FFmpeg probing"
+        );
+        assert_eq!(
+            input_arg_value(&args, &fifo_path.display().to_string(), "-analyzeduration"),
+            Some("0")
+        );
+        assert_eq!(
+            input_arg_value(&args, &fifo_path.display().to_string(), "-fflags"),
+            None,
+            "bounded probing must preserve the first keyframe"
         );
         assert!(!input_has_arg(
             &args,
@@ -22694,6 +24699,450 @@ mod tests {
         );
         assert_eq!(capture_media_clock_log_message("out_time_us=N/A"), None);
         assert_eq!(capture_media_clock_log_message("progress=continue"), None);
+        assert_eq!(ffmpeg_output_startup_media_seconds("out_time_us=0"), None);
+        assert_eq!(ffmpeg_output_startup_media_seconds("out_time_us=N/A"), None);
+        assert_eq!(
+            ffmpeg_output_startup_media_seconds("progress=continue"),
+            None
+        );
+        assert_eq!(
+            ffmpeg_output_startup_media_seconds("out_time_us=1"),
+            Some(0.000001)
+        );
+        assert!(is_ffmpeg_progress_report_boundary("progress=continue"));
+        assert!(is_ffmpeg_progress_report_boundary("progress=end"));
+        assert!(!is_ffmpeg_progress_report_boundary("out_time_us=2500123"));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stderr_relay_waits_for_strictly_positive_media_progress() {
+        let (mut writer, reader) = tokio::io::duplex(256);
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let (ready_sender, mut ready) = oneshot::channel();
+        let relay = tokio::spawn(relay_ffmpeg_stderr(
+            BufReader::new(reader).lines(),
+            event_sender,
+            Some(ready_sender),
+        ));
+
+        writer
+            .write_all(b"out_time_us=0\nprogress=continue\n")
+            .await
+            .unwrap();
+        assert!(
+            timeout(Duration::from_millis(25), &mut ready)
+                .await
+                .is_err()
+        );
+
+        writer.write_all(b"out_time_us=1\n").await.unwrap();
+        assert_eq!(
+            timeout(Duration::from_secs(1), &mut ready)
+                .await
+                .unwrap()
+                .unwrap(),
+            Ok(())
+        );
+        drop(writer);
+        relay.await.unwrap();
+        assert!(matches!(
+            events.recv().await,
+            Some(FfmpegStderrEvent::Line(_))
+        ));
+        while let Some(event) = events.recv().await {
+            if matches!(event, FfmpegStderrEvent::Eof) {
+                return;
+            }
+        }
+        panic!("stderr relay did not publish EOF");
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stderr_relay_nacks_eof_without_positive_media_progress() {
+        let (event_sender, _events) = mpsc::unbounded_channel();
+        let (ready_sender, ready) = oneshot::channel();
+        relay_ffmpeg_stderr(
+            BufReader::new(&b"out_time_us=0\nprogress=end\n"[..]).lines(),
+            event_sender,
+            Some(ready_sender),
+        )
+        .await;
+
+        let error = ready.await.unwrap().unwrap_err();
+        assert!(error.contains("stopped before confirming"));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stderr_relay_preserves_the_first_startup_fatal_category() {
+        let (event_sender, mut events) = mpsc::unbounded_channel();
+        let (ready_sender, ready) = oneshot::channel();
+        relay_ffmpeg_stderr(
+            BufReader::new(&b"Could not write header for output file #0\n"[..]).lines(),
+            event_sender,
+            Some(ready_sender),
+        )
+        .await;
+
+        let error = ready.await.unwrap().unwrap_err();
+        assert!(error.contains("output-open-failed"));
+        assert!(matches!(
+            events.recv().await,
+            Some(FfmpegStderrEvent::Line(line)) if line.contains("Could not write header")
+        ));
+        assert!(matches!(events.recv().await, Some(FfmpegStderrEvent::Eof)));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_output_startup_deadline_is_absolute_but_keeps_a_completed_ack() {
+        let expired_start = Instant::now()
+            .checked_sub(FFMPEG_OUTPUT_STARTUP_TIMEOUT + Duration::from_millis(1))
+            .unwrap();
+
+        let (ready_sender, ready) = oneshot::channel();
+        ready_sender.send(Ok(())).unwrap();
+        wait_for_ffmpeg_output_startup(ready, expired_start)
+            .await
+            .unwrap();
+
+        let (_pending_sender, pending) = oneshot::channel();
+        let error = wait_for_ffmpeg_output_startup(pending, expired_start)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("within 8000ms of process spawn"));
+    }
+
+    #[test]
+    fn ffmpeg_output_startup_rejection_status_returns_the_started_session_to_idle() {
+        let output = Path::new("/tmp/videorc-startup-failure.mkv");
+        let mut pipeline = RecordingPipeline::new(true, false, &[]);
+        pipeline.mark_failed(
+            RecordingPipelineStage::Muxer,
+            "FFmpeg output startup failed",
+        );
+
+        let status = recording_start_rejected_status(
+            "startup-failure-session",
+            Some(output),
+            &pipeline,
+            "FFmpeg output startup failed",
+        );
+
+        assert!(matches!(status.state, RecordingState::Idle));
+        assert_eq!(
+            status.session_id.as_deref(),
+            Some("startup-failure-session")
+        );
+        assert_eq!(status.output_path.as_deref(), output.to_str());
+        assert_eq!(
+            status.pipeline.unwrap().finalization,
+            crate::protocol::RecordingFinalizationState::Failed
+        );
+    }
+
+    #[test]
+    fn published_start_failure_origins_map_to_the_owning_pipeline_stage() {
+        let cases = [
+            (
+                PublishedSessionStartFailureOrigin::FfmpegSpawn,
+                RecordingPipelineStage::Muxer,
+            ),
+            (
+                PublishedSessionStartFailureOrigin::FfmpegOutputStartup,
+                RecordingPipelineStage::Muxer,
+            ),
+            (
+                PublishedSessionStartFailureOrigin::LiveAudioControlStdin,
+                RecordingPipelineStage::AudioEncoder,
+            ),
+            (
+                PublishedSessionStartFailureOrigin::EncoderBridge,
+                RecordingPipelineStage::VideoEncoder,
+            ),
+            (
+                PublishedSessionStartFailureOrigin::ScreenOverlay,
+                RecordingPipelineStage::Render,
+            ),
+        ];
+
+        for (origin, expected_stage) in cases {
+            assert_eq!(origin.pipeline_stage(), expected_stage, "origin={origin:?}");
+        }
+    }
+
+    #[test]
+    fn bridge_terminal_failure_precedes_secondary_ffmpeg_readiness_failure() {
+        let (origin, error) = published_output_startup_failure(
+            Some("bridge prime failed".to_string()),
+            Err(anyhow::anyhow!(
+                "FFmpeg stopped before its first output clock"
+            )),
+        )
+        .expect("startup failure");
+
+        assert_eq!(origin, PublishedSessionStartFailureOrigin::EncoderBridge);
+        let message = format!("{error:#}");
+        assert!(message.contains("bridge prime failed"));
+        assert!(!message.contains("FFmpeg stopped"));
+
+        let (origin, error) =
+            published_output_startup_failure(None, Err(anyhow::anyhow!("Could not write header")))
+                .expect("FFmpeg startup failure");
+        assert_eq!(
+            origin,
+            PublishedSessionStartFailureOrigin::FfmpegOutputStartup
+        );
+        assert!(format!("{error:#}").contains("Could not write header"));
+    }
+
+    #[tokio::test]
+    async fn published_start_guard_emits_one_terminal_idle_and_disarm_suppresses_it() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let pipeline = RecordingPipeline::new(true, false, &[]);
+        {
+            let mut guard = PublishedSessionStartGuard::unarmed();
+            let session_start_admission = state
+                .capture_interruption
+                .try_begin_session_start()
+                .expect("admit guarded test start");
+            guard.arm(
+                state.clone(),
+                "guarded-start",
+                Some(PathBuf::from("/tmp/guarded-start.mkv")),
+                &pipeline,
+                session_start_admission,
+            );
+            guard.set_failure(
+                PublishedSessionStartFailureOrigin::LiveAudioControlStdin,
+                "FFmpeg live microphone control stdin was unavailable",
+            );
+        }
+        let event = timeout(Duration::from_secs(1), events.recv())
+            .await
+            .expect("terminal startup event")
+            .expect("recording event");
+        assert_eq!(event.event, "recording.status");
+        let status: RecordingStatus = serde_json::from_value(event.payload).unwrap();
+        assert!(matches!(status.state, RecordingState::Idle));
+        assert_eq!(status.session_id.as_deref(), Some("guarded-start"));
+        assert_eq!(
+            status.message.as_deref(),
+            Some("FFmpeg live microphone control stdin was unavailable")
+        );
+        let terminal_pipeline = status.pipeline.expect("terminal event includes pipeline");
+        let failed = terminal_pipeline
+            .stages
+            .iter()
+            .find(|stage| stage.state == crate::protocol::RecordingPipelineStageState::Failed)
+            .expect("one failed pipeline stage");
+        assert_eq!(failed.stage, RecordingPipelineStage::AudioEncoder);
+        assert_eq!(failed.detail, status.message);
+
+        {
+            let mut guard = PublishedSessionStartGuard::unarmed();
+            let session_start_admission = state
+                .capture_interruption
+                .try_begin_session_start()
+                .expect("admit disarmed test start");
+            guard.arm(
+                state,
+                "running-start",
+                None,
+                &pipeline,
+                session_start_admission,
+            );
+            guard.disarm();
+        }
+        assert!(events.try_recv().is_err());
+    }
+
+    #[test]
+    fn ffmpeg_progress_deltas_merge_until_a_report_boundary() {
+        let mut merged = ParsedStreamHealthDelta::default();
+        merged.merge(parse_ffmpeg_stream_health("fps=29.97").unwrap());
+        merged.merge(parse_ffmpeg_stream_health("total_size=4096").unwrap());
+        merged.merge(parse_ffmpeg_stream_health("drop_frames=2").unwrap());
+        assert_eq!(merged.fps, Some(29.97));
+        assert_eq!(merged.total_bytes, Some(4096));
+        assert_eq!(merged.dropped_frames, Some(2));
+
+        merged.merge(parse_ffmpeg_stream_health("fps=30.0 total_size=8192").unwrap());
+        assert_eq!(merged.fps, Some(30.0));
+        assert_eq!(merged.total_bytes, Some(8192));
+        assert_eq!(merged.dropped_frames, Some(2));
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_stream_health_flushes_a_partial_report_at_stderr_eof() {
+        let state = test_state();
+        *state.recording.lock().await = Some(test_active_recording_stub("partial-health"));
+        let mut events = state.events.subscribe();
+        let mut accumulator = StreamHealthAccumulator::new("partial-health", 0);
+        let mut pending = parse_ffmpeg_stream_health("fps=29.5 total_size=4096").unwrap();
+
+        assert!(
+            publish_pending_ffmpeg_stream_health(
+                &state,
+                "partial-health",
+                0,
+                30,
+                &mut accumulator,
+                &mut pending,
+            )
+            .await
+        );
+        assert_eq!(pending, ParsedStreamHealthDelta::default());
+
+        let health = timeout(Duration::from_secs(1), async {
+            loop {
+                let event = events.recv().await.unwrap();
+                if event.event == "stream.health" {
+                    break event.payload;
+                }
+            }
+        })
+        .await
+        .expect("stream health event");
+        assert_eq!(health["sessionId"], "partial-health");
+        assert_eq!(health["fps"], 29.5);
+        assert_eq!(health["totalBytes"], 4096);
+    }
+
+    #[tokio::test]
+    async fn ffmpeg_dropped_frame_warning_only_repeats_when_counter_increases() {
+        let session_id = "stream-drop-warning-cadence";
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session(session_id)
+            .unwrap();
+        *state.recording.lock().await = Some(test_active_recording_stub(session_id));
+        let mut events = state.events.subscribe();
+        let mut accumulator = StreamHealthAccumulator::new(session_id, 0);
+
+        for dropped_frames in [2_u64, 2, 3] {
+            let mut pending = parse_ffmpeg_stream_health(&format!(
+                "fps=30.0 drop_frames={dropped_frames} progress=continue"
+            ))
+            .unwrap();
+            assert!(
+                publish_pending_ffmpeg_stream_health(
+                    &state,
+                    session_id,
+                    0,
+                    30,
+                    &mut accumulator,
+                    &mut pending,
+                )
+                .await
+            );
+        }
+
+        let persisted = state.database.list_health_events(session_id).unwrap();
+        let warnings = persisted
+            .iter()
+            .filter(|event| event.code == "stream-dropped-frames")
+            .collect::<Vec<_>>();
+        assert_eq!(warnings.len(), 2, "warnings: {warnings:?}");
+        assert!(warnings.iter().any(|event| event.message.contains('2')));
+        assert!(warnings.iter().any(|event| event.message.contains('3')));
+
+        let mut published_warning_count = 0;
+        while let Ok(event) = events.try_recv() {
+            if event.event == "health.event" && event.payload["code"] == "stream-dropped-frames" {
+                published_warning_count += 1;
+            }
+        }
+        assert_eq!(published_warning_count, 2);
+    }
+
+    #[tokio::test]
+    async fn retired_stderr_generation_cannot_publish_health_into_replacement_session() {
+        let state = test_state();
+        *state.recording.lock().await = Some(test_active_recording_stub("replacement-session"));
+        state.diagnostics.lock().await.session_id = Some("replacement-session".to_string());
+        let mut events = state.events.subscribe();
+        let mut accumulator = StreamHealthAccumulator::new("retired-session", 0);
+        let mut pending = parse_ffmpeg_stream_health("fps=1.0 total_size=64").unwrap();
+
+        assert!(
+            !publish_pending_ffmpeg_stream_health(
+                &state,
+                "retired-session",
+                0,
+                30,
+                &mut accumulator,
+                &mut pending,
+            )
+            .await
+        );
+        assert_ne!(pending, ParsedStreamHealthDelta::default());
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert_eq!(
+            state.diagnostics.lock().await.session_id.as_deref(),
+            Some("replacement-session")
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_stderr_generation_cannot_publish_target_failure() {
+        let state = test_state();
+        *state.recording.lock().await = Some(test_active_recording_stub("replacement-session"));
+        let targets = Arc::new(StdMutex::new(StreamTargetsSnapshot {
+            session_id: "retired-session".to_string(),
+            targets: vec![StreamTargetRuntime {
+                target_id: "target".to_string(),
+                platform: StreamPlatform::Custom,
+                label: "Retired target".to_string(),
+                state: StreamTargetState::Live,
+                message: None,
+                redacted_url: Some("rtmp://example.invalid/live/REDACTED".to_string()),
+            }],
+        }));
+        let mut events = state.events.subscribe();
+
+        publish_stream_target_failure_if_active(
+            &state,
+            "retired-session",
+            &targets,
+            0,
+            "late failure".to_string(),
+        )
+        .await;
+
+        assert_eq!(
+            stream_targets_snapshot_value(&targets).targets[0].state,
+            StreamTargetState::Live
+        );
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test]
+    async fn retired_stderr_generation_cannot_publish_ffmpeg_warning() {
+        let state = test_state();
+        *state.recording.lock().await = Some(test_active_recording_stub("replacement-session"));
+        let mut events = state.events.subscribe();
+
+        publish_ffmpeg_health_event_if_active(&state, "retired-session", "Conversion failed!")
+            .await;
+
+        assert!(matches!(
+            events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+        assert!(
+            state
+                .database
+                .list_health_events("retired-session")
+                .expect("retired health events")
+                .is_empty()
+        );
     }
 
     #[test]
@@ -22736,14 +25185,15 @@ mod tests {
 
     #[test]
     fn ffmpeg_live_audio_reply_timeout_has_progress_cadence_headroom() {
+        assert_eq!(FFMPEG_PROGRESS_REPORT_PERIOD, Duration::from_millis(500));
+        assert_eq!(FFMPEG_DIAGNOSTICS_PUBLISH_PERIOD, Duration::from_secs(2));
+        assert!(FFMPEG_OUTPUT_STARTUP_TIMEOUT < Duration::from_secs(30));
         assert!(
-            FFMPEG_LIVE_AUDIO_READY_TIMEOUT
-                >= Duration::from_secs(FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS * 4),
+            FFMPEG_LIVE_AUDIO_READY_TIMEOUT >= FFMPEG_PROGRESS_REPORT_PERIOD.saturating_mul(4),
             "physical-device startup gets four progress intervals to become command-ready"
         );
         assert!(
-            FFMPEG_LIVE_AUDIO_REPLY_TIMEOUT
-                > Duration::from_secs(FFMPEG_PROGRESS_REPORT_PERIOD_SECONDS * 2),
+            FFMPEG_LIVE_AUDIO_REPLY_TIMEOUT > FFMPEG_PROGRESS_REPORT_PERIOD.saturating_mul(2),
             "a command written just after a progress report needs the next interval plus scheduling headroom"
         );
         assert!(
@@ -23428,6 +25878,31 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn stale_recording_preview_publication_cannot_overwrite_terminal_generation() {
+        let state = test_state();
+        let mut preview_events = state.events.subscribe();
+        let recording_generation = stop_idle_live_preview_for_recording(state.clone()).await;
+        {
+            let mut preview = state.live_preview.lock().await;
+            // Model a preview command winning after the recording-start edge
+            // was captured but before the detached native-status lookup commits.
+            cancel_idle_preview_start(&mut preview);
+            preview.status = unavailable_live_preview_status(Some("Session ended.".to_string()));
+        }
+
+        publish_recording_live_preview_status(&state, false, recording_generation, None).await;
+
+        let preview = state.live_preview.lock().await;
+        assert_eq!(preview.status.state, PreviewLiveState::Unavailable);
+        assert_eq!(preview.status.source, PreviewLiveSource::Unavailable);
+        assert_eq!(preview.status.message.as_deref(), Some("Session ended."));
+        assert!(matches!(
+            preview_events.try_recv(),
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty)
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn fallback_spawn_install_race_reaps_cancelled_child_and_blocks_fresh_reserve() {
         let state = test_state();
         let params = PreviewLiveParams {
@@ -23442,6 +25917,7 @@ mod tests {
             reserve_idle_preview_start(
                 &mut preview,
                 state.capture_interruption.capture_admission_is_idle(),
+                state.process_shutdown_requested(),
             )
             .expect("idle monitor reserves its exact generation")
         };
@@ -23476,6 +25952,7 @@ mod tests {
                 reserve_idle_preview_start(
                     &mut preview,
                     state.capture_interruption.capture_admission_is_idle(),
+                    state.process_shutdown_requested(),
                 ),
                 None,
                 "SessionStarting cannot reserve a replacement token"
@@ -23499,6 +25976,132 @@ mod tests {
         assert!(state.live_preview.lock().await.idle_process.is_none());
         drop(admission);
         assert!(state.capture_interruption.capture_admission_is_idle());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_latch_rejects_live_preview_start_after_drain_snapshot() {
+        let state = test_state();
+        let params = PreviewLiveParams {
+            sources: base_params(true, false).sources,
+            layout: base_params(true, false).layout,
+            ffmpeg_path: None,
+            video: Some(default_video_settings()),
+        };
+        assert!(state.request_process_shutdown());
+
+        // Model the live-preview portion of the graceful drain completing
+        // before a late RPC reaches start_live_preview.
+        let drained_generation = {
+            let mut preview = state.live_preview.lock().await;
+            cancel_idle_preview_start(&mut preview);
+            preview.desired_params = None;
+            preview.idle_process = None;
+            preview.generation
+        };
+        let status = start_live_preview(state.clone(), params)
+            .await
+            .expect("shutdown rejection is a normal status response");
+
+        let preview = state.live_preview.lock().await;
+        assert_eq!(status.state, PreviewLiveState::Unavailable);
+        assert_eq!(preview.generation, drained_generation);
+        assert!(preview.desired_params.is_none());
+        assert!(preview.idle_process.is_none());
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("shutting down"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_latch_wins_recording_preview_publication_after_outer_recheck() {
+        let state = test_state();
+        let params = PreviewLiveParams {
+            sources: base_params(true, false).sources,
+            layout: base_params(true, false).layout,
+            ffmpeg_path: None,
+            video: Some(default_video_settings()),
+        };
+        *state.recording.lock().await = Some(test_active_recording_stub("preview-shutdown"));
+
+        // Model start_live_preview already having sampled an active recording
+        // and passed its outer shutdown recheck. Shutdown then latches and
+        // drains before the command reaches the final live-preview lock.
+        assert!(state.request_process_shutdown());
+        let drained_generation = {
+            let mut preview = state.live_preview.lock().await;
+            cancel_idle_preview_start(&mut preview);
+            preview.desired_params = None;
+            preview.idle_process = None;
+            preview.generation
+        };
+        let status = commit_recording_live_preview_start(&state, params).await;
+
+        let preview = state.live_preview.lock().await;
+        assert_eq!(status.state, PreviewLiveState::Unavailable);
+        assert_eq!(preview.generation, drained_generation);
+        assert!(preview.desired_params.is_none());
+        assert!(preview.idle_process.is_none());
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("shutting down"))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn shutdown_latch_reaps_fallback_child_in_final_install_cas() {
+        let state = test_state();
+        let params = PreviewLiveParams {
+            sources: base_params(true, false).sources,
+            layout: base_params(true, false).layout,
+            ffmpeg_path: None,
+            video: Some(default_video_settings()),
+        };
+        let reserved_generation = {
+            let mut preview = state.live_preview.lock().await;
+            preview.desired_params = Some(params.clone());
+            reserve_idle_preview_start(
+                &mut preview,
+                state.capture_interruption.capture_admission_is_idle(),
+                state.process_shutdown_requested(),
+            )
+            .expect("pre-shutdown request reserves its generation")
+        };
+
+        #[cfg(target_os = "windows")]
+        let mut command = Command::new("more.com");
+        #[cfg(not(target_os = "windows"))]
+        let mut command = Command::new("cat");
+        command
+            .kill_on_drop(true)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = spawn_owned_tokio(&mut command).expect("spawn owned fallback test child");
+        let spawned_pid = child.id().unwrap_or_default();
+        assert!(state.request_process_shutdown());
+
+        match install_or_reap_idle_preview_child(&state, &params, reserved_generation, child).await
+        {
+            IdlePreviewChildInstall::Reaped {
+                pid,
+                wait_succeeded,
+            } => {
+                assert_eq!(pid, spawned_pid);
+                assert!(
+                    wait_succeeded,
+                    "shutdown-rejected child is synchronously reaped"
+                );
+            }
+            IdlePreviewChildInstall::Installed { .. } => {
+                panic!("shutdown latch must win the final fallback install CAS")
+            }
+        }
+        assert!(state.live_preview.lock().await.idle_process.is_none());
     }
 
     #[test]
@@ -23649,6 +26252,40 @@ mod tests {
             None,
             None
         ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn finalization_waits_for_the_session_stderr_consumer() {
+        let published = Arc::new(AtomicBool::new(false));
+        let task_published = published.clone();
+        let monitor = tokio::spawn(async move {
+            tokio::task::yield_now().await;
+            task_published.store(true, Ordering::Relaxed);
+        });
+
+        assert!(
+            drain_ffmpeg_stderr_monitor(Some(monitor), Duration::from_secs(1)).await,
+            "a healthy stderr consumer must drain before final diagnostics"
+        );
+        assert!(published.load(Ordering::Relaxed));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn timed_out_stderr_consumer_is_aborted_instead_of_detached() {
+        let (held_sender, held_receiver) = oneshot::channel::<()>();
+        let monitor = tokio::spawn(async move {
+            let _held_sender = held_sender;
+            std::future::pending::<()>().await;
+        });
+
+        assert!(
+            !drain_ffmpeg_stderr_monitor(Some(monitor), Duration::from_millis(1)).await,
+            "a wedged stderr consumer must not block finalization forever"
+        );
+        assert!(
+            held_receiver.await.is_err(),
+            "the timed-out consumer must be cancelled rather than detached"
+        );
     }
 
     #[test]
@@ -24758,6 +27395,43 @@ mod tests {
             first.file_name().and_then(|name| name.to_str()),
             Some("videorc-session-20260712-123456-session-a.mkv")
         );
+    }
+
+    #[tokio::test]
+    async fn rejected_start_removes_only_its_zero_byte_output() {
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-empty-startup-output-test-{}",
+            Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let session_id = "current-session";
+        let empty = directory.join("videorc-session-20260829-120000-current-session.mkv");
+        let preserved = directory.join("videorc-session-20260829-120001-current-session.mkv");
+        let other_session = directory.join("videorc-session-20260829-120002-other-session.mkv");
+        std::fs::write(&empty, []).unwrap();
+        std::fs::write(&preserved, b"recoverable bytes").unwrap();
+        std::fs::write(&other_session, []).unwrap();
+
+        assert!(
+            remove_zero_byte_startup_output(session_id, &empty)
+                .await
+                .unwrap()
+        );
+        assert!(!empty.exists());
+        assert!(
+            !remove_zero_byte_startup_output(session_id, &preserved)
+                .await
+                .unwrap()
+        );
+        assert_eq!(std::fs::read(&preserved).unwrap(), b"recoverable bytes");
+        assert!(
+            !remove_zero_byte_startup_output(session_id, &other_session)
+                .await
+                .unwrap()
+        );
+        assert!(other_session.exists());
+
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[tokio::test]
@@ -26473,12 +29147,26 @@ mod tests {
             None,
             "malformed counters do not create health updates"
         );
+        for line in [
+            "fps=NaN",
+            "fps=inf",
+            "speed=-inf",
+            "speed=-0.5x",
+            "bitrate=NaNkbits/s",
+            "bitrate=-1kbits/s",
+        ] {
+            assert_eq!(
+                parse_ffmpeg_stream_health(line),
+                None,
+                "non-finite or negative progress must not cross the diagnostics contract: {line}"
+            );
+        }
     }
 
     #[test]
     fn stream_health_accumulator_preserves_sparse_values_and_monotonic_counters() {
         let mut accumulator = StreamHealthAccumulator::new("session", 7);
-        let first = accumulator.apply(
+        let (first, first_drop_increase) = accumulator.apply(
             "session",
             7,
             parse_ffmpeg_stream_health(
@@ -26486,7 +29174,7 @@ mod tests {
             )
             .unwrap(),
         );
-        let second = accumulator.apply(
+        let (second, second_drop_increase) = accumulator.apply(
             "session",
             7,
             parse_ffmpeg_stream_health(
@@ -26501,6 +29189,8 @@ mod tests {
         assert_eq!(second.total_bytes, Some(4096));
         assert_eq!(second.duplicated_frames, Some(4));
         assert_eq!(second.dropped_frames, Some(3));
+        assert!(first_drop_increase);
+        assert!(!second_drop_increase);
     }
 
     #[test]
@@ -26512,7 +29202,7 @@ mod tests {
             parse_ffmpeg_stream_health("fps=60 total_size=9000 dup_frames=8").unwrap(),
         );
 
-        let restarted = accumulator.apply(
+        let (restarted, _) = accumulator.apply(
             "session-a",
             2,
             parse_ffmpeg_stream_health("total_size=10 dup_frames=1").unwrap(),
@@ -26521,7 +29211,7 @@ mod tests {
         assert_eq!(restarted.total_bytes, Some(10));
         assert_eq!(restarted.duplicated_frames, Some(1));
 
-        let new_session = accumulator.apply(
+        let (new_session, _) = accumulator.apply(
             "session-b",
             2,
             parse_ffmpeg_stream_health("bitrate=5000kbits/s").unwrap(),

@@ -130,6 +130,73 @@ export function evaluateTransientFifoPressure({
   return failures
 }
 
+export function evaluateSharedRecordStreamPressure({
+  diagnostics,
+  streamTargetsSnapshot,
+  lifecycleEntries,
+  sessionId,
+  streamArtifactBytes
+}) {
+  const failures = []
+  if (diagnostics?.encoderBridgeEffectiveVideoOutput !== 'videotoolbox-h264-mpegts') {
+    failures.push(
+      `shared record+stream pressure pass used ${
+        diagnostics?.encoderBridgeEffectiveVideoOutput ?? 'an unknown bridge output'
+      }; expected videotoolbox-h264-mpegts`
+    )
+  }
+  if (diagnostics?.encoderBridgeSeparateOutputEncodersActive !== false) {
+    failures.push(
+      'shared record+stream pressure pass unexpectedly used separate recording and stream encoders'
+    )
+  }
+  if (diagnostics?.encoderBridgeActiveEncodedOutputEncoders !== 1) {
+    failures.push(
+      `shared record+stream pressure pass reported ${
+        diagnostics?.encoderBridgeActiveEncodedOutputEncoders ?? 'an unknown number of'
+      } active encoded outputs; expected exactly one`
+    )
+  }
+  const lifecycleRoles = new Set(
+    (lifecycleEntries ?? [])
+      .filter((entry) => entry?.code === 'encoder-bridge-writer-lifecycle')
+      .map((entry) => /(?:^|\s)role=([^\s]+)/u.exec(entry.message ?? '')?.[1])
+      .filter(Boolean)
+  )
+  if (
+    !lifecycleRoles.has('shared') ||
+    lifecycleRoles.has('recording') ||
+    lifecycleRoles.has('stream')
+  ) {
+    failures.push(
+      `encoder bridge lifecycle roles were ${
+        lifecycleRoles.size > 0 ? [...lifecycleRoles].join(', ') : 'missing'
+      }; expected only shared`
+    )
+  }
+  if (streamTargetsSnapshot?.sessionId !== sessionId) {
+    failures.push(
+      `stream target snapshot belonged to ${
+        streamTargetsSnapshot?.sessionId ?? 'no session'
+      }; expected ${sessionId ?? 'the active session'}`
+    )
+  }
+  const targets = streamTargetsSnapshot?.targets ?? []
+  if (targets.length !== 1 || targets[0]?.state !== 'live') {
+    failures.push(
+      `shared record+stream target was not live after pressure recovery ` +
+        `(targets=${targets.map((target) => `${target.targetId}:${target.state}`).join(', ') || 'none'})`
+    )
+  }
+  if (!(diagnostics?.streamOutputTotalBytes > 0)) {
+    failures.push('shared record+stream diagnostics reported no emitted stream bytes')
+  }
+  if (!(streamArtifactBytes > 0)) {
+    failures.push('local RTMP listener received no shared record+stream bytes')
+  }
+  return failures
+}
+
 export function missingRecordingMatrixResultFailures({ expectedLabels, results }) {
   const observed = new Set(results.map((result) => result.combo))
   return expectedLabels

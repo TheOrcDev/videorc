@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
@@ -971,7 +971,7 @@ impl CohostEngine {
 
 // --- AppState integration ------------------------------------------------------------
 
-fn emit_state(state: &AppState, snapshot: &CohostState) {
+fn emit_state(state: &AppState, snapshot: &CohostState, _lifecycle_delivery: &OwnedMutexGuard<()>) {
     state.emit_event(COHOST_STATE_EVENT, snapshot.clone());
 }
 
@@ -989,6 +989,7 @@ pub async fn set_cohost_settings(
     state: &AppState,
     patch: CohostSettingsPatch,
 ) -> Result<CohostSettings, CohostError> {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let mut engine = state.cohost.lock().await;
     let mut next = engine.settings.clone();
     next.apply(patch);
@@ -1002,7 +1003,7 @@ pub async fn set_cohost_settings(
     drop(engine);
     if stopped {
         state.emit_log("info", "Co-host stopped: turned off in Settings.");
-        emit_state(state, &snapshot);
+        emit_state(state, &snapshot, &lifecycle_delivery);
     }
     Ok(next)
 }
@@ -1015,10 +1016,34 @@ pub async fn start_cohost(
     state: &AppState,
     params: CohostStartParams,
 ) -> Result<CohostState, CohostError> {
+    start_cohost_after_chat_validation(
+        state,
+        params,
+        std::future::ready(()),
+        std::future::ready(()),
+    )
+    .await
+}
+
+async fn start_cohost_after_chat_validation<F, G>(
+    state: &AppState,
+    params: CohostStartParams,
+    after_chat_validation: F,
+    before_state_emit: G,
+) -> Result<CohostState, CohostError>
+where
+    F: std::future::Future<Output = ()>,
+    G: std::future::Future<Output = ()>,
+{
     let session_id = params.session_id.trim().to_string();
     if session_id.is_empty() {
         return Err(CohostError::InvalidParams);
     }
+    // Chat replacement/retirement and co-host admission are one session
+    // lifecycle transaction. Keep this fence from validation through the
+    // authoritative state publication, but never hold the chat coordinator
+    // lock while awaiting the co-host lock.
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let chat_session_id = state
         .live_chat
         .lock()
@@ -1028,6 +1053,7 @@ pub async fn start_cohost(
     if chat_session_id.as_deref() != Some(session_id.as_str()) {
         return Err(CohostError::SessionMismatch);
     }
+    after_chat_validation.await;
 
     let mut engine = state.cohost.lock().await;
     if !engine.settings.enabled {
@@ -1049,37 +1075,101 @@ pub async fn start_cohost(
     engine.scheduler = Some(spawn_scheduler(state.clone(), generation));
     let snapshot = engine.snapshot();
     drop(engine);
+    before_state_emit.await;
     state.emit_log(
         "info",
         format!("Co-host listening for session {session_id}."),
     );
-    emit_state(state, &snapshot);
+    emit_state(state, &snapshot, &lifecycle_delivery);
+    drop(lifecycle_delivery);
     Ok(snapshot)
 }
 
 pub async fn stop_cohost(state: &AppState) -> CohostState {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    stop_cohost_under_lifecycle_fence(state, &lifecycle_delivery, std::future::ready(())).await
+}
+
+async fn stop_cohost_under_lifecycle_fence<F>(
+    state: &AppState,
+    lifecycle_delivery: &OwnedMutexGuard<()>,
+    before_state_emit: F,
+) -> CohostState
+where
+    F: std::future::Future<Output = ()>,
+{
     let mut engine = state.cohost.lock().await;
     let stopped = engine.stop_session();
     let snapshot = engine.snapshot();
     drop(engine);
+    before_state_emit.await;
     if stopped {
         state.emit_log("info", "Co-host stopped.");
-        emit_state(state, &snapshot);
+        emit_state(state, &snapshot, lifecycle_delivery);
     }
     snapshot
 }
 
 /// Live-chat session boundary (stop, or a replacing start): drop the engine
 /// session so no late tick can publish into the next stream.
-pub(crate) async fn stop_cohost_for_session_end(state: &AppState) {
-    stop_cohost(state).await;
+pub(crate) async fn stop_cohost_for_session_end_under_lifecycle_fence(
+    state: &AppState,
+    lifecycle_delivery: &OwnedMutexGuard<()>,
+) {
+    stop_cohost_under_lifecycle_fence(state, lifecycle_delivery, std::future::ready(())).await;
+}
+
+/// Recording monitors are generation-late by construction: final media work
+/// can overlap admission of a replacement session. Stop the co-host only when
+/// it still belongs to the recording session that just retired.
+pub(crate) async fn stop_cohost_for_session_end_if_matching_before_emit<F>(
+    state: &AppState,
+    expected_session_id: &str,
+    lifecycle_delivery: &OwnedMutexGuard<()>,
+    before_state_emit: F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    stop_cohost_for_session_end_if_matching_impl(
+        state,
+        expected_session_id,
+        lifecycle_delivery,
+        before_state_emit,
+    )
+    .await;
+}
+
+async fn stop_cohost_for_session_end_if_matching_impl<F>(
+    state: &AppState,
+    expected_session_id: &str,
+    lifecycle_delivery: &OwnedMutexGuard<()>,
+    before_state_emit: F,
+) where
+    F: std::future::Future<Output = ()>,
+{
+    let mut engine = state.cohost.lock().await;
+    if !engine.is_running_for(expected_session_id) {
+        return;
+    }
+    let stopped = engine.stop_session();
+    let snapshot = engine.snapshot();
+    drop(engine);
+    before_state_emit.await;
+    if stopped {
+        state.emit_log("info", "Co-host stopped.");
+        emit_state(state, &snapshot, lifecycle_delivery);
+    }
 }
 
 /// Delivery-path hook: remember eligible rows for the next tick. Rows from a
 /// different session are ignored by the engine's own guard. The UI learns
 /// about queued chat when `pending_messages` crosses an emission bucket
 /// (0 -> 1, then every +5) — a reaction per wave, never a per-message storm.
-pub(crate) async fn note_messages(state: &AppState, messages: &[LiveChatMessage]) {
+pub(crate) async fn note_messages_under_lifecycle_fence(
+    state: &AppState,
+    lifecycle_delivery: &OwnedMutexGuard<()>,
+    messages: &[LiveChatMessage],
+) {
     if messages.is_empty() {
         return;
     }
@@ -1096,7 +1186,13 @@ pub(crate) async fn note_messages(state: &AppState, messages: &[LiveChatMessage]
         }
         engine.snapshot()
     };
-    emit_state(state, &snapshot);
+    emit_state(state, &snapshot, lifecycle_delivery);
+}
+
+#[cfg(test)]
+async fn note_messages(state: &AppState, messages: &[LiveChatMessage]) {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    note_messages_under_lifecycle_fence(state, &lifecycle_delivery, messages).await;
 }
 
 pub async fn mark_question_answered(
@@ -1106,12 +1202,13 @@ pub async fn mark_question_answered(
     if params.session_id.trim().is_empty() || params.question_id.trim().is_empty() {
         return Err(CohostError::InvalidParams);
     }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let mut engine = state.cohost.lock().await;
     let changed = engine.mark_answered(&params.session_id, &params.question_id)?;
     let snapshot = engine.snapshot();
     drop(engine);
     if changed {
-        emit_state(state, &snapshot);
+        emit_state(state, &snapshot, &lifecycle_delivery);
     }
     Ok(snapshot)
 }
@@ -1133,6 +1230,7 @@ pub(crate) async fn mark_question_answered_after_send(
     session_id: &str,
     question_id: &str,
 ) {
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let mut engine = state.cohost.lock().await;
     let changed = engine
         .mark_answered(session_id, question_id)
@@ -1140,7 +1238,7 @@ pub(crate) async fn mark_question_answered_after_send(
     let snapshot = engine.snapshot();
     drop(engine);
     if changed {
-        emit_state(state, &snapshot);
+        emit_state(state, &snapshot, &lifecycle_delivery);
     }
 }
 
@@ -1151,12 +1249,13 @@ pub async fn dismiss_flag(
     if params.session_id.trim().is_empty() || params.message_id.trim().is_empty() {
         return Err(CohostError::InvalidParams);
     }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let mut engine = state.cohost.lock().await;
     let changed = engine.dismiss_flag(&params.session_id, &params.message_id)?;
     let snapshot = engine.snapshot();
     drop(engine);
     if changed {
-        emit_state(state, &snapshot);
+        emit_state(state, &snapshot, &lifecycle_delivery);
     }
     Ok(snapshot)
 }
@@ -1184,6 +1283,7 @@ fn spawn_scheduler(state: AppState, generation: u64) -> JoinHandle<()> {
 async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
     let token = crate::account::stored_session_token();
     let premium = premium_entitled();
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let prepared = {
         let mut engine = state.cohost.lock().await;
         let prepared = engine.prepare_tick(generation, token.is_some(), premium, Instant::now());
@@ -1206,13 +1306,14 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
                     serde_json::to_string(&reason).unwrap_or_default()
                 ),
             );
-            emit_state(state, &snapshot);
+            emit_state(state, &snapshot, &lifecycle_delivery);
             return true;
         }
     };
     // tick_in_flight toggles true exactly here and false in apply_tick_result;
     // both edges reach the renderer (this emit, and the post-tick emit below).
-    emit_state(state, &in_flight_snapshot);
+    emit_state(state, &in_flight_snapshot, &lifecycle_delivery);
+    drop(lifecycle_delivery);
     let Some(token) = token else {
         return true;
     };
@@ -1249,6 +1350,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             ),
         )),
     };
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     let snapshot = {
         let mut engine = state.cohost.lock().await;
         let applied = engine.apply_tick_result(
@@ -1270,7 +1372,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
     if let Some((level, message)) = log {
         state.emit_log(level, message);
     }
-    emit_state(state, &snapshot);
+    emit_state(state, &snapshot, &lifecycle_delivery);
     true
 }
 
@@ -2503,6 +2605,296 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(cohost_status(&state).await, CohostState::off());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chat_replacement_cannot_overtake_a_validated_cohost_start() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        state.cohost.lock().await.settings.enabled = true;
+
+        let (validated_tx, validated_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_cohost_after_chat_validation(
+                &start_state,
+                CohostStartParams {
+                    session_id: "session-a".to_string(),
+                    consent_to_process_chat: true,
+                    stream_title: None,
+                },
+                async move {
+                    let _ = validated_tx.send(());
+                    let _ = resume_rx.await;
+                },
+                std::future::ready(()),
+            )
+            .await
+        });
+        validated_rx
+            .await
+            .expect("co-host start validates the original chat session");
+
+        let replacement_params: crate::live_chat::LiveChatStartParams =
+            serde_json::from_value(serde_json::json!({
+                "sessionId": "session-b",
+                "platforms": []
+            }))
+            .expect("replacement live-chat params");
+        let mut replacement = Box::pin(crate::live_chat::start_live_chat(
+            &state,
+            replacement_params,
+        ));
+        let completed_during_gap = std::future::poll_fn(|context| {
+            Poll::Ready(match replacement.as_mut().poll(context) {
+                Poll::Ready(snapshot) => Some(snapshot),
+                Poll::Pending => None,
+            })
+        })
+        .await;
+        assert!(
+            completed_during_gap.is_none(),
+            "chat replacement must wait for the validated co-host start lifecycle transaction"
+        );
+
+        resume_tx.send(()).expect("resume co-host start");
+        let started = start
+            .await
+            .expect("co-host start task")
+            .expect("start co-host for original session");
+        assert_eq!(started.session_id.as_deref(), Some("session-a"));
+
+        let replacement = replacement.await;
+        assert_eq!(replacement.session_id.as_deref(), Some("session-b"));
+        assert_eq!(cohost_status(&state).await, CohostState::off());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn start_cohost_emission_order_survives_chat_replacement() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        state.cohost.lock().await.settings.enabled = true;
+        let mut events = state.events.subscribe();
+
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_cohost_after_chat_validation(
+                &start_state,
+                CohostStartParams {
+                    session_id: "session-a".to_string(),
+                    consent_to_process_chat: true,
+                    stream_title: None,
+                },
+                std::future::ready(()),
+                async move {
+                    let _ = captured_tx.send(());
+                    let _ = resume_rx.await;
+                },
+            )
+            .await
+        });
+        captured_rx
+            .await
+            .expect("co-host start captures the original session state");
+
+        let replacement_params: crate::live_chat::LiveChatStartParams =
+            serde_json::from_value(serde_json::json!({
+                "sessionId": "session-b",
+                "platforms": []
+            }))
+            .expect("replacement live-chat params");
+        let mut replacement = Box::pin(crate::live_chat::start_live_chat(
+            &state,
+            replacement_params,
+        ));
+        let completed_during_emit_gap = std::future::poll_fn(|context| {
+            Poll::Ready(match replacement.as_mut().poll(context) {
+                Poll::Ready(snapshot) => Some(snapshot),
+                Poll::Pending => None,
+            })
+        })
+        .await;
+
+        resume_tx.send(()).expect("resume co-host state emit");
+        let started = start
+            .await
+            .expect("co-host start task")
+            .expect("start original co-host");
+        assert_eq!(started.session_id.as_deref(), Some("session-a"));
+        let replacement = match completed_during_emit_gap {
+            Some(snapshot) => snapshot,
+            None => replacement.await,
+        };
+        assert_eq!(replacement.session_id.as_deref(), Some("session-b"));
+        assert_eq!(cohost_status(&state).await, CohostState::off());
+
+        let mut states = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == COHOST_STATE_EVENT {
+                states.push(event.payload);
+            }
+        }
+        let final_event = states.last().expect("co-host state events");
+        assert_eq!(final_event["status"], "off");
+        assert_eq!(final_event["sessionId"], serde_json::Value::Null);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn public_stop_cohost_emission_order_survives_fenced_start() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        state.cohost.lock().await.settings.enabled = true;
+        let mut events = state.events.subscribe();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_cohost_after_chat_validation(
+                &start_state,
+                CohostStartParams {
+                    session_id: "session-a".to_string(),
+                    consent_to_process_chat: true,
+                    stream_title: None,
+                },
+                std::future::ready(()),
+                async move {
+                    let _ = captured_tx.send(());
+                    let _ = resume_rx.await;
+                },
+            )
+            .await
+        });
+        captured_rx
+            .await
+            .expect("co-host start captures listening state");
+
+        let mut stop = Box::pin(stop_cohost(&state));
+        let completed_during_emit_gap = std::future::poll_fn(|context| {
+            Poll::Ready(match stop.as_mut().poll(context) {
+                Poll::Ready(snapshot) => Some(snapshot),
+                Poll::Pending => None,
+            })
+        })
+        .await;
+        resume_tx.send(()).expect("resume co-host start emit");
+        start
+            .await
+            .expect("co-host start task")
+            .expect("co-host start result");
+        let stopped = match completed_during_emit_gap {
+            Some(snapshot) => snapshot,
+            None => stop.await,
+        };
+        assert_eq!(stopped, CohostState::off());
+        assert_eq!(cohost_status(&state).await, CohostState::off());
+
+        let mut states = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == COHOST_STATE_EVENT {
+                states.push(event.payload);
+            }
+        }
+        let final_event = states.last().expect("co-host state events");
+        assert_eq!(final_event["status"], "off");
+        assert_eq!(final_event["sessionId"], serde_json::Value::Null);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn settings_stop_emission_order_survives_fenced_start() {
+        use std::future::Future as _;
+        use std::task::Poll;
+
+        let state = test_state();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("session-a".to_string(), Vec::new());
+        state.cohost.lock().await.settings.enabled = true;
+        let mut events = state.events.subscribe();
+        let (captured_tx, captured_rx) = tokio::sync::oneshot::channel();
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_cohost_after_chat_validation(
+                &start_state,
+                CohostStartParams {
+                    session_id: "session-a".to_string(),
+                    consent_to_process_chat: true,
+                    stream_title: None,
+                },
+                std::future::ready(()),
+                async move {
+                    let _ = captured_tx.send(());
+                    let _ = resume_rx.await;
+                },
+            )
+            .await
+        });
+        captured_rx
+            .await
+            .expect("co-host start captures listening state");
+
+        let mut disable = Box::pin(set_cohost_settings(
+            &state,
+            CohostSettingsPatch {
+                enabled: Some(false),
+                ..Default::default()
+            },
+        ));
+        let completed_during_emit_gap = std::future::poll_fn(|context| {
+            Poll::Ready(match disable.as_mut().poll(context) {
+                Poll::Ready(result) => Some(result),
+                Poll::Pending => None,
+            })
+        })
+        .await;
+        resume_tx.send(()).expect("resume co-host start emit");
+        start
+            .await
+            .expect("co-host start task")
+            .expect("co-host start result");
+        let settings = match completed_during_emit_gap {
+            Some(result) => result,
+            None => disable.await,
+        }
+        .expect("disable co-host settings");
+        assert!(!settings.enabled);
+        assert_eq!(cohost_status(&state).await, CohostState::off());
+
+        let mut states = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            if event.event == COHOST_STATE_EVENT {
+                states.push(event.payload);
+            }
+        }
+        let final_event = states.last().expect("co-host state events");
+        assert_eq!(final_event["status"], "off");
+        assert_eq!(final_event["sessionId"], serde_json::Value::Null);
     }
 
     #[tokio::test]

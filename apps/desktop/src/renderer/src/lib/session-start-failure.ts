@@ -10,6 +10,8 @@
  * user starts again or dismisses it.
  */
 
+import type { RecordingStatus } from './backend'
+
 /** Sonner key for the start-failure toast: re-reporting updates it in place. */
 export const SESSION_START_FAILED_TOAST_ID = 'session-start-failed'
 /** Shared title: sonner merges an update over the existing toast by id, so the
@@ -30,6 +32,37 @@ export type SessionStartFailureAction =
   | { type: 'start-attempted' }
   /** The user dismissed the line or the toast. */
   | { type: 'dismissed' }
+
+export interface SessionStartResponseResolution {
+  status: RecordingStatus
+  supersededByAuthoritativeEvent: boolean
+  sessionActive: boolean
+}
+
+/**
+ * A stopping/terminal push can overtake the response to `session.start`. Keep
+ * that exact-session push authoritative so the older active response cannot
+ * make Studio (or provider activation) believe the ending session is live.
+ */
+export function reconcileSessionStartResponse(
+  response: RecordingStatus,
+  authoritativeStatusDuringRequest?: RecordingStatus | null
+): SessionStartResponseResolution {
+  const responseIsActive = response.state === 'recording' || response.state === 'streaming'
+  const authoritativeStatusMatchesResponse = Boolean(
+    responseIsActive &&
+    response.sessionId &&
+    authoritativeStatusDuringRequest?.sessionId === response.sessionId &&
+    ['stopping', 'idle', 'failed'].includes(authoritativeStatusDuringRequest.state)
+  )
+  const status = authoritativeStatusMatchesResponse ? authoritativeStatusDuringRequest! : response
+
+  return {
+    status,
+    supersededByAuthoritativeEvent: authoritativeStatusMatchesResponse,
+    sessionActive: status.state === 'recording' || status.state === 'streaming'
+  }
+}
 
 export function sessionStartFailureMessage(error: unknown): string {
   const message = error instanceof Error ? error.message : String(error)
