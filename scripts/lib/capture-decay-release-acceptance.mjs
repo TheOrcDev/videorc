@@ -58,6 +58,140 @@ export const CAPTURE_DECAY_D3_MAX_RECOVERY_DELAY_MS = 30 * 60 * 1_000
 export const CAPTURE_DECAY_D3_MAX_ATTESTATION_DELAY_MS = 5 * 60 * 1_000
 export const CAPTURE_DECAY_D3_ACCEPTANCE_RECORD_PATH = 'docs/acceptance/macos-capture-decay-d3.json'
 
+const CAPTURE_DECAY_D3_SENSITIVE_EXACT_PATHS = new Set([
+  '.npmrc',
+  'Cargo.lock',
+  'Cargo.toml',
+  'package.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'rust-toolchain',
+  'rust-toolchain.toml',
+  'apps/desktop/package.json',
+  'apps/desktop/scripts/release-upload.mjs',
+  'apps/desktop/build-resources/entitlements.mac.plist',
+  'apps/desktop/electron-builder.yml',
+  'apps/desktop/electron.vite.config.ts',
+  'apps/desktop/tsconfig.json',
+  'apps/desktop/tsconfig.node.json',
+  'apps/desktop/tsconfig.web.json',
+  'apps/desktop/src/renderer/index.html',
+  'apps/desktop/src/renderer/theme-bootstrap.js',
+  '.github/workflows/promote-macos-capture-decay-d3.yml',
+  '.github/workflows/release-macos.yml',
+  'scripts/build-ffmpeg-macos.sh'
+])
+const CAPTURE_DECAY_D3_SENSITIVE_PREFIXES = Object.freeze([
+  'crates/videorc-native-preview-addon/',
+  'patches/'
+])
+const CAPTURE_DECAY_D3_PRODUCTION_PREFIXES = Object.freeze([
+  'apps/desktop/src/main/',
+  'apps/desktop/src/preload/',
+  'apps/desktop/src/shared/',
+  'apps/desktop/src/renderer/',
+  'crates/videorc-backend/'
+])
+const CAPTURE_DECAY_D3_SAFE_PRODUCTION_PATHS = Object.freeze([
+  /^apps\/desktop\/src\/main\/(?:account-refresh-broker|account-sign-in-transactions|avatar-cache|comments-command-broker|comments-history-cache|global-shortcut-lifecycle|obs-import|provider-oauth-callbacks|updater|updater-install|updater-status|windows-pilot-update)(?:\.test)?\.ts$/,
+  /^apps\/desktop\/src\/shared\/(?:comments-command-timing|comments-send-operation|comments-snapshot-delta|oauth-callback-policy|windows-live-audio-smoke)(?:\.test)?\.ts$/,
+  /^apps\/desktop\/src\/renderer\/src\/assets\/videorc-logo\.png$/,
+  /^apps\/desktop\/src\/renderer\/src\/components\/ui\//,
+  /^apps\/desktop\/src\/renderer\/src\/components\/(?:account-menu|chat-platform-icon|cohost-flag-row|cohost-nudge|cohost-pane|cohost-question-row|cohost-settings-section|cohost-status|comment-row|comments-destination-status|comments-reader|live-chat-panel|theme-toggle|whats-new-dialog|workspace-nav)(?:\.test)?\.tsx?$/,
+  /^apps\/desktop\/src\/renderer\/src\/hooks\/(?:use-account|use-modifier-held|use-reduced-motion|use-theme-toggle|use-updater|use-whats-new)(?:\.test)?\.tsx?$/,
+  /^apps\/desktop\/src\/renderer\/src\/lib\/(?:account(?:-callback-retry|-ready-refresh|-snapshot-policy)?|ai-readiness|ai-workflow-status|chat-avatar|chat-send|cohost-presence|cohost-view|library-view|live-chat-view|noise-cleanup-view|obs-import-apply|obs-import-map|obs-import-nudge|obs-import-read-authority|platform|premium-upgrade|provider-oauth-retry|stream-key-format|update-ui|utils|videorc-web-links|viewer-count-view|whats-new|youtube-channels|youtube-transition)(?:\.test)?\.tsx?$/,
+  // format.ts owns isActiveRecordingState/findDevice/mergeStreamHealth: capture-facing, so NOT safe.
+  /^crates\/videorc-backend\/src\/(?:account|ai|cohost|live_chat|live_chat_persistence|oauth|publish_clips|secrets|twitch|twitch_chat|videorc_api|viewer_stats|x_chat|x_live|x_oauth1|youtube|youtube_chat)\.rs$/,
+  // Only these two backend Windows modules are #[cfg(target_os = "windows")]-gated at their mod
+  // declarations; every windows_d3d11_* module compiles into (and partly runs inside) the macOS
+  // backend, so those stay sensitive.
+  /^crates\/videorc-backend\/src\/(?:windows_graphics_capture|windows_media_foundation_encoder)\.rs$/,
+  /^crates\/videorc-backend\/tests\/content_length_wire\.rs$/
+])
+export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
+  'apps/desktop/scripts/staple-dmg.mjs',
+  'scripts/check-real-source-evidence.mjs',
+  'scripts/build-native-preview-addon.mjs',
+  'scripts/generate-macos-beta-manifest.mjs',
+  'scripts/preflight-macos-package.mjs',
+  'scripts/preflight-macos-release-upload.mjs',
+  'scripts/preflight-macos-release.mjs',
+  'scripts/real-source-baseline-app.mjs',
+  'scripts/run-with-env.mjs',
+  'scripts/smoke-noise-cleanup.mjs',
+  'scripts/smoke-recording-session-decay.mjs',
+  'scripts/smoke-recording-session.mjs',
+  'scripts/upload-macos-beta-release.mjs',
+  'scripts/validate-macos-release-artifact.mjs',
+  'scripts/lib/acceptance-gate.mjs',
+  'scripts/lib/app-launcher.mjs',
+  'scripts/lib/av-sync-stimulus.mjs',
+  'scripts/lib/beta-release-manifest.mjs',
+  'scripts/lib/changelog.mjs',
+  'scripts/lib/ffmpeg-sibling-paths.mjs',
+  'scripts/lib/final-recording-path.mjs',
+  'scripts/lib/frame-cadence.mjs',
+  'scripts/lib/macos-release-artifact-validation.mjs',
+  'scripts/lib/macos-release-preflight.mjs',
+  'scripts/lib/media-quality-mode.mjs',
+  'scripts/lib/native-preview-claim.mjs',
+  'scripts/lib/native-preview-addon-build.mjs',
+  'scripts/lib/noise-cleanup-artifact.mjs',
+  'scripts/lib/notes-overlay-artifact-gate.mjs',
+  'scripts/lib/obs-parity-evidence.mjs',
+  'scripts/lib/performance-budget.mjs',
+  'scripts/lib/performance-contract.mjs',
+  'scripts/lib/performance-sampling-schedule.mjs',
+  'scripts/lib/process-census.mjs',
+  'scripts/lib/process-endurance.mjs',
+  'scripts/lib/process-memory-gate.mjs',
+  'scripts/lib/real-source-evidence-gates.mjs',
+  'scripts/lib/recording-analyzer.mjs',
+  'scripts/lib/recording-duration-gate.mjs',
+  'scripts/lib/recording-smoke-guards.mjs',
+  'scripts/lib/repair-encoder-capabilities.mjs',
+  'scripts/lib/release-upload-https-transport.mjs',
+  'scripts/lib/release-upload-s3.mjs',
+  'scripts/lib/required-source-blockers.mjs',
+  'scripts/lib/run-with-env.mjs',
+  'scripts/lib/screen-motion-stimulus.mjs',
+  'scripts/lib/session-decay-gates.mjs',
+  'scripts/lib/smoke-command-client.mjs',
+  'scripts/lib/smoke-output-guards.mjs',
+  'scripts/lib/source-preflight.mjs',
+  'scripts/lib/source-selection.mjs',
+  'scripts/lib/startup-resolution-analyzer.mjs',
+  'scripts/lib/windows-alpha-release.mjs',
+  'scripts/lib/windows-release-publication.mjs'
+])
+const CAPTURE_DECAY_D3_SENSITIVE_SCRIPT_PATHS = new Set(CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS)
+const CAPTURE_DECAY_D3_NAMED_SCRIPT_PATH =
+  /^scripts\/(?:lib\/)?(?:[^/]*capture-decay[^/]*|[^/]*macos-d3[^/]*)\.mjs$/
+const CAPTURE_DECAY_D3_MANIFEST_PATH =
+  /^(?:apps\/desktop|crates\/videorc-backend|crates\/videorc-native-preview-addon)\/(?:[^/]+\/)*(?:Cargo\.toml|package\.json|tsconfig[^/]*\.json)$/
+const CAPTURE_DECAY_D3_VITE_CONFIG_PATH =
+  /^apps\/desktop\/electron\.vite\.config(?:\.[^/]+)?\.(?:mjs|ts)$/
+// Case-insensitive shadows of every sensitivity trigger: on case-insensitive release
+// filesystems (APFS), a committed case-variant path clobbers the genuine guarded file,
+// so any collision with a guarded root classifies sensitive.
+const CAPTURE_DECAY_D3_FOLDED_GUARDED_EXACT_PATHS = new Set(
+  [...CAPTURE_DECAY_D3_SENSITIVE_EXACT_PATHS, ...CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS].map(
+    (guardedPath) => guardedPath.toLowerCase()
+  )
+)
+const CAPTURE_DECAY_D3_FOLDED_GUARDED_PREFIXES = Object.freeze(
+  [...CAPTURE_DECAY_D3_SENSITIVE_PREFIXES, ...CAPTURE_DECAY_D3_PRODUCTION_PREFIXES].map((prefix) =>
+    prefix.toLowerCase()
+  )
+)
+const CAPTURE_DECAY_D3_FOLDED_GUARDED_PATTERNS = Object.freeze(
+  [
+    CAPTURE_DECAY_D3_MANIFEST_PATH,
+    CAPTURE_DECAY_D3_VITE_CONFIG_PATH,
+    CAPTURE_DECAY_D3_NAMED_SCRIPT_PATH
+  ].map((pattern) => new RegExp(pattern.source, 'i'))
+)
+
 const CAPTURE_DECAY_D3_PUBLICATION_RESERVATION_PROFILE =
   'capture-decay-d3-publication-reservation-v3'
 const CAPTURE_DECAY_D3_EXACT_PROMOTION_MODE = 'exact-sealed-candidate'
@@ -1285,7 +1419,12 @@ export function buildSatisfiedCaptureDecayD3Record(
 
 export function assertCaptureDecayD3PublicationSourceState(
   record,
-  { candidateIsAncestor, changedPaths = [], publicationSourceIsAncestor }
+  {
+    candidateIsAncestor,
+    changedPaths,
+    desktopPackageVersionOnlyChange = false,
+    publicationSourceIsAncestor
+  }
 ) {
   const valid = assertCaptureDecayD3AcceptanceRecord(record)
   if (valid.status === 'accepted') {
@@ -1301,13 +1440,76 @@ export function assertCaptureDecayD3PublicationSourceState(
         'Accepted D3 publication permits only the committed acceptance-record change after the tested commit.'
       )
     }
-  } else if (publicationSourceIsAncestor !== true) {
+  } else {
+    assertCaptureDecayD3SatisfiedSourceState({
+      changedPaths,
+      desktopPackageVersionOnlyChange,
+      publicationSourceIsAncestor
+    })
+  }
+  return valid
+}
+
+export function assertCaptureDecayD3SatisfiedSourceState({
+  changedPaths,
+  desktopPackageVersionOnlyChange = false,
+  publicationSourceIsAncestor
+}) {
+  if (publicationSourceIsAncestor !== true) {
     throw acceptanceError(
       'satisfied-publication-ancestry',
       'The validated first D3 publication is not an ancestor of this later release.'
     )
   }
-  return valid
+  const sensitivePaths = captureDecayD3SensitiveChangedPaths(changedPaths, {
+    desktopPackageVersionOnlyChange
+  })
+  if (sensitivePaths.length > 0) {
+    throw acceptanceError(
+      'satisfied-sensitive-source-diff',
+      `Later macOS release changes invalidate satisfied D3 evidence: ${sensitivePaths.join(', ')}.`
+    )
+  }
+  return sensitivePaths
+}
+
+export function captureDecayD3SensitiveChangedPaths(
+  changedPaths,
+  { desktopPackageVersionOnlyChange = false } = {}
+) {
+  if (!Array.isArray(changedPaths)) {
+    throw acceptanceError(
+      'satisfied-source-diff-invalid',
+      'Later macOS release changed paths must be an array.'
+    )
+  }
+  return changedPaths.filter((path) =>
+    isCaptureDecayD3SensitivePath(path, { desktopPackageVersionOnlyChange })
+  )
+}
+
+function isCaptureDecayD3SensitivePath(path, { desktopPackageVersionOnlyChange }) {
+  if (typeof path !== 'string' || path.length === 0 || path.includes('\\')) return true
+  if (path.split('/').some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    return true
+  }
+  if (path === 'apps/desktop/package.json' && desktopPackageVersionOnlyChange === true) {
+    return false
+  }
+  if (CAPTURE_DECAY_D3_SENSITIVE_EXACT_PATHS.has(path)) return true
+  if (CAPTURE_DECAY_D3_SENSITIVE_PREFIXES.some((prefix) => path.startsWith(prefix))) return true
+  if (CAPTURE_DECAY_D3_MANIFEST_PATH.test(path)) return true
+  if (CAPTURE_DECAY_D3_VITE_CONFIG_PATH.test(path)) return true
+  if (CAPTURE_DECAY_D3_SENSITIVE_SCRIPT_PATHS.has(path)) return true
+  if (CAPTURE_DECAY_D3_NAMED_SCRIPT_PATH.test(path)) return true
+  if (CAPTURE_DECAY_D3_SAFE_PRODUCTION_PATHS.some((pattern) => pattern.test(path))) return false
+  if (CAPTURE_DECAY_D3_PRODUCTION_PREFIXES.some((prefix) => path.startsWith(prefix))) return true
+  const folded = path.toLowerCase()
+  return (
+    CAPTURE_DECAY_D3_FOLDED_GUARDED_EXACT_PATHS.has(folded) ||
+    CAPTURE_DECAY_D3_FOLDED_GUARDED_PREFIXES.some((prefix) => folded.startsWith(prefix)) ||
+    CAPTURE_DECAY_D3_FOLDED_GUARDED_PATTERNS.some((pattern) => pattern.test(folded))
+  )
 }
 
 export function assertCaptureDecayD3AcceptanceRecord(record) {

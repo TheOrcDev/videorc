@@ -560,8 +560,18 @@ eight-subject directory, the isolated GitHub attestation, and all six
 independently downloaded public byte strings against the accepted seal and
 receipt mappings. The satisfied record retains the complete embedded
 attestation bundle, not only its digest. Commit that satisfied record. Later
-macOS releases must descend from the exact first publication and still run the
-recurring 60-minute idle and 15-minute recording synthetic gates. The
+macOS releases must descend from the exact first publication and must not change
+native capture, retention, recovery, diagnostics, dependencies, or the D3 gate
+definitions without collecting and publishing fresh D3 evidence. Committed
+edits, deletions, and both sides of renames are checked from the first
+publication commit. Release documentation and a reviewed, named allowlist of
+unrelated paths (UI surfaces, account/provider/chat integrations, updater and
+import helpers, and the two cfg-gated Windows-only backend capture modules)
+stay allowed; any other production path fails closed until it is deliberately
+added to that allowlist or fresh D3 evidence is collected. Case-variant paths
+that collide with guarded files on a case-insensitive filesystem classify as
+sensitive. Later releases still run the recurring 60-minute idle and
+15-minute recording synthetic gates. The
 acceptance record stores hashes and bounded summaries, not twelve hours of raw
 media; retain the immutable raw evidence, seal receipt, publication receipt,
 exact subject directory, public downloads, and attestation bundle in protected
