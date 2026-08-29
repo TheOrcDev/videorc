@@ -2,7 +2,7 @@ import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { basename, join, resolve } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
@@ -127,10 +127,10 @@ describe('capture-decay D3 publication attestation verification', () => {
       assert.equal(calls[0].command, 'gh')
       assert.equal(calls[0].args[0], 'attestation')
       assert.equal(calls[0].args[1], 'verify')
-      assert.equal(calls[0].args[2].endsWith('/receipt.json'), true)
+      assert.equal(basename(calls[0].args[2]), 'receipt.json')
       assert.notEqual(calls[0].args[2], resolve(receiptPath))
       assert.equal(calls[0].args[3], '--bundle')
-      assert.equal(calls[0].args[4].endsWith('/receipt.attestation.jsonl'), true)
+      assert.equal(basename(calls[0].args[4]), 'receipt.attestation.jsonl')
       assert.notEqual(calls[0].args[4], resolve(bundlePath))
       assert.deepEqual(calls[0].args.slice(5), [
         '--repo',

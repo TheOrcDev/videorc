@@ -24,7 +24,7 @@ import {
   statSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
+import { dirname, isAbsolute, join, posix, relative, resolve, sep } from 'node:path'
 
 import { assertSmokeCommandConnection } from './smoke-command-client.mjs'
 
@@ -492,13 +492,14 @@ export function macosLaunchServicesAppSpawnSpec({
     throw new Error('LaunchServices app launch is supported only on macOS.')
   }
   const bundlePath = macosAppBundlePath(command)
+  const executablePath = posix.resolve(command)
   const launchOutputPaths = outputPaths ?? launchServicesOutputPaths(env)
   const configuredAppOwnership = appOwnership ?? launchServicesAppOwnership(env)
   validateMacosLaunchServicesAppOwnership(configuredAppOwnership)
   const launchAppOwnership = {
     path: configuredAppOwnership.path,
     token: configuredAppOwnership.token,
-    expectedExecutablePath: resolve(command),
+    expectedExecutablePath: executablePath,
     expectedBundlePath: bundlePath
   }
   const launchEnv = {
@@ -537,7 +538,7 @@ export function macosLaunchServicesAppSpawnSpec({
     args,
     options: {
       ...devAppSpawnOptions({ env: launchServicesControllerEnv(env), platform }),
-      cwd: dirname(bundlePath)
+      cwd: posix.dirname(bundlePath)
     },
     handshakeOutputPaths: [launchOutputPaths.stdout, launchOutputPaths.stderr],
     appOwnership: launchAppOwnership
@@ -566,9 +567,11 @@ export function macosAppBundlePath(executable) {
   if (typeof executable !== 'string' || !executable.trim()) {
     throw new Error('LaunchServices app launch requires a packaged executable path.')
   }
-  const normalized = resolve(executable)
+  // LaunchServices always consumes Darwin/POSIX paths. Parse that wire format
+  // explicitly so its validation remains testable on non-macOS CI hosts.
+  const normalized = posix.resolve(executable)
   const marker = '.app'
-  const markerIndex = normalized.toLocaleLowerCase('en-US').indexOf(`${marker}${sep}`)
+  const markerIndex = normalized.toLocaleLowerCase('en-US').indexOf(`${marker}/`)
   if (
     markerIndex === -1 ||
     !normalized.slice(markerIndex + marker.length + 1).startsWith('Contents/')
@@ -628,10 +631,11 @@ export async function resolveMacosLaunchServicesAppPid({
   appOwnership,
   previewMarker,
   controller,
-  identityProbe = probeDarwinProcessIdentity
+  identityProbe = probeDarwinProcessIdentity,
+  canonicalPath = canonicalExistingPath
 }) {
   if (appOwnership) {
-    captureMacosLaunchServicesAppOwnership(appOwnership, identityProbe)
+    captureMacosLaunchServicesAppOwnership(appOwnership, identityProbe, canonicalPath)
     if (appOwnership.appPid) return appOwnership.appPid
   }
   const markerPid = previewMarker?.appPid
@@ -641,10 +645,10 @@ export async function resolveMacosLaunchServicesAppPid({
   const deadline = Date.now() + LAUNCH_SERVICES_OWNERSHIP_WAIT_MS
   while (Date.now() < deadline && !isChildExited(controller)) {
     await new Promise((resolveWait) => setTimeout(resolveWait, 50))
-    captureMacosLaunchServicesAppOwnership(appOwnership, identityProbe)
+    captureMacosLaunchServicesAppOwnership(appOwnership, identityProbe, canonicalPath)
     if (appOwnership.appPid) return appOwnership.appPid
   }
-  captureMacosLaunchServicesAppOwnership(appOwnership, identityProbe)
+  captureMacosLaunchServicesAppOwnership(appOwnership, identityProbe, canonicalPath)
   if (appOwnership.appPid) return appOwnership.appPid
   if (!isChildExited(controller)) {
     throw new Error(
@@ -656,7 +660,8 @@ export async function resolveMacosLaunchServicesAppPid({
 
 function captureMacosLaunchServicesAppOwnership(
   appOwnership,
-  identityProbe = probeDarwinProcessIdentity
+  identityProbe = probeDarwinProcessIdentity,
+  canonicalPath = canonicalExistingPath
 ) {
   if (!appOwnership) return
   if (appOwnership.appPid || appOwnership.processIdentity) {
@@ -666,7 +671,11 @@ function captureMacosLaunchServicesAppOwnership(
   const publication = readMacosLaunchServicesAppOwnership(appOwnership)
   if (!publication) return
 
-  const publishedPaths = canonicalLaunchServicesPublicationPaths(publication, appOwnership)
+  const publishedPaths = canonicalLaunchServicesPublicationPaths(
+    publication,
+    appOwnership,
+    canonicalPath
+  )
   const processIdentity = inspectOwnedDarwinProcessIdentity(publication.appPid, identityProbe)
   if (!processIdentity) {
     throw new Error(
@@ -698,14 +707,19 @@ function validateMacosLaunchServicesAppOwnership(appOwnership) {
   }
 }
 
-export function readMacosLaunchServicesAppOwnership(appOwnership) {
+export function readMacosLaunchServicesAppOwnership(
+  appOwnership,
+  { platform = process.platform } = {}
+) {
   validateMacosLaunchServicesAppOwnership(appOwnership)
   if (!existsSync(appOwnership.path)) return null
   const metadata = lstatSync(appOwnership.path)
   if (!metadata.isFile() || metadata.isSymbolicLink()) {
     throw new Error('LaunchServices app ownership path is not a regular file.')
   }
-  if ((metadata.mode & 0o077) !== 0) {
+  // Windows does not expose POSIX owner/group/other permission semantics.
+  // Production LaunchServices runs on Darwin, where this remains fail-closed.
+  if (platform !== 'win32' && (metadata.mode & 0o077) !== 0) {
     throw new Error('LaunchServices app ownership file must not be accessible by other users.')
   }
   let payload
@@ -738,16 +752,17 @@ export function readMacosLaunchServicesAppOwnership(appOwnership) {
   return payload
 }
 
-function canonicalLaunchServicesPublicationPaths(publication, appOwnership) {
-  const executablePath = canonicalExistingPath(
+function canonicalLaunchServicesPublicationPaths(
+  publication,
+  appOwnership,
+  canonicalPath = canonicalExistingPath
+) {
+  const executablePath = canonicalPath(
     publication.executablePath,
     'published LaunchServices executable'
   )
-  const bundlePath = canonicalExistingPath(
-    publication.bundlePath,
-    'published LaunchServices app bundle'
-  )
-  const executableBundlePath = canonicalExistingPath(
+  const bundlePath = canonicalPath(publication.bundlePath, 'published LaunchServices app bundle')
+  const executableBundlePath = canonicalPath(
     macosAppBundlePath(executablePath),
     'bundle derived from the published LaunchServices executable'
   )
@@ -758,7 +773,7 @@ function canonicalLaunchServicesPublicationPaths(publication, appOwnership) {
   }
 
   if (appOwnership.expectedExecutablePath) {
-    const expectedExecutablePath = canonicalExistingPath(
+    const expectedExecutablePath = canonicalPath(
       appOwnership.expectedExecutablePath,
       'expected LaunchServices executable'
     )
@@ -767,7 +782,7 @@ function canonicalLaunchServicesPublicationPaths(publication, appOwnership) {
     }
   }
   if (appOwnership.expectedBundlePath) {
-    const expectedBundlePath = canonicalExistingPath(
+    const expectedBundlePath = canonicalPath(
       appOwnership.expectedBundlePath,
       'expected LaunchServices app bundle'
     )
@@ -930,19 +945,19 @@ function validateDarwinProcessIdentity(identity, pid, { requireBundle = false } 
   if (typeof identity.startTime !== 'string' || !identity.startTime.trim()) {
     throw new Error(`Darwin process identity for pid ${pid} did not contain a start time.`)
   }
-  if (typeof identity.executablePath !== 'string' || !isAbsolute(identity.executablePath)) {
+  if (typeof identity.executablePath !== 'string' || !posix.isAbsolute(identity.executablePath)) {
     throw new Error(`Darwin process identity for pid ${pid} did not contain an executable path.`)
   }
   if (
     (requireBundle && identity.bundlePath === null) ||
     (identity.bundlePath !== null &&
-      (typeof identity.bundlePath !== 'string' || !isAbsolute(identity.bundlePath)))
+      (typeof identity.bundlePath !== 'string' || !posix.isAbsolute(identity.bundlePath)))
   ) {
     throw new Error(`Darwin process identity for pid ${pid} did not contain an app bundle path.`)
   }
   if (
     identity.bundlePath !== null &&
-    macosAppBundlePath(identity.executablePath) !== resolve(identity.bundlePath)
+    macosAppBundlePath(identity.executablePath) !== posix.resolve(identity.bundlePath)
   ) {
     throw new Error(`Darwin process identity for pid ${pid} had inconsistent executable paths.`)
   }

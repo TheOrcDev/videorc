@@ -59,29 +59,51 @@ describe('capture-decay app bundle identity', () => {
         {
           path: 'Contents/Resources/config-current.json',
           type: 'symlink',
-          mode: '0111',
+          mode: process.platform === 'win32' ? '0000' : '0111',
           target: 'config.json'
         }
       )
       assert.equal(
         manifest.entries.find((entry) => entry.path === 'Contents/MacOS/Videorc').mode,
-        '0111'
+        process.platform === 'win32' ? '0000' : '0111'
       )
       assert.equal(
         manifest.entries.find((entry) => entry.path === 'Contents/Resources/config.json').mode,
         '0000'
       )
 
-      await chmod(second.resource, 0o755)
-      assert.notEqual(
-        (await captureDecayAppBundleIdentityFromExecutable(second.executable)).manifestSha256,
-        firstIdentity.manifestSha256
-      )
-      await chmod(second.resource, 0o644)
+      if (process.platform !== 'win32') {
+        await chmod(second.resource, 0o755)
+        assert.notEqual(
+          (await captureDecayAppBundleIdentityFromExecutable(second.executable)).manifestSha256,
+          firstIdentity.manifestSha256
+        )
+        await chmod(second.resource, 0o644)
+      }
       await writeFile(second.resource, '{"channel":"mutated"}\n')
       assert.notEqual(
         (await captureDecayAppBundleIdentityFromExecutable(second.executable)).manifestSha256,
         firstIdentity.manifestSha256
+      )
+
+      // Windows fixture files do not expose POSIX execute bits. The explicit
+      // Darwin profile must still reject a non-executable candidate so the
+      // production macOS check cannot be weakened by cross-platform tests.
+      await chmod(first.executable, 0o644)
+      assert.equal(
+        (
+          await captureDecayAppBundleIdentityFromExecutable(first.executable, {
+            platform: 'win32'
+          })
+        ).profile,
+        CAPTURE_DECAY_APP_BUNDLE_PROFILE
+      )
+      await assert.rejects(
+        () =>
+          captureDecayAppBundleIdentityFromExecutable(first.executable, {
+            platform: 'darwin'
+          }),
+        hasCode('app-bundle-executable')
       )
     } finally {
       await rm(directory, { force: true, recursive: true })
@@ -89,8 +111,7 @@ describe('capture-decay app bundle identity', () => {
   })
 
   it('rejects escaping symlinks and special filesystem entries', async () => {
-    // Unix-domain sockets have a short path ceiling on macOS.
-    const directory = await mkdtemp('/tmp/vab-')
+    const directory = await mkdtemp(join(tmpdir(), 'vab-'))
     const fixture = await createBundleFixture(directory, {
       resourceMode: 0o644,
       reverseCreationOrder: false

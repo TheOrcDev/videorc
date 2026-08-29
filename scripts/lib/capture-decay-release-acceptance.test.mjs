@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
-import { chmod, mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
@@ -1678,7 +1678,17 @@ describe('pending -> accepted -> satisfied publication state', () => {
     )
 
     await withAcceptanceGitRepository(accepted, async ({ recordPath, repoRoot }) => {
-      await chmod(recordPath, 0o755)
+      // Windows does not expose a mutable POSIX execute bit through chmod.
+      // Change the committed Git mode instead so every host observes the same
+      // local-regular-file versus HEAD-mode mismatch.
+      await execFileAsync(
+        'git',
+        ['update-index', '--chmod=+x', '--', CAPTURE_DECAY_D3_ACCEPTANCE_RECORD_PATH],
+        { cwd: repoRoot }
+      )
+      await execFileAsync('git', ['commit', '--quiet', '-m', 'mark acceptance executable'], {
+        cwd: repoRoot
+      })
       await assert.rejects(
         readCaptureDecayD3AcceptanceRecord(recordPath, {
           repoRoot,

@@ -59,11 +59,17 @@ export async function captureDecayAppBundleManifest(bundlePath) {
   }
 }
 
-export async function captureDecayAppBundleIdentityFromExecutable(executablePath) {
+export async function captureDecayAppBundleIdentityFromExecutable(
+  executablePath,
+  { platform = process.platform } = {}
+) {
   const paths = captureDecayAppBundlePaths(executablePath)
   const manifest = await captureDecayAppBundleManifest(paths.bundlePath)
   const executable = manifest.entries.find((entry) => entry.path === paths.executableRelativePath)
-  if (executable?.type !== 'file' || (Number.parseInt(executable.mode, 8) & 0o111) === 0) {
+  if (
+    executable?.type !== 'file' ||
+    (platform !== 'win32' && (Number.parseInt(executable.mode, 8) & 0o111) === 0)
+  ) {
     throw bundleError(
       'app-bundle-executable',
       'Bound app executable must be an executable regular file in the bundle manifest.'

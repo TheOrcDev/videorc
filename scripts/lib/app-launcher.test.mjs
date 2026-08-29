@@ -1,6 +1,14 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
+import {
+  chmodSync,
+  mkdtempSync,
+  mkdirSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
@@ -104,21 +112,63 @@ test('macOS real-source launch uses the exact app bundle through LaunchServices'
   })
 })
 
-test('macOS LaunchServices cleanup resolves authenticated ownership without a requested marker', async () => {
+test(
+  'macOS LaunchServices cleanup canonicalizes real bundle ownership paths',
+  { skip: process.platform === 'win32' },
+  async () => {
+    const root = mkdtempSync(resolve(tmpdir(), 'videorc-launch-ownership-realpath-test-'))
+    try {
+      const path = resolve(root, 'app-ownership.json')
+      const token = 't'.repeat(43)
+      const unresolvedBundlePath = resolve(root, 'Videorc.app')
+      const unresolvedExecutablePath = resolve(unresolvedBundlePath, 'Contents/MacOS/Videorc')
+      mkdirSync(resolve(unresolvedBundlePath, 'Contents/MacOS'), { recursive: true })
+      writeFileSync(unresolvedExecutablePath, '')
+      const bundlePath = realpathSync(unresolvedBundlePath)
+      const executablePath = realpathSync(unresolvedExecutablePath)
+      const aliasBundlePath = resolve(root, 'Videorc-alias.app')
+      symlinkSync(unresolvedBundlePath, aliasBundlePath)
+      const publication = {
+        schemaVersion: 1,
+        appPid: 4242,
+        executablePath: resolve(aliasBundlePath, 'Contents/MacOS/Videorc'),
+        bundlePath: aliasBundlePath,
+        token
+      }
+      const processIdentity = {
+        startTime: 'Sat Aug 29 02:34:55 2026',
+        executablePath,
+        bundlePath
+      }
+      writeFileSync(path, JSON.stringify(publication), { mode: 0o600 })
+      const appOwnership = {
+        path,
+        token,
+        expectedExecutablePath: executablePath,
+        expectedBundlePath: bundlePath
+      }
+
+      assert.equal(
+        await resolveMacosLaunchServicesAppPid({
+          appOwnership,
+          previewMarker: undefined,
+          controller: fakeChild(31337),
+          identityProbe: () => processIdentity
+        }),
+        4242
+      )
+      assert.deepEqual(appOwnership.processIdentity, processIdentity)
+    } finally {
+      rmSync(root, { force: true, recursive: true })
+    }
+  }
+)
+
+test('macOS LaunchServices cleanup accepts portable Darwin ownership wire paths', async () => {
   const root = mkdtempSync(resolve(tmpdir(), 'videorc-launch-ownership-test-'))
   const path = resolve(root, 'app-ownership.json')
   const token = 't'.repeat(43)
-  const unresolvedBundlePath = resolve(root, 'Videorc.app')
-  const unresolvedExecutablePath = resolve(unresolvedBundlePath, 'Contents/MacOS/Videorc')
-  mkdirSync(resolve(unresolvedBundlePath, 'Contents/MacOS'), { recursive: true })
-  writeFileSync(unresolvedExecutablePath, '')
-  const bundlePath = realpathSync(unresolvedBundlePath)
-  const executablePath = realpathSync(unresolvedExecutablePath)
-  const processIdentity = {
-    startTime: 'Sat Aug 29 02:34:55 2026',
-    executablePath,
-    bundlePath
-  }
+  const processIdentity = launchServicesProcessIdentity()
   const publication = {
     schemaVersion: 1,
     appPid: 4242,
@@ -140,11 +190,22 @@ test('macOS LaunchServices cleanup resolves authenticated ownership without a re
       appOwnership,
       previewMarker: undefined,
       controller: fakeChild(31337),
-      identityProbe: () => processIdentity
+      identityProbe: () => processIdentity,
+      canonicalPath: (value) => value
     }),
     4242
   )
   assert.deepEqual(appOwnership.processIdentity, processIdentity)
+  chmodSync(path, 0o644)
+  assert.deepEqual(
+    readMacosLaunchServicesAppOwnership(appOwnership, { platform: 'win32' }),
+    publication
+  )
+  assert.throws(
+    () => readMacosLaunchServicesAppOwnership(appOwnership, { platform: 'darwin' }),
+    /must not be accessible by other users/
+  )
+  chmodSync(path, 0o600)
   assert.throws(
     () => readMacosLaunchServicesAppOwnership({ path, token: 'x'.repeat(43) }),
     /authentication token did not match/

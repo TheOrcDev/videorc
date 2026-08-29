@@ -5,6 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 import { deriveMacosD3DestinationBindingFromRelease } from './macos-d3-destination-binding-plan.mjs'
@@ -90,7 +91,7 @@ describe('macOS D3 prepublication destination binding', () => {
       const command = await execFileAsync(
         process.execPath,
         [
-          new URL('../derive-macos-d3-destination-binding.mjs', import.meta.url).pathname,
+          fileURLToPath(new URL('../derive-macos-d3-destination-binding.mjs', import.meta.url)),
           '--release-dir',
           fixture.releaseDir,
           '--manifest',

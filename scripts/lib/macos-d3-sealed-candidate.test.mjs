@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
+import { constants } from 'node:fs'
 import { Readable } from 'node:stream'
 import { mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { describe, it } from 'node:test'
 
 import {
@@ -231,9 +232,10 @@ describe('sealed candidate macOS authenticity gate', () => {
       MACOS_D3_EXPECTED_SIGNING_AUTHORITY,
       'Developer ID Application: Uros Miric (C2PA37RB58)'
     )
+    const dmgPath = resolve('/release/Videorc.dmg')
     const calls = []
     const verified = await verifyMacosD3ReleaseArtifactAuthenticity(
-      { dmgPath: '/release/Videorc.dmg' },
+      { dmgPath },
       {
         runArtifactValidation: async (path) => {
           calls.push(['validate', path])
@@ -251,8 +253,8 @@ describe('sealed candidate macOS authenticity gate', () => {
       teamId: 'C2PA37RB58'
     })
     assert.deepEqual(calls, [
-      ['validate', '/release/Videorc.dmg'],
-      ['identity', '/release/Videorc.dmg']
+      ['validate', dmgPath],
+      ['identity', dmgPath]
     ])
   })
 
@@ -666,11 +668,21 @@ describe('sealed candidate remote download and local verification', () => {
         fixture.verifiers
       )
       const descriptorPath = join(outputDir, MACOS_D3_PUBLICATION_VERIFICATION_FILENAME)
-      await writeMacosD3PublicationVerificationDescriptor({
-        descriptorPath,
-        expectedSealedCandidate: summary,
-        outputDir
-      })
+      const writeDescriptor = () =>
+        writeMacosD3PublicationVerificationDescriptor({
+          descriptorPath,
+          expectedSealedCandidate: summary,
+          outputDir
+        })
+
+      if (!Number.isSafeInteger(constants.O_NOFOLLOW)) {
+        await assert.rejects(
+          writeDescriptor(),
+          hasCode('candidate-publication-verification-nofollow')
+        )
+        return
+      }
+      await writeDescriptor()
 
       let fullParserCalls = 0
       const verified = await verifyDownloadedMacosD3SealedCandidate(
@@ -714,11 +726,22 @@ describe('sealed candidate remote download and local verification', () => {
         summary.sealReceipt.document
       )
       const descriptorPath = join(outputDir, MACOS_D3_PUBLICATION_VERIFICATION_FILENAME)
-      await writeMacosD3PublicationVerificationDescriptor({
-        descriptorPath,
-        expectedSealedCandidate: summary,
-        outputDir
-      })
+      const writeDescriptor = () =>
+        writeMacosD3PublicationVerificationDescriptor({
+          descriptorPath,
+          expectedSealedCandidate: summary,
+          outputDir
+        })
+
+      if (!Number.isSafeInteger(constants.O_NOFOLLOW)) {
+        await assert.rejects(
+          writeDescriptor(),
+          hasCode('candidate-publication-verification-nofollow')
+        )
+        return
+      }
+      await writeDescriptor()
+
       const blockmap = plan.document.release.artifacts.find(
         (artifact) => artifact.label === 'feed-blockmap'
       )
