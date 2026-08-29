@@ -2306,29 +2306,29 @@ export interface DiagnosticStats {
   /** Completed-command boundaries that flushed the CoreVideo Metal texture cache. */
   compositorSourceTextureCacheFlushes: number
   /** Cached capture-source CVMetalTexture/IOSurface imports retained process-wide. */
-  compositorMetalCachedCaptureSourceImportsLiveCount?: number
+  compositorMetalCachedCaptureSourceImportsLiveCount?: number | null
   /** Peak cached capture-source imports retained process-wide. */
-  compositorMetalCachedCaptureSourceImportsPeakCount?: number
+  compositorMetalCachedCaptureSourceImportsPeakCount?: number | null
   /** Peak bounded capture-source cache capacity observed process-wide. */
-  compositorMetalCachedCaptureSourceImportsCeiling?: number
+  compositorMetalCachedCaptureSourceImportsCeiling?: number | null
   /** IOSurface-backed Metal target-ring slots currently retained process-wide. */
-  compositorMetalTargetRingSlotsLiveCount?: number
+  compositorMetalTargetRingSlotsLiveCount?: number | null
   /** Peak IOSurface-backed Metal target-ring slots retained process-wide. */
-  compositorMetalTargetRingSlotsPeakCount?: number
+  compositorMetalTargetRingSlotsPeakCount?: number | null
   /** Peak target-ring capacity; each compositor contributes the actual hard maximum of five. */
-  compositorMetalTargetRingSlotsCeiling?: number
+  compositorMetalTargetRingSlotsCeiling?: number | null
   /** Encoder guards currently retaining compositor target frames. */
-  encoderBridgeMetalTargetRefsInFlightLiveCount?: number
+  encoderBridgeMetalTargetRefsInFlightLiveCount?: number | null
   /** Peak encoder guards retaining compositor target frames. */
-  encoderBridgeMetalTargetRefsInFlightPeakCount?: number
+  encoderBridgeMetalTargetRefsInFlightPeakCount?: number | null
   /** Peak bounded in-flight capacity derived from the target-ring authorities. */
-  encoderBridgeMetalTargetRefsInFlightCeiling?: number
+  encoderBridgeMetalTargetRefsInFlightCeiling?: number | null
   /** Native-presenter cached IOSurface imports currently retained. */
-  nativePreviewIosurfaceImportLiveCount?: number
+  nativePreviewIosurfaceImportLiveCount?: number | null
   /** Peak native-presenter cached IOSurface imports retained. */
-  nativePreviewIosurfaceImportPeakCount?: number
+  nativePreviewIosurfaceImportPeakCount?: number | null
   /** Hard cached-IOSurface import bound reported by the active presenter. */
-  nativePreviewIosurfaceImportCeiling?: number
+  nativePreviewIosurfaceImportCeiling?: number | null
   /** Cumulative live-source zero-copy import attempts that fell back to byte upload. */
   compositorSourceImportFailures: number
   /** Cumulative camera frames imported from IOSurface storage into Metal. */

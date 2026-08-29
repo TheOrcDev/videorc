@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rename, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 import { promisify } from 'node:util'
 
 import {
+  assertCaptureDecayD3SatisfiedSourceState,
+  captureDecayD3SensitiveChangedPaths
+} from './capture-decay-release-acceptance.mjs'
+import {
   assertCaptureDecayCurrentProtectedMain,
+  captureDecayD3CommittedChangedPaths,
+  captureDecayD3DesktopPackageVersionOnlyChange,
   assertCaptureDecayD3PublicationMode,
   assertCaptureDecayD3PublicationTrackedTreeClean,
   assertCaptureDecayProtectedPublicationRef,
@@ -91,6 +97,137 @@ describe('capture-decay publication tracked source boundary', () => {
       await assert.rejects(
         assertCaptureDecayD3PublicationTrackedTreeClean({ repoRoot: repository }),
         /tracked source changes/
+      )
+    })
+  })
+})
+
+describe('satisfied capture-decay committed drift boundary', () => {
+  it('reports committed edits, deletes, and both sides of renames without UI/docs noise loss', async () => {
+    await withGitRepository(async (repository) => {
+      const backendDir = join(repository, 'crates/videorc-backend/src')
+      const scriptDir = join(repository, 'scripts')
+      const uiDir = join(repository, 'apps/desktop/src/renderer/src/components/ui')
+      const docsDir = join(repository, 'docs/releases')
+      await Promise.all(
+        [backendDir, scriptDir, uiDir, docsDir].map((directory) =>
+          mkdir(directory, { recursive: true })
+        )
+      )
+      const recoveryPath = join(backendDir, 'capture_recovery.rs')
+      const gatePath = join(scriptDir, 'smoke-capture-decay-soak.mjs')
+      const uiPath = join(uiDir, 'button.tsx')
+      const runbookPath = join(docsDir, 'release-runbook.md')
+      await writeFile(recoveryPath, 'pub fn recover() {}\n')
+      await writeFile(gatePath, 'export const gate = true\n')
+      await writeFile(uiPath, 'export const AboutTab = null\n')
+      await writeFile(runbookPath, '# Release\n')
+      await execFileAsync('git', ['add', '.'], { cwd: repository })
+      await execFileAsync('git', ['commit', '--quiet', '-m', 'published D3 source'], {
+        cwd: repository
+      })
+      const publicationSourceCommit = await gitHead(repository)
+
+      const renamedPath = join(docsDir, 'capture-recovery-history.rs')
+      await rename(recoveryPath, renamedPath)
+      await rm(gatePath)
+      await writeFile(uiPath, 'export const AboutTab = "updated"\n')
+      await writeFile(runbookPath, '# Release\n\nUpdated after D3.\n')
+      await execFileAsync('git', ['add', '-A'], { cwd: repository })
+      await execFileAsync('git', ['commit', '--quiet', '-m', 'later release'], {
+        cwd: repository
+      })
+
+      const changedPaths = await captureDecayD3CommittedChangedPaths({
+        fromCommit: publicationSourceCommit,
+        repoRoot: repository
+      })
+      assert.deepEqual(changedPaths.sort(), [
+        'apps/desktop/src/renderer/src/components/ui/button.tsx',
+        'crates/videorc-backend/src/capture_recovery.rs',
+        'docs/releases/capture-recovery-history.rs',
+        'docs/releases/release-runbook.md',
+        'scripts/smoke-capture-decay-soak.mjs'
+      ])
+      assert.deepEqual(captureDecayD3SensitiveChangedPaths(changedPaths), [
+        'crates/videorc-backend/src/capture_recovery.rs',
+        'scripts/smoke-capture-decay-soak.mjs'
+      ])
+      assert.throws(
+        () =>
+          assertCaptureDecayD3SatisfiedSourceState({
+            changedPaths,
+            publicationSourceIsAncestor: true
+          }),
+        (error) => error?.code === 'satisfied-sensitive-source-diff'
+      )
+    })
+  })
+
+  it('allows only the desktop package version field to change after D3 publication', async () => {
+    await withGitRepository(async (repository) => {
+      const desktopDirectory = join(repository, 'apps/desktop')
+      const packagePath = join(desktopDirectory, 'package.json')
+      await mkdir(desktopDirectory, { recursive: true })
+      await writeFile(
+        packagePath,
+        `${JSON.stringify({ name: '@videorc/desktop', version: '1.0.0', scripts: { build: 'vite' } }, null, 2)}\n`
+      )
+      await execFileAsync('git', ['add', '.'], { cwd: repository })
+      await execFileAsync('git', ['commit', '--quiet', '-m', 'published D3 package'], {
+        cwd: repository
+      })
+      const publicationSourceCommit = await gitHead(repository)
+
+      await writeFile(
+        packagePath,
+        `${JSON.stringify({ name: '@videorc/desktop', version: '1.0.1', scripts: { build: 'vite' } }, null, 2)}\n`
+      )
+      await execFileAsync('git', ['add', '.'], { cwd: repository })
+      await execFileAsync('git', ['commit', '--quiet', '-m', 'bump release version'], {
+        cwd: repository
+      })
+      assert.equal(
+        await captureDecayD3DesktopPackageVersionOnlyChange({
+          fromCommit: publicationSourceCommit,
+          repoRoot: repository
+        }),
+        true
+      )
+      const versionChangedPaths = await captureDecayD3CommittedChangedPaths({
+        fromCommit: publicationSourceCommit,
+        repoRoot: repository
+      })
+      assert.deepEqual(
+        captureDecayD3SensitiveChangedPaths(versionChangedPaths, {
+          desktopPackageVersionOnlyChange: true
+        }),
+        []
+      )
+
+      await writeFile(
+        packagePath,
+        `${JSON.stringify({ name: '@videorc/desktop', version: '1.0.2', scripts: { build: 'vite --mode changed' } }, null, 2)}\n`
+      )
+      await execFileAsync('git', ['add', '.'], { cwd: repository })
+      await execFileAsync('git', ['commit', '--quiet', '-m', 'change build behavior'], {
+        cwd: repository
+      })
+      assert.equal(
+        await captureDecayD3DesktopPackageVersionOnlyChange({
+          fromCommit: publicationSourceCommit,
+          repoRoot: repository
+        }),
+        false
+      )
+      assert.deepEqual(
+        captureDecayD3SensitiveChangedPaths(
+          await captureDecayD3CommittedChangedPaths({
+            fromCommit: publicationSourceCommit,
+            repoRoot: repository
+          })
+        ),
+        ['apps/desktop/package.json']
       )
     })
   })

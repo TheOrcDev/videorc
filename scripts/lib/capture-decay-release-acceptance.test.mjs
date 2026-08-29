@@ -3,7 +3,7 @@ import { execFile } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rename, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, dirname, extname, join, relative, resolve, sep } from 'node:path'
 import { describe, it } from 'node:test'
 import { promisify } from 'node:util'
 
@@ -33,6 +33,7 @@ import {
   CAPTURE_DECAY_D3_ACCEPTANCE_RECORD_PATH,
   CAPTURE_DECAY_D3_EVIDENCE_PROFILE,
   CAPTURE_DECAY_D3_PUBLICATION_RECEIPT_PROFILE,
+  CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS,
   CAPTURE_DECAY_DEBUG_RUNNER_PROVENANCE_PROFILE,
   CAPTURE_DECAY_REAL_RELEASE_RATE_FRACTION,
   CAPTURE_DECAY_REAL_RELEASE_SOAK_MINUTES,
@@ -47,6 +48,7 @@ import {
   buildCaptureDecayRunAttestation,
   buildSatisfiedCaptureDecayD3Record,
   captureDecayCanonicalJsonSha256,
+  captureDecayD3SensitiveChangedPaths,
   captureDecayD3PublicationAttestationSubjectSha256s,
   captureDecayRunCoordinates,
   loadAndValidateCaptureDecayD3Evidence,
@@ -1425,6 +1427,33 @@ describe('pending -> accepted -> satisfied publication state', () => {
     }
   })
 
+  it('classifies every transitive D3 gate script dependency as sensitive', async () => {
+    const repositoryRoot = resolve(import.meta.dirname, '..', '..')
+    for (const dependencyPath of CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS) {
+      await assert.doesNotReject(
+        readFile(join(repositoryRoot, ...dependencyPath.split('/'))),
+        `missing declared D3 script dependency ${dependencyPath}`
+      )
+    }
+    const gatePaths = await captureDecayD3GateScriptClosure()
+    for (const expectedPath of [
+      'apps/desktop/scripts/staple-dmg.mjs',
+      'scripts/smoke-capture-decay-soak.mjs',
+      'scripts/smoke-noise-cleanup.mjs',
+      'scripts/smoke-recording-session-decay.mjs',
+      'scripts/upload-macos-beta-release.mjs',
+      'scripts/validate-macos-release-artifact.mjs',
+      'scripts/lib/capture-decay-release-acceptance.mjs',
+      'scripts/lib/release-upload-s3.mjs'
+    ]) {
+      assert.ok(gatePaths.includes(expectedPath), `missing D3 gate dependency ${expectedPath}`)
+    }
+    assert.deepEqual(
+      gatePaths.filter((path) => captureDecayD3SensitiveChangedPaths([path]).length !== 1),
+      []
+    )
+  })
+
   it('derives satisfied only from the exact accepted record and verified published release', () => {
     const accepted = buildAccepted(validate(validEvidence()))
     const publication = publicationFixture(accepted)
@@ -1469,7 +1498,15 @@ describe('pending -> accepted -> satisfied publication state', () => {
     assert.equal(
       assertCaptureDecayD3PublicationSourceState(satisfied, {
         candidateIsAncestor: false,
-        changedPaths: [],
+        changedPaths: [
+          'apps/desktop/package.json',
+          'apps/desktop/src/renderer/src/components/account-menu.tsx',
+          'apps/desktop/src/renderer/src/components/ui/button.tsx',
+          'apps/desktop/src/renderer/src/lib/update-ui.ts',
+          'crates/videorc-backend/src/youtube_chat.rs',
+          'docs/releases/release-runbook.md'
+        ],
+        desktopPackageVersionOnlyChange: true,
         publicationSourceIsAncestor: true
       }),
       satisfied
@@ -1483,6 +1520,159 @@ describe('pending -> accepted -> satisfied publication state', () => {
         }),
       hasCode('satisfied-publication-ancestry')
     )
+    const sensitiveChanges = [
+      '.github/workflows/release-macos.yml',
+      '.npmrc',
+      'Cargo.lock',
+      'apps/desktop/package.json',
+      'apps/desktop/electron.vite.config.1787864947110.mjs',
+      'apps/desktop/scripts/release-upload.mjs',
+      'apps/desktop/scripts/staple-dmg.mjs',
+      'apps/desktop/config/tsconfig.renderer.json',
+      'apps/desktop/tsconfig.web.json',
+      'apps/desktop/src/main/backend-bootstrap.ts',
+      'apps/desktop/src/main/future-capture-owner.ts',
+      'apps/desktop/src/preload/index.ts',
+      'apps/desktop/src/shared/backend-rpc-contract.ts',
+      'apps/desktop/src/shared/background-import.test.ts',
+      'apps/desktop/src/shared/background-import.ts',
+      'apps/desktop/src/shared/electron-ipc-contract.ts',
+      'apps/desktop/src/shared/future-runtime-owner.ts',
+      'apps/desktop/src/shared/renderer-security-policy.ts',
+      'apps/desktop/src/shared/runtime-schema.ts',
+      'apps/desktop/src/renderer/captions.html',
+      'apps/desktop/src/renderer/captions/main.tsx',
+      'apps/desktop/src/renderer/comments.html',
+      'apps/desktop/src/renderer/comments/main.tsx',
+      'apps/desktop/src/renderer/src/App.tsx',
+      'apps/desktop/src/renderer/index.html',
+      'apps/desktop/src/renderer/theme-bootstrap.js',
+      'apps/desktop/src/renderer/src/backendClient.ts',
+      'apps/desktop/src/renderer/src/assets/backgrounds/tutorial.webp',
+      'apps/desktop/src/renderer/src/assets/replacement.ts',
+      'apps/desktop/src/renderer/src/components/preview-stage.tsx',
+      'apps/desktop/src/renderer/src/components/source-select.tsx',
+      'apps/desktop/src/renderer/src/components/studio/quick-settings.tsx',
+      'apps/desktop/src/renderer/src/components/video-preset-select-items.tsx',
+      'apps/desktop/src/renderer/src/future-entry.tsx',
+      'apps/desktop/src/renderer/src/hooks/use-studio.tsx',
+      'apps/desktop/src/renderer/src/hooks/use-background-assets.test.tsx',
+      'apps/desktop/src/renderer/src/hooks/use-background-assets.tsx',
+      'apps/desktop/src/renderer/src/lib/background-assets.ts',
+      'apps/desktop/src/renderer/src/lib/caption-overlay.ts',
+      'apps/desktop/src/renderer/src/lib/captions-ui.test.ts',
+      'apps/desktop/src/renderer/src/lib/captions-ui.ts',
+      'apps/desktop/src/renderer/src/lib/captions-preflight.ts',
+      'apps/desktop/src/renderer/src/lib/capture.ts',
+      'apps/desktop/src/renderer/src/lib/comment-highlight.ts',
+      'apps/desktop/src/renderer/src/lib/format.test.ts',
+      'apps/desktop/src/renderer/src/lib/format.ts',
+      'apps/desktop/src/renderer/src/lib/entitlement-ui.ts',
+      'apps/desktop/src/renderer/src/lib/entitlements.ts',
+      'apps/desktop/src/renderer/src/lib/session-params.ts',
+      'apps/desktop/src/renderer/src/lib/session-runtime-recovery.ts',
+      'crates/videorc-backend/src/capture_recovery.rs',
+      'crates/videorc-backend/src/comment_highlight.rs',
+      'crates/videorc-backend/src/windows_d3d11_capture.rs',
+      'crates/videorc-backend/src/windows_d3d11_device.rs',
+      'crates/videorc-backend/src/windows_d3d11_shaders.hlsl',
+      'crates/videorc-backend/src/entitlements.rs',
+      'crates/videorc-backend/src/future_capture_owner.rs',
+      'crates/videorc-backend/src/posters.rs',
+      'crates/videorc-backend/vendor/helper/Cargo.toml',
+      'crates/videorc-native-preview-addon/vendor/helper/Cargo.toml',
+      'crates/videorc-native-preview-addon/src/lib.rs',
+      'scripts/build-ffmpeg-macos.sh',
+      'scripts/build-native-preview-addon.mjs',
+      'scripts/lib/native-preview-addon-build.mjs',
+      'scripts/lib/noise-cleanup-artifact.mjs',
+      'scripts/smoke-capture-decay-soak.mjs',
+      'scripts/smoke-noise-cleanup.mjs',
+      'scripts/validate-macos-release-artifact.mjs',
+      // Case-variant collisions with guarded roots clobber the genuine file on APFS.
+      'Apps/desktop/src/main/index.ts',
+      'Crates/videorc-backend/src/screen_capture.rs',
+      'CARGO.toml',
+      'cargo.toml',
+      'PNPM-LOCK.YAML',
+      'apps/Desktop/package.json',
+      'apps/desktop/TSCONFIG.json',
+      'Scripts/lib/capture-decay-release-acceptance.mjs',
+      'scripts/LIB/Macos-D3-sealed-candidate.mjs'
+    ]
+    assert.deepEqual(captureDecayD3SensitiveChangedPaths(sensitiveChanges), sensitiveChanges)
+    const safeChanges = [
+      '.github/workflows/windows.yml',
+      'apps/streamdeck-plugin/package.json',
+      'apps/streamdeck-plugin/tsconfig.json',
+      'apps/desktop/src/main/provider-oauth-callbacks.ts',
+      'apps/desktop/src/renderer/src/components/chat-platform-icon.tsx',
+      'apps/desktop/src/renderer/src/components/theme-toggle.tsx',
+      'apps/desktop/src/renderer/src/components/ui/button.tsx',
+      'apps/desktop/src/renderer/src/components/workspace-nav.test.ts',
+      'apps/desktop/src/renderer/src/components/workspace-nav.tsx',
+      'apps/desktop/src/renderer/src/assets/videorc-logo.png',
+      'apps/desktop/src/renderer/src/lib/chat-send.ts',
+      'apps/desktop/src/shared/comments-send-operation.ts',
+      'crates/videorc-backend/src/twitch_chat.rs',
+      'crates/videorc-backend/src/windows_graphics_capture.rs',
+      'crates/videorc-backend/src/windows_media_foundation_encoder.rs',
+      'crates/unrelated/Cargo.toml',
+      'docs/acceptance/macos-capture-decay-d3.json',
+      'docs/releases/release-runbook.md',
+      'examples/demo/tsconfig.json',
+      'packages/unrelated/package.json',
+      'scripts/smoke-platform-lifecycle.mjs'
+    ]
+    assert.deepEqual(captureDecayD3SensitiveChangedPaths(safeChanges), [])
+    assert.deepEqual(
+      captureDecayD3SensitiveChangedPaths(['apps/desktop/package.json'], {
+        desktopPackageVersionOnlyChange: true
+      }),
+      []
+    )
+    assert.deepEqual(
+      captureDecayD3SensitiveChangedPaths([
+        '',
+        '/absolute.ts',
+        '../escape.ts',
+        'mixed\\path.ts',
+        './crates/videorc-backend/src/state.rs',
+        'crates//videorc-backend/src/state.rs',
+        'crates/videorc-backend/src/./state.rs',
+        'docs/trailing/'
+      ]),
+      [
+        '',
+        '/absolute.ts',
+        '../escape.ts',
+        'mixed\\path.ts',
+        './crates/videorc-backend/src/state.rs',
+        'crates//videorc-backend/src/state.rs',
+        'crates/videorc-backend/src/./state.rs',
+        'docs/trailing/'
+      ]
+    )
+    assert.throws(
+      () =>
+        assertCaptureDecayD3PublicationSourceState(satisfied, {
+          candidateIsAncestor: false,
+          publicationSourceIsAncestor: true
+        }),
+      hasCode('satisfied-source-diff-invalid')
+    )
+    for (const changedPath of sensitiveChanges) {
+      assert.throws(
+        () =>
+          assertCaptureDecayD3PublicationSourceState(satisfied, {
+            candidateIsAncestor: false,
+            changedPaths: [changedPath],
+            publicationSourceIsAncestor: true
+          }),
+        hasCode('satisfied-sensitive-source-diff'),
+        changedPath
+      )
+    }
   })
 
   it('rejects premature/manual-looking satisfaction and wrong receipt/release/artifact chains', () => {
@@ -2895,6 +3085,164 @@ function publicationTlsPolicyFixture() {
     allowedIssuerOrganizations: ['Cloudflare, Inc.'],
     allowedSpkiSha256: ['a'.repeat(64)]
   }
+}
+
+async function captureDecayD3GateScriptClosure() {
+  const repositoryRoot = resolve(import.meta.dirname, '..', '..')
+  const packageDocument = JSON.parse(await readFile(join(repositoryRoot, 'package.json'), 'utf8'))
+  const desktopPackageDocument = JSON.parse(
+    await readFile(join(repositoryRoot, 'apps', 'desktop', 'package.json'), 'utf8')
+  )
+  const packageScopes = new Map([
+    ['root', { basePath: '', scripts: packageDocument.scripts ?? {} }],
+    ['desktop', { basePath: 'apps/desktop', scripts: desktopPackageDocument.scripts ?? {} }]
+  ])
+  const spawnedScriptEdges = new Map([
+    [
+      'scripts/create-capture-decay-debug-runner-provenance.mjs',
+      ['scripts/build-capture-decay-debug-runner.mjs']
+    ],
+    ['scripts/run-capture-decay-real-release.mjs', ['scripts/smoke-capture-decay-soak.mjs']],
+    [
+      'scripts/smoke-capture-decay-long-recording.mjs',
+      ['scripts/smoke-recording-session-decay.mjs']
+    ],
+    ['scripts/preflight-macos-package.mjs', ['scripts/smoke-noise-cleanup.mjs']],
+    ['scripts/lib/macos-d3-sealed-candidate.mjs', ['scripts/validate-macos-release-artifact.mjs']]
+  ])
+  const queuedPackageScripts = []
+  const visitedPackageScripts = new Set()
+  const queuedPaths = new Set()
+
+  const collectCommandReferences = (
+    command,
+    { basePath = '', followPackageScripts = false, scope = 'root' } = {}
+  ) => {
+    const currentScripts = packageScopes.get(scope)?.scripts ?? {}
+    for (const match of command.matchAll(/\bscripts\/[a-zA-Z0-9_./-]+\.(?:cjs|js|mjs|sh)\b/g)) {
+      queuedPaths.add([basePath, match[0]].filter(Boolean).join('/'))
+    }
+    if (!followPackageScripts) return
+    for (const match of command.matchAll(
+      /\bpnpm\s+--filter\s+@videorc\/desktop\s+([a-zA-Z0-9:_-]+)/g
+    )) {
+      if (typeof packageScopes.get('desktop').scripts[match[1]] === 'string') {
+        queuedPackageScripts.push({ name: match[1], scope: 'desktop' })
+      }
+    }
+    for (const match of command.matchAll(/\bpnpm(?:\s+--silent)?\s+([a-zA-Z0-9:_-]+)/g)) {
+      if (typeof currentScripts[match[1]] === 'string') {
+        queuedPackageScripts.push({ name: match[1], scope })
+      }
+    }
+  }
+
+  const rootPackageScripts = packageScopes.get('root').scripts
+  for (const name of Object.keys(rootPackageScripts)) {
+    if (/(?:capture-decay|macos-d3)/.test(name)) {
+      queuedPackageScripts.push({ name, scope: 'root' })
+    }
+  }
+  for (const name of [
+    'dist:desktop:release',
+    'release:upload:macos',
+    'release:upload:preflight:macos',
+    'release:validate:macos'
+  ]) {
+    queuedPackageScripts.push({ name, scope: 'root' })
+  }
+  for (const workflowPath of [
+    '.github/workflows/promote-macos-capture-decay-d3.yml',
+    '.github/workflows/release-macos.yml'
+  ]) {
+    collectCommandReferences(await readFile(join(repositoryRoot, workflowPath), 'utf8'))
+  }
+  while (queuedPackageScripts.length > 0) {
+    const { name, scope } = queuedPackageScripts.shift()
+    const identity = `${scope}:${name}`
+    if (visitedPackageScripts.has(identity)) continue
+    visitedPackageScripts.add(identity)
+    const packageScope = packageScopes.get(scope)
+    collectCommandReferences(packageScope.scripts[name], {
+      basePath: packageScope.basePath,
+      followPackageScripts: true,
+      scope
+    })
+  }
+
+  const closure = new Set()
+  const pendingPaths = [...queuedPaths]
+  while (pendingPaths.length > 0) {
+    const repositoryPath = pendingPaths.shift()
+    if (closure.has(repositoryPath)) continue
+    const absolutePath = join(repositoryRoot, ...repositoryPath.split('/'))
+    try {
+      const source = await readFile(absolutePath, 'utf8')
+      closure.add(repositoryPath)
+      for (const specifier of localStaticModuleSpecifiers(source)) {
+        const dependencyPath = await resolveLocalModulePath({
+          importerPath: absolutePath,
+          repositoryRoot,
+          specifier
+        })
+        if (!closure.has(dependencyPath)) pendingPaths.push(dependencyPath)
+      }
+      for (const spawnedPath of spawnedScriptEdges.get(repositoryPath) ?? []) {
+        assert.ok(
+          source.includes(basename(spawnedPath)),
+          `declared D3 spawn edge is absent: ${repositoryPath} -> ${spawnedPath}`
+        )
+        if (!closure.has(spawnedPath)) pendingPaths.push(spawnedPath)
+      }
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        assert.fail(`missing D3 gate dependency ${repositoryPath}`)
+      }
+      throw error
+    }
+  }
+  return [...closure].sort()
+}
+
+function localStaticModuleSpecifiers(source) {
+  const specifiers = new Set()
+  for (const pattern of [
+    /\b(?:import|export)\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/g,
+    /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+  ]) {
+    for (const match of source.matchAll(pattern)) {
+      if (match[1].startsWith('.')) specifiers.add(match[1])
+    }
+  }
+  return specifiers
+}
+
+async function resolveLocalModulePath({ importerPath, repositoryRoot, specifier }) {
+  const unresolved = resolve(dirname(importerPath), specifier)
+  const candidates = extname(unresolved)
+    ? [unresolved]
+    : [
+        unresolved,
+        ...['.cjs', '.js', '.json', '.mjs', '.ts', '.tsx'].map(
+          (extension) => `${unresolved}${extension}`
+        ),
+        ...['index.cjs', 'index.js', 'index.json', 'index.mjs', 'index.ts', 'index.tsx'].map(
+          (filename) => join(unresolved, filename)
+        )
+      ]
+  for (const candidatePath of candidates) {
+    try {
+      await readFile(candidatePath)
+      const repositoryPath = relative(repositoryRoot, candidatePath).split(sep).join('/')
+      if (repositoryPath === '..' || repositoryPath.startsWith('../')) {
+        assert.fail(`D3 gate dependency escapes the repository: ${specifier}`)
+      }
+      return repositoryPath
+    } catch (error) {
+      if (error?.code !== 'ENOENT' && error?.code !== 'EISDIR') throw error
+    }
+  }
+  assert.fail(`missing local D3 gate import ${specifier} from ${importerPath}`)
 }
 
 function canonical(value) {

@@ -68,7 +68,7 @@ try {
   )
   assert.deepEqual(
     preparedYouTubeCompletionTargets(streaming).map((item) => item.id),
-    ['youtube-ready']
+    ['youtube-ready', 'youtube-no-stream', 'youtube-disabled']
   )
   assert.deepEqual(readyStreamTargetLabels(streaming), [
     'youtube-ready',

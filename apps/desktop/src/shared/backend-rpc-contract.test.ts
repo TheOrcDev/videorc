@@ -930,12 +930,13 @@ describe('backend RPC contract', () => {
           [field]: -1
         })
       ).toThrow(field)
-      expect(() =>
-        validateBackendEventPayload('diagnostics.stats', {
-          ...diagnostics,
-          [field]: null
-        })
-      ).toThrow(field)
+      const nullablePayload = { ...diagnostics, [field]: null }
+      expect(validateBackendRpcResult('diagnostics.stats', nullablePayload)).toEqual(
+        nullablePayload
+      )
+      expect(validateBackendEventPayload('diagnostics.stats', nullablePayload)).toEqual(
+        nullablePayload
+      )
     }
     // capturePipelineDegradedStage: absent while healthy (the wire omits it),
     // a stage label while degraded, and null tolerated for defense in depth

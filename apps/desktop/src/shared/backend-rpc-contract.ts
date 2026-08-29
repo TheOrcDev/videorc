@@ -1105,18 +1105,30 @@ const diagnosticStatsSchema = boundedSemanticValue(
       compositorCameraSourceCaptureTextureReuses: nonNegativeInteger,
       compositorScreenSourceCaptureTextureReuses: nonNegativeInteger,
       compositorSourceTextureCacheFlushes: nonNegativeInteger,
-      compositorMetalCachedCaptureSourceImportsLiveCount: optionalSchema(nonNegativeInteger),
-      compositorMetalCachedCaptureSourceImportsPeakCount: optionalSchema(nonNegativeInteger),
-      compositorMetalCachedCaptureSourceImportsCeiling: optionalSchema(nonNegativeInteger),
-      compositorMetalTargetRingSlotsLiveCount: optionalSchema(nonNegativeInteger),
-      compositorMetalTargetRingSlotsPeakCount: optionalSchema(nonNegativeInteger),
-      compositorMetalTargetRingSlotsCeiling: optionalSchema(nonNegativeInteger),
-      encoderBridgeMetalTargetRefsInFlightLiveCount: optionalSchema(nonNegativeInteger),
-      encoderBridgeMetalTargetRefsInFlightPeakCount: optionalSchema(nonNegativeInteger),
-      encoderBridgeMetalTargetRefsInFlightCeiling: optionalSchema(nonNegativeInteger),
-      nativePreviewIosurfaceImportLiveCount: optionalSchema(nonNegativeInteger),
-      nativePreviewIosurfaceImportPeakCount: optionalSchema(nonNegativeInteger),
-      nativePreviewIosurfaceImportCeiling: optionalSchema(nonNegativeInteger),
+      compositorMetalCachedCaptureSourceImportsLiveCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalCachedCaptureSourceImportsPeakCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalCachedCaptureSourceImportsCeiling: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalTargetRingSlotsLiveCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      compositorMetalTargetRingSlotsPeakCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      compositorMetalTargetRingSlotsCeiling: optionalSchema(nullableSchema(nonNegativeInteger)),
+      encoderBridgeMetalTargetRefsInFlightLiveCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      encoderBridgeMetalTargetRefsInFlightPeakCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      encoderBridgeMetalTargetRefsInFlightCeiling: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      nativePreviewIosurfaceImportLiveCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      nativePreviewIosurfaceImportPeakCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      nativePreviewIosurfaceImportCeiling: optionalSchema(nullableSchema(nonNegativeInteger)),
       previewCameraCaptureCallbackCount: nonNegativeInteger,
       previewCameraDidDropCallbackCount: nonNegativeInteger,
       previewCameraFrameStorePublications: nonNegativeInteger,

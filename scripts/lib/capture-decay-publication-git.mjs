@@ -1,5 +1,5 @@
 import { execFile } from 'node:child_process'
-import { promisify } from 'node:util'
+import { isDeepStrictEqual, promisify } from 'node:util'
 
 import {
   assertCaptureDecayD3AcceptanceRecord,
@@ -10,6 +10,7 @@ import {
 const execFileAsync = promisify(execFile)
 const DEFAULT_BRANCH = 'main'
 const DEFAULT_REPOSITORY = 'TheOrcDev/videorc'
+const DESKTOP_PACKAGE_PATH = 'apps/desktop/package.json'
 
 export class CaptureDecayPublicationRefError extends Error {
   constructor(code, message, options) {
@@ -76,34 +77,9 @@ export async function assertCaptureDecayD3PublicationGate({
   const record = assertCaptureDecayD3AcceptanceRecord(
     await readCaptureDecayD3AcceptanceRecord(recordPath)
   )
-  const headCommit = await gitText(repoRoot, ['rev-parse', 'HEAD'])
-  if (record.status === 'accepted') {
-    const candidateCommit = record.candidate.sourceCommit
-    const candidateIsAncestor = await gitIsAncestor(repoRoot, candidateCommit, headCommit)
-    const changedPaths = await gitLines(repoRoot, [
-      'diff',
-      '--name-only',
-      '--diff-filter=ACDMRTUXB',
-      `${candidateCommit}..${headCommit}`,
-      '--'
-    ])
-    assertCaptureDecayD3PublicationSourceState(record, {
-      candidateIsAncestor,
-      changedPaths,
-      publicationSourceIsAncestor: false
-    })
-  } else {
-    const publicationSourceCommit = record.publicationReceipt.publicationSourceCommit
-    assertCaptureDecayD3PublicationSourceState(record, {
-      candidateIsAncestor: false,
-      changedPaths: [],
-      publicationSourceIsAncestor: await gitIsAncestor(
-        repoRoot,
-        publicationSourceCommit,
-        headCommit
-      )
-    })
-  }
+  const sourceState = await captureDecayD3PublicationSourceState({ record, repoRoot })
+  assertCaptureDecayD3PublicationSourceState(record, sourceState)
+  const { headCommit } = sourceState
   return { headCommit, protectedRef, record }
 }
 
@@ -353,25 +329,69 @@ export async function captureDecayD3PublicationSourceState({ record, repoRoot })
     return {
       headCommit,
       candidateIsAncestor: await gitIsAncestor(repoRoot, candidateCommit, headCommit),
-      changedPaths: await gitLines(repoRoot, [
-        'diff',
-        '--name-only',
-        '--diff-filter=ACDMRTUXB',
-        `${candidateCommit}..${headCommit}`,
-        '--'
-      ]),
+      changedPaths: await captureDecayD3CommittedChangedPaths({
+        fromCommit: candidateCommit,
+        repoRoot,
+        toCommit: headCommit
+      }),
       publicationSourceIsAncestor: false
     }
   }
+  const publicationSourceCommit = valid.publicationReceipt.publicationSourceCommit
+  const changedPaths = await captureDecayD3CommittedChangedPaths({
+    fromCommit: publicationSourceCommit,
+    repoRoot,
+    toCommit: headCommit
+  })
   return {
     headCommit,
     candidateIsAncestor: false,
-    changedPaths: [],
-    publicationSourceIsAncestor: await gitIsAncestor(
-      repoRoot,
-      valid.publicationReceipt.publicationSourceCommit,
-      headCommit
-    )
+    changedPaths,
+    desktopPackageVersionOnlyChange:
+      changedPaths.includes(DESKTOP_PACKAGE_PATH) &&
+      (await captureDecayD3DesktopPackageVersionOnlyChange({
+        fromCommit: publicationSourceCommit,
+        repoRoot,
+        toCommit: headCommit
+      })),
+    publicationSourceIsAncestor: await gitIsAncestor(repoRoot, publicationSourceCommit, headCommit)
+  }
+}
+
+export async function captureDecayD3CommittedChangedPaths({
+  fromCommit,
+  repoRoot,
+  toCommit = 'HEAD'
+}) {
+  return await gitNulFields(repoRoot, [
+    'diff',
+    '--name-only',
+    '-z',
+    '--no-renames',
+    '--diff-filter=ACDMRTUXB',
+    `${fromCommit}..${toCommit}`,
+    '--'
+  ])
+}
+
+export async function captureDecayD3DesktopPackageVersionOnlyChange({
+  fromCommit,
+  repoRoot,
+  toCommit = 'HEAD'
+}) {
+  try {
+    const [before, after] = await Promise.all([
+      gitJsonAtCommit(repoRoot, fromCommit, DESKTOP_PACKAGE_PATH),
+      gitJsonAtCommit(repoRoot, toCommit, DESKTOP_PACKAGE_PATH)
+    ])
+    if (typeof before.version !== 'string' || typeof after.version !== 'string') return false
+    const beforeWithoutVersion = { ...before }
+    const afterWithoutVersion = { ...after }
+    delete beforeWithoutVersion.version
+    delete afterWithoutVersion.version
+    return isDeepStrictEqual(beforeWithoutVersion, afterWithoutVersion)
+  } catch {
+    return false
   }
 }
 
@@ -385,6 +405,15 @@ async function gitIsAncestor(repoRoot, ancestor, descendant) {
     if (error?.code === 1) return false
     throw error
   }
+}
+
+async function gitJsonAtCommit(repoRoot, commit, path) {
+  const text = await gitText(repoRoot, ['show', `${commit}:${path}`])
+  const document = JSON.parse(text)
+  if (!document || typeof document !== 'object' || Array.isArray(document)) {
+    throw new Error(`Git JSON object is invalid: ${path}.`)
+  }
+  return document
 }
 
 async function resolvePublicationRef(repoRoot, ref, code) {
@@ -439,6 +468,15 @@ function publicationRefError(code, message, cause) {
 async function gitLines(repoRoot, args) {
   const text = await gitText(repoRoot, args)
   return text.length > 0 ? text.split('\n') : []
+}
+
+async function gitNulFields(repoRoot, args) {
+  const { stdout } = await execFileAsync('git', args, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    maxBuffer: 4 * 1024 * 1024
+  })
+  return stdout.split('\0').filter((value) => value.length > 0)
 }
 
 async function gitText(repoRoot, args) {
