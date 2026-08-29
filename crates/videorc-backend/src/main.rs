@@ -14486,15 +14486,37 @@ mod tests {
             None,
         )
         .unwrap();
-        entered.acquire().await.unwrap().forget();
+        // The handler runs on the deliberately separate mutation runtime. A
+        // paused Tokio clock can auto-advance the execution deadline before
+        // that OS worker is scheduled, rejecting the command before it can
+        // publish this readiness signal. Use real time only for the
+        // cross-runtime dispatch handshake, then return to the paused clock to
+        // drive the watchdog deterministically.
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), entered.acquire())
+            .await
+            .expect("durable chat mutation should dispatch")
+            .unwrap()
+            .forget();
+        tokio::time::pause();
 
-        tokio::time::advance(WEBSOCKET_MUTATION_MAX_EXECUTION_AGE).await;
-        tokio::task::yield_now().await;
-        assert!(
-            state.process_shutdown_requested(),
-            "recycle cannot wait for a backpressured renderer"
+        // Observe the actual latch with a later virtual-time guard. Moving the
+        // clock to the watchdog deadline is not enough: the test task and the
+        // watchdog can wake together, and the test may otherwise assert before
+        // the watchdog processes its wake-up.
+        timeout(
+            WEBSOCKET_MUTATION_MAX_EXECUTION_AGE + Duration::from_secs(1),
+            state.wait_for_process_shutdown_request(),
+        )
+        .await
+        .expect("durable chat watchdog should latch process shutdown");
+        assert!(state.process_shutdown_requested());
+        assert_eq!(
+            timeout(Duration::from_secs(1), pressure_rx.recv())
+                .await
+                .expect("full response queue should signal slow-peer pressure"),
+            Some(())
         );
-        assert!(pressure_rx.try_recv().is_ok());
         assert!(matches!(
             outgoing_rx.try_recv(),
             Ok(Message::Text(text)) if text == "occupied"
@@ -14502,7 +14524,12 @@ mod tests {
 
         release.add_permits(1);
         drop(lane);
-        while workers.join_next().await.is_some() {}
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), async {
+            while workers.join_next().await.is_some() {}
+        })
+        .await
+        .expect("durable chat lane worker should stop after its sender closes");
     }
 
     #[tokio::test]
