@@ -14310,16 +14310,19 @@ mod tests {
         }
 
         let first_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let latest_entered = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
         let release_first = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
         let executed = std::sync::Arc::new(tokio::sync::Mutex::new(Vec::<String>::new()));
         let first_future_dropped = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let handler: WebSocketCommandHandler = {
             let first_entered = first_entered.clone();
+            let latest_entered = latest_entered.clone();
             let release_first = release_first.clone();
             let executed = executed.clone();
             let first_future_dropped = first_future_dropped.clone();
             std::sync::Arc::new(move |_state, text| {
                 let first_entered = first_entered.clone();
+                let latest_entered = latest_entered.clone();
                 let release_first = release_first.clone();
                 let executed = executed.clone();
                 let first_future_dropped = first_future_dropped.clone();
@@ -14331,6 +14334,8 @@ mod tests {
                     if command.id == "wedged-layout" {
                         first_entered.add_permits(1);
                         release_first.acquire().await.unwrap().forget();
+                    } else if command.id == "later-layout" {
+                        latest_entered.add_permits(1);
                     }
                     ServerResponse::ok(command.id, json!({}))
                 })
@@ -14400,7 +14405,23 @@ mod tests {
             .await
             .unwrap();
 
-        let latest = receive_tracked_json(&mut outgoing_rx, &reliable_metrics).await;
+        // The latest-wins handler also runs on the isolated mutation runtime.
+        // Prove it has started and receive its completion while real time is
+        // active so a paused-clock receive cannot auto-advance the old intent's
+        // watchdog before the cross-runtime completion is delivered.
+        tokio::time::resume();
+        timeout(Duration::from_secs(5), latest_entered.acquire())
+            .await
+            .expect("latest layout intent should dispatch")
+            .unwrap()
+            .forget();
+        let latest = timeout(
+            Duration::from_secs(5),
+            receive_tracked_json(&mut outgoing_rx, &reliable_metrics),
+        )
+        .await
+        .expect("latest layout response should arrive");
+        tokio::time::pause();
         assert_eq!(latest["id"], "later-layout");
         assert_eq!(latest["ok"], true);
         assert_eq!(

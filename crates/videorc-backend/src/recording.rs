@@ -15564,8 +15564,12 @@ fn recording_compositor_stream_output(
     {
         return Ok(None);
     }
-    let provider_plan =
-        resolve_provider_stream_output_plan_for_effective_bridge(params, video_output)?;
+    // This test seam receives the effective bridge explicitly so platform-
+    // independent topology tests can exercise VideoToolbox and Media
+    // Foundation plans from any CI host. Production resolves the bridge from
+    // the host capability probe before it builds this plan.
+    let provider_plan = resolve_provider_stream_output_plan_with_separate_roles(params, true)?;
+    validate_provider_plan_against_effective_bridge(&provider_plan, video_output)?;
     recording_compositor_stream_output_with_plan(params, video_output, Some(&provider_plan))
 }
 
@@ -19142,7 +19146,8 @@ mod tests {
         params.output.video = video_preset_defaults(VideoPreset::StreamSafe1080p30);
         params.streaming = None;
 
-        let topology = encoder_output_topology_plan_from_session(&params).unwrap();
+        let topology = encoder_output_topology_plan_from_session_with_separate_roles(&params, true)
+            .expect("encoded split topology");
         assert_eq!(
             topology.output_roles,
             vec![
