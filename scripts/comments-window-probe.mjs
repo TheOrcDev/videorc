@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Comments window probe — headless verification of the detached comments window.
 // Drives the detached Comments window through its real preload/main broker:
-// correlated send (including an 11s delayed Studio acknowledgement),
+// correlated send (including an acknowledgement beyond the former 15s relay),
 // acknowledged + failed highlight, live/history cache isolation, and
 // reopen/frame persistence. It also captures every important 420x640 visual
 // state. Real-machine bound (Electron + a display).
@@ -14,6 +14,10 @@ import { mkdirSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+import {
+  COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
+  COMMENTS_SEND_TIMING_CONTRACT
+} from '../apps/desktop/src/shared/comments-command-timing.ts'
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
@@ -33,6 +37,10 @@ const LIVE_MESSAGE_IDS = {
   twitch: `${LIVE_SESSION_ID}:twitch:probe-2`,
   x: `${LIVE_SESSION_ID}:x:probe-3`
 }
+const DELAYED_SEND_ACK_MS =
+  COMMENTS_SEND_TIMING_CONTRACT.backendRequestMs +
+  COMMENTS_SEND_TIMING_CONTRACT.reconciliationMs +
+  2_000
 
 let launched
 let smoke
@@ -279,19 +287,18 @@ async function main() {
   assertCorrelatedTrace(failedHighlight.last?.command, 'failed highlight')
   await captureState('highlight-failed', 'failed highlight')
 
-  // The renderer gets 12s for the provider-backed send and Main gets 15s for
-  // the renderer relay. Hold the real relay open past the former 10s Main
-  // budget: the command must remain correlated and resolve instead of raising
-  // the owner's "Studio renderer did not reply" error one second too early.
+  // Hold the real relay open past the former 15s Main budget. The command must
+  // remain correlated inside the shared 20s envelope and resolve instead of
+  // raising the owner's "Studio renderer did not reply" error too early.
   const delayedOutboundText = 'Delayed acknowledgement from Comments'
   const delayedFixture = await smokeCommand('comments-window-set-command-fixture', {
     kind: 'send',
     outcome: 'sent',
-    delayMs: 11_000
+    delayMs: DELAYED_SEND_ACK_MS
   })
   assertProbe(
-    delayedFixture.delayMs === 11_000,
-    'send budget: smoke fixture preserves an acknowledgement beyond the old 10s Main timeout',
+    delayedFixture.delayMs === DELAYED_SEND_ACK_MS,
+    'send budget: smoke fixture preserves an acknowledgement beyond the old 15s Main timeout',
     JSON.stringify(delayedFixture)
   )
   const delayedSubmitted = await smokeCommand('comments-window-submit-message', {
@@ -312,11 +319,11 @@ async function main() {
       s.command.pendingCount === 0 &&
       s.command.trace?.resolutionAccepted === true &&
       s.command.trace?.terminal === 'resolved',
-    14_000
+    COMMENTS_COMMAND_RELAY_TIMEOUT_MS + 5_000
   )
   assertProbe(
     delayedSend.ok,
-    'send budget: 11s Studio acknowledgement resolves through the 15s Main broker',
+    `${DELAYED_SEND_ACK_MS / 1_000}s Studio acknowledgement resolves through the shared ${COMMENTS_COMMAND_RELAY_TIMEOUT_MS / 1_000}s Main broker`,
     JSON.stringify(delayedSend.last)
   )
   assertCorrelatedTrace(delayedSend.last?.command, 'delayed send result', true)

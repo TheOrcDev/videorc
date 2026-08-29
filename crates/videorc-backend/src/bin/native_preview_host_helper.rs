@@ -259,6 +259,9 @@ mod macos {
         native_preview_iosurface_imports: u64,
         native_preview_iosurface_invalidations: u64,
         native_preview_iosurface_import_failures: u64,
+        native_preview_iosurface_import_live_count: u64,
+        native_preview_iosurface_import_peak_count: u64,
+        native_preview_iosurface_import_ceiling: u64,
     }
 
     #[derive(Debug, Serialize)]
@@ -748,6 +751,9 @@ mod macos {
                             native_preview_iosurface_imports: cache_metrics.imports,
                             native_preview_iosurface_invalidations: cache_metrics.invalidations,
                             native_preview_iosurface_import_failures: cache_metrics.import_failures,
+                            native_preview_iosurface_import_live_count: cache_metrics.live_count,
+                            native_preview_iosurface_import_peak_count: cache_metrics.peak_count,
+                            native_preview_iosurface_import_ceiling: cache_metrics.ceiling,
                         }),
                         error: None,
                     },

@@ -1,4 +1,5 @@
 import type { CommentsViewMode } from '../shared/backend'
+import { COMMENTS_COMMAND_RELAY_TIMEOUT_MS } from '../shared/comments-command-timing'
 
 export interface CommentsCommandResolution<T> {
   requestId: string
@@ -68,20 +69,23 @@ export class CommentsCommandBroker {
   private readonly pending = new Map<string, PendingCommand>()
 
   // Provider delivery is bounded at 8s in the backend and Studio gives the
-  // backend request 12s. Main owns the outer relay, so its deadline must be
-  // strictly longer or it can report "renderer did not reply" while Studio is
-  // still reconciling the durable operation.
-  constructor(private readonly timeoutMs = 15_000) {}
+  // backend request 12s, followed by a 2s outcome-unknown reconciliation.
+  // Main owns the outer relay, so keep another 6s for renderer scheduling and
+  // IPC or it can falsely report "renderer did not reply" during recovery.
+  constructor(private readonly timeoutMs = COMMENTS_COMMAND_RELAY_TIMEOUT_MS) {}
 
-  request<T>(requestId: string, dispatch: () => boolean): Promise<T> {
+  request<T>(requestId: string, dispatch: () => boolean, timeoutMs = this.timeoutMs): Promise<T> {
     if (!requestId || this.pending.has(requestId)) {
       return Promise.reject(new Error('Duplicate or missing Comments request id.'))
+    }
+    if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+      return Promise.reject(new Error('Comments command timeout must be a positive finite number.'))
     }
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId)
         reject(new Error('Comments command timed out because the Studio renderer did not reply.'))
-      }, this.timeoutMs)
+      }, timeoutMs)
       this.pending.set(requestId, {
         timeout,
         resolve: resolve as (value: unknown) => void,

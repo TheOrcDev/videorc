@@ -30,6 +30,10 @@ import {
   commentsRefreshRevisionIsCurrent,
   reconcileCommentsSendOperation
 } from '../../../shared/comments-send-operation'
+import {
+  COMMENTS_HIGHLIGHT_TIMING_CONTRACT,
+  COMMENTS_SEND_TIMING_CONTRACT
+} from '../../../shared/comments-command-timing'
 import { nativePreviewStatusProvesSceneRevision } from '../../../shared/native-preview-scene-authority'
 import { compositorStatusFromFrameReady } from '../../../shared/compositor-frame-ready'
 import { rendererCompositorUpdateWasAccepted } from '../../../shared/native-preview-present-ownership'
@@ -190,6 +194,7 @@ import type {
   CaptionsUpdate,
   CaptionsWindowState,
   CaptionStyleId,
+  CaptureRecoveryStatus,
   LiveChatSnapshot,
   NotesWindowState,
   PreviewCameraStatus,
@@ -882,6 +887,9 @@ export type StudioContextValue = {
   streamTargets: StreamTargetRuntime[]
   streamOutputTopologyPreflight: StreamOutputTopologyPreflight
   refreshStreamOutputTopology: () => Promise<void>
+  captureRecoveryStatus: CaptureRecoveryStatus
+  captureRecoveryRetryPending: boolean
+  retryCaptureRecovery: () => Promise<void>
   diagnosticStats: DiagnosticStats
   sessions: SessionSummary[]
   sessionsNextCursor: string | null
@@ -1056,8 +1064,8 @@ export type StudioContextValue = {
   renameScreen: (screenId: string, name: string) => Promise<void>
   deleteScreen: (screenId: string) => Promise<void>
   reorderScreen: (screenId: string, targetIndex: number) => Promise<void>
-  activateScreen: (screenId: string) => Promise<void>
-  clearActiveScreen: () => Promise<void>
+  activateScreen: (screenId: string) => Promise<boolean>
+  clearActiveScreen: () => Promise<boolean>
   refreshPreview: () => Promise<void>
   reloadSceneFromCaptureConfig: () => Promise<void>
   resetSceneSource: (sourceId?: string) => Promise<void>
@@ -1085,8 +1093,8 @@ export type StudioContextValue = {
     generation?: number
   ) => Promise<void>
   sampleAudioMeter: () => Promise<boolean>
-  startSession: () => Promise<void>
-  stopSession: () => Promise<void>
+  startSession: () => Promise<boolean>
+  stopSession: () => Promise<boolean>
   remuxSession: (sessionId: string) => Promise<void>
   ensureSessionPoster: (sessionId: string) => Promise<boolean>
   renameSession: (sessionId: string, title: string) => Promise<void>
@@ -1125,6 +1133,8 @@ export type StudioContextValue = {
 
 export type StudioCoreContextValue = Omit<
   StudioContextValue,
+  | 'captureRecoveryRetryPending'
+  | 'captureRecoveryStatus'
   | 'diagnosticStats'
   | 'healthEvents'
   | 'liveChatSnapshot'
@@ -1133,6 +1143,7 @@ export type StudioCoreContextValue = Omit<
   | 'previewLiveStatus'
   | 'previewScreenStatus'
   | 'streamHealth'
+  | 'retryCaptureRecovery'
   | 'previewSurfaceStatus'
   | 'audioMeter'
   | 'audioMeterLoading'
@@ -1152,11 +1163,14 @@ export type StudioPreviewContextValue = Pick<
 >
 
 interface StudioDiagnosticsContextValue {
+  captureRecoveryStatus: CaptureRecoveryStatus
+  captureRecoveryRetryPending: boolean
   diagnosticStats: DiagnosticStats
   healthEvents: HealthEvent[]
   logs: BackendLogEvent[]
   streamHealth: StreamHealth | null
   previewSurfaceStatus: PreviewSurfaceStatus
+  retryCaptureRecovery: () => Promise<void>
 }
 
 interface StudioChatContextValue {
@@ -1198,6 +1212,13 @@ interface StudioShellContextValue {
 }
 
 const StudioShellContext = createContext<StudioShellContextValue | null>(null)
+
+const idleCaptureRecoveryStatus = (): CaptureRecoveryStatus => ({
+  revision: 0,
+  phase: 'idle',
+  retryable: false,
+  attempts: 0
+})
 
 const idleDiagnosticStats = (): DiagnosticStats => ({
   skippedFrames: 0,
@@ -1731,6 +1752,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // imperative change-detection, debounce, and retry behavior.
   const remoteSurfacePublisherRef = useRef<RemoteSurfacePublisher | null>(null)
   const remoteSurfaceValuesRef = useRef<RemoteSurfaceValues | null>(null)
+  const remoteIntentTailRef = useRef<Promise<void>>(Promise.resolve())
   const globalShortcutsRegistrarRef = useRef<GlobalShortcutsRegistrar | null>(null)
   const accountCallbacksInFlightRef = useRef<Set<string>>(new Set())
   const accountCallbacksCompletedRef = useRef<Set<string>>(new Set())
@@ -1781,6 +1803,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [streamHealth, setStreamHealth] = useState<StreamHealth | null>(null)
   const [streamTargets, setStreamTargets] = useState<StreamTargetRuntime[]>([])
   const [diagnosticStats, setDiagnosticStats] = useState<DiagnosticStats>(idleDiagnosticStats)
+  const [captureRecoveryStatus, setCaptureRecoveryStatus] =
+    useState<CaptureRecoveryStatus>(idleCaptureRecoveryStatus)
+  const [captureRecoveryRetryPending, setCaptureRecoveryRetryPending] = useState(false)
+  const captureRecoveryConnectionGenerationRef = useRef(0)
+  const captureRecoveryServerRevisionRef = useRef(-1)
+  const captureRecoveryRetryInFlightRef = useRef<{
+    token: symbol
+    client: BackendClient
+    connectionGeneration: number
+  } | null>(null)
+  const commitCaptureRecoveryStatus = useCallback(
+    (status: CaptureRecoveryStatus, connectionGeneration: number): boolean => {
+      if (
+        captureRecoveryConnectionGenerationRef.current !== connectionGeneration ||
+        status.revision <= captureRecoveryServerRevisionRef.current
+      ) {
+        return false
+      }
+      captureRecoveryServerRevisionRef.current = status.revision
+      setCaptureRecoveryStatus(status)
+      return true
+    },
+    []
+  )
   const [sessions, setSessions] = useState<SessionSummary[]>([])
   const [sessionsNextCursor, setSessionsNextCursor] = useState<string | null>(null)
   const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false)
@@ -2209,7 +2255,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') throw error
             const authoritative = await client
               .request<CommentHighlightState>('comments.highlight.status', undefined, {
-                timeoutMs: 2_000
+                timeoutMs: COMMENTS_HIGHLIGHT_TIMING_CONTRACT.reconciliationMs
               })
               .catch(() => null)
             if (!failurePolicy.commentHighlightClearFailureCanReconcile(error, authoritative)) {
@@ -2251,7 +2297,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') throw error
           const authoritative = await client
             .request<CommentHighlightState>('comments.highlight.status', undefined, {
-              timeoutMs: 2_000
+              timeoutMs: COMMENTS_HIGHLIGHT_TIMING_CONTRACT.reconciliationMs
             })
             .catch(() => null)
           if (
@@ -2320,21 +2366,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           : Promise.reject(new Error('The selected live comment is no longer available.'))
       )
         .then(async (state) => {
-          const resolvedState =
-            state ??
-            (await client
-              ?.request<CommentHighlightState>('comments.highlight.status')
-              .catch(() => null))
-          if (!resolvedState) {
+          if (!state) {
             throw new Error('A newer comment highlight replaced this request.')
           }
-          if (state && commentHighlightIntentRef.current === intent) {
+          if (commentHighlightIntentRef.current === intent) {
             publishCommentHighlightState(state)
           }
           await window.videorc?.pushCommentHighlightResult?.({
             requestId: command.requestId,
             ok: true,
-            value: resolvedState
+            value: state
           })
         })
         .catch(async (error) => {
@@ -2389,7 +2430,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ?.request<CommentsSendOperation[]>(
                 'liveChat.sendOperations.list',
                 { sessionId: command.sessionId },
-                { timeoutMs: 2_000 }
+                { timeoutMs: COMMENTS_SEND_TIMING_CONTRACT.reconciliationMs }
               )
               .then((operations) =>
                 operations.find((operation) => operation.id === command.operationId)
@@ -2676,10 +2717,59 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const microphoneInputLostSessionRef = useRef<string | null>(null)
   const sessionRuntimeEpochRef = useRef(0)
   const captureConfigRef = useRef(captureConfig)
+  const [liveAudioProcessingApplied, setLiveAudioProcessingApplied] = useState<
+    (LiveAudioProcessingValues & { sessionId: string }) | null
+  >(null)
+  const liveAudioProcessingAppliedRef = useRef<
+    (LiveAudioProcessingValues & { sessionId: string }) | null
+  >(null)
+  const liveMicrophoneSettlementWaitersRef = useRef<
+    Set<{
+      sessionId: string
+      microphoneMuted: boolean
+      resolve: (applied: boolean) => void
+    }>
+  >(new Set())
+  const commitLiveAudioProcessingApplied = useCallback(
+    (next: LiveAudioProcessingValues & { sessionId: string }): void => {
+      liveAudioProcessingAppliedRef.current = next
+      setLiveAudioProcessingApplied((current) =>
+        current?.sessionId === next.sessionId &&
+        current.microphoneGainDb === next.microphoneGainDb &&
+        current.microphoneMuted === next.microphoneMuted
+          ? current
+          : next
+      )
+    },
+    []
+  )
+  const settleLiveMicrophoneWaiters = useCallback(
+    (sessionId: string, microphoneMuted: boolean, terminal: boolean): void => {
+      for (const waiter of liveMicrophoneSettlementWaitersRef.current) {
+        if (waiter.sessionId !== sessionId) continue
+        if (waiter.microphoneMuted === microphoneMuted) {
+          liveMicrophoneSettlementWaitersRef.current.delete(waiter)
+          waiter.resolve(true)
+        } else if (terminal) {
+          liveMicrophoneSettlementWaitersRef.current.delete(waiter)
+          waiter.resolve(false)
+        }
+      }
+    },
+    []
+  )
+  const failLiveMicrophoneWaiters = useCallback((sessionId?: string): void => {
+    for (const waiter of liveMicrophoneSettlementWaitersRef.current) {
+      if (sessionId && waiter.sessionId !== sessionId) continue
+      liveMicrophoneSettlementWaitersRef.current.delete(waiter)
+      waiter.resolve(false)
+    }
+  }, [])
   const liveAudioProcessingSyncRef = useRef<{
     token: object
     sessionId: string
     lastApplied: LiveAudioProcessingValues
+    authoritative: boolean
     disabled: boolean
     queue: LatestWinsLiveAudioProcessingQueue
   } | null>(null)
@@ -2729,8 +2819,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   useEffect(
     () => () => {
       liveAudioProcessingSyncRef.current?.queue.stop()
+      failLiveMicrophoneWaiters()
     },
-    []
+    [failLiveMicrophoneWaiters]
   )
   useEffect(() => {
     latestLayoutTransactionCommitRef.current = null
@@ -2905,6 +2996,46 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const status = wsStatusRef.current
     void loadSessionRuntimeRecovery().then((runtime) => runtime.showBackendError(message, status))
   }, [])
+
+  const retryCaptureRecovery = useCallback(async (): Promise<void> => {
+    const activeClient = clientRef.current
+    const connectionGeneration = captureRecoveryConnectionGenerationRef.current
+    const inFlight = captureRecoveryRetryInFlightRef.current
+    if (
+      !activeClient ||
+      (inFlight?.client === activeClient && inFlight.connectionGeneration === connectionGeneration)
+    ) {
+      return
+    }
+    const token = Symbol('capture-recovery-retry')
+    captureRecoveryRetryInFlightRef.current = {
+      token,
+      client: activeClient,
+      connectionGeneration
+    }
+    setCaptureRecoveryRetryPending(true)
+    try {
+      const status = await activeClient.requestTyped('capture.recovery.retry', undefined)
+      if (
+        clientRef.current === activeClient &&
+        captureRecoveryConnectionGenerationRef.current === connectionGeneration
+      ) {
+        commitCaptureRecoveryStatus(status, connectionGeneration)
+      }
+    } catch (error) {
+      if (
+        clientRef.current === activeClient &&
+        captureRecoveryConnectionGenerationRef.current === connectionGeneration
+      ) {
+        reportError(error)
+      }
+    } finally {
+      if (captureRecoveryRetryInFlightRef.current?.token === token) {
+        captureRecoveryRetryInFlightRef.current = null
+        setCaptureRecoveryRetryPending(false)
+      }
+    }
+  }, [commitCaptureRecoveryStatus, reportError])
 
   // --- Session-start failures are unmissable (B0) ----------------------------
   // A refused Record / Go Live used to be one default 4s toast while the user
@@ -4682,6 +4813,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let disposed = false
     const generation = bootstrapGenerationRef.current + 1
     bootstrapGenerationRef.current = generation
+    captureRecoveryConnectionGenerationRef.current = generation
+    captureRecoveryServerRevisionRef.current = -1
+    captureRecoveryRetryInFlightRef.current = null
+    setCaptureRecoveryRetryPending(false)
+    setCaptureRecoveryStatus(idleCaptureRecoveryStatus())
     sessionRuntimeEpochRef.current += 1
     const priorSessionState = lastRecordingStateRef.current ?? recordingRef.current.state
     const priorSessionId = lastRecordingSessionIdRef.current ?? recordingRef.current.sessionId
@@ -4975,10 +5111,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .catch(reportError)
       }),
       // Remote-control intents (Stream Deck et al) arrive as events relayed
-      // by the backend; the executor is an effect event, so it always sees
-      // the latest session handlers without re-subscribing.
+      // by the backend. Preserve arrival order across asynchronous handlers:
+      // each executor samples authoritative session truth only when its turn
+      // begins, and a failed predecessor cannot poison the tail.
       nextClient.on('remote.intent', (payload) => {
-        void handleRemoteIntent(payload)
+        const result = remoteIntentTailRef.current
+          .catch(() => undefined)
+          .then(() => (disposed ? undefined : handleRemoteIntent(payload)))
+        remoteIntentTailRef.current = result.then(
+          () => undefined,
+          () => undefined
+        )
       }),
       nextClient.on('remote.control.status', (payload) => {
         setRemoteControlStatus(payload as RemoteControlStatus)
@@ -5181,6 +5324,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('diagnostics.stats', (payload) => {
         bootstrapGuard.mark('diagnostics')
         commitDiagnosticStatsThrottled(payload as DiagnosticStats)
+      }),
+      nextClient.on('capture.recovery.status', (payload) => {
+        commitCaptureRecoveryStatus(payload as CaptureRecoveryStatus, generation)
       }),
       nextClient.on('preview.live.status', (payload) => {
         bootstrapGuard.mark('previewLive')
@@ -5519,6 +5665,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           nextDevices,
           nextRecording,
           nextDiagnostics,
+          nextCaptureRecoveryStatus,
           nextCaptionsStatus,
           nextLiveChat,
           nextCommentHighlight,
@@ -5540,6 +5687,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           bootstrapRequest<DeviceList>('devices.list'),
           bootstrapRequest<RecordingStatus>('recording.status'),
           bootstrapRequest<DiagnosticStats>('diagnostics.stats'),
+          bootstrapRequest<CaptureRecoveryStatus>('capture.recovery.status'),
           bootstrapRequest<CaptionsStatus>('captions.status.get'),
           bootstrapRequest<LiveChatSnapshot>('liveChat.status'),
           bootstrapRequest<CommentHighlightState>('comments.highlight.status'),
@@ -5643,6 +5791,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'diagnostics')) {
           setDiagnosticStats(nextDiagnostics)
         }
+        commitCaptureRecoveryStatus(nextCaptureRecoveryStatus, generation)
         if (captionsStatusRevisionRef.current === captionsStatusRevisionAtBootstrapStart) {
           commitCaptionsStatus(nextCaptionsStatus)
         }
@@ -5870,6 +6019,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setRemoteControlStatus(null)
       nextClient.close()
       setClient(null)
+      if (captureRecoveryConnectionGenerationRef.current === generation) {
+        captureRecoveryConnectionGenerationRef.current = 0
+        captureRecoveryServerRevisionRef.current = -1
+        captureRecoveryRetryInFlightRef.current = null
+        setCaptureRecoveryStatus(idleCaptureRecoveryStatus())
+        setCaptureRecoveryRetryPending(false)
+      }
       setEntitlements(null)
       setNoiseCleanupJobs([])
       entitlementRefreshInFlightRef.current = null
@@ -5892,6 +6048,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     applyRecordingStatus,
     commitActiveScreen,
     commitCohostState,
+    commitCaptureRecoveryStatus,
     commitDiagnosticStatsThrottled,
     clearSessionRuntimeState,
     connection,
@@ -6548,11 +6705,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         videoOverride?: VideoSettings
         captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
       }
-    ) => {
+    ): Promise<boolean> => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
       if (!client || wsStatus !== 'connected') {
         toast.error('Backend socket is not connected — layout unchanged.')
-        return
+        return Promise.resolve(false)
       }
 
       const intentId = Math.max(layoutIntentIdRef.current + 1, Date.now())
@@ -6562,6 +6719,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // controls into "Switching…" for them reads as an unrelated change.
       if (options?.pendingIndicator !== false) {
         setLayoutSwitchPending(layout.layoutPreset)
+      }
+
+      let commitReceiptSettled = false
+      let resolveCommitReceipt: (committed: boolean) => void = () => undefined
+      const commitReceipt = new Promise<boolean>((resolve) => {
+        resolveCommitReceipt = resolve
+      })
+      const settleCommitReceipt = (committed: boolean): void => {
+        if (commitReceiptSettled) return
+        commitReceiptSettled = true
+        resolveCommitReceipt(committed)
       }
 
       void (async () => {
@@ -6619,6 +6787,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             compositorStatus: status.compositorStatus,
             captureConfigPatch: options?.captureConfigPatch
           }
+          // This is the remote-control acknowledgement edge: the backend has
+          // returned an authoritative commit. Presentation proof and React
+          // reconciliation continue below, but a bounded deck ack must not
+          // consume their additional preview/readback budget.
+          settleCommitReceipt(true)
           // Intent freshness and backend commit freshness are separate. A may be
           // superseded by B after A commits; remember A before waiting for proof
           // so a failed B can reconcile the renderer to committed backend truth.
@@ -6708,14 +6881,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             if (reconciliation) {
               rememberLayoutTransactionSnapshot(reconciliation.snapshot)
               applyLayoutTransactionState(reconciliation.snapshot)
+              settleCommitReceipt(failureDisposition === 'requested-scene-applied')
               if (failureDisposition !== 'requested-scene-applied') {
                 reportError(error)
               }
+              return
             } else if (layoutIntentIdRef.current === intentId) {
               reportError(error)
             }
           }
+          settleCommitReceipt(false)
         } finally {
+          settleCommitReceipt(false)
           if (layoutIntentAwaitingProofRef.current === intentId) {
             layoutIntentAwaitingProofRef.current = null
           }
@@ -6723,7 +6900,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             setLayoutSwitchPending(null)
           }
         }
-      })()
+      })().catch((error) => {
+        settleCommitReceipt(false)
+        reportError(error)
+      })
+      return commitReceipt
     },
     [
       activeSceneBackground,
@@ -6758,13 +6939,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     })
     liveBackgroundFingerprintRef.current = decision.next
     if (decision.commit) {
-      requestLayoutTransaction(captureConfigRef.current.layout, { pendingIndicator: false })
+      void requestLayoutTransaction(captureConfigRef.current.layout, { pendingIndicator: false })
     }
   }, [activeSceneBackgroundFingerprint, recording.state, requestLayoutTransaction])
 
   const applyLayoutPatch = useCallback(
     (patch: Partial<LayoutSettings>) => {
-      requestLayoutTransaction({
+      void requestLayoutTransaction({
         ...captureConfigRef.current.layout,
         ...patch
       })
@@ -6772,7 +6953,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [requestLayoutTransaction]
   )
 
-  const applyCameraPreset = useCallback(
+  const requestCameraPresetTransaction = useCallback(
     (patch: Partial<LayoutSettings>) => {
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
@@ -6799,7 +6980,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       }
 
-      requestLayoutTransaction(
+      return requestLayoutTransaction(
         {
           ...current.layout,
           ...patch,
@@ -6810,6 +6991,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       )
     },
     [requestLayoutTransaction]
+  )
+
+  const applyCameraPreset = useCallback(
+    (patch: Partial<LayoutSettings>) => {
+      void requestCameraPresetTransaction(patch)
+    },
+    [requestCameraPresetTransaction]
   )
 
   const switchSourceDeviceLive = useCallback(
@@ -8077,6 +8265,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!params || !client || wsStatus !== 'connected' || stopRequestPending) {
       liveAudioProcessingSyncRef.current?.queue.stop()
       liveAudioProcessingSyncRef.current = null
+      failLiveMicrophoneWaiters()
       return
     }
     if (
@@ -8089,11 +8278,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     let sync = liveAudioProcessingSyncRef.current
     let enqueueDesiredForNewSync = false
     if (!sync || sync.sessionId !== params.sessionId) {
+      if (sync) {
+        failLiveMicrophoneWaiters(sync.sessionId)
+      }
       sync?.queue.stop()
-      const syncDecision = liveAudioProcessingSessionSyncDecision(
-        params,
-        liveAudioProcessingStartSnapshotRef.current
-      )
+      const startSnapshot = liveAudioProcessingStartSnapshotRef.current
+      const syncDecision = liveAudioProcessingSessionSyncDecision(params, startSnapshot)
       if (liveAudioProcessingStartSnapshotRef.current?.sessionId === params.sessionId) {
         liveAudioProcessingStartSnapshotRef.current = null
       }
@@ -8135,6 +8325,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             recordingRef.current.sessionId !== requested.sessionId ||
             !['recording', 'streaming'].includes(recordingRef.current.state)
           ) {
+            failLiveMicrophoneWaiters(requested.sessionId)
             return false
           }
 
@@ -8148,9 +8339,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               microphoneGainDb: validResult.microphoneGainDb,
               microphoneMuted: validResult.microphoneMuted
             }
+            latest.authoritative = true
+            commitLiveAudioProcessingApplied({
+              sessionId: requested.sessionId,
+              ...latest.lastApplied
+            })
+            settleLiveMicrophoneWaiters(
+              requested.sessionId,
+              latest.lastApplied.microphoneMuted,
+              !queue.hasOutstandingWork
+            )
             return true
           }
           if (validResult?.reasonCode === 'session-ended') {
+            failLiveMicrophoneWaiters(requested.sessionId)
             return false
           }
 
@@ -8161,9 +8363,41 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             result: validResult,
             lastApplied: latest.lastApplied
           })
-          if (!rejection) return true
+          if (!rejection) {
+            settleLiveMicrophoneWaiters(
+              requested.sessionId,
+              latest.lastApplied.microphoneMuted,
+              !queue.hasOutstandingWork
+            )
+            return true
+          }
 
           latest.disabled = rejection.disableForSession
+          const rollbackAuthoritative =
+            latest.authoritative ||
+            (typeof validResult?.confirmedMicrophoneGainDb === 'number' &&
+              typeof validResult.confirmedMicrophoneMuted === 'boolean')
+          latest.lastApplied = rejection.rollback
+          latest.authoritative = rollbackAuthoritative
+          if (rollbackAuthoritative) {
+            commitLiveAudioProcessingApplied({
+              sessionId: requested.sessionId,
+              ...rejection.rollback
+            })
+          }
+          if (
+            !rollbackAuthoritative ||
+            !validResult ||
+            validResult.reasonCode === 'live-audio-control-state-unknown'
+          ) {
+            failLiveMicrophoneWaiters(requested.sessionId)
+          } else {
+            settleLiveMicrophoneWaiters(
+              requested.sessionId,
+              rejection.rollback.microphoneMuted,
+              rejection.disableForSession || !queue.hasOutstandingWork
+            )
+          }
           setCaptureConfig((current) => {
             const currentRejection = rejectedLiveAudioProcessingUpdate({
               recording: recordingRef.current,
@@ -8194,11 +8428,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         token,
         sessionId: params.sessionId,
         lastApplied: syncDecision.lastApplied,
+        authoritative: startSnapshot?.sessionId === params.sessionId,
         disabled: false,
         queue
       }
       sync = nextSync
       liveAudioProcessingSyncRef.current = nextSync
+      if (startSnapshot?.sessionId === params.sessionId) {
+        commitLiveAudioProcessingApplied({
+          sessionId: params.sessionId,
+          ...syncDecision.lastApplied
+        })
+        settleLiveMicrophoneWaiters(
+          params.sessionId,
+          syncDecision.lastApplied.microphoneMuted,
+          false
+        )
+      }
       enqueueDesiredForNewSync = syncDecision.enqueueDesired
     }
 
@@ -8233,10 +8479,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     recording.state,
     captureConfig.audio.microphoneGainDb,
     captureConfig.audio.microphoneMuted,
+    commitLiveAudioProcessingApplied,
+    failLiveMicrophoneWaiters,
     reportError,
     runtimeInfo?.windowsLiveAudioSmokeMode,
     startRequestPending,
     stopRequestPending,
+    settleLiveMicrophoneWaiters,
     wsStatus
   ])
 
@@ -8644,21 +8893,22 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const activateScreen = useCallback(
-    async (screenId: string) => {
+    async (screenId: string): Promise<boolean> => {
       if (!client) {
         toast.error('Backend socket is not connected.')
-        return
+        return false
       }
 
       try {
         setLastError(null)
         const screen = await client.request<StreamScreen>('screens.activate', { screenId })
         commitActiveScreen(screen)
+        return true
       } catch (error) {
         const failurePolicy = await loadCommandFailurePolicy()
         if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') {
           reportError(error)
-          return
+          return false
         }
         const authoritative = await client
           .request<StreamScreen | null>('screens.active', undefined, { timeoutMs: 2_000 })
@@ -8667,29 +8917,31 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           commitActiveScreen(authoritative)
         }
         if (failurePolicy.screenActivateFailureCanReconcile(error, screenId, authoritative)) {
-          return
+          return true
         }
         reportError(error)
+        return false
       }
     },
     [client, commitActiveScreen, reportError]
   )
 
-  const clearActiveScreen = useCallback(async () => {
+  const clearActiveScreen = useCallback(async (): Promise<boolean> => {
     if (!client) {
       toast.error('Backend socket is not connected.')
-      return
+      return false
     }
 
     try {
       setLastError(null)
       await client.request<StreamScreen | null>('screens.clear')
       commitActiveScreen(null)
+      return true
     } catch (error) {
       const failurePolicy = await loadCommandFailurePolicy()
       if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') {
         reportError(error)
-        return
+        return false
       }
       const authoritative = await client
         .request<StreamScreen | null>('screens.active', undefined, { timeoutMs: 2_000 })
@@ -8698,9 +8950,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         commitActiveScreen(authoritative)
       }
       if (failurePolicy.screenClearFailureCanReconcile(error, authoritative)) {
-        return
+        return true
       }
       reportError(error)
+      return false
     }
   }, [client, commitActiveScreen, reportError])
 
@@ -9625,7 +9878,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const runStartSessionRef = useRef<
-    ((streamingOverride?: StreamingSettings) => Promise<void>) | null
+    ((streamingOverride?: StreamingSettings) => Promise<boolean>) | null
   >(null)
   const runStartSession = useCallback(
     async (streamingOverride?: StreamingSettings) => {
@@ -9633,7 +9886,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (startBlockedReason && !isSessionActive) {
           reportError(new Error(startBlockedReason))
         }
-        return
+        return false
       }
 
       let streamingForStart: StreamingSettings | null = null
@@ -9763,6 +10016,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             status.sessionId ?? recordingRef.current.sessionId
           )
         }
+        return true
       } catch (error) {
         if (streamingOverride && streamingForStart) {
           await completePreparedPlatformBroadcasts(streamingForStart)
@@ -9777,6 +10031,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (recordingRef.current.state === 'starting' && !recordingRef.current.sessionId) {
           applyRecordingStatus({ state: 'idle', message: 'Ready to start a capture session.' })
         }
+        return false
       } finally {
         setStartRequestPending(false)
       }
@@ -10020,9 +10275,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const startSession = useCallback(async () => {
     if (decideGoLiveStart(captureConfig.streamEnabled) === 'open-confirmation') {
       await openGoLiveConfirmation()
-      return
+      return false
     }
-    await runStartSession()
+    return runStartSession()
   }, [captureConfig.streamEnabled, openGoLiveConfirmation, runStartSession])
 
   const cancelGoLiveConfirmation = useCallback(() => {
@@ -10168,7 +10423,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const stopSession = useCallback(async () => {
     if (!client || stopRequestPending) {
-      return
+      return false
     }
 
     try {
@@ -10194,8 +10449,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         await completePreparedPlatformBroadcasts(cleaned)
       }
       platformLifecycleStreamingRef.current = null
+      return true
     } catch (error) {
       reportError(error)
+      return false
     } finally {
       setStopRequestPending(false)
     }
@@ -11034,6 +11291,84 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     stopSession
   ])
 
+  const requestRemoteMicrophoneMute = useCallback(
+    (mode: 'mute' | 'unmute' | 'toggle'): Promise<boolean> => {
+      const recordingStatus = recordingRef.current
+      const sessionActive = isActiveRecordingState(recordingStatus.state)
+      const currentAudio = captureConfigRef.current.audio
+      const commitRequestedMute = (microphoneMuted: boolean): void => {
+        captureConfigRef.current = {
+          ...captureConfigRef.current,
+          audio: { ...captureConfigRef.current.audio, microphoneMuted }
+        }
+        setCaptureConfig((current) =>
+          current.audio.microphoneMuted === microphoneMuted
+            ? current
+            : {
+                ...current,
+                audio: { ...current.audio, microphoneMuted }
+              }
+        )
+      }
+
+      if (!sessionActive) {
+        const microphoneMuted = mode === 'toggle' ? !currentAudio.microphoneMuted : mode === 'mute'
+        commitRequestedMute(microphoneMuted)
+        return Promise.resolve(true)
+      }
+
+      const sessionId = recordingStatus.sessionId
+      if (!sessionId) {
+        return Promise.resolve(false)
+      }
+      const sync = liveAudioProcessingSyncRef.current
+      const applied =
+        sync?.sessionId === sessionId && sync.authoritative
+          ? sync.lastApplied
+          : liveAudioProcessingAppliedRef.current?.sessionId === sessionId
+            ? liveAudioProcessingAppliedRef.current
+            : liveAudioProcessingStartSnapshotRef.current?.sessionId === sessionId
+              ? liveAudioProcessingStartSnapshotRef.current
+              : null
+      if (!applied) {
+        return Promise.resolve(false)
+      }
+      const microphoneMuted = mode === 'toggle' ? !applied.microphoneMuted : mode === 'mute'
+      if (
+        sync?.sessionId === sessionId &&
+        sync.disabled &&
+        microphoneMuted !== applied.microphoneMuted
+      ) {
+        return Promise.resolve(false)
+      }
+
+      commitRequestedMute(microphoneMuted)
+      if (
+        microphoneMuted === applied.microphoneMuted &&
+        !(sync?.sessionId === sessionId && sync.queue.hasOutstandingWork)
+      ) {
+        return Promise.resolve(true)
+      }
+
+      const settlement = new Promise<boolean>((resolve) => {
+        liveMicrophoneSettlementWaitersRef.current.add({
+          sessionId,
+          microphoneMuted,
+          resolve
+        })
+      })
+      if (sync?.sessionId === sessionId) {
+        sync.queue.enqueue({
+          sessionId,
+          microphoneGainDb: captureConfigRef.current.audio.microphoneGainDb,
+          microphoneMuted
+        })
+      }
+      return settlement
+    },
+    []
+  )
+
   // ── Remote control (issue #143) ──────────────────────────────────────
   // Intents execute through the SAME handlers as the on-screen buttons —
   // no second session-start path, no validation bypass. Every intent is
@@ -11044,21 +11379,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const knownLayoutPresets = [...HORIZONTAL_LAYOUT_PRESETS, ...VERTICAL_LAYOUT_PRESETS]
     const context: RemoteIntentContext = {
       client,
-      sessionActive: isActiveRecordingState(recording.state),
+      sessionActive: isActiveRecordingState(recordingRef.current.state),
       streamEnabled: captureConfigRef.current.streamEnabled,
       startSession,
       stopSession,
-      setMicrophoneMuted: (mode) => {
-        setCaptureConfig((current) => ({
-          ...current,
-          audio: {
-            ...current.audio,
-            microphoneMuted: mode === 'toggle' ? !current.audio.microphoneMuted : mode === 'mute'
-          }
-        }))
-      },
+      setMicrophoneMuted: requestRemoteMicrophoneMute,
       knownLayoutPresets,
-      applyLayoutPreset: (layoutPreset) => applyLayoutPatch({ layoutPreset }),
+      applyLayoutPreset: (layoutPreset) => requestCameraPresetTransaction({ layoutPreset }),
       hasTakeover: (assetId) => screens.some((screen) => screen.id === assetId),
       activateTakeover: activateScreen,
       clearTakeover: clearActiveScreen,
@@ -11081,12 +11408,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // The state projection deck keys render (types in lib/remote-surface.ts).
   // Minimal by design and the ONLY payload remote sockets receive — never
   // widen it with tokens/paths/URLs.
+  const activeSessionAppliedAudio =
+    liveAudioProcessingApplied?.sessionId === recording.sessionId
+      ? liveAudioProcessingApplied
+      : null
+  const activeSessionStartAudio = liveAudioProcessingStartSnapshotRef.current
+  const activeSessionStartMicrophoneMuted =
+    activeSessionStartAudio && activeSessionStartAudio.sessionId === recording.sessionId
+      ? activeSessionStartAudio.microphoneMuted
+      : null
+  const remoteSurfaceMicrophoneMuted = isActiveRecordingState(recording.state)
+    ? activeSessionAppliedAudio
+      ? activeSessionAppliedAudio.microphoneMuted
+      : (activeSessionStartMicrophoneMuted ??
+        remoteSurfaceValuesRef.current?.[4] ??
+        captureConfig.audio.microphoneMuted)
+    : captureConfig.audio.microphoneMuted
   const remoteSurfaceValues: RemoteSurfaceValues = [
     recording.state,
     isSessionActive,
     captureConfig.recordEnabled,
     captureConfig.streamEnabled,
-    captureConfig.audio.microphoneMuted,
+    remoteSurfaceMicrophoneMuted,
     captureConfig.layout.layoutPreset,
     activeScreen?.id ?? null,
     notesWindow.open,
@@ -11214,8 +11557,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const diagnosticsValue = useMemo<StudioDiagnosticsContextValue>(
-    () => ({ diagnosticStats, healthEvents, logs, previewSurfaceStatus, streamHealth }),
-    [diagnosticStats, healthEvents, logs, previewSurfaceStatus, streamHealth]
+    () => ({
+      captureRecoveryStatus,
+      captureRecoveryRetryPending,
+      diagnosticStats,
+      healthEvents,
+      logs,
+      previewSurfaceStatus,
+      retryCaptureRecovery,
+      streamHealth
+    }),
+    [
+      captureRecoveryRetryPending,
+      captureRecoveryStatus,
+      diagnosticStats,
+      healthEvents,
+      logs,
+      previewSurfaceStatus,
+      retryCaptureRecovery,
+      streamHealth
+    ]
   )
   const chatValue = useMemo<StudioChatContextValue>(
     () => ({ cohostState, liveChatSnapshot }),

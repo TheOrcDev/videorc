@@ -658,6 +658,17 @@ pub struct LiveChatCoordinator {
     send_operations_in_flight: HashMap<String, InFlightSendOperation>,
 }
 
+/// Minimal authoritative answer needed at the comment-card commit edge. Do
+/// not clone the full 5,000-row chat snapshot (or even one rich message) while
+/// the bounded highlight fence is held.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum HighlightMessageEligibility {
+    Eligible,
+    WrongSession,
+    Missing,
+    Ineligible,
+}
+
 struct ReversibleIngest {
     outcome: IngestOutcome,
     undo: LiveChatIngestUndo,
@@ -731,6 +742,37 @@ impl LiveChatCoordinator {
 
     pub fn sender(&self, destination_id: &str) -> Option<ChatSenderConfig> {
         self.senders.get(destination_id).cloned()
+    }
+
+    pub(crate) fn highlight_message_eligibility(
+        &self,
+        session_id: &str,
+        message_id: &str,
+    ) -> HighlightMessageEligibility {
+        if self.session_id.as_deref() != Some(session_id) {
+            return HighlightMessageEligibility::WrongSession;
+        }
+        let Some(message) = self
+            .messages
+            .iter()
+            .find(|message| message.id == message_id)
+        else {
+            return HighlightMessageEligibility::Missing;
+        };
+        if message.session_id != session_id {
+            return HighlightMessageEligibility::WrongSession;
+        }
+        if message.is_deleted
+            || matches!(
+                message.event_type,
+                LiveChatEventType::Deleted
+                    | LiveChatEventType::System
+                    | LiveChatEventType::Moderation
+            )
+        {
+            return HighlightMessageEligibility::Ineligible;
+        }
+        HighlightMessageEligibility::Eligible
     }
 
     #[allow(dead_code)]
@@ -2005,6 +2047,10 @@ pub(crate) async fn try_deliver_messages(
     }
     let _delivery = state.live_chat_persistence.begin_delivery().await;
     let (delivery_generation, delivery_session_id, undos, authoritative_messages) = {
+        // Coordinator ingest can turn an eligible message into a tombstone.
+        // Publish that authority under the same short fence used by the final
+        // highlight install; persistence remains outside the fence below.
+        let _highlight_commit = state.comment_highlight_commit.lock().await;
         let mut coordinator = state.live_chat.lock().await;
         let Some(delivery_session_id) = coordinator.session_id.clone() else {
             return Err(LiveChatPersistenceFailure::terminal(
@@ -2047,6 +2093,7 @@ pub(crate) async fn try_deliver_messages(
         .persist_batch(authoritative_messages.clone())
         .await
     {
+        let _highlight_commit = state.comment_highlight_commit.lock().await;
         let mut coordinator = state.live_chat.lock().await;
         for undo in undos.into_iter().rev() {
             coordinator.rollback_ingest(undo);
@@ -2061,6 +2108,7 @@ pub(crate) async fn try_deliver_messages(
         );
         return Err(error);
     }
+    let _highlight_commit = state.comment_highlight_commit.lock().await;
     let delivery_still_current = {
         let coordinator = state.live_chat.lock().await;
         coordinator.generation == delivery_generation
@@ -2077,7 +2125,7 @@ pub(crate) async fn try_deliver_messages(
     }
     for message in &authoritative_messages {
         if message.is_deleted {
-            crate::comment_highlight::clear_comment_highlight_for_message(
+            crate::comment_highlight::clear_comment_highlight_for_message_under_commit_fence(
                 state,
                 &message.session_id,
                 &message.id,
@@ -2086,6 +2134,7 @@ pub(crate) async fn try_deliver_messages(
         }
         state.emit_event("liveChat.message", message);
     }
+    drop(_highlight_commit);
     crate::cohost::note_messages(state, &authoritative_messages).await;
     Ok(())
 }

@@ -8,10 +8,11 @@ use chrono::Utc;
 use crate::ffmpeg_work::FfmpegWorkSnapshot;
 use crate::frame_store::FrameStoreStats;
 use crate::protocol::{
-    CameraCapabilityFormat, CompositorBackend, DiagnosticBottleneck, DiagnosticStats,
-    PermissionPane, PreviewCameraDropReasonStats, PreviewCameraStatus, PreviewImagePollCounts,
-    PreviewScreenFrameStatusStats, PreviewScreenStatus, PreviewSourceSurfaceBackingStats,
-    PreviewSurfaceBacking, PreviewTransport, StreamHealth,
+    CameraCapabilityFormat, CaptureRecoveryPhase, CaptureRecoveryStatus, CompositorBackend,
+    DiagnosticBottleneck, DiagnosticStats, PermissionPane, PreviewCameraDropReasonStats,
+    PreviewCameraStatus, PreviewImagePollCounts, PreviewScreenFrameStatusStats,
+    PreviewScreenStatus, PreviewSourceSurfaceBackingStats, PreviewSurfaceBacking, PreviewTransport,
+    StreamHealth,
 };
 use crate::source_registry::SourceRegistrySnapshot;
 
@@ -697,6 +698,18 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_camera_source_capture_texture_reuses: 0,
         compositor_screen_source_capture_texture_reuses: 0,
         compositor_source_texture_cache_flushes: 0,
+        compositor_metal_cached_capture_source_imports_live_count: None,
+        compositor_metal_cached_capture_source_imports_peak_count: None,
+        compositor_metal_cached_capture_source_imports_ceiling: None,
+        compositor_metal_target_ring_slots_live_count: None,
+        compositor_metal_target_ring_slots_peak_count: None,
+        compositor_metal_target_ring_slots_ceiling: None,
+        encoder_bridge_metal_target_refs_in_flight_live_count: None,
+        encoder_bridge_metal_target_refs_in_flight_peak_count: None,
+        encoder_bridge_metal_target_refs_in_flight_ceiling: None,
+        native_preview_iosurface_import_live_count: None,
+        native_preview_iosurface_import_peak_count: None,
+        native_preview_iosurface_import_ceiling: None,
         compositor_source_import_failures: 0,
         compositor_camera_source_iosurface_import_frames: 0,
         compositor_camera_source_cvpixelbuffer_import_frames: 0,
@@ -728,6 +741,11 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_screen_source_held_serves: 0,
         compositor_screen_source_served_age_max_ms: 0,
         capture_pipeline_degraded_stage: None,
+        capture_recovery_phase: None,
+        capture_recovery_source: None,
+        capture_recovery_attempts: None,
+        capture_recovery_last_error: None,
+        capture_recovery_last_duration_ms: None,
         preview_repeated_frames: 0,
         preview_surface_resize_count: 0,
         preview_latency_ms: None,
@@ -829,7 +847,35 @@ pub fn apply_runtime_diagnostics_snapshot(
     stats: DiagnosticStats,
     snapshot: FfmpegWorkSnapshot,
 ) -> DiagnosticStats {
-    apply_runtime_resource_snapshot(apply_ffmpeg_work_snapshot(stats, snapshot))
+    apply_metal_retention_snapshot(apply_runtime_resource_snapshot(apply_ffmpeg_work_snapshot(
+        stats, snapshot,
+    )))
+}
+
+fn apply_metal_retention_snapshot(mut stats: DiagnosticStats) -> DiagnosticStats {
+    #[cfg(target_os = "macos")]
+    {
+        let retention = crate::metal_compositor::metal_retention_snapshot();
+        stats.compositor_metal_cached_capture_source_imports_live_count =
+            Some(retention.cached_capture_source_imports_live_count);
+        stats.compositor_metal_cached_capture_source_imports_peak_count =
+            Some(retention.cached_capture_source_imports_peak_count);
+        stats.compositor_metal_cached_capture_source_imports_ceiling =
+            Some(retention.cached_capture_source_imports_ceiling);
+        stats.compositor_metal_target_ring_slots_live_count =
+            Some(retention.target_ring_slots_live_count);
+        stats.compositor_metal_target_ring_slots_peak_count =
+            Some(retention.target_ring_slots_peak_count);
+        stats.compositor_metal_target_ring_slots_ceiling =
+            Some(retention.target_ring_slots_ceiling);
+        stats.encoder_bridge_metal_target_refs_in_flight_live_count =
+            Some(retention.encoder_in_flight_target_refs_live_count);
+        stats.encoder_bridge_metal_target_refs_in_flight_peak_count =
+            Some(retention.encoder_in_flight_target_refs_peak_count);
+        stats.encoder_bridge_metal_target_refs_in_flight_ceiling =
+            Some(retention.encoder_in_flight_target_refs_ceiling);
+    }
+    stats
 }
 
 pub fn apply_websocket_transport_stats(
@@ -1972,6 +2018,32 @@ pub fn apply_capture_health(
     stats
 }
 
+/// Mirrors the authoritative recovery coordinator into the broad diagnostics
+/// snapshot. Idle values are omitted, and an invalid duration is discarded at
+/// this boundary instead of becoming JSON `null` in a strict renderer schema.
+pub fn apply_capture_recovery_status(
+    mut stats: DiagnosticStats,
+    status: &CaptureRecoveryStatus,
+) -> DiagnosticStats {
+    if status.phase == CaptureRecoveryPhase::Idle {
+        stats.capture_recovery_phase = None;
+        stats.capture_recovery_source = None;
+        stats.capture_recovery_attempts = None;
+        stats.capture_recovery_last_error = None;
+        stats.capture_recovery_last_duration_ms = None;
+    } else {
+        stats.capture_recovery_phase = Some(status.phase);
+        stats.capture_recovery_source = status.source;
+        stats.capture_recovery_attempts = (status.attempts > 0).then_some(status.attempts);
+        stats.capture_recovery_last_error = status.last_error.clone();
+        stats.capture_recovery_last_duration_ms = status
+            .last_duration_ms
+            .filter(|duration| duration.is_finite() && *duration >= 0.0);
+    }
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
 /// Coverage at or below this fraction of real-time is treated as a mic capture gap.
 const AUDIO_COVERAGE_MIN: f64 = 0.9;
 
@@ -2583,6 +2655,11 @@ mod tests {
         assert_eq!(stats.compositor_screen_source_byte_upload_frames, 0);
         assert_eq!(stats.compositor_screen_source_import_failures, 0);
         assert_eq!(stats.compositor_source_import_p95_ms, None);
+        assert_eq!(stats.capture_recovery_phase, None);
+        assert_eq!(stats.capture_recovery_source, None);
+        assert_eq!(stats.capture_recovery_attempts, None);
+        assert_eq!(stats.capture_recovery_last_error, None);
+        assert_eq!(stats.capture_recovery_last_duration_ms, None);
         assert_eq!(stats.preview_compositor_frame_lag, None);
         assert!(!stats.preview_frame_polling_suppressed);
         assert!(!stats.preview_source_pixels_present);
@@ -2629,6 +2706,80 @@ mod tests {
         assert_eq!(stats.active_ffprobe_processes, 0);
         assert!(stats.duplicate_capture_sources.is_empty());
         assert!(stats.source_registry.entries.is_empty());
+    }
+
+    #[test]
+    fn capture_recovery_diagnostics_omit_idle_and_sanitize_non_finite_duration() {
+        let idle = CaptureRecoveryStatus {
+            revision: 1,
+            phase: CaptureRecoveryPhase::Idle,
+            retryable: false,
+            attempts: 0,
+            stage: None,
+            source: None,
+            trigger: None,
+            source_generation: None,
+            detected_at: None,
+            updated_at: None,
+            message: None,
+            last_error: None,
+            last_duration_ms: Some(f64::NAN),
+        };
+        let stats = apply_capture_recovery_status(idle_diagnostics(), &idle);
+        let wire = serde_json::to_value(stats).expect("idle recovery diagnostics serialize");
+        for field in [
+            "captureRecoveryPhase",
+            "captureRecoverySource",
+            "captureRecoveryAttempts",
+            "captureRecoveryLastError",
+            "captureRecoveryLastDurationMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "idle recovery field {field} must be omitted"
+            );
+        }
+
+        let failed = CaptureRecoveryStatus {
+            revision: 2,
+            phase: CaptureRecoveryPhase::Failed,
+            retryable: true,
+            attempts: 1,
+            stage: Some(crate::protocol::CaptureRecoveryStage::CameraDelivery),
+            source: Some(crate::protocol::CaptureRecoverySource::Camera),
+            trigger: Some(crate::protocol::CaptureRecoveryTrigger::Automatic),
+            source_generation: Some(8),
+            detected_at: Some("2026-08-28T10:00:00Z".to_string()),
+            updated_at: Some("2026-08-28T10:00:03Z".to_string()),
+            message: Some("Restart did not restore cadence.".to_string()),
+            last_error: Some("cadence remained below threshold".to_string()),
+            last_duration_ms: Some(f64::INFINITY),
+        };
+        let stats = apply_capture_recovery_status(idle_diagnostics(), &failed);
+        let wire = serde_json::to_value(stats).expect("failed recovery diagnostics serialize");
+        assert_eq!(wire["captureRecoveryPhase"], "failed");
+        assert_eq!(wire["captureRecoverySource"], "camera");
+        assert_eq!(wire["captureRecoveryAttempts"], 1);
+        assert_eq!(
+            wire["captureRecoveryLastError"],
+            "cadence remained below threshold"
+        );
+        assert!(
+            wire.get("captureRecoveryLastDurationMs").is_none(),
+            "non-finite recovery duration must be omitted, never serialized as null"
+        );
+
+        let failed_screen = CaptureRecoveryStatus {
+            stage: Some(crate::protocol::CaptureRecoveryStage::ScreenDelivery),
+            source: Some(crate::protocol::CaptureRecoverySource::Screen),
+            ..failed
+        };
+        let wire = serde_json::to_value(apply_capture_recovery_status(
+            idle_diagnostics(),
+            &failed_screen,
+        ))
+        .expect("screen recovery diagnostics serialize");
+        assert_eq!(wire["captureRecoverySource"], "screen");
     }
 
     #[test]

@@ -1,5 +1,7 @@
 import { createHash } from 'node:crypto'
 
+import { COMMENTS_HIGHLIGHT_TIMING_CONTRACT } from '../shared/comments-command-timing'
+
 // Chat avatar caching policy (Comments window upgrade S1). Renderers never
 // hot-link platform CDNs: main fetches each avatar once from an ALLOWLISTED
 // host, stores it under {userData}/avatar-cache, and serves it through the
@@ -28,10 +30,10 @@ export const AVATAR_CACHE_MAX_FILES = 200
  * avatar the web happily accepted. */
 export const AVATAR_MAX_BYTES = 2 * 1024 * 1024
 
-/** Avatar decoration is best-effort and must leave enough of Main's 15-second
- * Comments relay budget for rasterization and the authoritative backend
- * mutation. A stalled CDN therefore cannot keep a highlight command alive. */
-export const AVATAR_FETCH_TIMEOUT_MS = 4_000
+/** Avatar decoration is best-effort and owns only its explicit slice of the
+ * end-to-end highlight relay budget. A stalled CDN therefore cannot consume
+ * the authoritative backend mutation window. */
+export const AVATAR_FETCH_TIMEOUT_MS = COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs
 
 export class AvatarFetchTimeoutError extends Error {
   constructor(timeoutMs: number) {
@@ -47,7 +49,7 @@ export class AvatarFetchTimeoutError extends Error {
  */
 export async function withAvatarFetchDeadline<T>(
   operation: (signal: AbortSignal) => Promise<T>,
-  timeoutMs = AVATAR_FETCH_TIMEOUT_MS
+  timeoutMs: number = AVATAR_FETCH_TIMEOUT_MS
 ): Promise<T> {
   const controller = new AbortController()
   let timeout: ReturnType<typeof setTimeout> | undefined

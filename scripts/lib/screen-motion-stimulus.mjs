@@ -1045,6 +1045,13 @@ export async function stopScreenMotionStimulus(stimulus, options = {}) {
   return await stopStimulusBrowserTree(stimulus, options)
 }
 
+export function screenMotionStimulusTeardownFailures(result) {
+  if (result?.treeExited === true) return []
+  return [
+    `screen motion stimulus process tree did not exit (state ${result?.state ?? 'unavailable'}, pid ${result?.pid ?? 'unavailable'})`
+  ]
+}
+
 /**
  * Stop an exact stimulus browser tree and return auditable teardown proof.
  *

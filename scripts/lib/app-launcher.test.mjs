@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { mkdtempSync, mkdirSync, realpathSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { resolve } from 'node:path'
 
@@ -11,10 +11,15 @@ import {
   devAppSpawnOptions,
   devAppSpawnSpec,
   launchDevApp,
+  macosAppBundlePath,
+  macosLaunchServicesAppSpawnSpec,
   performanceAppSpawnSpec,
+  readMacosLaunchServicesAppOwnership,
+  resolveMacosLaunchServicesAppPid,
   resolveSmokeAppDirs,
   smokeAppEnv,
   stopProcess,
+  terminateMacosLaunchServicesOwnedProcess,
   windowsAcceptanceProfileDir
 } from './app-launcher.mjs'
 import {
@@ -34,8 +39,209 @@ const SMOKE_ENV_KEYS = [
   'VIDEORC_WINDOWS_ACCEPTANCE_PROFILE_DIR',
   'VIDEORC_WINDOWS_ACCEPTANCE_REQUIRE_INSTALLED',
   'VIDEORC_DISABLE_BACKEND_REAP',
-  'VIDEORC_SMOKE_PRINT_BACKEND_READY'
+  'VIDEORC_SMOKE_PRINT_BACKEND_READY',
+  'VIDEORC_SMOKE_APP_OWNERSHIP_PATH',
+  'VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN'
 ]
+
+test('macOS real-source launch uses the exact app bundle through LaunchServices', () => {
+  const executable = '/private/tmp/Videorc.app/Contents/MacOS/Videorc'
+  const appOwnership = {
+    path: '/private/tmp/launch.app-ownership.json',
+    token: 'o'.repeat(43)
+  }
+  const spec = macosLaunchServicesAppSpawnSpec({
+    command: executable,
+    env: {
+      HOME: '/Users/probe',
+      PATH: '/usr/bin:/bin',
+      VIDEORC_APP_DATA_DIR: '/private/tmp/state/app-data',
+      VIDEORC_PACKAGED_SMOKE_TEST: '1',
+      VIDEORC_SMOKE_COMMAND_CAPABILITY: 'capability'
+    },
+    requestedEnv: {
+      VIDEORC_PACKAGED_SMOKE_TEST: '1',
+      VIDEORC_SMOKE_COMMAND_CAPABILITY: 'capability'
+    },
+    outputPaths: {
+      stdout: '/private/tmp/launch.stdout.log',
+      stderr: '/private/tmp/launch.stderr.log'
+    },
+    appOwnership,
+    platform: 'darwin'
+  })
+
+  assert.equal(macosAppBundlePath(executable), '/private/tmp/Videorc.app')
+  assert.equal(spec.command, '/usr/bin/open')
+  assert.deepEqual(spec.args.slice(0, 8), [
+    '-n',
+    '-W',
+    '-a',
+    '/private/tmp/Videorc.app',
+    '-o',
+    '/private/tmp/launch.stdout.log',
+    '--stderr',
+    '/private/tmp/launch.stderr.log'
+  ])
+  assert.ok(spec.args.includes('VIDEORC_APP_DATA_DIR=/private/tmp/state/app-data'))
+  assert.ok(spec.args.includes('VIDEORC_PACKAGED_SMOKE_TEST=1'))
+  assert.ok(spec.args.includes('VIDEORC_SMOKE_COMMAND_CAPABILITY=capability'))
+  assert.ok(spec.args.includes(`VIDEORC_SMOKE_APP_OWNERSHIP_PATH=${appOwnership.path}`))
+  assert.ok(spec.args.includes(`VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN=${appOwnership.token}`))
+  assert.equal(
+    spec.args.some((arg) => arg.startsWith('HOME=')),
+    false
+  )
+  assert.deepEqual(spec.options.env, { HOME: '/Users/probe', PATH: '/usr/bin:/bin' })
+  assert.deepEqual(spec.handshakeOutputPaths, [
+    '/private/tmp/launch.stdout.log',
+    '/private/tmp/launch.stderr.log'
+  ])
+  assert.deepEqual(spec.appOwnership, {
+    ...appOwnership,
+    expectedExecutablePath: executable,
+    expectedBundlePath: '/private/tmp/Videorc.app'
+  })
+})
+
+test('macOS LaunchServices cleanup resolves authenticated ownership without a requested marker', async () => {
+  const root = mkdtempSync(resolve(tmpdir(), 'videorc-launch-ownership-test-'))
+  const path = resolve(root, 'app-ownership.json')
+  const token = 't'.repeat(43)
+  const unresolvedBundlePath = resolve(root, 'Videorc.app')
+  const unresolvedExecutablePath = resolve(unresolvedBundlePath, 'Contents/MacOS/Videorc')
+  mkdirSync(resolve(unresolvedBundlePath, 'Contents/MacOS'), { recursive: true })
+  writeFileSync(unresolvedExecutablePath, '')
+  const bundlePath = realpathSync(unresolvedBundlePath)
+  const executablePath = realpathSync(unresolvedExecutablePath)
+  const processIdentity = {
+    startTime: 'Sat Aug 29 02:34:55 2026',
+    executablePath,
+    bundlePath
+  }
+  const publication = {
+    schemaVersion: 1,
+    appPid: 4242,
+    executablePath: processIdentity.executablePath,
+    bundlePath: processIdentity.bundlePath,
+    token
+  }
+  writeFileSync(path, JSON.stringify(publication), { mode: 0o600 })
+  const appOwnership = {
+    path,
+    token,
+    expectedExecutablePath: processIdentity.executablePath,
+    expectedBundlePath: processIdentity.bundlePath
+  }
+
+  assert.deepEqual(readMacosLaunchServicesAppOwnership(appOwnership), publication)
+  assert.equal(
+    await resolveMacosLaunchServicesAppPid({
+      appOwnership,
+      previewMarker: undefined,
+      controller: fakeChild(31337),
+      identityProbe: () => processIdentity
+    }),
+    4242
+  )
+  assert.deepEqual(appOwnership.processIdentity, processIdentity)
+  assert.throws(
+    () => readMacosLaunchServicesAppOwnership({ path, token: 'x'.repeat(43) }),
+    /authentication token did not match/
+  )
+})
+
+test('macOS LaunchServices cleanup signals only a matching captured process identity', async () => {
+  const identity = launchServicesProcessIdentity()
+  const signals = []
+  const probes = [identity, null]
+
+  const result = await terminateMacosLaunchServicesOwnedProcess({
+    pid: 4242,
+    processIdentity: identity,
+    identityProbe: () => probes.shift(),
+    signalProcess: (pid, signal) => signals.push({ pid, signal })
+  })
+
+  assert.deepEqual(result, { pid: 4242, state: 'terminated', signaled: true })
+  assert.deepEqual(signals, [{ pid: 4242, signal: 'SIGTERM' }])
+  assert.equal(probes.length, 0)
+})
+
+test('macOS LaunchServices cleanup treats a reused PID as exited without signaling it', async () => {
+  const identity = launchServicesProcessIdentity()
+  const signals = []
+
+  const result = await terminateMacosLaunchServicesOwnedProcess({
+    pid: 4242,
+    processIdentity: identity,
+    identityProbe: () => ({
+      startTime: 'Sat Aug 29 02:35:01 2026',
+      executablePath: '/usr/bin/unrelated',
+      bundlePath: null
+    }),
+    signalProcess: (pid, signal) => signals.push({ pid, signal })
+  })
+
+  assert.deepEqual(result, { pid: 4242, state: 'already-exited', signaled: false })
+  assert.deepEqual(signals, [])
+})
+
+test('macOS LaunchServices cleanup stops waiting when identity changes after SIGTERM', async () => {
+  const identity = launchServicesProcessIdentity()
+  const replacement = {
+    ...identity,
+    executablePath: '/Applications/Unrelated.app/Contents/MacOS/Unrelated',
+    bundlePath: '/Applications/Unrelated.app'
+  }
+  const probes = [identity, identity, replacement]
+  const signals = []
+  let now = 0
+
+  const result = await terminateMacosLaunchServicesOwnedProcess({
+    pid: 4242,
+    processIdentity: identity,
+    identityProbe: () => probes.shift(),
+    signalProcess: (pid, signal) => signals.push({ pid, signal }),
+    sleep: async () => {
+      now += 1
+    },
+    now: () => now,
+    timeoutMs: 10
+  })
+
+  assert.deepEqual(result, { pid: 4242, state: 'terminated', signaled: true })
+  assert.deepEqual(signals, [{ pid: 4242, signal: 'SIGTERM' }])
+  assert.equal(probes.length, 0)
+})
+
+test('macOS LaunchServices cleanup fails closed when identity cannot be probed', async () => {
+  const signals = []
+
+  await assert.rejects(
+    terminateMacosLaunchServicesOwnedProcess({
+      pid: 4242,
+      processIdentity: launchServicesProcessIdentity(),
+      identityProbe: () => {
+        throw new Error('process inspection denied')
+      },
+      signalProcess: (pid, signal) => signals.push({ pid, signal })
+    }),
+    /process inspection denied/
+  )
+  assert.deepEqual(signals, [])
+})
+
+test('macOS LaunchServices launch rejects a direct non-bundle executable', () => {
+  assert.throws(
+    () =>
+      macosLaunchServicesAppSpawnSpec({
+        command: '/usr/local/bin/Videorc',
+        platform: 'darwin'
+      }),
+    /inside a \.app bundle/
+  )
+})
 
 test('resolveSmokeAppDirs derives isolated dirs from an explicit smoke state dir', () => {
   withCleanSmokeEnv(() => {
@@ -77,6 +283,8 @@ test('smokeAppEnv never inherits state paths from the parent shell', () => {
     process.env.VIDEORC_SECRETS_PATH = '/real/profile/videorc-secrets.json'
     process.env.VIDEORC_RECORDINGS_DIR = '/real/profile/recordings'
     process.env.VIDEORC_SMOKE_OUTPUT_DIR = '/old/smoke-output'
+    process.env.VIDEORC_SMOKE_APP_OWNERSHIP_PATH = '/old/app-ownership.json'
+    process.env.VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN = 'old-ownership-token'
 
     const stateDir = '/tmp/videorc-current-smoke'
     const env = smokeAppEnv({ VIDEORC_SMOKE_STATE_DIR: stateDir })
@@ -87,6 +295,8 @@ test('smokeAppEnv never inherits state paths from the parent shell', () => {
     assert.equal(env.VIDEORC_SECRETS_PATH, resolve(stateDir, 'app-data/videorc-secrets.json'))
     assert.equal(env.VIDEORC_RECORDINGS_DIR, resolve(stateDir, 'app-data/recordings'))
     assert.equal(env.VIDEORC_SMOKE_OUTPUT_DIR, undefined)
+    assert.equal(env.VIDEORC_SMOKE_APP_OWNERSHIP_PATH, undefined)
+    assert.equal(env.VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN, undefined)
   })
 })
 
@@ -587,6 +797,14 @@ test('stopProcess reports leaked children when SIGKILL cannot finish teardown', 
 
 function fakeChild(pid) {
   return { pid, exitCode: null, signalCode: null }
+}
+
+function launchServicesProcessIdentity() {
+  return {
+    startTime: 'Sat Aug 29 02:34:55 2026',
+    executablePath: '/private/tmp/Videorc.app/Contents/MacOS/Videorc',
+    bundlePath: '/private/tmp/Videorc.app'
+  }
 }
 
 function exactProcessGroupExists(pid) {

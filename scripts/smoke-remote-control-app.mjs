@@ -77,6 +77,17 @@ function waitForRemoteEvent(ws, event, predicate = () => true) {
   })
 }
 
+async function waitForBackendState(connection, method, predicate, label) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    last = await request(connection, timeoutMs, method)
+    if (predicate(last)) return last
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 100))
+  }
+  fail(`timed out waiting for ${label}; last ${method}: ${JSON.stringify(last)}`)
+}
+
 let stopApp = async () => {}
 try {
   const launch = await launchDevApp({
@@ -87,7 +98,7 @@ try {
     timeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: (line) => {
-      if (process.env.VIDEORC_REMOTE_SMOKE_DEBUG === '1' && /DEBUG-/.test(line)) {
+      if (process.env.VIDEORC_REMOTE_SMOKE_DEBUG === '1') {
         console.log('[app]', line)
       }
     }
@@ -144,14 +155,18 @@ try {
     renderer.addEventListener('message', (raw) => {
       const message = JSON.parse(String(raw.data ?? raw))
       if (message.event?.startsWith('remote.')) {
-        console.log('[DEBUG-rc] renderer saw event:', message.event, JSON.stringify(message.payload).slice(0, 120))
+        console.log(
+          '[DEBUG-rc] renderer saw event:',
+          message.event,
+          JSON.stringify(message.payload).slice(0, 120)
+        )
       }
     })
     remote.on('message', (raw) => {
       console.log('[DEBUG-rc] remote saw:', String(raw).slice(0, 160))
     })
   }
-  const micAckPromise = waitForRemoteEvent(remote, 'remote.ack', (ack) => ack?.ok === true)
+  const micAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const micStatePromise = waitForRemoteEvent(
     remote,
     'remote.state',
@@ -159,11 +174,27 @@ try {
   )
   const micTicket = await remoteRequest(remote, 'remote.intent', { kind: 'micToggle' })
   if (!micTicket.payload?.accepted) fail('micToggle intent was not accepted')
-  await micAckPromise
+  const micAck = await micAckPromise
+  if (micAck?.intentId !== micTicket.payload.intentId || micAck?.ok !== true) {
+    fail(`micToggle was not acknowledged successfully: ${JSON.stringify(micAck)}`)
+  }
   await micStatePromise
   console.log('remote-control smoke: micToggle ack + confirmed state OK')
 
-  const sceneAckPromise = waitForRemoteEvent(remote, 'remote.ack', (ack) => ack?.ok === true)
+  // `remote.describe` becomes available before the initial preview sources have
+  // necessarily delivered a frame. A scene switch during that startup window
+  // is correctly NACKed; wait for the source required by the target layout so
+  // this step proves the steady-state scene round trip rather than a startup
+  // race.
+  await waitForBackendState(
+    renderer,
+    'preview.screen.status',
+    (screen) =>
+      screen?.state === 'live' && ((screen.framesCaptured ?? 0) > 0 || screen.sequence != null),
+    'initial screen preview readiness'
+  )
+
+  const sceneAckPromise = waitForRemoteEvent(remote, 'remote.ack')
   const sceneStatePromise = waitForRemoteEvent(
     remote,
     'remote.state',
@@ -184,7 +215,10 @@ try {
   if (bounced.payload?.accepted !== false) fail('immediate same-kind intent was not debounced')
   console.log('remote-control smoke: debounce OK')
 
-  await sceneAckPromise
+  const sceneAck = await sceneAckPromise
+  if (sceneAck?.intentId !== sceneTicket.payload.intentId || sceneAck?.ok !== true) {
+    fail(`sceneApply was not acknowledged successfully: ${JSON.stringify(sceneAck)}`)
+  }
   await sceneStatePromise
   console.log('remote-control smoke: sceneApply ack + confirmed state OK')
 

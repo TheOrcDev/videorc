@@ -85,6 +85,14 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:dev']
       },
       {
+        // Exercise the real Electron before-quit -> authenticated backend
+        // shutdown path while terminal MP4 publication remains blocked beyond
+        // the historical 30s process-kill boundary.
+        label: 'app quit during recording finalization smoke',
+        command: 'pnpm',
+        args: ['smoke:app-quit-recording']
+      },
+      {
         label: 'imported screen image recording smoke',
         command: 'pnpm',
         args: ['smoke:screens']
@@ -112,6 +120,11 @@ export function buildRecordingStudioGateSteps({
         label: 'comment highlight stream artifact smoke',
         command: 'pnpm',
         args: ['smoke:comment-highlight-stream']
+      },
+      {
+        label: 'detached Comments command relay probe',
+        command: 'pnpm',
+        args: ['probe:comments-window']
       },
       {
         label: 'backend-owned preview scene commit smoke',

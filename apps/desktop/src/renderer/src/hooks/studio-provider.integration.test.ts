@@ -22,6 +22,7 @@ import type {
   CommentHighlightCommand,
   CommentHighlightState,
   CompositorStatus,
+  CaptureRecoveryStatus,
   CommentsCommandResolution,
   CommentsSendCommand,
   CommentsSendOperation,
@@ -59,6 +60,7 @@ import {
   useStudioAudio,
   useStudioChat,
   useStudioCore,
+  useStudioDiagnostics,
   useStudioRecording,
   type StudioCoreContextValue,
   type StudioRecordingContextValue
@@ -328,6 +330,9 @@ class StudioBackend {
   noiseCleanupJobs: NoiseCleanupJob[] = []
   sourceMutationRevision = 4
   layoutResponseDelayMs = 0
+  layoutApplyFailure: 'definite' | 'request-outcome-unknown-after-commit' | null = null
+  screenActivateFailure: 'definite' | null = null
+  screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
   sessionStartError: string | null = null
   emitRecordingStatusBeforeStartResponse = false
@@ -395,6 +400,12 @@ class StudioBackend {
   commentHighlightClearOutcomeUnknownRemaining = 0
   liveChatSendOperations: CommentsSendOperation[] = []
   liveChatSendFailure: { code: string; message: string } | null = null
+  captureRecoveryStatus: CaptureRecoveryStatus = {
+    revision: 0,
+    phase: 'idle',
+    retryable: false,
+    attempts: 0
+  }
 
   deferResponse(
     method: string,
@@ -588,6 +599,19 @@ class StudioBackend {
           skippedFrames: 0,
           updatedAt: now
         }
+      case 'capture.recovery.status':
+        return this.captureRecoveryStatus
+      case 'capture.recovery.retry':
+        this.captureRecoveryStatus = {
+          ...this.captureRecoveryStatus,
+          revision: this.captureRecoveryStatus.revision + 1,
+          phase: 'restarting',
+          retryable: false,
+          trigger: 'manual',
+          attempts: this.captureRecoveryStatus.attempts + 1,
+          updatedAt: now
+        }
+        return this.captureRecoveryStatus
       case 'captions.status.get':
         return { state: 'idle' }
       case 'liveChat.status':
@@ -688,9 +712,32 @@ class StudioBackend {
         }
       case 'scene.layout.apply_preview':
       case 'scene.layout.apply_live': {
+        if (this.layoutApplyFailure === 'definite') {
+          throw Object.assign(new Error('The test backend rejected the layout change.'), {
+            code: 'layout-preview-failed'
+          })
+        }
         this.currentLayout = params.layout as LayoutSettings
         this.currentScene = sceneForLayout(this.currentLayout)
         this.revision += 1
+        if (this.layoutApplyFailure === 'request-outcome-unknown-after-commit') {
+          const video = params.video as { width: number; height: number; fps: number }
+          this.currentScene = {
+            ...this.currentScene,
+            outputs: [
+              {
+                id: 'recording',
+                kind: 'recording',
+                width: video.width,
+                height: video.height,
+                fps: video.fps
+              }
+            ]
+          }
+          throw Object.assign(new Error('The committed layout response was not observed.'), {
+            code: 'request-outcome-unknown'
+          })
+        }
         return {
           applied: true,
           mode: command.method.endsWith('live') ? 'hot' : 'idle',
@@ -718,12 +765,22 @@ class StudioBackend {
       case 'screens.active':
         return this.activeScreen
       case 'screens.activate': {
+        if (this.screenActivateFailure === 'definite') {
+          throw Object.assign(new Error('The test backend rejected takeover activation.'), {
+            code: 'screen-activate-failed'
+          })
+        }
         const screen = this.screens.find((candidate) => candidate.id === params.screenId)
         if (!screen) throw new Error('Screen not found.')
         this.activeScreen = screen
         return screen
       }
       case 'screens.clear':
+        if (this.screenClearFailure === 'request-outcome-unknown-before-commit') {
+          throw Object.assign(new Error('The takeover clear result was not observed.'), {
+            code: 'request-outcome-unknown'
+          })
+        }
         this.activeScreen = null
         return null
       case 'streamTargets.metadata.get':
@@ -999,6 +1056,7 @@ type StudioObservation = {
   audio: ReturnType<typeof useStudioAudio>
   chat: ReturnType<typeof useStudioChat>
   core: StudioCoreContextValue
+  diagnostics: ReturnType<typeof useStudioDiagnostics>
   recording: StudioRecordingContextValue
 }
 
@@ -1014,10 +1072,11 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
   const audio = useStudioAudio()
   const chat = useStudioChat()
   const core = useStudioCore()
+  const diagnostics = useStudioDiagnostics()
   const recording = useStudioRecording()
   useEffect(
-    () => observe({ audio, chat, core, recording }),
-    [audio, chat, core, observe, recording]
+    () => observe({ audio, chat, core, diagnostics, recording }),
+    [audio, chat, core, diagnostics, observe, recording]
   )
   return null
 }
@@ -1054,6 +1113,149 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+  })
+
+  it('rehydrates failed recovery, single-flights retry, and rejects its stale response', async () => {
+    const backend = new StudioBackend()
+    backend.captureRecoveryStatus = {
+      revision: 4,
+      phase: 'failed',
+      retryable: true,
+      attempts: 1,
+      stage: 'camera-delivery',
+      source: 'camera',
+      trigger: 'automatic',
+      sourceGeneration: 7,
+      lastError: 'Camera cadence stayed below the recovery floor.',
+      updatedAt: now
+    }
+    const restarting: CaptureRecoveryStatus = {
+      ...backend.captureRecoveryStatus,
+      revision: 5,
+      phase: 'restarting',
+      retryable: false,
+      trigger: 'manual',
+      attempts: 2
+    }
+    const releaseRetry = backend.deferResponse('capture.recovery.retry', restarting)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(() => latest()?.diagnostics.captureRecoveryStatus.phase === 'failed')
+    expect(latest()?.diagnostics.captureRecoveryStatus.lastError).toContain('recovery floor')
+
+    let firstRetry!: Promise<void>
+    let duplicateRetry!: Promise<void>
+    act(() => {
+      firstRetry = latest()!.diagnostics.retryCaptureRecovery()
+      duplicateRetry = latest()!.diagnostics.retryCaptureRecovery()
+    })
+    await waitForObservation(() => latest()?.diagnostics.captureRecoveryRetryPending === true)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'capture.recovery.retry')
+    ).toHaveLength(1)
+
+    const verifying: CaptureRecoveryStatus = {
+      ...restarting,
+      revision: 6,
+      phase: 'verifying',
+      message: 'Camera restarted; verifying cadence.'
+    }
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'capture.recovery.status', payload: verifying })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () => latest()?.diagnostics.captureRecoveryStatus.phase === 'verifying'
+    )
+
+    releaseRetry()
+    await act(async () => Promise.all([firstRetry, duplicateRetry]))
+    expect(latest()?.diagnostics.captureRecoveryStatus).toMatchObject({
+      revision: 6,
+      phase: 'verifying'
+    })
+    expect(latest()?.diagnostics.captureRecoveryRetryPending).toBe(false)
+  })
+
+  it('resets capture recovery revision ordering for a new backend connection', async () => {
+    const initialBackend = new StudioBackend()
+    initialBackend.captureRecoveryStatus = {
+      revision: 12,
+      phase: 'recovered',
+      retryable: false,
+      attempts: 1,
+      stage: 'camera-delivery',
+      source: 'camera',
+      trigger: 'automatic',
+      sourceGeneration: 8,
+      updatedAt: now
+    }
+    TestWebSocket.backend = initialBackend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emit: ((name: string, value: unknown) => void) | undefined
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => [],
+        registerEmitter: (nextEmit) => {
+          emit = nextEmit
+        }
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(() => latest()?.diagnostics.captureRecoveryStatus.revision === 12)
+
+    const reconnectedBackend = new StudioBackend()
+    reconnectedBackend.captureRecoveryStatus = {
+      revision: 1,
+      phase: 'degraded',
+      retryable: false,
+      attempts: 0,
+      stage: 'camera-delivery',
+      source: 'camera',
+      trigger: 'automatic',
+      sourceGeneration: 2,
+      updatedAt: now
+    }
+    TestWebSocket.backend = reconnectedBackend
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9992,
+        token: 'capture-recovery-new-generation'
+      })
+      await Promise.resolve()
+    })
+
+    await waitForObservation(() => latest()?.diagnostics.captureRecoveryStatus.phase === 'degraded')
+    expect(latest()?.diagnostics.captureRecoveryStatus.revision).toBe(1)
   })
 
   it('reconciles an outcome-unknown local comment highlight toggle', async () => {
@@ -1158,6 +1360,76 @@ describe('real StudioProvider lifecycle', () => {
       }
     ])
     expect(latest()?.core.commentHighlightFailure).toBeNull()
+  })
+
+  it('rejects a detached highlight request superseded by a newer command', async () => {
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: highlightMessage.sessionId,
+      providers: [],
+      messages: [highlightMessage],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    backend.commentHighlightState = liveHighlightState
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const resolutions: CommentsCommandResolution<CommentHighlightState>[] = []
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      },
+      pushCommentHighlightResult: async (resolution) => {
+        resolutions.push(resolution)
+        return true
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.highlightedCommentId === highlightMessage.id
+    )
+
+    const first: CommentHighlightCommand = {
+      requestId: 'highlight-request-superseded',
+      sessionId: highlightMessage.sessionId,
+      messageId: highlightMessage.id
+    }
+    const second: CommentHighlightCommand = {
+      requestId: 'highlight-request-current',
+      sessionId: highlightMessage.sessionId,
+      messageId: highlightMessage.id
+    }
+    await act(async () => {
+      emitIpc?.('onCommentHighlightRequest', first)
+      emitIpc?.('onCommentHighlightRequest', second)
+    })
+
+    await waitForObservation(() => resolutions.length === 2)
+    expect(resolutions.find(({ requestId }) => requestId === first.requestId)).toEqual({
+      requestId: first.requestId,
+      ok: false,
+      error: 'A newer comment highlight replaced this request.'
+    })
+    expect(resolutions.find(({ requestId }) => requestId === second.requestId)).toEqual({
+      requestId: second.requestId,
+      ok: true,
+      value: { generation: 3, phase: 'idle' }
+    })
   })
 
   it('keeps an explicit chat-send operation-id collision as a failure', async () => {
@@ -3459,6 +3731,611 @@ describe('real StudioProvider lifecycle', () => {
     // The renderer must ack the executed intent so deck keys learn the result.
     const ack = backend.sentCommands.find((command) => command.method === 'remote.intent.ack')
     expect(ack?.params).toMatchObject({ intentId: 'ri-test-1', ok: true })
+
+    backend.layoutResponseDelayMs = 100
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-scene',
+              intent: { kind: 'sceneApply', layoutPreset: 'screen-only' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'scene.layout.apply_preview')
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene'
+      )
+    ).toBeUndefined()
+
+    await waitForObservation(
+      () => latest()?.core.captureConfig.layout.layoutPreset === 'screen-only'
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene'
+      )?.params
+    ).toMatchObject({ intentId: 'ri-test-scene', ok: true })
+  })
+
+  it('serializes a delayed remote start followed by stop so the final stop wins', async () => {
+    const backend = new StudioBackend()
+    const releaseStart = backend.deferResponse('session.start', {
+      state: 'recording',
+      sessionId: 'session-1',
+      startedAt: now,
+      message: 'Recording.'
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-delayed-start', intent: { kind: 'recordStart' } }
+          })
+        })
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-following-stop', intent: { kind: 'recordStop' } }
+          })
+        })
+      }
+      await Promise.resolve()
+    })
+
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.start')
+    )
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+    ).toHaveLength(1)
+    expect(backend.sentCommands.some((command) => command.method === 'session.stop')).toBe(false)
+
+    await act(async () => {
+      releaseStart()
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    const lifecycleMethods = backend.sentCommands
+      .filter((command) => command.method === 'session.start' || command.method === 'session.stop')
+      .map((command) => command.method)
+    expect(lifecycleMethods).toEqual(['session.start', 'session.stop'])
+    expect(
+      backend.sentCommands
+        .filter((command) => command.method === 'remote.intent.ack')
+        .map((command) => command.params)
+    ).toEqual(
+      expect.arrayContaining([
+        { intentId: 'ri-delayed-start', ok: true },
+        { intentId: 'ri-following-stop', ok: true }
+      ])
+    )
+  })
+
+  it('waits for active-session microphone truth before ACK and remote projection', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({ event: 'backend.ready', payload: null })
+        })
+      }
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.surface.publish' &&
+          (command.params as { state?: { micMuted?: boolean } }).state?.micMuted === false
+      )
+    )
+
+    const commandStart = backend.sentCommands.length
+    const releaseAudioUpdate = backend.deferResponse('audio.processing.update', {
+      applied: true,
+      sessionId: 'session-1',
+      microphoneGainDb: 0,
+      microphoneMuted: true
+    })
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-test-mic-active', intent: { kind: 'micToggle' } }
+          })
+        })
+      }
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.audio.microphoneMuted === true &&
+        backend.sentCommands
+          .slice(commandStart)
+          .some((command) => command.method === 'audio.processing.update')
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40))
+    })
+
+    expect(
+      backend.sentCommands
+        .slice(commandStart)
+        .find(
+          (command) =>
+            command.method === 'remote.intent.ack' &&
+            (command.params as { intentId?: string }).intentId === 'ri-test-mic-active'
+        )
+    ).toBeUndefined()
+    expect(
+      backend.sentCommands
+        .slice(commandStart)
+        .filter((command) => command.method === 'remote.surface.publish')
+        .every(
+          (command) =>
+            (command.params as { state?: { micMuted?: boolean } }).state?.micMuted === false
+        )
+    ).toBe(true)
+
+    releaseAudioUpdate()
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-active'
+      )
+    )
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.surface.publish' &&
+          (command.params as { state?: { micMuted?: boolean } }).state?.micMuted === true
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-active'
+      )?.params
+    ).toEqual({ intentId: 'ri-test-mic-active', ok: true })
+
+    const reconciliationStart = backend.sentCommands.length
+    const releaseReconciliation = backend.deferResponse('audio.processing.update', {
+      applied: false,
+      sessionId: 'session-1',
+      microphoneGainDb: 0,
+      microphoneMuted: false,
+      reasonCode: 'live-audio-control-unavailable',
+      confirmedMicrophoneGainDb: 0,
+      confirmedMicrophoneMuted: false
+    })
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-test-mic-reconciled', intent: { kind: 'micUnmute' } }
+          })
+        })
+      }
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.audio.microphoneMuted === false &&
+        backend.sentCommands
+          .slice(reconciliationStart)
+          .some((command) => command.method === 'audio.processing.update')
+    )
+    expect(
+      backend.sentCommands
+        .slice(reconciliationStart)
+        .find(
+          (command) =>
+            command.method === 'remote.intent.ack' &&
+            (command.params as { intentId?: string }).intentId === 'ri-test-mic-reconciled'
+        )
+    ).toBeUndefined()
+
+    releaseReconciliation()
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-reconciled'
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-reconciled'
+      )?.params
+    ).toEqual({ intentId: 'ri-test-mic-reconciled', ok: true })
+  })
+
+  it('NACKs an active remote microphone rejection and projects confirmed rollback truth', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({ event: 'backend.ready', payload: null })
+        })
+      }
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+
+    const commandStart = backend.sentCommands.length
+    const releaseAudioUpdate = backend.deferResponse('audio.processing.update', {
+      applied: false,
+      sessionId: 'session-1',
+      microphoneGainDb: 0,
+      microphoneMuted: true,
+      reasonCode: 'live-audio-control-unavailable',
+      confirmedMicrophoneGainDb: 0,
+      confirmedMicrophoneMuted: false
+    })
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-test-mic-rejected', intent: { kind: 'micMute' } }
+          })
+        })
+      }
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.audio.microphoneMuted === true &&
+        backend.sentCommands
+          .slice(commandStart)
+          .some((command) => command.method === 'audio.processing.update')
+    )
+    expect(
+      backend.sentCommands
+        .slice(commandStart)
+        .find(
+          (command) =>
+            command.method === 'remote.intent.ack' &&
+            (command.params as { intentId?: string }).intentId === 'ri-test-mic-rejected'
+        )
+    ).toBeUndefined()
+
+    releaseAudioUpdate()
+    await waitForObservation(() => latest()?.core.captureConfig.audio.microphoneMuted === false)
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-rejected'
+      )
+    )
+
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-rejected'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-mic-rejected',
+      ok: false,
+      message: 'The microphone change was not applied.'
+    })
+    expect(
+      backend.sentCommands
+        .slice(commandStart)
+        .filter((command) => command.method === 'remote.surface.publish')
+        .some(
+          (command) =>
+            (command.params as { state?: { micMuted?: boolean } }).state?.micMuted === true
+        )
+    ).toBe(false)
+  })
+
+  it('keeps the layout unchanged and acks false when a remote scene is rejected', async () => {
+    const backend = new StudioBackend()
+    backend.layoutApplyFailure = 'definite'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    const layoutBefore = latest()?.core.captureConfig.layout
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-scene-rejected',
+              intent: { kind: 'sceneApply', layoutPreset: 'screen-only' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-rejected'
+      )
+    )
+
+    expect(latest()?.core.captureConfig.layout).toEqual(layoutBefore)
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-rejected'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-scene-rejected',
+      ok: false,
+      message: 'The layout change was not committed.'
+    })
+  })
+
+  it('reconciles an outcome-unknown remote scene commit and acks true', async () => {
+    const backend = new StudioBackend()
+    backend.layoutApplyFailure = 'request-outcome-unknown-after-commit'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-scene-outcome-unknown',
+              intent: { kind: 'sceneApply', layoutPreset: 'side-by-side' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-outcome-unknown'
+      )
+    )
+
+    expect(latest()?.core.captureConfig.layout.layoutPreset).toBe('side-by-side')
+    expect(latest()?.core.lastError).toBeNull()
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-outcome-unknown'
+      )?.params
+    ).toEqual({ intentId: 'ri-test-scene-outcome-unknown', ok: true })
+  })
+
+  it('acks false for definite takeover failure and outcome-unknown clear mismatch', async () => {
+    const backend = new StudioBackend()
+    backend.screens = [takeoverScreen]
+    backend.screenActivateFailure = 'definite'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-takeover-definite-failure',
+              intent: { kind: 'takeoverShow', assetId: takeoverScreen.id }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-takeover-definite-failure'
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-takeover-definite-failure'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-takeover-definite-failure',
+      ok: false,
+      message: 'The takeover was not activated.'
+    })
+    expect(backend.activeScreen).toBeNull()
+
+    backend.screenActivateFailure = null
+    backend.screenClearFailure = 'request-outcome-unknown-before-commit'
+    backend.activeScreen = takeoverScreen
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'screens.active.changed',
+            payload: takeoverScreen
+          })
+        })
+      }
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.core.activeScreen?.id === takeoverScreen.id)
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-takeover-clear-outcome-unknown',
+              intent: { kind: 'takeoverHide' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId ===
+            'ri-test-takeover-clear-outcome-unknown'
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId ===
+            'ri-test-takeover-clear-outcome-unknown'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-takeover-clear-outcome-unknown',
+      ok: false,
+      message: 'The takeover was not cleared.'
+    })
+    expect(backend.activeScreen?.id).toBe(takeoverScreen.id)
   })
 
   it('never revokes persisted cloud-AI consent when readiness is not ready', async () => {
@@ -4558,7 +5435,7 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
     )
 
-    let startPromise: Promise<void> | undefined
+    let startPromise: Promise<boolean> | undefined
     await act(async () => {
       startPromise = latest()?.core.startSession()
       await Promise.resolve()

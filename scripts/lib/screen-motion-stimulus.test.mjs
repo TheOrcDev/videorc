@@ -7,6 +7,7 @@ import {
   macApplicationNameFromPath,
   resolveWindowsStimulusBrowser,
   stopScreenMotionStimulus,
+  screenMotionStimulusTeardownFailures,
   stimulusTemporalVisibilityFromRgb,
   stimulusVisibilityFromBgraBmp,
   stimulusVisibilityFromRgb,
@@ -412,6 +413,14 @@ describe('stopScreenMotionStimulus', () => {
     assert.equal(result.forced, true)
     assert.equal(result.treeExited, false)
     assert.equal(result.livenessScope, 'posix-process-group')
+    assert.deepEqual(screenMotionStimulusTeardownFailures(result), [
+      'screen motion stimulus process tree did not exit (state leaked, pid 6543)'
+    ])
+  })
+
+  it('accepts only explicit process-tree exit evidence', () => {
+    assert.deepEqual(screenMotionStimulusTeardownFailures({ treeExited: true }), [])
+    assert.equal(screenMotionStimulusTeardownFailures(null).length, 1)
   })
 })
 

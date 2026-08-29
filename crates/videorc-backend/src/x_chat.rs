@@ -929,6 +929,20 @@ mod tests {
         }
     }
 
+    async fn wait_for_access_calls(state: &MockXServerState, expected: usize) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            if state.access_calls.lock().await.len() >= expected {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for {expected} X chat access requests"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
     async fn wait_for_persistence_rejection(state: &AppState) {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         loop {
@@ -1253,6 +1267,7 @@ mod tests {
             mock_config(&server),
         ));
         wait_for_count(&server.state.token_calls, 2, "X chat token requests").await;
+        wait_for_access_calls(&server.state, 2).await;
         let access_calls = server.state.access_calls.lock().await.len();
         let diagnostics = current_diagnostics(&state).await;
         connector.abort();

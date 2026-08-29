@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { parseBackendBootstrap, publicBackendConnectionJson } from './backend-bootstrap'
+import {
+  backendOwnershipLineageMatches,
+  backendReadyMatchesOwnershipMarker,
+  observeBackendOwnershipMarker,
+  parseBackendBootstrap,
+  parseBackendProcessOwnership,
+  publicBackendConnectionJson
+} from './backend-bootstrap'
 
 describe('backend bootstrap authority split', () => {
   it('keeps admin credential out of renderer connection and smoke serialization', () => {
@@ -37,5 +44,84 @@ describe('backend bootstrap authority split', () => {
         adminToken: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'
       })
     ).toThrow(/invalid/)
+  })
+
+  it('authenticates the early real-backend process identity independently of READY', () => {
+    const token = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc'
+    expect(parseBackendProcessOwnership({ token, pid: 4242, parentPid: 101 }, token)).toEqual({
+      pid: 4242,
+      parentPid: 101
+    })
+    expect(() =>
+      parseBackendProcessOwnership(
+        { token: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd', pid: 4242 },
+        token
+      )
+    ).toThrow(/invalid/)
+    expect(() => parseBackendProcessOwnership({ token, pid: 1 }, token)).toThrow(/invalid/)
+    expect(() => parseBackendProcessOwnership({ token, pid: 4242.5 }, token)).toThrow(/invalid/)
+    expect(parseBackendProcessOwnership({ token, pid: 4242, parentPid: null }, token)).toEqual({
+      pid: 4242
+    })
+    expect(parseBackendProcessOwnership({ token, pid: 4242, parentPid: 1 }, token)).toEqual({
+      pid: 4242,
+      parentPid: 1
+    })
+  })
+
+  it('binds one authenticated ownership PID to the later READY identity', () => {
+    expect(observeBackendOwnershipMarker(undefined, 4242)).toEqual({
+      markerPid: 4242,
+      conflict: false
+    })
+    expect(observeBackendOwnershipMarker(4242, 4242)).toEqual({
+      markerPid: 4242,
+      conflict: false
+    })
+    expect(observeBackendOwnershipMarker(4242, 5252)).toEqual({
+      markerPid: 4242,
+      conflict: true
+    })
+    expect(backendReadyMatchesOwnershipMarker(undefined, 4242)).toBe(false)
+    expect(backendReadyMatchesOwnershipMarker(4242, 5252)).toBe(false)
+    expect(backendReadyMatchesOwnershipMarker(4242, 4242)).toBe(true)
+  })
+
+  it('treats parent PID as advisory without losing token-authenticated PID evidence', () => {
+    expect(
+      backendOwnershipLineageMatches({
+        packaged: false,
+        platform: 'darwin',
+        wrapperPid: 101,
+        backendPid: 4242,
+        parentPid: 101
+      })
+    ).toBe(true)
+    expect(
+      backendOwnershipLineageMatches({
+        packaged: false,
+        platform: 'darwin',
+        wrapperPid: 101,
+        backendPid: 4242,
+        parentPid: 1
+      })
+    ).toBe(false)
+    expect(
+      backendOwnershipLineageMatches({
+        packaged: false,
+        platform: 'win32',
+        wrapperPid: 101,
+        backendPid: 4242
+      })
+    ).toBe(true)
+    expect(
+      backendOwnershipLineageMatches({
+        packaged: true,
+        platform: 'darwin',
+        wrapperPid: 101,
+        backendPid: 4242,
+        parentPid: 101
+      })
+    ).toBe(false)
   })
 })

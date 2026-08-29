@@ -31,6 +31,7 @@ export type OwnedProcessProbeResult =
   | { state: 'unprobeable' }
 
 export type RecordedProcessOwnership = 'owned' | 'gone' | 'unconfirmed'
+export type RecordedProcessSignalResult = 'signalled' | 'gone' | 'unconfirmed'
 
 type KillProcess = (pid: number, signal: NodeJS.Signals) => void
 type Sleep = (delayMs: number) => void
@@ -238,6 +239,28 @@ export class OwnedProcessRegistry {
       return 'unconfirmed'
     }
     return processIdentitiesEqual(record.identity, probe.identity) ? 'owned' : 'gone'
+  }
+
+  /**
+   * Signal one ledger-authenticated process only after revalidating its birth
+   * identity. Callers retain the ledger and confirm death separately; signal
+   * acceptance is not exit evidence.
+   */
+  signalRecordedOwnership(pid: number, signal: NodeJS.Signals): RecordedProcessSignalResult {
+    const ownership = this.probeRecordedOwnership(pid)
+    if (ownership !== 'owned') {
+      return ownership
+    }
+    try {
+      this.killProcess(pid, signal)
+      return 'signalled'
+    } catch (error) {
+      const code =
+        error && typeof error === 'object' && 'code' in error
+          ? (error as { code?: unknown }).code
+          : undefined
+      return code === 'ESRCH' ? 'gone' : 'unconfirmed'
+    }
   }
 
   reapStale(options: ReapOwnedProcessesOptions = {}): ReapOwnedProcessesResult {

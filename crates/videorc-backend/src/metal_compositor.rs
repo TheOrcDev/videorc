@@ -19,7 +19,8 @@ use std::cell::Cell;
 use std::ffi::c_void;
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Instant;
 
 pub use crate::source_mask::SourceMask;
@@ -568,6 +569,177 @@ const TARGET_RING_MAX_SIZE: usize = TARGET_RING_SIZE + 2;
 /// command buffer that consumed the imported views has completed.
 const CV_METAL_TEXTURE_CACHE_FLUSH_INTERVAL_IMPORTS: u64 = 64;
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MetalRetentionSnapshot {
+    pub cached_capture_source_imports_live_count: u64,
+    pub cached_capture_source_imports_peak_count: u64,
+    pub cached_capture_source_imports_ceiling: u64,
+    pub target_ring_slots_live_count: u64,
+    pub target_ring_slots_peak_count: u64,
+    pub target_ring_slots_ceiling: u64,
+    pub encoder_in_flight_target_refs_live_count: u64,
+    pub encoder_in_flight_target_refs_peak_count: u64,
+    pub encoder_in_flight_target_refs_ceiling: u64,
+}
+
+#[derive(Default)]
+struct MetalRetentionCounters {
+    cached_source_live: AtomicU64,
+    cached_source_peak: AtomicU64,
+    cached_source_capacity_live: AtomicU64,
+    cached_source_capacity_peak: AtomicU64,
+    target_ring_live: AtomicU64,
+    target_ring_peak: AtomicU64,
+    encoder_in_flight_live: AtomicU64,
+    encoder_in_flight_peak: AtomicU64,
+    compositor_live: AtomicU64,
+    compositor_peak: AtomicU64,
+}
+
+impl MetalRetentionCounters {
+    fn snapshot(&self) -> MetalRetentionSnapshot {
+        let compositor_peak = self.compositor_peak.load(Ordering::Acquire);
+        let target_capacity = compositor_peak.saturating_mul(TARGET_RING_MAX_SIZE as u64);
+        MetalRetentionSnapshot {
+            cached_capture_source_imports_live_count: self
+                .cached_source_live
+                .load(Ordering::Acquire),
+            cached_capture_source_imports_peak_count: self
+                .cached_source_peak
+                .load(Ordering::Acquire),
+            cached_capture_source_imports_ceiling: self
+                .cached_source_capacity_peak
+                .load(Ordering::Acquire),
+            target_ring_slots_live_count: self.target_ring_live.load(Ordering::Acquire),
+            target_ring_slots_peak_count: self.target_ring_peak.load(Ordering::Acquire),
+            target_ring_slots_ceiling: target_capacity,
+            encoder_in_flight_target_refs_live_count: self
+                .encoder_in_flight_live
+                .load(Ordering::Acquire),
+            encoder_in_flight_target_refs_peak_count: self
+                .encoder_in_flight_peak
+                .load(Ordering::Acquire),
+            encoder_in_flight_target_refs_ceiling: target_capacity,
+        }
+    }
+}
+
+static PROCESS_METAL_RETENTION_COUNTERS: OnceLock<MetalRetentionCounters> = OnceLock::new();
+
+fn process_metal_retention_counters() -> &'static MetalRetentionCounters {
+    PROCESS_METAL_RETENTION_COUNTERS.get_or_init(MetalRetentionCounters::default)
+}
+
+pub fn metal_retention_snapshot() -> MetalRetentionSnapshot {
+    process_metal_retention_counters().snapshot()
+}
+
+#[derive(Clone, Copy)]
+enum MetalRetentionKind {
+    CachedCaptureSourceImport,
+    TargetRingSlot,
+    EncoderInFlightTargetRef,
+    Compositor,
+}
+
+struct MetalRetentionLease {
+    local: Arc<MetalRetentionCounters>,
+    kind: MetalRetentionKind,
+}
+
+impl MetalRetentionLease {
+    fn new(local: Arc<MetalRetentionCounters>, kind: MetalRetentionKind) -> Self {
+        increment_retention_kind(&local, kind);
+        increment_retention_kind(process_metal_retention_counters(), kind);
+        Self { local, kind }
+    }
+}
+
+impl Drop for MetalRetentionLease {
+    fn drop(&mut self) {
+        decrement_retention_kind(&self.local, self.kind);
+        decrement_retention_kind(process_metal_retention_counters(), self.kind);
+    }
+}
+
+struct MetalSourceRetentionCapacity {
+    local: Arc<MetalRetentionCounters>,
+    current: u64,
+}
+
+impl MetalSourceRetentionCapacity {
+    fn new(local: Arc<MetalRetentionCounters>) -> Self {
+        Self { local, current: 0 }
+    }
+
+    fn set(&mut self, next: usize) {
+        let next = u64::try_from(next).unwrap_or(u64::MAX);
+        adjust_retention_capacity(&self.local, self.current, next);
+        adjust_retention_capacity(process_metal_retention_counters(), self.current, next);
+        self.current = next;
+    }
+}
+
+impl Drop for MetalSourceRetentionCapacity {
+    fn drop(&mut self) {
+        adjust_retention_capacity(&self.local, self.current, 0);
+        adjust_retention_capacity(process_metal_retention_counters(), self.current, 0);
+    }
+}
+
+fn increment_retention_kind(counters: &MetalRetentionCounters, kind: MetalRetentionKind) {
+    let (live, peak) = retention_gauge(counters, kind);
+    let next = live.fetch_add(1, Ordering::AcqRel).saturating_add(1);
+    update_atomic_peak(peak, next);
+}
+
+fn decrement_retention_kind(counters: &MetalRetentionCounters, kind: MetalRetentionKind) {
+    let (live, _) = retention_gauge(counters, kind);
+    let previous = live.fetch_sub(1, Ordering::AcqRel);
+    debug_assert!(previous > 0, "Metal retention counter underflow");
+}
+
+fn retention_gauge(
+    counters: &MetalRetentionCounters,
+    kind: MetalRetentionKind,
+) -> (&AtomicU64, &AtomicU64) {
+    match kind {
+        MetalRetentionKind::CachedCaptureSourceImport => {
+            (&counters.cached_source_live, &counters.cached_source_peak)
+        }
+        MetalRetentionKind::TargetRingSlot => {
+            (&counters.target_ring_live, &counters.target_ring_peak)
+        }
+        MetalRetentionKind::EncoderInFlightTargetRef => (
+            &counters.encoder_in_flight_live,
+            &counters.encoder_in_flight_peak,
+        ),
+        MetalRetentionKind::Compositor => (&counters.compositor_live, &counters.compositor_peak),
+    }
+}
+
+fn adjust_retention_capacity(counters: &MetalRetentionCounters, previous: u64, next: u64) {
+    let live = if next >= previous {
+        counters
+            .cached_source_capacity_live
+            .fetch_add(next - previous, Ordering::AcqRel)
+            .saturating_add(next - previous)
+    } else {
+        let prior = counters
+            .cached_source_capacity_live
+            .fetch_sub(previous - next, Ordering::AcqRel);
+        debug_assert!(prior >= previous - next, "Metal source capacity underflow");
+        prior.saturating_sub(previous - next)
+    };
+    update_atomic_peak(&counters.cached_source_capacity_peak, live);
+}
+
+fn update_atomic_peak(peak: &AtomicU64, value: u64) {
+    let _ = peak.fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+        (value > current).then_some(value)
+    });
+}
+
 pub struct MetalSceneCompositor {
     device: Retained<MetalDevice>,
     queue: Retained<ProtocolObject<dyn MTLCommandQueue>>,
@@ -584,6 +756,9 @@ pub struct MetalSceneCompositor {
     source_textures: Vec<Option<CachedSourceTexture>>,
     source_texture_cache: Option<MetalSourceTextureCache>,
     pending_source_import_stats: PendingMetalSourceImportStats,
+    retention_counters: Arc<MetalRetentionCounters>,
+    _retention_lifetime: MetalRetentionLease,
+    source_retention_capacity: MetalSourceRetentionCapacity,
     #[cfg(test)]
     force_next_pixel_buffer_import_failure: bool,
 }
@@ -596,6 +771,7 @@ struct CachedTargetTexture {
     /// encode is in flight — the 0.9.44 regression let an uncapped encoder
     /// pipeline hold >2 slots and the ring scribbled over frames mid-encode.
     in_flight: Arc<AtomicUsize>,
+    _retention: Option<MetalRetentionLease>,
 }
 
 struct CachedSourceTexture {
@@ -606,6 +782,7 @@ struct CachedSourceTexture {
     width: usize,
     height: usize,
     content_key: Option<GpuSourceContentKey>,
+    _retention: Option<MetalRetentionLease>,
 }
 
 enum CachedSourceBacking {
@@ -805,6 +982,7 @@ pub struct MetalCompositorTargetPixelBuffer {
     width: usize,
     height: usize,
     in_flight: Arc<AtomicUsize>,
+    retention_counters: Arc<MetalRetentionCounters>,
 }
 
 /// RAII mark that a consumer (a VideoToolbox encode) still needs this ring
@@ -813,12 +991,25 @@ pub struct MetalCompositorTargetPixelBuffer {
 /// or an encode submission error unwinding) releases the slot.
 pub struct MetalTargetInFlightGuard {
     in_flight: Arc<AtomicUsize>,
+    retention_counters: Arc<MetalRetentionCounters>,
 }
 
 impl Drop for MetalTargetInFlightGuard {
     fn drop(&mut self) {
-        self.in_flight
+        let previous = self
+            .in_flight
             .fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+        debug_assert!(previous > 0, "Metal target in-flight counter underflow");
+        if previous == 1 {
+            decrement_retention_kind(
+                &self.retention_counters,
+                MetalRetentionKind::EncoderInFlightTargetRef,
+            );
+            decrement_retention_kind(
+                process_metal_retention_counters(),
+                MetalRetentionKind::EncoderInFlightTargetRef,
+            );
+        }
     }
 }
 
@@ -847,10 +1038,22 @@ impl MetalCompositorTargetPixelBuffer {
     /// the guard until the encoder no longer reads the pixels (output
     /// callback complete).
     pub fn begin_in_flight(&self) -> MetalTargetInFlightGuard {
-        self.in_flight
+        let previous = self
+            .in_flight
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+        if previous == 0 {
+            increment_retention_kind(
+                &self.retention_counters,
+                MetalRetentionKind::EncoderInFlightTargetRef,
+            );
+            increment_retention_kind(
+                process_metal_retention_counters(),
+                MetalRetentionKind::EncoderInFlightTargetRef,
+            );
+        }
         MetalTargetInFlightGuard {
             in_flight: self.in_flight.clone(),
+            retention_counters: self.retention_counters.clone(),
         }
     }
 
@@ -908,6 +1111,11 @@ impl MetalSceneCompositor {
             build_sampler(&device)?
         };
         let source_texture_cache = make_texture_cache(&device).map(MetalSourceTextureCache::new);
+        let retention_counters = Arc::new(MetalRetentionCounters::default());
+        let retention_lifetime =
+            MetalRetentionLease::new(retention_counters.clone(), MetalRetentionKind::Compositor);
+        let source_retention_capacity =
+            MetalSourceRetentionCapacity::new(retention_counters.clone());
         Some(Self {
             device,
             queue,
@@ -921,6 +1129,9 @@ impl MetalSceneCompositor {
             source_textures: Vec::new(),
             source_texture_cache,
             pending_source_import_stats: PendingMetalSourceImportStats::default(),
+            retention_counters,
+            _retention_lifetime: retention_lifetime,
+            source_retention_capacity,
             #[cfg(test)]
             force_next_pixel_buffer_import_failure: false,
         })
@@ -989,6 +1200,12 @@ impl MetalSceneCompositor {
         };
         encoder.setRenderPipelineState(&self.pipeline);
         unsafe { encoder.setFragmentSamplerState_atIndex(Some(&self.sampler), 0) };
+        self.source_retention_capacity.set(
+            sources
+                .iter()
+                .filter(|source| source.kind.is_capture())
+                .count(),
+        );
         self.source_textures.truncate(sources.len());
         let mut source_texture_ms = 0.0;
         let mut source_import_stats = MetalSourceImportStats::default();
@@ -1190,6 +1407,7 @@ impl MetalSceneCompositor {
             width: self.target_width,
             height: self.target_height,
             in_flight: target.in_flight.clone(),
+            retention_counters: self.retention_counters.clone(),
         })
     }
 
@@ -1204,8 +1422,12 @@ impl MetalSceneCompositor {
             self.target_height = height;
         }
         if self.targets.len() < TARGET_RING_SIZE {
-            self.targets
-                .push(make_target_texture(&self.device, width, height)?);
+            self.targets.push(make_target_texture(
+                &self.device,
+                width,
+                height,
+                self.retention_counters.clone(),
+            )?);
             self.target_cursor = self.targets.len() - 1;
             return Some(());
         }
@@ -1226,8 +1448,12 @@ impl MetalSceneCompositor {
             }
         }
         if self.targets.len() < TARGET_RING_MAX_SIZE {
-            self.targets
-                .push(make_target_texture(&self.device, width, height)?);
+            self.targets.push(make_target_texture(
+                &self.device,
+                width,
+                height,
+                self.retention_counters.clone(),
+            )?);
             self.target_cursor = self.targets.len() - 1;
             return Some(());
         }
@@ -1299,7 +1525,15 @@ impl MetalSceneCompositor {
                     width: source.width,
                     height: source.height,
                     content_key: source.content_key,
+                    _retention: None,
                 });
+                self.source_textures[index]
+                    .as_mut()
+                    .expect("the CVMetal source cache entry was just installed")
+                    ._retention = Some(MetalRetentionLease::new(
+                    self.retention_counters.clone(),
+                    MetalRetentionKind::CachedCaptureSourceImport,
+                ));
                 return Ok(SourceTextureReady {
                     outcome: SourceImportOutcome::CvpixelbufferImported,
                     failures,
@@ -1323,7 +1557,15 @@ impl MetalSceneCompositor {
                     width: source.width,
                     height: source.height,
                     content_key: source.content_key,
+                    _retention: None,
                 });
+                self.source_textures[index]
+                    .as_mut()
+                    .expect("the IOSurface source cache entry was just installed")
+                    ._retention = Some(MetalRetentionLease::new(
+                    self.retention_counters.clone(),
+                    MetalRetentionKind::CachedCaptureSourceImport,
+                ));
                 return Ok(SourceTextureReady {
                     outcome: SourceImportOutcome::IosurfaceImported,
                     failures,
@@ -1354,6 +1596,7 @@ impl MetalSceneCompositor {
                 width: source.width,
                 height: source.height,
                 content_key: None,
+                _retention: None,
             });
         }
 
@@ -1435,6 +1678,11 @@ impl MetalSceneCompositor {
                 })
             })
             .count()
+    }
+
+    #[cfg(test)]
+    fn retention_snapshot(&self) -> MetalRetentionSnapshot {
+        self.retention_counters.snapshot()
     }
 
     #[cfg(test)]
@@ -1889,8 +2137,9 @@ fn make_target_texture(
     device: &MetalDevice,
     width: usize,
     height: usize,
+    retention_counters: Arc<MetalRetentionCounters>,
 ) -> Option<CachedTargetTexture> {
-    make_iosurface_target_texture(device, width, height).or_else(|| {
+    make_iosurface_target_texture(device, width, height, retention_counters).or_else(|| {
         make_texture(
             device,
             width,
@@ -1901,6 +2150,7 @@ fn make_target_texture(
             texture,
             pixel_buffer: None,
             in_flight: Arc::new(AtomicUsize::new(0)),
+            _retention: None,
         })
     })
 }
@@ -1909,6 +2159,7 @@ fn make_iosurface_target_texture(
     device: &MetalDevice,
     width: usize,
     height: usize,
+    retention_counters: Arc<MetalRetentionCounters>,
 ) -> Option<CachedTargetTexture> {
     let pixel_buffer = make_iosurface_bgra_pixel_buffer(width, height)?;
     let surface = CVPixelBufferGetIOSurface(Some(pixel_buffer.as_ref()))?;
@@ -1927,6 +2178,10 @@ fn make_iosurface_target_texture(
         texture,
         pixel_buffer: Some(pixel_buffer),
         in_flight: Arc::new(AtomicUsize::new(0)),
+        _retention: Some(MetalRetentionLease::new(
+            retention_counters,
+            MetalRetentionKind::TargetRingSlot,
+        )),
     })
 }
 
@@ -2656,6 +2911,98 @@ mod tests {
             held_ids.iter().any(|id| seen.contains(id)),
             "released slots should rejoin the rotation: held {held_ids:?}, saw {seen:?}"
         );
+        let retention = compositor.retention_snapshot();
+        assert_eq!(retention.encoder_in_flight_target_refs_live_count, 0);
+        assert_eq!(retention.encoder_in_flight_target_refs_peak_count, 2);
+        assert!(retention.target_ring_slots_live_count <= TARGET_RING_MAX_SIZE as u64);
+        assert_eq!(
+            retention.target_ring_slots_ceiling,
+            TARGET_RING_MAX_SIZE as u64
+        );
+    }
+
+    #[test]
+    fn target_ring_and_encoder_retention_reach_but_never_exceed_five_slots_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            return;
+        };
+        let red = [0u8, 0, 255, 255];
+        let sources = [full_frame(&red, 1, 1, false, SourceMask::None, [0.0; 4])];
+        let counters = compositor.retention_counters.clone();
+        let mut held = Vec::new();
+        for _ in 0..TARGET_RING_MAX_SIZE {
+            compositor
+                .compose_bgra(8, 4, [0.0, 0.0, 0.0, 1.0], &sources)
+                .expect("a free or newly bounded ring slot");
+            let Some(target) = compositor.latest_target_pixel_buffer() else {
+                return;
+            };
+            held.push((target.begin_in_flight(), target));
+        }
+        let saturated = compositor.retention_snapshot();
+        assert_eq!(saturated.target_ring_slots_live_count, 5);
+        assert_eq!(saturated.target_ring_slots_peak_count, 5);
+        assert_eq!(saturated.target_ring_slots_ceiling, 5);
+        assert_eq!(saturated.encoder_in_flight_target_refs_live_count, 5);
+        assert_eq!(saturated.encoder_in_flight_target_refs_peak_count, 5);
+        assert_eq!(saturated.encoder_in_flight_target_refs_ceiling, 5);
+        assert!(
+            compositor
+                .compose_bgra(8, 4, [0.0, 0.0, 0.0, 1.0], &sources)
+                .is_none(),
+            "a sixth target slot must never be allocated"
+        );
+
+        drop(held);
+        assert_eq!(
+            compositor
+                .retention_snapshot()
+                .encoder_in_flight_target_refs_live_count,
+            0
+        );
+        drop(compositor);
+        assert_eq!(counters.snapshot().target_ring_slots_live_count, 0);
+    }
+
+    #[test]
+    fn repeated_encoder_guards_for_one_target_count_one_unique_retained_slot_or_skips() {
+        let Some(mut compositor) = MetalSceneCompositor::new() else {
+            return;
+        };
+        let red = [0u8, 0, 255, 255];
+        let sources = [full_frame(&red, 1, 1, false, SourceMask::None, [0.0; 4])];
+        compositor
+            .compose_bgra(8, 4, [0.0, 0.0, 0.0, 1.0], &sources)
+            .expect("compose a retained encoder target");
+        let Some(target) = compositor.latest_target_pixel_buffer() else {
+            return;
+        };
+
+        let first = target.begin_in_flight();
+        let second = target.begin_in_flight();
+        let duplicated = compositor.retention_snapshot();
+        assert_eq!(duplicated.encoder_in_flight_target_refs_live_count, 1);
+        assert_eq!(duplicated.encoder_in_flight_target_refs_peak_count, 1);
+        assert!(
+            duplicated.encoder_in_flight_target_refs_peak_count
+                <= duplicated.encoder_in_flight_target_refs_ceiling
+        );
+
+        drop(first);
+        assert_eq!(
+            compositor
+                .retention_snapshot()
+                .encoder_in_flight_target_refs_live_count,
+            1,
+            "the target remains retained until its final encode callback guard drops"
+        );
+        drop(second);
+        assert_eq!(
+            compositor
+                .retention_snapshot()
+                .encoder_in_flight_target_refs_live_count,
+            0
+        );
     }
 
     #[test]
@@ -3248,6 +3595,10 @@ mod tests {
                 .expect("fresh-frame characterization compose");
             assert_eq!(imported.source_import_stats.cvpixelbuffer_frames, 1);
             assert_eq!(compositor.cached_source_cvmetal_texture_count(), 1);
+            let retained_import = compositor.retention_snapshot();
+            assert_eq!(retained_import.cached_capture_source_imports_live_count, 1);
+            assert_eq!(retained_import.cached_capture_source_imports_peak_count, 1);
+            assert_eq!(retained_import.cached_capture_source_imports_ceiling, 1);
             imports = imports.saturating_add(imported.source_import_stats.cvpixelbuffer_frames);
             flushes = flushes.saturating_add(imported.source_import_stats.texture_cache_flushes);
 
@@ -3284,12 +3635,22 @@ mod tests {
         assert_eq!(released.surface_backing_live_count, 0);
         assert_eq!(released.surface_backing_estimated_bytes, 0);
         assert_eq!(released.surface_backing_oldest_age_ms, None);
+        assert_eq!(
+            compositor
+                .retention_snapshot()
+                .cached_capture_source_imports_live_count,
+            1,
+            "dropping FrameHandle storage must not hide the CVMetal cache owner"
+        );
 
         compositor
             .compose_target_with_timings(w, h, [0.0, 0.0, 0.0, 1.0], &[])
             .expect("drop cached source texture after completed work");
         assert_eq!(compositor.cached_source_texture_count(), 0);
         assert_eq!(compositor.cached_source_cvmetal_texture_count(), 0);
+        let evicted = compositor.retention_snapshot();
+        assert_eq!(evicted.cached_capture_source_imports_live_count, 0);
+        assert_eq!(evicted.cached_capture_source_imports_peak_count, 1);
     }
 
     #[test]

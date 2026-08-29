@@ -1,12 +1,22 @@
-use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use tokio::sync::{Notify, broadcast};
+use tokio::sync::{Notify, broadcast, watch};
 
+use crate::capture_health::{CaptureHealthStageLatchesSlot, new_capture_health_stage_latches_slot};
 use crate::capture_interruption::CaptureInterruptionCoordinator;
+use crate::capture_recovery::{
+    CaptureRecoveryCompositorEvidenceSlot, CaptureRecoverySlot,
+    INITIAL_CAPTURE_RECOVERY_CAMERA_MUTATION_EPOCH, new_capture_recovery_compositor_evidence_slot,
+    new_capture_recovery_slot,
+};
+#[cfg(debug_assertions)]
+use crate::capture_recovery::{
+    CaptureRecoverySmokeFaultSlot, new_capture_recovery_smoke_fault_slot,
+};
 use crate::compositor::{CompositorSlot, initial_compositor_state};
 use crate::diagnostics::idle_diagnostics;
 use crate::ffmpeg_work::FfmpegWorkCoordinator;
@@ -38,6 +48,103 @@ use crate::windows_d3d11_device::{
 
 const PREVIEW_FRAME_CHANNEL_CAPACITY: usize = 256;
 const LOG_HISTORY_LIMIT: usize = 200;
+
+#[derive(Debug)]
+struct CaptureRecoveryAdmissionState {
+    camera_mutation_epoch: u64,
+    admission_epoch: u64,
+    next_explicit_camera_mutation_lease_id: u64,
+    active_explicit_camera_mutation_leases: BTreeSet<u64>,
+}
+
+impl CaptureRecoveryAdmissionState {
+    fn advance_camera_mutation_epoch_and_revoke_admission(&mut self) -> u64 {
+        self.camera_mutation_epoch = self
+            .camera_mutation_epoch
+            .checked_add(1)
+            .expect("capture recovery camera mutation epoch exhausted");
+        self.admission_epoch = 0;
+        self.camera_mutation_epoch
+    }
+}
+
+/// Transaction-scoped explicit camera mutation boundary. Each unique lease is
+/// nesting-safe. Dropping it on success, error, cancellation, or panic revokes
+/// recovery admission again and advances the sampling epoch, making every
+/// health window collected inside the transaction stale.
+#[must_use = "the explicit camera mutation lease must live for the whole transaction"]
+pub(crate) struct CaptureRecoveryExplicitCameraMutationLease {
+    state: AppState,
+    lease_id: Option<u64>,
+}
+
+impl CaptureRecoveryExplicitCameraMutationLease {
+    pub(crate) fn finish(mut self) {
+        self.release();
+    }
+
+    fn release(&mut self) {
+        let Some(lease_id) = self.lease_id.take() else {
+            return;
+        };
+        let mut admission = self
+            .state
+            .capture_recovery_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let released = admission
+            .active_explicit_camera_mutation_leases
+            .remove(&lease_id);
+        if released {
+            admission.advance_camera_mutation_epoch_and_revoke_admission();
+        }
+        drop(admission);
+        if released {
+            self.state
+                .schedule_capture_recovery_explicit_mutation_reconciliation();
+        }
+    }
+}
+
+impl Drop for CaptureRecoveryExplicitCameraMutationLease {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
+
+pub(crate) struct CaptureRecoveryAdmissionGuard<'a> {
+    state: std::sync::MutexGuard<'a, CaptureRecoveryAdmissionState>,
+}
+
+impl CaptureRecoveryAdmissionGuard<'_> {
+    pub(crate) fn camera_mutation_epoch(&self) -> u64 {
+        self.state.camera_mutation_epoch
+    }
+
+    pub(crate) fn camera_mutation_epoch_is_current(&self, epoch: u64) -> bool {
+        self.state.camera_mutation_epoch == epoch
+    }
+
+    pub(crate) fn explicit_camera_mutation_is_active(&self) -> bool {
+        !self.state.active_explicit_camera_mutation_leases.is_empty()
+    }
+
+    pub(crate) fn admission_epoch_is_current(&self, epoch: u64) -> bool {
+        epoch > 0 && self.state.admission_epoch == epoch
+    }
+
+    pub(crate) fn set_admission_epoch(&mut self, epoch: u64) {
+        assert!(
+            epoch > 0,
+            "capture recovery admission epoch must be positive"
+        );
+        self.state.admission_epoch = epoch;
+    }
+
+    pub(crate) fn revoke_admission(&mut self) {
+        self.state.admission_epoch = 0;
+    }
+}
 
 pub(crate) type WindowsD3d11MediaCoordinatorSlot = Arc<StdMutex<WindowsD3d11MediaCoordinator>>;
 
@@ -827,6 +934,32 @@ impl CommandCompletionSnapshot {
 
 #[derive(Clone)]
 pub struct AppState {
+    /// Handle for the process-lifetime Tokio runtime captured before any
+    /// compositor-owned current-thread runtime is entered. Detached capture
+    /// and preview supervisors must use this authority so retiring a
+    /// compositor run cannot cancel native teardown or recovery ownership.
+    process_runtime: Option<tokio::runtime::Handle>,
+    /// Process-wide intake fence set before graceful capture cleanup begins.
+    /// Capture/preview admissions read this atomically and fail closed so an
+    /// HTTP/WebSocket request cannot create new native ownership during drain.
+    process_shutdown_requested: Arc<AtomicBool>,
+    /// Wakes the graceful server shutdown task for an authenticated main-
+    /// process preparation request. This avoids `SIGTERM`, which Electron
+    /// implements as an immediate TerminateProcess on Windows.
+    process_shutdown_requested_notify: Arc<Notify>,
+    /// Shared terminal result produced only by the process-owned graceful
+    /// shutdown future. HTTP request cancellation can therefore never cancel
+    /// the recording finalizer that authorizes Electron's shutdown receipt.
+    process_shutdown_preparation: Arc<watch::Sender<Option<Result<(), String>>>>,
+    /// Linearizes session-start source snapshots with automatic recovery and
+    /// idle geometry resync admission. A recovery owns this only until its
+    /// persistent source-transition guard is registered; native completion is
+    /// deliberately outside this mutex.
+    pub(crate) session_start_source_transition_fence: Arc<tokio::sync::Mutex<()>>,
+    /// Linearizes only observable recording publication with process cleanup.
+    /// Recovery/native source waits never own this fence, so shutdown cannot
+    /// be stranded behind AVCaptureSession::stopRunning.
+    pub(crate) session_start_publication_fence: Arc<tokio::sync::Mutex<()>>,
     /// Least-privilege renderer transport credential.
     pub token: String,
     /// Electron-main/admin transport credential. Never serialize this through
@@ -842,6 +975,10 @@ pub struct AppState {
     pub oauth_callback_port: Option<u16>,
     pub events: broadcast::Sender<ServerEvent>,
     pub recording: RecordingSlot,
+    /// Serializes user Stop/Force-stop with the shutdown-only idempotent stop
+    /// join so process shutdown can never reinterpret an in-flight graceful
+    /// stop as a second force request.
+    pub(crate) recording_stop_fence: Arc<tokio::sync::Mutex<()>>,
     /// Atomic admission edge shared by session startup and privileged process
     /// interruptions. Main-process status events are UX hints, not authority.
     pub capture_interruption: Arc<CaptureInterruptionCoordinator>,
@@ -877,14 +1014,52 @@ pub struct AppState {
     /// warm-up to run concurrently. A newer registered intent supersedes older
     /// waiters before they can replace the last good scene.
     pub layout_intents: Arc<tokio::sync::Mutex<LayoutIntentState>>,
+    /// Lock-free mirror of `layout_intents.latest_intent_id`. Registration
+    /// publishes this while holding the intent mutex, so detached camera and
+    /// screen workers can reject stale admission without introducing a
+    /// layout-intent/preview-runtime lock-order cycle.
+    latest_layout_intent_id: Arc<AtomicU64>,
+    /// Synchronous linearization gate shared by layout registration and the
+    /// final, non-awaiting mutation edge of camera/screen admission.
+    layout_source_admission: Arc<StdMutex<()>>,
     pub source_registry: Arc<tokio::sync::Mutex<SourceRegistry>>,
     pub diagnostics: Arc<tokio::sync::Mutex<DiagnosticStats>>,
+    /// Shared camera/render health authority latches. Every diagnostics writer
+    /// derives the published stage from this camera-first aggregate so the
+    /// independent render supervisor cannot transiently erase camera decay.
+    pub(crate) capture_health_stage_latches: CaptureHealthStageLatchesSlot,
+    /// Single mutation authority for capture auto-heal and operator retry.
+    /// Source restart work is generation-scoped inside the coordinator so a
+    /// stale completion cannot overwrite a newer capture configuration.
+    pub capture_recovery: CaptureRecoverySlot,
+    /// One synchronous gate linearizes an explicit camera mutation's
+    /// `{mutation epoch + 1, admission = 0}` with a health handler's
+    /// `{sampled mutation epoch matches, admission = ticket}`. Preview camera
+    /// checks the same gate while holding native mutation authority.
+    capture_recovery_admission: Arc<StdMutex<CaptureRecoveryAdmissionState>>,
+    /// Exact compositor-consumer delivery evidence for recovery verification.
+    /// This is a synchronous slot because the render loop updates it on every
+    /// tick; identity changes reset the generation-bound baseline.
+    pub capture_recovery_compositor_evidence: CaptureRecoveryCompositorEvidenceSlot,
+    /// Serializes the ancillary diagnostics mirror and remembers the newest
+    /// recovery revision mirrored there. Renderer events are committed
+    /// synchronously under the coordinator lock and never await this lane.
+    pub capture_recovery_published_revision: Arc<tokio::sync::Mutex<u64>>,
+    /// Debug+smoke-only generation-bound producer-stall injection. Production
+    /// builds contain neither this state nor the arming RPC.
+    #[cfg(debug_assertions)]
+    pub capture_recovery_smoke_fault: CaptureRecoverySmokeFaultSlot,
     pub websocket_transport_metrics: Arc<WebSocketTransportMetrics>,
     /// Defines one process-wide intake order while global fence/order metadata
     /// is attached to a command before it enters a per-socket queue.
     pub websocket_command_admission: Arc<StdMutex<()>>,
     /// Completion truth for layout/live-control mutations across reconnects.
     pub operator_command_fence: Arc<CommandCompletionFence>,
+    /// Physical camera/screen transition completion, independent from the
+    /// bounded command response that admitted the transition. Session startup
+    /// snapshots this fence after command ordering so it cannot publish while
+    /// an older native source supervisor is still changing device ownership.
+    pub source_transition_fence: Arc<CommandCompletionFence>,
     /// FIFO receipt order for non-idempotent live controls across reconnects.
     pub live_control_command_order: Arc<CommandCompletionFence>,
     /// Start completion truth used by Stop across reconnects/admin sockets.
@@ -936,6 +1111,10 @@ pub struct AppState {
     /// card. The image slot above and this state are mutated under this
     /// state-machine lock so stale expiry tasks cannot clear newer cards.
     pub comment_highlight: crate::comment_highlight::CommentHighlightSlot,
+    /// Linearizes the bounded comment-card commit edge with authoritative
+    /// message tombstones and compositor Live -> non-Live invalidation. Image
+    /// decode and chat persistence must stay outside this fence.
+    pub(crate) comment_highlight_commit: Arc<tokio::sync::Mutex<()>>,
     /// Live Co-host engine: per-session open questions, flags, mood, and the
     /// tick scheduler. Settings are loaded from `app_settings` at startup.
     pub cohost: crate::cohost::CohostSlot,
@@ -952,6 +1131,12 @@ impl AppState {
             .then(|| database.path().with_extension("oauth-pending.json"));
         let cohost_settings = crate::cohost::load_cohost_settings(&database);
         Self {
+            process_runtime: tokio::runtime::Handle::try_current().ok(),
+            process_shutdown_requested: Arc::new(AtomicBool::new(false)),
+            process_shutdown_requested_notify: Arc::new(Notify::new()),
+            process_shutdown_preparation: Arc::new(watch::channel(None).0),
+            session_start_source_transition_fence: Arc::new(tokio::sync::Mutex::new(())),
+            session_start_publication_fence: Arc::new(tokio::sync::Mutex::new(())),
             token,
             admin_token: uuid::Uuid::new_v4().to_string(),
             smoke_rpc_enabled: cfg!(debug_assertions)
@@ -960,6 +1145,7 @@ impl AppState {
             oauth_callback_port: None,
             events,
             recording: Arc::new(tokio::sync::Mutex::new(None)),
+            recording_stop_fence: Arc::new(tokio::sync::Mutex::new(())),
             capture_interruption: Arc::new(CaptureInterruptionCoordinator::default()),
             live_preview: Arc::new(tokio::sync::Mutex::new(initial_live_preview_state())),
             preview_frames: broadcast::channel(PREVIEW_FRAME_CHANNEL_CAPACITY).0,
@@ -976,11 +1162,26 @@ impl AppState {
             scene_commit: Arc::new(tokio::sync::Mutex::new(())),
             active_screen_transition: Arc::new(tokio::sync::Mutex::new(())),
             layout_intents: Arc::new(tokio::sync::Mutex::new(LayoutIntentState::default())),
+            latest_layout_intent_id: Arc::new(AtomicU64::new(0)),
+            layout_source_admission: Arc::new(StdMutex::new(())),
             source_registry: Arc::new(tokio::sync::Mutex::new(SourceRegistry::new())),
             diagnostics: Arc::new(tokio::sync::Mutex::new(idle_diagnostics())),
+            capture_health_stage_latches: new_capture_health_stage_latches_slot(),
+            capture_recovery: new_capture_recovery_slot(),
+            capture_recovery_admission: Arc::new(StdMutex::new(CaptureRecoveryAdmissionState {
+                camera_mutation_epoch: INITIAL_CAPTURE_RECOVERY_CAMERA_MUTATION_EPOCH,
+                admission_epoch: 0,
+                next_explicit_camera_mutation_lease_id: 1,
+                active_explicit_camera_mutation_leases: BTreeSet::new(),
+            })),
+            capture_recovery_compositor_evidence: new_capture_recovery_compositor_evidence_slot(),
+            capture_recovery_published_revision: Arc::new(tokio::sync::Mutex::new(0)),
+            #[cfg(debug_assertions)]
+            capture_recovery_smoke_fault: new_capture_recovery_smoke_fault_slot(),
             websocket_transport_metrics: Arc::new(WebSocketTransportMetrics::default()),
             websocket_command_admission: Arc::new(StdMutex::new(())),
             operator_command_fence: Arc::new(CommandCompletionFence::default()),
+            source_transition_fence: Arc::new(CommandCompletionFence::default()),
             live_control_command_order: Arc::new(CommandCompletionFence::default()),
             session_start_command_fence: Arc::new(CommandCompletionFence::default()),
             #[cfg(debug_assertions)]
@@ -1013,6 +1214,7 @@ impl AppState {
             caption_overlay: crate::captions::new_caption_overlay_slots(),
             highlight_overlay: crate::captions::new_caption_overlay_slot(),
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
+            comment_highlight_commit: Arc::new(tokio::sync::Mutex::new(())),
             cohost: crate::cohost::new_cohost_slot(cohost_settings),
         }
     }
@@ -1022,6 +1224,21 @@ impl AppState {
     /// accept any loopback port, like Google).
     pub fn oauth_redirect_port(&self) -> u16 {
         self.oauth_callback_port.unwrap_or(self.port)
+    }
+
+    pub(crate) fn publish_latest_layout_intent_id(&self, intent_id: u64) {
+        self.latest_layout_intent_id
+            .store(intent_id, Ordering::Release);
+    }
+
+    pub(crate) fn latest_layout_intent_id(&self) -> u64 {
+        self.latest_layout_intent_id.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn lock_layout_source_admission(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.layout_source_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     pub fn emit_event<T: serde::Serialize>(&self, event: impl Into<String>, payload: T) {
@@ -1037,6 +1254,164 @@ impl AppState {
             );
         }
         let _ = self.events.send(event);
+    }
+
+    /// Spawn process-owned work independently of the caller's Tokio runtime.
+    ///
+    /// Production constructs `AppState` inside the process runtime. Tests
+    /// which exercise detached ownership must do the same; deliberately panic
+    /// instead of falling back to a disposable caller runtime when the handle
+    /// was not captured.
+    pub(crate) fn spawn_process_task<F>(&self, future: F) -> tokio::task::JoinHandle<F::Output>
+    where
+        F: std::future::Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        self.process_runtime
+            .as_ref()
+            .expect("AppState process runtime was not captured")
+            .spawn(future)
+    }
+
+    /// Drop paths cannot await, but cancellation/error must still reconcile a
+    /// terminal recovery incident against the lease's final epoch. A missing
+    /// process runtime is possible only in narrow construction tests; Drop
+    /// remains non-panicking there and the next health edge still adopts the
+    /// published epoch synchronously.
+    fn schedule_capture_recovery_explicit_mutation_reconciliation(&self) {
+        if self.process_shutdown_requested() {
+            return;
+        }
+        let Some(process_runtime) = self.process_runtime.clone() else {
+            return;
+        };
+        let state = self.clone();
+        process_runtime.spawn(async move {
+            crate::capture_recovery::note_explicit_camera_configuration_changed(&state).await;
+        });
+    }
+
+    pub(crate) fn request_process_shutdown(&self) -> bool {
+        let first_request = !self.process_shutdown_requested.swap(true, Ordering::AcqRel);
+        if first_request {
+            self.process_shutdown_requested_notify.notify_waiters();
+        }
+        first_request
+    }
+
+    pub(crate) fn process_shutdown_requested(&self) -> bool {
+        self.process_shutdown_requested.load(Ordering::Acquire)
+    }
+
+    pub(crate) async fn wait_for_process_shutdown_request(&self) {
+        loop {
+            let notified = self.process_shutdown_requested_notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            if self.process_shutdown_requested() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    pub(crate) fn publish_process_shutdown_preparation(&self, result: Result<(), String>) {
+        debug_assert!(
+            self.process_shutdown_preparation.borrow().is_none(),
+            "process shutdown preparation may be published only once"
+        );
+        self.process_shutdown_preparation.send_replace(Some(result));
+    }
+
+    pub(crate) async fn wait_for_process_shutdown_preparation(&self) -> Result<(), String> {
+        let mut receiver = self.process_shutdown_preparation.subscribe();
+        loop {
+            if let Some(result) = receiver.borrow().clone() {
+                return result;
+            }
+            receiver
+                .changed()
+                .await
+                .expect("AppState owns the process shutdown preparation sender");
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_capture_recovery_admission_epoch(&self, epoch: u64) {
+        self.lock_capture_recovery_admission_gate()
+            .set_admission_epoch(epoch);
+    }
+
+    pub(crate) fn capture_recovery_camera_mutation_epoch(&self) -> u64 {
+        self.capture_recovery_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .camera_mutation_epoch
+    }
+
+    /// Begin while holding the preview-camera mutation authority, then retain
+    /// the returned lease across the entire explicit operator/configuration
+    /// transaction. Begin and Drop/finish are both epoch boundaries.
+    pub(crate) fn begin_capture_recovery_explicit_camera_mutation(
+        &self,
+    ) -> CaptureRecoveryExplicitCameraMutationLease {
+        let mut admission = self
+            .capture_recovery_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let lease_id = admission.next_explicit_camera_mutation_lease_id;
+        admission.next_explicit_camera_mutation_lease_id = admission
+            .next_explicit_camera_mutation_lease_id
+            .checked_add(1)
+            .expect("capture recovery explicit mutation lease id exhausted");
+        assert!(
+            admission
+                .active_explicit_camera_mutation_leases
+                .insert(lease_id),
+            "capture recovery explicit mutation lease id reused"
+        );
+        admission.advance_camera_mutation_epoch_and_revoke_admission();
+        drop(admission);
+        CaptureRecoveryExplicitCameraMutationLease {
+            state: self.clone(),
+            lease_id: Some(lease_id),
+        }
+    }
+
+    pub(crate) fn lock_capture_recovery_admission_gate(&self) -> CaptureRecoveryAdmissionGuard<'_> {
+        CaptureRecoveryAdmissionGuard {
+            state: self
+                .capture_recovery_admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+        }
+    }
+
+    pub(crate) fn invalidate_capture_recovery_admission(&self) {
+        self.capture_recovery_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .admission_epoch = 0;
+    }
+
+    pub(crate) fn capture_recovery_admission_is_current(&self, epoch: u64) -> bool {
+        epoch > 0
+            && self
+                .capture_recovery_admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .admission_epoch
+                == epoch
+    }
+
+    pub(crate) fn clear_capture_recovery_admission_if(&self, epoch: u64) {
+        let mut admission = self
+            .capture_recovery_admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if admission.admission_epoch == epoch {
+            admission.admission_epoch = 0;
+        }
     }
 
     pub fn emit_log(&self, level: impl Into<String>, message: impl Into<String>) {

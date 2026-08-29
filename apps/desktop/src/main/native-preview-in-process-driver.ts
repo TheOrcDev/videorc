@@ -20,6 +20,9 @@ export interface NativePreviewInProcessMetrics {
   iosurfaceImports: number
   iosurfaceInvalidations: number
   iosurfaceImportFailures: number
+  iosurfaceImportLiveCount: number
+  iosurfaceImportPeakCount: number
+  iosurfaceImportCeiling: number
   drawableWidth?: number
   drawableHeight?: number
   contentsScale?: number
@@ -292,6 +295,9 @@ export function createNativePreviewInProcessDriver(
         nativePreviewIosurfaceImports: cachedBindingMetrics.iosurfaceImports,
         nativePreviewIosurfaceInvalidations: cachedBindingMetrics.iosurfaceInvalidations,
         nativePreviewIosurfaceImportFailures: cachedBindingMetrics.iosurfaceImportFailures,
+        nativePreviewIosurfaceImportLiveCount: cachedBindingMetrics.iosurfaceImportLiveCount,
+        nativePreviewIosurfaceImportPeakCount: cachedBindingMetrics.iosurfaceImportPeakCount,
+        nativePreviewIosurfaceImportCeiling: cachedBindingMetrics.iosurfaceImportCeiling,
         nativePreviewDrawableWidth: cachedBindingMetrics.drawableWidth,
         nativePreviewDrawableHeight: cachedBindingMetrics.drawableHeight,
         nativePreviewContentsScale: cachedBindingMetrics.contentsScale,
@@ -384,7 +390,10 @@ function emptyNativeMetrics(): NativePreviewInProcessMetrics {
     iosurfaceCacheHits: 0,
     iosurfaceImports: 0,
     iosurfaceInvalidations: 0,
-    iosurfaceImportFailures: 0
+    iosurfaceImportFailures: 0,
+    iosurfaceImportLiveCount: 0,
+    iosurfaceImportPeakCount: 0,
+    iosurfaceImportCeiling: 0
   }
 }
 

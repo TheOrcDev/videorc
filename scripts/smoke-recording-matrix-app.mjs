@@ -19,7 +19,8 @@
 //   VIDEORC_MATRIX_RECORDING_MS=6000   per-combo capture length
 //   VIDEORC_SMOKE_OUTPUT_DIR=...       artifact + report directory
 
-import { existsSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
+import { spawn } from 'node:child_process'
+import { existsSync, mkdirSync, mkdtempSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -29,6 +30,7 @@ import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import {
   countTransientFifoPauseMarkers,
+  evaluateSharedRecordStreamPressure,
   evaluateTransientFifoPressure,
   missingRecordingMatrixResultFailures
 } from './lib/transient-fifo-pressure-gates.mjs'
@@ -42,6 +44,16 @@ const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = siblingFfprobePath(ffmpegPath) ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
 const recordingMs = Number(process.env.VIDEORC_MATRIX_RECORDING_MS ?? 6000)
+const sharedStreamPort = Number(process.env.VIDEORC_MATRIX_SHARED_RTMP_PORT ?? 19619)
+const sharedStreamTarget = {
+  port: sharedStreamPort,
+  streamKey: 'matrix-shared-pressure',
+  serverUrl: `rtmp://127.0.0.1:${sharedStreamPort}/live`,
+  listenUrl: `rtmp://127.0.0.1:${sharedStreamPort}/live/matrix-shared-pressure`,
+  recvPath: join(outputDirectory, 'shared-transient-fifo-stream.flv')
+}
+
+mkdirSync(outputDirectory, { recursive: true })
 
 // Every shipping recording profile plus the 60fps combos the encoder bridge
 // now serves. 4K60 must use its experimental preset at the EXACT pinned
@@ -74,11 +86,15 @@ const HARD_COMBOS = MATRIX.filter((combo) => ['4K30', '1080p60'].includes(combo.
   (combo) => (combo.label === '4K30' ? { ...combo, stress: true } : combo)
 )
 const TRANSIENT_FIFO_COMBO = MATRIX.find((combo) => combo.label === '4K30')
+const SHARED_TRANSIENT_FIFO_COMBO = MATRIX.find((combo) => combo.label === '1080p30')
 const EXPECTED_RESULT_LABELS = [
   ...MATRIX.map((combo) => combo.label),
   ...HARD_COMBOS.map((combo) => `${combo.label}:hard`),
   ...(process.platform === 'darwin' && TRANSIENT_FIFO_COMBO
     ? [`${TRANSIENT_FIFO_COMBO.label}:transient-fifo-pressure`]
+    : []),
+  ...(process.platform === 'darwin' && SHARED_TRANSIENT_FIFO_COMBO
+    ? [`${SHARED_TRANSIENT_FIFO_COMBO.label}:shared-transient-fifo-pressure`]
     : [])
 ]
 
@@ -92,7 +108,7 @@ const MATRIX_GATES = Object.freeze({
   maxTailMismatchMs: 100
 })
 
-function sessionParams({ outputDirectoryCapability, combo }) {
+function sessionParams({ outputDirectoryCapability, combo, streamTarget = null }) {
   return {
     sources: { testPattern: true },
     layout: {
@@ -113,7 +129,7 @@ function sessionParams({ outputDirectoryCapability, combo }) {
     },
     output: {
       recordEnabled: true,
-      streamEnabled: false,
+      streamEnabled: Boolean(streamTarget),
       ...(outputDirectoryCapability ? { outputDirectoryCapability } : {}),
       video: {
         preset: combo.preset ?? 'custom',
@@ -122,7 +138,11 @@ function sessionParams({ outputDirectoryCapability, combo }) {
         fps: combo.fps,
         bitrateKbps: combo.bitrateKbps
       },
-      rtmp: { preset: 'custom', serverUrl: '', streamKey: '' }
+      rtmp: {
+        preset: 'custom',
+        serverUrl: streamTarget?.serverUrl ?? '',
+        streamKey: streamTarget?.streamKey ?? ''
+      }
     }
   }
 }
@@ -155,6 +175,7 @@ async function recordCombo({
   ws,
   smoke,
   combo,
+  streamTarget = null,
   assertPreviewLiveness = false,
   stress = false,
   requireTransientFifoPressure = false,
@@ -172,7 +193,7 @@ async function recordCombo({
     ws,
     timeoutMs,
     'session.start',
-    sessionParams({ outputDirectoryCapability: capabilityId, combo })
+    sessionParams({ outputDirectoryCapability: capabilityId, combo, streamTarget })
   )
   if (started.state !== 'recording') {
     throw new Error(`session.start state ${started.state}: ${started.message ?? ''}`)
@@ -201,6 +222,9 @@ async function recordCombo({
     await new Promise((resolveSleep) => setTimeout(resolveSleep, recordingMs))
   }
   const activeStatus = await request(ws, timeoutMs, 'recording.status')
+  const streamTargetsSnapshot = streamTarget
+    ? await request(ws, timeoutMs, 'stream.targets.snapshot')
+    : null
   const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
   const bridgeDiagnostics = Object.fromEntries(
     [
@@ -223,6 +247,14 @@ async function recordCombo({
       'encoderBridgeEncodedOutputFrames',
       'encoderBridgeEncodedOutputBytes',
       'encoderBridgeEncodedOutputErrors',
+      'encoderBridgeActiveEncodedOutputEncoders',
+      'encoderBridgeSeparateOutputEncodersActive',
+      'encoderBridgeEffectiveVideoOutput',
+      'encoderBridgeRecordingEncodedOutputFrames',
+      'encoderBridgeRecordingEncodedOutputBytes',
+      'encoderBridgeStreamEncodedOutputFrames',
+      'encoderBridgeStreamEncodedOutputBytes',
+      'streamOutputTotalBytes',
       'encoderBridgeEncodedSubmitP95Ms',
       'encoderBridgeEncodedFifoWriteP95Ms',
       'encoderBridgeCompositorWaitP95Ms',
@@ -248,6 +280,7 @@ async function recordCombo({
   }
   const stopped = await request(ws, timeoutMs, 'session.stop')
   let transientFifoCleanFfmpegExitCount = 0
+  let lifecycleEntries = []
   if (requireTransientFifoPressure) {
     const sessionId = stopped.sessionId ?? started.sessionId
     if (!sessionId) {
@@ -261,6 +294,8 @@ async function recordCombo({
       (event) => event.code === 'transient-fifo-ffmpeg-exit-zero'
     ).length
     bridgeDiagnostics.transientFifoCleanFfmpegExitCount = transientFifoCleanFfmpegExitCount
+    const lifecycleLogs = await waitForEncoderBridgeLifecycleLogs(ws, sessionId)
+    lifecycleEntries = lifecycleLogs.entries ?? []
   }
   const outputPath = stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
@@ -318,7 +353,13 @@ async function recordCombo({
     metrics: quality.metrics,
     bridgeDiagnostics,
     transientFifoPauseFiredCount,
-    transientFifoCleanFfmpegExitCount
+    transientFifoCleanFfmpegExitCount,
+    activeStatus,
+    stoppedStatus: stopped,
+    diagnostics,
+    sessionId: stopped.sessionId ?? started.sessionId,
+    streamTargetsSnapshot,
+    lifecycleEntries
   }
 }
 
@@ -327,12 +368,18 @@ async function runPass({
   combos,
   extraEnv = {},
   assertPreviewLiveness = false,
-  requireTransientFifoPressure = false
+  requireTransientFifoPressure = false,
+  streamTarget = null,
+  requireSharedRecordStream = false
 }) {
   const passResults = []
   let transientFifoPauseFiredCount = 0
   let stopApp = async () => {}
+  let listener = null
   try {
+    if (requireSharedRecordStream && (!streamTarget || combos.length !== 1)) {
+      throw new Error('shared record+stream pressure pass requires one combo and one RTMP target')
+    }
     const launch = await launchDevApp({
       env: {
         VIDEORC_SMOKE_COMMAND_SERVER: '1',
@@ -351,6 +398,16 @@ async function runPass({
     const ws = await connectBackend(launch.connections['backend-ready'], timeoutMs)
     const smoke = launch.connections['preview-motion-ready']
 
+    if (streamTarget) {
+      listener = spawnLocalRtmpListener(streamTarget)
+      await sleep(1500)
+      if (listener.proc.exitCode !== null) {
+        throw new Error(
+          `local RTMP listener exited before session start: ${listener.stderr().trim() || `code ${listener.proc.exitCode}`}`
+        )
+      }
+    }
+
     for (const combo of combos) {
       const label = `${combo.label}${passLabel ? `:${passLabel}` : ''}`
       try {
@@ -358,11 +415,34 @@ async function runPass({
           ws,
           smoke,
           combo,
+          streamTarget,
           assertPreviewLiveness,
           stress: combo.stress ?? false,
           requireTransientFifoPressure,
           getTransientFifoPauseFiredCount: () => transientFifoPauseFiredCount
         })
+        if (streamTarget) {
+          const listenerExit = await finishLocalRtmpListener(listener)
+          listener = null
+          const streamEvidence = await analyzeSharedStreamArtifact(
+            streamTarget,
+            combo,
+            listenerExit
+          )
+          result.streamArtifact = streamEvidence
+          result.failures.push(...streamEvidence.failures)
+          if (requireSharedRecordStream) {
+            result.failures.push(
+              ...evaluateSharedRecordStreamPressure({
+                diagnostics: result.diagnostics,
+                streamTargetsSnapshot: result.streamTargetsSnapshot,
+                lifecycleEntries: result.lifecycleEntries,
+                sessionId: result.sessionId,
+                streamArtifactBytes: streamEvidence.sizeBytes
+              })
+            )
+          }
+        }
         result.combo = label
         passResults.push(result)
         const status = result.failures.length === 0 ? 'PASS' : 'FAIL'
@@ -387,9 +467,154 @@ async function runPass({
       }
     }
   } finally {
+    if (listener) {
+      await stopLocalRtmpListener(listener.proc)
+    }
     await stopApp()
   }
   return passResults
+}
+
+async function waitForEncoderBridgeLifecycleLogs(ws, sessionId) {
+  const deadline = Date.now() + 5000
+  let last = { entries: [] }
+  while (Date.now() < deadline) {
+    last = await request(ws, timeoutMs, 'sessions.logs.list', { sessionId, limit: 120 })
+    const lifecycle = (last.entries ?? []).filter(
+      (entry) => entry.code === 'encoder-bridge-writer-lifecycle'
+    )
+    if (lifecycle.some((entry) => entry.message?.includes('resource-released'))) {
+      return last
+    }
+    await sleep(100)
+  }
+  return last
+}
+
+function spawnLocalRtmpListener(target) {
+  const stderrChunks = []
+  const proc = spawn(
+    ffmpegPath,
+    [
+      '-y',
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-listen',
+      '1',
+      '-i',
+      target.listenUrl,
+      '-c',
+      'copy',
+      '-f',
+      'flv',
+      target.recvPath
+    ],
+    { stdio: ['ignore', 'ignore', 'pipe'] }
+  )
+  proc.stderr.setEncoding('utf8')
+  proc.stderr.on('data', (chunk) => stderrChunks.push(chunk))
+  proc.on('error', (error) => stderrChunks.push(String(error?.message ?? error)))
+  return { proc, stderr: () => stderrChunks.join('') }
+}
+
+async function finishLocalRtmpListener(listener) {
+  const naturalExit = await waitForChildExit(listener.proc, 2500)
+  if (naturalExit) {
+    return { ...naturalExit, forced: false, stderr: listener.stderr() }
+  }
+  await stopLocalRtmpListener(listener.proc)
+  return {
+    code: listener.proc.exitCode,
+    signal: listener.proc.signalCode,
+    forced: true,
+    stderr: listener.stderr()
+  }
+}
+
+async function stopLocalRtmpListener(proc) {
+  if (!proc?.pid || proc.exitCode !== null || proc.signalCode !== null) return
+  try {
+    proc.kill('SIGTERM')
+  } catch {
+    return
+  }
+  if (await waitForChildExit(proc, 2000)) return
+  try {
+    proc.kill('SIGKILL')
+  } catch {
+    // The owned listener exited between the bounded waits.
+  }
+  await waitForChildExit(proc, 1000)
+}
+
+function waitForChildExit(proc, waitMs) {
+  if (proc.exitCode !== null || proc.signalCode !== null) {
+    return Promise.resolve({ code: proc.exitCode, signal: proc.signalCode })
+  }
+  return new Promise((resolveExit) => {
+    const timer = setTimeout(() => {
+      proc.off('exit', onExit)
+      resolveExit(null)
+    }, waitMs)
+    const onExit = (code, signal) => {
+      clearTimeout(timer)
+      resolveExit({ code, signal })
+    }
+    proc.once('exit', onExit)
+  })
+}
+
+async function analyzeSharedStreamArtifact(target, combo, listenerExit) {
+  const sizeBytes = existsSync(target.recvPath) ? statSync(target.recvPath).size : 0
+  const failures = []
+  if (sizeBytes <= 0) {
+    failures.push(
+      `shared record+stream listener produced no FLV artifact: ${target.recvPath} ` +
+        `(${listenerExit.stderr.trim() || 'no listener error'})`
+    )
+    return { path: target.recvPath, sizeBytes, listenerExit, failures }
+  }
+  const quality = await analyzeRecording(target.recvPath, {
+    ffmpegPath,
+    ffprobePath,
+    intendedFps: combo.fps,
+    expectAudio: false,
+    gates: {
+      ...TRANSIENT_FIFO_GATES,
+      // The listener's FLV shutdown edge is independent of the recording
+      // artifact's audio-tail law. Decode, timestamp, color, level, and
+      // keyframe gates remain armed for the actual bytes a platform received.
+      maxTailMismatchMs: null
+    }
+  })
+  writeReports(quality)
+  failures.push(
+    ...quality.verdict.failures.map((failure) => `shared livestream artifact: ${failure}`)
+  )
+  if (quality.metrics.width !== combo.width || quality.metrics.height !== combo.height) {
+    failures.push(
+      `shared livestream dimensions ${quality.metrics.width}x${quality.metrics.height} ` +
+        `!= requested ${combo.width}x${combo.height}`
+    )
+  }
+  if (!((quality.metrics.durationSeconds ?? 0) >= 2)) {
+    failures.push(
+      `shared livestream duration ${quality.metrics.durationSeconds ?? 'missing'}s was below 2s`
+    )
+  }
+  return {
+    path: target.recvPath,
+    sizeBytes,
+    listenerExit,
+    failures,
+    metrics: quality.metrics,
+    warnings: quality.verdict.warnings
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
 }
 
 const results = []
@@ -433,6 +658,30 @@ try {
         },
         assertPreviewLiveness: true,
         requireTransientFifoPressure: true
+      }))
+    )
+  }
+  // The owner incident occurred while one encoder fed BOTH the local
+  // recording and livestream. Keep that fallback failure domain covered even
+  // though current capable hardware normally selects isolated record/stream
+  // encoders: the debug-only selector is accepted only behind the backend's
+  // smoke-RPC authority. The local RTMP receiver proves that the shared stream
+  // remains live through the same depth-16/528ms burst, while the recording
+  // still stops on user request and finalizes as a fully analyzed MP4.
+  if (process.platform === 'darwin' && SHARED_TRANSIENT_FIFO_COMBO) {
+    results.push(
+      ...(await runPass({
+        passLabel: 'shared-transient-fifo-pressure',
+        combos: [SHARED_TRANSIENT_FIFO_COMBO],
+        extraEnv: {
+          VIDEORC_TEST_FORCE_SHARED_ENCODER_OUTPUT: '1',
+          VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES: '60',
+          VIDEORC_TEST_VT_FIFO_PAUSE_MS: '700'
+        },
+        assertPreviewLiveness: true,
+        requireTransientFifoPressure: true,
+        streamTarget: sharedStreamTarget,
+        requireSharedRecordStream: true
       }))
     )
   }
