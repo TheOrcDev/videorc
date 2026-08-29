@@ -311,26 +311,20 @@ and incremental CSV, as well as the raw ordered recovery observations. A leftove
 MKV, a changed process/session identity, a missing screen recovery, an event gap,
 or a media-analysis failure is a hard failure.
 
-#### Owner-acknowledged local publication bridge (temporary)
+#### Publication policy: regular betas are never blocked by the D3 ceremony
 
-The protected Actions publication lane shipped before its infrastructure:
-`release-macos.yml` requires `CSC_LINK`, `CSC_KEY_PASSWORD`, `APPLE_*`, and
-`VIDEORC_DOWNLOAD_S3_*` secrets that are not yet provisioned, and the
-D3-pending freeze would otherwise block every regular beta until the
-multi-day owner acceptance ceremony completes. Until either the secrets
-exist or the D3 record is `satisfied`, the release owner may publish a
-regular beta from the established local keychain path by setting exactly:
+Owner decision (2026-08-29): regular macOS beta publication uses the
+established local keychain path with no protected-Actions requirement and no
+D3-record freeze. A `pending` or missing acceptance record logs a notice and
+publishes; `satisfied`-evidence drift is logged loudly but does not block a
+regular beta (the next exact promotion must reckon with it). Every
+publication still requires a clean tracked tree, artifact validation, the
+TLS-issuer guard, and upload verification.
 
-```sh
-VIDEORC_RELEASE_LOCAL_PUBLICATION_ACK=owner-keychain
-```
-
-The bridge still requires a clean tracked tree and a `HEAD` that is an
-ancestor of freshly fetched `origin/main`, logs a loud notice on every use,
-and never weakens `accepted`-state D3 promotion rules (sealed candidates,
-exact promotion, drift checks all take the strict path regardless of the
-acknowledgment). Retire this section, the env override, and its tests once
-the Actions lane is provisioned or the D3 record is satisfied.
+The strict machinery — protected GitHub Actions ref context, the pending
+freeze, sealed-candidate binding, and drift throws — applies exclusively to
+the one-time D3 exact promotion (`VIDEORC_CAPTURE_DECAY_D3_EXACT_PROMOTION`)
+and to `accepted`-state records, which always take the full validation path.
 
 #### One-time D3 acceptance and publication
 

@@ -45,12 +45,17 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const defaultReleaseDir = join(repoRoot, 'apps', 'desktop', 'release')
 
 async function main() {
+  const exactPromotion = envFlag(process.env.VIDEORC_CAPTURE_DECAY_D3_EXACT_PROMOTION)
+  // Regular beta publication is never blocked by the D3 machinery: the
+  // protected-Actions ref requirement, the pending freeze, and drift throws
+  // apply only to the one-time exact sealed-candidate promotion (owner
+  // decision, 2026-08-29 — releases must not be hostage to the ceremony).
   const d3Gate = await assertCaptureDecayD3PublicationGate({
     recordPath: join(repoRoot, 'docs', 'acceptance', 'macos-capture-decay-d3.json'),
     repoRoot,
-    requireProtectedRef: true
+    requireProtectedRef: exactPromotion,
+    strict: exactPromotion
   })
-  const exactPromotion = envFlag(process.env.VIDEORC_CAPTURE_DECAY_D3_EXACT_PROMOTION)
   if (d3Gate.record.status === 'accepted' && !exactPromotion) {
     throw new Error(
       'the first accepted D3 release may be published only by exact sealed-candidate promotion'
