@@ -150,7 +150,13 @@ impl FfmpegWorkCoordinator {
 
     /// Wait for the next idle maintenance slot ahead of background maintenance.
     /// This is for short, user-visible work such as poster extraction. Capture
-    /// and finalization still take precedence.
+    /// and finalization still take precedence. An in-flight background
+    /// maintenance job (post-recording quality gate, repair scan, ...) is
+    /// asked to cancel — those jobs observe the token, defer, and re-run
+    /// later — instead of queueing behind a multi-minute analysis, which
+    /// would push a stateful caller such as sessions.poster past its
+    /// execution contract and restart the backend (2026-08-29 tester log:
+    /// poster queued behind a 110s-recording quality assessment).
     pub async fn begin_priority_maintenance_when_idle(self: &Arc<Self>) -> MaintenancePermit {
         let mut waiter = PriorityMaintenanceWaiter::new(self.clone());
         loop {
@@ -177,6 +183,12 @@ impl FfmpegWorkCoordinator {
                     waiter.registered = false;
                     Some(self.begin_maintenance_locked(&mut state))
                 } else {
+                    if state.maintenance_running && !state.maintenance_cancel_requested {
+                        state.maintenance_cancel_generation =
+                            state.maintenance_cancel_generation.saturating_add(1);
+                        state.maintenance_cancel_requested = true;
+                        self.notify.notify_waiters();
+                    }
                     None
                 }
             };
@@ -688,6 +700,38 @@ mod tests {
                 .expect("capture waiter must acquire after the release")
                 .expect("capture waiter task");
             drop(capture);
+        }
+    }
+
+    /// 2026-08-29 tester log: a priority waiter (sessions.poster) queued
+    /// behind a still-running post-recording quality assessment for minutes
+    /// and blew its 25s execution contract, restarting the backend. Priority
+    /// maintenance is short, user-visible work: it must request cancellation
+    /// of the active background job (which defers and re-runs later) instead
+    /// of queueing behind it.
+    #[tokio::test]
+    async fn priority_maintenance_cancels_the_active_maintenance_and_acquires() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        for _ in 0..25 {
+            let maintenance = coordinator.try_begin_maintenance().unwrap();
+            let cancel_token = maintenance.cancel_token();
+            let waiter = tokio::spawn({
+                let coordinator = coordinator.clone();
+                async move { coordinator.begin_priority_maintenance_when_idle().await }
+            });
+            tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                while !cancel_token.is_cancelled() {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("priority waiter must request cancellation of the active maintenance");
+            drop(maintenance);
+            let permit = tokio::time::timeout(std::time::Duration::from_secs(1), waiter)
+                .await
+                .expect("priority waiter must acquire after the cancelled job releases")
+                .expect("priority waiter task");
+            drop(permit);
         }
     }
 
