@@ -35,6 +35,9 @@ pub const DEGRADED_RATE_FRACTION: f64 = 0.6;
 /// changed nothing. Restarting for slowness is repair theater; slowness is
 /// logged silently, stalls are healed silently.
 pub const PRODUCER_STALL_FLOOR_FPS: f64 = 1.0;
+/// Consecutive slow-camera windows before an adaptive format step-down is
+/// attempted (2s windows → ~10s of sustained shortfall).
+pub const CAMERA_STEP_DOWN_WINDOW_THRESHOLD: u32 = 5;
 
 /// Our own process CPU (% of one core) over the sampled window, from
 /// getrusage deltas. Answers "are WE the load?" inside every capture-health
@@ -243,6 +246,14 @@ pub struct CaptureHealthMonitor {
     /// Edge-latch for the slow-but-flowing delivery log so a sustained
     /// pressure episode writes one line, not one per window.
     slow_delivery_log_active: bool,
+    /// Consecutive slow-camera windows; drives the one-shot adaptive
+    /// step-down (reset by health, stall, or a camera epoch change).
+    slow_camera_streak: u32,
+    /// Latched once a step-down is armed: keeps presenting camera-delivery
+    /// as the degraded stage across the declare threshold so the recovery
+    /// machinery actually runs the renegotiating restart. Cleared by the
+    /// epoch rearm the restart itself causes.
+    camera_step_down_pending: bool,
     last_process_cpu_seconds: Option<f64>,
 }
 
@@ -259,6 +270,8 @@ impl CaptureHealthMonitor {
     fn reset_camera_epoch_state(&mut self, epoch: Option<CaptureHealthCameraEpoch>) {
         self.last_camera_fresh = None;
         self.last_camera_callbacks = None;
+        self.slow_camera_streak = 0;
+        self.camera_step_down_pending = false;
         self.last_camera_publications = None;
         self.last_camera_did_drop_callbacks = None;
         self.last_camera_out_of_buffers = None;
@@ -527,8 +540,39 @@ impl CaptureHealthMonitor {
                             if callbacks < floor && publications < floor
                     )
             });
+        // Adaptive step-down (Cam Link-class USB shortfall): a camera that
+        // sustains slow-but-flowing delivery for CAMERA_STEP_DOWN_WINDOW_THRESHOLD
+        // windows, whose negotiated format sits above the step-down ceiling,
+        // is worth exactly ONE purposeful restart — renegotiating a tier down
+        // returns inside the bus budget. arm_camera_step_down is the one-shot
+        // guard: once armed (or when no step-down exists), slowness never
+        // restarts anything again.
+        if producer_camera_slow && consumer_camera_starved {
+            self.slow_camera_streak = self.slow_camera_streak.saturating_add(1);
+            if self.slow_camera_streak >= CAMERA_STEP_DOWN_WINDOW_THRESHOLD
+                && !self.camera_step_down_pending
+                && let Some(epoch) = sample_camera_epoch.as_ref()
+                && crate::camera_capture::arm_camera_step_down(&epoch.source_key.id)
+            {
+                tracing::warn!(
+                    "[capture-health] stepping the camera down one format tier after {} sustained slow windows (USB/bus delivery shortfall at the negotiated resolution); restarting the camera once to renegotiate",
+                    self.slow_camera_streak
+                );
+                self.camera_step_down_pending = true;
+            }
+        } else {
+            self.slow_camera_streak = 0;
+        }
+        // The latch presents camera-delivery to the normal declare machinery
+        // until the renegotiating restart replaces the epoch (which rearms
+        // and clears it).
+        let step_down_stage = self
+            .camera_step_down_pending
+            .then_some(CaptureStage::CameraDelivery);
         let degraded_stage = if consumer_camera_starved && producer_camera_stalled {
             Some(CaptureStage::CameraDelivery)
+        } else if step_down_stage.is_some() {
+            step_down_stage
         } else if consumer_screen_starved && producer_screen_stalled {
             Some(CaptureStage::ScreenDelivery)
         } else if sample.render_fps < render_floor {
@@ -866,6 +910,80 @@ mod tests {
             other => panic!("expected a camera-delivery degradation, got {other:?}"),
         }
         assert_eq!(monitor.degraded_stage(), Some(CaptureStage::CameraDelivery));
+    }
+
+    /// The Cam Link shape: slow-but-flowing delivery from a camera whose
+    /// negotiated format sits above the step-down ceiling earns exactly ONE
+    /// renegotiating restart. The latch must hold camera-delivery across the
+    /// declare threshold (a single edge window would otherwise never satisfy
+    /// DEGRADED_WINDOW_THRESHOLD), and the restart's new generation must
+    /// rearm the monitor without re-declaring.
+    #[test]
+    fn sustained_slow_camera_above_ceiling_steps_down_exactly_once() {
+        let camera_id = "camera:avfoundation-native:step-down-monitor";
+        crate::camera_capture::clear_camera_step_down(camera_id);
+        crate::camera_capture::record_negotiated_camera_format(camera_id, 3840, 2160);
+
+        let sample = |camera_fresh: u64, generation: u64| {
+            let mut sample = healthy_sample(camera_fresh, 0);
+            sample.screen_present = false;
+            let producer = sample.camera_producer.as_mut().unwrap();
+            producer.epoch = CaptureHealthCameraEpoch {
+                source_key: SourceKey::camera(camera_id),
+                generation,
+            };
+            sample
+        };
+
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut camera = 0_u64;
+        for _ in 0..4 {
+            camera += 60;
+            assert_eq!(monitor.observe(sample(camera, 1)), None);
+        }
+        // Slow-but-flowing windows: nothing declared until the streak arms
+        // the step-down, then the latch carries the declare threshold.
+        let mut transitions = Vec::new();
+        for _ in 0..(CAMERA_STEP_DOWN_WINDOW_THRESHOLD + DEGRADED_WINDOW_THRESHOLD) {
+            camera += 13; // ~6.5fps: starved consumer, flowing producer
+            transitions.extend(monitor.observe(sample(camera, 1)));
+        }
+        match transitions.as_slice() {
+            [CaptureHealthTransition::Degraded { stage, .. }] => {
+                assert_eq!(*stage, CaptureStage::CameraDelivery);
+            }
+            other => panic!("expected exactly one step-down degradation, got {other:?}"),
+        }
+        assert_eq!(
+            crate::camera_capture::camera_format_ceiling(camera_id),
+            Some(crate::camera_capture::CAMERA_STEP_DOWN_CEILING),
+            "the arm must have recorded the renegotiation ceiling"
+        );
+
+        // The renegotiating restart brings generation 2: the epoch rearm
+        // clears the declared stage and the latch (verified recovery is the
+        // recovery supervisor's job, not the monitor's), and renewed slowness
+        // at the now ceiling-bound format never earns a second restart.
+        camera += 60;
+        assert_eq!(monitor.observe(sample(camera, 2)), None);
+        assert_eq!(
+            monitor.degraded_stage(),
+            None,
+            "the new generation is a fresh incident boundary"
+        );
+        for _ in 0..4 {
+            camera += 60;
+            assert_eq!(monitor.observe(sample(camera, 2)), None);
+        }
+        for _ in 0..(CAMERA_STEP_DOWN_WINDOW_THRESHOLD * 3) {
+            camera += 13;
+            assert_eq!(
+                monitor.observe(sample(camera, 2)),
+                None,
+                "an armed camera must never step down (or degrade) again"
+            );
+        }
+        crate::camera_capture::clear_camera_step_down(camera_id);
     }
 
     #[test]

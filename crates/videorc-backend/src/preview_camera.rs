@@ -4766,9 +4766,25 @@ mod macos {
         };
 
         let selected =
-            select_camera_format(&device, &config.layout, &config.video).ok_or_else(|| {
-                NativeCameraStartup::Failed("Camera did not report usable formats.".to_string())
-            })?;
+            select_camera_format(&device, &config.camera_id, &config.layout, &config.video)
+                .ok_or_else(|| {
+                    NativeCameraStartup::Failed("Camera did not report usable formats.".to_string())
+                })?;
+        crate::camera_capture::record_negotiated_camera_format(
+            &config.camera_id,
+            selected.format.width,
+            selected.format.height,
+        );
+        tracing::info!(
+            "Camera capture format selected: {}x{}@{:.2} (requested {}x{}@{}, ceiling {:?})",
+            selected.format.width,
+            selected.format.height,
+            selected.format.max_fps,
+            selected.requested_width,
+            selected.requested_height,
+            config.video.fps,
+            crate::camera_capture::camera_format_ceiling(&config.camera_id),
+        );
         let configured_fps = configure_device(&device, &selected, config.video.fps)?;
 
         let input = unsafe { AVCaptureDeviceInput::deviceInputWithDevice_error(&device) }.map_err(
@@ -4915,6 +4931,7 @@ mod macos {
 
     fn select_camera_format(
         camera: &AVCaptureDevice,
+        camera_id: &str,
         layout: &LayoutSettings,
         video: &VideoSettings,
     ) -> Option<NativeCameraFormatSelection> {
@@ -4944,7 +4961,16 @@ mod macos {
             .iter()
             .map(|(summary, _)| summary.clone())
             .collect::<Vec<_>>();
-        let (target_width, target_height) = camera_capture_target_dimensions(layout, video);
+        let (mut target_width, mut target_height) = camera_capture_target_dimensions(layout, video);
+        // An armed adaptive ceiling (Cam Link-class USB bandwidth shortfall)
+        // caps the requested capture box; the chooser then prefers the
+        // highest format inside it (1080p60 on the Cam Link 4K).
+        if let Some((ceiling_width, ceiling_height)) =
+            crate::camera_capture::camera_format_ceiling(camera_id)
+        {
+            target_width = target_width.min(ceiling_width);
+            target_height = target_height.min(ceiling_height);
+        }
         let choice = choose_camera_format(&summaries, target_width, target_height, video.fps)?;
         let selected_entry = entries
             .into_iter()

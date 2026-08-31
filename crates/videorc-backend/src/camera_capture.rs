@@ -1,6 +1,87 @@
 use crate::protocol::{Device, DeviceKind, DeviceStatus};
 
 const NATIVE_CAMERA_PREFIX: &str = "camera:avfoundation-native:";
+
+/// Adaptive camera step-down (2026-08-31, Cam Link 4K field diagnosis): true
+/// 2160p over USB 3.0 is at the wire's physical ceiling (~497 MB/s
+/// uncompressed 4:2:2 at 29.97fps) and collapses to a stable ~6fps fraction
+/// under any bus variance — on a CLEAN machine (owner repro: fresh reboot,
+/// nothing running, backend at 8% CPU). A same-format restart is useless; a
+/// renegotiation ONE tier down (1080p) returns inside comfortable bandwidth.
+/// The registry holds, per camera id, the negotiated dimensions of the last
+/// start and an armed ceiling the next (re)start's format chooser honors.
+pub const CAMERA_STEP_DOWN_CEILING: (u32, u32) = (1920, 1080);
+
+#[derive(Debug, Default, Clone, Copy)]
+struct CameraFormatAdaptiveState {
+    negotiated: Option<(u32, u32)>,
+    ceiling: Option<(u32, u32)>,
+}
+
+fn camera_adaptive_registry()
+-> &'static std::sync::Mutex<std::collections::HashMap<String, CameraFormatAdaptiveState>> {
+    static REGISTRY: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::HashMap<String, CameraFormatAdaptiveState>>,
+    > = std::sync::OnceLock::new();
+    REGISTRY.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
+}
+
+/// Record what a camera start actually negotiated (called on every start).
+pub fn record_negotiated_camera_format(camera_id: &str, width: u32, height: u32) {
+    let mut registry = camera_adaptive_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    registry
+        .entry(camera_id.to_string())
+        .or_default()
+        .negotiated = Some((width, height));
+}
+
+/// The ceiling the format chooser must respect for this camera, if armed.
+pub fn camera_format_ceiling(camera_id: &str) -> Option<(u32, u32)> {
+    camera_adaptive_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(camera_id)
+        .and_then(|state| state.ceiling)
+}
+
+/// Arm a one-tier step-down for this camera. Returns true only when the
+/// camera's negotiated format exceeds the ceiling AND no ceiling was armed
+/// yet — the caller restarts the camera exactly once on a true return; a
+/// false return means a step-down is unavailable or already applied, so no
+/// restart is warranted (restart-for-slowness stays banned).
+pub fn arm_camera_step_down(camera_id: &str) -> bool {
+    let mut registry = camera_adaptive_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let state = registry.entry(camera_id.to_string()).or_default();
+    if state.ceiling.is_some() {
+        return false;
+    }
+    let Some((width, height)) = state.negotiated else {
+        return false;
+    };
+    let (ceiling_width, ceiling_height) = CAMERA_STEP_DOWN_CEILING;
+    if width <= ceiling_width && height <= ceiling_height {
+        return false;
+    }
+    state.ceiling = Some(CAMERA_STEP_DOWN_CEILING);
+    true
+}
+
+/// Clear an armed ceiling (a future explicit quality setting or camera swap).
+/// Test-only: production never forgets a ceiling — the bus shortfall is a
+/// property of the device+port, not of one session.
+#[cfg(test)]
+pub fn clear_camera_step_down(camera_id: &str) {
+    let mut registry = camera_adaptive_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(state) = registry.get_mut(camera_id) {
+        state.ceiling = None;
+    }
+}
 const WINDOWS_DSHOW_CAMERA_PREFIX: &str = "camera:windows-dshow:";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1131,5 +1212,25 @@ mod tests {
         // Junk ranges never panic and never resolve below the sane floor.
         let junk = super::resolve_camera_frame_rate(30, &[(-5.0, -1.0)]).unwrap();
         assert!(junk.effective_fps > 0.0);
+    }
+    #[test]
+    fn camera_step_down_arms_once_and_only_above_the_ceiling() {
+        let id = "camera:avfoundation-native:test-step-down";
+        super::clear_camera_step_down(id);
+        // No negotiation recorded yet: nothing to step down from.
+        assert!(!super::arm_camera_step_down(id));
+        // Already at/below the ceiling: no step-down.
+        super::record_negotiated_camera_format(id, 1920, 1080);
+        assert!(!super::arm_camera_step_down(id));
+        // Above the ceiling: arms exactly once.
+        super::record_negotiated_camera_format(id, 3840, 2160);
+        assert!(super::arm_camera_step_down(id));
+        assert_eq!(
+            super::camera_format_ceiling(id),
+            Some(super::CAMERA_STEP_DOWN_CEILING)
+        );
+        assert!(!super::arm_camera_step_down(id), "second arm is a no-op");
+        super::clear_camera_step_down(id);
+        assert_eq!(super::camera_format_ceiling(id), None);
     }
 }
