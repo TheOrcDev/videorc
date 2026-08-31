@@ -316,21 +316,6 @@ describe('studio context invalidation boundaries', () => {
     expect(previewComponent).toMatch(/useStudioDiagnostics\s*\(/)
   })
 
-  it('keeps the capture-recovery action in flow with narrow preview error copy', () => {
-    const source = readFileSync(
-      new URL('../components/tabs/studio-tab.tsx', import.meta.url),
-      'utf8'
-    )
-    const alertStart = source.indexOf('<Alert data-testid="capture-health-alert"')
-    const alertEnd = source.indexOf('</Alert>', alertStart)
-    const alert = source.slice(alertStart, alertEnd)
-
-    expect(alertStart).toBeGreaterThan(-1)
-    expect(alertEnd).toBeGreaterThan(alertStart)
-    expect(alert).toMatch(/<AlertDescription[\s\S]*Restart capture[\s\S]*<\/AlertDescription>/)
-    expect(alert).not.toMatch(/<AlertAction>/)
-  })
-
   it('coalesces websocket chat messages before updating React state', () => {
     const source = readFileSync(new URL('./use-studio.tsx', import.meta.url), 'utf8')
     const handlerStart = source.indexOf("nextClient.on('liveChat.message'")

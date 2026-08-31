@@ -229,23 +229,10 @@ function StudioPreviewPanel(): ReactElement {
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const { previewLiveStatus } = useStudioPreview()
-  const {
-    captureRecoveryRetryPending,
-    captureRecoveryStatus,
-    diagnosticStats,
-    previewSurfaceStatus,
-    retryCaptureRecovery
-  } = useStudioDiagnostics()
+  const { diagnosticStats, previewSurfaceStatus } = useStudioDiagnostics()
   const active = isSessionTransportActive(recording.state)
   const previewHealth = studioHealth(
-    {
-      ...diagnosticStats,
-      captureRecoveryLastError: captureRecoveryStatus.lastError,
-      captureRecoveryPhase:
-        captureRecoveryStatus.phase === 'idle' ? undefined : captureRecoveryStatus.phase,
-      captureRecoveryStage: captureRecoveryStatus.stage,
-      captureRecoverySource: captureRecoveryStatus.source
-    },
+    diagnosticStats,
     active,
     runtimeInfo?.platform,
     previewSurfaceStatus.nativePreviewHostKind
@@ -265,11 +252,6 @@ function StudioPreviewPanel(): ReactElement {
         muted={captureConfig.audio.microphoneMuted}
         sessionActive={active}
       />
-      {captureRecoveryStatus.phase === 'idle' ? null : (
-        <span data-videorc-capture-recovery-status>
-          <StatusBadge tone={previewHealth.tone} value={previewHealth.value} />
-        </span>
-      )}
       <span data-videorc-session-status>
         <StatusBadge
           tone={sessionStatusTone(recording.state, wsStatus)}
@@ -288,19 +270,6 @@ function StudioPreviewPanel(): ReactElement {
           <p className="line-clamp-3" title={previewHealth.detail}>
             {previewHealth.detail}
           </p>
-          {captureRecoveryStatus.phase === 'failed' && captureRecoveryStatus.retryable ? (
-            <div className="flex flex-wrap gap-1 pt-2">
-              <Button
-                disabled={captureRecoveryRetryPending || wsStatus !== 'connected'}
-                size="xs"
-                type="button"
-                variant="destructive"
-                onClick={() => void retryCaptureRecovery()}
-              >
-                {captureRecoveryRetryPending ? 'Restarting…' : 'Restart capture'}
-              </Button>
-            </div>
-          ) : null}
         </AlertDescription>
       </Alert>
     ) : null
