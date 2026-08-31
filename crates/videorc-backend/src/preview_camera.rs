@@ -4778,6 +4778,17 @@ mod macos {
         let output = unsafe { AVCaptureVideoDataOutput::new() };
         let delegate = CameraPreviewDelegate::new(shared);
         let queue = DispatchQueue::new("com.videorc.preview.camera", None);
+        // Camera delivery feeds the live preview and the recording. Under
+        // system load (2026-08-31 field capture: load ~10/10 cores, camera
+        // delivered 17fps into a healthy callback) the default QoS lets
+        // macOS starve capture before our own encode/diagnostics work.
+        // Raise the floor so the system sheds OUR background work first.
+        if queue
+            .set_qos_class_floor(dispatch2::DispatchQoS::UserInitiated, 0)
+            .is_err()
+        {
+            tracing::warn!("Camera delegate queue kept default QoS (floor request rejected).");
+        }
 
         // AVCaptureSession mutators (`addInput`/`addOutput`/`startRunning`) can also
         // raise NSExceptions for sources AVFoundation refuses; guard them so a
@@ -4788,8 +4799,19 @@ mod macos {
                 if session.canSetSessionPreset(AVCaptureSessionPresetInputPriority) {
                     session.setSessionPreset(AVCaptureSessionPresetInputPriority);
                 }
+                // VIDEORC_CAMERA_NATIVE_FORMAT=1 opts the camera out of the
+                // BGRA zero-copy preference: the device's native YUV wire
+                // format halves-or-better the per-frame bytes crossing the
+                // system CMIO/XPC camera path AND removes the system-side
+                // format conversion (UVCAssistant measured at 45% CPU
+                // converting for us, 2026-08-31). Our own CPU converter
+                // takes over; A/B with the self_cpu telemetry before making
+                // it the default via Metal YUV ingestion.
+                let camera_native_format_override =
+                    std::env::var("VIDEORC_CAMERA_NATIVE_FORMAT").as_deref() == Ok("1");
                 let prefer_zero_copy_source_format =
-                    crate::metal_compositor::source_zerocopy_enabled();
+                    crate::metal_compositor::source_zerocopy_enabled()
+                        && !camera_native_format_override;
                 let capture_pixel_format =
                     preferred_capture_pixel_format(&output, prefer_zero_copy_source_format);
                 tracing::info!(
