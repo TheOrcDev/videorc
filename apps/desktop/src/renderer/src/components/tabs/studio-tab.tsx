@@ -2,7 +2,6 @@ import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
-import { ObsImportNudge } from '@/components/obs-import-nudge'
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
@@ -155,7 +154,6 @@ export function StudioTab(): ReactElement {
         <PageStack>
           {/* Fresh-profile OBS hint (O5): quiet, dismissible, gone forever once
               a capture source exists — never a nag. */}
-          <ObsImportNudge />
           {/* Hard blocks surface INSIDE the Session panel next to the disabled
               buttons (quiet inline line + jump link) — the yellow top banner
               made the Studio read as broken (post-0.9.4 fix batch F8). */}
