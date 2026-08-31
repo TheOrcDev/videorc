@@ -39,6 +39,7 @@ pub const PRODUCER_STALL_FLOOR_FPS: f64 = 1.0;
 /// Our own process CPU (% of one core) over the sampled window, from
 /// getrusage deltas. Answers "are WE the load?" inside every capture-health
 /// line — the 2026-08-31 investigation had to reconstruct this from `ps`.
+#[cfg(unix)]
 fn process_cpu_seconds() -> Option<f64> {
     let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
     let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
@@ -48,6 +49,14 @@ fn process_cpu_seconds() -> Option<f64> {
     let usage = unsafe { usage.assume_init() };
     let seconds = |tv: libc::timeval| tv.tv_sec as f64 + tv.tv_usec as f64 / 1_000_000.0;
     Some(seconds(usage.ru_utime) + seconds(usage.ru_stime))
+}
+
+/// Windows reports `self_cpu=n/a`; the D3-class investigations this feeds are
+/// macOS-first, and the Windows lane can grow a GetProcessTimes impl when a
+/// field report needs it there.
+#[cfg(not(unix))]
+fn process_cpu_seconds() -> Option<f64> {
+    None
 }
 /// Consecutive degraded windows before a transition is declared (2s windows
 /// → ≈6s of sustained collapse; single-window blips never flap).
