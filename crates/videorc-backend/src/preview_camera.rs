@@ -4777,18 +4777,23 @@ mod macos {
         let session = unsafe { AVCaptureSession::new() };
         let output = unsafe { AVCaptureVideoDataOutput::new() };
         let delegate = CameraPreviewDelegate::new(shared);
-        let queue = DispatchQueue::new("com.videorc.preview.camera", None);
         // Camera delivery feeds the live preview and the recording. Under
         // system load (2026-08-31 field capture: load ~10/10 cores, camera
         // delivered 17fps into a healthy callback) the default QoS lets
         // macOS starve capture before our own encode/diagnostics work.
-        // Raise the floor so the system sheds OUR background work first.
-        if queue
-            .set_qos_class_floor(dispatch2::DispatchQoS::UserInitiated, 0)
-            .is_err()
-        {
-            tracing::warn!("Camera delegate queue kept default QoS (floor request rejected).");
-        }
+        // Targeting the UserInitiated global queue at CREATION confers that
+        // QoS; a property setter after creation is a libdispatch client bug
+        // that SIGTRAPs on every camera start (the 0.9.88 crash loop —
+        // "dispatch queue property setter called after activation").
+        let queue = DispatchQueue::new_with_target(
+            "com.videorc.preview.camera",
+            None,
+            Some(&DispatchQueue::global_queue(
+                dispatch2::GlobalQueueIdentifier::QualityOfService(
+                    dispatch2::DispatchQoS::UserInitiated,
+                ),
+            )),
+        );
 
         // AVCaptureSession mutators (`addInput`/`addOutput`/`startRunning`) can also
         // raise NSExceptions for sources AVFoundation refuses; guard them so a
