@@ -27,6 +27,28 @@ use crate::source_registry::SourceKey;
 
 /// Fraction of the target rate below which a stage counts as degraded.
 pub const DEGRADED_RATE_FRACTION: f64 = 0.6;
+/// Below this producer callback rate the source counts as STALLED — the only
+/// state that admits an automatic restart. 2026-08-31 field capture proved a
+/// slow-but-flowing producer (17fps of a 30fps target under system load,
+/// UVCAssistant at 45% CPU, host load ~10/10 cores) is an UPSTREAM capacity
+/// problem a source restart cannot fix: two cold restarts (epoch @1->@3)
+/// changed nothing. Restarting for slowness is repair theater; slowness is
+/// logged silently, stalls are healed silently.
+pub const PRODUCER_STALL_FLOOR_FPS: f64 = 1.0;
+
+/// Our own process CPU (% of one core) over the sampled window, from
+/// getrusage deltas. Answers "are WE the load?" inside every capture-health
+/// line — the 2026-08-31 investigation had to reconstruct this from `ps`.
+fn process_cpu_seconds() -> Option<f64> {
+    let mut usage = std::mem::MaybeUninit::<libc::rusage>::zeroed();
+    let rc = unsafe { libc::getrusage(libc::RUSAGE_SELF, usage.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let usage = unsafe { usage.assume_init() };
+    let seconds = |tv: libc::timeval| tv.tv_sec as f64 + tv.tv_usec as f64 / 1_000_000.0;
+    Some(seconds(usage.ru_utime) + seconds(usage.ru_stime))
+}
 /// Consecutive degraded windows before a transition is declared (2s windows
 /// → ≈6s of sustained collapse; single-window blips never flap).
 pub const DEGRADED_WINDOW_THRESHOLD: u32 = 3;
@@ -209,6 +231,10 @@ pub struct CaptureHealthMonitor {
     /// The stage the running degraded streak is accumulating toward.
     pending_stage: Option<CaptureStage>,
     consumer_starvation_advisory_active: bool,
+    /// Edge-latch for the slow-but-flowing delivery log so a sustained
+    /// pressure episode writes one line, not one per window.
+    slow_delivery_log_active: bool,
+    last_process_cpu_seconds: Option<f64>,
 }
 
 impl CaptureHealthMonitor {
@@ -445,15 +471,24 @@ impl CaptureHealthMonitor {
             (camera_fresh_fps, camera_consumer_floor),
             (Some(rate), Some(floor)) if rate < floor
         );
-        let producer_camera_degraded = matches!(
-            (
-                camera_callback_fps,
-                camera_publication_fps,
-                camera_producer_floor
-            ),
-            (Some(callbacks), Some(publications), Some(floor))
-                if callbacks < floor || publications < floor
+        // STALLED (restart-worthy): callbacks effectively stopped while a
+        // generation claims to be live — the serial-queue-wedge family.
+        // SLOW (log-only): flowing below the cadence floor — the system-load
+        // family, where restarts are proven useless.
+        let producer_camera_stalled = matches!(
+            (camera_callback_fps, camera_producer_floor),
+            (Some(callbacks), Some(_)) if callbacks < PRODUCER_STALL_FLOOR_FPS
         );
+        let producer_camera_slow = !producer_camera_stalled
+            && matches!(
+                (
+                    camera_callback_fps,
+                    camera_publication_fps,
+                    camera_producer_floor
+                ),
+                (Some(callbacks), Some(publications), Some(floor))
+                    if callbacks < floor || publications < floor
+            );
         let consumer_screen_starved = matches!(
             (screen_fresh_fps, screen_consumer_floor),
             (Some(rate), Some(floor)) if rate < floor
@@ -463,21 +498,29 @@ impl CaptureHealthMonitor {
         // can use callback collapse to distinguish a stalled stream from
         // damage-driven idleness. Windows desktop duplication and gdigrab do
         // not provide that discriminator and must never arm source recovery.
-        let producer_screen_degraded = sample.screen_producer.as_ref().is_some_and(|producer| {
+        let producer_screen_stalled = sample.screen_producer.as_ref().is_some_and(|producer| {
             producer.callback_cadence.is_authoritative()
                 && matches!(
-                    (
-                        screen_callback_fps,
-                        screen_publication_fps,
-                        screen_producer_floor
-                    ),
-                    (Some(callbacks), Some(publications), Some(floor))
-                        if callbacks < floor && publications < floor
+                    (screen_callback_fps, screen_producer_floor),
+                    (Some(callbacks), Some(_)) if callbacks < PRODUCER_STALL_FLOOR_FPS
                 )
         });
-        let degraded_stage = if consumer_camera_starved && producer_camera_degraded {
+        let producer_screen_slow = !producer_screen_stalled
+            && sample.screen_producer.as_ref().is_some_and(|producer| {
+                producer.callback_cadence.is_authoritative()
+                    && matches!(
+                        (
+                            screen_callback_fps,
+                            screen_publication_fps,
+                            screen_producer_floor
+                        ),
+                        (Some(callbacks), Some(publications), Some(floor))
+                            if callbacks < floor && publications < floor
+                    )
+            });
+        let degraded_stage = if consumer_camera_starved && producer_camera_stalled {
             Some(CaptureStage::CameraDelivery)
-        } else if consumer_screen_starved && producer_screen_degraded {
+        } else if consumer_screen_starved && producer_screen_stalled {
             Some(CaptureStage::ScreenDelivery)
         } else if sample.render_fps < render_floor {
             Some(CaptureStage::CompositorRender)
@@ -485,10 +528,22 @@ impl CaptureHealthMonitor {
             None
         };
 
+        let self_cpu_pct = {
+            let now = process_cpu_seconds();
+            let pct = match (self.last_process_cpu_seconds, now, sample.window_secs) {
+                (Some(previous), Some(current), window) if window > 0.0 && current >= previous => {
+                    Some((current - previous) / window * 100.0)
+                }
+                _ => None,
+            };
+            self.last_process_cpu_seconds = now;
+            pct
+        };
         let detail = format!(
-            "target={:.1}fps render={:.1}fps camera_target={} camera_fresh={} camera_callbacks={} camera_publications={} camera_dev={} camera_did_drop={} camera_oob={} camera_pool={}/{} camera_epoch={} screen_target={} screen_fresh={} screen_callbacks={} screen_publications={} screen_epoch={}",
+            "target={:.1}fps render={:.1}fps self_cpu={} camera_target={} camera_fresh={} camera_callbacks={} camera_publications={} camera_dev={} camera_did_drop={} camera_oob={} camera_pool={}/{} camera_epoch={} screen_target={} screen_fresh={} screen_callbacks={} screen_publications={} screen_epoch={}",
             sample.target_fps,
             sample.render_fps,
+            self_cpu_pct.map_or_else(|| "n/a".to_string(), |pct| format!("{pct:.0}%")),
             sample
                 .camera_target_fps
                 .map_or_else(|| "n/a".to_string(), |rate| format!("{rate:.1}fps")),
@@ -529,8 +584,19 @@ impl CaptureHealthMonitor {
             ),
         );
 
+        let slow_delivery = (producer_camera_slow && consumer_camera_starved)
+            || (producer_screen_slow && consumer_screen_starved);
+        if slow_delivery && !self.slow_delivery_log_active {
+            self.slow_delivery_log_active = true;
+            tracing::warn!(
+                "[capture-health] delivery is slow but flowing (system capture pressure suspected; no restart will be attempted): {detail}"
+            );
+        } else if !slow_delivery {
+            self.slow_delivery_log_active = false;
+        }
         let advisory = if consumer_camera_starved
-            && !producer_camera_degraded
+            && !producer_camera_stalled
+            && !producer_camera_slow
             && degraded_stage.is_none()
         {
             if !self.consumer_starvation_advisory_active {
@@ -714,8 +780,8 @@ mod tests {
         let mut transition = None;
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
             camera_fresh += 12;
-            callbacks += 60;
-            publications += 12;
+            callbacks += 1;
+            publications += 1;
             did_drop += 48;
             out_of_buffers += 48;
             transition = monitor.observe(sample(
@@ -732,35 +798,47 @@ mod tests {
             panic!("expected a degradation transition")
         };
         assert!(detail.contains("camera_dev=29.9fps"), "{detail}");
-        assert!(detail.contains("camera_callbacks=30.0fps"), "{detail}");
+        assert!(detail.contains("camera_callbacks=0.5fps"), "{detail}");
         assert!(detail.contains("camera_did_drop=+24.0/s"), "{detail}");
         assert!(detail.contains("camera_oob=+24.0/s"), "{detail}");
         assert!(detail.contains("camera_pool=14/16"), "{detail}");
         assert!(detail.contains("camera_epoch=camera:test@7"), "{detail}");
     }
 
-    /// Replays the measured 2026-08-27 decay shape: healthy windows, then the
-    /// camera fetch collapses to ~6.4 fresh fps while render cadence stays at
-    /// target (held frames re-served) — the monitor must name camera-delivery.
+    /// The measured 2026-08-27/31 SLOW shape (camera flowing at ~6.5fps
+    /// under system pressure): logged silently, NEVER declared degraded —
+    /// restarts are proven useless against upstream capacity (owner
+    /// directive 2026-08-31: no repair theater for slowness).
     #[test]
-    fn names_camera_delivery_on_the_field_decay_signature() {
+    fn slow_flowing_camera_is_never_degraded() {
         let mut monitor = CaptureHealthMonitor::new();
         let mut camera = 0_u64;
-        let mut screen = 0_u64;
-        // Baseline + healthy windows: 30fps × 2s = 60 fresh serves per window.
         for _ in 0..4 {
             camera += 60;
-            screen += 60;
-            assert_eq!(monitor.observe(healthy_sample(camera, screen)), None);
+            assert_eq!(monitor.observe(healthy_sample(camera, 0)), None);
         }
-        // Decay: ~6.4 fresh fps → ~13 fresh serves per 2s window.
+        for _ in 0..(DEGRADED_WINDOW_THRESHOLD * 2) {
+            camera += 13; // ~6.5fps: starved consumer, flowing producer
+            assert_eq!(monitor.observe(healthy_sample(camera, 0)), None);
+        }
+        assert_eq!(monitor.degraded_stage(), None);
+    }
+
+    /// A STALLED camera (callbacks below the 1fps stall floor while the
+    /// generation claims to be live — the 2026-08-28 wedge shape) is the one
+    /// state that degrades and admits the silent restart.
+    #[test]
+    fn stalled_camera_names_camera_delivery() {
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut camera = 0_u64;
+        for _ in 0..4 {
+            camera += 60;
+            assert_eq!(monitor.observe(healthy_sample(camera, 0)), None);
+        }
         let mut transition = None;
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            camera += 13;
-            screen += 13;
-            let mut sample = healthy_sample(camera, screen);
-            sample.render_fps = 30.0; // render cadence stays healthy
-            transition = monitor.observe(sample);
+            camera += 1; // 0.5fps < PRODUCER_STALL_FLOOR_FPS
+            transition = monitor.observe(healthy_sample(camera, 0));
         }
         match transition {
             Some(CaptureHealthTransition::Degraded {
@@ -770,7 +848,10 @@ mod tests {
                 ..
             }) => {
                 assert_eq!(stage, CaptureStage::CameraDelivery);
-                assert!(detail.contains("camera_fresh=6.5fps"), "detail: {detail}");
+                assert!(
+                    detail.contains("camera_callbacks=0.5fps"),
+                    "detail: {detail}"
+                );
                 assert_eq!(camera_epoch.unwrap().generation, 1);
             }
             other => panic!("expected a camera-delivery degradation, got {other:?}"),
@@ -802,7 +883,7 @@ mod tests {
         camera += 60;
         monitor.observe(healthy_sample(camera, 0));
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            camera += 5;
+            camera += 1;
             monitor.observe(healthy_sample(camera, 0));
         }
         assert_eq!(monitor.degraded_stage(), Some(CaptureStage::CameraDelivery));
@@ -888,9 +969,9 @@ mod tests {
         );
         let mut transition = None;
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            screen += 4;
-            callbacks += 4;
-            publications += 4;
+            screen += 1;
+            callbacks += 1;
+            publications += 1;
             transition = monitor.observe(screen_sample(screen, callbacks, publications));
         }
 
@@ -1050,7 +1131,7 @@ mod tests {
     }
 
     #[test]
-    fn producer_floor_uses_60fps_camera_cadence_under_30fps_compositor() {
+    fn slow_producer_below_negotiated_floor_never_degrades_only_a_stall_does() {
         let mut monitor = CaptureHealthMonitor::new();
         let mut consumer = 20_u64;
         let mut producer = 40_u64;
@@ -1061,11 +1142,11 @@ mod tests {
         evidence.frame_store_publications = producer;
         assert_eq!(monitor.observe(baseline), None);
 
-        let mut transition = None;
-        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            // Consumer delivery is 10fps (below the compositor-visible 18fps
-            // floor) and the native producer is 20fps (below the camera's
-            // negotiated 36fps floor, but above the old incorrect 18fps one).
+        for _ in 0..(DEGRADED_WINDOW_THRESHOLD * 2) {
+            // Consumer delivery is 10fps and the native producer is 20fps —
+            // below the camera's negotiated 36fps floor but FLOWING. A slow
+            // producer is upstream capacity pressure a restart cannot fix
+            // (2026-08-31 field proof): logged silently, never degraded.
             consumer += 20;
             producer += 40;
             let mut sample = healthy_sample(consumer, 0);
@@ -1073,9 +1154,22 @@ mod tests {
             let evidence = sample.camera_producer.as_mut().unwrap();
             evidence.capture_callbacks = producer;
             evidence.frame_store_publications = producer;
+            assert_eq!(monitor.observe(sample), None);
+        }
+        assert_eq!(monitor.degraded_stage(), None);
+
+        // A true stall on the same 60fps-negotiated camera still degrades.
+        let mut transition = None;
+        for _ in 0..DEGRADED_WINDOW_THRESHOLD {
+            consumer += 1;
+            producer += 1;
+            let mut sample = healthy_sample(consumer, 0);
+            sample.camera_target_fps = Some(60.0);
+            let evidence = sample.camera_producer.as_mut().unwrap();
+            evidence.capture_callbacks = producer;
+            evidence.frame_store_publications = producer;
             transition = monitor.observe(sample);
         }
-
         assert!(matches!(
             transition,
             Some(CaptureHealthTransition::Degraded {
@@ -1091,7 +1185,7 @@ mod tests {
         let mut old_counter = 60_u64;
         monitor.observe(healthy_sample(old_counter, 0));
         for _ in 0..(DEGRADED_WINDOW_THRESHOLD - 1) {
-            old_counter += 5;
+            old_counter += 1;
             assert_eq!(monitor.observe(healthy_sample(old_counter, 0)), None);
         }
         assert_eq!(monitor.pending_stage, Some(CaptureStage::CameraDelivery));
@@ -1113,11 +1207,11 @@ mod tests {
 
         // Two degraded windows on generation N plus one on N+1 must not
         // satisfy the three-window threshold for the replacement source.
-        let mut first_new_degraded = healthy_sample(10, 0);
+        let mut first_new_degraded = healthy_sample(6, 0);
         let evidence = first_new_degraded.camera_producer.as_mut().unwrap();
         evidence.epoch = replacement_epoch.clone();
-        evidence.capture_callbacks = 10;
-        evidence.frame_store_publications = 10;
+        evidence.capture_callbacks = 6;
+        evidence.frame_store_publications = 6;
         assert_eq!(monitor.observe(first_new_degraded), None);
         assert_eq!(monitor.degraded_streak, 1);
         assert_eq!(monitor.degraded_stage(), None);
@@ -1128,7 +1222,7 @@ mod tests {
         let mut counter = 60_u64;
         declared.observe(healthy_sample(counter, 0));
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            counter += 5;
+            counter += 1;
             declared.observe(healthy_sample(counter, 0));
         }
         assert_eq!(
@@ -1150,7 +1244,7 @@ mod tests {
         let mut camera = 60_u64;
         monitor.observe(healthy_sample(camera, 0));
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            camera += 5;
+            camera += 1;
             monitor.observe(healthy_sample(camera, 0));
         }
         assert_eq!(monitor.degraded_stage(), Some(CaptureStage::CameraDelivery));
@@ -1165,7 +1259,7 @@ mod tests {
         assert_eq!(monitor.observe(healthy_sample(camera, 0)), None);
         let mut transition = None;
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            camera += 5;
+            camera += 1;
             transition = monitor.observe(healthy_sample(camera, 0));
         }
         assert!(matches!(
@@ -1183,7 +1277,7 @@ mod tests {
         let mut camera = 60_u64;
         monitor.observe(healthy_sample(camera, 0));
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            camera += 5;
+            camera += 1;
             monitor.observe(healthy_sample(camera, 0));
         }
         assert_eq!(monitor.degraded_stage(), Some(CaptureStage::CameraDelivery));
@@ -1194,11 +1288,11 @@ mod tests {
         // The explicit mutation may reuse the same native generation and its
         // cumulative counters. Rearming must still establish a new baseline
         // and allow persistent post-boundary decay to declare a new incident.
-        camera += 5;
+        camera += 1;
         assert_eq!(monitor.observe(healthy_sample(camera, 0)), None);
         let mut transition = None;
         for _ in 0..DEGRADED_WINDOW_THRESHOLD {
-            camera += 5;
+            camera += 1;
             transition = monitor.observe(healthy_sample(camera, 0));
         }
         assert!(matches!(
@@ -1451,7 +1545,7 @@ mod tests {
         let mut counter = 60_u64;
         monitor.observe(healthy_sample(counter, 0));
         for _ in 0..(DEGRADED_WINDOW_THRESHOLD - 1) {
-            counter += 5;
+            counter += 1;
             assert_eq!(monitor.observe(healthy_sample(counter, 0)), None);
         }
         let before = (
@@ -1512,7 +1606,7 @@ mod tests {
         );
         assert_eq!(after, before);
 
-        counter += 5;
+        counter += 1;
         assert!(matches!(
             monitor.observe(healthy_sample(counter, 0)),
             Some(CaptureHealthTransition::Degraded {
