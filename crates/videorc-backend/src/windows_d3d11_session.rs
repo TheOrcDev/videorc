@@ -25,13 +25,14 @@ fn windows_d3d11_terminal_source_error(
 }
 
 /// Screen-camera composition keeps one more full-frame layer in flight and
-/// stretches NV12/BGRA lease residency past the screen-only envelope. Size the
-/// capture and primary render pools so transient fence lag cannot starve a CFR
-/// tick into a silent single-frame skip (5 slots stays inside the per-format
-/// pool ceiling of 8 even for split screen-camera sessions).
+/// stretches NV12/BGRA lease residency past the screen-only envelope, and the
+/// stop/preview-restore accounting from #262 raised steady-state churn for
+/// every session shape. Size the capture and primary render pools to five
+/// slots so transient fence lag cannot starve a CFR tick into a silent
+/// single-frame skip (the per-format pool ceiling is 8).
 #[cfg(any(target_os = "windows", test))]
-const fn windows_d3d11_render_pool_slots(camera_required: bool) -> usize {
-    if camera_required { 5 } else { 3 }
+const fn windows_d3d11_render_pool_slots(_camera_required: bool) -> usize {
+    5
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2168,8 +2169,8 @@ mod tests {
     }
 
     #[test]
-    fn windows_d3d11_screen_camera_sessions_size_deeper_render_pools() {
-        assert_eq!(windows_d3d11_render_pool_slots(false), 3);
+    fn windows_d3d11_sessions_size_deep_render_pools() {
+        assert_eq!(windows_d3d11_render_pool_slots(false), 5);
         assert_eq!(windows_d3d11_render_pool_slots(true), 5);
     }
 
