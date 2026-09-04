@@ -628,6 +628,7 @@ pub async fn resolve_live_chat_id(
 pub async fn run_youtube_chat_connector(
     state: AppState,
     session_id: String,
+    session_generation: u64,
     config: YouTubeChatConfig,
 ) {
     let client = reqwest::Client::new();
@@ -648,6 +649,8 @@ pub async fn run_youtube_chat_connector(
                     Err(error) => {
                         set_provider_and_emit(
                             &state,
+                            &session_id,
+                            session_generation,
                             StreamPlatform::Youtube,
                             target_id.as_deref(),
                             LiveChatProviderConnectionState::Failed,
@@ -664,6 +667,8 @@ pub async fn run_youtube_chat_connector(
     let Some(live_chat_id) = resolved else {
         set_provider_and_emit(
             &state,
+            &session_id,
+            session_generation,
             StreamPlatform::Youtube,
             target_id.as_deref(),
             LiveChatProviderConnectionState::Failed,
@@ -673,10 +678,19 @@ pub async fn run_youtube_chat_connector(
         return;
     };
     // The send path needs the resolved id too (Comments upgrade S4).
-    crate::live_chat::set_youtube_send_chat_id(&state, target_id.as_deref(), &live_chat_id).await;
+    crate::live_chat::set_youtube_send_chat_id(
+        &state,
+        &session_id,
+        session_generation,
+        target_id.as_deref(),
+        &live_chat_id,
+    )
+    .await;
 
     set_provider_and_emit(
         &state,
+        &session_id,
+        session_generation,
         StreamPlatform::Youtube,
         target_id.as_deref(),
         LiveChatProviderConnectionState::Connecting,
@@ -707,6 +721,8 @@ pub async fn run_youtube_chat_connector(
                     connected = true;
                     set_provider_and_emit(
                         &state,
+                        &session_id,
+                        session_generation,
                         StreamPlatform::Youtube,
                         target_id.as_deref(),
                         LiveChatProviderConnectionState::Connected,
@@ -714,10 +730,14 @@ pub async fn run_youtube_chat_connector(
                     )
                     .await;
                 }
-                if let Err(error) = try_deliver_messages(&state, page.messages).await {
+                if let Err(error) =
+                    try_deliver_messages(&state, session_generation, page.messages).await
+                {
                     if error.is_terminal() {
                         set_provider_and_emit(
                             &state,
+                            &session_id,
+                            session_generation,
                             StreamPlatform::Youtube,
                             target_id.as_deref(),
                             LiveChatProviderConnectionState::Failed,
@@ -739,6 +759,8 @@ pub async fn run_youtube_chat_connector(
                 if page.ended {
                     set_provider_and_emit(
                         &state,
+                        &session_id,
+                        session_generation,
                         StreamPlatform::Youtube,
                         target_id.as_deref(),
                         LiveChatProviderConnectionState::Ended,
@@ -757,6 +779,8 @@ pub async fn run_youtube_chat_connector(
                 let (provider_state, message, stop) = provider_reaction(kind);
                 set_provider_and_emit(
                     &state,
+                    &session_id,
+                    session_generation,
                     StreamPlatform::Youtube,
                     target_id.as_deref(),
                     provider_state,

@@ -83,6 +83,60 @@ const idleCapturePressureDiagnostics = {
 } satisfies Pick<DiagnosticStats, (typeof requiredCapturePressureDiagnosticFields)[number]>
 
 describe('backend RPC contract', () => {
+  it('validates the generation-bound capture recovery status and retry surface', () => {
+    const recovering = {
+      revision: 4,
+      phase: 'verifying',
+      retryable: false,
+      attempts: 1,
+      stage: 'camera-delivery',
+      source: 'camera',
+      trigger: 'automatic',
+      sourceGeneration: 8,
+      detectedAt: '2026-08-28T10:00:00Z',
+      updatedAt: '2026-08-28T10:00:02Z',
+      message: 'Camera restarted; verifying cadence.'
+    } as const
+
+    expect(validateBackendRpcResult('capture.recovery.status', recovering)).toEqual(recovering)
+    expect(
+      validateBackendRpcResult('capture.recovery.status', { ...recovering, revision: 0 })
+    ).toEqual({ ...recovering, revision: 0 })
+    expect(validateBackendRpcResult('capture.recovery.retry', recovering)).toEqual(recovering)
+    expect(validateBackendEventPayload('capture.recovery.status', recovering)).toEqual(recovering)
+    expect(validateBackendRpcParams('capture.recovery.retry', undefined)).toBeUndefined()
+
+    const recoveringScreen = {
+      ...recovering,
+      stage: 'screen-delivery',
+      source: 'screen',
+      message: 'Screen capture restarted; verifying cadence.'
+    } as const
+    expect(validateBackendRpcResult('capture.recovery.status', recoveringScreen)).toEqual(
+      recoveringScreen
+    )
+    expect(validateBackendEventPayload('capture.recovery.status', recoveringScreen)).toEqual(
+      recoveringScreen
+    )
+
+    for (const invalid of [
+      { ...recovering, revision: Number.POSITIVE_INFINITY },
+      { ...recovering, phase: 'repairing' },
+      { ...recovering, attempts: -1 },
+      { ...recovering, sourceGeneration: 0 },
+      { ...recovering, sourceGeneration: 1.5 },
+      { ...recovering, sourceGeneration: Number.MAX_SAFE_INTEGER + 1 },
+      { ...recovering, lastDurationMs: null }
+    ]) {
+      expect(() => validateBackendRpcResult('capture.recovery.status', invalid)).toThrow()
+      expect(() => validateBackendEventPayload('capture.recovery.status', invalid)).toThrow()
+    }
+    const { revision: _revision, ...missingRevision } = recovering
+    expect(() => validateBackendRpcResult('capture.recovery.status', missingRevision)).toThrow()
+    expect(() => validateBackendEventPayload('capture.recovery.status', missingRevision)).toThrow()
+    expect(() => validateBackendRpcParams('capture.recovery.retry', {})).toThrow()
+  })
+
   it('keeps the Windows HWND in an exact generation-bound main-owned request', () => {
     const request = {
       bounds: {
@@ -683,6 +737,9 @@ describe('backend RPC contract', () => {
       height: 720,
       framesRendered: 42,
       droppedFrames: 0,
+      nativePreviewIosurfaceImportLiveCount: 2,
+      nativePreviewIosurfaceImportPeakCount: 3,
+      nativePreviewIosurfaceImportCeiling: 3,
       framePollingSuppressed: false,
       sourcePixelsPresent: true,
       pendingHostCommandCount: 0,
@@ -693,6 +750,24 @@ describe('backend RPC contract', () => {
     expect(validateBackendEventPayload('preview.surface.status', surfaceStatus)).toEqual(
       surfaceStatus
     )
+    for (const field of [
+      'nativePreviewIosurfaceImportLiveCount',
+      'nativePreviewIosurfaceImportPeakCount',
+      'nativePreviewIosurfaceImportCeiling'
+    ] as const) {
+      expect(() =>
+        validateBackendRpcResult('preview.surface.status', {
+          ...surfaceStatus,
+          [field]: -1
+        })
+      ).toThrow(field)
+      expect(() =>
+        validateBackendEventPayload('preview.surface.status', {
+          ...surfaceStatus,
+          [field]: null
+        })
+      ).toThrow(field)
+    }
     const d3d11SurfaceStatus = {
       ...surfaceStatus,
       transport: 'd3d11-shared-texture',
@@ -811,6 +886,18 @@ describe('backend RPC contract', () => {
       encoderBridgeVideoToolboxPendingEncodeFrames: 2,
       encoderBridgeVideoToolboxPendingFifoFrames: 14,
       encoderBridgeEncodedAccessUnitDroppedFrames: 0,
+      compositorMetalCachedCaptureSourceImportsLiveCount: 2,
+      compositorMetalCachedCaptureSourceImportsPeakCount: 3,
+      compositorMetalCachedCaptureSourceImportsCeiling: 4,
+      compositorMetalTargetRingSlotsLiveCount: 3,
+      compositorMetalTargetRingSlotsPeakCount: 5,
+      compositorMetalTargetRingSlotsCeiling: 5,
+      encoderBridgeMetalTargetRefsInFlightLiveCount: 1,
+      encoderBridgeMetalTargetRefsInFlightPeakCount: 2,
+      encoderBridgeMetalTargetRefsInFlightCeiling: 5,
+      nativePreviewIosurfaceImportLiveCount: 2,
+      nativePreviewIosurfaceImportPeakCount: 3,
+      nativePreviewIosurfaceImportCeiling: 3,
       previewImagePollCounts: {
         cameraPng: 0,
         screenPng: 0,
@@ -824,11 +911,83 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
     expect(validateBackendEventPayload('diagnostics.stats', diagnostics)).toEqual(diagnostics)
     for (const field of [
+      'compositorMetalCachedCaptureSourceImportsLiveCount',
+      'compositorMetalCachedCaptureSourceImportsPeakCount',
+      'compositorMetalCachedCaptureSourceImportsCeiling',
+      'compositorMetalTargetRingSlotsLiveCount',
+      'compositorMetalTargetRingSlotsPeakCount',
+      'compositorMetalTargetRingSlotsCeiling',
+      'encoderBridgeMetalTargetRefsInFlightLiveCount',
+      'encoderBridgeMetalTargetRefsInFlightPeakCount',
+      'encoderBridgeMetalTargetRefsInFlightCeiling',
+      'nativePreviewIosurfaceImportLiveCount',
+      'nativePreviewIosurfaceImportPeakCount',
+      'nativePreviewIosurfaceImportCeiling'
+    ] as const) {
+      expect(() =>
+        validateBackendRpcResult('diagnostics.stats', {
+          ...diagnostics,
+          [field]: -1
+        })
+      ).toThrow(field)
+      const nullablePayload = { ...diagnostics, [field]: null }
+      expect(validateBackendRpcResult('diagnostics.stats', nullablePayload)).toEqual(
+        nullablePayload
+      )
+      expect(validateBackendEventPayload('diagnostics.stats', nullablePayload)).toEqual(
+        nullablePayload
+      )
+    }
+    // capturePipelineDegradedStage: absent while healthy (the wire omits it),
+    // a stage label while degraded, and null tolerated for defense in depth
+    // against the serde-null trap (0.9.68 / 0.9.79 outage class).
+    for (const degradedStage of ['camera-delivery', 'screen-delivery', 'compositor-render', null]) {
+      const flagged = { ...diagnostics, capturePipelineDegradedStage: degradedStage }
+      expect(validateBackendEventPayload('diagnostics.stats', flagged)).toEqual(flagged)
+    }
+    const failedRecovery = {
+      ...diagnostics,
+      captureRecoveryPhase: 'failed',
+      captureRecoverySource: 'camera',
+      captureRecoveryAttempts: 1,
+      captureRecoveryLastError: 'Camera cadence did not recover.',
+      captureRecoveryLastDurationMs: 2_104
+    }
+    expect(validateBackendRpcResult('diagnostics.stats', failedRecovery)).toEqual(failedRecovery)
+    expect(validateBackendEventPayload('diagnostics.stats', failedRecovery)).toEqual(failedRecovery)
+    const failedScreenRecovery = {
+      ...failedRecovery,
+      captureRecoverySource: 'screen'
+    } as const
+    expect(validateBackendRpcResult('diagnostics.stats', failedScreenRecovery)).toEqual(
+      failedScreenRecovery
+    )
+    for (const field of [
+      'captureRecoveryPhase',
+      'captureRecoverySource',
+      'captureRecoveryAttempts',
+      'captureRecoveryLastError',
+      'captureRecoveryLastDurationMs'
+    ] as const) {
+      const nullable = { ...failedRecovery, [field]: null }
+      expect(validateBackendRpcResult('diagnostics.stats', nullable)).toEqual(nullable)
+      expect(validateBackendEventPayload('diagnostics.stats', nullable)).toEqual(nullable)
+    }
+    expect(() =>
+      validateBackendEventPayload('diagnostics.stats', {
+        ...diagnostics,
+        capturePipelineDegradedStage: ''
+      })
+    ).toThrow('capturePipelineDegradedStage')
+    for (const field of [
       'encoderBridgeOutputQueueOldestFrameAgeMs',
       'encoderBridgeOutputQueueOldestFrameAgeHighWaterMs',
       'encoderBridgeOutputLastProgressAgeMs'
     ]) {
-      for (const invalid of [null, -1, Number.POSITIVE_INFINITY]) {
+      const nullable = { ...diagnostics, [field]: null }
+      expect(validateBackendRpcResult('diagnostics.stats', nullable)).toEqual(nullable)
+      expect(validateBackendEventPayload('diagnostics.stats', nullable)).toEqual(nullable)
+      for (const invalid of [-1, Number.POSITIVE_INFINITY]) {
         expect(() =>
           validateBackendRpcResult('diagnostics.stats', {
             ...diagnostics,

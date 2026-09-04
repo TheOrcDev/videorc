@@ -16,7 +16,11 @@ const config = {
   forcePathStyle: true,
   region: 'auto',
   secretAccessKey: 'test-secret',
-  sessionToken: null
+  sessionToken: null,
+  tlsPolicy: {
+    allowedIssuerOrganizations: ['Test Issuer'],
+    allowedSpkiSha256: []
+  }
 }
 
 function feed(version, sha = 'same') {
@@ -130,21 +134,21 @@ describe('private storage verification', () => {
       sha256: createHash('sha256').update(bytes).digest('hex'),
       sizeBytes: bytes.length
     }
-    const fetchImpl = async (_url, request) => {
+    const transport = requestTransport(async (_url, request) => {
       if (request.method !== 'GET') throw new Error('unexpected method')
       return new Response(bytes, { status: 200 })
-    }
+    })
 
     assert.equal(
-      await readRemoteTextObject({ config, fetchImpl, objectKey: 'updates/windows/latest.yml' }),
+      await readRemoteTextObject({ config, objectKey: 'updates/windows/latest.yml', transport }),
       bytes.toString()
     )
-    assert.equal((await inspectRemoteArtifact({ artifact, config, fetchImpl })).state, 'identical')
+    assert.equal((await inspectRemoteArtifact({ artifact, config, transport })).state, 'identical')
     assert.equal(
       await readRemoteTextObject({
         config,
-        fetchImpl: async () => new Response(null, { status: 404 }),
-        objectKey: 'missing'
+        objectKey: 'missing',
+        transport: requestTransport(async () => new Response(null, { status: 404 }))
       }),
       null
     )
@@ -161,7 +165,9 @@ describe('private storage verification', () => {
       inspectRemoteArtifact({
         artifact,
         config,
-        fetchImpl: async () => new Response(Buffer.from('attacker'), { status: 200 })
+        transport: requestTransport(
+          async () => new Response(Buffer.from('attacker'), { status: 200 })
+        )
       }),
       (error) =>
         error instanceof WindowsReleasePublicationError && error.code === 'remote-artifact-mismatch'
@@ -172,12 +178,44 @@ describe('private storage verification', () => {
     await assert.rejects(
       readRemoteTextObject({
         config,
-        fetchImpl: async () => new Response('oversized', { status: 200 }),
         maxBytes: 4,
-        objectKey: 'changelog/changelog.json'
+        objectKey: 'changelog/changelog.json',
+        transport: requestTransport(async () => new Response('oversized', { status: 200 }))
       }),
       (error) =>
         error instanceof WindowsReleasePublicationError && error.code === 'remote-read-too-large'
     )
   })
+
+  it('does not follow redirects or fall back to ambient fetch', async () => {
+    let requestCount = 0
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = async () => {
+      throw new Error('ambient fetch must not be used')
+    }
+    try {
+      await assert.rejects(
+        readRemoteTextObject({
+          config,
+          objectKey: 'updates/windows/latest.yml',
+          transport: requestTransport(async () => {
+            requestCount += 1
+            return new Response(null, {
+              headers: { location: 'https://attacker.example/latest.yml' },
+              status: 302
+            })
+          })
+        }),
+        (error) =>
+          error instanceof WindowsReleasePublicationError && error.code === 'remote-read-failed'
+      )
+      assert.equal(requestCount, 1)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
 })
+
+function requestTransport(request) {
+  return { close() {}, request }
+}

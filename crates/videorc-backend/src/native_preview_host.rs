@@ -203,6 +203,9 @@ pub struct NativePreviewIosurfaceCacheMetrics {
     pub imports: u64,
     pub invalidations: u64,
     pub import_failures: u64,
+    pub live_count: u64,
+    pub peak_count: u64,
+    pub ceiling: u64,
 }
 
 impl NativePreviewIosurfaceCacheMetrics {
@@ -222,6 +225,13 @@ impl NativePreviewIosurfaceCacheMetrics {
         if cached_entry_count > 0 {
             self.invalidations = self.invalidations.saturating_add(1);
         }
+    }
+
+    fn record_cache_state(&mut self, cached_entry_count: usize, ceiling: usize) {
+        self.live_count = u64::try_from(cached_entry_count).unwrap_or(u64::MAX);
+        self.peak_count = self.peak_count.max(self.live_count);
+        self.ceiling = u64::try_from(ceiling).unwrap_or(u64::MAX);
+        debug_assert!(self.live_count <= self.ceiling);
     }
 }
 
@@ -732,7 +742,11 @@ mod macos {
                 presenter: MetalPreviewPresenter::new_default()?,
                 overlay: None,
                 cached_textures: Vec::new(),
-                cache_metrics: NativePreviewIosurfaceCacheMetrics::default(),
+                cache_metrics: {
+                    let mut metrics = NativePreviewIosurfaceCacheMetrics::default();
+                    metrics.record_cache_state(0, IMPORTED_TEXTURE_CACHE_SIZE);
+                    metrics
+                },
             })
         }
 
@@ -742,6 +756,8 @@ mod macos {
                 self.cache_metrics
                     .record_invalidation(self.cached_textures.len());
                 self.cached_textures.clear();
+                self.cache_metrics
+                    .record_cache_state(0, IMPORTED_TEXTURE_CACHE_SIZE);
             }
             apply_overlay_command(&self.presenter, &mut self.overlay, command, mtm);
         }
@@ -800,6 +816,10 @@ mod macos {
                         self.cached_textures.remove(0);
                     }
                     self.cached_textures.push(imported);
+                    self.cache_metrics.record_cache_state(
+                        self.cached_textures.len(),
+                        IMPORTED_TEXTURE_CACHE_SIZE,
+                    );
                     self.cached_textures.len() - 1
                 }
             };
@@ -1043,8 +1063,33 @@ mod tests {
                 imports: 1,
                 invalidations: 1,
                 import_failures: 1,
+                live_count: 0,
+                peak_count: 0,
+                ceiling: 0,
             }
         );
+    }
+
+    #[test]
+    fn iosurface_cache_metrics_bound_churn_and_reach_zero_on_destroy() {
+        let mut metrics = NativePreviewIosurfaceCacheMetrics::default();
+        for live in 1..=4 {
+            metrics.record_import_success();
+            metrics.record_cache_state(live, 4);
+        }
+        // A fifth distinct surface evicts the oldest entry before insertion.
+        metrics.record_import_success();
+        metrics.record_invalidation(1);
+        metrics.record_cache_state(4, 4);
+        assert_eq!(metrics.live_count, 4);
+        assert_eq!(metrics.peak_count, 4);
+        assert_eq!(metrics.ceiling, 4);
+
+        metrics.record_invalidation(4);
+        metrics.record_cache_state(0, 4);
+        assert_eq!(metrics.live_count, 0);
+        assert_eq!(metrics.peak_count, 4);
+        assert_eq!(metrics.ceiling, 4);
     }
 
     #[test]

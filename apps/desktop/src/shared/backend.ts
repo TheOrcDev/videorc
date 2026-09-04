@@ -1661,6 +1661,12 @@ export interface PreviewSurfaceStatus {
   nativePreviewIosurfaceImports?: number
   nativePreviewIosurfaceInvalidations?: number
   nativePreviewIosurfaceImportFailures?: number
+  /** Cached IOSurface imports currently retained by the native presenter. */
+  nativePreviewIosurfaceImportLiveCount?: number
+  /** Highest cached-IOSurface retention observed for this presenter lifetime. */
+  nativePreviewIosurfaceImportPeakCount?: number
+  /** Hard cache-entry ceiling enforced by the active presenter implementation. */
+  nativePreviewIosurfaceImportCeiling?: number
   nativePreviewDrawableWidth?: number
   nativePreviewDrawableHeight?: number
   nativePreviewContentsScale?: number
@@ -1747,6 +1753,9 @@ export interface PreviewSurfacePresentParams {
   nativePreviewMainSceneMismatchAgeMs?: number
   nativePreviewMainLastSkippedSceneRevision?: number
   nativePreviewMainLastSkippedFrameSceneRevision?: number
+  nativePreviewIosurfaceImportLiveCount?: number
+  nativePreviewIosurfaceImportPeakCount?: number
+  nativePreviewIosurfaceImportCeiling?: number
   message?: string
   framePollingSuppressed?: boolean
   sourcePixelsPresent?: boolean
@@ -1994,6 +2003,36 @@ export interface PreviewSourceSurfaceBackingStats {
   oldestAgeMs?: number
 }
 
+export type CaptureRecoveryPhase =
+  | 'idle'
+  | 'degraded'
+  | 'restarting'
+  | 'verifying'
+  | 'recovered'
+  | 'failed'
+
+export type CaptureRecoveryStage = 'camera-delivery' | 'screen-delivery' | 'compositor-render'
+export type CaptureRecoverySource = 'camera' | 'screen'
+export type CaptureRecoveryTrigger = 'automatic' | 'manual'
+
+/** Authoritative backend-owned state for one capture-recovery incident. */
+export interface CaptureRecoveryStatus {
+  /** Process-local monotonic ordering key. Resets when the backend process reconnects. */
+  revision: number
+  phase: CaptureRecoveryPhase
+  retryable: boolean
+  attempts: number
+  stage?: CaptureRecoveryStage
+  source?: CaptureRecoverySource
+  trigger?: CaptureRecoveryTrigger
+  sourceGeneration?: number
+  detectedAt?: string
+  updatedAt?: string
+  message?: string
+  lastError?: string
+  lastDurationMs?: number
+}
+
 export interface DiagnosticStats {
   sessionId?: string
   activeOutputMode?: string
@@ -2008,11 +2047,11 @@ export interface DiagnosticStats {
   /** Peak combined pending encoder + FIFO depth retained after recovery. */
   encoderBridgeOutputQueueHighWaterFrames?: number
   /** Oldest frame waiting for VideoToolbox completion or FIFO output. */
-  encoderBridgeOutputQueueOldestFrameAgeMs?: number
+  encoderBridgeOutputQueueOldestFrameAgeMs?: number | null
   /** Peak oldest-frame age retained after recovery. */
-  encoderBridgeOutputQueueOldestFrameAgeHighWaterMs?: number
+  encoderBridgeOutputQueueOldestFrameAgeHighWaterMs?: number | null
   /** Milliseconds since the latest encoder completion or complete FIFO AU write. */
-  encoderBridgeOutputLastProgressAgeMs?: number
+  encoderBridgeOutputLastProgressAgeMs?: number | null
   /** Enqueue attempts that encountered a full bounded output queue. */
   encoderBridgeOutputQueueCapacityPressureEvents: number
   /** Pressured intervals that returned to the healthy output budget. */
@@ -2266,6 +2305,30 @@ export interface DiagnosticStats {
   compositorScreenSourceCaptureTextureReuses: number
   /** Completed-command boundaries that flushed the CoreVideo Metal texture cache. */
   compositorSourceTextureCacheFlushes: number
+  /** Cached capture-source CVMetalTexture/IOSurface imports retained process-wide. */
+  compositorMetalCachedCaptureSourceImportsLiveCount?: number | null
+  /** Peak cached capture-source imports retained process-wide. */
+  compositorMetalCachedCaptureSourceImportsPeakCount?: number | null
+  /** Peak bounded capture-source cache capacity observed process-wide. */
+  compositorMetalCachedCaptureSourceImportsCeiling?: number | null
+  /** IOSurface-backed Metal target-ring slots currently retained process-wide. */
+  compositorMetalTargetRingSlotsLiveCount?: number | null
+  /** Peak IOSurface-backed Metal target-ring slots retained process-wide. */
+  compositorMetalTargetRingSlotsPeakCount?: number | null
+  /** Peak target-ring capacity; each compositor contributes the actual hard maximum of five. */
+  compositorMetalTargetRingSlotsCeiling?: number | null
+  /** Encoder guards currently retaining compositor target frames. */
+  encoderBridgeMetalTargetRefsInFlightLiveCount?: number | null
+  /** Peak encoder guards retaining compositor target frames. */
+  encoderBridgeMetalTargetRefsInFlightPeakCount?: number | null
+  /** Peak bounded in-flight capacity derived from the target-ring authorities. */
+  encoderBridgeMetalTargetRefsInFlightCeiling?: number | null
+  /** Native-presenter cached IOSurface imports currently retained. */
+  nativePreviewIosurfaceImportLiveCount?: number | null
+  /** Peak native-presenter cached IOSurface imports retained. */
+  nativePreviewIosurfaceImportPeakCount?: number | null
+  /** Hard cached-IOSurface import bound reported by the active presenter. */
+  nativePreviewIosurfaceImportCeiling?: number | null
   /** Cumulative live-source zero-copy import attempts that fell back to byte upload. */
   compositorSourceImportFailures: number
   /** Cumulative camera frames imported from IOSurface storage into Metal. */
@@ -2326,6 +2389,19 @@ export interface DiagnosticStats {
   compositorScreenSourceHeldServes: number
   /** Oldest capture age (ms) of any screen/window frame the compositor served. */
   compositorScreenSourceServedAgeMaxMs: number
+  /**
+   * The pipeline stage the backend's capture-health monitor currently
+   * declares degraded ('camera-delivery' / 'screen-delivery' /
+   * 'compositor-render'); absent while
+   * healthy. Nullable for defense in depth against the serde-null trap.
+   */
+  capturePipelineDegradedStage?: string | null
+  /** Recovery fields are omitted while idle; null remains tolerated at the renderer boundary. */
+  captureRecoveryPhase?: CaptureRecoveryPhase | null
+  captureRecoverySource?: CaptureRecoverySource | null
+  captureRecoveryAttempts?: number | null
+  captureRecoveryLastError?: string | null
+  captureRecoveryLastDurationMs?: number | null
   previewRepeatedFrames: number
   previewSurfaceResizeCount: number
   previewLatencyMs?: number

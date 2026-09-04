@@ -716,16 +716,107 @@ fn restore_oauth_work(
     })
 }
 
-fn restore_persisted_sessions(
+/// Secret references named by a persisted work checkpoint, readable without
+/// restoring the work (restoration needs the platform's provider config, which
+/// a gated platform cannot supply).
+fn persisted_oauth_work_secret_refs(work: &PersistedOAuthWork) -> Vec<String> {
+    let checkpoint_refs = |checkpoint: &PendingOAuthTokenCheckpoint| {
+        let mut refs = vec![checkpoint.secret_ref.clone()];
+        if let Some(pkce) = checkpoint.pkce_verifier_secret_ref.clone() {
+            refs.push(pkce);
+        }
+        if !checkpoint.candidate_access_secret_ref.is_empty() {
+            refs.push(checkpoint.candidate_access_secret_ref.clone());
+        }
+        if !checkpoint.candidate_refresh_secret_ref.is_empty() {
+            refs.push(checkpoint.candidate_refresh_secret_ref.clone());
+        }
+        refs
+    };
+    match work {
+        PersistedOAuthWork::Generic => Vec::new(),
+        PersistedOAuthWork::ProviderExchange {
+            code_verifier_secret_ref,
+            ..
+        } => code_verifier_secret_ref.clone().into_iter().collect(),
+        PersistedOAuthWork::ProviderExchangeStarted { checkpoint }
+        | PersistedOAuthWork::ProviderToken { checkpoint } => checkpoint_refs(checkpoint),
+        PersistedOAuthWork::AccountStorage {
+            checkpoint_secret_ref,
+            pkce_verifier_secret_ref,
+            candidate_access_secret_ref,
+            candidate_refresh_secret_ref,
+            superseded_secret_refs,
+            ..
+        } => checkpoint_secret_ref
+            .clone()
+            .into_iter()
+            .chain(pkce_verifier_secret_ref.clone())
+            .chain(candidate_access_secret_ref.clone())
+            .chain(candidate_refresh_secret_ref.clone())
+            .chain(superseded_secret_refs.iter().cloned())
+            .collect(),
+    }
+}
+
+/// Outcome of loading the persisted sessions: the restorable ones, plus
+/// whether any were dropped (so the caller rewrites the store without them).
+struct RestoredPersistedSessions {
+    pending: HashMap<String, PendingOAuthSession>,
+    dropped_any: bool,
+}
+
+fn restore_persisted_sessions<D>(
     sessions: Vec<PersistedOAuthSession>,
-) -> Result<HashMap<String, PendingOAuthSession>> {
+    delete_secret: &mut D,
+) -> Result<RestoredPersistedSessions>
+where
+    D: FnMut(&str) -> Result<()>,
+{
     let mut pending = HashMap::with_capacity(sessions.len());
+    let mut dropped_any = false;
     for session in sessions {
         if session.state.is_empty() || session.state.len() > 2048 {
             anyhow::bail!("OAuth transaction recovery store contains an invalid state.");
         }
-        let work = restore_oauth_work(&session.state, session.platform, session.work)
-            .context("OAuth transaction recovery store contains an invalid work checkpoint")?;
+        let secret_refs = persisted_oauth_work_secret_refs(&session.work);
+        let platform = session.platform;
+        let work = match restore_oauth_work(&session.state, platform, session.work) {
+            Ok(work) => work,
+            // A checkpoint whose restoration fails ONLY because the platform's
+            // OAuth is currently gated off (a YouTube pre-exchange flow
+            // recorded while the integration was enabled, loaded after it was
+            // disabled again) is not corruption: the flow can never resume
+            // while the gate is closed, so the checkpoint is dropped and its
+            // secrets are cleaned up. Later stages (token / account storage)
+            // restore without provider config and MUST survive restarts, so
+            // the drop is keyed to the restoration error, not the platform.
+            // Failing the whole store here put every backend into a 5-second
+            // "storage is unavailable" ERROR loop for the life of the process
+            // (2026-08-27 field log).
+            Err(error)
+                if provider_oauth_unavailable_message(platform)
+                    .is_some_and(|message| format!("{error:#}").contains(message)) =>
+            {
+                tracing::warn!(
+                    "Dropped a pending {platform:?} OAuth recovery checkpoint: the platform's OAuth is currently disabled, so the interrupted flow can never resume."
+                );
+                for secret_ref in secret_refs {
+                    if let Err(error) = delete_secret(&secret_ref) {
+                        tracing::warn!(
+                            "Could not delete an orphaned OAuth secret ({secret_ref}): {error:#}"
+                        );
+                    }
+                }
+                dropped_any = true;
+                continue;
+            }
+            Err(error) => {
+                return Err(error.context(
+                    "OAuth transaction recovery store contains an invalid work checkpoint",
+                ));
+            }
+        };
         let previous = pending.insert(
             session.state,
             PendingOAuthSession {
@@ -738,7 +829,10 @@ fn restore_persisted_sessions(
             anyhow::bail!("OAuth transaction recovery store contains a duplicate state.");
         }
     }
-    Ok(pending)
+    Ok(RestoredPersistedSessions {
+        pending,
+        dropped_any,
+    })
 }
 
 fn migrate_legacy_oauth_store<P, D>(
@@ -822,10 +916,10 @@ where
                 work,
             });
         }
-        let pending = restore_persisted_sessions(sessions)?;
-        persist_pending_oauth_sessions(path, &pending)
+        let restored = restore_persisted_sessions(sessions, delete_secret)?;
+        persist_pending_oauth_sessions(path, &restored.pending)
             .context("Could not commit protected OAuth transaction migration")?;
-        Ok(pending)
+        Ok(restored.pending)
     })();
     if migration.is_err() {
         for secret_ref in newly_protected_refs.iter().rev() {
@@ -869,12 +963,12 @@ where
     {
         anyhow::bail!("OAuth transaction recovery store version is unsupported.");
     }
-    let pending = restore_persisted_sessions(store.sessions)?;
-    if store.version < OAUTH_PENDING_STORE_VERSION {
-        persist_pending_oauth_sessions(path, &pending)
-            .context("Could not commit OAuth candidate-reference migration")?;
+    let restored = restore_persisted_sessions(store.sessions, delete_secret)?;
+    if store.version < OAUTH_PENDING_STORE_VERSION || restored.dropped_any {
+        persist_pending_oauth_sessions(path, &restored.pending)
+            .context("Could not commit OAuth recovery store maintenance")?;
     }
-    Ok(pending)
+    Ok(restored.pending)
 }
 
 fn persist_pending_oauth_sessions(
@@ -3097,6 +3191,72 @@ mod tests {
             );
             let _ = std::fs::remove_file(store_path);
         }
+    }
+
+    #[tokio::test]
+    async fn gate_closed_youtube_checkpoint_is_dropped_not_fatal() {
+        // 2026-08-27 field incident: a YouTube checkpoint persisted while the
+        // OAuth gate was open failed restoration once the gate closed, which
+        // failed the WHOLE store load and put every backend into a 5-second
+        // "storage is unavailable" ERROR loop for the life of the process.
+        // (This test assumes the ambient environment leaves the YouTube gate
+        // closed, like every other gate-dependent test in this file.)
+        let store_path = pending_store_path();
+        let store = format!(
+            concat!(
+                "{{\"version\":{version},\"sessions\":[",
+                "{{\"state\":\"stale-youtube-state\",\"platform\":\"youtube\",",
+                "\"expiresAt\":\"2026-08-25T14:00:00Z\",",
+                "\"work\":{{\"kind\":\"provider-exchange\",",
+                "\"redirectUri\":\"http://127.0.0.1:17995/callback\",",
+                "\"codeVerifierSecretRef\":\"videorc-oauth-pkce-stale-youtube-state-youtube\"}}}},",
+                "{{\"state\":\"live-twitch-state\",\"platform\":\"twitch\",",
+                "\"expiresAt\":\"2099-01-01T00:00:00Z\",",
+                "\"work\":{{\"kind\":\"generic\"}}}}",
+                "]}}"
+            ),
+            version = OAUTH_PENDING_STORE_VERSION
+        );
+        std::fs::write(&store_path, store.as_bytes()).unwrap();
+
+        let deleted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let deleted_sink = deleted.clone();
+        let sessions =
+            OAuthSessions::new_with_secret_cleanup(Some(store_path.clone()), move |secret_ref| {
+                deleted_sink.lock().unwrap().push(secret_ref.to_string());
+                Ok(())
+            });
+
+        // The store loaded: operations work instead of failing with
+        // "storage is unavailable".
+        sessions
+            .start(
+                OAuthStartParams {
+                    platform: StreamPlatform::Twitch,
+                    ..start_params()
+                },
+                61234,
+            )
+            .await
+            .unwrap();
+
+        // The dead checkpoint's secret was cleaned up…
+        assert!(
+            deleted
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|secret_ref| secret_ref.contains("stale-youtube-state")),
+            "expected the stale PKCE secret to be deleted, saw {:?}",
+            deleted.lock().unwrap()
+        );
+        // …and the rewritten store no longer names the YouTube session, so
+        // the next launch does not re-drop (and re-warn about) it. The
+        // unrelated Twitch session survives.
+        let rewritten = std::fs::read_to_string(&store_path).unwrap();
+        assert!(!rewritten.contains("stale-youtube-state"));
+        assert!(rewritten.contains("live-twitch-state"));
+        let _ = std::fs::remove_file(store_path);
     }
 
     #[tokio::test]

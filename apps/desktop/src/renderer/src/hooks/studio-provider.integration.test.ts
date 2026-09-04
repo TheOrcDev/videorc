@@ -22,6 +22,7 @@ import type {
   CommentHighlightCommand,
   CommentHighlightState,
   CompositorStatus,
+  CaptureRecoveryStatus,
   CommentsCommandResolution,
   CommentsSendCommand,
   CommentsSendOperation,
@@ -32,6 +33,7 @@ import type {
   LiveChatSnapshot,
   NoiseCleanupJob,
   OAuthCallbackEnvelope,
+  PlatformAccountValidation,
   PreviewSurfaceBounds,
   PreviewSurfaceStatus,
   PreviewWindowState,
@@ -59,12 +61,13 @@ import {
   useStudioAudio,
   useStudioChat,
   useStudioCore,
+  useStudioDiagnostics,
   useStudioRecording,
   type StudioCoreContextValue,
   type StudioRecordingContextValue
 } from './use-studio'
-import { DEFAULT_BASIC_ENTITLEMENTS } from '../lib/entitlements'
-import { defaultCaptureConfig, videoPresets } from '../lib/capture'
+import { DEFAULT_BASIC_ENTITLEMENTS, PREMIUM_STREAMING_LIMITS } from '../lib/entitlements'
+import { defaultCaptureConfig, videoPresets, type CaptureConfig } from '../lib/capture'
 import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
 import { SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY } from '../lib/screen-takeover-microphone'
 import type {
@@ -73,6 +76,13 @@ import type {
 } from '../../../shared/windows-live-audio-smoke'
 
 type BackendCommand = { id: string; method: string; params?: unknown }
+type DeferredBackendResponse = {
+  payload?: unknown
+  error?: Error
+  ready: Promise<void>
+  release: () => void
+  matches?: (command: BackendCommand) => boolean
+}
 
 const now = '2026-07-12T00:00:00.000Z'
 const signedInAccount = {
@@ -90,7 +100,11 @@ const premiumEntitlements = {
     ...capability,
     state: 'enabled' as const,
     reason: undefined
-  }))
+  })),
+  limits: {
+    ...DEFAULT_BASIC_ENTITLEMENTS.limits,
+    streaming: PREMIUM_STREAMING_LIMITS
+  }
 }
 
 const takeoverScreen: StreamScreen = {
@@ -328,9 +342,23 @@ class StudioBackend {
   noiseCleanupJobs: NoiseCleanupJob[] = []
   sourceMutationRevision = 4
   layoutResponseDelayMs = 0
+  layoutApplyFailure: 'definite' | 'request-outcome-unknown-after-commit' | null = null
+  screenActivateFailure: 'definite' | null = null
+  screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
   sessionStartResponseDelayMs = 0
   sessionStartError: string | null = null
   emitRecordingStatusBeforeStartResponse = false
+  authoritativeRecordingStatusBeforeStartResponse: 'stopping' | 'idle' | 'failed' | null = null
+  terminalRecordingStatusOnMethod: string | null = null
+  terminalRecordingStatusOnMethodEmitted = false
+  youtubePrepareCount = 0
+  youtubeCompleteFailuresRemaining = 0
+  xPrepareCount = 0
+  xPrepareFailuresRemaining = 0
+  xPublishCount = 0
+  xPublishTweetError: string | undefined
+  xEndFailuresRemaining = 0
+  platformAccountValidations: PlatformAccountValidation[] = []
   audioProcessingResponseDelayMs = 0
   audioProcessingReasonCode: 'session-ended' | null = null
   deviceListFailuresRemaining = 0
@@ -358,15 +386,7 @@ class StudioBackend {
     tickSeq: 0,
     partial: false
   }
-  private readonly deferredResponses = new Map<
-    string,
-    Array<{
-      payload: unknown
-      ready: Promise<void>
-      release: () => void
-      matches?: (command: BackendCommand) => boolean
-    }>
-  >()
+  private readonly deferredResponses = new Map<string, DeferredBackendResponse[]>()
   deviceList: DeviceList = {
     devices: [
       {
@@ -395,6 +415,12 @@ class StudioBackend {
   commentHighlightClearOutcomeUnknownRemaining = 0
   liveChatSendOperations: CommentsSendOperation[] = []
   liveChatSendFailure: { code: string; message: string } | null = null
+  captureRecoveryStatus: CaptureRecoveryStatus = {
+    revision: 0,
+    phase: 'idle',
+    retryable: false,
+    attempts: 0
+  }
 
   deferResponse(
     method: string,
@@ -411,17 +437,25 @@ class StudioBackend {
     return release
   }
 
+  deferFailure(
+    method: string,
+    error: Error,
+    matches?: (command: BackendCommand) => boolean
+  ): () => void {
+    let release!: () => void
+    const ready = new Promise<void>((resolve) => {
+      release = resolve
+    })
+    const pending = this.deferredResponses.get(method) ?? []
+    pending.push({ error, ready, release, matches })
+    this.deferredResponses.set(method, pending)
+    return release
+  }
+
   takeDeferredResponse(
     method: string,
     command: BackendCommand
-  ):
-    | {
-        payload: unknown
-        ready: Promise<void>
-        release: () => void
-        matches?: (command: BackendCommand) => boolean
-      }
-    | undefined {
+  ): DeferredBackendResponse | undefined {
     const pending = this.deferredResponses.get(method)
     const index = pending?.findIndex((candidate) => candidate.matches?.(command) ?? true) ?? -1
     const next = index >= 0 ? pending?.splice(index, 1)[0] : undefined
@@ -588,6 +622,19 @@ class StudioBackend {
           skippedFrames: 0,
           updatedAt: now
         }
+      case 'capture.recovery.status':
+        return this.captureRecoveryStatus
+      case 'capture.recovery.retry':
+        this.captureRecoveryStatus = {
+          ...this.captureRecoveryStatus,
+          revision: this.captureRecoveryStatus.revision + 1,
+          phase: 'restarting',
+          retryable: false,
+          trigger: 'manual',
+          attempts: this.captureRecoveryStatus.attempts + 1,
+          updatedAt: now
+        }
+        return this.captureRecoveryStatus
       case 'captions.status.get':
         return { state: 'idle' }
       case 'liveChat.status':
@@ -688,9 +735,32 @@ class StudioBackend {
         }
       case 'scene.layout.apply_preview':
       case 'scene.layout.apply_live': {
+        if (this.layoutApplyFailure === 'definite') {
+          throw Object.assign(new Error('The test backend rejected the layout change.'), {
+            code: 'layout-preview-failed'
+          })
+        }
         this.currentLayout = params.layout as LayoutSettings
         this.currentScene = sceneForLayout(this.currentLayout)
         this.revision += 1
+        if (this.layoutApplyFailure === 'request-outcome-unknown-after-commit') {
+          const video = params.video as { width: number; height: number; fps: number }
+          this.currentScene = {
+            ...this.currentScene,
+            outputs: [
+              {
+                id: 'recording',
+                kind: 'recording',
+                width: video.width,
+                height: video.height,
+                fps: video.fps
+              }
+            ]
+          }
+          throw Object.assign(new Error('The committed layout response was not observed.'), {
+            code: 'request-outcome-unknown'
+          })
+        }
         return {
           applied: true,
           mode: command.method.endsWith('live') ? 'hot' : 'idle',
@@ -718,12 +788,22 @@ class StudioBackend {
       case 'screens.active':
         return this.activeScreen
       case 'screens.activate': {
+        if (this.screenActivateFailure === 'definite') {
+          throw Object.assign(new Error('The test backend rejected takeover activation.'), {
+            code: 'screen-activate-failed'
+          })
+        }
         const screen = this.screens.find((candidate) => candidate.id === params.screenId)
         if (!screen) throw new Error('Screen not found.')
         this.activeScreen = screen
         return screen
       }
       case 'screens.clear':
+        if (this.screenClearFailure === 'request-outcome-unknown-before-commit') {
+          throw Object.assign(new Error('The takeover clear result was not observed.'), {
+            code: 'request-outcome-unknown'
+          })
+        }
         this.activeScreen = null
         return null
       case 'streamTargets.metadata.get':
@@ -734,14 +814,128 @@ class StudioBackend {
           targetOverrides: [],
           updatedAt: now
         }
+      case 'streamTargets.metadata.update':
+        return params
       case 'streamTargets.metadata.validate':
         return { valid: true, issues: [] }
+      case 'streamTargets.confirmation.validate':
+        return { valid: true, destinations: [], issues: [] }
+      case 'streamTargets.youtube.prepare': {
+        const prepareSequence = ++this.youtubePrepareCount
+        return {
+          platform: 'youtube',
+          accountId: String(params.accountId ?? 'youtube-account-1'),
+          accountLabel: 'YouTube Test Channel',
+          broadcastId: `youtube-broadcast-${prepareSequence}`,
+          streamId: `youtube-stream-${prepareSequence}`,
+          serverUrl: 'rtmp://a.rtmp.youtube.com/live2',
+          streamKeySecretRef: `stream-key:youtube-${prepareSequence}`,
+          streamKeyPresent: true,
+          redactedUrl: 'rtmp://a.rtmp.youtube.com/live2/••••test',
+          title: 'Provider test stream',
+          description: '',
+          privacy: 'unlisted',
+          madeForKids: false,
+          scheduledStartTime: now
+        }
+      }
+      case 'streamTargets.youtube.streamStatus':
+        return {
+          platform: 'youtube',
+          accountId: String(params.accountId ?? 'youtube-account-1'),
+          streamId: String(params.streamId),
+          streamStatus: 'active',
+          active: true,
+          message: 'YouTube ingest is active.'
+        }
+      case 'streamTargets.youtube.transition':
+        if (params.status === 'complete' && this.youtubeCompleteFailuresRemaining > 0) {
+          this.youtubeCompleteFailuresRemaining -= 1
+          throw new Error('Temporary YouTube completion failure.')
+        }
+        return {
+          platform: 'youtube',
+          accountId: String(params.accountId ?? 'youtube-account-1'),
+          broadcastId: String(params.broadcastId),
+          requestedStatus: params.status,
+          lifecycleStatus: params.status,
+          message: `YouTube broadcast transitioned to ${String(params.status)}.`
+        }
+      case 'streamTargets.x.capability':
+        return {
+          platform: 'x',
+          state: 'native-available',
+          nativeAvailable: true,
+          manualRtmpAvailable: true,
+          oauthConnected: true,
+          accountId: String(params.accountId ?? 'x-account-1'),
+          accountLabel: 'X Test Account',
+          credentialSource: 'test',
+          message: 'X native live is available.',
+          evidence: ['provider-test'],
+          docsUrl: 'https://developer.x.com/docs',
+          apiOverviewUrl: 'https://developer.x.com/en/docs/twitter-api'
+        }
+      case 'streamTargets.x.prepare': {
+        if (this.xPrepareFailuresRemaining > 0) {
+          this.xPrepareFailuresRemaining -= 1
+          throw new Error('Temporary X preparation failure.')
+        }
+        const prepareSequence = ++this.xPrepareCount
+        return {
+          platform: 'x',
+          accountId: String(params.accountId ?? 'x-account-1'),
+          accountLabel: 'X Test Account',
+          sourceId: `x-source-${prepareSequence}`,
+          region: `x-region-${prepareSequence}`,
+          serverUrl: 'rtmp://x.example.test/live',
+          streamKeySecretRef: `stream-key:x-${prepareSequence}`,
+          streamKeyPresent: true,
+          redactedUrl: 'rtmp://x.example.test/live/••••test',
+          isStreamActive: true,
+          selection: 'created',
+          deletedRetiredSourceIds: []
+        }
+      }
+      case 'streamTargets.x.publish': {
+        const publishSequence = ++this.xPublishCount
+        return {
+          platform: 'x',
+          accountId: String(params.accountId ?? 'x-account-1'),
+          sourceId: String(params.sourceId),
+          broadcastId: `x-broadcast-${publishSequence}`,
+          mediaKey: `x-media-key-${publishSequence}`,
+          shareUrl: `https://x.com/i/broadcasts/${publishSequence}`,
+          state: 'running',
+          ...(this.xPublishTweetError ? { tweetError: this.xPublishTweetError } : {}),
+          message: 'X broadcast published.'
+        }
+      }
+      case 'streamTargets.x.end':
+        if (this.xEndFailuresRemaining > 0) {
+          this.xEndFailuresRemaining -= 1
+          throw new Error('Temporary X END failure.')
+        }
+        return {
+          platform: 'x',
+          accountId: String(params.accountId ?? 'x-account-1'),
+          broadcastId: String(params.broadcastId),
+          message: 'X broadcast ended.'
+        }
       case 'streamTargets.manualKey.store':
         return {
           targetId: params.targetId,
           streamKeySecretRef: `stream-key:${String(params.targetId)}`,
           streamKeyPresent: Boolean(params.streamKey),
           streamKeyHint: params.streamKey ? String(params.streamKey).slice(-4) : undefined,
+          previousStreamKeyPresent: false
+        }
+      case 'streamTargets.manualKey.inspect':
+        return {
+          targetId: params.targetId,
+          streamKeySecretRef: `stream-key:${String(params.targetId)}`,
+          streamKeyPresent: true,
+          streamKeyHint: '••••test',
           previousStreamKeyPresent: false
         }
       case 'sessions.list':
@@ -811,9 +1005,10 @@ class StudioBackend {
         return job
       }
       case 'platformAccounts.list':
-      case 'platformAccounts.validate':
       case 'platformAccounts.oauth.providerCredentials':
         return []
+      case 'platformAccounts.validate':
+        return this.platformAccountValidations
       case 'platformAccounts.oauth.complete':
         if (this.oauthCompletedStates.has(String(params.state))) {
           return {
@@ -923,20 +1118,44 @@ class TestWebSocket {
     this.sentCommands.push(command)
     this.backend.sentCommands.push(command)
     const deferredResponse = this.backend.takeDeferredResponse(command.method, command)
-    if (command.method === 'session.start' && this.backend.emitRecordingStatusBeforeStartResponse) {
+    const emitRecordingStatus = (
+      state: 'recording' | 'stopping' | 'idle' | 'failed',
+      message: string
+    ) => {
       queueMicrotask(() => {
         this.onmessage?.({
           data: JSON.stringify({
             event: 'recording.status',
             payload: {
-              state: 'recording',
+              state,
               sessionId: 'session-1',
               startedAt: now,
-              message: 'Recording.'
+              message
             }
           })
         })
       })
+    }
+    if (
+      command.method === 'session.start' &&
+      (this.backend.emitRecordingStatusBeforeStartResponse ||
+        this.backend.authoritativeRecordingStatusBeforeStartResponse)
+    ) {
+      const state =
+        this.backend.authoritativeRecordingStatusBeforeStartResponse ?? ('recording' as const)
+      emitRecordingStatus(
+        state,
+        state === 'recording' ? 'Recording.' : 'Session ended before start replied.'
+      )
+    }
+    if (
+      command.method === this.backend.terminalRecordingStatusOnMethod &&
+      this.backend.recordingState === 'recording' &&
+      !this.backend.terminalRecordingStatusOnMethodEmitted
+    ) {
+      this.backend.terminalRecordingStatusOnMethodEmitted = true
+      this.backend.recordingState = 'stopping'
+      emitRecordingStatus('stopping', `Session ended during ${command.method}.`)
     }
     const respond = (payloadOverride?: unknown): void => {
       if (this.readyState !== TestWebSocket.OPEN) {
@@ -945,6 +1164,9 @@ class TestWebSocket {
       try {
         if (deferredResponse) {
           this.backend.commands.push(command)
+        }
+        if (deferredResponse?.error) {
+          throw deferredResponse.error
         }
         this.onmessage?.({
           data: JSON.stringify({
@@ -999,6 +1221,7 @@ type StudioObservation = {
   audio: ReturnType<typeof useStudioAudio>
   chat: ReturnType<typeof useStudioChat>
   core: StudioCoreContextValue
+  diagnostics: ReturnType<typeof useStudioDiagnostics>
   recording: StudioRecordingContextValue
 }
 
@@ -1014,10 +1237,11 @@ function Probe({ observe }: { observe: (value: StudioObservation) => void }): nu
   const audio = useStudioAudio()
   const chat = useStudioChat()
   const core = useStudioCore()
+  const diagnostics = useStudioDiagnostics()
   const recording = useStudioRecording()
   useEffect(
-    () => observe({ audio, chat, core, recording }),
-    [audio, chat, core, observe, recording]
+    () => observe({ audio, chat, core, diagnostics, recording }),
+    [audio, chat, core, diagnostics, observe, recording]
   )
   return null
 }
@@ -1040,6 +1264,186 @@ async function mountStudioProvider(
   return mountedRoot
 }
 
+function youtubeOauthStreamCaptureConfig(): CaptureConfig {
+  const streamVideo = videoPresets['stream-safe-1080p30']
+  return {
+    ...defaultCaptureConfig,
+    recordEnabled: false,
+    streamEnabled: true,
+    video: streamVideo,
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      defaultOutputPreset: streamVideo.preset,
+      defaultBitrateKbps: streamVideo.bitrateKbps,
+      enabledTargetIds: ['youtube'],
+      targets: defaultCaptureConfig.streaming.targets.map((target) =>
+        target.id === 'youtube'
+          ? {
+              ...target,
+              enabled: true,
+              authMode: 'oauth',
+              accountId: 'youtube-account-1',
+              accountLabel: 'YouTube Test Channel',
+              status: { state: 'ready' as const }
+            }
+          : target
+      )
+    }
+  }
+}
+
+function xOauthStreamCaptureConfig(): CaptureConfig {
+  const streamVideo = videoPresets['stream-safe-1080p30']
+  return {
+    ...defaultCaptureConfig,
+    recordEnabled: false,
+    streamEnabled: true,
+    video: streamVideo,
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      defaultOutputPreset: streamVideo.preset,
+      defaultBitrateKbps: streamVideo.bitrateKbps,
+      enabledTargetIds: ['x'],
+      targets: defaultCaptureConfig.streaming.targets.map((target) =>
+        target.id === 'x'
+          ? {
+              ...target,
+              enabled: true,
+              authMode: 'oauth',
+              accountId: 'x-account-1',
+              accountLabel: 'X Test Account',
+              status: { state: 'ready' as const }
+            }
+          : target
+      )
+    }
+  }
+}
+
+function youtubeAndXOauthStreamCaptureConfig(): CaptureConfig {
+  const youtubeConfig = youtubeOauthStreamCaptureConfig()
+  return {
+    ...youtubeConfig,
+    streaming: {
+      ...youtubeConfig.streaming,
+      enabledTargetIds: ['youtube', 'x'],
+      targets: youtubeConfig.streaming.targets.map((target) =>
+        target.id === 'x'
+          ? {
+              ...target,
+              enabled: true,
+              authMode: 'oauth',
+              accountId: 'x-account-1',
+              accountLabel: 'X Test Account',
+              status: { state: 'ready' as const }
+            }
+          : target
+      )
+    }
+  }
+}
+
+function enableYouTubeOauthForTest(backend: StudioBackend): void {
+  backend.entitlements = premiumEntitlements
+  backend.platformAccountValidations = [
+    {
+      platform: 'youtube',
+      state: 'valid',
+      accountId: 'youtube-account-1',
+      accountLabel: 'YouTube Test Channel',
+      scopes: [],
+      message: 'YouTube account is connected.'
+    }
+  ]
+}
+
+function enableXOauthForTest(backend: StudioBackend): void {
+  backend.entitlements = premiumEntitlements
+  backend.platformAccountValidations = [
+    {
+      platform: 'x',
+      state: 'valid',
+      accountId: 'x-account-1',
+      accountLabel: 'X Test Account',
+      scopes: [],
+      message: 'X account is connected.'
+    }
+  ]
+}
+
+function enableYouTubeAndXOauthForTest(backend: StudioBackend): void {
+  backend.entitlements = premiumEntitlements
+  backend.platformAccountValidations = [
+    {
+      platform: 'youtube',
+      state: 'valid',
+      accountId: 'youtube-account-1',
+      accountLabel: 'YouTube Test Channel',
+      scopes: [],
+      message: 'YouTube account is connected.'
+    },
+    {
+      platform: 'x',
+      state: 'valid',
+      accountId: 'x-account-1',
+      accountLabel: 'X Test Account',
+      scopes: [],
+      message: 'X account is connected.'
+    }
+  ]
+}
+
+async function openYouTubeGoLiveConfirmation(
+  latest: () => StudioObservation | undefined
+): Promise<void> {
+  await act(async () => {
+    latest()!.core.setCaptureConfig(youtubeOauthStreamCaptureConfig())
+  })
+  await waitForObservation(
+    () =>
+      latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+      latest()?.core.startBlockedReason === null
+  )
+  await act(async () => {
+    await latest()!.core.startSession()
+  })
+  await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+}
+
+async function openXGoLiveConfirmation(latest: () => StudioObservation | undefined): Promise<void> {
+  await act(async () => {
+    latest()!.core.setCaptureConfig(xOauthStreamCaptureConfig())
+  })
+  await waitForObservation(
+    () =>
+      latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+      latest()?.core.startBlockedReason === null
+  )
+  await act(async () => {
+    await latest()!.core.startSession()
+  })
+  await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+}
+
+async function openYouTubeAndXGoLiveConfirmation(
+  latest: () => StudioObservation | undefined
+): Promise<void> {
+  await act(async () => {
+    latest()!.core.setCaptureConfig(youtubeAndXOauthStreamCaptureConfig())
+  })
+  await waitForObservation(
+    () =>
+      latest()?.core.streamOutputTopologyPreflight.state === 'ready' &&
+      latest()?.core.startBlockedReason === null
+  )
+  await act(async () => {
+    await latest()!.core.startSession()
+  })
+  await waitForObservation(() => latest()?.core.goLiveConfirmationOpen === true)
+}
+
 describe('real StudioProvider lifecycle', () => {
   let restoreEnvironment: (() => void) | undefined
   let root: Root | null = null
@@ -1054,6 +1458,149 @@ describe('real StudioProvider lifecycle', () => {
     vi.unstubAllGlobals()
     vi.clearAllMocks()
     vi.useRealTimers()
+  })
+
+  it('rehydrates failed recovery, single-flights retry, and rejects its stale response', async () => {
+    const backend = new StudioBackend()
+    backend.captureRecoveryStatus = {
+      revision: 4,
+      phase: 'failed',
+      retryable: true,
+      attempts: 1,
+      stage: 'camera-delivery',
+      source: 'camera',
+      trigger: 'automatic',
+      sourceGeneration: 7,
+      lastError: 'Camera cadence stayed below the recovery floor.',
+      updatedAt: now
+    }
+    const restarting: CaptureRecoveryStatus = {
+      ...backend.captureRecoveryStatus,
+      revision: 5,
+      phase: 'restarting',
+      retryable: false,
+      trigger: 'manual',
+      attempts: 2
+    }
+    const releaseRetry = backend.deferResponse('capture.recovery.retry', restarting)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(() => latest()?.diagnostics.captureRecoveryStatus.phase === 'failed')
+    expect(latest()?.diagnostics.captureRecoveryStatus.lastError).toContain('recovery floor')
+
+    let firstRetry!: Promise<void>
+    let duplicateRetry!: Promise<void>
+    act(() => {
+      firstRetry = latest()!.diagnostics.retryCaptureRecovery()
+      duplicateRetry = latest()!.diagnostics.retryCaptureRecovery()
+    })
+    await waitForObservation(() => latest()?.diagnostics.captureRecoveryRetryPending === true)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'capture.recovery.retry')
+    ).toHaveLength(1)
+
+    const verifying: CaptureRecoveryStatus = {
+      ...restarting,
+      revision: 6,
+      phase: 'verifying',
+      message: 'Camera restarted; verifying cadence.'
+    }
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({ event: 'capture.recovery.status', payload: verifying })
+      })
+      await Promise.resolve()
+    })
+    await waitForObservation(
+      () => latest()?.diagnostics.captureRecoveryStatus.phase === 'verifying'
+    )
+
+    releaseRetry()
+    await act(async () => Promise.all([firstRetry, duplicateRetry]))
+    expect(latest()?.diagnostics.captureRecoveryStatus).toMatchObject({
+      revision: 6,
+      phase: 'verifying'
+    })
+    expect(latest()?.diagnostics.captureRecoveryRetryPending).toBe(false)
+  })
+
+  it('resets capture recovery revision ordering for a new backend connection', async () => {
+    const initialBackend = new StudioBackend()
+    initialBackend.captureRecoveryStatus = {
+      revision: 12,
+      phase: 'recovered',
+      retryable: false,
+      attempts: 1,
+      stage: 'camera-delivery',
+      source: 'camera',
+      trigger: 'automatic',
+      sourceGeneration: 8,
+      updatedAt: now
+    }
+    TestWebSocket.backend = initialBackend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emit: ((name: string, value: unknown) => void) | undefined
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => [],
+        registerEmitter: (nextEmit) => {
+          emit = nextEmit
+        }
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(() => latest()?.diagnostics.captureRecoveryStatus.revision === 12)
+
+    const reconnectedBackend = new StudioBackend()
+    reconnectedBackend.captureRecoveryStatus = {
+      revision: 1,
+      phase: 'degraded',
+      retryable: false,
+      attempts: 0,
+      stage: 'camera-delivery',
+      source: 'camera',
+      trigger: 'automatic',
+      sourceGeneration: 2,
+      updatedAt: now
+    }
+    TestWebSocket.backend = reconnectedBackend
+    await act(async () => {
+      emit?.('backend:connection', {
+        host: '127.0.0.1',
+        port: 9992,
+        token: 'capture-recovery-new-generation'
+      })
+      await Promise.resolve()
+    })
+
+    await waitForObservation(() => latest()?.diagnostics.captureRecoveryStatus.phase === 'degraded')
+    expect(latest()?.diagnostics.captureRecoveryStatus.revision).toBe(1)
   })
 
   it('reconciles an outcome-unknown local comment highlight toggle', async () => {
@@ -1158,6 +1705,76 @@ describe('real StudioProvider lifecycle', () => {
       }
     ])
     expect(latest()?.core.commentHighlightFailure).toBeNull()
+  })
+
+  it('rejects a detached highlight request superseded by a newer command', async () => {
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: highlightMessage.sessionId,
+      providers: [],
+      messages: [highlightMessage],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    backend.commentHighlightState = liveHighlightState
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const resolutions: CommentsCommandResolution<CommentHighlightState>[] = []
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      },
+      pushCommentHighlightResult: async (resolution) => {
+        resolutions.push(resolution)
+        return true
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.highlightedCommentId === highlightMessage.id
+    )
+
+    const first: CommentHighlightCommand = {
+      requestId: 'highlight-request-superseded',
+      sessionId: highlightMessage.sessionId,
+      messageId: highlightMessage.id
+    }
+    const second: CommentHighlightCommand = {
+      requestId: 'highlight-request-current',
+      sessionId: highlightMessage.sessionId,
+      messageId: highlightMessage.id
+    }
+    await act(async () => {
+      emitIpc?.('onCommentHighlightRequest', first)
+      emitIpc?.('onCommentHighlightRequest', second)
+    })
+
+    await waitForObservation(() => resolutions.length === 2)
+    expect(resolutions.find(({ requestId }) => requestId === first.requestId)).toEqual({
+      requestId: first.requestId,
+      ok: false,
+      error: 'A newer comment highlight replaced this request.'
+    })
+    expect(resolutions.find(({ requestId }) => requestId === second.requestId)).toEqual({
+      requestId: second.requestId,
+      ok: true,
+      value: { generation: 3, phase: 'idle' }
+    })
   })
 
   it('keeps an explicit chat-send operation-id collision as a failure', async () => {
@@ -3459,6 +4076,611 @@ describe('real StudioProvider lifecycle', () => {
     // The renderer must ack the executed intent so deck keys learn the result.
     const ack = backend.sentCommands.find((command) => command.method === 'remote.intent.ack')
     expect(ack?.params).toMatchObject({ intentId: 'ri-test-1', ok: true })
+
+    backend.layoutResponseDelayMs = 100
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-scene',
+              intent: { kind: 'sceneApply', layoutPreset: 'screen-only' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'scene.layout.apply_preview')
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene'
+      )
+    ).toBeUndefined()
+
+    await waitForObservation(
+      () => latest()?.core.captureConfig.layout.layoutPreset === 'screen-only'
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene'
+      )?.params
+    ).toMatchObject({ intentId: 'ri-test-scene', ok: true })
+  })
+
+  it('serializes a delayed remote start followed by stop so the final stop wins', async () => {
+    const backend = new StudioBackend()
+    const releaseStart = backend.deferResponse('session.start', {
+      state: 'recording',
+      sessionId: 'session-1',
+      startedAt: now,
+      message: 'Recording.'
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-delayed-start', intent: { kind: 'recordStart' } }
+          })
+        })
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-following-stop', intent: { kind: 'recordStop' } }
+          })
+        })
+      }
+      await Promise.resolve()
+    })
+
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.start')
+    )
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+    ).toHaveLength(1)
+    expect(backend.sentCommands.some((command) => command.method === 'session.stop')).toBe(false)
+
+    await act(async () => {
+      releaseStart()
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'idle')
+
+    const lifecycleMethods = backend.sentCommands
+      .filter((command) => command.method === 'session.start' || command.method === 'session.stop')
+      .map((command) => command.method)
+    expect(lifecycleMethods).toEqual(['session.start', 'session.stop'])
+    expect(
+      backend.sentCommands
+        .filter((command) => command.method === 'remote.intent.ack')
+        .map((command) => command.params)
+    ).toEqual(
+      expect.arrayContaining([
+        { intentId: 'ri-delayed-start', ok: true },
+        { intentId: 'ri-following-stop', ok: true }
+      ])
+    )
+  })
+
+  it('waits for active-session microphone truth before ACK and remote projection', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({ event: 'backend.ready', payload: null })
+        })
+      }
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.surface.publish' &&
+          (command.params as { state?: { micMuted?: boolean } }).state?.micMuted === false
+      )
+    )
+
+    const commandStart = backend.sentCommands.length
+    const releaseAudioUpdate = backend.deferResponse('audio.processing.update', {
+      applied: true,
+      sessionId: 'session-1',
+      microphoneGainDb: 0,
+      microphoneMuted: true
+    })
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-test-mic-active', intent: { kind: 'micToggle' } }
+          })
+        })
+      }
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.audio.microphoneMuted === true &&
+        backend.sentCommands
+          .slice(commandStart)
+          .some((command) => command.method === 'audio.processing.update')
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 40))
+    })
+
+    expect(
+      backend.sentCommands
+        .slice(commandStart)
+        .find(
+          (command) =>
+            command.method === 'remote.intent.ack' &&
+            (command.params as { intentId?: string }).intentId === 'ri-test-mic-active'
+        )
+    ).toBeUndefined()
+    expect(
+      backend.sentCommands
+        .slice(commandStart)
+        .filter((command) => command.method === 'remote.surface.publish')
+        .every(
+          (command) =>
+            (command.params as { state?: { micMuted?: boolean } }).state?.micMuted === false
+        )
+    ).toBe(true)
+
+    releaseAudioUpdate()
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-active'
+      )
+    )
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.surface.publish' &&
+          (command.params as { state?: { micMuted?: boolean } }).state?.micMuted === true
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-active'
+      )?.params
+    ).toEqual({ intentId: 'ri-test-mic-active', ok: true })
+
+    const reconciliationStart = backend.sentCommands.length
+    const releaseReconciliation = backend.deferResponse('audio.processing.update', {
+      applied: false,
+      sessionId: 'session-1',
+      microphoneGainDb: 0,
+      microphoneMuted: false,
+      reasonCode: 'live-audio-control-unavailable',
+      confirmedMicrophoneGainDb: 0,
+      confirmedMicrophoneMuted: false
+    })
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-test-mic-reconciled', intent: { kind: 'micUnmute' } }
+          })
+        })
+      }
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.audio.microphoneMuted === false &&
+        backend.sentCommands
+          .slice(reconciliationStart)
+          .some((command) => command.method === 'audio.processing.update')
+    )
+    expect(
+      backend.sentCommands
+        .slice(reconciliationStart)
+        .find(
+          (command) =>
+            command.method === 'remote.intent.ack' &&
+            (command.params as { intentId?: string }).intentId === 'ri-test-mic-reconciled'
+        )
+    ).toBeUndefined()
+
+    releaseReconciliation()
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-reconciled'
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-reconciled'
+      )?.params
+    ).toEqual({ intentId: 'ri-test-mic-reconciled', ok: true })
+  })
+
+  it('NACKs an active remote microphone rejection and projects confirmed rollback truth', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({ event: 'backend.ready', payload: null })
+        })
+      }
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await latest()?.core.startSession()
+    })
+    await waitForObservation(() => latest()?.recording.recording.state === 'recording')
+
+    const commandStart = backend.sentCommands.length
+    const releaseAudioUpdate = backend.deferResponse('audio.processing.update', {
+      applied: false,
+      sessionId: 'session-1',
+      microphoneGainDb: 0,
+      microphoneMuted: true,
+      reasonCode: 'live-audio-control-unavailable',
+      confirmedMicrophoneGainDb: 0,
+      confirmedMicrophoneMuted: false
+    })
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: { intentId: 'ri-test-mic-rejected', intent: { kind: 'micMute' } }
+          })
+        })
+      }
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.captureConfig.audio.microphoneMuted === true &&
+        backend.sentCommands
+          .slice(commandStart)
+          .some((command) => command.method === 'audio.processing.update')
+    )
+    expect(
+      backend.sentCommands
+        .slice(commandStart)
+        .find(
+          (command) =>
+            command.method === 'remote.intent.ack' &&
+            (command.params as { intentId?: string }).intentId === 'ri-test-mic-rejected'
+        )
+    ).toBeUndefined()
+
+    releaseAudioUpdate()
+    await waitForObservation(() => latest()?.core.captureConfig.audio.microphoneMuted === false)
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-rejected'
+      )
+    )
+
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-mic-rejected'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-mic-rejected',
+      ok: false,
+      message: 'The microphone change was not applied.'
+    })
+    expect(
+      backend.sentCommands
+        .slice(commandStart)
+        .filter((command) => command.method === 'remote.surface.publish')
+        .some(
+          (command) =>
+            (command.params as { state?: { micMuted?: boolean } }).state?.micMuted === true
+        )
+    ).toBe(false)
+  })
+
+  it('keeps the layout unchanged and acks false when a remote scene is rejected', async () => {
+    const backend = new StudioBackend()
+    backend.layoutApplyFailure = 'definite'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+    const layoutBefore = latest()?.core.captureConfig.layout
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-scene-rejected',
+              intent: { kind: 'sceneApply', layoutPreset: 'screen-only' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-rejected'
+      )
+    )
+
+    expect(latest()?.core.captureConfig.layout).toEqual(layoutBefore)
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-rejected'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-scene-rejected',
+      ok: false,
+      message: 'The layout change was not committed.'
+    })
+  })
+
+  it('reconciles an outcome-unknown remote scene commit and acks true', async () => {
+    const backend = new StudioBackend()
+    backend.layoutApplyFailure = 'request-outcome-unknown-after-commit'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-scene-outcome-unknown',
+              intent: { kind: 'sceneApply', layoutPreset: 'side-by-side' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-outcome-unknown'
+      )
+    )
+
+    expect(latest()?.core.captureConfig.layout.layoutPreset).toBe('side-by-side')
+    expect(latest()?.core.lastError).toBeNull()
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-scene-outcome-unknown'
+      )?.params
+    ).toEqual({ intentId: 'ri-test-scene-outcome-unknown', ok: true })
+  })
+
+  it('acks false for definite takeover failure and outcome-unknown clear mismatch', async () => {
+    const backend = new StudioBackend()
+    backend.screens = [takeoverScreen]
+    backend.screenActivateFailure = 'definite'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => latest()?.core.wsStatus === 'connected')
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-takeover-definite-failure',
+              intent: { kind: 'takeoverShow', assetId: takeoverScreen.id }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-takeover-definite-failure'
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId === 'ri-test-takeover-definite-failure'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-takeover-definite-failure',
+      ok: false,
+      message: 'The takeover was not activated.'
+    })
+    expect(backend.activeScreen).toBeNull()
+
+    backend.screenActivateFailure = null
+    backend.screenClearFailure = 'request-outcome-unknown-before-commit'
+    backend.activeScreen = takeoverScreen
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'screens.active.changed',
+            payload: takeoverScreen
+          })
+        })
+      }
+      await Promise.resolve()
+    })
+    await waitForObservation(() => latest()?.core.activeScreen?.id === takeoverScreen.id)
+
+    await act(async () => {
+      for (const socket of backend.sockets) {
+        socket.onmessage?.({
+          data: JSON.stringify({
+            event: 'remote.intent',
+            payload: {
+              intentId: 'ri-test-takeover-clear-outcome-unknown',
+              intent: { kind: 'takeoverHide' }
+            }
+          })
+        })
+      }
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId ===
+            'ri-test-takeover-clear-outcome-unknown'
+      )
+    )
+    expect(
+      backend.sentCommands.find(
+        (command) =>
+          command.method === 'remote.intent.ack' &&
+          (command.params as { intentId?: string }).intentId ===
+            'ri-test-takeover-clear-outcome-unknown'
+      )?.params
+    ).toEqual({
+      intentId: 'ri-test-takeover-clear-outcome-unknown',
+      ok: false,
+      message: 'The takeover was not cleared.'
+    })
+    expect(backend.activeScreen?.id).toBe(takeoverScreen.id)
   })
 
   it('never revokes persisted cloud-AI consent when readiness is not ready', async () => {
@@ -4558,7 +5780,7 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
     )
 
-    let startPromise: Promise<void> | undefined
+    let startPromise: Promise<boolean> | undefined
     await act(async () => {
       startPromise = latest()?.core.startSession()
       await Promise.resolve()
@@ -4599,6 +5821,1544 @@ describe('real StudioProvider lifecycle', () => {
         }
       })
     ])
+  })
+
+  it('keeps an exact-session stopping event authoritative when start responds late', async () => {
+    const backend = new StudioBackend()
+    backend.authoritativeRecordingStatusBeforeStartResponse = 'stopping'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+
+    let started: boolean | undefined
+    await act(async () => {
+      started = await latest()?.core.startSession()
+    })
+
+    expect(started).toBe(false)
+    expect(latest()?.recording.recording).toMatchObject({
+      state: 'stopping',
+      sessionId: 'session-1',
+      message: 'Session ended before start replied.'
+    })
+  })
+
+  it('coalesces overlapping starts when an exact-session terminal event wins the response race', async () => {
+    const backend = new StudioBackend()
+    backend.sessionStartResponseDelayMs = 100
+    backend.authoritativeRecordingStatusBeforeStartResponse = 'stopping'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+
+    let results: boolean[] = []
+    await act(async () => {
+      const firstStart = latest()!.core.startSession()
+      const secondStart = latest()!.core.startSession()
+      results = await Promise.all([firstStart, secondStart])
+    })
+
+    expect(results).toEqual([false, false])
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+    ).toHaveLength(1)
+    expect(latest()?.recording.recording).toMatchObject({
+      state: 'stopping',
+      sessionId: 'session-1',
+      message: 'Session ended before start replied.'
+    })
+  })
+
+  it('cleans up one prepared broadcast without activating it after a coalesced start ends early', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.sessionStartResponseDelayMs = 100
+    backend.authoritativeRecordingStatusBeforeStartResponse = 'stopping'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+
+    await openYouTubeGoLiveConfirmation(latest)
+
+    await act(async () => {
+      const firstConfirmation = latest()!.core.confirmGoLive()
+      const secondConfirmation = latest()!.core.confirmGoLive()
+      await Promise.all([firstConfirmation, secondConfirmation])
+    })
+
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.start')
+    ).toHaveLength(1)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.youtube.prepare')
+    ).toHaveLength(1)
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({ broadcastId: 'youtube-broadcast-1' })
+      })
+    ])
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'live'
+      )
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter(
+        (command) => command.method === 'streamTargets.youtube.streamStatus'
+      )
+    ).toHaveLength(0)
+    expect(latest()?.recording.recording).toMatchObject({
+      state: 'stopping',
+      sessionId: 'session-1'
+    })
+  })
+
+  it('retains rejected pre-session cleanup and retries it before preparing another broadcast', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.sessionStartError = 'The encoder rejected this start.'
+    backend.youtubeCompleteFailuresRemaining = 1
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(1)
+
+    backend.sessionStartError = null
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(2)
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
+  })
+
+  it('retains cancelled partial-setup cleanup and retries it before preparing again', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    backend.xPrepareFailuresRemaining = 1
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeAndXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    await waitForObservation(() => latest()?.core.goLivePartialSetup !== null)
+
+    backend.youtubeCompleteFailuresRemaining = 1
+    await act(async () => {
+      latest()!.core.cancelGoLiveConfirmation()
+    })
+    await waitForObservation(
+      () =>
+        backend.sentCommands.filter(
+          (command) =>
+            command.method === 'streamTargets.youtube.transition' &&
+            (command.params as { status?: string }).status === 'complete'
+        ).length === 1
+    )
+
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(2)
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
+  })
+
+  it('joins a pending start response before Stop cleans its prepared broadcast', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    const releaseStart = backend.deferResponse('session.start', {
+      state: 'recording',
+      sessionId: 'session-1',
+      startedAt: now,
+      message: 'Recording.'
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+
+    let confirmationPromise!: Promise<void>
+    await act(async () => {
+      confirmationPromise = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.start')
+    )
+
+    let stopPromise!: Promise<boolean>
+    await act(async () => {
+      stopPromise = latest()!.core.stopSession()
+      await Promise.resolve()
+    })
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.stop')
+    ).toHaveLength(0)
+
+    await act(async () => {
+      releaseStart()
+      await Promise.all([confirmationPromise, stopPromise])
+    })
+
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(1)
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'live'
+      )
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.stop')
+    ).toHaveLength(1)
+    expect(latest()?.recording.recording.state).toBe('idle')
+  })
+
+  it('does not activate a prepared broadcast when the session ends during Library refresh', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.terminalRecordingStatusOnMethod = 'sessions.list'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    expect(backend.terminalRecordingStatusOnMethodEmitted).toBe(true)
+    expect(
+      backend.sentCommands.filter(
+        (command) => command.method === 'streamTargets.youtube.streamStatus'
+      )
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'live'
+      )
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(1)
+    expect(latest()?.recording.recording).toMatchObject({
+      state: 'stopping',
+      sessionId: 'session-1'
+    })
+  })
+
+  it('does not transition a prepared broadcast live when the session ends during ingest proof', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.terminalRecordingStatusOnMethod = 'streamTargets.youtube.streamStatus'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    expect(backend.terminalRecordingStatusOnMethodEmitted).toBe(true)
+    expect(
+      backend.sentCommands.filter(
+        (command) => command.method === 'streamTargets.youtube.streamStatus'
+      )
+    ).toHaveLength(1)
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'live'
+      )
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(1)
+  })
+
+  it.each(['success', 'failure'] as const)(
+    'does not overwrite stopped YouTube state when a deferred ingest poll resolves with %s',
+    async (outcome) => {
+      const backend = new StudioBackend()
+      enableYouTubeOauthForTest(backend)
+      const releasePoll =
+        outcome === 'success'
+          ? backend.deferResponse('streamTargets.youtube.streamStatus', {
+              platform: 'youtube',
+              accountId: 'youtube-account-1',
+              streamId: 'youtube-stream-1',
+              streamStatus: 'active',
+              active: true,
+              message: 'YouTube ingest is active.'
+            })
+          : backend.deferFailure(
+              'streamTargets.youtube.streamStatus',
+              new Error('Deferred YouTube ingest probe failed.')
+            )
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const api = createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+      const testDom = installProviderTestEnvironment(api)
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = (): StudioObservation | undefined => observations.at(-1)
+
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.wsStatus === 'connected' &&
+          latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+      )
+      await openYouTubeGoLiveConfirmation(latest)
+
+      let confirmationPromise!: Promise<void>
+      await act(async () => {
+        confirmationPromise = latest()!.core.confirmGoLive()
+        await Promise.resolve()
+      })
+      await waitForObservation(() =>
+        backend.sentCommands.some(
+          (command) => command.method === 'streamTargets.youtube.streamStatus'
+        )
+      )
+
+      let stopped: boolean | undefined
+      await act(async () => {
+        stopped = await latest()!.core.stopSession()
+      })
+      expect(stopped).toBe(true)
+      expect(
+        latest()?.core.captureConfig.streaming.targets.find(
+          (target) => target.platform === 'youtube'
+        )?.status?.state
+      ).toBe('stopped')
+
+      await act(async () => {
+        releasePoll()
+        await confirmationPromise
+      })
+
+      expect(
+        backend.sentCommands.filter(
+          (command) =>
+            command.method === 'streamTargets.youtube.transition' &&
+            (command.params as { status?: string }).status === 'live'
+        )
+      ).toHaveLength(0)
+      expect(
+        backend.sentCommands.filter(
+          (command) =>
+            command.method === 'streamTargets.youtube.transition' &&
+            (command.params as { status?: string }).status === 'complete'
+        )
+      ).toHaveLength(1)
+      expect(
+        latest()?.core.captureConfig.streaming.targets.find(
+          (target) => target.platform === 'youtube'
+        )?.status?.state
+      ).toBe('stopped')
+      expect(
+        toastSpies.warning.mock.calls.some(([message]) =>
+          String(message).startsWith('Could not transition')
+        )
+      ).toBe(false)
+    }
+  )
+
+  it('does not publish a live target state when the session ends during the transition RPC', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.terminalRecordingStatusOnMethod = 'streamTargets.youtube.transition'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    expect(backend.terminalRecordingStatusOnMethodEmitted).toBe(true)
+    expect(
+      backend.sentCommands
+        .filter((command) => command.method === 'streamTargets.youtube.transition')
+        .map((command) => (command.params as { status?: string }).status)
+    ).toEqual(['live', 'complete'])
+    expect(
+      observations.some((observation) =>
+        observation.core.captureConfig.streaming.targets.some(
+          (target) => target.platform === 'youtube' && target.status?.state === 'live'
+        )
+      )
+    ).toBe(false)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+        ?.status?.state
+    ).toBe('stopped')
+  })
+
+  it('correlates a sessionless terminal push while the YouTube transition is pending', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    const releaseLiveTransition = backend.deferResponse(
+      'streamTargets.youtube.transition',
+      {
+        platform: 'youtube',
+        accountId: 'youtube-account-1',
+        broadcastId: 'youtube-broadcast-1',
+        requestedStatus: 'live',
+        lifecycleStatus: 'live',
+        message: 'YouTube broadcast transitioned to live.'
+      },
+      (command) => (command.params as { status?: string }).status === 'live'
+    )
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+
+    let confirmationPromise!: Promise<void>
+    await act(async () => {
+      confirmationPromise = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'live'
+      )
+    )
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'failed',
+            message: 'Encoder stopped without a session ID.'
+          }
+        })
+      })
+      releaseLiveTransition()
+      await confirmationPromise
+    })
+
+    expect(
+      backend.sentCommands
+        .filter((command) => command.method === 'streamTargets.youtube.transition')
+        .map((command) => (command.params as { status?: string }).status)
+    ).toEqual(['live', 'complete'])
+    expect(
+      observations.some((observation) =>
+        observation.core.captureConfig.streaming.targets.some(
+          (target) => target.platform === 'youtube' && target.status?.state === 'live'
+        )
+      )
+    ).toBe(false)
+    expect(latest()?.recording.recording).toMatchObject({
+      state: 'failed',
+      sessionId: 'session-1'
+    })
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+        ?.status?.state
+    ).toBe('stopped')
+  })
+
+  it('ends the actual X broadcast when the session dies during publish', async () => {
+    const backend = new StudioBackend()
+    enableXOauthForTest(backend)
+    backend.xPublishTweetError = 'The announcement post was rejected.'
+    backend.terminalRecordingStatusOnMethod = 'streamTargets.x.publish'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openXGoLiveConfirmation(latest)
+
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    expect(backend.terminalRecordingStatusOnMethodEmitted).toBe(true)
+    expect(backend.xPrepareCount).toBe(1)
+    expect(backend.xPublishCount).toBe(1)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({ broadcastId: 'x-broadcast-1' })
+      })
+    ])
+    expect(
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'streamTargets.x.end' &&
+          (command.params as { broadcastId?: string }).broadcastId === 'x-region-1'
+      )
+    ).toBe(false)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'liveChat.x.start')
+    ).toHaveLength(0)
+    expect(
+      observations.some((observation) =>
+        observation.core.captureConfig.streaming.targets.some(
+          (target) => target.platform === 'x' && target.status?.state === 'live'
+        )
+      )
+    ).toBe(false)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
+        ?.status?.state
+    ).toBe('stopped')
+  })
+
+  it('keeps a published X broadcast live when only the announcement post fails', async () => {
+    const backend = new StudioBackend()
+    enableXOauthForTest(backend)
+    backend.xPublishTweetError = 'The announcement post was rejected.'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openXGoLiveConfirmation(latest)
+
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
+        ?.status
+    ).toMatchObject({
+      state: 'live',
+      lastError: 'The announcement post was rejected.',
+      redactedUrl: 'https://x.com/i/broadcasts/1'
+    })
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'liveChat.x.start')
+    ).toHaveLength(1)
+
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toHaveLength(1)
+  })
+
+  it('cleans the exact owner after an autonomous terminal status omits its session ID', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeAndXOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeAndXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'liveChat.snapshot',
+          payload: {
+            sessionId: 'session-1',
+            providers: [],
+            messages: [],
+            unreadCount: 0,
+            updatedAt: now
+          }
+        })
+      })
+    })
+    await waitForObservation(() => latest()?.chat.liveChatSnapshot.sessionId === 'session-1')
+
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'failed',
+            message: 'Encoder stopped unexpectedly.'
+          }
+        })
+      })
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'failed',
+            message: 'Repeated encoder terminal status.'
+          }
+        })
+      })
+    })
+    await waitForObservation(() =>
+      Boolean(
+        latest()
+          ?.core.captureConfig.streaming.targets.filter(
+            (target) => target.platform === 'youtube' || target.platform === 'x'
+          )
+          .every((target) => target.status?.state === 'stopped')
+      )
+    )
+
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({ broadcastId: 'x-broadcast-1' })
+      })
+    ])
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({ broadcastId: 'youtube-broadcast-1' })
+      })
+    ])
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.stop')
+    ).toHaveLength(0)
+    expect(latest()?.recording.recording.state).toBe('failed')
+    expect(latest()?.chat.liveChatSnapshot.sessionId).toBeUndefined()
+  })
+
+  it('retains an autonomous cleanup owner after failure and retries it before another Go Live', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    backend.youtubeCompleteFailuresRemaining = 1
+    await act(async () => {
+      backend.sockets[0]?.onmessage?.({
+        data: JSON.stringify({
+          event: 'recording.status',
+          payload: {
+            state: 'failed',
+            sessionId: 'session-1',
+            message: 'Encoder stopped unexpectedly.'
+          }
+        })
+      })
+    })
+    await waitForObservation(
+      () =>
+        backend.sentCommands.filter(
+          (command) =>
+            command.method === 'streamTargets.youtube.transition' &&
+            (command.params as { status?: string }).status === 'complete'
+        ).length === 1 &&
+        latest()?.core.captureConfig.streaming.targets.find(
+          (target) => target.platform === 'youtube'
+        )?.status?.state === 'warning'
+    )
+
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(2)
+    expect(backend.youtubePrepareCount).toBe(1)
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+        ?.status?.state
+    ).toBe('stopped')
+  })
+
+  it('completes YouTube once when Stop races its pending live transition', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    const releaseLiveTransition = backend.deferResponse(
+      'streamTargets.youtube.transition',
+      {
+        platform: 'youtube',
+        accountId: 'youtube-account-1',
+        broadcastId: 'youtube-broadcast-1',
+        requestedStatus: 'live',
+        lifecycleStatus: 'live',
+        message: 'YouTube broadcast transitioned to live.'
+      },
+      (command) => (command.params as { status?: string }).status === 'live'
+    )
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+
+    let confirmationPromise!: Promise<void>
+    await act(async () => {
+      confirmationPromise = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'live'
+      )
+    )
+
+    let stopPromise!: Promise<boolean>
+    await act(async () => {
+      stopPromise = latest()!.core.stopSession()
+      await Promise.resolve()
+    })
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.stop')
+    ).toHaveLength(0)
+    await act(async () => {
+      releaseLiveTransition()
+      await Promise.all([confirmationPromise, stopPromise])
+    })
+
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(1)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+        ?.status?.state
+    ).toBe('stopped')
+  })
+
+  it('retries YouTube completion after a real failure during a Stop/start race', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.youtubeCompleteFailuresRemaining = 1
+    const releaseLiveTransition = backend.deferResponse(
+      'streamTargets.youtube.transition',
+      {
+        platform: 'youtube',
+        accountId: 'youtube-account-1',
+        broadcastId: 'youtube-broadcast-1',
+        requestedStatus: 'live',
+        lifecycleStatus: 'live',
+        message: 'YouTube broadcast transitioned to live.'
+      },
+      (command) => (command.params as { status?: string }).status === 'live'
+    )
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+
+    let confirmationPromise!: Promise<void>
+    await act(async () => {
+      confirmationPromise = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'live'
+      )
+    )
+
+    let stopPromise!: Promise<boolean>
+    await act(async () => {
+      stopPromise = latest()!.core.stopSession()
+      await Promise.resolve()
+    })
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.stop')
+    ).toHaveLength(0)
+    await act(async () => {
+      releaseLiveTransition()
+      await Promise.all([confirmationPromise, stopPromise])
+    })
+
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(1)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+        ?.status?.state
+    ).toBe('warning')
+
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+
+    expect(
+      backend.sentCommands.filter(
+        (command) =>
+          command.method === 'streamTargets.youtube.transition' &&
+          (command.params as { status?: string }).status === 'complete'
+      )
+    ).toHaveLength(2)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+        ?.status?.state
+    ).toBe('stopped')
+  })
+
+  it('retries an X END after a real failure instead of caching the rejection', async () => {
+    const backend = new StudioBackend()
+    enableXOauthForTest(backend)
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    backend.xEndFailuresRemaining = 1
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toHaveLength(1)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
+        ?.status?.state
+    ).toBe('warning')
+
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toHaveLength(2)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
+        ?.status?.state
+    ).toBe('stopped')
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
+  })
+
+  it('bounds a hung X END, stops the encoder, and retains cleanup for the next start', async () => {
+    const backend = new StudioBackend()
+    enableXOauthForTest(backend)
+    const releaseEnd = backend.deferResponse('streamTargets.x.end', {
+      platform: 'x',
+      accountId: 'x-account-1',
+      broadcastId: 'x-broadcast-1',
+      message: 'X broadcast ended.'
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openXGoLiveConfirmation(latest)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+
+    let stopPromise!: Promise<boolean>
+    await act(async () => {
+      stopPromise = latest()!.core.stopSession()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'streamTargets.x.end')
+    )
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.stop')
+    ).toHaveLength(0)
+
+    let stopped: boolean | undefined
+    await act(async () => {
+      stopped = await stopPromise
+    })
+
+    expect(stopped).toBe(true)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toHaveLength(1)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.stop')
+    ).toHaveLength(1)
+    expect(latest()?.recording.recording.state).toBe('idle')
+
+    await act(async () => {
+      releaseEnd()
+      await Promise.resolve()
+      await Promise.resolve()
+    })
+    await act(async () => {
+      await latest()!.core.startSession()
+    })
+
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toHaveLength(1)
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
+        ?.status?.state
+    ).toBe('stopped')
+    expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
+  })
+
+  it('waits for an in-flight X publish and ENDs its actual broadcast before encoder Stop', async () => {
+    const backend = new StudioBackend()
+    enableXOauthForTest(backend)
+    const releasePublish = backend.deferResponse('streamTargets.x.publish', {
+      platform: 'x',
+      accountId: 'x-account-1',
+      sourceId: 'x-source-1',
+      broadcastId: 'x-broadcast-1',
+      mediaKey: 'x-media-key-1',
+      shareUrl: 'https://x.com/i/broadcasts/1',
+      state: 'running',
+      message: 'X broadcast published.'
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openXGoLiveConfirmation(latest)
+
+    let confirmationPromise!: Promise<void>
+    await act(async () => {
+      confirmationPromise = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'streamTargets.x.publish')
+    )
+
+    let stopPromise!: Promise<boolean>
+    await act(async () => {
+      stopPromise = latest()!.core.stopSession()
+      await Promise.resolve()
+    })
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toHaveLength(0)
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'session.stop')
+    ).toHaveLength(0)
+
+    await act(async () => {
+      releasePublish()
+      await Promise.all([confirmationPromise, stopPromise])
+    })
+
+    const xEndIndex = backend.sentCommands.findIndex(
+      (command) => command.method === 'streamTargets.x.end'
+    )
+    const sessionStopIndex = backend.sentCommands.findIndex(
+      (command) => command.method === 'session.stop'
+    )
+    expect(xEndIndex).toBeGreaterThan(-1)
+    expect(sessionStopIndex).toBeGreaterThan(xEndIndex)
+    expect(backend.sentCommands[xEndIndex]).toEqual(
+      expect.objectContaining({
+        params: expect.objectContaining({ broadcastId: 'x-broadcast-1' })
+      })
+    )
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'liveChat.x.start')
+    ).toHaveLength(0)
+    expect(latest()?.recording.recording.state).toBe('idle')
+  })
+
+  it('ends X once from its exact owner when Stop races stale UI and pending chat', async () => {
+    const backend = new StudioBackend()
+    enableXOauthForTest(backend)
+    const releaseChatStart = backend.deferResponse('liveChat.x.start', {
+      sessionId: 'session-1',
+      providers: [],
+      messages: [],
+      unreadCount: 0,
+      updatedAt: now
+    })
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openXGoLiveConfirmation(latest)
+
+    let confirmationPromise!: Promise<void>
+    await act(async () => {
+      confirmationPromise = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'liveChat.x.start')
+    )
+
+    await act(async () => {
+      const current = latest()!.core.captureConfig
+      latest()!.core.setCaptureConfig({
+        ...current,
+        streaming: {
+          ...current.streaming,
+          targets: current.streaming.targets.map((target) =>
+            target.platform === 'x'
+              ? {
+                  ...target,
+                  platformBroadcastId: 'x-region-1',
+                  platformStreamId: 'x-source-1',
+                  status: { state: 'ready' as const, message: 'Stale prepared UI snapshot.' }
+                }
+              : target
+          )
+        }
+      })
+    })
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
+        ?.platformBroadcastId
+    ).toBe('x-region-1')
+
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({ broadcastId: 'x-broadcast-1' })
+      })
+    ])
+    await act(async () => {
+      releaseChatStart()
+      await confirmationPromise
+    })
+
+    expect(
+      backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+    ).toEqual([
+      expect.objectContaining({
+        params: expect.objectContaining({ broadcastId: 'x-broadcast-1' })
+      })
+    ])
+    expect(
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
+        ?.status?.state
+    ).toBe('stopped')
+    expect(latest()?.recording.recording.state).toBe('idle')
+    expect(latest()?.chat.liveChatSnapshot).toMatchObject({
+      messages: [],
+      unreadCount: 0
+    })
+    expect(latest()?.chat.liveChatSnapshot.sessionId).toBeUndefined()
+  })
+
+  it('rejects a conflicting record start while a prepared livestream start is pending', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.sessionStartResponseDelayMs = 100
+    backend.authoritativeRecordingStatusBeforeStartResponse = 'stopping'
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    const recordStart = latest()!.core.startSession
+    await openYouTubeGoLiveConfirmation(latest)
+
+    let confirmationPromise!: Promise<void>
+    await act(async () => {
+      confirmationPromise = latest()!.core.confirmGoLive()
+      await Promise.resolve()
+    })
+    await waitForObservation(() =>
+      backend.sentCommands.some((command) => command.method === 'session.start')
+    )
+
+    let conflictingRecordResult: boolean | undefined
+    await act(async () => {
+      conflictingRecordResult = await recordStart()
+      await confirmationPromise
+    })
+
+    expect(conflictingRecordResult).toBe(false)
+    const startCommands = backend.sentCommands.filter(
+      (command) => command.method === 'session.start'
+    )
+    expect(startCommands).toHaveLength(1)
+    expect(startCommands[0]?.params).toMatchObject({
+      output: { recordEnabled: false, streamEnabled: true }
+    })
   })
 
   it('drops pending microphone edits without warning when the capture session ended', async () => {

@@ -95,11 +95,11 @@ const RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT: Duration = Duration::from_secs(2);
 /// 2 of 8 frames. Transient downstream stalls recover within this window; a
 /// genuinely wedged output still fails honestly.
 const STREAM_OUTPUT_SUSTAINED_FAIL_WINDOW: Duration = Duration::from_secs(2);
-// Raw frames receive wall-clock PTS at FFmpeg demux. Keep no stale waiting
-// frames: the writer accepts the latest scheduler frame only when it is ready
-// for another complete write; busy ticks are explicitly coalesced and the
-// decoder holds the last VFR frame across the wall-time gap.
-const RAW_VIDEO_FIFO_QUEUE_MAX_FRAMES: usize = 0;
+// Raw stream frames receive wall-clock PTS at FFmpeg demux, so the stream leg
+// may remain latest-wins under pressure. Recording/shared raw fallback has the
+// same integrity contract as encoded output: preserve admitted frames in order
+// inside the role's bounded queue, then stop on bounded no-progress instead of
+// silently replacing content.
 #[cfg(not(target_os = "windows"))]
 const FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = Duration::from_secs(2);
 #[cfg(target_os = "macos")]
@@ -123,8 +123,8 @@ const RAW_VIDEO_FIFO_FRAME_WRITE_HARD_TIMEOUT: Duration = FIFO_FRAME_WRITE_HARD_
 // from the output queue's age budget. Issue #149 (real Windows device): the
 // software Media Foundation MFT pauses draining the raw pipe for seconds at a
 // time; the writer was using the recording queue's 250ms max_frame_age both
-// as the initial deadline (anchored at SUBMIT time, so a frame that waited in
-// the latest-wins mailbox was dead before its first byte) and as the sliding
+// as the initial deadline (anchored at SUBMIT time, so an admitted frame that
+// waited in the output queue was dead before its first byte) and as the sliding
 // no-progress window — making the 30s Windows hard timeout unreachable and
 // killing healthy recordings ~1s in. Late is fine for a file; only a truly
 // wedged pipe (no bytes for this long) is fatal.
@@ -1131,6 +1131,7 @@ fn encoder_bridge_progress_aware_pre_encode_admission(
     queue_depth: u64,
     oldest_frame_age: Option<Duration>,
     last_progress_age: Duration,
+    recording_no_progress_timeout: Duration,
 ) -> EncoderBridgePreEncodeAdmission {
     if policy.role == EncoderBridgeOutputRole::Stream {
         return encoder_bridge_pre_encode_admission(policy, queue_depth, oldest_frame_age);
@@ -1144,10 +1145,41 @@ fn encoder_bridge_progress_aware_pre_encode_admission(
     if queue_depth < policy.max_frames as u64 {
         return EncoderBridgePreEncodeAdmission::Submit;
     }
-    if last_progress_age < RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT {
+    if last_progress_age < recording_no_progress_timeout {
         EncoderBridgePreEncodeAdmission::PauseRecordingFrame
     } else {
         EncoderBridgePreEncodeAdmission::FailOutput
+    }
+}
+
+fn encoder_bridge_recording_no_progress_timeout(
+    video_output: EncoderBridgeVideoOutput,
+    raw_fifo_write_stall_tolerance: Duration,
+) -> Duration {
+    // Encoded outputs retain the proven two-second bridge contract. Raw fallback
+    // must not be failed on that shorter generic window when its platform writer
+    // is explicitly allowed to wait longer for the next FIFO byte (Windows MF).
+    // The writer's complete-frame hard timeout independently bounds a write that
+    // keeps making byte progress.
+    if video_output == EncoderBridgeVideoOutput::RawYuv420p {
+        RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT.max(raw_fifo_write_stall_tolerance)
+    } else {
+        RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT
+    }
+}
+
+fn refresh_raw_fifo_write_progress(
+    writer: Option<&RawVideoFifoWriter>,
+    observed_epoch: &mut u64,
+    last_output_progress_at: &mut Instant,
+) {
+    let Some(writer) = writer else {
+        return;
+    };
+    let current_epoch = writer.write_progress_epoch();
+    if current_epoch != *observed_epoch {
+        *observed_epoch = current_epoch;
+        *last_output_progress_at = Instant::now();
     }
 }
 
@@ -1187,6 +1219,7 @@ fn encoder_bridge_output_pressure_error(
     queue_depth: u64,
     oldest_frame_age: Option<Duration>,
     last_progress_age: Duration,
+    recording_no_progress_timeout: Duration,
 ) -> io::Error {
     let age_ms = oldest_frame_age.map(|age| age.as_millis()).unwrap_or(0);
     let role = encoder_bridge_output_role_label(policy.role);
@@ -1205,11 +1238,19 @@ fn encoder_bridge_output_pressure_error(
         io::Error::other(format!(
             "{role} encoder output made no progress for {}ms (limit {}ms; depth {queue_depth}/{}, oldest {age_ms}/{}ms); {integrity}",
             last_progress_age.as_millis(),
-            RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT.as_millis(),
+            recording_no_progress_timeout.as_millis(),
             policy.max_frames,
             policy.max_age.as_millis(),
         ))
     }
+}
+
+fn raw_video_fifo_capacity_pressure_error(policy: EncoderBridgeOutputQueuePolicy) -> io::Error {
+    let role = encoder_bridge_output_role_label(policy.role);
+    io::Error::other(format!(
+        "{role} raw-video encoder output reached its bounded preserving queue capacity ({0}/{0} frames); admitted frames were preserved; the output stopped instead of replacing recording content",
+        policy.max_frames,
+    ))
 }
 
 const fn encoder_bridge_output_role_label(role: EncoderBridgeOutputRole) -> &'static str {
@@ -3125,6 +3166,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         terminal_failure.clone(),
         Some(lifecycle.clone()),
     ));
+    let recording_no_progress_timeout = encoder_bridge_recording_no_progress_timeout(
+        video_output,
+        RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+    );
     let frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
     let source = SyntheticMovingSource;
     let mut sequence = 0_u64;
@@ -3154,8 +3199,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let mut pending_video_toolbox_fifo_frames = 0_u64;
     let mut pending_raw_fifo_frames = 0_u64;
     let mut pending_raw_fifo_started_at = VecDeque::<Instant>::new();
-    // The raw queue is a zero-capacity rendezvous, so at most one synthetic
-    // frame can be in flight. Retain at most one returned fallback allocation.
+    // Queued fallback frames own their allocations until written. Retain at
+    // most one returned allocation for reuse after writer completion.
     let mut recycled_synthetic_buffer = None::<Vec<u8>>;
     #[cfg(target_os = "windows")]
     let mut direct_camera_overlay_bytes = Vec::new();
@@ -3178,6 +3223,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     let encoded_access_unit_dropped_frames = 0_u64;
     let mut output_pressure_active = false;
     let mut last_output_progress_at = Instant::now();
+    let mut observed_raw_fifo_write_progress_epoch = raw_fifo_writer
+        .as_ref()
+        .map_or(0, RawVideoFifoWriter::write_progress_epoch);
     // First instant the output queue went over its hard budget; cleared the
     // moment it recovers. Drives the sustained-violation escalation.
     let mut output_over_budget_since: Option<Instant> = None;
@@ -3477,6 +3525,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             );
             return;
         }
+        last_output_progress_at = Instant::now();
         if let Some(frame) = prime_frame {
             last_fed_sequence = Some(frame.sequence);
             let source_age_ms = frame.captured_at.elapsed().as_millis() as u64;
@@ -3497,38 +3546,6 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
     }
 
     while !stop.load(Ordering::Relaxed) {
-        if let Some(writer) = raw_fifo_writer.as_mut()
-            && let Err(error) = drain_raw_video_fifo_writer_results(
-                writer,
-                &mut pending_raw_fifo_frames,
-                &mut pending_raw_fifo_started_at,
-                &mut recycled_synthetic_buffer,
-                &mut raw_video_copied_frames,
-                &mut raw_frames_delivered_in_window,
-                &mut metal_target_frames,
-                &mut metal_target_copied_frames,
-                &mut metal_target_handle_frames,
-                &mut raw_video_fifo_write_times_ms,
-            )
-        {
-            let error = record_encoder_bridge_terminal_failure(
-                &terminal_failure,
-                format!(
-                    "{} raw-video encoder output stopped: {error}",
-                    encoder_bridge_output_role_label(output_queue_policy.role)
-                ),
-            );
-            terminal_writer_error = Some(error.clone());
-            emit_encoder_bridge_diagnostics_from_thread(
-                &diagnostics_tx,
-                session_id.clone(),
-                target_fps,
-                current_runtime_stats!(pending_raw_fifo_frames),
-                diagnostics_context,
-                Some(error),
-            );
-            break;
-        }
         let loop_started_at = Instant::now();
         let now = Instant::now();
         let tick_lag = now.saturating_duration_since(next_frame_at);
@@ -3575,6 +3592,36 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         // path submitted first and only observed pressure afterwards, allowing
         // a 240-frame blocking FIFO to turn a slow sink into seconds of hidden
         // latency.
+        let raw_fifo_drain_error = if let Some(writer) = raw_fifo_writer.as_mut() {
+            let written_before = raw_video_copied_frames;
+            let result = drain_raw_video_fifo_writer_results(
+                writer,
+                &mut pending_raw_fifo_frames,
+                &mut pending_raw_fifo_started_at,
+                &mut recycled_synthetic_buffer,
+                &mut raw_video_copied_frames,
+                &mut raw_frames_delivered_in_window,
+                &mut metal_target_frames,
+                &mut metal_target_copied_frames,
+                &mut metal_target_handle_frames,
+                &mut raw_video_fifo_write_times_ms,
+            );
+            if raw_video_copied_frames > written_before {
+                last_output_progress_at = Instant::now();
+            }
+            result.err()
+        } else {
+            None
+        };
+        // A raw frame is indivisible, but a progressing Windows pipe can need
+        // longer than the complete-frame accounting window to finish it. Byte
+        // progress therefore refreshes liveness while queue depth remains full;
+        // the writer's independent hard deadline still bounds the whole frame.
+        refresh_raw_fifo_write_progress(
+            raw_fifo_writer.as_ref(),
+            &mut observed_raw_fifo_write_progress_epoch,
+            &mut last_output_progress_at,
+        );
         #[cfg(target_os = "macos")]
         let mut pipeline_error = if video_output.uses_video_toolbox() {
             let writer = video_toolbox_fifo_writer
@@ -3617,10 +3664,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             }
             drain_result.err()
         } else {
-            None
+            raw_fifo_drain_error
         };
         #[cfg(not(target_os = "macos"))]
-        let mut pipeline_error: Option<io::Error> = None;
+        let mut pipeline_error = raw_fifo_drain_error;
 
         queue_depth = if video_output.uses_media_foundation() {
             #[cfg(target_os = "windows")]
@@ -3639,7 +3686,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             pending_raw_fifo_frames
         };
         observe_output_queue!(queue_depth);
-        let admission = if pipeline_error.is_some() || !video_output.uses_encoded_h264() {
+        let admission = if pipeline_error.is_some() {
             EncoderBridgePreEncodeAdmission::Submit
         } else {
             encoder_bridge_progress_aware_pre_encode_admission(
@@ -3647,6 +3694,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 queue_depth,
                 oldest_output_queue_age!(),
                 last_output_progress_at.elapsed(),
+                recording_no_progress_timeout,
             )
         };
         // Over-budget is a death sentence only when SUSTAINED (or the queue is
@@ -3757,6 +3805,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                     queue_depth,
                     oldest_output_queue_age!(),
                     last_output_progress_at.elapsed(),
+                    recording_no_progress_timeout,
                 ));
             }
         }
@@ -4409,8 +4458,9 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             );
             break;
         }
-        if let Some(writer) = raw_fifo_writer.as_mut()
-            && let Err(error) = drain_raw_video_fifo_writer_results(
+        if let Some(writer) = raw_fifo_writer.as_mut() {
+            let written_before = raw_video_copied_frames;
+            if let Err(error) = drain_raw_video_fifo_writer_results(
                 writer,
                 &mut pending_raw_fifo_frames,
                 &mut pending_raw_fifo_started_at,
@@ -4421,25 +4471,28 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 &mut metal_target_copied_frames,
                 &mut metal_target_handle_frames,
                 &mut raw_video_fifo_write_times_ms,
-            )
-        {
-            let error = record_encoder_bridge_terminal_failure(
-                &terminal_failure,
-                format!(
-                    "{} raw-video encoder output stopped: {error}",
-                    encoder_bridge_output_role_label(output_queue_policy.role)
-                ),
-            );
-            terminal_writer_error = Some(error.clone());
-            emit_encoder_bridge_diagnostics_from_thread(
-                &diagnostics_tx,
-                session_id.clone(),
-                target_fps,
-                current_runtime_stats!(pending_raw_fifo_frames),
-                diagnostics_context,
-                Some(error),
-            );
-            break;
+            ) {
+                let error = record_encoder_bridge_terminal_failure(
+                    &terminal_failure,
+                    format!(
+                        "{} raw-video encoder output stopped: {error}",
+                        encoder_bridge_output_role_label(output_queue_policy.role)
+                    ),
+                );
+                terminal_writer_error = Some(error.clone());
+                emit_encoder_bridge_diagnostics_from_thread(
+                    &diagnostics_tx,
+                    session_id.clone(),
+                    target_fps,
+                    current_runtime_stats!(pending_raw_fifo_frames),
+                    diagnostics_context,
+                    Some(error),
+                );
+                break;
+            }
+            if raw_video_copied_frames > written_before {
+                last_output_progress_at = Instant::now();
+            }
         }
         queue_depth = if video_output.uses_media_foundation() {
             #[cfg(target_os = "windows")]
@@ -4986,10 +5039,29 @@ impl EncoderBridgeVideoToolboxProbe {
 }
 
 struct RawVideoFifoWriter {
-    frame_mailbox: Arc<LatestRawVideoFrameMailbox>,
+    frame_sender: RawVideoFrameQueueSender,
+    policy: EncoderBridgeOutputQueuePolicy,
+    terminal_failure: Arc<StdMutex<Option<String>>>,
+    write_progress_epoch: Arc<AtomicU64>,
     result_rx: std_mpsc::Receiver<RawVideoFifoWriterResult>,
     join: Option<thread::JoinHandle<()>>,
     lifecycle: Option<EncoderBridgeWriterLifecycle>,
+}
+
+enum RawVideoFrameQueueSender {
+    Latest(Arc<LatestRawVideoFrameMailbox>),
+    Preserving(Option<std_mpsc::SyncSender<QueuedRawVideoFrame>>),
+}
+
+enum RawVideoFrameQueueReceiver {
+    Latest(Arc<LatestRawVideoFrameMailbox>),
+    Preserving(std_mpsc::Receiver<QueuedRawVideoFrame>),
+}
+
+enum RawVideoFrameQueueOffer {
+    Enqueued,
+    Coalesced(QueuedRawVideoFrame),
+    CapacityPressure(QueuedRawVideoFrame),
 }
 
 #[derive(Default)]
@@ -5055,6 +5127,72 @@ impl LatestRawVideoFrameMailbox {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.closed = true;
         self.ready.notify_all();
+    }
+}
+
+impl RawVideoFrameQueueSender {
+    fn offer(
+        &self,
+        frame: QueuedRawVideoFrame,
+    ) -> std::result::Result<RawVideoFrameQueueOffer, QueuedRawVideoFrame> {
+        match self {
+            Self::Latest(mailbox) => match mailbox.offer(frame)? {
+                LatestRawVideoFrameOffer::Enqueued => Ok(RawVideoFrameQueueOffer::Enqueued),
+                LatestRawVideoFrameOffer::Replaced(frame) => {
+                    Ok(RawVideoFrameQueueOffer::Coalesced(frame))
+                }
+            },
+            Self::Preserving(Some(tx)) => match offer_preserving_output_frame(tx, frame)? {
+                PreservingOutputFrameOffer::Enqueued => Ok(RawVideoFrameQueueOffer::Enqueued),
+                PreservingOutputFrameOffer::CapacityPressure(frame) => {
+                    Ok(RawVideoFrameQueueOffer::CapacityPressure(frame))
+                }
+            },
+            Self::Preserving(None) => Err(frame),
+        }
+    }
+
+    fn close(&mut self) {
+        match self {
+            Self::Latest(mailbox) => mailbox.close(),
+            Self::Preserving(tx) => {
+                tx.take();
+            }
+        }
+    }
+}
+
+impl RawVideoFrameQueueReceiver {
+    fn receive(&self) -> Option<QueuedRawVideoFrame> {
+        match self {
+            Self::Latest(mailbox) => mailbox.receive(),
+            Self::Preserving(rx) => rx.recv().ok(),
+        }
+    }
+}
+
+fn raw_video_frame_queue(
+    policy: EncoderBridgeOutputQueuePolicy,
+) -> (RawVideoFrameQueueSender, RawVideoFrameQueueReceiver) {
+    match policy.role {
+        EncoderBridgeOutputRole::Stream => {
+            let mailbox = Arc::new(LatestRawVideoFrameMailbox::default());
+            (
+                RawVideoFrameQueueSender::Latest(mailbox.clone()),
+                RawVideoFrameQueueReceiver::Latest(mailbox),
+            )
+        }
+        EncoderBridgeOutputRole::Recording | EncoderBridgeOutputRole::Shared => {
+            // `pending_raw_fifo_frames` remains the authority for the combined
+            // waiting + in-flight ceiling. The physical channel needs one full
+            // policy window because completion accounting can run before the
+            // writer is scheduled to receive its next waiting frame.
+            let (tx, rx) = std_mpsc::sync_channel(policy.max_frames);
+            (
+                RawVideoFrameQueueSender::Preserving(Some(tx)),
+                RawVideoFrameQueueReceiver::Preserving(rx),
+            )
+        }
     }
 }
 
@@ -5156,28 +5294,33 @@ impl RawVideoFifoWriter {
     where
         W: StdWrite + Send + 'static,
     {
-        let max_frames = RAW_VIDEO_FIFO_QUEUE_MAX_FRAMES;
-        let frame_mailbox = Arc::new(LatestRawVideoFrameMailbox::default());
-        let writer_mailbox = frame_mailbox.clone();
+        let (frame_sender, frame_receiver) = raw_video_frame_queue(policy);
         // Queue + one in-flight result + one terminal flush result.
-        let (result_tx, result_rx) = std_mpsc::sync_channel(max_frames + 2);
+        let (result_tx, result_rx) = std_mpsc::sync_channel(policy.max_frames + 2);
+        let writer_terminal_failure = terminal_failure.clone();
+        let write_progress_epoch = Arc::new(AtomicU64::new(0));
+        let writer_progress_epoch = write_progress_epoch.clone();
         let join = spawn_registered_fifo_writer(
             lifecycle.clone(),
             thread::Builder::new().name(format!("videorc-{:?}-raw-video-fifo-writer", policy.role)),
             move || {
-                run_raw_video_fifo_writer_loop_with_receiver(
+                run_raw_video_fifo_writer_loop_with_receiver_and_progress(
                     fifo,
-                    || writer_mailbox.receive(),
+                    || frame_receiver.receive(),
                     result_tx,
                     stop,
-                    terminal_failure,
+                    writer_terminal_failure,
                     policy.role,
+                    writer_progress_epoch,
                 );
             },
         )
         .expect("could not start raw-video FIFO writer thread");
         Self {
-            frame_mailbox,
+            frame_sender,
+            policy,
+            terminal_failure,
+            write_progress_epoch,
             result_rx,
             join: Some(join),
             lifecycle,
@@ -5189,11 +5332,20 @@ impl RawVideoFifoWriter {
         frame: QueuedRawVideoFrame,
         capacity_pressure_events: &mut u64,
     ) -> io::Result<RawVideoFifoEnqueueOutcome> {
-        match self.frame_mailbox.offer(frame) {
-            Ok(LatestRawVideoFrameOffer::Enqueued) => Ok(RawVideoFifoEnqueueOutcome::Enqueued),
-            Ok(LatestRawVideoFrameOffer::Replaced(frame)) => {
+        match self.frame_sender.offer(frame) {
+            Ok(RawVideoFrameQueueOffer::Enqueued) => Ok(RawVideoFifoEnqueueOutcome::Enqueued),
+            Ok(RawVideoFrameQueueOffer::Coalesced(frame)) => {
                 *capacity_pressure_events = capacity_pressure_events.saturating_add(1);
                 Ok(RawVideoFifoEnqueueOutcome::Coalesced(frame))
+            }
+            Ok(RawVideoFrameQueueOffer::CapacityPressure(frame)) => {
+                *capacity_pressure_events = capacity_pressure_events.saturating_add(1);
+                drop(frame);
+                let error = raw_video_fifo_capacity_pressure_error(self.policy);
+                Err(io::Error::other(record_encoder_bridge_terminal_failure(
+                    &self.terminal_failure,
+                    error.to_string(),
+                )))
             }
             Err(_) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
@@ -5203,16 +5355,33 @@ impl RawVideoFifoWriter {
     }
 
     fn enqueue_startup(&self, frame: QueuedRawVideoFrame) -> io::Result<()> {
-        self.frame_mailbox.offer(frame).map(|_| ()).map_err(|_| {
-            io::Error::new(
+        match self.frame_sender.offer(frame) {
+            Ok(RawVideoFrameQueueOffer::Enqueued) => Ok(()),
+            Ok(RawVideoFrameQueueOffer::Coalesced(frame)) => {
+                drop(frame);
+                Ok(())
+            }
+            Ok(RawVideoFrameQueueOffer::CapacityPressure(frame)) => {
+                drop(frame);
+                let error = raw_video_fifo_capacity_pressure_error(self.policy);
+                Err(io::Error::other(record_encoder_bridge_terminal_failure(
+                    &self.terminal_failure,
+                    error.to_string(),
+                )))
+            }
+            Err(_) => Err(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 "raw-video FIFO writer stopped during startup priming",
-            )
-        })
+            )),
+        }
     }
 
     fn try_recv_result(&mut self) -> Option<RawVideoFifoWriterResult> {
         self.result_rx.try_recv().ok()
+    }
+
+    fn write_progress_epoch(&self) -> u64 {
+        self.write_progress_epoch.load(Ordering::Relaxed)
     }
 
     fn close_and_join(&mut self) {
@@ -5221,7 +5390,7 @@ impl RawVideoFifoWriter {
     }
 
     fn close_and_join_until(&mut self, deadline_at: Instant) -> BoundedWriterJoinOutcome {
-        self.frame_mailbox.close();
+        self.frame_sender.close();
         if let Some(join) = self.join.take() {
             let outcome = bounded_writer_join_until(join, deadline_at);
             if outcome == BoundedWriterJoinOutcome::Detached
@@ -5261,9 +5430,10 @@ fn run_raw_video_fifo_writer_loop<W: StdWrite>(
     );
 }
 
+#[cfg(test)]
 fn run_raw_video_fifo_writer_loop_with_receiver<W, F>(
-    mut sink: W,
-    mut receive: F,
+    sink: W,
+    receive: F,
     result_tx: std_mpsc::SyncSender<RawVideoFifoWriterResult>,
     stop: Arc<AtomicBool>,
     terminal_failure: Arc<StdMutex<Option<String>>>,
@@ -5272,9 +5442,55 @@ fn run_raw_video_fifo_writer_loop_with_receiver<W, F>(
     W: StdWrite,
     F: FnMut() -> Option<QueuedRawVideoFrame>,
 {
+    run_raw_video_fifo_writer_loop_with_receiver_and_progress(
+        sink,
+        receive,
+        result_tx,
+        stop,
+        terminal_failure,
+        role,
+        Arc::new(AtomicU64::new(0)),
+    );
+}
+
+struct RawVideoWriteProgressSink<W> {
+    inner: W,
+    epoch: Arc<AtomicU64>,
+}
+
+impl<W: StdWrite> StdWrite for RawVideoWriteProgressSink<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.inner.write(bytes)?;
+        if written > 0 {
+            self.epoch.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn run_raw_video_fifo_writer_loop_with_receiver_and_progress<W, F>(
+    sink: W,
+    mut receive: F,
+    result_tx: std_mpsc::SyncSender<RawVideoFifoWriterResult>,
+    stop: Arc<AtomicBool>,
+    terminal_failure: Arc<StdMutex<Option<String>>>,
+    role: EncoderBridgeOutputRole,
+    write_progress_epoch: Arc<AtomicU64>,
+) where
+    W: StdWrite,
+    F: FnMut() -> Option<QueuedRawVideoFrame>,
+{
+    let mut sink = RawVideoWriteProgressSink {
+        inner: sink,
+        epoch: write_progress_epoch,
+    };
     while let Some(frame) = receive() {
         let write_started_at = Instant::now();
-        // The deadline anchors at WRITE START, not submit time: a latest-wins
+        // The deadline anchors at WRITE START, not submit time: an admitted
         // frame that waited out an encoder pause is still valid recording
         // content — a recording tolerates late frames, never dropped ones
         // (issue #149). Progress is judged by the platform stall tolerance;
@@ -6799,10 +7015,11 @@ fn parse_encoder_progress_line(line: &str) -> Option<EncoderProgressUpdate> {
 }
 
 fn parse_stat_f64(line: &str, label: &str) -> Option<f64> {
-    stat_value(line, label)?
+    let value = stat_value(line, label)?
         .trim_end_matches('x')
         .parse::<f64>()
-        .ok()
+        .ok()?;
+    (value.is_finite() && value >= 0.0).then_some(value)
 }
 
 fn parse_stat_u64(line: &str, label: &str) -> Option<u64> {
@@ -8196,6 +8413,7 @@ mod tests {
                     6,
                     Some(Duration::from_millis(528)),
                     Duration::from_millis(20),
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
                 ),
                 EncoderBridgePreEncodeAdmission::Submit,
                 "recording age is diagnostic while bounded depth remains"
@@ -8206,6 +8424,7 @@ mod tests {
                     16,
                     Some(Duration::from_millis(528)),
                     RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT - Duration::from_millis(1),
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
                 ),
                 EncoderBridgePreEncodeAdmission::PauseRecordingFrame
             );
@@ -8215,8 +8434,191 @@ mod tests {
                     16,
                     Some(Duration::from_millis(528)),
                     RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
                 ),
                 EncoderBridgePreEncodeAdmission::FailOutput
+            );
+        }
+    }
+
+    #[test]
+    fn partial_raw_fifo_bytes_refresh_full_recording_queue_liveness() {
+        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        let no_progress_timeout = Duration::from_millis(20);
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut writer = RawVideoFifoWriter::start_with_sink(
+            ProgressThenPauseSink {
+                writes: 0,
+                pause: Duration::from_millis(100),
+            },
+            policy,
+            stop,
+            Arc::new(StdMutex::new(None)),
+            None,
+        );
+        writer
+            .enqueue_startup(QueuedRawVideoFrame::synthetic(vec![7; 3]))
+            .expect("queue progressing raw frame");
+
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while writer.write_progress_epoch() == 0 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            writer.write_progress_epoch() > 0,
+            "the first positive byte write must publish progress before frame completion"
+        );
+        assert!(
+            writer.try_recv_result().is_none(),
+            "the frame must still be in flight while byte progress is observed"
+        );
+
+        let mut observed_epoch = 0;
+        let mut last_output_progress_at = Instant::now() - no_progress_timeout;
+        refresh_raw_fifo_write_progress(
+            Some(&writer),
+            &mut observed_epoch,
+            &mut last_output_progress_at,
+        );
+        assert_eq!(
+            encoder_bridge_progress_aware_pre_encode_admission(
+                policy,
+                policy.max_frames as u64,
+                Some(Duration::from_millis(528)),
+                last_output_progress_at.elapsed(),
+                no_progress_timeout,
+            ),
+            EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
+            "partial FIFO bytes must keep a full recording queue alive"
+        );
+
+        thread::sleep(no_progress_timeout + Duration::from_millis(5));
+        refresh_raw_fifo_write_progress(
+            Some(&writer),
+            &mut observed_epoch,
+            &mut last_output_progress_at,
+        );
+        assert_eq!(
+            encoder_bridge_progress_aware_pre_encode_admission(
+                policy,
+                policy.max_frames as u64,
+                Some(Duration::from_millis(528)),
+                last_output_progress_at.elapsed(),
+                no_progress_timeout,
+            ),
+            EncoderBridgePreEncodeAdmission::FailOutput,
+            "a full queue must fail after actual byte progress stops"
+        );
+
+        writer.close_and_join();
+    }
+
+    #[test]
+    fn simulated_windows_raw_recording_full_queue_honors_the_fifo_writer_stall_contract() {
+        let windows_raw_fifo_stall_tolerance = Duration::from_secs(10);
+        let no_progress_timeout = encoder_bridge_recording_no_progress_timeout(
+            EncoderBridgeVideoOutput::RawYuv420p,
+            windows_raw_fifo_stall_tolerance,
+        );
+        assert_eq!(no_progress_timeout, windows_raw_fifo_stall_tolerance);
+        assert_eq!(
+            encoder_bridge_recording_no_progress_timeout(
+                EncoderBridgeVideoOutput::RawYuv420p,
+                RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+            ),
+            RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+            "macOS/Linux raw fallback keeps its existing two-second contract",
+        );
+        assert_eq!(
+            encoder_bridge_recording_no_progress_timeout(
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs,
+                windows_raw_fifo_stall_tolerance,
+            ),
+            RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+            "encoded outputs keep the existing two-second bridge contract",
+        );
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                role,
+                ..EncoderBridgeDiagnosticsContext::default()
+            });
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    Some(Duration::from_millis(528)),
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT + Duration::from_millis(1),
+                    no_progress_timeout,
+                ),
+                EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
+                "a full Windows raw {role:?} queue must not fail while its in-flight frame remains inside the writer's ten-second no-progress contract",
+            );
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    Some(windows_raw_fifo_stall_tolerance),
+                    windows_raw_fifo_stall_tolerance,
+                    no_progress_timeout,
+                ),
+                EncoderBridgePreEncodeAdmission::FailOutput,
+                "a full Windows raw {role:?} queue still fails at the bounded writer deadline",
+            );
+            let error = encoder_bridge_output_pressure_error(
+                policy,
+                policy.max_frames as u64,
+                Some(windows_raw_fifo_stall_tolerance),
+                windows_raw_fifo_stall_tolerance + Duration::from_millis(1),
+                no_progress_timeout,
+            )
+            .to_string();
+            assert!(error.contains("no progress for 10001ms (limit 10000ms"));
+            assert!(
+                !error.contains("limit 2000ms"),
+                "the terminal message must report the active raw FIFO timeout: {error}",
+            );
+        }
+    }
+
+    #[test]
+    fn raw_recording_full_queue_uses_the_active_platform_fifo_stall_window() {
+        let no_progress_timeout = encoder_bridge_recording_no_progress_timeout(
+            EncoderBridgeVideoOutput::RawYuv420p,
+            RAW_VIDEO_FIFO_WRITE_STALL_TOLERANCE,
+        );
+        for role in [
+            EncoderBridgeOutputRole::Recording,
+            EncoderBridgeOutputRole::Shared,
+        ] {
+            let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+                role,
+                ..EncoderBridgeDiagnosticsContext::default()
+            });
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    Some(Duration::from_millis(528)),
+                    no_progress_timeout - Duration::from_millis(1),
+                    no_progress_timeout,
+                ),
+                EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
+            );
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    policy.max_frames as u64,
+                    Some(no_progress_timeout),
+                    no_progress_timeout,
+                    no_progress_timeout,
+                ),
+                EncoderBridgePreEncodeAdmission::FailOutput,
             );
         }
     }
@@ -8269,6 +8671,7 @@ mod tests {
                 16,
                 Some(Duration::from_millis(528)),
                 Duration::from_millis(12),
+                RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
             ),
             EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
             "the reproduced 4K30 depth 16/16, oldest 528ms sample was still making downstream progress and must pause before encode instead of stopping the recording",
@@ -8287,6 +8690,7 @@ mod tests {
             16,
             Some(Duration::from_millis(251)),
             RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+            RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
         )
         .to_string();
         assert!(recording_error.contains("recording encoder output"));
@@ -8304,6 +8708,7 @@ mod tests {
             8,
             Some(Duration::from_millis(151)),
             Duration::from_millis(20),
+            RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
         )
         .to_string();
         assert!(stream_error.contains("stream encoder output"));
@@ -9010,6 +9415,200 @@ mod tests {
     }
 
     #[test]
+    fn recording_raw_fifo_completion_accounting_can_precede_the_next_worker_receive() {
+        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        let (mut sender, receiver) = raw_video_frame_queue(policy);
+
+        // Model a full 16-frame output: one frame has just completed its FIFO
+        // write and the other 15 are still physically waiting. The accounting
+        // thread observes the completion first, while the writer has not yet
+        // been scheduled to receive the next waiting frame.
+        for value in 0..policy.max_frames - 1 {
+            assert!(matches!(
+                sender.offer(QueuedRawVideoFrame::synthetic(vec![value as u8])),
+                Ok(RawVideoFrameQueueOffer::Enqueued)
+            ));
+        }
+        let mut pending_frames = policy.max_frames as u64;
+        pending_frames = pending_frames.saturating_sub(1);
+        assert_eq!(pending_frames, policy.max_frames as u64 - 1);
+
+        // The newly available policy slot must be usable even though the worker
+        // has not run `recv` yet. The old max_frames - 1 channel failed here and
+        // turned this benign scheduling window into a terminal recording error.
+        assert!(matches!(
+            sender.offer(QueuedRawVideoFrame::synthetic(vec![
+                (policy.max_frames - 1) as u8,
+            ])),
+            Ok(RawVideoFrameQueueOffer::Enqueued)
+        ));
+        pending_frames = pending_frames.saturating_add(1);
+        assert_eq!(pending_frames, policy.max_frames as u64);
+        assert_eq!(
+            encoder_bridge_progress_aware_pre_encode_admission(
+                policy,
+                pending_frames,
+                Some(Duration::from_millis(528)),
+                Duration::from_millis(1),
+                RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+            ),
+            EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
+            "the accounting ceiling still prevents a seventeenth pending frame",
+        );
+
+        sender.close();
+        let preserved = std::iter::from_fn(|| receiver.receive())
+            .map(|frame| {
+                frame
+                    .into_synthetic_buffer()
+                    .expect("test frame is synthetic")[0]
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(preserved, (0..policy.max_frames as u8).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn recording_raw_fifo_preserves_admitted_frames_in_order_while_writer_is_blocked() {
+        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let terminal_failure = Arc::new(StdMutex::new(None));
+        let (first_write_started_tx, first_write_started_rx) = std_mpsc::sync_channel(1);
+        let (release_first_write_tx, release_first_write_rx) = std_mpsc::sync_channel(1);
+        let sink = SharedCountingSink::default();
+        let mut writer = RawVideoFifoWriter::start_with_sink(
+            GatedFirstWriteSink {
+                written: sink.clone(),
+                first_write_started: Some(first_write_started_tx),
+                release_first_write: release_first_write_rx,
+            },
+            policy,
+            stop,
+            terminal_failure.clone(),
+            None,
+        );
+
+        writer
+            .enqueue_startup(QueuedRawVideoFrame::synthetic(vec![0]))
+            .expect("queue first recording frame");
+        first_write_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer starts the first frame");
+        let mut pressure_events = 0;
+        for value in 1..=3 {
+            assert!(matches!(
+                writer.enqueue(
+                    QueuedRawVideoFrame::synthetic(vec![value]),
+                    &mut pressure_events,
+                ),
+                Ok(RawVideoFifoEnqueueOutcome::Enqueued)
+            ));
+        }
+
+        release_first_write_tx
+            .send(())
+            .expect("release first recording write");
+        writer.close_and_join();
+
+        assert_eq!(sink.bytes(), vec![0, 1, 2, 3]);
+        assert_eq!(pressure_events, 0);
+        assert!(
+            terminal_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn recording_raw_fifo_admission_stops_at_total_pending_capacity_without_replacement() {
+        let policy = encoder_bridge_output_queue_policy(EncoderBridgeDiagnosticsContext {
+            role: EncoderBridgeOutputRole::Recording,
+            ..EncoderBridgeDiagnosticsContext::default()
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let terminal_failure = Arc::new(StdMutex::new(None));
+        let (first_write_started_tx, first_write_started_rx) = std_mpsc::sync_channel(1);
+        let (release_first_write_tx, release_first_write_rx) = std_mpsc::sync_channel(1);
+        let sink = SharedCountingSink::default();
+        let mut writer = RawVideoFifoWriter::start_with_sink(
+            GatedFirstWriteSink {
+                written: sink.clone(),
+                first_write_started: Some(first_write_started_tx),
+                release_first_write: release_first_write_rx,
+            },
+            policy,
+            stop,
+            terminal_failure.clone(),
+            None,
+        );
+
+        writer
+            .enqueue_startup(QueuedRawVideoFrame::synthetic(vec![0]))
+            .expect("queue in-flight recording frame");
+        first_write_started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("writer blocks on the in-flight frame");
+        let mut pressure_events = 0;
+        let mut pending_frames = 1_u64;
+        for value in 1..policy.max_frames {
+            assert_eq!(
+                encoder_bridge_progress_aware_pre_encode_admission(
+                    policy,
+                    pending_frames,
+                    None,
+                    Duration::from_millis(1),
+                    RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+                ),
+                EncoderBridgePreEncodeAdmission::Submit,
+            );
+            assert!(matches!(
+                writer.enqueue(
+                    QueuedRawVideoFrame::synthetic(vec![value as u8]),
+                    &mut pressure_events,
+                ),
+                Ok(RawVideoFifoEnqueueOutcome::Enqueued)
+            ));
+            pending_frames = pending_frames.saturating_add(1);
+        }
+        assert_eq!(pending_frames, policy.max_frames as u64);
+        assert_eq!(
+            encoder_bridge_progress_aware_pre_encode_admission(
+                policy,
+                pending_frames,
+                None,
+                Duration::from_millis(1),
+                RECORDING_OUTPUT_NO_PROGRESS_TIMEOUT,
+            ),
+            EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
+            "the total pending ceiling must suppress the seventeenth submission",
+        );
+        assert_eq!(pressure_events, 0);
+        assert_eq!(
+            terminal_failure
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .as_ref(),
+            None
+        );
+
+        release_first_write_tx
+            .send(())
+            .expect("release first recording write");
+        writer.close_and_join();
+        assert_eq!(
+            sink.bytes(),
+            (0..policy.max_frames as u8).collect::<Vec<_>>(),
+            "all 16 admitted frames must survive in FIFO order"
+        );
+    }
+
+    #[test]
     fn raw_bridge_cadence_counts_only_frames_delivered_to_ffmpeg() {
         assert_eq!(
             encoder_bridge_input_frame_count(EncoderBridgeVideoOutput::RawYuv420p, 30, 11),
@@ -9149,7 +9748,7 @@ mod tests {
                 result_tx,
                 Arc::new(AtomicBool::new(false)),
                 Arc::new(StdMutex::new(None)),
-                EncoderBridgeOutputRole::Recording,
+                EncoderBridgeOutputRole::Stream,
             );
         });
 
@@ -9204,8 +9803,8 @@ mod tests {
     #[test]
     fn raw_fifo_writer_writes_a_frame_older_than_any_queue_age_budget() {
         // Issue #149: the deadline was anchored at SUBMIT time with the
-        // recording queue's 250ms age budget, so a latest-wins frame that
-        // waited out a Media Foundation pause was declared dead before its
+        // recording queue's 250ms age budget, so an admitted frame that waited
+        // out a Media Foundation pause was declared dead before its
         // first byte. Recording semantics: late frames are written, not
         // dropped — QueuedRawVideoFrame now carries no timestamp at all, so
         // the writer cannot even observe how long a frame waited; only a
@@ -10491,6 +11090,11 @@ mod tests {
         delay: Duration,
     }
 
+    struct ProgressThenPauseSink {
+        writes: usize,
+        pause: Duration,
+    }
+
     #[derive(Clone, Copy)]
     enum PipePressure {
         WouldBlock,
@@ -10534,6 +11138,20 @@ mod tests {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .extend_from_slice(&bytes[..written]);
             Ok(written)
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl StdWrite for ProgressThenPauseSink {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.writes = self.writes.saturating_add(1);
+            if self.writes == 2 {
+                thread::sleep(self.pause);
+            }
+            Ok(bytes.len().min(1))
         }
 
         fn flush(&mut self) -> io::Result<()> {
@@ -10676,6 +11294,25 @@ mod tests {
         assert_eq!(progress.encoded_fps, Some(29.95));
         assert_eq!(progress.encoder_speed, Some(0.99));
         assert_eq!(progress.dropped_frames, Some(3));
+    }
+
+    #[test]
+    fn progress_parser_rejects_non_finite_and_negative_floats() {
+        for invalid in ["NaN", "inf", "-inf", "-0.01"] {
+            assert_eq!(
+                parse_stat_f64(&format!("fps={invalid}"), "fps="),
+                None,
+                "fps={invalid} must be rejected"
+            );
+            assert_eq!(
+                parse_stat_f64(&format!("speed={invalid}x"), "speed="),
+                None,
+                "speed={invalid}x must be rejected"
+            );
+        }
+
+        assert_eq!(parse_stat_f64("fps=0", "fps="), Some(0.0));
+        assert_eq!(parse_stat_f64("speed=0x", "speed="), Some(0.0));
     }
 
     #[test]

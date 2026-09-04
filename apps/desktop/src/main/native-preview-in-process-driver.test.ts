@@ -312,6 +312,9 @@ describe('native preview in-process driver', () => {
         iosurfaceImports: 2,
         iosurfaceInvalidations: 1,
         iosurfaceImportFailures: 0,
+        iosurfaceImportLiveCount: 2,
+        iosurfaceImportPeakCount: 3,
+        iosurfaceImportCeiling: 3,
         drawableWidth: 1920,
         drawableHeight: 1080,
         contentsScale: 2
@@ -350,6 +353,9 @@ describe('native preview in-process driver', () => {
       nativePreviewIosurfaceImports: 2,
       nativePreviewIosurfaceInvalidations: 1,
       nativePreviewIosurfaceImportFailures: 0,
+      nativePreviewIosurfaceImportLiveCount: 2,
+      nativePreviewIosurfaceImportPeakCount: 3,
+      nativePreviewIosurfaceImportCeiling: 3,
       nativePreviewDrawableWidth: 1920,
       nativePreviewDrawableHeight: 1080,
       nativePreviewContentsScale: 2,
@@ -491,7 +497,10 @@ describe('native preview in-process driver', () => {
         iosurfaceCacheHits: 4,
         iosurfaceImports: 1,
         iosurfaceInvalidations: 0,
-        iosurfaceImportFailures: 0
+        iosurfaceImportFailures: 0,
+        iosurfaceImportLiveCount: 1,
+        iosurfaceImportPeakCount: 1,
+        iosurfaceImportCeiling: 3
       })
     }
 
@@ -510,6 +519,9 @@ function emptyMetrics() {
     iosurfaceCacheHits: 0,
     iosurfaceImports: 0,
     iosurfaceInvalidations: 0,
-    iosurfaceImportFailures: 0
+    iosurfaceImportFailures: 0,
+    iosurfaceImportLiveCount: 0,
+    iosurfaceImportPeakCount: 0,
+    iosurfaceImportCeiling: 3
   }
 }

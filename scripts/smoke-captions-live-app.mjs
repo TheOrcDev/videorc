@@ -321,11 +321,18 @@ try {
   await waitFor(() => existsSync(srtPath), timeoutMs, 'caption SRT sidecar')
   const captionedCopyPath = captionedPath(recordingPath)
   await waitFor(
-    () =>
-      observed.healthEvents.some(
+    () => {
+      const failure = observed.healthEvents.find(
+        (event) => event.sessionId === started.sessionId && event.code === 'captions-burn-failed'
+      )
+      if (failure) {
+        throw new Error(`Captioned recording copy failed: ${failure.message}`)
+      }
+      return observed.healthEvents.some(
         (event) =>
           event.sessionId === started.sessionId && event.code === 'captions-burned-copy-ready'
-      ),
+      )
+    },
     timeoutMs,
     'captioned recording copy finalization'
   )
@@ -937,8 +944,13 @@ function waitFor(predicate, deadlineMs, label) {
   return new Promise((resolveWait, rejectWait) => {
     const startedAt = Date.now()
     const tick = () => {
-      if (predicate()) {
-        resolveWait()
+      try {
+        if (predicate()) {
+          resolveWait()
+          return
+        }
+      } catch (error) {
+        rejectWait(error)
         return
       }
       if (Date.now() - startedAt > deadlineMs) {

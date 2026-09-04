@@ -2,7 +2,6 @@ import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
-import { ObsImportNudge } from '@/components/obs-import-nudge'
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
@@ -10,6 +9,7 @@ import { StatusBadge } from '@/components/status-badge'
 import { QuickSettings } from '@/components/studio/quick-settings'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SessionPanel } from '@/components/studio/session-panel'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
@@ -154,7 +154,6 @@ export function StudioTab(): ReactElement {
         <PageStack>
           {/* Fresh-profile OBS hint (O5): quiet, dismissible, gone forever once
               a capture source exists — never a nag. */}
-          <ObsImportNudge />
           {/* Hard blocks surface INSIDE the Session panel next to the disabled
               buttons (quiet inline line + jump link) — the yellow top banner
               made the Studio read as broken (post-0.9.4 fix batch F8). */}
@@ -264,10 +263,15 @@ function StudioPreviewPanel(): ReactElement {
 
   const healthErrorRow =
     previewHealth.tone === 'error' && previewHealth.detail ? (
-      <div className="flex items-center gap-2 rounded-row border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
-        <AlertIcon className="size-4 shrink-0" weight="fill" />
-        <span className="min-w-0">{previewHealth.detail}</span>
-      </div>
+      <Alert data-testid="capture-health-alert" variant="destructive">
+        <AlertIcon weight="fill" />
+        <AlertTitle>{previewHealth.value}</AlertTitle>
+        <AlertDescription className="min-w-0">
+          <p className="line-clamp-3" title={previewHealth.detail}>
+            {previewHealth.detail}
+          </p>
+        </AlertDescription>
+      </Alert>
     ) : null
 
   const previewStage = (

@@ -1,16 +1,24 @@
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::borrow::Cow;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, TryLockError, mpsc as std_mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
+use futures_util::FutureExt;
 use image::ImageEncoder;
 use image::codecs::png::PngEncoder;
 use image::imageops::FilterType;
-use tokio::sync::oneshot;
+use tokio::sync::{Notify, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 use uuid::Uuid;
+
+#[cfg(target_os = "macos")]
+use objc2_core_video::{
+    CVPixelBufferGetBaseAddress, CVPixelBufferGetBytesPerRow, CVPixelBufferLockBaseAddress,
+    CVPixelBufferLockFlags, CVPixelBufferUnlockBaseAddress,
+};
 
 use crate::diagnostics::{
     PreviewScreenCaptureStats, PreviewScreenCaptureTimingStats, apply_preview_screen_capture_stats,
@@ -22,15 +30,18 @@ use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats, SurfaceBackin
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
     PreviewScreenFrameStatusStats, PreviewScreenSourceKind, PreviewScreenStartParams,
-    PreviewScreenState, PreviewScreenStatus, VideoSettings,
+    PreviewScreenState, PreviewScreenStatus, SourceSelection, VideoSettings,
 };
 #[cfg(target_os = "windows")]
 use crate::screen_capture::parse_windows_dxgi_source_id;
 use crate::screen_capture::{
-    is_windows_gdigrab_desktop_screen_id, parse_screencapturekit_display_id,
-    parse_screencapturekit_window_id, parse_windows_dxgi_output_index,
+    ScreenCaptureCallbackCadence, is_windows_gdigrab_desktop_screen_id,
+    parse_screencapturekit_display_id, parse_screencapturekit_window_id,
+    parse_windows_dxgi_output_index,
 };
-use crate::source_registry::{SourceConsumerReason, SourceIdentityConfidence, SourceKey};
+use crate::source_registry::{
+    SourceConsumerReason, SourceIdentityConfidence, SourceKey, SourceKind,
+};
 use crate::source_status::SourceLifecycleStatus;
 use crate::state::AppState;
 
@@ -43,6 +54,10 @@ const PREVIEW_SCREEN_TIMING_WINDOW: usize = 180;
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT: Duration = Duration::from_secs(12);
 const SCREEN_CAPTUREKIT_DISCOVERY_ATTEMPTS: u32 = 2;
 const SCREEN_CAPTUREKIT_STREAM_START_TIMEOUT: Duration = Duration::from_secs(30);
+/// Backend callers must never inherit ScreenCaptureKit's discovery/start or
+/// native shutdown latency. The transition worker keeps owning the physical
+/// session after this deadline and publishes the eventual terminal status.
+const SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT: Duration = Duration::from_secs(2);
 const SCREEN_CAPTURE_CPU_COPY_ENV: &str = "VIDEORC_SCREEN_CAPTURE_CPU_COPY";
 const SCREEN_CAPTUREKIT_DISCOVERY_TIMEOUT_MESSAGE: &str = "ScreenCaptureKit source discovery timed out after Screen Recording permission preflight passed.";
 
@@ -114,7 +129,27 @@ pub struct PreviewScreenRuntime {
     run_id: Option<String>,
     source_key: Option<SourceKey>,
     starting: Option<PreviewScreenStartKey>,
+    /// Layout intent that owns timeout cancellation for the Starting
+    /// generation. Same-key layout joins transfer this monotonically; public
+    /// commands clear it and remain immune to stale layout cleanup.
+    starting_layout_intent_id: Option<u64>,
     start_generation: u64,
+    /// Generation of `active`, separate from an in-flight start lease.
+    active_generation: Option<u64>,
+    /// Private restart parameters retained only while an exact recovery
+    /// generation is the current terminal failure. They make operator retry
+    /// generation-safe without reconstructing capture config from renderer
+    /// state.
+    failed_recovery_retry: Option<PreviewScreenFailedRecoveryRetry>,
+    /// Brief admission edge shared with live-layout intent checks. Physical
+    /// shutdown/start work never owns this guard.
+    transition_gate: Arc<tokio::sync::Mutex<()>>,
+    /// FIFO ticket allocator for detached transition workers. A caller may be
+    /// cancelled after admission without cancelling its native transition.
+    transition_sequence: u64,
+    transition_order: Arc<PreviewScreenTransitionOrder>,
+    /// The only owner of native stop senders and thread join handles.
+    native_supervisor: Arc<tokio::sync::Mutex<PreviewScreenNativeSupervisor>>,
     active: Option<NativeScreenPreviewThread>,
     poll_task: Option<JoinHandle<()>>,
 }
@@ -135,19 +170,221 @@ struct PreviewScreenStartLease {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreviewScreenStartingIdentity {
+    pub source_key: SourceKey,
+    pub generation: u64,
+    pub layout_intent_id: Option<u64>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct PreviewScreenLayoutStart {
+    pub status: PreviewScreenStatus,
+    pub admitted_starting_identity: Option<PreviewScreenStartingIdentity>,
+}
+
+impl PreviewScreenLayoutStart {
+    fn without_admission(status: PreviewScreenStatus) -> Self {
+        Self {
+            status,
+            admitted_starting_identity: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 enum PreviewScreenStartRegistration {
-    JoinExisting,
-    Started(PreviewScreenStartLease),
+    JoinExisting {
+        admitted_starting_identity: Option<PreviewScreenStartingIdentity>,
+    },
+    Reused(PreviewScreenStatus),
+    RejectedSuperseded(PreviewScreenStatus),
+    RejectedShutdown(PreviewScreenStatus),
+    Started {
+        lease: PreviewScreenStartLease,
+        transition: PreviewScreenTransitionTicket,
+    },
+}
+
+impl PartialEq for PreviewScreenStartRegistration {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::JoinExisting { .. }, Self::JoinExisting { .. }) => true,
+            (Self::Reused(left), Self::Reused(right)) => left == right,
+            (Self::RejectedSuperseded(left), Self::RejectedSuperseded(right)) => left == right,
+            (Self::RejectedShutdown(left), Self::RejectedShutdown(right)) => left == right,
+            (Self::Started { lease: left, .. }, Self::Started { lease: right, .. }) => {
+                left == right
+            }
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PreviewScreenTransitionTicket {
+    sequence: u64,
+    order: Arc<PreviewScreenTransitionOrder>,
+    native_supervisor: Arc<tokio::sync::Mutex<PreviewScreenNativeSupervisor>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+struct PreviewScreenRestartConfig {
+    source: SelectedScreenSource,
+    ffmpeg_path: String,
+    video: VideoSettings,
+    target_fps: u32,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
+    protected_overlay_window_ids: Vec<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct PreviewScreenFailedRecoveryRetry {
+    source_key: SourceKey,
+    generation: u64,
+    config_fingerprint: u64,
+    config: PreviewScreenRestartConfig,
+}
+
+/// Generation-bound authority to restart the module-owned live screen config.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+pub(crate) struct PreviewScreenRestartSnapshot {
+    pub source_key: SourceKey,
+    pub generation: u64,
+    pub config_fingerprint: u64,
+    config: PreviewScreenRestartConfig,
+}
+
+/// Producer truth read from the exact native screen generation named by a
+/// restart snapshot. Callers must discard it when the generation changes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PreviewScreenRecoveryEvidence {
+    pub source_key: SourceKey,
+    pub generation: u64,
+    pub target_fps: u32,
+    pub callback_cadence: ScreenCaptureCallbackCadence,
+    pub capture_callback_count: u64,
+    pub frame_store_publications: u64,
+    pub latest_sequence: Option<u64>,
+    pub frame_age_ms: Option<u64>,
+    pub configured_width: u32,
+    pub configured_height: u32,
+    pub actual_width: Option<u32>,
+    pub actual_height: Option<u32>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+#[allow(dead_code)]
+// Recovery consumes this result immediately. Keeping the generation-bound
+// status snapshot inline avoids adding heap ownership to the restart handoff.
+#[allow(clippy::large_enum_variant)]
+pub(crate) enum PreviewScreenForceRestartResult {
+    Restarted {
+        status: PreviewScreenStatus,
+        generation: u64,
+    },
+    RejectedStale,
+}
+
+/// A recovery generation whose process-owned screen transition has already
+/// been queued. Session startup may release its short admission mutex before
+/// awaiting native ScreenCaptureKit teardown/startup.
+pub(crate) struct PreviewScreenForceRestartAttempt {
+    generation: u64,
+    source_key: SourceKey,
+    /// Resolves only after the previous native ScreenCaptureKit owner has
+    /// fully retired. Recovery uses this edge to give replacement discovery
+    /// and stream startup their complete latency budget without allowing
+    /// overlapping native owners.
+    native_startup_ready: Option<oneshot::Receiver<()>>,
+    completion: oneshot::Receiver<PreviewScreenStatus>,
+}
+
+impl PreviewScreenForceRestartAttempt {
+    /// Wait until exclusive ownership is available for replacement startup.
+    /// This remains cancellation-safe: a bounded observer may stop waiting
+    /// and resume later without consuming the process-owned transition edge.
+    pub(crate) async fn await_native_startup_ready(&mut self) -> bool {
+        let ready = match self.native_startup_ready.as_mut() {
+            Some(native_startup_ready) => native_startup_ready.await.is_ok(),
+            None => return false,
+        };
+        self.native_startup_ready = None;
+        ready
+    }
+}
+
+struct PreparedScreenStart {
+    #[allow(dead_code)]
+    source: SelectedScreenSource,
+    ffmpeg_path: String,
+    target_fps: u32,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
+    source_key: SourceKey,
+    params: PreviewScreenStartParams,
+    lease: PreviewScreenStartLease,
+    layout_intent_id: Option<u64>,
+    transition: PreviewScreenTransitionTicket,
+    restart_ready: Option<oneshot::Sender<()>>,
+    recovery: Option<PreparedScreenRecoveryAdmission>,
+}
+
+#[derive(Debug, Clone)]
+struct PreparedScreenRecoveryAdmission {
+    epoch: u64,
+    previous_status: PreviewScreenStatus,
+    previous_run_id: Option<String>,
 }
 
 #[derive(Debug)]
 struct NativeScreenPreviewThread {
-    stop_tx: std_mpsc::Sender<()>,
-    join_handle: Option<thread::JoinHandle<()>>,
     shared: Arc<StdMutex<PreviewScreenShared>>,
+    source: SelectedScreenSource,
     ffmpeg_path: String,
     video: VideoSettings,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
     protected_overlay_window_ids: Vec<u32>,
+}
+
+#[derive(Debug)]
+struct OwnedNativeScreenPreviewThread {
+    stop_tx: std_mpsc::Sender<()>,
+    join_handle: Option<thread::JoinHandle<()>>,
+}
+
+#[derive(Debug, Default)]
+struct PreviewScreenNativeSupervisor {
+    active: Option<OwnedNativeScreenPreviewThread>,
+}
+
+#[derive(Debug, Default)]
+struct PreviewScreenTransitionOrder {
+    completed: AtomicU64,
+    notify: Notify,
+}
+
+/// RAII completion for one FIFO turn. Tokio task panics unwind through local
+/// values, so a failed transition cannot strand every later ticket behind a
+/// completion store that was never reached.
+struct PreviewScreenTransitionTurn {
+    order: Arc<PreviewScreenTransitionOrder>,
+    ticket: u64,
+}
+
+impl PreviewScreenTransitionTurn {
+    fn new(order: Arc<PreviewScreenTransitionOrder>, ticket: u64) -> Self {
+        Self { order, ticket }
+    }
+}
+
+impl Drop for PreviewScreenTransitionTurn {
+    fn drop(&mut self) {
+        finish_screen_transition_turn(&self.order, self.ticket);
+    }
 }
 
 /// Fast half of a screen stop. Runtime ownership has already been detached and
@@ -156,8 +393,11 @@ struct NativeScreenPreviewThread {
 /// one atomic edge without holding the intent mutex during the join.
 pub(crate) struct PreviewScreenStop {
     status: PreviewScreenStatus,
-    join_handle: Option<thread::JoinHandle<()>>,
+    completion: Option<oneshot::Receiver<PreviewScreenStatus>>,
+    _transition_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
 }
+
+pub(crate) type PreviewScreenTransitionGuard = tokio::sync::OwnedMutexGuard<()>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PreviewScreenPixelFormat {
@@ -274,11 +514,16 @@ pub struct PreviewScreenFrameInfo {
 pub struct PreviewScreenFrameSource {
     shared: Arc<StdMutex<PreviewScreenShared>>,
     source_key: Option<SourceKey>,
+    generation: u64,
 }
 
 impl PreviewScreenFrameSource {
     pub fn source_key(&self) -> Option<&SourceKey> {
         self.source_key.as_ref()
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn try_latest_frame_result(
@@ -492,6 +737,53 @@ fn max_sample(samples: &[f64]) -> Option<f64> {
     samples.iter().copied().reduce(f64::max)
 }
 
+fn stable_capture_config_fingerprint(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for byte in bytes {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    hash
+}
+
+fn screen_config_fingerprint(
+    start_key: &PreviewScreenStartKey,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
+) -> u64 {
+    let encoded = serde_json::to_vec(&(
+        &start_key.source_key,
+        &start_key.ffmpeg_path,
+        &start_key.video,
+        start_key.target_fps,
+        &start_key.protected_overlay_window_ids,
+        include_cursor,
+        exclude_current_process_windows,
+    ))
+    .unwrap_or_default();
+    stable_capture_config_fingerprint(&encoded)
+}
+
+fn log_screen_generation(
+    generation: u64,
+    reason: &'static str,
+    start_key: &PreviewScreenStartKey,
+    include_cursor: bool,
+    exclude_current_process_windows: bool,
+) {
+    let source = match start_key.source_key.kind {
+        SourceKind::Window => "window",
+        _ => "screen",
+    };
+    tracing::info!(
+        "[capture-generation] source={} generation={} reason={} config={:016x}",
+        source,
+        generation,
+        reason,
+        screen_config_fingerprint(start_key, include_cursor, exclude_current_process_windows,),
+    );
+}
+
 pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
     PreviewScreenRuntime {
         status: idle_status(Some("Native screen preview is not running.".to_string())),
@@ -499,7 +791,16 @@ pub fn initial_preview_screen_state() -> PreviewScreenRuntime {
         run_id: None,
         source_key: None,
         starting: None,
+        starting_layout_intent_id: None,
         start_generation: 0,
+        active_generation: None,
+        failed_recovery_retry: None,
+        transition_gate: Arc::new(tokio::sync::Mutex::new(())),
+        transition_sequence: 0,
+        transition_order: Arc::new(PreviewScreenTransitionOrder::default()),
+        native_supervisor: Arc::new(tokio::sync::Mutex::new(
+            PreviewScreenNativeSupervisor::default(),
+        )),
         active: None,
         poll_task: None,
     }
@@ -509,7 +810,9 @@ pub async fn start_preview_screen(
     state: AppState,
     params: PreviewScreenStartParams,
 ) -> PreviewScreenStatus {
-    start_preview_screen_with_restart_signal(state, params, None).await
+    start_preview_screen_with_restart_signal(state, params, None, None, None)
+        .await
+        .status
 }
 
 /// The live-layout deadline starts only after the old capture thread is fully
@@ -519,21 +822,48 @@ pub(crate) async fn start_preview_screen_for_live_switch(
     state: AppState,
     params: PreviewScreenStartParams,
     restart_ready: oneshot::Sender<()>,
-) -> PreviewScreenStatus {
-    start_preview_screen_with_restart_signal(state, params, Some(restart_ready)).await
+    layout_intent_id: u64,
+    admission_ready: oneshot::Sender<Option<PreviewScreenStartingIdentity>>,
+) -> PreviewScreenLayoutStart {
+    start_preview_screen_with_restart_signal(
+        state,
+        params,
+        Some(restart_ready),
+        Some(layout_intent_id),
+        Some(admission_ready),
+    )
+    .await
 }
 
 async fn start_preview_screen_with_restart_signal(
     state: AppState,
     params: PreviewScreenStartParams,
     mut restart_ready: Option<oneshot::Sender<()>>,
-) -> PreviewScreenStatus {
+    layout_intent_id: Option<u64>,
+    mut admission_ready: Option<oneshot::Sender<Option<PreviewScreenStartingIdentity>>>,
+) -> PreviewScreenLayoutStart {
+    if state.process_shutdown_requested() {
+        signal_screen_restart_ready(&mut restart_ready);
+        signal_screen_layout_admission(&mut admission_ready, None);
+        return PreviewScreenLayoutStart::without_admission(screen_start_rejected_for_shutdown(
+            preview_screen_status(&state).await,
+        ));
+    }
+    if layout_intent_id.is_some_and(|intent_id| intent_id < state.latest_layout_intent_id()) {
+        signal_screen_restart_ready(&mut restart_ready);
+        signal_screen_layout_admission(&mut admission_ready, None);
+        return PreviewScreenLayoutStart::without_admission(preview_screen_status(&state).await);
+    }
     let Some(source) = selected_screen_source(&params) else {
-        stop_preview_screen(&state).await;
         let status =
             status_for_missing_source(None, None, "No screen or window source is selected.");
-        set_screen_status(&state, status.clone()).await;
-        return status;
+        if layout_intent_id.is_none() {
+            let _ = stop_preview_screen(&state).await;
+            set_screen_status(&state, status.clone()).await;
+        }
+        signal_screen_restart_ready(&mut restart_ready);
+        signal_screen_layout_admission(&mut admission_ready, None);
+        return PreviewScreenLayoutStart::without_admission(status);
     };
 
     let target_fps = params.video.fps.clamp(1, 120);
@@ -550,15 +880,24 @@ async fn start_preview_screen_with_restart_signal(
     if let Some(window_id) = source.window_id
         && protected_overlay_window_ids.contains(&window_id)
     {
-        stop_preview_screen(&state).await;
         let status = status_for_missing_source(
             Some(source.source_id),
             Some(source.source_kind),
             "The Videorc Notes window cannot be selected as a capture source.",
         );
-        set_screen_status(&state, status.clone()).await;
-        return status;
+        if layout_intent_id.is_none() {
+            let _ = stop_preview_screen(&state).await;
+            set_screen_status(&state, status.clone()).await;
+        }
+        signal_screen_restart_ready(&mut restart_ready);
+        signal_screen_layout_admission(&mut admission_ready, None);
+        return PreviewScreenLayoutStart::without_admission(status);
     }
+
+    // Admission is deliberately separate from physical transition ownership.
+    // Native work is queued while this brief guard is held, then continues in
+    // a detached FIFO worker even if the caller is cancelled.
+    let transition = acquire_preview_screen_transition(&state).await;
     let source_key = source_key_for_source(&source);
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
     let start_key = PreviewScreenStartKey {
@@ -568,41 +907,6 @@ async fn start_preview_screen_with_restart_signal(
         target_fps,
         protected_overlay_window_ids: protected_overlay_window_ids.clone(),
     };
-    let existing_source_key = current_screen_source_key(&state).await;
-    if existing_source_key.as_ref() != Some(&source_key) {
-        let keep_alive = release_current_preview_screen_source(&state).await;
-        if !keep_alive {
-            stop_current_screen(&state).await;
-        }
-    }
-    acquire_preview_screen_source(
-        &state,
-        source_key.clone(),
-        SourceLifecycleStatus::Starting,
-        SourceIdentityConfidence::Exact,
-    )
-    .await;
-    if let Some(status) = reuse_current_screen_source(
-        &state,
-        &source_key,
-        &ffmpeg_path,
-        &params.video,
-        target_fps,
-        &protected_overlay_window_ids,
-    )
-    .await
-    {
-        acquire_preview_screen_source(
-            &state,
-            source_key,
-            SourceLifecycleStatus::Live,
-            SourceIdentityConfidence::Exact,
-        )
-        .await;
-        state.emit_event("preview.screen.status", status.clone());
-        return status;
-    }
-
     let starting = PreviewScreenStatus {
         state: PreviewScreenState::Starting,
         source_id: Some(source.source_id.clone()),
@@ -628,16 +932,243 @@ async fn start_preview_screen_with_restart_signal(
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Starting native screen preview.".to_string()),
     };
-    let start_lease = match begin_screen_start(&state, start_key.clone(), starting).await {
-        PreviewScreenStartRegistration::JoinExisting => {
-            signal_screen_restart_ready(&mut restart_ready);
-            return wait_for_screen_start(&state, &start_key).await;
-        }
-        PreviewScreenStartRegistration::Started(lease) => lease,
-    };
+    let start_lease =
+        match begin_screen_start(&state, start_key.clone(), starting, layout_intent_id).await {
+            PreviewScreenStartRegistration::JoinExisting {
+                admitted_starting_identity,
+            } => {
+                signal_screen_layout_admission(
+                    &mut admission_ready,
+                    admitted_starting_identity.clone(),
+                );
+                signal_screen_restart_ready(&mut restart_ready);
+                drop(transition);
+                return PreviewScreenLayoutStart {
+                    status: wait_for_screen_start(&state, &start_key).await,
+                    admitted_starting_identity,
+                };
+            }
+            PreviewScreenStartRegistration::Reused(status) => {
+                signal_screen_layout_admission(&mut admission_ready, None);
+                signal_screen_restart_ready(&mut restart_ready);
+                drop(transition);
+                return PreviewScreenLayoutStart::without_admission(status);
+            }
+            PreviewScreenStartRegistration::RejectedSuperseded(status)
+            | PreviewScreenStartRegistration::RejectedShutdown(status) => {
+                signal_screen_layout_admission(&mut admission_ready, None);
+                signal_screen_restart_ready(&mut restart_ready);
+                drop(transition);
+                return PreviewScreenLayoutStart::without_admission(status);
+            }
+            PreviewScreenStartRegistration::Started { lease, transition } => (lease, transition),
+        };
+    let (start_lease, transition_ticket) = start_lease;
 
-    stop_current_screen_for_restart(&state).await;
+    log_screen_generation(
+        start_lease.generation,
+        "normal-start",
+        &start_key,
+        include_cursor,
+        exclude_current_process_windows,
+    );
+    let admitted_starting_identity =
+        layout_intent_id.map(|layout_intent_id| PreviewScreenStartingIdentity {
+            source_key: start_lease.key.source_key.clone(),
+            generation: start_lease.generation,
+            layout_intent_id: Some(layout_intent_id),
+        });
+    let completion = queue_registered_preview_screen(
+        state.clone(),
+        PreparedScreenStart {
+            source,
+            ffmpeg_path,
+            target_fps,
+            include_cursor,
+            exclude_current_process_windows,
+            source_key,
+            params,
+            lease: start_lease,
+            layout_intent_id,
+            transition: transition_ticket,
+            restart_ready,
+            recovery: None,
+        },
+    );
+    signal_screen_layout_admission(&mut admission_ready, admitted_starting_identity.clone());
+    drop(transition);
+    PreviewScreenLayoutStart {
+        status: await_screen_transition_completion(&state, completion).await,
+        admitted_starting_identity,
+    }
+}
+
+fn queue_registered_preview_screen(
+    state: AppState,
+    prepared: PreparedScreenStart,
+) -> oneshot::Receiver<PreviewScreenStatus> {
+    let source_transition_guard = state.source_transition_fence.begin();
+    let ticket = prepared.transition.sequence;
+    let order = Arc::clone(&prepared.transition.order);
+    let native_supervisor = Arc::clone(&prepared.transition.native_supervisor);
+    let panic_lease = prepared.lease.clone();
+    let panic_recovery = prepared.recovery.clone();
+    let panic_status = failed_status(
+        Some(prepared.source.source_id.clone()),
+        Some(prepared.source.source_kind.clone()),
+        prepared.target_fps,
+        prepared.include_cursor,
+        prepared.exclude_current_process_windows,
+        "Native screen transition panicked after capture ownership was registered.".to_string(),
+    );
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let supervisor_state = state.clone();
+    state.spawn_process_task(async move {
+        let _source_transition_guard = source_transition_guard;
+        wait_for_screen_transition_turn(&order, ticket).await;
+        let turn = PreviewScreenTransitionTurn::new(Arc::clone(&order), ticket);
+        let status = {
+            let mut supervisor = native_supervisor.lock().await;
+            match std::panic::AssertUnwindSafe(execute_registered_preview_screen(
+                &supervisor_state,
+                &mut supervisor,
+                prepared,
+            ))
+            .catch_unwind()
+            .await
+            {
+                Ok(status) => status,
+                Err(_) => {
+                    retire_panicked_screen_generation(
+                        &supervisor_state,
+                        &mut supervisor,
+                        &panic_lease,
+                        panic_status,
+                        panic_recovery.as_ref(),
+                    )
+                    .await
+                }
+            }
+        };
+        drop(turn);
+        let _ = completion_tx.send(status);
+    });
+    completion_rx
+}
+
+fn allocate_screen_transition_ticket(
+    slot: &mut PreviewScreenRuntime,
+) -> PreviewScreenTransitionTicket {
+    slot.transition_sequence = slot.transition_sequence.wrapping_add(1).max(1);
+    PreviewScreenTransitionTicket {
+        sequence: slot.transition_sequence,
+        order: Arc::clone(&slot.transition_order),
+        native_supervisor: Arc::clone(&slot.native_supervisor),
+    }
+}
+
+async fn wait_for_screen_transition_turn(order: &PreviewScreenTransitionOrder, ticket: u64) {
+    loop {
+        let notified = order.notify.notified();
+        if order.completed.load(Ordering::Acquire).wrapping_add(1) == ticket {
+            return;
+        }
+        notified.await;
+    }
+}
+
+fn finish_screen_transition_turn(order: &PreviewScreenTransitionOrder, ticket: u64) {
+    order.completed.store(ticket, Ordering::Release);
+    order.notify.notify_waiters();
+}
+
+async fn await_screen_transition_completion(
+    state: &AppState,
+    completion: oneshot::Receiver<PreviewScreenStatus>,
+) -> PreviewScreenStatus {
+    await_screen_transition_completion_with_timeout(
+        state,
+        completion,
+        SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT,
+    )
+    .await
+}
+
+async fn await_screen_transition_completion_with_timeout(
+    state: &AppState,
+    completion: oneshot::Receiver<PreviewScreenStatus>,
+    timeout: Duration,
+) -> PreviewScreenStatus {
+    match tokio::time::timeout(timeout, completion).await {
+        Ok(Ok(status)) => status,
+        Ok(Err(_)) => preview_screen_status(state).await,
+        Err(_) => delayed_screen_transition_status(state).await,
+    }
+}
+
+async fn delayed_screen_transition_status(state: &AppState) -> PreviewScreenStatus {
+    let status = {
+        let mut slot = state.preview_screen.lock().await;
+        if slot.status.state == PreviewScreenState::Starting {
+            slot.status.updated_at = Utc::now().to_rfc3339();
+            slot.status.message = Some(
+                "Screen transition is still retiring the previous native session; cleanup continues without overlapping capture."
+                    .to_string(),
+            );
+        }
+        slot.status.clone()
+    };
+    state.emit_event("preview.screen.status", status.clone());
+    status
+}
+
+async fn execute_registered_preview_screen(
+    state: &AppState,
+    supervisor: &mut PreviewScreenNativeSupervisor,
+    prepared: PreparedScreenStart,
+) -> PreviewScreenStatus {
+    let PreparedScreenStart {
+        source,
+        ffmpeg_path,
+        target_fps,
+        include_cursor,
+        exclude_current_process_windows,
+        source_key,
+        params,
+        lease: start_lease,
+        layout_intent_id,
+        transition: _,
+        mut restart_ready,
+        recovery,
+    } = prepared;
+    let protected_overlay_window_ids = params.protected_overlay_window_ids.clone();
+
+    if let Err(status) = ensure_registered_preview_screen_start_is_current(
+        state,
+        &start_lease,
+        layout_intent_id,
+        recovery.as_ref(),
+    )
+    .await
+    {
+        signal_screen_restart_ready(&mut restart_ready);
+        return *status;
+    }
+    publish_screen_starting_status(state, &start_lease).await;
+
+    detach_screen_runtime_for_native_transition(state, false).await;
+    stop_supervised_screen(supervisor, Some(start_lease.generation), "restart").await;
     signal_screen_restart_ready(&mut restart_ready);
+    if let Err(status) = ensure_registered_preview_screen_start_is_current(
+        state,
+        &start_lease,
+        layout_intent_id,
+        recovery.as_ref(),
+    )
+    .await
+    {
+        return *status;
+    }
 
     let run_id = Uuid::new_v4().to_string();
     let surface_backing_tracker = state
@@ -661,14 +1192,65 @@ async fn start_preview_screen_with_restart_signal(
         video: params.video.clone(),
         include_cursor,
         exclude_current_process_windows,
-        protected_overlay_window_ids,
+        protected_overlay_window_ids: protected_overlay_window_ids.clone(),
     };
 
-    let join_handle = thread::Builder::new()
-        .name("videorc-preview-screen".to_string())
-        .spawn(move || {
-            run_native_screen_preview(thread_config, thread_shared, stop_rx, startup_tx)
-        });
+    // This is the final cancellation-free admission check before native
+    // creation. Once the process shutdown latch is visible, a queued start may
+    // retire its predecessor but must never create a replacement session.
+    let join_handle = loop {
+        let ownership_slot = state.preview_screen.lock().await;
+        let layout_admission = state.lock_layout_source_admission();
+        let lease_is_current = ownership_slot.start_generation == start_lease.generation
+            && ownership_slot.starting.as_ref() == Some(&start_lease.key);
+        let recovery_is_current = recovery
+            .as_ref()
+            .is_none_or(|recovery| state.capture_recovery_admission_is_current(recovery.epoch));
+        let start_is_stale = !screen_layout_start_is_current_locked(
+            state,
+            &ownership_slot,
+            &start_lease,
+            layout_intent_id,
+        );
+        if state.process_shutdown_requested() || !lease_is_current || !recovery_is_current {
+            drop(ownership_slot);
+            drop(layout_admission);
+            if !recovery_is_current {
+                return retire_superseded_screen_recovery(
+                    state,
+                    &start_lease,
+                    recovery
+                        .as_ref()
+                        .expect("stale screen recovery retains admission"),
+                )
+                .await;
+            }
+            let status = preview_screen_status(state).await;
+            return if state.process_shutdown_requested() {
+                screen_start_rejected_for_shutdown(status)
+            } else {
+                status
+            };
+        }
+        if start_is_stale {
+            drop(ownership_slot);
+            drop(layout_admission);
+            match ensure_screen_layout_start_is_current(state, &start_lease, layout_intent_id).await
+            {
+                Ok(()) => continue,
+                Err(status) => return *status,
+            }
+        }
+
+        let join_handle = thread::Builder::new()
+            .name("videorc-preview-screen".to_string())
+            .spawn(move || {
+                run_native_screen_preview(thread_config, thread_shared, stop_rx, startup_tx)
+            });
+        drop(ownership_slot);
+        drop(layout_admission);
+        break join_handle;
+    };
 
     let join_handle = match join_handle {
         Ok(join_handle) => join_handle,
@@ -681,9 +1263,16 @@ async fn start_preview_screen_with_restart_signal(
                 exclude_current_process_windows,
                 format!("Could not start screen preview thread: {error}"),
             );
-            if set_screen_status_for_start(&state, &start_lease, status.clone()).await {
+            if set_screen_status_for_start(
+                state,
+                &start_lease,
+                status.clone(),
+                recovery.as_ref().map(|recovery| recovery.epoch),
+            )
+            .await
+            {
                 acquire_preview_screen_source(
-                    &state,
+                    state,
                     source_key,
                     SourceLifecycleStatus::Failed,
                     SourceIdentityConfidence::Exact,
@@ -691,9 +1280,16 @@ async fn start_preview_screen_with_restart_signal(
                 .await;
                 return status;
             }
-            return preview_screen_status(&state).await;
+            return screen_start_fallback_status(state, &start_lease, recovery.as_ref()).await;
         }
     };
+    // From the first instruction after spawn succeeds, the persistent
+    // supervisor owns both the stop sender and the join handle. The transition
+    // panic boundary below can therefore always stop and join this generation.
+    supervisor.active = Some(OwnedNativeScreenPreviewThread {
+        stop_tx,
+        join_handle: Some(join_handle),
+    });
 
     let startup_timeout = native_screen_preview_thread_startup_timeout();
     let startup = tokio::task::spawn_blocking(move || {
@@ -736,8 +1332,8 @@ async fn start_preview_screen_with_restart_signal(
             };
             let mut status = PreviewScreenStatus {
                 state: PreviewScreenState::Live,
-                source_id: Some(source.source_id),
-                source_kind: Some(source.source_kind),
+                source_id: Some(source.source_id.clone()),
+                source_kind: Some(source.source_kind.clone()),
                 target_fps,
                 width: Some(width),
                 height: Some(height),
@@ -780,35 +1376,44 @@ async fn start_preview_screen_with_restart_signal(
                 status.frame_age_ms = Some(frame.captured_at.elapsed().as_millis() as u64);
             }
             let mut started_thread = Some(NativeScreenPreviewThread {
-                stop_tx,
-                join_handle: Some(join_handle),
                 shared: Arc::clone(&shared),
+                source: source.clone(),
                 ffmpeg_path,
                 video: params.video,
-                protected_overlay_window_ids: start_key.protected_overlay_window_ids.clone(),
+                include_cursor,
+                exclude_current_process_windows,
+                protected_overlay_window_ids,
             });
             let installed = {
                 let mut slot = state.preview_screen.lock().await;
-                if !claim_screen_start(&mut slot, &start_lease) {
+                if !claim_screen_start_if_admitted(
+                    state,
+                    &mut slot,
+                    &start_lease,
+                    recovery.as_ref().map(|recovery| recovery.epoch),
+                ) {
                     false
                 } else {
+                    slot.failed_recovery_retry = None;
                     slot.status = status.clone();
                     slot.run_id = Some(run_id.clone());
                     slot.source_key = Some(source_key.clone());
                     slot.active = started_thread.take();
+                    slot.active_generation = Some(start_lease.generation);
                     true
                 }
             };
             if !installed {
-                if let Some(mut stale_thread) = started_thread {
-                    let _ = stale_thread.stop_tx.send(());
-                    if let Some(join_handle) = stale_thread.join_handle.take() {
-                        let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
-                    }
+                stop_supervised_screen(supervisor, Some(start_lease.generation), "stale-start")
+                    .await;
+                if let Some(recovery) = recovery.as_ref()
+                    && !state.capture_recovery_admission_is_current(recovery.epoch)
+                {
+                    return retire_superseded_screen_recovery(state, &start_lease, recovery).await;
                 }
-                return preview_screen_status(&state).await;
+                return preview_screen_status(state).await;
             }
-            let poll_task = tokio::spawn(poll_screen_metrics(
+            let poll_task = state.spawn_process_task(poll_screen_metrics(
                 state.clone(),
                 run_id.clone(),
                 Arc::clone(&shared),
@@ -823,7 +1428,7 @@ async fn start_preview_screen_with_restart_signal(
                 }
             }
             acquire_preview_screen_source(
-                &state,
+                state,
                 source_key,
                 SourceLifecycleStatus::Live,
                 SourceIdentityConfidence::Exact,
@@ -833,8 +1438,12 @@ async fn start_preview_screen_with_restart_signal(
             status
         }
         NativeScreenStartup::PermissionNeeded(message) => {
-            let _ = stop_tx.send(());
-            let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
+            stop_supervised_screen(
+                supervisor,
+                Some(start_lease.generation),
+                "permission-needed",
+            )
+            .await;
             let status = PreviewScreenStatus {
                 state: PreviewScreenState::PermissionNeeded,
                 source_id: Some(source.source_id),
@@ -860,9 +1469,16 @@ async fn start_preview_screen_with_restart_signal(
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some(message),
             };
-            if set_screen_status_for_start(&state, &start_lease, status.clone()).await {
+            if set_screen_status_for_start(
+                state,
+                &start_lease,
+                status.clone(),
+                recovery.as_ref().map(|recovery| recovery.epoch),
+            )
+            .await
+            {
                 acquire_preview_screen_source(
-                    &state,
+                    state,
                     source_key,
                     SourceLifecycleStatus::PermissionNeeded,
                     SourceIdentityConfidence::Exact,
@@ -870,20 +1486,27 @@ async fn start_preview_screen_with_restart_signal(
                 .await;
                 status
             } else {
-                preview_screen_status(&state).await
+                screen_start_fallback_status(state, &start_lease, recovery.as_ref()).await
             }
         }
         NativeScreenStartup::SourceMissing(message) => {
-            let _ = stop_tx.send(());
-            let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
+            stop_supervised_screen(supervisor, Some(start_lease.generation), "source-missing")
+                .await;
             let status = status_for_missing_source(
                 Some(source.source_id),
                 Some(source.source_kind),
                 &message,
             );
-            if set_screen_status_for_start(&state, &start_lease, status.clone()).await {
+            if set_screen_status_for_start(
+                state,
+                &start_lease,
+                status.clone(),
+                recovery.as_ref().map(|recovery| recovery.epoch),
+            )
+            .await
+            {
                 acquire_preview_screen_source(
-                    &state,
+                    state,
                     source_key,
                     SourceLifecycleStatus::SourceMissing,
                     SourceIdentityConfidence::Exact,
@@ -891,12 +1514,11 @@ async fn start_preview_screen_with_restart_signal(
                 .await;
                 status
             } else {
-                preview_screen_status(&state).await
+                screen_start_fallback_status(state, &start_lease, recovery.as_ref()).await
             }
         }
         NativeScreenStartup::Failed(message) => {
-            let _ = stop_tx.send(());
-            let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
+            stop_supervised_screen(supervisor, Some(start_lease.generation), "failed-start").await;
             let status = failed_status(
                 Some(source.source_id),
                 Some(source.source_kind),
@@ -905,9 +1527,16 @@ async fn start_preview_screen_with_restart_signal(
                 exclude_current_process_windows,
                 message,
             );
-            if set_screen_status_for_start(&state, &start_lease, status.clone()).await {
+            if set_screen_status_for_start(
+                state,
+                &start_lease,
+                status.clone(),
+                recovery.as_ref().map(|recovery| recovery.epoch),
+            )
+            .await
+            {
                 acquire_preview_screen_source(
-                    &state,
+                    state,
                     source_key,
                     SourceLifecycleStatus::Failed,
                     SourceIdentityConfidence::Exact,
@@ -915,15 +1544,814 @@ async fn start_preview_screen_with_restart_signal(
                 .await;
                 status
             } else {
-                preview_screen_status(&state).await
+                screen_start_fallback_status(state, &start_lease, recovery.as_ref()).await
             }
         }
     }
 }
 
+async fn screen_start_is_current(state: &AppState, lease: &PreviewScreenStartLease) -> bool {
+    let slot = state.preview_screen.lock().await;
+    slot.start_generation == lease.generation && slot.starting.as_ref() == Some(&lease.key)
+}
+
+async fn ensure_registered_preview_screen_start_is_current(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    layout_intent_id: Option<u64>,
+    recovery: Option<&PreparedScreenRecoveryAdmission>,
+) -> std::result::Result<(), Box<PreviewScreenStatus>> {
+    let recovery_is_stale = recovery
+        .is_some_and(|recovery| !state.capture_recovery_admission_is_current(recovery.epoch));
+    if recovery_is_stale {
+        return Err(Box::new(
+            retire_superseded_screen_recovery(
+                state,
+                lease,
+                recovery.expect("stale screen recovery retains admission"),
+            )
+            .await,
+        ));
+    }
+    if state.process_shutdown_requested() || !screen_start_is_current(state, lease).await {
+        return Err(Box::new(preview_screen_status(state).await));
+    }
+    ensure_screen_layout_start_is_current(state, lease, layout_intent_id).await
+}
+
+async fn retire_superseded_screen_recovery(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    recovery: &PreparedScreenRecoveryAdmission,
+) -> PreviewScreenStatus {
+    let (status, lifecycle, release_source) = {
+        let mut slot = state.preview_screen.lock().await;
+        if slot.start_generation != lease.generation || slot.starting.as_ref() != Some(&lease.key) {
+            return slot.status.clone();
+        }
+        slot.starting = None;
+        slot.starting_layout_intent_id = None;
+        slot.failed_recovery_retry = None;
+        if slot.active.is_some() {
+            slot.status = recovery.previous_status.clone();
+            slot.run_id = recovery.previous_run_id.clone();
+            (slot.status.clone(), SourceLifecycleStatus::Live, false)
+        } else if matches!(
+            recovery.previous_status.state,
+            PreviewScreenState::Failed
+                | PreviewScreenState::PermissionNeeded
+                | PreviewScreenState::SourceMissing
+        ) {
+            slot.status = recovery.previous_status.clone();
+            slot.run_id = None;
+            (slot.status.clone(), SourceLifecycleStatus::Failed, false)
+        } else {
+            let status = idle_status(Some(
+                "Screen recovery was superseded after the previous native session retired; no replacement was started."
+                    .to_string(),
+            ));
+            slot.status = status.clone();
+            slot.run_id = None;
+            slot.source_key = None;
+            slot.active_generation = None;
+            (status, SourceLifecycleStatus::Stopped, true)
+        }
+    };
+    {
+        let mut registry = state.source_registry.lock().await;
+        if release_source {
+            registry.release(&lease.key.source_key, &SourceConsumerReason::Preview);
+        }
+        registry.set_status(lease.key.source_key.clone(), lifecycle);
+    }
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+    }
+    state.emit_event("preview.screen.status", status.clone());
+    status
+}
+
+fn screen_layout_start_is_current_locked(
+    state: &AppState,
+    slot: &PreviewScreenRuntime,
+    lease: &PreviewScreenStartLease,
+    layout_intent_id: Option<u64>,
+) -> bool {
+    let Some(prepared_intent_id) = layout_intent_id else {
+        return true;
+    };
+    let latest_intent_id = state.latest_layout_intent_id();
+    prepared_intent_id == latest_intent_id
+        || (slot.start_generation == lease.generation
+            && slot.starting.as_ref() == Some(&lease.key)
+            && slot.starting_layout_intent_id != Some(prepared_intent_id))
+}
+
+async fn screen_layout_start_is_current(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    layout_intent_id: Option<u64>,
+) -> bool {
+    let slot = state.preview_screen.lock().await;
+    screen_layout_start_is_current_locked(state, &slot, lease, layout_intent_id)
+}
+
+async fn ensure_screen_layout_start_is_current(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    layout_intent_id: Option<u64>,
+) -> std::result::Result<(), Box<PreviewScreenStatus>> {
+    if screen_layout_start_is_current(state, lease, layout_intent_id).await {
+        return Ok(());
+    }
+    let Some(layout_intent_id) = layout_intent_id else {
+        return Ok(());
+    };
+    let expected = PreviewScreenStartingIdentity {
+        source_key: lease.key.source_key.clone(),
+        generation: lease.generation,
+        layout_intent_id: Some(layout_intent_id),
+    };
+    let transition = acquire_preview_screen_transition(state).await;
+    if let Some(stop) =
+        begin_preview_screen_stop_if_starting_with_transition(state, transition, &expected).await
+    {
+        return Err(Box::new(stop.status));
+    }
+    if screen_layout_start_is_current(state, lease, Some(layout_intent_id)).await {
+        Ok(())
+    } else {
+        Err(Box::new(preview_screen_status(state).await))
+    }
+}
+
+async fn publish_screen_starting_status(state: &AppState, lease: &PreviewScreenStartLease) {
+    let status = {
+        let slot = state.preview_screen.lock().await;
+        if slot.start_generation != lease.generation || slot.starting.as_ref() != Some(&lease.key) {
+            return;
+        }
+        slot.status.clone()
+    };
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+    }
+}
+
+async fn detach_screen_runtime_for_native_transition(state: &AppState, clear_starting: bool) {
+    let poll_task = {
+        let mut slot = state.preview_screen.lock().await;
+        slot.run_id = None;
+        slot.active_generation = None;
+        slot.active = None;
+        if clear_starting {
+            slot.source_key = None;
+            slot.starting = None;
+            slot.starting_layout_intent_id = None;
+        }
+        slot.poll_task.take()
+    };
+    if let Some(task) = poll_task {
+        task.abort();
+    }
+}
+
+async fn stop_supervised_screen(
+    supervisor: &mut PreviewScreenNativeSupervisor,
+    generation: Option<u64>,
+    reason: &'static str,
+) {
+    if let Some(active) = supervisor.active.take() {
+        stop_owned_native_screen(active, generation, reason).await;
+    }
+}
+
+async fn retire_panicked_screen_generation(
+    state: &AppState,
+    supervisor: &mut PreviewScreenNativeSupervisor,
+    lease: &PreviewScreenStartLease,
+    failed: PreviewScreenStatus,
+    recovery: Option<&PreparedScreenRecoveryAdmission>,
+) -> PreviewScreenStatus {
+    // The supervisor may still own the previous generation if the panic landed
+    // before execute detached it. Since this transition will retire that owner
+    // below, its runtime metadata must be retired as well.
+    let supervisor_has_owner = supervisor.active.is_some();
+    let (poll_task, publish_failed, recovery_was_superseded) = {
+        let mut slot = state.preview_screen.lock().await;
+        let recovery_was_superseded = recovery
+            .is_some_and(|recovery| !state.capture_recovery_admission_is_current(recovery.epoch));
+        let owns_active = slot.active_generation == Some(lease.generation);
+        if supervisor_has_owner {
+            slot.active = None;
+            slot.active_generation = None;
+            slot.run_id = None;
+        }
+        let publish_failed = slot.start_generation == lease.generation
+            && (slot.starting.as_ref() == Some(&lease.key) || owns_active);
+        if publish_failed && !recovery_was_superseded {
+            slot.starting = None;
+            slot.starting_layout_intent_id = None;
+            slot.source_key = Some(lease.key.source_key.clone());
+            slot.status = failed.clone();
+        }
+        (
+            if supervisor_has_owner {
+                slot.poll_task.take()
+            } else {
+                None
+            },
+            publish_failed && !recovery_was_superseded,
+            recovery_was_superseded,
+        )
+    };
+    if let Some(poll_task) = poll_task {
+        poll_task.abort();
+    }
+    // This await completes while the transition still owns its FIFO turn, so a
+    // replacement can never cross the panicked generation's native join.
+    stop_supervised_screen(supervisor, Some(lease.generation), "panic").await;
+
+    if recovery_was_superseded {
+        return retire_superseded_screen_recovery(
+            state,
+            lease,
+            recovery.expect("superseded screen recovery panic retains admission"),
+        )
+        .await;
+    }
+
+    let status = if publish_failed {
+        acquire_preview_screen_source(
+            state,
+            lease.key.source_key.clone(),
+            SourceLifecycleStatus::Failed,
+            SourceIdentityConfidence::Exact,
+        )
+        .await;
+        failed
+    } else {
+        preview_screen_status(state).await
+    };
+    {
+        let mut diagnostics = state.diagnostics.lock().await;
+        *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+    }
+    state.emit_event("preview.screen.status", status.clone());
+    status
+}
+
+async fn stop_owned_native_screen(
+    mut active: OwnedNativeScreenPreviewThread,
+    generation: Option<u64>,
+    reason: &'static str,
+) {
+    let _ = active.stop_tx.send(());
+    if let Some(join_handle) = active.join_handle.take() {
+        join_screen_capture_thread(join_handle, generation, reason).await;
+    }
+}
+
+#[allow(dead_code)]
+pub(crate) async fn preview_screen_restart_snapshot(
+    state: &AppState,
+) -> Option<PreviewScreenRestartSnapshot> {
+    let slot = state.preview_screen.lock().await;
+    screen_restart_snapshot_from_slot(&slot)
+}
+
+pub(crate) async fn preview_screen_recovery_evidence(
+    state: &AppState,
+    expected: &PreviewScreenRestartSnapshot,
+) -> Option<PreviewScreenRecoveryEvidence> {
+    let shared = {
+        let slot = state.preview_screen.lock().await;
+        if screen_restart_snapshot_from_slot(&slot).as_ref() != Some(expected) {
+            return None;
+        }
+        Arc::clone(&slot.active.as_ref()?.shared)
+    };
+    let (
+        capture_callback_count,
+        frame_store_publications,
+        latest_sequence,
+        frame_age_ms,
+        actual_width,
+        actual_height,
+    ) = {
+        let capture = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let latest = capture.frame_store.latest();
+        (
+            capture.capture_callback_count,
+            capture.frames_captured,
+            latest.as_ref().map(|frame| frame.sequence),
+            latest
+                .as_ref()
+                .map(|frame| frame.captured_at.elapsed().as_millis() as u64),
+            latest.as_ref().map(|frame| frame.width),
+            latest.as_ref().map(|frame| frame.height),
+        )
+    };
+    {
+        let slot = state.preview_screen.lock().await;
+        if screen_restart_snapshot_from_slot(&slot).as_ref() != Some(expected)
+            || !slot
+                .active
+                .as_ref()
+                .is_some_and(|active| Arc::ptr_eq(&active.shared, &shared))
+        {
+            return None;
+        }
+    }
+    Some(PreviewScreenRecoveryEvidence {
+        source_key: expected.source_key.clone(),
+        generation: expected.generation,
+        target_fps: expected.config.target_fps,
+        callback_cadence: expected.config.source.callback_cadence,
+        capture_callback_count,
+        frame_store_publications,
+        latest_sequence,
+        frame_age_ms,
+        configured_width: expected.config.video.width,
+        configured_height: expected.config.video.height,
+        actual_width,
+        actual_height,
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn force_restart_preview_screen(
+    state: AppState,
+    expected: &PreviewScreenRestartSnapshot,
+) -> PreviewScreenForceRestartResult {
+    let transition = acquire_preview_screen_transition(&state).await;
+    let Some(prepared) = begin_forced_screen_restart(&state, expected, None).await else {
+        drop(transition);
+        return PreviewScreenForceRestartResult::RejectedStale;
+    };
+    let attempt = queue_forced_preview_screen_restart(&state, prepared, "force-recovery-test");
+    drop(transition);
+    complete_force_restart_preview_screen(&state, attempt).await
+}
+
+/// Compare-and-swap the exact Live screen generation and synchronously queue
+/// its process-lifetime transition supervisor. Native teardown/startup is not
+/// awaited here, so session startup needs to serialize only this short edge.
+pub(crate) async fn admit_force_restart_preview_screen(
+    state: &AppState,
+    expected: &PreviewScreenRestartSnapshot,
+    recovery_epoch: u64,
+) -> Option<PreviewScreenForceRestartAttempt> {
+    if state.process_shutdown_requested()
+        || !state.capture_recovery_admission_is_current(recovery_epoch)
+    {
+        return None;
+    }
+    let transition = acquire_preview_screen_transition(state).await;
+    let prepared = begin_forced_screen_restart(state, expected, Some(recovery_epoch)).await?;
+    let attempt = queue_forced_preview_screen_restart(state, prepared, "force-recovery");
+    drop(transition);
+    Some(attempt)
+}
+
+/// Reserve the exact retained failed recovery config for a generation-safe
+/// one-click retry, then synchronously hand it to the process supervisor.
+pub(crate) async fn admit_failed_preview_screen_recovery_retry(
+    state: &AppState,
+    expected_source_key: &SourceKey,
+    expected_generation: u64,
+    recovery_epoch: u64,
+) -> Option<PreviewScreenForceRestartAttempt> {
+    if state.process_shutdown_requested()
+        || !state.capture_recovery_admission_is_current(recovery_epoch)
+    {
+        return None;
+    }
+    let transition = acquire_preview_screen_transition(state).await;
+    let prepared = begin_failed_screen_recovery_retry(
+        state,
+        expected_source_key,
+        expected_generation,
+        recovery_epoch,
+    )
+    .await?;
+    let attempt = queue_forced_preview_screen_restart(state, prepared, "force-recovery-retry");
+    drop(transition);
+    Some(attempt)
+}
+
+fn queue_forced_preview_screen_restart(
+    state: &AppState,
+    mut prepared: PreparedScreenStart,
+    reason: &'static str,
+) -> PreviewScreenForceRestartAttempt {
+    let generation = prepared.lease.generation;
+    let source_key = prepared.lease.key.source_key.clone();
+    let (native_startup_ready_tx, native_startup_ready_rx) = oneshot::channel();
+    debug_assert!(prepared.restart_ready.is_none());
+    prepared.restart_ready = Some(native_startup_ready_tx);
+    log_screen_generation(
+        generation,
+        reason,
+        &prepared.lease.key,
+        prepared.include_cursor,
+        prepared.exclude_current_process_windows,
+    );
+    let completion = queue_registered_preview_screen(state.clone(), prepared);
+    PreviewScreenForceRestartAttempt {
+        generation,
+        source_key,
+        native_startup_ready: Some(native_startup_ready_rx),
+        completion,
+    }
+}
+
+/// Await an already-admitted screen transition. Dropping this waiter never
+/// cancels the process-owned source transition or its native join.
+pub(crate) async fn complete_force_restart_preview_screen(
+    state: &AppState,
+    attempt: PreviewScreenForceRestartAttempt,
+) -> PreviewScreenForceRestartResult {
+    let PreviewScreenForceRestartAttempt {
+        generation,
+        source_key,
+        native_startup_ready: _,
+        completion,
+    } = attempt;
+    // Recovery needs the exact native transition result. Its independent
+    // coordinator watchdog bounds public state; applying the shorter
+    // interactive-command timeout here would detach the waiter while teardown
+    // and replacement were still process-owned, then misclassify that live
+    // attempt as superseded before cadence verification could begin.
+    let Ok(status) = completion.await else {
+        return PreviewScreenForceRestartResult::RejectedStale;
+    };
+    let restart_still_current = {
+        let slot = state.preview_screen.lock().await;
+        slot.start_generation == generation
+            && slot.source_key.as_ref() == Some(&source_key)
+            && slot.starting.is_none()
+    };
+    if !restart_still_current {
+        return PreviewScreenForceRestartResult::RejectedStale;
+    }
+    PreviewScreenForceRestartResult::Restarted { status, generation }
+}
+
+/// True only while the exact failed recovery generation still owns the
+/// terminal screen runtime and its retained private configuration.
+pub(crate) async fn failed_preview_screen_retry_is_current(
+    state: &AppState,
+    expected_source_key: &SourceKey,
+    expected_generation: u64,
+) -> bool {
+    let slot = state.preview_screen.lock().await;
+    failed_screen_recovery_retry_from_slot(&slot, expected_source_key, expected_generation)
+        .is_some()
+}
+
+#[allow(dead_code)]
+fn screen_restart_snapshot_from_slot(
+    slot: &PreviewScreenRuntime,
+) -> Option<PreviewScreenRestartSnapshot> {
+    if slot.status.state != PreviewScreenState::Live || slot.starting.is_some() {
+        return None;
+    }
+    let active = slot.active.as_ref()?;
+    let generation = slot.active_generation?;
+    let source_key = slot.source_key.clone()?;
+    if source_key != source_key_for_source(&active.source)
+        || slot.status.source_id.as_ref() != Some(&active.source.source_id)
+        || slot.status.source_kind.as_ref() != Some(&active.source.source_kind)
+        || slot.status.include_cursor != active.include_cursor
+        || slot.status.exclude_current_process_windows != active.exclude_current_process_windows
+    {
+        return None;
+    }
+    let config = PreviewScreenRestartConfig {
+        source: active.source.clone(),
+        ffmpeg_path: active.ffmpeg_path.clone(),
+        video: active.video.clone(),
+        target_fps: slot.status.target_fps,
+        include_cursor: active.include_cursor,
+        exclude_current_process_windows: active.exclude_current_process_windows,
+        protected_overlay_window_ids: active.protected_overlay_window_ids.clone(),
+    };
+    let start_key = PreviewScreenStartKey {
+        source_key: source_key.clone(),
+        ffmpeg_path: config.ffmpeg_path.clone(),
+        video: config.video.clone(),
+        target_fps: config.target_fps,
+        protected_overlay_window_ids: config.protected_overlay_window_ids.clone(),
+    };
+    Some(PreviewScreenRestartSnapshot {
+        source_key,
+        generation,
+        config_fingerprint: screen_config_fingerprint(
+            &start_key,
+            config.include_cursor,
+            config.exclude_current_process_windows,
+        ),
+        config,
+    })
+}
+
+fn failed_screen_recovery_retry_from_slot<'a>(
+    slot: &'a PreviewScreenRuntime,
+    expected_source_key: &SourceKey,
+    expected_generation: u64,
+) -> Option<&'a PreviewScreenFailedRecoveryRetry> {
+    let retry = slot.failed_recovery_retry.as_ref()?;
+    let terminal = matches!(
+        slot.status.state,
+        PreviewScreenState::Failed
+            | PreviewScreenState::PermissionNeeded
+            | PreviewScreenState::SourceMissing
+    );
+    let start_key = PreviewScreenStartKey {
+        source_key: retry.source_key.clone(),
+        ffmpeg_path: retry.config.ffmpeg_path.clone(),
+        video: retry.config.video.clone(),
+        target_fps: retry.config.target_fps,
+        protected_overlay_window_ids: retry.config.protected_overlay_window_ids.clone(),
+    };
+    if !terminal
+        || slot.active.is_some()
+        || slot.active_generation.is_some()
+        || slot.starting.is_some()
+        || slot.run_id.is_some()
+        || slot.start_generation != expected_generation
+        || retry.generation != expected_generation
+        || &retry.source_key != expected_source_key
+        || slot.source_key.as_ref() != Some(expected_source_key)
+        || expected_source_key != &source_key_for_source(&retry.config.source)
+        || slot.status.source_id.as_ref() != Some(&retry.config.source.source_id)
+        || slot.status.source_kind.as_ref() != Some(&retry.config.source.source_kind)
+        || slot.status.target_fps != retry.config.target_fps
+        || retry.config_fingerprint
+            != screen_config_fingerprint(
+                &start_key,
+                retry.config.include_cursor,
+                retry.config.exclude_current_process_windows,
+            )
+    {
+        return None;
+    }
+    Some(retry)
+}
+
+#[allow(dead_code)]
+async fn begin_forced_screen_restart(
+    state: &AppState,
+    expected: &PreviewScreenRestartSnapshot,
+    recovery_epoch: Option<u64>,
+) -> Option<PreparedScreenStart> {
+    let (prepared, starting) = {
+        let mut slot = state.preview_screen.lock().await;
+        if state.process_shutdown_requested()
+            || recovery_epoch
+                .is_some_and(|epoch| !state.capture_recovery_admission_is_current(epoch))
+        {
+            return None;
+        }
+        if screen_restart_snapshot_from_slot(&slot).as_ref() != Some(expected) {
+            return None;
+        }
+
+        let config = expected.config.clone();
+        let recovery = recovery_epoch.map(|epoch| PreparedScreenRecoveryAdmission {
+            epoch,
+            previous_status: slot.status.clone(),
+            previous_run_id: slot.run_id.clone(),
+        });
+        let start_key = PreviewScreenStartKey {
+            source_key: expected.source_key.clone(),
+            ffmpeg_path: config.ffmpeg_path.clone(),
+            video: config.video.clone(),
+            target_fps: config.target_fps,
+            protected_overlay_window_ids: config.protected_overlay_window_ids.clone(),
+        };
+        slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
+        let lease = PreviewScreenStartLease {
+            key: start_key.clone(),
+            generation: slot.start_generation,
+        };
+        let transition = allocate_screen_transition_ticket(&mut slot);
+        slot.failed_recovery_retry = recovery_epoch.map(|_| PreviewScreenFailedRecoveryRetry {
+            source_key: expected.source_key.clone(),
+            generation: lease.generation,
+            config_fingerprint: screen_config_fingerprint(
+                &start_key,
+                config.include_cursor,
+                config.exclude_current_process_windows,
+            ),
+            config: config.clone(),
+        });
+        let starting = PreviewScreenStatus {
+            state: PreviewScreenState::Starting,
+            source_id: Some(config.source.source_id.clone()),
+            source_kind: Some(config.source.source_kind.clone()),
+            target_fps: config.target_fps,
+            width: None,
+            height: None,
+            native_width: None,
+            native_height: None,
+            requested_width: None,
+            requested_height: None,
+            actual_width: None,
+            actual_height: None,
+            iosurface_available: None,
+            d3d11_texture_available: None,
+            source_fps: None,
+            frame_age_ms: None,
+            frames_captured: 0,
+            dropped_frames: 0,
+            sequence: None,
+            include_cursor: config.include_cursor,
+            exclude_current_process_windows: config.exclude_current_process_windows,
+            updated_at: Utc::now().to_rfc3339(),
+            message: Some(
+                "Restarting native screen capture after verified degradation.".to_string(),
+            ),
+        };
+        slot.status = starting.clone();
+        slot.run_id = None;
+        slot.source_key = Some(expected.source_key.clone());
+        slot.starting = Some(start_key);
+        slot.starting_layout_intent_id = None;
+
+        let (screen_id, window_id) = match &config.source.source_kind {
+            PreviewScreenSourceKind::Screen => (Some(config.source.source_id.clone()), None),
+            PreviewScreenSourceKind::Window => (None, Some(config.source.source_id.clone())),
+        };
+        let params = PreviewScreenStartParams {
+            sources: SourceSelection {
+                screen_id,
+                window_id,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+            video: config.video,
+            protected_overlay_window_ids: config.protected_overlay_window_ids,
+            ffmpeg_path: Some(config.ffmpeg_path.clone()),
+        };
+        (
+            PreparedScreenStart {
+                source: config.source,
+                ffmpeg_path: config.ffmpeg_path,
+                target_fps: config.target_fps,
+                include_cursor: config.include_cursor,
+                exclude_current_process_windows: config.exclude_current_process_windows,
+                source_key: expected.source_key.clone(),
+                params,
+                lease,
+                layout_intent_id: None,
+                transition,
+                restart_ready: None,
+                recovery,
+            },
+            starting,
+        )
+    };
+
+    state.emit_event("preview.screen.status", starting);
+    Some(prepared)
+}
+
+async fn begin_failed_screen_recovery_retry(
+    state: &AppState,
+    expected_source_key: &SourceKey,
+    expected_generation: u64,
+    recovery_epoch: u64,
+) -> Option<PreparedScreenStart> {
+    let (prepared, starting) = {
+        let mut slot = state.preview_screen.lock().await;
+        if state.process_shutdown_requested()
+            || !state.capture_recovery_admission_is_current(recovery_epoch)
+        {
+            return None;
+        }
+        let config = failed_screen_recovery_retry_from_slot(
+            &slot,
+            expected_source_key,
+            expected_generation,
+        )?
+        .config
+        .clone();
+        let recovery = PreparedScreenRecoveryAdmission {
+            epoch: recovery_epoch,
+            previous_status: slot.status.clone(),
+            previous_run_id: slot.run_id.clone(),
+        };
+        let start_key = PreviewScreenStartKey {
+            source_key: expected_source_key.clone(),
+            ffmpeg_path: config.ffmpeg_path.clone(),
+            video: config.video.clone(),
+            target_fps: config.target_fps,
+            protected_overlay_window_ids: config.protected_overlay_window_ids.clone(),
+        };
+        slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
+        let lease = PreviewScreenStartLease {
+            key: start_key.clone(),
+            generation: slot.start_generation,
+        };
+        let transition = allocate_screen_transition_ticket(&mut slot);
+        slot.failed_recovery_retry = Some(PreviewScreenFailedRecoveryRetry {
+            source_key: expected_source_key.clone(),
+            generation: lease.generation,
+            config_fingerprint: screen_config_fingerprint(
+                &start_key,
+                config.include_cursor,
+                config.exclude_current_process_windows,
+            ),
+            config: config.clone(),
+        });
+        let starting = PreviewScreenStatus {
+            state: PreviewScreenState::Starting,
+            source_id: Some(config.source.source_id.clone()),
+            source_kind: Some(config.source.source_kind.clone()),
+            target_fps: config.target_fps,
+            width: None,
+            height: None,
+            native_width: None,
+            native_height: None,
+            requested_width: None,
+            requested_height: None,
+            actual_width: None,
+            actual_height: None,
+            iosurface_available: None,
+            d3d11_texture_available: None,
+            source_fps: None,
+            frame_age_ms: None,
+            frames_captured: 0,
+            dropped_frames: 0,
+            sequence: None,
+            include_cursor: config.include_cursor,
+            exclude_current_process_windows: config.exclude_current_process_windows,
+            updated_at: Utc::now().to_rfc3339(),
+            message: Some("Retrying the failed native screen recovery generation.".to_string()),
+        };
+        slot.status = starting.clone();
+        slot.run_id = None;
+        slot.source_key = Some(expected_source_key.clone());
+        slot.starting = Some(start_key);
+        slot.starting_layout_intent_id = None;
+
+        let (screen_id, window_id) = match &config.source.source_kind {
+            PreviewScreenSourceKind::Screen => (Some(config.source.source_id.clone()), None),
+            PreviewScreenSourceKind::Window => (None, Some(config.source.source_id.clone())),
+        };
+        let params = PreviewScreenStartParams {
+            sources: SourceSelection {
+                screen_id,
+                window_id,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+            video: config.video.clone(),
+            protected_overlay_window_ids: config.protected_overlay_window_ids.clone(),
+            ffmpeg_path: Some(config.ffmpeg_path.clone()),
+        };
+        (
+            PreparedScreenStart {
+                source: config.source,
+                ffmpeg_path: config.ffmpeg_path,
+                target_fps: config.target_fps,
+                include_cursor: config.include_cursor,
+                exclude_current_process_windows: config.exclude_current_process_windows,
+                source_key: expected_source_key.clone(),
+                params,
+                lease,
+                layout_intent_id: None,
+                transition,
+                restart_ready: None,
+                recovery: Some(recovery),
+            },
+            starting,
+        )
+    };
+    state.emit_event("preview.screen.status", starting);
+    Some(prepared)
+}
+
 fn signal_screen_restart_ready(restart_ready: &mut Option<oneshot::Sender<()>>) {
     if let Some(restart_ready) = restart_ready.take() {
         let _ = restart_ready.send(());
+    }
+}
+
+fn signal_screen_layout_admission(
+    admission_ready: &mut Option<oneshot::Sender<Option<PreviewScreenStartingIdentity>>>,
+    identity: Option<PreviewScreenStartingIdentity>,
+) {
+    if let Some(admission_ready) = admission_ready.take() {
+        let _ = admission_ready.send(identity);
     }
 }
 
@@ -933,56 +2361,250 @@ pub async fn stop_preview_screen(state: &AppState) -> PreviewScreenStatus {
 }
 
 pub(crate) async fn begin_preview_screen_stop(state: &AppState) -> PreviewScreenStop {
-    let keep_alive = release_current_preview_screen_source(state).await;
-    if keep_alive {
-        let status = {
-            let mut slot = state.preview_screen.lock().await;
+    let transition_guard = acquire_preview_screen_transition(state).await;
+    begin_preview_screen_stop_with_transition(state, transition_guard).await
+}
+
+/// Acquire transition ownership before a layout-intent mutex. The caller can
+/// then perform its stale-intent check and detach atomically without waiting
+/// for native shutdown while blocking newer intents.
+pub(crate) async fn acquire_preview_screen_transition(
+    state: &AppState,
+) -> PreviewScreenTransitionGuard {
+    let transition_gate = {
+        let slot = state.preview_screen.lock().await;
+        Arc::clone(&slot.transition_gate)
+    };
+    transition_gate.lock_owned().await
+}
+
+pub(crate) async fn begin_preview_screen_stop_with_transition(
+    state: &AppState,
+    transition_guard: PreviewScreenTransitionGuard,
+) -> PreviewScreenStop {
+    let mut stop = try_begin_preview_screen_stop_serialized(state, false, None)
+        .await
+        .expect("unconditional screen stop admission");
+    stop._transition_guard = Some(transition_guard);
+    stop
+}
+
+/// Cancel only a generation which is still pending startup. Transition
+/// ownership blocks competing command admission, while the Starting check and
+/// runtime invalidation share the preview lock. A late native Live publication
+/// therefore wins cleanly instead of being torn down from stale readiness.
+pub(crate) async fn begin_preview_screen_stop_if_starting_with_transition(
+    state: &AppState,
+    transition_guard: PreviewScreenTransitionGuard,
+    expected: &PreviewScreenStartingIdentity,
+) -> Option<PreviewScreenStop> {
+    let mut stop = try_begin_preview_screen_stop_serialized(state, false, Some(expected)).await?;
+    stop._transition_guard = Some(transition_guard);
+    Some(stop)
+}
+
+fn screen_starting_identity_from_slot(
+    slot: &PreviewScreenRuntime,
+) -> Option<PreviewScreenStartingIdentity> {
+    let starting = slot.starting.as_ref()?;
+    (slot.status.state == PreviewScreenState::Starting).then(|| PreviewScreenStartingIdentity {
+        source_key: starting.source_key.clone(),
+        generation: slot.start_generation,
+        layout_intent_id: slot.starting_layout_intent_id,
+    })
+}
+
+#[cfg(test)]
+pub(crate) async fn preview_screen_status_and_starting_identity(
+    state: &AppState,
+) -> (PreviewScreenStatus, Option<PreviewScreenStartingIdentity>) {
+    let slot = state.preview_screen.lock().await;
+    (
+        slot.status.clone(),
+        screen_starting_identity_from_slot(&slot),
+    )
+}
+
+async fn try_begin_preview_screen_stop_serialized(
+    state: &AppState,
+    force_shutdown: bool,
+    expected_starting: Option<&PreviewScreenStartingIdentity>,
+) -> Option<PreviewScreenStop> {
+    // Keep runtime intent and the Preview consumer transfer on one admission
+    // edge. Cancellation while waiting for the registry occurs before either is
+    // changed; after both guards are owned there is no suspension before the
+    // stop ticket is registered.
+    let (status, poll_task, generation, transition) = {
+        let mut slot = state.preview_screen.lock().await;
+        if let Some(expected) = expected_starting
+            && screen_starting_identity_from_slot(&slot).as_ref() != Some(expected)
+        {
+            return None;
+        }
+        let mut registry = state.source_registry.lock().await;
+        let keep_alive = if let Some(source_key) = slot.source_key.as_ref() {
+            let snapshot = registry.release(source_key, &SourceConsumerReason::Preview);
+            !force_shutdown
+                && snapshot
+                    .entries
+                    .iter()
+                    .find(|entry| &entry.key == source_key)
+                    .is_some_and(|entry| !entry.consumers.is_empty())
+        } else {
+            false
+        };
+        if keep_alive {
             let mut status = slot.status.clone();
             status.updated_at = Utc::now().to_rfc3339();
             status.message =
                 Some("Preview consumer released; screen source is still in use.".to_string());
             slot.status = status.clone();
-            status
-        };
-        state.emit_event("preview.screen.status", status.clone());
-        return PreviewScreenStop {
-            status,
-            join_handle: None,
-        };
-    }
-
-    let status = idle_status(Some("Native screen preview stopped.".to_string()));
-    let (previous, poll_task) = {
-        let mut slot = state.preview_screen.lock().await;
-        slot.status = status.clone();
-        slot.run_id = None;
-        slot.source_key = None;
-        slot.starting = None;
-        (slot.active.take(), slot.poll_task.take())
+            (status, None, None, None)
+        } else {
+            let status = idle_status(Some(
+                "Stopping native screen preview; teardown remains exclusively owned.".to_string(),
+            ));
+            let generation = slot.active_generation;
+            slot.status = status.clone();
+            slot.run_id = None;
+            slot.source_key = None;
+            slot.starting = None;
+            slot.starting_layout_intent_id = None;
+            slot.active_generation = None;
+            slot.active = None;
+            let transition = allocate_screen_transition_ticket(&mut slot);
+            (
+                slot.status.clone(),
+                slot.poll_task.take(),
+                generation,
+                Some(transition),
+            )
+        }
     };
+
     if let Some(task) = poll_task {
         task.abort();
     }
-    let join_handle = previous.and_then(|mut previous| {
-        let _ = previous.stop_tx.send(());
-        previous.join_handle.take()
+    let completion = transition.map(|transition| {
+        queue_public_screen_stop(state.clone(), transition, generation, status.clone())
     });
+    if completion.is_none() {
+        state.emit_event("preview.screen.status", status.clone());
+        return Some(PreviewScreenStop {
+            status,
+            completion: None,
+            _transition_guard: None,
+        });
+    }
     {
         let mut diagnostics = state.diagnostics.lock().await;
         *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
     }
     state.emit_event("preview.screen.status", status.clone());
-    PreviewScreenStop {
+    Some(PreviewScreenStop {
         status,
-        join_handle,
-    }
+        completion,
+        _transition_guard: None,
+    })
 }
 
 pub(crate) async fn finish_preview_screen_stop(mut stop: PreviewScreenStop) -> PreviewScreenStatus {
-    if let Some(join_handle) = stop.join_handle.take() {
-        let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
+    // The command was already enqueued under admission ownership. Releasing
+    // this guard lets newer commands enqueue behind it while the supervisor
+    // retains exclusive physical ownership.
+    drop(stop._transition_guard.take());
+    if let Some(mut completion) = stop.completion.take()
+        && let Ok(Ok(status)) =
+            tokio::time::timeout(SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT, &mut completion).await
+    {
+        return status;
     }
     stop.status
+}
+
+/// Graceful application shutdown drains the physical screen owner even when a
+/// stale logical consumer remains registered. The command wait is bounded; a
+/// slow native join stays owned by the process-lifetime FIFO supervisor.
+pub(crate) async fn shutdown_preview_screen(state: &AppState) -> bool {
+    shutdown_preview_screen_with_timeout(state, SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT).await
+}
+
+async fn shutdown_preview_screen_with_timeout(state: &AppState, timeout: Duration) -> bool {
+    let transition_guard = acquire_preview_screen_transition(state).await;
+    let mut stop = try_begin_preview_screen_stop_serialized(state, true, None)
+        .await
+        .expect("unconditional screen shutdown admission");
+    stop._transition_guard = Some(transition_guard);
+    drop(stop._transition_guard.take());
+    let Some(mut completion) = stop.completion.take() else {
+        return true;
+    };
+    matches!(
+        tokio::time::timeout(timeout, &mut completion).await,
+        Ok(Ok(_))
+    )
+}
+
+fn queue_public_screen_stop(
+    state: AppState,
+    transition: PreviewScreenTransitionTicket,
+    generation: Option<u64>,
+    admitted_status: PreviewScreenStatus,
+) -> oneshot::Receiver<PreviewScreenStatus> {
+    let source_transition_guard = state.source_transition_fence.begin();
+    let (completion_tx, completion_rx) = oneshot::channel();
+    let supervisor_state = state.clone();
+    state.spawn_process_task(async move {
+        let _source_transition_guard = source_transition_guard;
+        wait_for_screen_transition_turn(&transition.order, transition.sequence).await;
+        let turn =
+            PreviewScreenTransitionTurn::new(Arc::clone(&transition.order), transition.sequence);
+        {
+            let mut supervisor = transition.native_supervisor.lock().await;
+            stop_supervised_screen(&mut supervisor, generation, "stop").await;
+        }
+        // Native ownership is now fully retired. Release the FIFO before
+        // publishing status so diagnostics latency cannot delay the next source.
+        drop(turn);
+        let status = {
+            let mut slot = supervisor_state.preview_screen.lock().await;
+            if slot.status == admitted_status && slot.starting.is_none() {
+                let status = idle_status(Some("Native screen preview stopped.".to_string()));
+                slot.status = status.clone();
+                status
+            } else {
+                slot.status.clone()
+            }
+        };
+        {
+            let mut diagnostics = supervisor_state.diagnostics.lock().await;
+            *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+        }
+        supervisor_state.emit_event("preview.screen.status", status.clone());
+        let _ = completion_tx.send(status);
+    });
+    completion_rx
+}
+
+#[cfg(test)]
+fn queue_supervised_screen_stop(
+    transition: PreviewScreenTransitionTicket,
+    generation: Option<u64>,
+    reason: &'static str,
+) -> oneshot::Receiver<()> {
+    let (completion_tx, completion_rx) = oneshot::channel();
+    tokio::spawn(async move {
+        wait_for_screen_transition_turn(&transition.order, transition.sequence).await;
+        let turn =
+            PreviewScreenTransitionTurn::new(Arc::clone(&transition.order), transition.sequence);
+        {
+            let mut supervisor = transition.native_supervisor.lock().await;
+            stop_supervised_screen(&mut supervisor, generation, reason).await;
+        }
+        drop(turn);
+        let _ = completion_tx.send(());
+    });
+    completion_rx
 }
 
 pub async fn preview_screen_status(state: &AppState) -> PreviewScreenStatus {
@@ -1061,9 +2683,11 @@ pub async fn preview_screen_latest_frame_info(state: &AppState) -> Option<Previe
 pub async fn preview_screen_frame_source(state: &AppState) -> Option<PreviewScreenFrameSource> {
     let slot = state.preview_screen.lock().await;
     let active = slot.active.as_ref()?;
+    let generation = slot.active_generation?;
     Some(PreviewScreenFrameSource {
         shared: Arc::clone(&active.shared),
         source_key: slot.source_key.clone(),
+        generation,
     })
 }
 
@@ -1074,10 +2698,189 @@ pub fn try_preview_screen_frame_source(
     let Some(active) = slot.active.as_ref() else {
         return Ok(None);
     };
+    let Some(generation) = slot.active_generation else {
+        return Ok(None);
+    };
     Ok(Some(PreviewScreenFrameSource {
         shared: Arc::clone(&active.shared),
         source_key: slot.source_key.clone(),
+        generation,
     }))
+}
+
+/// Test-only: install a Live screen generation with a deterministic frame,
+/// without exposing the module-private native source/session fields.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) async fn test_install_live_screen_generation(
+    state: &AppState,
+    source_id: &str,
+    generation: u64,
+    sequence: u64,
+    video: &VideoSettings,
+) {
+    let source = SelectedScreenSource {
+        source_id: source_id.to_string(),
+        source_kind: PreviewScreenSourceKind::Screen,
+        callback_cadence: if source_id.starts_with("screen:screencapturekit:") {
+            ScreenCaptureCallbackCadence::Authoritative
+        } else {
+            ScreenCaptureCallbackCadence::DamageDriven
+        },
+        display_id: None,
+        window_id: None,
+    };
+    let source_key = source_key_for_source(&source);
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+    shared.lock().unwrap().frame_store.publish(
+        sequence,
+        video.width,
+        video.height,
+        PreviewScreenPixelFormat::Bgra8,
+        Instant::now(),
+        vec![0; video.width as usize * video.height as usize * 4],
+    );
+    let mut slot = state.preview_screen.lock().await;
+    slot.start_generation = generation.max(1);
+    slot.active_generation = Some(slot.start_generation);
+    slot.source_key = Some(source_key);
+    slot.starting = None;
+    slot.starting_layout_intent_id = None;
+    slot.status.state = PreviewScreenState::Live;
+    slot.status.source_id = Some(source_id.to_string());
+    slot.status.source_kind = Some(PreviewScreenSourceKind::Screen);
+    slot.status.target_fps = video.fps;
+    slot.status.width = Some(video.width);
+    slot.status.height = Some(video.height);
+    slot.status.requested_width = Some(video.width);
+    slot.status.requested_height = Some(video.height);
+    slot.status.actual_width = Some(video.width);
+    slot.status.actual_height = Some(video.height);
+    slot.status.frames_captured = sequence;
+    slot.status.sequence = Some(sequence);
+    slot.status.include_cursor = true;
+    slot.status.exclude_current_process_windows = false;
+    slot.active = Some(NativeScreenPreviewThread {
+        shared,
+        source,
+        ffmpeg_path: resolve_ffmpeg_path(None),
+        video: video.clone(),
+        include_cursor: true,
+        exclude_current_process_windows: false,
+        protected_overlay_window_ids: Vec::new(),
+    });
+}
+
+#[cfg(test)]
+pub(crate) async fn test_install_starting_screen_generation(
+    state: &AppState,
+    source_id: &str,
+    video: &VideoSettings,
+    layout_intent_id: Option<u64>,
+) -> PreviewScreenStartingIdentity {
+    let source = SelectedScreenSource {
+        source_id: source_id.to_string(),
+        source_kind: PreviewScreenSourceKind::Screen,
+        callback_cadence: if source_id.starts_with("screen:screencapturekit:") {
+            ScreenCaptureCallbackCadence::Authoritative
+        } else {
+            ScreenCaptureCallbackCadence::DamageDriven
+        },
+        display_id: None,
+        window_id: None,
+    };
+    let source_key = source_key_for_source(&source);
+    let start_key = PreviewScreenStartKey {
+        source_key: source_key.clone(),
+        ffmpeg_path: resolve_ffmpeg_path(None),
+        video: video.clone(),
+        target_fps: video.fps,
+        protected_overlay_window_ids: Vec::new(),
+    };
+    let mut slot = state.preview_screen.lock().await;
+    let mut registry = state.source_registry.lock().await;
+    registry.acquire(source_key.clone(), SourceConsumerReason::Preview);
+    registry.set_status(source_key.clone(), SourceLifecycleStatus::Starting);
+    slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
+    slot.active_generation = None;
+    slot.active = None;
+    slot.source_key = Some(source_key.clone());
+    slot.starting = Some(start_key);
+    slot.starting_layout_intent_id = layout_intent_id;
+    slot.status = PreviewScreenStatus {
+        state: PreviewScreenState::Starting,
+        source_id: Some(source_id.to_string()),
+        source_kind: Some(PreviewScreenSourceKind::Screen),
+        target_fps: video.fps,
+        width: None,
+        height: None,
+        native_width: None,
+        native_height: None,
+        requested_width: None,
+        requested_height: None,
+        actual_width: None,
+        actual_height: None,
+        iosurface_available: None,
+        d3d11_texture_available: None,
+        source_fps: None,
+        frame_age_ms: None,
+        frames_captured: 0,
+        dropped_frames: 0,
+        sequence: None,
+        include_cursor: true,
+        exclude_current_process_windows: false,
+        updated_at: Utc::now().to_rfc3339(),
+        message: Some("Starting native screen preview.".to_string()),
+    };
+    PreviewScreenStartingIdentity {
+        source_key,
+        generation: slot.start_generation,
+        layout_intent_id,
+    }
+}
+
+/// Test-only: replace the active screen owner with a same-key new generation
+/// and deterministic frame, returning the new generation identity.
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) async fn test_advance_live_screen_generation(state: &AppState, sequence: u64) -> u64 {
+    let mut slot = state.preview_screen.lock().await;
+    let active = slot.active.as_ref().expect("test live screen");
+    let source = active.source.clone();
+    let ffmpeg_path = active.ffmpeg_path.clone();
+    let video = active.video.clone();
+    let include_cursor = active.include_cursor;
+    let exclude_current_process_windows = active.exclude_current_process_windows;
+    let protected_overlay_window_ids = active.protected_overlay_window_ids.clone();
+    let width = slot.status.width.unwrap_or(video.width).max(1);
+    let height = slot.status.height.unwrap_or(video.height).max(1);
+    let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+    shared.lock().unwrap().frame_store.publish(
+        sequence,
+        width,
+        height,
+        PreviewScreenPixelFormat::Bgra8,
+        Instant::now(),
+        vec![0; width as usize * height as usize * 4],
+    );
+    slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
+    let generation = slot.start_generation;
+    slot.active_generation = Some(generation);
+    slot.status.state = PreviewScreenState::Live;
+    slot.status.frames_captured = sequence;
+    slot.status.sequence = Some(sequence);
+    slot.status.actual_width = Some(width);
+    slot.status.actual_height = Some(height);
+    slot.active = Some(NativeScreenPreviewThread {
+        shared,
+        source,
+        ffmpeg_path,
+        video,
+        include_cursor,
+        exclude_current_process_windows,
+        protected_overlay_window_ids,
+    });
+    generation
 }
 
 pub async fn latest_preview_screen_png(
@@ -1124,19 +2927,76 @@ pub async fn latest_preview_screen_bmp(
 
     let max_width = preview_screen_png_max_width(requested_max_width);
     tokio::task::spawn_blocking(move || {
+        let bytes = latest_preview_screen_bgra_bytes(&frame)?;
         encode_latest_bgra_bmp(
             cursor.as_ref(),
             generation,
             frame.sequence,
             frame.width,
             frame.height,
-            &frame.bytes,
+            bytes.as_ref(),
             max_width,
         )
     })
     .await
     .ok()
     .flatten()
+}
+
+/// Materialize BGRA bytes only for the authenticated latest-frame proof route.
+/// Production macOS capture intentionally leaves `bytes` empty while retaining
+/// the source CVPixelBuffer for zero-copy Metal composition. A one-shot smoke
+/// or fallback poll still needs truthful pixels, so read back that retained
+/// buffer here without changing the capture callback or normal compositor path.
+fn latest_preview_screen_bgra_bytes(
+    frame: &FrameHandle<PreviewScreenPixelFormat>,
+) -> Option<Cow<'_, [u8]>> {
+    let row_bytes = usize::try_from(frame.width).ok()?.checked_mul(4)?;
+    let expected_len = row_bytes.checked_mul(usize::try_from(frame.height).ok()?)?;
+    if frame.bytes.len() >= expected_len {
+        return Some(Cow::Borrowed(&frame.bytes[..expected_len]));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        let pixel_buffer = frame.source_pixel_buffer.as_ref()?.pixel_buffer();
+        let lock_result =
+            unsafe { CVPixelBufferLockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly) };
+        if lock_result != 0 {
+            return None;
+        }
+
+        let copied = (|| {
+            let source_stride = CVPixelBufferGetBytesPerRow(pixel_buffer);
+            if source_stride < row_bytes {
+                return None;
+            }
+            let base_address = CVPixelBufferGetBaseAddress(pixel_buffer);
+            if base_address.is_null() {
+                return None;
+            }
+            let mut bytes = vec![0_u8; expected_len];
+            unsafe {
+                let source = base_address.cast::<u8>();
+                for row in 0..usize::try_from(frame.height).ok()? {
+                    let source_row = source.add(row.checked_mul(source_stride)?);
+                    let target_start = row.checked_mul(row_bytes)?;
+                    let target_end = target_start.checked_add(row_bytes)?;
+                    bytes[target_start..target_end]
+                        .copy_from_slice(std::slice::from_raw_parts(source_row, row_bytes));
+                }
+            }
+            Some(bytes)
+        })();
+
+        unsafe {
+            CVPixelBufferUnlockBaseAddress(pixel_buffer, CVPixelBufferLockFlags::ReadOnly);
+        }
+        copied.map(Cow::Owned)
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 fn encode_preview_screen_png(
@@ -1282,10 +3142,11 @@ fn select_preview_screen_capture_request(
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct SelectedScreenSource {
     source_id: String,
     source_kind: PreviewScreenSourceKind,
+    callback_cadence: ScreenCaptureCallbackCadence,
     display_id: Option<u32>,
     window_id: Option<u32>,
 }
@@ -1307,6 +3168,7 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
             SelectedScreenSource {
                 source_id: window_id,
                 source_kind: PreviewScreenSourceKind::Window,
+                callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                 display_id: None,
                 window_id: Some(native_window_id),
             }
@@ -1318,6 +3180,7 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
             return Some(SelectedScreenSource {
                 source_id: screen_id,
                 source_kind: PreviewScreenSourceKind::Screen,
+                callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
                 display_id: Some(native_display_id),
                 window_id: None,
             });
@@ -1326,6 +3189,7 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
             return Some(SelectedScreenSource {
                 source_id: screen_id,
                 source_kind: PreviewScreenSourceKind::Screen,
+                callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
                 display_id: Some(output_index),
                 window_id: None,
             });
@@ -1334,6 +3198,7 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
             return Some(SelectedScreenSource {
                 source_id: screen_id,
                 source_kind: PreviewScreenSourceKind::Screen,
+                callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
                 display_id: None,
                 window_id: None,
             });
@@ -1442,10 +3307,10 @@ async fn set_screen_status(state: &AppState, status: PreviewScreenStatus) {
         slot.run_id = None;
         slot.source_key = source_key_from_status(&status);
         slot.starting = None;
-    }
-    {
-        let mut diagnostics = state.diagnostics.lock().await;
-        *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
+        slot.starting_layout_intent_id = None;
+        if slot.active.is_none() {
+            slot.active_generation = None;
+        }
     }
     state.emit_event("preview.screen.status", status);
 }
@@ -1454,15 +3319,19 @@ async fn set_screen_status_for_start(
     state: &AppState,
     lease: &PreviewScreenStartLease,
     status: PreviewScreenStatus,
+    recovery_epoch: Option<u64>,
 ) -> bool {
     {
         let mut slot = state.preview_screen.lock().await;
-        if !claim_screen_start(&mut slot, lease) {
+        if !claim_screen_start_if_admitted(state, &mut slot, lease, recovery_epoch) {
             return false;
         }
         slot.status = status.clone();
         slot.run_id = None;
         slot.source_key = source_key_from_status(&status);
+        if slot.active.is_none() {
+            slot.active_generation = None;
+        }
     }
     {
         let mut diagnostics = state.diagnostics.lock().await;
@@ -1472,34 +3341,80 @@ async fn set_screen_status_for_start(
     true
 }
 
-async fn stop_current_screen(state: &AppState) {
-    stop_current_screen_inner(state, true).await;
+async fn screen_start_fallback_status(
+    state: &AppState,
+    lease: &PreviewScreenStartLease,
+    recovery: Option<&PreparedScreenRecoveryAdmission>,
+) -> PreviewScreenStatus {
+    if let Some(recovery) = recovery
+        && !state.capture_recovery_admission_is_current(recovery.epoch)
+    {
+        return retire_superseded_screen_recovery(state, lease, recovery).await;
+    }
+    preview_screen_status(state).await
 }
 
+#[cfg(test)]
 async fn stop_current_screen_for_restart(state: &AppState) {
     stop_current_screen_inner(state, false).await;
 }
 
+#[cfg(test)]
 async fn stop_current_screen_inner(state: &AppState, clear_starting: bool) {
-    let (previous, poll_task) = {
+    let transition_guard = acquire_preview_screen_transition(state).await;
+    let (poll_task, generation, transition) = {
         let mut slot = state.preview_screen.lock().await;
+        let generation = slot.active_generation;
         slot.run_id = None;
+        slot.active_generation = None;
         if clear_starting {
             slot.source_key = None;
             slot.starting = None;
+            slot.starting_layout_intent_id = None;
         }
-        (slot.active.take(), slot.poll_task.take())
+        slot.active = None;
+        let transition = allocate_screen_transition_ticket(&mut slot);
+        (slot.poll_task.take(), generation, transition)
     };
 
     if let Some(task) = poll_task {
         task.abort();
     }
 
-    if let Some(mut previous) = previous {
-        let _ = previous.stop_tx.send(());
-        if let Some(join_handle) = previous.join_handle.take() {
-            let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
-        }
+    let completion = queue_supervised_screen_stop(
+        transition,
+        generation,
+        if clear_starting { "retire" } else { "restart" },
+    );
+    drop(transition_guard);
+    let _ = tokio::time::timeout(SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT, completion).await;
+}
+
+async fn join_screen_capture_thread(
+    join_handle: thread::JoinHandle<()>,
+    generation: Option<u64>,
+    reason: &'static str,
+) {
+    let started_at = Instant::now();
+    // ScreenCaptureKit's completion wait is internally bounded, but the owning
+    // native thread remains the only authority that proves the session released
+    // its source. Do not abandon the join and overlap a replacement session.
+    let _ = tokio::task::spawn_blocking(move || join_handle.join()).await;
+    let elapsed_ms = started_at.elapsed().as_millis() as u64;
+    if elapsed_ms > 2_000 {
+        tracing::warn!(
+            "[capture-generation] source=screen generation={} reason={} stop_join_ms={} target_ms=2000 bounded=false",
+            generation.unwrap_or_default(),
+            reason,
+            elapsed_ms,
+        );
+    } else {
+        tracing::info!(
+            "[capture-generation] source=screen generation={} reason={} stop_join_ms={}",
+            generation.unwrap_or_default(),
+            reason,
+            elapsed_ms,
+        );
     }
 }
 
@@ -1507,28 +3422,107 @@ async fn begin_screen_start(
     state: &AppState,
     start_key: PreviewScreenStartKey,
     status: PreviewScreenStatus,
+    layout_intent_id: Option<u64>,
 ) -> PreviewScreenStartRegistration {
+    // Lock-order invariant for atomic admission: a preview runtime may acquire
+    // the source registry, but code holding the source registry must never wait
+    // for a preview runtime. This is the only await after taking `slot`, and all
+    // observable mutations happen synchronously after both guards are owned.
     let mut slot = state.preview_screen.lock().await;
-    if slot.starting.as_ref() == Some(&start_key) {
-        return PreviewScreenStartRegistration::JoinExisting;
+    if state.process_shutdown_requested() {
+        return PreviewScreenStartRegistration::RejectedShutdown(
+            screen_start_rejected_for_shutdown(slot.status.clone()),
+        );
     }
+    {
+        let _layout_admission = state.lock_layout_source_admission();
+        if layout_intent_id.is_some_and(|intent_id| intent_id < state.latest_layout_intent_id()) {
+            return PreviewScreenStartRegistration::RejectedSuperseded(slot.status.clone());
+        }
+        if slot.starting.as_ref() == Some(&start_key) {
+            let admitted_starting_identity =
+                match (slot.starting_layout_intent_id, layout_intent_id) {
+                    (Some(current_owner), Some(intent_id)) if intent_id >= current_owner => {
+                        slot.starting_layout_intent_id = Some(intent_id);
+                        Some(PreviewScreenStartingIdentity {
+                            source_key: start_key.source_key.clone(),
+                            generation: slot.start_generation,
+                            layout_intent_id: Some(intent_id),
+                        })
+                    }
+                    (Some(_), Some(_)) => None,
+                    (Some(_), None) => {
+                        slot.starting_layout_intent_id = None;
+                        None
+                    }
+                    (None, Some(_)) | (None, None) => None,
+                };
+            return PreviewScreenStartRegistration::JoinExisting {
+                admitted_starting_identity,
+            };
+        }
+    }
+
+    let previous_source_key = slot.source_key.clone();
+    let mut registry = state.source_registry.lock().await;
+    let _layout_admission = state.lock_layout_source_admission();
+    if layout_intent_id.is_some_and(|intent_id| intent_id < state.latest_layout_intent_id()) {
+        return PreviewScreenStartRegistration::RejectedSuperseded(slot.status.clone());
+    }
+    if let Some(reused) = reuse_current_screen_source_locked(&mut slot, &start_key) {
+        registry.acquire(start_key.source_key.clone(), SourceConsumerReason::Preview);
+        registry.set_status(start_key.source_key.clone(), SourceLifecycleStatus::Live);
+        registry.set_identity_confidence(
+            start_key.source_key.clone(),
+            SourceIdentityConfidence::Exact,
+        );
+        drop(registry);
+        drop(slot);
+        state.emit_event("preview.screen.status", reused.clone());
+        return PreviewScreenStartRegistration::Reused(reused);
+    }
+
+    if let Some(previous_source_key) = previous_source_key.as_ref()
+        && previous_source_key != &start_key.source_key
+    {
+        registry.release(previous_source_key, &SourceConsumerReason::Preview);
+    }
+    registry.acquire(start_key.source_key.clone(), SourceConsumerReason::Preview);
+    registry.set_status(
+        start_key.source_key.clone(),
+        SourceLifecycleStatus::Starting,
+    );
+    registry.set_identity_confidence(
+        start_key.source_key.clone(),
+        SourceIdentityConfidence::Exact,
+    );
     slot.start_generation = slot.start_generation.wrapping_add(1).max(1);
+    slot.failed_recovery_retry = None;
     let lease = PreviewScreenStartLease {
         key: start_key.clone(),
         generation: slot.start_generation,
     };
+    let transition = allocate_screen_transition_ticket(&mut slot);
     slot.status = status.clone();
     slot.run_id = None;
     slot.source_key = Some(start_key.source_key.clone());
     slot.starting = Some(start_key);
+    slot.starting_layout_intent_id = layout_intent_id;
+    drop(registry);
+    drop(_layout_admission);
     drop(slot);
 
-    {
-        let mut diagnostics = state.diagnostics.lock().await;
-        *diagnostics = apply_preview_screen_source_stats(diagnostics.clone(), &status);
-    }
+    // Emission is synchronous. The caller queues the detached transition owner
+    // immediately after this return, with no cancellation point in between.
     state.emit_event("preview.screen.status", status);
-    PreviewScreenStartRegistration::Started(lease)
+    PreviewScreenStartRegistration::Started { lease, transition }
+}
+
+fn screen_start_rejected_for_shutdown(mut status: PreviewScreenStatus) -> PreviewScreenStatus {
+    status.updated_at = Utc::now().to_rfc3339();
+    status.message =
+        Some("Screen start rejected because backend shutdown is already in progress.".to_string());
+    status
 }
 
 fn claim_screen_start(slot: &mut PreviewScreenRuntime, lease: &PreviewScreenStartLease) -> bool {
@@ -1536,15 +3530,26 @@ fn claim_screen_start(slot: &mut PreviewScreenRuntime, lease: &PreviewScreenStar
         return false;
     }
     slot.starting = None;
+    slot.starting_layout_intent_id = None;
     true
+}
+
+fn claim_screen_start_if_admitted(
+    state: &AppState,
+    slot: &mut PreviewScreenRuntime,
+    lease: &PreviewScreenStartLease,
+    recovery_epoch: Option<u64>,
+) -> bool {
+    !state.process_shutdown_requested()
+        && recovery_epoch.is_none_or(|epoch| state.capture_recovery_admission_is_current(epoch))
+        && claim_screen_start(slot, lease)
 }
 
 async fn wait_for_screen_start(
     state: &AppState,
     start_key: &PreviewScreenStartKey,
 ) -> PreviewScreenStatus {
-    let timeout =
-        native_screen_preview_thread_startup_timeout().saturating_add(Duration::from_secs(1));
+    let timeout = SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT;
     let started_at = Instant::now();
     loop {
         let (still_starting, status) = {
@@ -1562,6 +3567,7 @@ async fn wait_for_screen_start(
     }
 }
 
+#[cfg(test)]
 async fn current_screen_source_key(state: &AppState) -> Option<SourceKey> {
     state.preview_screen.lock().await.source_key.clone()
 }
@@ -1578,6 +3584,7 @@ async fn acquire_preview_screen_source(
     registry.set_identity_confidence(source_key, confidence);
 }
 
+#[cfg(test)]
 async fn release_current_preview_screen_source(state: &AppState) -> bool {
     let Some(source_key) = current_screen_source_key(state).await else {
         return false;
@@ -1594,22 +3601,20 @@ async fn release_current_preview_screen_source(state: &AppState) -> bool {
         .is_some_and(|entry| !entry.consumers.is_empty())
 }
 
-async fn reuse_current_screen_source(
-    state: &AppState,
-    source_key: &SourceKey,
-    ffmpeg_path: &str,
-    video: &VideoSettings,
-    target_fps: u32,
-    protected_overlay_window_ids: &[u32],
+fn reuse_current_screen_source_locked(
+    slot: &mut PreviewScreenRuntime,
+    start_key: &PreviewScreenStartKey,
 ) -> Option<PreviewScreenStatus> {
-    let mut slot = state.preview_screen.lock().await;
-    if slot.source_key.as_ref() != Some(source_key) {
+    if slot.source_key.as_ref() != Some(&start_key.source_key)
+        || slot.starting.is_some()
+        || slot.status.state != PreviewScreenState::Live
+    {
         return None;
     }
     let can_reuse = slot.active.as_ref().is_some_and(|active| {
-        active.ffmpeg_path == ffmpeg_path
-            && active.video == *video
-            && slot.status.target_fps == target_fps
+        active.ffmpeg_path == start_key.ffmpeg_path
+            && active.video == start_key.video
+            && slot.status.target_fps == start_key.target_fps
     });
     if !can_reuse {
         return None;
@@ -1622,12 +3627,11 @@ async fn reuse_current_screen_source(
     // windows from EVERY capture at the OS level independently of this
     // filter, which is best-effort hygiene. The stored set updates so status
     // stays truthful, and the SCK filter picks it up at the next real start.
-    let ids_changed = slot
-        .active
-        .as_ref()
-        .is_some_and(|active| active.protected_overlay_window_ids != protected_overlay_window_ids);
+    let ids_changed = slot.active.as_ref().is_some_and(|active| {
+        active.protected_overlay_window_ids != start_key.protected_overlay_window_ids
+    });
     if ids_changed && let Some(active) = slot.active.as_mut() {
-        active.protected_overlay_window_ids = protected_overlay_window_ids.to_vec();
+        active.protected_overlay_window_ids = start_key.protected_overlay_window_ids.clone();
     }
     let mut status = slot.status.clone();
     status.updated_at = Utc::now().to_rfc3339();
@@ -1638,7 +3642,44 @@ async fn reuse_current_screen_source(
         "Native screen preview source reused.".to_string()
     });
     slot.status = status.clone();
+    let (include_cursor, exclude_current_process_windows) = slot
+        .active
+        .as_ref()
+        .map(|active| {
+            (
+                active.include_cursor,
+                active.exclude_current_process_windows,
+            )
+        })
+        .unwrap_or((true, false));
+    log_screen_generation(
+        slot.active_generation.unwrap_or(slot.start_generation),
+        "reuse",
+        start_key,
+        include_cursor,
+        exclude_current_process_windows,
+    );
     Some(status)
+}
+
+#[cfg(test)]
+async fn reuse_current_screen_source(
+    state: &AppState,
+    source_key: &SourceKey,
+    ffmpeg_path: &str,
+    video: &VideoSettings,
+    target_fps: u32,
+    protected_overlay_window_ids: &[u32],
+) -> Option<PreviewScreenStatus> {
+    let start_key = PreviewScreenStartKey {
+        source_key: source_key.clone(),
+        ffmpeg_path: ffmpeg_path.to_string(),
+        video: video.clone(),
+        target_fps,
+        protected_overlay_window_ids: protected_overlay_window_ids.to_vec(),
+    };
+    let mut slot = state.preview_screen.lock().await;
+    reuse_current_screen_source_locked(&mut slot, &start_key)
 }
 
 fn screen_shared_snapshot(shared: &Arc<StdMutex<PreviewScreenShared>>) -> ScreenSharedSnapshot {
@@ -3763,6 +5804,1897 @@ mod tests {
         }
     }
 
+    fn starting_screen_status(
+        source_key: &SourceKey,
+        video: &VideoSettings,
+    ) -> PreviewScreenStatus {
+        PreviewScreenStatus {
+            state: PreviewScreenState::Starting,
+            source_id: Some(source_key.id.clone()),
+            source_kind: Some(PreviewScreenSourceKind::Screen),
+            target_fps: video.fps,
+            width: None,
+            height: None,
+            native_width: None,
+            native_height: None,
+            requested_width: None,
+            requested_height: None,
+            actual_width: None,
+            actual_height: None,
+            iosurface_available: None,
+            d3d11_texture_available: None,
+            source_fps: None,
+            frame_age_ms: None,
+            frames_captured: 0,
+            dropped_frames: 0,
+            sequence: None,
+            include_cursor: true,
+            exclude_current_process_windows: false,
+            updated_at: Utc::now().to_rfc3339(),
+            message: Some("Starting native screen preview.".to_string()),
+        }
+    }
+
+    fn test_screen_start_key(
+        source_key: SourceKey,
+        video: &VideoSettings,
+    ) -> PreviewScreenStartKey {
+        PreviewScreenStartKey {
+            source_key,
+            ffmpeg_path: "ffmpeg".to_string(),
+            video: video.clone(),
+            target_fps: video.fps,
+            protected_overlay_window_ids: Vec::new(),
+        }
+    }
+
+    async fn assert_queued_screen_supervisor_survives_owner_transfer(
+        next_layout_intent_id: Option<u64>,
+    ) {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let start_key = test_screen_start_key(source_key.clone(), &video);
+        let blocker = {
+            let mut slot = state.preview_screen.lock().await;
+            allocate_screen_transition_ticket(&mut slot)
+        };
+        state.publish_latest_layout_intent_id(100);
+        let (lease, transition) = match begin_screen_start(
+            &state,
+            start_key.clone(),
+            starting_screen_status(&source_key, &video),
+            Some(100),
+        )
+        .await
+        {
+            PreviewScreenStartRegistration::Started { lease, transition } => (lease, transition),
+            other => panic!("first layout must own the queued screen generation: {other:?}"),
+        };
+        let queued_state = state.clone();
+        let queued_lease = lease.clone();
+        let queued_order = Arc::clone(&transition.order);
+        let queued_ticket = transition.sequence;
+        let (queued_tx, queued_rx) = oneshot::channel();
+        let queued = tokio::spawn(async move {
+            let mut turn = Box::pin(wait_for_screen_transition_turn(
+                &queued_order,
+                queued_ticket,
+            ));
+            assert!(
+                futures_util::poll!(&mut turn).is_pending(),
+                "the blocker ticket must queue the registered screen supervisor"
+            );
+            let _ = queued_tx.send(());
+            turn.await;
+            let turn = PreviewScreenTransitionTurn::new(queued_order, queued_ticket);
+            let result = ensure_registered_preview_screen_start_is_current(
+                &queued_state,
+                &queued_lease,
+                Some(100),
+                None,
+            )
+            .await;
+            drop(turn);
+            result
+        });
+        queued_rx.await.expect("screen supervisor queued");
+
+        {
+            let _layout_admission = state.lock_layout_source_admission();
+            state.publish_latest_layout_intent_id(101);
+        }
+        let transition_guard = acquire_preview_screen_transition(&state).await;
+        let transfer = begin_screen_start(
+            &state,
+            start_key,
+            starting_screen_status(&source_key, &video),
+            next_layout_intent_id,
+        )
+        .await;
+        drop(transition_guard);
+        match next_layout_intent_id {
+            Some(101) => assert!(matches!(
+                transfer,
+                PreviewScreenStartRegistration::JoinExisting {
+                    admitted_starting_identity: Some(_)
+                }
+            )),
+            None => assert!(matches!(
+                transfer,
+                PreviewScreenStartRegistration::JoinExisting {
+                    admitted_starting_identity: None
+                }
+            )),
+            other => panic!("unexpected test owner transfer: {other:?}"),
+        }
+
+        finish_screen_transition_turn(&blocker.order, blocker.sequence);
+        tokio::time::timeout(Duration::from_secs(1), queued)
+            .await
+            .expect("queued screen supervisor must resume")
+            .expect("queued screen supervisor task")
+            .expect("owner transfer must preserve the registered generation");
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.start_generation, lease.generation);
+        assert_eq!(slot.starting.as_ref(), Some(&lease.key));
+        assert_eq!(slot.starting_layout_intent_id, next_layout_intent_id);
+        assert_eq!(
+            slot.transition_order.completed.load(Ordering::Acquire),
+            transition.sequence
+        );
+    }
+
+    /// Deterministic fake-native worker using the production FIFO ticket path.
+    /// The function is synchronous through `tokio::spawn`, matching the
+    /// cancellation-safe registration -> detached-owner production boundary.
+    fn queue_fake_screen_transition(
+        transition: PreviewScreenTransitionTicket,
+        starts: Arc<AtomicU64>,
+        active: Arc<AtomicU64>,
+        max_active: Arc<AtomicU64>,
+        entered: oneshot::Sender<()>,
+        release: oneshot::Receiver<()>,
+    ) -> oneshot::Receiver<()> {
+        let (completion_tx, completion_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            wait_for_screen_transition_turn(&transition.order, transition.sequence).await;
+            starts.fetch_add(1, Ordering::SeqCst);
+            let active_now = active.fetch_add(1, Ordering::SeqCst) + 1;
+            max_active.fetch_max(active_now, Ordering::SeqCst);
+            let _ = entered.send(());
+            let _ = release.await;
+            active.fetch_sub(1, Ordering::SeqCst);
+            finish_screen_transition_turn(&transition.order, transition.sequence);
+            let _ = completion_tx.send(());
+        });
+        completion_rx
+    }
+
+    struct FakeNativeScreenControl {
+        release_tx: std_mpsc::Sender<()>,
+        stop_seen_rx: oneshot::Receiver<()>,
+        exited_rx: oneshot::Receiver<()>,
+    }
+
+    async fn install_blocking_fake_native_screen(
+        state: &AppState,
+        live_sessions: Arc<AtomicU64>,
+        max_live_sessions: Arc<AtomicU64>,
+    ) -> FakeNativeScreenControl {
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let source = SelectedScreenSource {
+            source_id: source_key.id.clone(),
+            source_kind: PreviewScreenSourceKind::Screen,
+            callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+            display_id: Some(5),
+            window_id: None,
+        };
+        let (stop_tx, stop_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (stop_seen_tx, stop_seen_rx) = oneshot::channel();
+        let (exited_tx, exited_rx) = oneshot::channel();
+        let thread_live_sessions = Arc::clone(&live_sessions);
+        let thread_max_live_sessions = Arc::clone(&max_live_sessions);
+        let join_handle = thread::Builder::new()
+            .name("videorc-test-fake-screen".to_string())
+            .spawn(move || {
+                let live = thread_live_sessions.fetch_add(1, Ordering::SeqCst) + 1;
+                thread_max_live_sessions.fetch_max(live, Ordering::SeqCst);
+                let _ = ready_tx.send(());
+                let _ = stop_rx.recv();
+                let _ = stop_seen_tx.send(());
+                let _ = release_rx.recv();
+                thread_live_sessions.fetch_sub(1, Ordering::SeqCst);
+                let _ = exited_tx.send(());
+            })
+            .expect("spawn fake screen native thread");
+        tokio::time::timeout(Duration::from_secs(1), ready_rx)
+            .await
+            .expect("fake native screen readiness deadline")
+            .expect("fake native screen readiness sender");
+
+        let native_supervisor = {
+            let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+            let mut status = starting_screen_status(&source_key, &video);
+            status.state = PreviewScreenState::Live;
+            status.width = Some(video.width);
+            status.height = Some(video.height);
+            status.native_width = Some(video.width);
+            status.native_height = Some(video.height);
+            status.requested_width = Some(video.width);
+            status.requested_height = Some(video.height);
+            status.actual_width = Some(video.width);
+            status.actual_height = Some(video.height);
+            status.frames_captured = 1;
+            status.sequence = Some(1);
+            status.message = Some("Fake native screen live.".to_string());
+            let mut slot = state.preview_screen.lock().await;
+            slot.start_generation = 1;
+            slot.active_generation = Some(1);
+            slot.source_key = Some(source_key);
+            slot.status = status;
+            slot.active = Some(NativeScreenPreviewThread {
+                shared,
+                source,
+                ffmpeg_path: "ffmpeg".to_string(),
+                video,
+                include_cursor: true,
+                exclude_current_process_windows: false,
+                protected_overlay_window_ids: Vec::new(),
+            });
+            Arc::clone(&slot.native_supervisor)
+        };
+        native_supervisor.lock().await.active = Some(OwnedNativeScreenPreviewThread {
+            stop_tx,
+            join_handle: Some(join_handle),
+        });
+
+        FakeNativeScreenControl {
+            release_tx,
+            stop_seen_rx,
+            exited_rx,
+        }
+    }
+
+    async fn install_restartable_screen(
+        state: &AppState,
+        generation: u64,
+        video: &VideoSettings,
+    ) -> (SourceKey, Arc<StdMutex<PreviewScreenShared>>) {
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let source = SelectedScreenSource {
+            source_id: source_key.id.clone(),
+            source_kind: PreviewScreenSourceKind::Screen,
+            callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+            display_id: Some(5),
+            window_id: None,
+        };
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+        let mut slot = state.preview_screen.lock().await;
+        slot.source_key = Some(source_key.clone());
+        slot.start_generation = generation;
+        slot.active_generation = Some(generation);
+        slot.status = PreviewScreenStatus {
+            state: PreviewScreenState::Live,
+            source_id: Some(source_key.id.clone()),
+            source_kind: Some(PreviewScreenSourceKind::Screen),
+            target_fps: video.fps,
+            width: Some(video.width),
+            height: Some(video.height),
+            native_width: Some(video.width),
+            native_height: Some(video.height),
+            requested_width: Some(video.width),
+            requested_height: Some(video.height),
+            actual_width: Some(video.width),
+            actual_height: Some(video.height),
+            iosurface_available: Some(true),
+            d3d11_texture_available: Some(false),
+            source_fps: Some(f64::from(video.fps)),
+            frame_age_ms: Some(1),
+            frames_captured: 1,
+            dropped_frames: 0,
+            sequence: Some(1),
+            include_cursor: true,
+            exclude_current_process_windows: false,
+            updated_at: Utc::now().to_rfc3339(),
+            message: Some("Live".to_string()),
+        };
+        slot.active = Some(NativeScreenPreviewThread {
+            shared: Arc::clone(&shared),
+            source,
+            ffmpeg_path: "/resolved/ffmpeg".to_string(),
+            video: video.clone(),
+            include_cursor: true,
+            exclude_current_process_windows: false,
+            protected_overlay_window_ids: vec![7, 42],
+        });
+        (source_key, shared)
+    }
+
+    #[tokio::test]
+    async fn screen_recovery_evidence_is_bound_to_the_exact_live_generation() {
+        let state = test_state();
+        let video = test_video();
+        let (_source_key, shared) = install_restartable_screen(&state, 5, &video).await;
+        {
+            let mut capture = shared
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            capture.capture_callback_count = 42;
+            capture.frames_captured = 40;
+            capture.frame_store.publish_with_metadata(
+                40,
+                video.width,
+                video.height,
+                PreviewScreenPixelFormat::Bgra8,
+                (),
+                Instant::now(),
+                vec![0; 4],
+            );
+        }
+        let snapshot = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("live screen restart snapshot");
+        let evidence = preview_screen_recovery_evidence(&state, &snapshot)
+            .await
+            .expect("exact generation evidence");
+        assert_eq!(evidence.generation, 5);
+        assert_eq!(evidence.capture_callback_count, 42);
+        assert_eq!(evidence.frame_store_publications, 40);
+        assert_eq!(evidence.latest_sequence, Some(40));
+
+        state.preview_screen.lock().await.active_generation = Some(6);
+        assert!(
+            preview_screen_recovery_evidence(&state, &snapshot)
+                .await
+                .is_none(),
+            "a superseded generation must never lend evidence to recovery"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn screen_recovery_completion_is_not_truncated_by_the_public_command_timeout() {
+        let state = test_state();
+        let video = test_video();
+        let (source_key, _) = install_restartable_screen(&state, 7, &video).await;
+        let generation = test_advance_live_screen_generation(&state, 2).await;
+        let status = preview_screen_status(&state).await;
+        let (completion_tx, completion_rx) = oneshot::channel();
+        let completion_state = state.clone();
+        let completion = tokio::spawn(async move {
+            complete_force_restart_preview_screen(
+                &completion_state,
+                PreviewScreenForceRestartAttempt {
+                    generation,
+                    source_key,
+                    native_startup_ready: None,
+                    completion: completion_rx,
+                },
+            )
+            .await
+        });
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT + Duration::from_secs(1)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !completion.is_finished(),
+            "recovery owns the exact native result until the coordinator watchdog supersedes it"
+        );
+
+        completion_tx
+            .send(status)
+            .expect("complete process-owned recovery transition");
+        assert!(matches!(
+            completion.await.expect("screen recovery waiter"),
+            PreviewScreenForceRestartResult::Restarted {
+                generation: completed_generation,
+                ..
+            } if completed_generation == generation
+        ));
+    }
+
+    #[tokio::test]
+    async fn forced_screen_restart_is_generation_and_key_cas_and_preserves_exact_config() {
+        let state = test_state();
+        let video = test_video();
+        let (source_key, _) = install_restartable_screen(&state, 5, &video).await;
+
+        assert!(
+            reuse_current_screen_source(
+                &state,
+                &source_key,
+                "/resolved/ffmpeg",
+                &video,
+                video.fps,
+                &[7, 42],
+            )
+            .await
+            .is_some(),
+            "the fixture is intentionally eligible for ordinary same-key reuse"
+        );
+        let expected = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("live restart snapshot");
+        assert_eq!(expected.source_key, source_key);
+        assert_eq!(expected.generation, 5);
+        assert_eq!(expected.config.source.display_id, Some(5));
+        assert_eq!(expected.config.video, video);
+        assert_eq!(expected.config.ffmpeg_path, "/resolved/ffmpeg");
+        assert_eq!(expected.config.protected_overlay_window_ids, vec![7, 42]);
+
+        let mut stale_generation = expected.clone();
+        stale_generation.generation = 4;
+        assert!(
+            begin_forced_screen_restart(&state, &stale_generation, None)
+                .await
+                .is_none()
+        );
+        let mut stale_key = expected.clone();
+        stale_key.source_key = SourceKey::window("window:screencapturekit:5");
+        assert!(
+            begin_forced_screen_restart(&state, &stale_key, None)
+                .await
+                .is_none()
+        );
+
+        let prepared = begin_forced_screen_restart(&state, &expected, None)
+            .await
+            .expect("exact snapshot must reserve a forced restart");
+        assert_eq!(prepared.lease.generation, 6);
+        assert_eq!(prepared.lease.key.source_key, source_key);
+        assert_eq!(prepared.source.display_id, Some(5));
+        assert_eq!(prepared.params.video, video);
+        assert_eq!(
+            prepared.params.ffmpeg_path.as_deref(),
+            Some("/resolved/ffmpeg")
+        );
+        assert_eq!(prepared.params.protected_overlay_window_ids, vec![7, 42]);
+        assert!(prepared.include_cursor);
+        assert!(!prepared.exclude_current_process_windows);
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.start_generation, 6);
+        assert_eq!(slot.active_generation, Some(5));
+        assert!(
+            slot.active.is_some(),
+            "CAS alone must not discard the old session"
+        );
+        drop(slot);
+        stop_current_screen_for_restart(&state).await;
+    }
+
+    #[tokio::test]
+    async fn superseded_screen_recovery_before_detach_restores_the_live_predecessor() {
+        let state = test_state();
+        let video = test_video();
+        let (source_key, _) = install_restartable_screen(&state, 5, &video).await;
+        let expected = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("live restart snapshot");
+        let recovery_epoch = 41;
+        state.set_capture_recovery_admission_epoch(recovery_epoch);
+
+        let prepared = begin_forced_screen_restart(&state, &expected, Some(recovery_epoch))
+            .await
+            .expect("exact recovery admission");
+        {
+            let slot = state.preview_screen.lock().await;
+            assert_eq!(slot.status.state, PreviewScreenState::Starting);
+            assert_eq!(slot.active_generation, Some(5));
+            assert!(slot.active.is_some());
+            assert_eq!(
+                slot.failed_recovery_retry
+                    .as_ref()
+                    .map(|retry| retry.generation),
+                Some(6)
+            );
+        }
+
+        state.invalidate_capture_recovery_admission();
+        let status = ensure_registered_preview_screen_start_is_current(
+            &state,
+            &prepared.lease,
+            None,
+            prepared.recovery.as_ref(),
+        )
+        .await
+        .expect_err("revoked recovery must retire before native detach");
+
+        assert_eq!(status.state, PreviewScreenState::Live);
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.status.state, PreviewScreenState::Live);
+        assert_eq!(slot.source_key.as_ref(), Some(&source_key));
+        assert_eq!(slot.active_generation, Some(5));
+        assert!(slot.active.is_some());
+        assert!(slot.starting.is_none());
+        assert!(slot.failed_recovery_retry.is_none());
+    }
+
+    #[tokio::test]
+    async fn superseded_screen_recovery_after_detach_never_starts_a_replacement() {
+        let state = test_state();
+        let video = test_video();
+        install_restartable_screen(&state, 9, &video).await;
+        let expected = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("live restart snapshot");
+        let recovery_epoch = 42;
+        state.set_capture_recovery_admission_epoch(recovery_epoch);
+        let prepared = begin_forced_screen_restart(&state, &expected, Some(recovery_epoch))
+            .await
+            .expect("exact recovery admission");
+
+        detach_screen_runtime_for_native_transition(&state, false).await;
+        state.invalidate_capture_recovery_admission();
+        let status = ensure_registered_preview_screen_start_is_current(
+            &state,
+            &prepared.lease,
+            None,
+            prepared.recovery.as_ref(),
+        )
+        .await
+        .expect_err("revoked recovery must retire after native detach");
+
+        assert_eq!(status.state, PreviewScreenState::SourceMissing);
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("no replacement was started"))
+        );
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.start_generation, 10);
+        assert!(slot.active_generation.is_none());
+        assert!(slot.active.is_none());
+        assert!(slot.starting.is_none());
+        assert!(slot.failed_recovery_retry.is_none());
+    }
+
+    #[tokio::test]
+    async fn failed_screen_recovery_retry_retains_exact_private_config_and_generation() {
+        let state = test_state();
+        let video = test_video();
+        let (source_key, _) = install_restartable_screen(&state, 12, &video).await;
+        let expected = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("live restart snapshot");
+        let first_epoch = 43;
+        state.set_capture_recovery_admission_epoch(first_epoch);
+        let prepared = begin_forced_screen_restart(&state, &expected, Some(first_epoch))
+            .await
+            .expect("exact recovery admission");
+        detach_screen_runtime_for_native_transition(&state, false).await;
+        let failed = failed_status(
+            Some(source_key.id.clone()),
+            Some(PreviewScreenSourceKind::Screen),
+            video.fps,
+            true,
+            false,
+            "synthetic replacement failure".to_string(),
+        );
+        assert!(
+            set_screen_status_for_start(&state, &prepared.lease, failed, Some(first_epoch),).await
+        );
+        assert!(failed_preview_screen_retry_is_current(&state, &source_key, 13).await);
+        assert!(!failed_preview_screen_retry_is_current(&state, &source_key, 12).await);
+
+        let retry_epoch = 44;
+        state.set_capture_recovery_admission_epoch(retry_epoch);
+        let retry = begin_failed_screen_recovery_retry(&state, &source_key, 13, retry_epoch)
+            .await
+            .expect("exact failed generation admits retry");
+        assert_eq!(retry.lease.generation, 14);
+        assert_eq!(retry.source, expected.config.source);
+        assert_eq!(retry.ffmpeg_path, expected.config.ffmpeg_path);
+        assert_eq!(retry.params.video, expected.config.video);
+        assert_eq!(
+            retry.params.protected_overlay_window_ids,
+            expected.config.protected_overlay_window_ids
+        );
+        assert_eq!(retry.include_cursor, expected.config.include_cursor);
+        assert_eq!(
+            retry.exclude_current_process_windows,
+            expected.config.exclude_current_process_windows
+        );
+
+        state.invalidate_capture_recovery_admission();
+        let restored = ensure_registered_preview_screen_start_is_current(
+            &state,
+            &retry.lease,
+            None,
+            retry.recovery.as_ref(),
+        )
+        .await
+        .expect_err("superseded retry must not cross native creation");
+        assert_eq!(restored.state, PreviewScreenState::Failed);
+        assert!(!failed_preview_screen_retry_is_current(&state, &source_key, 14).await);
+    }
+
+    #[tokio::test]
+    async fn public_stop_supersedes_a_reserved_screen_recovery_without_replacement() {
+        let state = test_state();
+        let video = test_video();
+        let (source_key, _) = install_restartable_screen(&state, 20, &video).await;
+        let expected = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("live restart snapshot");
+        let recovery_epoch = 45;
+        state.set_capture_recovery_admission_epoch(recovery_epoch);
+        let prepared = begin_forced_screen_restart(&state, &expected, Some(recovery_epoch))
+            .await
+            .expect("exact recovery admission");
+
+        let transition_guard = acquire_preview_screen_transition(&state).await;
+        let stop = begin_preview_screen_stop_with_transition(&state, transition_guard).await;
+        finish_screen_transition_turn(&prepared.transition.order, prepared.transition.sequence);
+        let stopped = finish_preview_screen_stop(stop).await;
+        assert_eq!(stopped.state, PreviewScreenState::SourceMissing);
+
+        let stale = ensure_registered_preview_screen_start_is_current(
+            &state,
+            &prepared.lease,
+            None,
+            prepared.recovery.as_ref(),
+        )
+        .await
+        .expect_err("operator stop owns the start/stop race");
+        assert_eq!(stale.state, PreviewScreenState::SourceMissing);
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.start_generation, 21);
+        assert!(slot.active.is_none());
+        assert!(slot.active_generation.is_none());
+        assert!(slot.starting.is_none());
+        drop(slot);
+        assert!(!failed_preview_screen_retry_is_current(&state, &source_key, 21).await);
+    }
+
+    #[tokio::test]
+    async fn same_key_new_screen_generation_replaces_source_and_releases_old_owner() {
+        let state = test_state();
+        let video = test_video();
+        let (source_key, old_shared) = install_restartable_screen(&state, 31, &video).await;
+        let old_source = preview_screen_frame_source(&state)
+            .await
+            .expect("old frame source");
+        let expected = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("restart snapshot");
+        let prepared = begin_forced_screen_restart(&state, &expected, None)
+            .await
+            .expect("forced restart reservation");
+        stop_current_screen_for_restart(&state).await;
+        assert_eq!(
+            Arc::strong_count(&old_shared),
+            2,
+            "only test + old reader remain"
+        );
+
+        let new_shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+        {
+            let mut slot = state.preview_screen.lock().await;
+            assert!(claim_screen_start(&mut slot, &prepared.lease));
+            slot.status.state = PreviewScreenState::Live;
+            slot.source_key = Some(source_key);
+            slot.active_generation = Some(prepared.lease.generation);
+            slot.active = Some(NativeScreenPreviewThread {
+                shared: Arc::clone(&new_shared),
+                source: prepared.source,
+                ffmpeg_path: prepared.ffmpeg_path,
+                video: prepared.params.video,
+                include_cursor: prepared.include_cursor,
+                exclude_current_process_windows: prepared.exclude_current_process_windows,
+                protected_overlay_window_ids: prepared.params.protected_overlay_window_ids,
+            });
+        }
+        let new_source = preview_screen_frame_source(&state)
+            .await
+            .expect("new frame source");
+        assert_eq!(old_source.source_key(), new_source.source_key());
+        assert_eq!(old_source.generation(), 31);
+        assert_eq!(new_source.generation(), 32);
+        assert!(!Arc::ptr_eq(&old_source.shared, &new_source.shared));
+
+        drop(old_source);
+        assert_eq!(
+            Arc::strong_count(&old_shared),
+            1,
+            "old reader releases its session owner"
+        );
+    }
+
+    #[tokio::test]
+    async fn public_screen_stop_waits_for_the_capture_transition_gate() {
+        let state = test_state();
+        let gate = Arc::clone(&state.preview_screen.lock().await.transition_gate);
+        let guard = gate.lock_owned().await;
+        let stop_state = state.clone();
+        let stop = tokio::spawn(async move { stop_preview_screen(&stop_state).await });
+        tokio::task::yield_now().await;
+        assert!(
+            !stop.is_finished(),
+            "stop must not cross an active start/restart edge"
+        );
+
+        drop(guard);
+        let status = tokio::time::timeout(Duration::from_secs(1), stop)
+            .await
+            .expect("stop should proceed once transition completes")
+            .expect("stop task");
+        assert_eq!(status.state, PreviewScreenState::SourceMissing);
+    }
+
+    #[tokio::test]
+    async fn graceful_screen_shutdown_forces_release_and_joins_the_native_owner() {
+        let state = test_state();
+        let live_sessions = Arc::new(AtomicU64::new(0));
+        let max_live_sessions = Arc::new(AtomicU64::new(0));
+        let FakeNativeScreenControl {
+            release_tx,
+            stop_seen_rx,
+            exited_rx,
+        } = install_blocking_fake_native_screen(
+            &state,
+            Arc::clone(&live_sessions),
+            Arc::clone(&max_live_sessions),
+        )
+        .await;
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        {
+            let mut registry = state.source_registry.lock().await;
+            registry.acquire(source_key.clone(), SourceConsumerReason::Preview);
+            registry.acquire(source_key, SourceConsumerReason::Recording);
+        }
+
+        let shutdown_state = state.clone();
+        let shutdown = tokio::spawn(async move {
+            shutdown_preview_screen_with_timeout(&shutdown_state, Duration::from_secs(1)).await
+        });
+        tokio::time::timeout(Duration::from_secs(1), stop_seen_rx)
+            .await
+            .expect("graceful shutdown must signal the screen owner")
+            .expect("fake screen stop sender");
+        assert!(
+            !shutdown.is_finished(),
+            "shutdown must retain the screen join until native teardown completes"
+        );
+
+        release_tx.send(()).expect("release shutdown screen join");
+        tokio::time::timeout(Duration::from_secs(1), exited_rx)
+            .await
+            .expect("shutdown screen exit deadline")
+            .expect("shutdown screen exit sender");
+        assert!(
+            shutdown.await.expect("screen shutdown supervisor"),
+            "the graceful shutdown deadline must observe the completed join"
+        );
+        let slot = state.preview_screen.lock().await;
+        assert!(slot.active.is_none());
+        assert!(slot.active_generation.is_none());
+        assert_eq!(slot.status.state, PreviewScreenState::SourceMissing);
+        let native_supervisor = Arc::clone(&slot.native_supervisor);
+        drop(slot);
+        assert!(native_supervisor.lock().await.active.is_none());
+        assert_eq!(live_sessions.load(Ordering::SeqCst), 0);
+        assert_eq!(max_live_sessions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn recovery_startup_budget_waits_for_previous_native_owner_join() {
+        let state = test_state();
+        let live_sessions = Arc::new(AtomicU64::new(0));
+        let max_live_sessions = Arc::new(AtomicU64::new(0));
+        let FakeNativeScreenControl {
+            release_tx,
+            stop_seen_rx,
+            exited_rx,
+        } = install_blocking_fake_native_screen(
+            &state,
+            Arc::clone(&live_sessions),
+            Arc::clone(&max_live_sessions),
+        )
+        .await;
+        let expected = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("fake live screen restart snapshot");
+        let recovery_epoch = 81;
+        state.set_capture_recovery_admission_epoch(recovery_epoch);
+        let mut attempt = admit_force_restart_preview_screen(&state, &expected, recovery_epoch)
+            .await
+            .expect("exact recovery admission");
+
+        tokio::time::timeout(Duration::from_secs(1), stop_seen_rx)
+            .await
+            .expect("recovery must signal the previous screen owner")
+            .expect("fake screen stop sender");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(20),
+                attempt.await_native_startup_ready(),
+            )
+            .await
+            .is_err(),
+            "replacement startup budget must not begin while the old native join is blocked"
+        );
+
+        // Prevent the test transition from starting a real ScreenCaptureKit
+        // owner after the fake predecessor retires.
+        state.invalidate_capture_recovery_admission();
+        release_tx
+            .send(())
+            .expect("release previous native screen owner");
+        tokio::time::timeout(Duration::from_secs(1), exited_rx)
+            .await
+            .expect("previous screen owner exit deadline")
+            .expect("previous screen owner exit sender");
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), attempt.await_native_startup_ready(),)
+                .await
+                .expect("startup readiness follows the completed native join")
+        );
+        assert_eq!(
+            complete_force_restart_preview_screen(&state, attempt).await,
+            PreviewScreenForceRestartResult::RejectedStale
+        );
+        assert_eq!(live_sessions.load(Ordering::SeqCst), 0);
+        assert_eq!(max_live_sessions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn graceful_screen_shutdown_deadline_keeps_slow_join_process_owned() {
+        let state = test_state();
+        let live_sessions = Arc::new(AtomicU64::new(0));
+        let max_live_sessions = Arc::new(AtomicU64::new(0));
+        let FakeNativeScreenControl {
+            release_tx,
+            stop_seen_rx,
+            exited_rx,
+        } = install_blocking_fake_native_screen(
+            &state,
+            Arc::clone(&live_sessions),
+            Arc::clone(&max_live_sessions),
+        )
+        .await;
+
+        let started_at = Instant::now();
+        assert!(
+            !shutdown_preview_screen_with_timeout(&state, Duration::from_millis(20)).await,
+            "a blocked screen join must be reported as continuing"
+        );
+        assert!(started_at.elapsed() < Duration::from_millis(500));
+        tokio::time::timeout(Duration::from_secs(1), stop_seen_rx)
+            .await
+            .expect("bounded shutdown must still signal the screen owner")
+            .expect("fake screen stop sender");
+        {
+            let slot = state.preview_screen.lock().await;
+            assert!(slot.active.is_none());
+            assert!(slot.active_generation.is_none());
+            assert!(
+                slot.status
+                    .message
+                    .as_deref()
+                    .is_some_and(|message| message.contains("exclusively owned"))
+            );
+        }
+
+        release_tx
+            .send(())
+            .expect("release slow graceful screen join");
+        tokio::time::timeout(Duration::from_secs(1), exited_rx)
+            .await
+            .expect("slow graceful screen exit deadline")
+            .expect("slow graceful screen exit sender");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let terminal = {
+                    let slot = state.preview_screen.lock().await;
+                    slot.status.state == PreviewScreenState::SourceMissing
+                        && slot
+                            .status
+                            .message
+                            .as_deref()
+                            .is_some_and(|message| message.contains("stopped"))
+                };
+                if terminal {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("process-owned screen join must finish after deadline return");
+        assert_eq!(live_sessions.load(Ordering::SeqCst), 0);
+        assert_eq!(max_live_sessions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn shutdown_latch_rejects_late_screen_start_and_recovery_without_new_native_generation() {
+        let state = test_state();
+        let live_sessions = Arc::new(AtomicU64::new(0));
+        let max_live_sessions = Arc::new(AtomicU64::new(0));
+        let FakeNativeScreenControl {
+            release_tx,
+            stop_seen_rx,
+            exited_rx,
+        } = install_blocking_fake_native_screen(
+            &state,
+            Arc::clone(&live_sessions),
+            Arc::clone(&max_live_sessions),
+        )
+        .await;
+        let restart = preview_screen_restart_snapshot(&state)
+            .await
+            .expect("fake live screen must expose an exact restart snapshot");
+        let generation = state.preview_screen.lock().await.start_generation;
+
+        assert!(state.request_process_shutdown());
+        let rejected = start_preview_screen(
+            state.clone(),
+            screen_params(Some("screen:screencapturekit:5"), None),
+        )
+        .await;
+        assert!(
+            rejected
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("shutdown"))
+        );
+        assert_eq!(
+            state.preview_screen.lock().await.start_generation,
+            generation
+        );
+        assert_eq!(
+            force_restart_preview_screen(state.clone(), &restart).await,
+            PreviewScreenForceRestartResult::RejectedStale
+        );
+        assert_eq!(
+            state.preview_screen.lock().await.start_generation,
+            generation
+        );
+        assert_eq!(max_live_sessions.load(Ordering::SeqCst), 1);
+
+        let started_at = Instant::now();
+        assert!(
+            !shutdown_preview_screen_with_timeout(&state, Duration::from_millis(20)).await,
+            "the process shutdown drain must stay bounded while the fake driver is blocked"
+        );
+        assert!(started_at.elapsed() < Duration::from_millis(500));
+        tokio::time::timeout(Duration::from_secs(1), stop_seen_rx)
+            .await
+            .expect("shutdown must signal the original screen generation")
+            .expect("fake screen stop sender");
+        assert_eq!(max_live_sessions.load(Ordering::SeqCst), 1);
+
+        release_tx
+            .send(())
+            .expect("release shutdown-latched screen join");
+        tokio::time::timeout(Duration::from_secs(1), exited_rx)
+            .await
+            .expect("shutdown-latched screen exit deadline")
+            .expect("shutdown-latched screen exit sender");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let terminal = {
+                    let slot = state.preview_screen.lock().await;
+                    slot.status.state == PreviewScreenState::SourceMissing
+                        && slot
+                            .status
+                            .message
+                            .as_deref()
+                            .is_some_and(|message| message.contains("stopped"))
+                };
+                if terminal {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("process-owned screen drain must reach terminal state");
+        assert_eq!(live_sessions.load(Ordering::SeqCst), 0);
+        assert_eq!(max_live_sessions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn screen_stop_survives_disposable_caller_runtime_drop_without_overlap() {
+        let state = test_state();
+        let live_sessions = Arc::new(AtomicU64::new(0));
+        let max_live_sessions = Arc::new(AtomicU64::new(0));
+        let FakeNativeScreenControl {
+            release_tx,
+            stop_seen_rx,
+            exited_rx,
+        } = install_blocking_fake_native_screen(
+            &state,
+            Arc::clone(&live_sessions),
+            Arc::clone(&max_live_sessions),
+        )
+        .await;
+
+        let caller_state = state.clone();
+        thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("disposable screen caller runtime");
+            runtime.block_on(async move {
+                let stop = begin_preview_screen_stop(&caller_state).await;
+                drop(stop);
+            });
+        })
+        .join()
+        .expect("disposable screen caller thread");
+
+        tokio::time::timeout(Duration::from_secs(1), stop_seen_rx)
+            .await
+            .expect("process supervisor must outlive the screen caller runtime")
+            .expect("fake screen stop sender");
+        let replacement_ticket = {
+            let mut slot = state.preview_screen.lock().await;
+            allocate_screen_transition_ticket(&mut slot)
+        };
+        let replacement_live = Arc::clone(&live_sessions);
+        let replacement_max = Arc::clone(&max_live_sessions);
+        let (replacement_started_tx, mut replacement_started_rx) = oneshot::channel();
+        let replacement = state.spawn_process_task(async move {
+            wait_for_screen_transition_turn(&replacement_ticket.order, replacement_ticket.sequence)
+                .await;
+            let turn = PreviewScreenTransitionTurn::new(
+                Arc::clone(&replacement_ticket.order),
+                replacement_ticket.sequence,
+            );
+            let supervisor = replacement_ticket.native_supervisor.lock().await;
+            assert!(supervisor.active.is_none());
+            let live = replacement_live.fetch_add(1, Ordering::SeqCst) + 1;
+            replacement_max.fetch_max(live, Ordering::SeqCst);
+            let _ = replacement_started_tx.send(());
+            replacement_live.fetch_sub(1, Ordering::SeqCst);
+            drop(supervisor);
+            drop(turn);
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut replacement_started_rx)
+                .await
+                .is_err(),
+            "runtime drop must not advance the FIFO before the screen join"
+        );
+        assert_eq!(live_sessions.load(Ordering::SeqCst), 1);
+
+        release_tx
+            .send(())
+            .expect("release screen join after caller runtime drop");
+        tokio::time::timeout(Duration::from_secs(1), exited_rx)
+            .await
+            .expect("screen exit after caller runtime drop")
+            .expect("fake screen exit sender");
+        replacement_started_rx
+            .await
+            .expect("replacement starts after old screen joins");
+        replacement.await.expect("replacement screen task");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                let terminal = {
+                    let slot = state.preview_screen.lock().await;
+                    slot.active.is_none()
+                        && slot.active_generation.is_none()
+                        && slot.status.state == PreviewScreenState::SourceMissing
+                };
+                if terminal {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("screen supervisor publishes terminal state");
+        assert_eq!(live_sessions.load(Ordering::SeqCst), 0);
+        assert_eq!(max_live_sessions.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn same_key_start_joins_one_transition_and_one_generation() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let start_key = test_screen_start_key(source_key.clone(), &video);
+        let first = begin_screen_start(
+            &state,
+            start_key.clone(),
+            starting_screen_status(&source_key, &video),
+            None,
+        )
+        .await;
+        let transition = match first {
+            PreviewScreenStartRegistration::Started { lease, transition } => {
+                assert_eq!(lease.generation, 1);
+                transition
+            }
+            PreviewScreenStartRegistration::JoinExisting { .. } => panic!("first start must own"),
+            PreviewScreenStartRegistration::Reused(_) => panic!("first start cannot reuse"),
+            PreviewScreenStartRegistration::RejectedSuperseded(_)
+            | PreviewScreenStartRegistration::RejectedShutdown(_) => {
+                panic!("start cannot be rejected before shutdown")
+            }
+        };
+        assert_eq!(
+            begin_screen_start(
+                &state,
+                start_key,
+                starting_screen_status(&source_key, &video),
+                None,
+            )
+            .await,
+            PreviewScreenStartRegistration::JoinExisting {
+                admitted_starting_identity: None,
+            }
+        );
+
+        let starts = Arc::new(AtomicU64::new(0));
+        let active = Arc::new(AtomicU64::new(0));
+        let max_active = Arc::new(AtomicU64::new(0));
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let completion = queue_fake_screen_transition(
+            transition,
+            Arc::clone(&starts),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+            entered_tx,
+            release_rx,
+        );
+        entered_rx.await.expect("fake native start");
+        release_tx.send(()).expect("release fake native");
+        completion.await.expect("fake transition completion");
+
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.start_generation, 1);
+        assert_eq!(slot.transition_sequence, 1);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn screen_layout_join_transfers_timeout_owner_forward_and_never_backward() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let start_key = test_screen_start_key(source_key.clone(), &video);
+        state.publish_latest_layout_intent_id(100);
+        let (first_lease, first_transition) = match begin_screen_start(
+            &state,
+            start_key.clone(),
+            starting_screen_status(&source_key, &video),
+            Some(100),
+        )
+        .await
+        {
+            PreviewScreenStartRegistration::Started { lease, transition } => (lease, transition),
+            other => panic!("first layout must own a fresh generation: {other:?}"),
+        };
+        let stale_owner = PreviewScreenStartingIdentity {
+            source_key: source_key.clone(),
+            generation: first_lease.generation,
+            layout_intent_id: Some(100),
+        };
+
+        {
+            let _layout_admission = state.lock_layout_source_admission();
+            state.publish_latest_layout_intent_id(101);
+        }
+        let winner = match begin_screen_start(
+            &state,
+            start_key.clone(),
+            starting_screen_status(&source_key, &video),
+            Some(101),
+        )
+        .await
+        {
+            PreviewScreenStartRegistration::JoinExisting {
+                admitted_starting_identity: Some(identity),
+            } => identity,
+            other => panic!("same-key winner must inherit the generation: {other:?}"),
+        };
+        assert_eq!(winner.generation, first_lease.generation);
+        assert_eq!(winner.layout_intent_id, Some(101));
+
+        assert!(matches!(
+            begin_screen_start(
+                &state,
+                start_key,
+                starting_screen_status(&source_key, &video),
+                Some(100),
+            )
+            .await,
+            PreviewScreenStartRegistration::RejectedSuperseded(_)
+        ));
+        assert_eq!(
+            state.preview_screen.lock().await.starting_layout_intent_id,
+            Some(101),
+            "a delayed superseded source task must not steal timeout ownership backward"
+        );
+        let transition_guard = acquire_preview_screen_transition(&state).await;
+        assert!(
+            begin_preview_screen_stop_if_starting_with_transition(
+                &state,
+                transition_guard,
+                &stale_owner,
+            )
+            .await
+            .is_none(),
+            "superseded layout token must stop matching after ownership transfer"
+        );
+
+        finish_screen_transition_turn(&first_transition.order, first_transition.sequence);
+        let transition_guard = acquire_preview_screen_transition(&state).await;
+        let stop = begin_preview_screen_stop_if_starting_with_transition(
+            &state,
+            transition_guard,
+            &winner,
+        )
+        .await
+        .expect("winning layout retains exact timeout cleanup authority");
+        let status = finish_preview_screen_stop(stop).await;
+        assert_ne!(status.state, PreviewScreenState::Starting);
+    }
+
+    #[tokio::test]
+    async fn public_screen_join_revokes_layout_timeout_owner() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let start_key = test_screen_start_key(source_key.clone(), &video);
+        state.publish_latest_layout_intent_id(200);
+        let (lease, transition) = match begin_screen_start(
+            &state,
+            start_key.clone(),
+            starting_screen_status(&source_key, &video),
+            Some(200),
+        )
+        .await
+        {
+            PreviewScreenStartRegistration::Started { lease, transition } => (lease, transition),
+            other => panic!("layout must own a fresh generation: {other:?}"),
+        };
+        let layout_owner = PreviewScreenStartingIdentity {
+            source_key: source_key.clone(),
+            generation: lease.generation,
+            layout_intent_id: Some(200),
+        };
+        {
+            let _layout_admission = state.lock_layout_source_admission();
+            state.publish_latest_layout_intent_id(201);
+        }
+        assert!(matches!(
+            begin_screen_start(
+                &state,
+                start_key,
+                starting_screen_status(&source_key, &video),
+                None,
+            )
+            .await,
+            PreviewScreenStartRegistration::JoinExisting {
+                admitted_starting_identity: None
+            }
+        ));
+        assert_eq!(
+            state.preview_screen.lock().await.starting_layout_intent_id,
+            None
+        );
+        let transition_guard = acquire_preview_screen_transition(&state).await;
+        assert!(
+            begin_preview_screen_stop_if_starting_with_transition(
+                &state,
+                transition_guard,
+                &layout_owner,
+            )
+            .await
+            .is_none(),
+            "layout timeout cannot cancel a public-owned generation"
+        );
+
+        finish_screen_transition_turn(&transition.order, transition.sequence);
+        let stop = begin_preview_screen_stop(&state).await;
+        let status = finish_preview_screen_stop(stop).await;
+        assert_ne!(status.state, PreviewScreenState::Starting);
+    }
+
+    #[tokio::test]
+    async fn queued_screen_supervisor_survives_newer_layout_adoption() {
+        assert_queued_screen_supervisor_survives_owner_transfer(Some(101)).await;
+    }
+
+    #[tokio::test]
+    async fn queued_screen_supervisor_survives_public_owner_transfer() {
+        assert_queued_screen_supervisor_survives_owner_transfer(None).await;
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn screen_stop_response_timeout_does_not_release_source_transition_fence() {
+        let state = test_state();
+        let video = test_video();
+        let blocker = {
+            let mut slot = state.preview_screen.lock().await;
+            allocate_screen_transition_ticket(&mut slot)
+        };
+        test_install_starting_screen_generation(&state, "screen:screencapturekit:5", &video, None)
+            .await;
+        let stop = begin_preview_screen_stop(&state).await;
+        let transition_snapshot = state.source_transition_fence.observe();
+        let response = tokio::spawn(finish_preview_screen_stop(stop));
+
+        tokio::time::advance(SCREEN_TRANSITION_CALLER_WAIT_TIMEOUT + Duration::from_secs(1)).await;
+        let status = response.await.expect("bounded screen stop response task");
+        assert_eq!(status.state, PreviewScreenState::SourceMissing);
+        let mut transition_wait = Box::pin(transition_snapshot.wait());
+        assert!(
+            futures_util::poll!(&mut transition_wait).is_pending(),
+            "caller timeout must not release physical screen transition ownership"
+        );
+
+        finish_screen_transition_turn(&blocker.order, blocker.sequence);
+        transition_wait.await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_same_key_waiter_does_not_cancel_native_owner() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let start_key = test_screen_start_key(source_key.clone(), &video);
+        let transition = match begin_screen_start(
+            &state,
+            start_key.clone(),
+            starting_screen_status(&source_key, &video),
+            None,
+        )
+        .await
+        {
+            PreviewScreenStartRegistration::Started { transition, .. } => transition,
+            PreviewScreenStartRegistration::JoinExisting { .. } => panic!("first start must own"),
+            PreviewScreenStartRegistration::Reused(_) => panic!("first start cannot reuse"),
+            PreviewScreenStartRegistration::RejectedSuperseded(_)
+            | PreviewScreenStartRegistration::RejectedShutdown(_) => {
+                panic!("start cannot be rejected before shutdown")
+            }
+        };
+        assert_eq!(
+            begin_screen_start(
+                &state,
+                start_key.clone(),
+                starting_screen_status(&source_key, &video),
+                None,
+            )
+            .await,
+            PreviewScreenStartRegistration::JoinExisting {
+                admitted_starting_identity: None,
+            }
+        );
+
+        let starts = Arc::new(AtomicU64::new(0));
+        let active = Arc::new(AtomicU64::new(0));
+        let max_active = Arc::new(AtomicU64::new(0));
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let completion = queue_fake_screen_transition(
+            transition,
+            Arc::clone(&starts),
+            Arc::clone(&active),
+            Arc::clone(&max_active),
+            entered_tx,
+            release_rx,
+        );
+        entered_rx.await.expect("fake native start");
+
+        let waiter_state = state.clone();
+        let waiter =
+            tokio::spawn(async move { wait_for_screen_start(&waiter_state, &start_key).await });
+        tokio::task::yield_now().await;
+        waiter.abort();
+        let _ = waiter.await;
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+
+        release_tx.send(()).expect("release fake native");
+        completion
+            .await
+            .expect("owner completes after waiter abort");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn post_admission_owner_abort_cannot_abandon_detached_transition() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        let start_key = test_screen_start_key(source_key.clone(), &video);
+        let starts = Arc::new(AtomicU64::new(0));
+        let active = Arc::new(AtomicU64::new(0));
+        let max_active = Arc::new(AtomicU64::new(0));
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        let (queued_tx, queued_rx) = oneshot::channel();
+        let caller_state = state.clone();
+        let caller_starts = Arc::clone(&starts);
+        let caller_active = Arc::clone(&active);
+        let caller_max_active = Arc::clone(&max_active);
+        let caller = tokio::spawn(async move {
+            let transition = match begin_screen_start(
+                &caller_state,
+                start_key,
+                starting_screen_status(&source_key, &video),
+                None,
+            )
+            .await
+            {
+                PreviewScreenStartRegistration::Started { transition, .. } => transition,
+                PreviewScreenStartRegistration::JoinExisting { .. } => {
+                    panic!("first start must own")
+                }
+                PreviewScreenStartRegistration::Reused(_) => panic!("first start cannot reuse"),
+                PreviewScreenStartRegistration::RejectedSuperseded(_)
+                | PreviewScreenStartRegistration::RejectedShutdown(_) => {
+                    panic!("start cannot be rejected before shutdown")
+                }
+            };
+            // There is intentionally no await between admission returning and
+            // this synchronous spawn. Cancellation can only happen after the
+            // detached owner exists.
+            let completion = queue_fake_screen_transition(
+                transition,
+                caller_starts,
+                caller_active,
+                caller_max_active,
+                entered_tx,
+                release_rx,
+            );
+            let _ = queued_tx.send(());
+            let _ = completion.await;
+        });
+        queued_rx.await.expect("transition queued after admission");
+        entered_rx.await.expect("detached owner entered");
+        caller.abort();
+        let _ = caller.await;
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+
+        release_tx.send(()).expect("release detached owner");
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while active.load(Ordering::SeqCst) != 0
+                || state
+                    .preview_screen
+                    .lock()
+                    .await
+                    .transition_order
+                    .completed
+                    .load(Ordering::SeqCst)
+                    != 1
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("detached owner must finish after caller abort");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(
+            state
+                .preview_screen
+                .lock()
+                .await
+                .transition_order
+                .completed
+                .load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn different_key_screen_layout_rechecks_supersession_after_registry_wait() {
+        let state = test_state();
+        let video = test_video();
+        let current_key = SourceKey::screen("screen:screencapturekit:4");
+        let stale_key = SourceKey::screen("screen:screencapturekit:5");
+        state.publish_latest_layout_intent_id(300);
+        let current_lease = match begin_screen_start(
+            &state,
+            test_screen_start_key(current_key.clone(), &video),
+            starting_screen_status(&current_key, &video),
+            Some(300),
+        )
+        .await
+        {
+            PreviewScreenStartRegistration::Started { lease, .. } => lease,
+            other => panic!("current layout must own a fresh generation: {other:?}"),
+        };
+        let registry_guard = state.source_registry.lock().await;
+        let registry_before = registry_guard.snapshot();
+        let blocked_state = state.clone();
+        let blocked_video = video.clone();
+        let blocked_key = stale_key.clone();
+        let blocked = tokio::spawn(async move {
+            begin_screen_start(
+                &blocked_state,
+                test_screen_start_key(blocked_key.clone(), &blocked_video),
+                starting_screen_status(&blocked_key, &blocked_video),
+                Some(300),
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while state.preview_screen.try_lock().is_ok() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("different-key screen admission must reach the registry wait");
+        {
+            let _layout_admission = state.lock_layout_source_admission();
+            state.publish_latest_layout_intent_id(301);
+        }
+        drop(registry_guard);
+        let stale = blocked.await.expect("blocked screen admission task");
+
+        assert!(matches!(
+            stale,
+            PreviewScreenStartRegistration::RejectedSuperseded(_)
+        ));
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.start_generation, current_lease.generation);
+        assert_eq!(slot.starting.as_ref(), Some(&current_lease.key));
+        assert_eq!(slot.source_key.as_ref(), Some(&current_key));
+        assert_eq!(slot.transition_sequence, 1);
+        drop(slot);
+        assert_eq!(
+            state.source_registry.lock().await.snapshot(),
+            registry_before
+        );
+    }
+
+    #[tokio::test]
+    async fn cancellation_while_waiting_for_registry_admission_leaves_no_preview_consumer_leak() {
+        let state = test_state();
+        let video = test_video();
+        let old_source_key = SourceKey::screen("screen:screencapturekit:4");
+        let new_source_key = SourceKey::screen("screen:screencapturekit:5");
+        let mut old_status = starting_screen_status(&old_source_key, &video);
+        old_status.state = PreviewScreenState::Live;
+        old_status.message = Some("Existing screen session remains live.".to_string());
+        {
+            let mut slot = state.preview_screen.lock().await;
+            slot.source_key = Some(old_source_key.clone());
+            slot.status = old_status.clone();
+            slot.start_generation = 7;
+        }
+
+        let mut registry_guard = state.source_registry.lock().await;
+        registry_guard.acquire(old_source_key.clone(), SourceConsumerReason::Preview);
+        registry_guard.set_status(old_source_key.clone(), SourceLifecycleStatus::Live);
+
+        let caller_state = state.clone();
+        let caller_new_source_key = new_source_key.clone();
+        let caller_video = video.clone();
+        let caller = tokio::spawn(async move {
+            begin_screen_start(
+                &caller_state,
+                test_screen_start_key(caller_new_source_key.clone(), &caller_video),
+                starting_screen_status(&caller_new_source_key, &caller_video),
+                None,
+            )
+            .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                if state.preview_screen.try_lock().is_err() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("start admission must reach the registry boundary");
+        caller.abort();
+        assert!(
+            caller
+                .await
+                .expect_err("admission caller must abort")
+                .is_cancelled()
+        );
+        drop(registry_guard);
+
+        let slot = state.preview_screen.lock().await;
+        assert_eq!(slot.source_key.as_ref(), Some(&old_source_key));
+        assert_eq!(slot.status, old_status);
+        assert_eq!(slot.start_generation, 7);
+        assert!(slot.starting.is_none());
+        assert_eq!(slot.transition_sequence, 0);
+        drop(slot);
+
+        let snapshot = state.source_registry.lock().await.snapshot();
+        let old_entry = snapshot
+            .entries
+            .iter()
+            .find(|entry| entry.key == old_source_key)
+            .expect("old source registry entry");
+        assert_eq!(old_entry.consumers, vec![SourceConsumerReason::Preview]);
+        assert!(
+            snapshot
+                .entries
+                .iter()
+                .all(|entry| entry.key != new_source_key),
+            "a cancelled admission must not register the new Preview consumer"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_native_startup_timeout_stops_and_reaps_owner() {
+        let state = test_state();
+        let transition = {
+            let mut slot = state.preview_screen.lock().await;
+            allocate_screen_transition_ticket(&mut slot)
+        };
+        let active = Arc::new(AtomicU64::new(0));
+        let stops = Arc::new(AtomicU64::new(0));
+        let worker_active = Arc::clone(&active);
+        let worker_stops = Arc::clone(&stops);
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (completion_tx, completion_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            wait_for_screen_transition_turn(&transition.order, transition.sequence).await;
+            worker_active.fetch_add(1, Ordering::SeqCst);
+            let _ = entered_tx.send(());
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), std::future::pending::<()>())
+                    .await
+                    .is_err(),
+                "fake startup readiness must time out"
+            );
+            worker_stops.fetch_add(1, Ordering::SeqCst);
+            worker_active.fetch_sub(1, Ordering::SeqCst);
+            finish_screen_transition_turn(&transition.order, transition.sequence);
+            let _ = completion_tx.send(());
+        });
+
+        entered_rx.await.expect("fake native owner entered");
+        completion_rx.await.expect("timed-out owner reaped");
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            state
+                .preview_screen
+                .lock()
+                .await
+                .transition_order
+                .completed
+                .load(Ordering::SeqCst),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn panic_after_native_spawn_reaps_owner_before_fifo_replacement_starts() {
+        let state = test_state();
+        let video = test_video();
+        let old_source_key = SourceKey::screen("screen:screencapturekit:4");
+        let new_source_key = SourceKey::screen("screen:screencapturekit:5");
+        let lease = PreviewScreenStartLease {
+            key: test_screen_start_key(new_source_key.clone(), &video),
+            generation: 2,
+        };
+        let shared = Arc::new(StdMutex::new(PreviewScreenShared::default()));
+        let (first, second) = {
+            let mut slot = state.preview_screen.lock().await;
+            slot.start_generation = lease.generation;
+            slot.starting = Some(lease.key.clone());
+            slot.source_key = Some(new_source_key.clone());
+            slot.status = starting_screen_status(&new_source_key, &video);
+            slot.active_generation = Some(1);
+            slot.active = Some(NativeScreenPreviewThread {
+                shared,
+                source: SelectedScreenSource {
+                    source_id: old_source_key.id,
+                    source_kind: PreviewScreenSourceKind::Screen,
+                    callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+                    display_id: Some(4),
+                    window_id: None,
+                },
+                ffmpeg_path: "ffmpeg".to_string(),
+                video: video.clone(),
+                include_cursor: true,
+                exclude_current_process_windows: false,
+                protected_overlay_window_ids: Vec::new(),
+            });
+            (
+                allocate_screen_transition_ticket(&mut slot),
+                allocate_screen_transition_ticket(&mut slot),
+            )
+        };
+        let live_sessions = Arc::new(AtomicU64::new(0));
+        let max_live_sessions = Arc::new(AtomicU64::new(0));
+        let thread_live_sessions = Arc::clone(&live_sessions);
+        let thread_max_live_sessions = Arc::clone(&max_live_sessions);
+        let (stop_tx, stop_rx) = std_mpsc::channel();
+        let (release_tx, release_rx) = std_mpsc::channel();
+        let (ready_tx, ready_rx) = oneshot::channel();
+        let (stop_seen_tx, stop_seen_rx) = oneshot::channel();
+        let (exited_tx, exited_rx) = oneshot::channel();
+        let native = thread::spawn(move || {
+            let live = thread_live_sessions.fetch_add(1, Ordering::SeqCst) + 1;
+            thread_max_live_sessions.fetch_max(live, Ordering::SeqCst);
+            let _ = ready_tx.send(());
+            let _ = stop_rx.recv();
+            let _ = stop_seen_tx.send(());
+            let _ = release_rx.recv();
+            thread_live_sessions.fetch_sub(1, Ordering::SeqCst);
+            let _ = exited_tx.send(());
+        });
+        ready_rx.await.expect("fake native screen readiness");
+
+        let first_state = state.clone();
+        let first_lease = lease.clone();
+        let first_task = tokio::spawn(async move {
+            wait_for_screen_transition_turn(&first.order, first.sequence).await;
+            let turn = PreviewScreenTransitionTurn::new(Arc::clone(&first.order), first.sequence);
+            let mut supervisor = first.native_supervisor.lock().await;
+            supervisor.active = Some(OwnedNativeScreenPreviewThread {
+                stop_tx,
+                join_handle: Some(native),
+            });
+            let panicked = std::panic::AssertUnwindSafe(async {
+                panic!("injected panic after native ownership registration");
+            })
+            .catch_unwind()
+            .await;
+            assert!(panicked.is_err());
+            let status = retire_panicked_screen_generation(
+                &first_state,
+                &mut supervisor,
+                &first_lease,
+                failed_status(
+                    Some(first_lease.key.source_key.id.clone()),
+                    Some(PreviewScreenSourceKind::Screen),
+                    first_lease.key.target_fps,
+                    true,
+                    false,
+                    "Injected screen transition panic.".to_string(),
+                ),
+                None,
+            )
+            .await;
+            assert_eq!(status.state, PreviewScreenState::Failed);
+            drop(supervisor);
+            drop(turn);
+        });
+        stop_seen_rx
+            .await
+            .expect("panic cleanup must signal the native owner");
+
+        let second_live_sessions = Arc::clone(&live_sessions);
+        let second_max_live_sessions = Arc::clone(&max_live_sessions);
+        let (second_started_tx, mut second_started_rx) = oneshot::channel();
+        let second_task = tokio::spawn(async move {
+            wait_for_screen_transition_turn(&second.order, second.sequence).await;
+            let turn = PreviewScreenTransitionTurn::new(Arc::clone(&second.order), second.sequence);
+            let supervisor = second.native_supervisor.lock().await;
+            assert!(supervisor.active.is_none());
+            let live = second_live_sessions.fetch_add(1, Ordering::SeqCst) + 1;
+            second_max_live_sessions.fetch_max(live, Ordering::SeqCst);
+            let _ = second_started_tx.send(());
+            second_live_sessions.fetch_sub(1, Ordering::SeqCst);
+            drop(supervisor);
+            drop(turn);
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), &mut second_started_rx)
+                .await
+                .is_err(),
+            "replacement must remain queued until the panicked owner is joined"
+        );
+        assert_eq!(live_sessions.load(Ordering::SeqCst), 1);
+        release_tx
+            .send(())
+            .expect("release fake native screen join");
+        exited_rx.await.expect("fake native screen exit");
+        first_task.await.expect("panic cleanup transition");
+        second_started_rx
+            .await
+            .expect("replacement starts after native join");
+        second_task.await.expect("replacement transition");
+        assert_eq!(live_sessions.load(Ordering::SeqCst), 0);
+        assert_eq!(max_live_sessions.load(Ordering::SeqCst), 1);
+        let slot = state.preview_screen.lock().await;
+        assert!(slot.active.is_none());
+        assert!(slot.active_generation.is_none());
+        assert_eq!(slot.status.state, PreviewScreenState::Failed);
+        drop(slot);
+        assert_eq!(
+            state
+                .preview_screen
+                .lock()
+                .await
+                .transition_order
+                .completed
+                .load(Ordering::SeqCst),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn stuck_join_returns_bounded_and_never_overlaps_next_start() {
+        let state = test_state();
+        let video = test_video();
+        let source_key = SourceKey::screen("screen:screencapturekit:5");
+        {
+            let mut slot = state.preview_screen.lock().await;
+            slot.status = starting_screen_status(&source_key, &video);
+        }
+        let (first, second) = {
+            let mut slot = state.preview_screen.lock().await;
+            (
+                allocate_screen_transition_ticket(&mut slot),
+                allocate_screen_transition_ticket(&mut slot),
+            )
+        };
+        let active = Arc::new(AtomicU64::new(0));
+        let max_active = Arc::new(AtomicU64::new(0));
+        let first_active = Arc::clone(&active);
+        let first_max = Arc::clone(&max_active);
+        let (join_entered_tx, join_entered_rx) = oneshot::channel();
+        let (join_release_tx, join_release_rx) = oneshot::channel();
+        let (first_completion_tx, first_completion_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            wait_for_screen_transition_turn(&first.order, first.sequence).await;
+            let active_now = first_active.fetch_add(1, Ordering::SeqCst) + 1;
+            first_max.fetch_max(active_now, Ordering::SeqCst);
+            let _ = join_entered_tx.send(());
+            let _ = join_release_rx.await;
+            first_active.fetch_sub(1, Ordering::SeqCst);
+            finish_screen_transition_turn(&first.order, first.sequence);
+            let _ = first_completion_tx.send(idle_status(Some("joined".to_string())));
+        });
+
+        let second_active = Arc::clone(&active);
+        let second_max = Arc::clone(&max_active);
+        let (second_started_tx, mut second_started_rx) = oneshot::channel();
+        let (second_completion_tx, second_completion_rx) = oneshot::channel();
+        tokio::spawn(async move {
+            wait_for_screen_transition_turn(&second.order, second.sequence).await;
+            let active_now = second_active.fetch_add(1, Ordering::SeqCst) + 1;
+            second_max.fetch_max(active_now, Ordering::SeqCst);
+            let _ = second_started_tx.send(());
+            second_active.fetch_sub(1, Ordering::SeqCst);
+            finish_screen_transition_turn(&second.order, second.sequence);
+            let _ = second_completion_tx.send(());
+        });
+
+        join_entered_rx.await.expect("fake join became stuck");
+        let started_at = Instant::now();
+        let status = await_screen_transition_completion_with_timeout(
+            &state,
+            first_completion_rx,
+            Duration::from_millis(20),
+        )
+        .await;
+        assert_eq!(status.state, PreviewScreenState::Starting);
+        assert!(started_at.elapsed() < Duration::from_millis(500));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(30), &mut second_started_rx)
+                .await
+                .is_err(),
+            "next native start must remain queued behind the stuck join"
+        );
+        assert_eq!(active.load(Ordering::SeqCst), 1);
+
+        join_release_tx.send(()).expect("release fake join");
+        second_started_rx.await.expect("next start after full join");
+        second_completion_rx
+            .await
+            .expect("second transition complete");
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    }
+
     #[test]
     fn selects_window_source_before_screen_source() {
         let params = screen_params(
@@ -3773,6 +7705,7 @@ mod tests {
         let selected = selected_screen_source(&params).unwrap();
 
         assert_eq!(selected.source_kind, PreviewScreenSourceKind::Window);
+        assert!(selected.callback_cadence.is_authoritative());
         assert_eq!(selected.window_id, Some(42));
         assert_eq!(selected.display_id, None);
     }
@@ -3784,6 +7717,7 @@ mod tests {
         let selected = selected_screen_source(&params).unwrap();
 
         assert_eq!(selected.source_kind, PreviewScreenSourceKind::Screen);
+        assert!(selected.callback_cadence.is_authoritative());
         assert_eq!(selected.display_id, Some(5));
     }
 
@@ -3794,6 +7728,10 @@ mod tests {
         let selected = selected_screen_source(&params).unwrap();
 
         assert_eq!(selected.source_kind, PreviewScreenSourceKind::Screen);
+        assert_eq!(
+            selected.callback_cadence,
+            ScreenCaptureCallbackCadence::DamageDriven
+        );
         assert_eq!(selected.source_id, "screen:dxgi:00000000000003f1:2");
         assert_eq!(selected.display_id, Some(2));
         assert_eq!(
@@ -3809,6 +7747,10 @@ mod tests {
         let selected = selected_screen_source(&params).unwrap();
 
         assert_eq!(selected.source_kind, PreviewScreenSourceKind::Screen);
+        assert_eq!(
+            selected.callback_cadence,
+            ScreenCaptureCallbackCadence::DamageDriven
+        );
         assert_eq!(selected.source_id, "screen:gdigrab:desktop");
         assert_eq!(selected.display_id, None);
         assert_eq!(
@@ -3933,6 +7875,82 @@ mod tests {
             status.message.as_deref(),
             Some("The Videorc Notes window cannot be selected as a capture source.")
         );
+    }
+
+    #[tokio::test]
+    async fn layout_invalid_screen_sources_do_not_mutate_public_start() {
+        let state = test_state();
+        let video = test_video();
+        let public_identity = test_install_starting_screen_generation(
+            &state,
+            "screen:screencapturekit:5",
+            &video,
+            None,
+        )
+        .await;
+        let public_status = state.preview_screen.lock().await.status.clone();
+        let registry_before = state.source_registry.lock().await.snapshot();
+        state.publish_latest_layout_intent_id(400);
+        let missing = screen_params(None, None);
+        let mut protected = screen_params(None, Some("window:screencapturekit:42"));
+        protected.protected_overlay_window_ids = vec![42];
+
+        for params in [missing, protected] {
+            let result = start_preview_screen_with_restart_signal(
+                state.clone(),
+                params,
+                None,
+                Some(400),
+                None,
+            )
+            .await;
+            assert_eq!(result.status.state, PreviewScreenState::SourceMissing);
+            assert!(result.admitted_starting_identity.is_none());
+            let slot = state.preview_screen.lock().await;
+            assert_eq!(
+                screen_starting_identity_from_slot(&slot),
+                Some(public_identity.clone())
+            );
+            assert_eq!(slot.status, public_status);
+            assert_eq!(slot.transition_sequence, 0);
+            drop(slot);
+            assert_eq!(
+                state.source_registry.lock().await.snapshot(),
+                registry_before
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn public_invalid_screen_sources_still_stop_and_publish_missing_status() {
+        let video = test_video();
+        let missing = screen_params(None, None);
+        let mut protected = screen_params(None, Some("window:screencapturekit:42"));
+        protected.protected_overlay_window_ids = vec![42];
+
+        for params in [missing, protected] {
+            let state = test_state();
+            let public_identity = test_install_starting_screen_generation(
+                &state,
+                "screen:screencapturekit:5",
+                &video,
+                None,
+            )
+            .await;
+
+            let status = start_preview_screen(state.clone(), params).await;
+
+            assert_eq!(status.state, PreviewScreenState::SourceMissing);
+            let slot = state.preview_screen.lock().await;
+            assert!(slot.starting.is_none());
+            assert_eq!(slot.status, status);
+            drop(slot);
+            let snapshot = state.source_registry.lock().await.snapshot();
+            assert!(snapshot.entries.iter().all(|entry| {
+                entry.key != public_identity.source_key
+                    || !entry.consumers.contains(&SourceConsumerReason::Preview)
+            }));
+        }
     }
 
     #[test]
@@ -4082,12 +8100,14 @@ mod tests {
         };
 
         assert!(matches!(
-            begin_screen_start(&state, start_key.clone(), starting.clone()).await,
-            PreviewScreenStartRegistration::Started(_)
+            begin_screen_start(&state, start_key.clone(), starting.clone(), None).await,
+            PreviewScreenStartRegistration::Started { .. }
         ));
         assert_eq!(
-            begin_screen_start(&state, start_key.clone(), starting).await,
-            PreviewScreenStartRegistration::JoinExisting
+            begin_screen_start(&state, start_key.clone(), starting, None).await,
+            PreviewScreenStartRegistration::JoinExisting {
+                admitted_starting_identity: None,
+            }
         );
 
         let waiter_state = state.clone();
@@ -4168,9 +8188,16 @@ mod tests {
             message: Some("Starting native screen preview.".to_string()),
         };
 
-        let lease = match begin_screen_start(&state, start_key, starting).await {
-            PreviewScreenStartRegistration::Started(lease) => lease,
-            PreviewScreenStartRegistration::JoinExisting => panic!("first start must own a lease"),
+        let lease = match begin_screen_start(&state, start_key, starting, None).await {
+            PreviewScreenStartRegistration::Started { lease, .. } => lease,
+            PreviewScreenStartRegistration::JoinExisting { .. } => {
+                panic!("first start must own a lease")
+            }
+            PreviewScreenStartRegistration::Reused(_) => panic!("first start cannot reuse"),
+            PreviewScreenStartRegistration::RejectedSuperseded(_)
+            | PreviewScreenStartRegistration::RejectedShutdown(_) => {
+                panic!("start cannot be rejected before shutdown")
+            }
         };
 
         let completion_state = state.clone();
@@ -4275,7 +8302,6 @@ mod tests {
     async fn same_screen_source_reuse_keeps_run_and_status_sequence() {
         let state = test_state();
         let source_key = SourceKey::screen("screen:screencapturekit:5");
-        let (stop_tx, _stop_rx) = std_mpsc::channel();
         let video = test_video();
         {
             let mut slot = state.preview_screen.lock().await;
@@ -4306,12 +8332,21 @@ mod tests {
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some("Live".to_string()),
             };
+            slot.start_generation = 1;
+            slot.active_generation = Some(1);
             slot.active = Some(NativeScreenPreviewThread {
-                stop_tx,
-                join_handle: None,
                 shared: Arc::new(StdMutex::new(PreviewScreenShared::default())),
+                source: SelectedScreenSource {
+                    source_id: source_key.id.clone(),
+                    source_kind: PreviewScreenSourceKind::Screen,
+                    callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+                    display_id: Some(5),
+                    window_id: None,
+                },
                 ffmpeg_path: "ffmpeg".to_string(),
                 video: video.clone(),
+                include_cursor: true,
+                exclude_current_process_windows: true,
                 protected_overlay_window_ids: Vec::new(),
             });
         }
@@ -4347,7 +8382,6 @@ mod tests {
     async fn changed_protected_overlay_windows_reuse_without_restart() {
         let state = test_state();
         let source_key = SourceKey::screen("screen:screencapturekit:5");
-        let (stop_tx, _stop_rx) = std_mpsc::channel();
         let video = test_video();
         {
             let mut slot = state.preview_screen.lock().await;
@@ -4378,12 +8412,21 @@ mod tests {
                 updated_at: Utc::now().to_rfc3339(),
                 message: Some("Live".to_string()),
             };
+            slot.start_generation = 1;
+            slot.active_generation = Some(1);
             slot.active = Some(NativeScreenPreviewThread {
-                stop_tx,
-                join_handle: None,
                 shared: Arc::new(StdMutex::new(PreviewScreenShared::default())),
+                source: SelectedScreenSource {
+                    source_id: source_key.id.clone(),
+                    source_kind: PreviewScreenSourceKind::Screen,
+                    callback_cadence: ScreenCaptureCallbackCadence::Authoritative,
+                    display_id: Some(5),
+                    window_id: None,
+                },
                 ffmpeg_path: "ffmpeg".to_string(),
                 video: video.clone(),
+                include_cursor: true,
+                exclude_current_process_windows: false,
                 protected_overlay_window_ids: vec![42],
             });
         }

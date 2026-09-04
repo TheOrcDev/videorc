@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   BackendRuntimeOwner,
+  backendRuntimeAcceptsBootstrap,
   claimDurableBackendPid,
   classifyOwnedProcessPids,
   requestBackendRuntimeTermination,
@@ -9,6 +10,33 @@ import {
 } from './backend-runtime-owner'
 
 describe('BackendRuntimeOwner', () => {
+  it('rejects a late READY after recording-impossible pre-bootstrap shutdown begins', () => {
+    const owner = new BackendRuntimeOwner<object>()
+    const runtime = owner.start({})
+    owner.recordOwnedPid(runtime, 101)
+
+    owner.beginShutdown(runtime)
+
+    expect(runtime.state).toBe('stopping')
+    expect(backendRuntimeAcceptsBootstrap(runtime)).toBe(false)
+    expect([...runtime.ownedProcessPids]).toEqual([101])
+  })
+
+  it('still accepts READY ownership while quit is provisionally waiting for its receipt', () => {
+    const owner = new BackendRuntimeOwner<object>()
+    const runtime = owner.start({})
+    expect(backendRuntimeAcceptsBootstrap(runtime)).toBe(true)
+
+    owner.beginShutdownReceiptWait(runtime)
+    expect(runtime.state).toBe('awaiting-shutdown-receipt')
+    expect(backendRuntimeAcceptsBootstrap(runtime)).toBe(true)
+    owner.recordOwnedPid(runtime, 202)
+    expect([...runtime.ownedProcessPids]).toEqual([202])
+
+    owner.confirmShutdownReceipt(runtime)
+    expect(backendRuntimeAcceptsBootstrap(runtime)).toBe(false)
+  })
+
   it('retains exact ownership and rejects a replacement after shutdown becomes unconfirmed', () => {
     const owner = new BackendRuntimeOwner<object>()
     const runtime = owner.start({})
@@ -22,6 +50,90 @@ describe('BackendRuntimeOwner', () => {
     expect(runtime.state).toBe('shutdown-unconfirmed')
     expect([...runtime.ownedProcessPids]).toEqual([101, 202])
     expect(() => owner.start({})).toThrow('previous backend runtime is still owned')
+  })
+
+  it('retains the real backend when its dev wrapper exits while a shutdown receipt is pending', () => {
+    const wrapper = { pid: 101 }
+    const owner = new BackendRuntimeOwner<typeof wrapper>()
+    const runtime = owner.start(wrapper)
+    owner.recordOwnedPid(runtime, 101)
+    owner.recordOwnedPid(runtime, 202)
+    owner.beginShutdownReceiptWait(runtime)
+
+    const wrapperClose = settleBackendRuntimeExit(owner, runtime, 101, (pid) => pid === 202)
+
+    expect(wrapperClose).toEqual({
+      completed: false,
+      wasCurrent: true,
+      wasIntentional: true,
+      confirmedDead: [101],
+      stillLive: [202]
+    })
+    expect(runtime.state).toBe('shutdown-unconfirmed')
+    expect(owner.current()).toBe(runtime)
+    expect([...runtime.ownedProcessPids]).toEqual([202])
+  })
+
+  it('keeps an unconfirmed receipt path blocked until the real backend is proven dead', () => {
+    const wrapper = { pid: 101 }
+    const owner = new BackendRuntimeOwner<typeof wrapper>()
+    const runtime = owner.start(wrapper)
+    owner.recordOwnedPid(runtime, 101)
+    owner.recordOwnedPid(runtime, 202)
+    owner.beginShutdownReceiptWait(runtime)
+    settleBackendRuntimeExit(owner, runtime, 101, (pid) => pid === 202)
+    owner.markShutdownUnconfirmed(runtime)
+
+    const stillLive = settleBackendRuntimeExit(owner, runtime, 101, (pid) => pid === 202)
+    expect(stillLive.completed).toBe(false)
+    expect(owner.current()).toBe(runtime)
+
+    const dead = settleBackendRuntimeExit(owner, runtime, undefined, () => false)
+    expect(dead.completed).toBe(true)
+    expect(dead.confirmedDead).toEqual([202])
+    expect(owner.current()).toBeNull()
+  })
+
+  it('uses an exact safe receipt to permit stopping but still waits for real process death', () => {
+    const wrapper = { pid: 101 }
+    const owner = new BackendRuntimeOwner<typeof wrapper>()
+    const runtime = owner.start(wrapper)
+    owner.recordOwnedPid(runtime, 101)
+    owner.recordOwnedPid(runtime, 202)
+    owner.beginShutdownReceiptWait(runtime)
+    settleBackendRuntimeExit(owner, runtime, 101, (pid) => pid === 202)
+
+    owner.confirmShutdownReceipt(runtime)
+    const safe = settleBackendRuntimeExit(owner, runtime, 101, (pid) => pid === 202)
+
+    expect(safe.completed).toBe(false)
+    expect(safe.stillLive).toEqual([202])
+    expect(runtime.state).toBe('shutdown-unconfirmed')
+    expect(owner.current()).toBe(runtime)
+
+    const dead = settleBackendRuntimeExit(owner, runtime, undefined, () => false)
+    expect(dead.completed).toBe(true)
+    expect(dead.confirmedDead).toEqual([202])
+    expect(owner.current()).toBeNull()
+  })
+
+  it('blocks replacement when a dev wrapper crashes before its real backend child', () => {
+    const wrapper = { pid: 101 }
+    const owner = new BackendRuntimeOwner<typeof wrapper>()
+    const runtime = owner.start(wrapper)
+    owner.recordOwnedPid(runtime, 101)
+    owner.recordOwnedPid(runtime, 202)
+
+    const wrapperClose = settleBackendRuntimeExit(owner, runtime, 101, (pid) => pid === 202)
+
+    expect(wrapperClose).toMatchObject({
+      completed: false,
+      wasIntentional: false,
+      confirmedDead: [101],
+      stillLive: [202]
+    })
+    expect(runtime.state).toBe('shutdown-unconfirmed')
+    expect(() => owner.start({ pid: 303 })).toThrow('previous backend runtime is still owned')
   })
 
   it('does not let a late completion from an old runtime clear its replacement', () => {
@@ -163,6 +275,20 @@ describe('BackendRuntimeOwner', () => {
       'Error: operation not permitted',
       'Error: Backend wrapper process 101 rejected SIGKILL.'
     ])
+  })
+
+  it('does not treat wrapper termination as proof for an unauthenticated real child pid', () => {
+    const runtimeProcess = {}
+    const owner = new BackendRuntimeOwner<typeof runtimeProcess>()
+    const runtime = owner.start(runtimeProcess)
+
+    expect(() =>
+      requestBackendRuntimeTermination(runtime, 202, {
+        runtimePid: 101,
+        signalExactPid: () => false,
+        signalRuntimeProcess: () => true
+      })
+    ).toThrow('Backend termination could not be confirmed as requested.')
   })
 })
 

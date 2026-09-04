@@ -40,7 +40,7 @@ import {
 } from 'node:http'
 import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
-import { basename, delimiter, dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
@@ -51,9 +51,20 @@ import {
   ownedProcessLedgerPath,
   ownedProcessStartupLockPath
 } from './backend-owned-processes'
-import { stopBackendProcess, type BackendShutdownResult } from './backend-process-shutdown'
+import { BACKEND_FILE_MUTATION_REQUEST_TIMEOUT_MS } from './backend-admin-timing'
+import {
+  backendShutdownAllowsForceKill,
+  classifyBackendShutdownTarget,
+  handleBackendBeforeQuit,
+  installPersistentBackendShutdownSignalHandlers,
+  stopPreBootstrapBackendProcess,
+  stopBackendProcess,
+  waitForBackendBootstrapOutputDrain,
+  type BackendShutdownResult
+} from './backend-process-shutdown'
 import {
   BackendRuntimeOwner,
+  backendRuntimeAcceptsBootstrap,
   claimDurableBackendPid,
   requestBackendRuntimeTermination,
   settleBackendRuntimeExit,
@@ -130,7 +141,15 @@ import {
   parseMainRecordingStatusEvent
 } from './backend-event-message'
 import { safeConsole } from './safe-console'
-import { parseBackendBootstrap, publicBackendConnectionJson } from './backend-bootstrap'
+import {
+  BACKEND_PROCESS_OWNERSHIP_PREFIX,
+  backendOwnershipLineageMatches,
+  backendReadyMatchesOwnershipMarker,
+  observeBackendOwnershipMarker,
+  parseBackendBootstrap,
+  parseBackendProcessOwnership,
+  publicBackendConnectionJson
+} from './backend-bootstrap'
 import { trashPaths } from './trash-paths'
 import {
   MainResourceCapabilityRegistry,
@@ -295,6 +314,10 @@ import {
   liveCommentsCommandAllowed,
   parseCommentsViewMode
 } from './comments-command-broker'
+import {
+  COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
+  COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS
+} from '../shared/comments-command-timing'
 import { AccountRefreshBroker } from './account-refresh-broker'
 import { reconcileCommentsSendOperation } from '../shared/comments-send-operation'
 import {
@@ -390,6 +413,50 @@ import type {
   ViewerSample
 } from '../shared/backend'
 import { offCohostWindowState } from '../shared/backend'
+
+publishLaunchServicesSmokeOwnership()
+
+function publishLaunchServicesSmokeOwnership(): void {
+  const path = process.env.VIDEORC_SMOKE_APP_OWNERSHIP_PATH?.trim()
+  const token = process.env.VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN?.trim()
+  if (!path && !token) return
+  if (!path || !isAbsolute(path)) {
+    throw new Error('VIDEORC_SMOKE_APP_OWNERSHIP_PATH must be an absolute path.')
+  }
+  if (!token || token.length < 32) {
+    throw new Error('VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN must contain at least 32 characters.')
+  }
+  // The LaunchServices controller cannot infer the new instance's PID from
+  // `open -n -W`. Publish ownership before normal main-process setup so every
+  // timeout/error path can stop this exact process without a broad scan. `wx`
+  // also makes a stale or substituted ownership path fail the smoke app closed.
+  const executablePath = resolve(process.execPath)
+  const bundlePath = launchServicesAppBundlePath(executablePath)
+  writeFileSync(
+    path,
+    JSON.stringify({
+      schemaVersion: 1,
+      appPid: process.pid,
+      executablePath,
+      bundlePath,
+      token
+    }),
+    {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600
+    }
+  )
+}
+
+function launchServicesAppBundlePath(executablePath: string): string {
+  const normalized = resolve(executablePath)
+  const markerIndex = normalized.toLocaleLowerCase('en-US').indexOf('.app/contents/')
+  if (markerIndex === -1) {
+    throw new Error('LaunchServices smoke ownership requires an executable inside a .app bundle.')
+  }
+  return normalized.slice(0, markerIndex + '.app'.length)
+}
 
 let mainWindow: BrowserWindow | null = null
 
@@ -558,8 +625,7 @@ let nativePreviewAppliedProofPollingSuppression: boolean | null = null
 let nativePreviewProofAnimationSuspended: boolean | null = null
 let nativePreviewFramePollingSuppressionSerial = 0
 let backendProcess: ChildProcessWithoutNullStreams | null = null
-let backendQuitComplete = false
-let backendQuitInProgress = false
+const backendQuitState = { complete: false, inProgress: false }
 let backendRestartInProgress: Promise<void> | null = null
 const backendRuntimeOwner = new BackendRuntimeOwner<ChildProcessWithoutNullStreams>()
 type BackendRuntime = OwnedBackendRuntime<ChildProcessWithoutNullStreams>
@@ -896,6 +962,11 @@ const backendLogFile = new RotatingLogFile({
 interface BackendGenerationEvidence {
   startedAtMs: number
   stderrTail: BackendStderrTail
+  ownershipToken: string
+  ownershipMarkerPid?: number
+  authorityEstablished: boolean
+  adminConnection?: BackendConnection
+  durableOwnedProcessPids: Set<number>
 }
 const backendGenerationEvidence = new WeakMap<BackendRuntime, BackendGenerationEvidence>()
 // Keep the detached preview window live while it sits behind the main window.
@@ -7647,6 +7718,7 @@ function recordBackendOwnedProcess(runtime: BackendRuntime, pid: unknown, label:
     persist: () => persistOwnedProcess(pid, label),
     terminate: () => terminateBackendRuntimeAfterOwnershipFailure(runtime, pid)
   })
+  backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids.add(pid)
 }
 
 function terminateBackendRuntimeAfterOwnershipFailure(runtime: BackendRuntime, pid: number): void {
@@ -7656,28 +7728,20 @@ function terminateBackendRuntimeAfterOwnershipFailure(runtime: BackendRuntime, p
   }
   requestBackendRuntimeTermination(runtime, pid, {
     runtimePid: runtime.process.pid,
-    signalExactPid: (exactPid) => {
-      try {
-        process.kill(exactPid, 'SIGKILL')
-        return true
-      } catch (error) {
-        if (processErrorCode(error) === 'ESRCH') {
-          return true
-        }
-        throw error
-      }
-    },
+    // Persistence failed, so no ledger identity can safely authenticate a raw
+    // numeric child PID. Retain it as unconfirmed and signal only the spawned
+    // wrapper through its ChildProcess handle.
+    signalExactPid: () => false,
     signalRuntimeProcess: (child) => child.kill('SIGKILL')
   })
 }
 
-function processErrorCode(error: unknown): string | undefined {
-  return error && typeof error === 'object' && 'code' in error
-    ? (error as { code?: string }).code
-    : undefined
-}
-
-function recordedBackendProcessMayStillBeOwned(pid: number): boolean {
+function recordedBackendProcessMayStillBeOwned(runtime: BackendRuntime, pid: number): boolean {
+  if (!backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids.has(pid)) {
+    // In-memory ownership without a successfully persisted birth identity can
+    // never be disproved by a possibly stale/missing ledger entry.
+    return true
+  }
   try {
     return withProcessRegistryLock(() => processRegistry().probeRecordedOwnership(pid) !== 'gone')
   } catch (error) {
@@ -7689,13 +7753,65 @@ function recordedBackendProcessMayStillBeOwned(pid: number): boolean {
   }
 }
 
+/**
+ * Force-stop only PIDs whose durable birth/executable identity still matches
+ * this runtime. This is permitted before renderer authority exists, or after
+ * an exact capture-finalization receipt. Signal acceptance is not treated as
+ * death; the runtime owner remains blocked until a later identity probe says
+ * every PID is gone.
+ */
+function signalExactlyOwnedBackendProcesses(runtime: BackendRuntime, signal: NodeJS.Signals): void {
+  backendRuntimeOwner.markShutdownUnconfirmed(runtime)
+  const durablePids = backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids
+  for (const pid of runtime.ownedProcessPids) {
+    if (!durablePids?.has(pid)) {
+      continue
+    }
+    let result: ReturnType<OwnedProcessRegistry['signalRecordedOwnership']>
+    try {
+      result = withProcessRegistryLock(() => processRegistry().signalRecordedOwnership(pid, signal))
+    } catch (error) {
+      logBackend(
+        'warn',
+        `Could not revalidate backend process ${pid} for exact termination; retaining ownership: ${errorMessage(error)}`
+      )
+      continue
+    }
+    if (result === 'gone') {
+      runtime.ownedProcessPids.delete(pid)
+      durablePids.delete(pid)
+      removeOwnedProcess(pid)
+    }
+  }
+}
+
+function rejectBackendBootstrapAuthority(runtime: BackendRuntime, reason: string): void {
+  const evidence = backendGenerationEvidence.get(runtime)
+  logBackend('error', `Backend bootstrap authority rejected: ${reason}`)
+  if (!evidence?.authorityEstablished) {
+    backendRuntimeOwner.beginShutdown(runtime)
+    signalExactlyOwnedBackendProcesses(runtime, 'SIGTERM')
+  }
+  if (backendRuntimeOwner.isCurrent(runtime)) {
+    clearBackendConnectionState()
+    sendToWindows('backend:lifecycle', { state: 'lost' })
+  }
+}
+
+function recordBackendRuntimePid(runtime: BackendRuntime, pid: number, parentPid?: number): void {
+  if (!validOwnedProcessPid(pid) || runtime.ownedProcessPids.has(pid)) {
+    return
+  }
+  recordBackendOwnedProcess(runtime, pid, 'videorc-backend')
+  const parent = validProcessPid(parentPid) ? ` parentPid=${parentPid}` : ''
+  logBackend('info', `Backend runtime pid=${pid}${parent}`)
+}
+
 function recordBackendRuntimeProcess(runtime: BackendRuntime, connection: BackendConnection): void {
   if (!validOwnedProcessPid(connection.pid)) {
     return
   }
-  recordBackendOwnedProcess(runtime, connection.pid, 'videorc-backend')
-  const parent = validProcessPid(connection.parentPid) ? ` parentPid=${connection.parentPid}` : ''
-  logBackend('info', `Backend runtime pid=${connection.pid}${parent}`)
+  recordBackendRuntimePid(runtime, connection.pid, connection.parentPid)
 }
 
 function resolveCargoBinary(): string {
@@ -7792,27 +7908,27 @@ function reapStaleBackendProcesses(): boolean {
   return true
 }
 
-function reconcileUnconfirmedBackendRuntime(): boolean {
+function reconcileUnconfirmedBackendRuntime(reportBlocked = true): boolean {
   const runtime = backendRuntimeOwner.current()
   if (!runtime || runtime.state !== 'shutdown-unconfirmed') {
     return runtime === null
   }
 
-  const settlement = settleBackendRuntimeExit(
-    backendRuntimeOwner,
-    runtime,
-    undefined,
-    recordedBackendProcessMayStillBeOwned
+  const settlement = settleBackendRuntimeExit(backendRuntimeOwner, runtime, undefined, (pid) =>
+    recordedBackendProcessMayStillBeOwned(runtime, pid)
   )
   for (const pid of settlement.confirmedDead) {
+    backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids.delete(pid)
     removeOwnedProcess(pid)
   }
   if (!settlement.completed) {
-    logBackend(
-      'error',
-      `Refusing backend startup because generation ${runtime.generation} still owns live or unprobeable pid(s) ${settlement.stillLive.join(', ')}.`
-    )
-    sendToWindows('backend:lifecycle', { state: 'lost' })
+    if (reportBlocked) {
+      logBackend(
+        'error',
+        `Refusing backend startup because generation ${runtime.generation} still owns live or unprobeable pid(s) ${settlement.stillLive.join(', ')}.`
+      )
+      sendToWindows('backend:lifecycle', { state: 'lost' })
+    }
     return false
   }
 
@@ -7847,12 +7963,13 @@ const BACKEND_RESTART_WINDOW_MS = 5 * 60_000
 const BACKEND_STABLE_UPTIME_MS = 60_000
 let backendCrashTimestamps: number[] = []
 let backendRestartTimer: ReturnType<typeof setTimeout> | null = null
+let backendRuntimeReconcileTimer: ReturnType<typeof setTimeout> | null = null
 let backendLastStartAt = 0
 
 /** Returns the restart attempt number, or null when no restart was scheduled
  * (the app is quitting, or the crash budget is exhausted). */
 function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | null): number | null {
-  if (appIsQuitting || backendQuitInProgress || backendQuitComplete) {
+  if (appIsQuitting || backendQuitState.inProgress || backendQuitState.complete) {
     return null
   }
   const now = Date.now()
@@ -7924,10 +8041,37 @@ function recordBackendExit(
   }
 }
 
+function scheduleUnexpectedBackendRuntimeReconciliation(
+  runtime: BackendRuntime,
+  code: number | null,
+  signal: NodeJS.Signals | null
+): void {
+  if (backendRuntimeReconcileTimer || appIsQuitting) {
+    return
+  }
+  const poll = (): void => {
+    backendRuntimeReconcileTimer = null
+    if (backendRuntimeOwner.current() !== runtime) {
+      return
+    }
+    if (!reconcileUnconfirmedBackendRuntime(false)) {
+      backendRuntimeReconcileTimer = setTimeout(poll, 250)
+      return
+    }
+    const attempt = scheduleBackendRestart(code, signal)
+    recordBackendExit(runtime, code, signal, false, attempt)
+  }
+  backendRuntimeReconcileTimer = setTimeout(poll, 250)
+}
+
 function cancelBackendRestart(): void {
   if (backendRestartTimer) {
     clearTimeout(backendRestartTimer)
     backendRestartTimer = null
+  }
+  if (backendRuntimeReconcileTimer) {
+    clearTimeout(backendRuntimeReconcileTimer)
+    backendRuntimeReconcileTimer = null
   }
 }
 
@@ -7948,9 +8092,10 @@ function finalizeBackendRuntimeExit(
     backendRuntimeOwner,
     runtime,
     validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
-    recordedBackendProcessMayStillBeOwned
+    (pid) => recordedBackendProcessMayStillBeOwned(runtime, pid)
   )
   for (const pid of settlement.confirmedDead) {
+    backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids.delete(pid)
     removeOwnedProcess(pid)
   }
   if (settlement.stillLive.length > 0) {
@@ -7960,11 +8105,14 @@ function finalizeBackendRuntimeExit(
     )
   }
   if (!settlement.completed) {
-    if (backendProcess === runtime.process) {
-      backendProcess = null
-    }
+    // Keep the wrapper handle paired with the still-owned real backend. A later
+    // quit/reconciliation must remain an exact target instead of degrading to
+    // the inconsistent (null process, live runtime) state.
     clearBackendConnectionState()
     sendToWindows('backend:lifecycle', { state: 'lost' })
+    if (!settlement.wasIntentional) {
+      scheduleUnexpectedBackendRuntimeReconciliation(runtime, code, signal)
+    }
     return
   }
   if (!settlement.wasCurrent) {
@@ -8007,6 +8155,7 @@ function startBackendWithRegistryLock(): void {
     logBackend('info', `Using bundled FFmpeg from ${ffmpegBinDir}`)
   }
   backendLastStartAt = Date.now()
+  const ownershipToken = randomUUID()
   const child = spawn(command, args, {
     cwd: root,
     env: {
@@ -8029,13 +8178,23 @@ function startBackendWithRegistryLock(): void {
       // check alone misses the dev chain (electron -> cargo -> backend), where
       // killing Electron leaves cargo alive as the backend's parent.
       VIDEORC_SUPERVISOR_PID: String(process.pid),
+      // Cargo is only the development wrapper. The backend publishes this
+      // generation-bound token with its real PID before any fallible startup
+      // work so pre-READY shutdown can retain and reap the exact child.
+      VIDEORC_BACKEND_OWNERSHIP_TOKEN: ownershipToken,
       RUST_LOG: process.env.RUST_LOG ?? 'videorc_backend=info'
     }
   })
   backendProcess = child
   const runtime = backendRuntimeOwner.start(child)
   const stderrTail = new BackendStderrTail()
-  backendGenerationEvidence.set(runtime, { startedAtMs: backendLastStartAt, stderrTail })
+  backendGenerationEvidence.set(runtime, {
+    startedAtMs: backendLastStartAt,
+    stderrTail,
+    ownershipToken,
+    authorityEstablished: false,
+    durableOwnedProcessPids: new Set<number>()
+  })
   logBackend(
     'info',
     `Backend generation ${runtime.generation} spawned as pid ${child.pid ?? 'unknown'}.`
@@ -8571,6 +8730,9 @@ function queueMainPresentReport(status: PreviewSurfaceStatus): void {
     nativePreviewMainLastSkippedSceneRevision: status.nativePreviewMainLastSkippedSceneRevision,
     nativePreviewMainLastSkippedFrameSceneRevision:
       status.nativePreviewMainLastSkippedFrameSceneRevision,
+    nativePreviewIosurfaceImportLiveCount: status.nativePreviewIosurfaceImportLiveCount,
+    nativePreviewIosurfaceImportPeakCount: status.nativePreviewIosurfaceImportPeakCount,
+    nativePreviewIosurfaceImportCeiling: status.nativePreviewIosurfaceImportCeiling,
     message: status.message,
     framePollingSuppressed: status.framePollingSuppressed,
     sourcePixelsPresent: status.sourcePixelsPresent
@@ -8596,7 +8758,7 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
   const lines = `${bufferedText}${text}`.split(/\r?\n/)
   const remaining = lines.pop() ?? ''
 
-  if (!backendRuntimeOwner.isCurrent(runtime) || runtime.state !== 'active') {
+  if (!backendRuntimeOwner.isCurrent(runtime)) {
     return remaining
   }
 
@@ -8606,13 +8768,99 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
       continue
     }
 
+    if (trimmed.startsWith(BACKEND_PROCESS_OWNERSHIP_PREFIX)) {
+      try {
+        const evidence = backendGenerationEvidence.get(runtime)
+        if (!evidence) {
+          throw new Error('Backend generation ownership token is unavailable.')
+        }
+        const ownership = parseBackendProcessOwnership(
+          JSON.parse(trimmed.slice(BACKEND_PROCESS_OWNERSHIP_PREFIX.length)),
+          evidence.ownershipToken
+        )
+        if (!validOwnedProcessPid(ownership.pid)) {
+          throw new Error('Backend ownership marker named a forbidden process.')
+        }
+        // Claim the token-authenticated PID before evaluating advisory lineage.
+        // Cargo may exit and reparent the backend to pid 1 during this exact
+        // race; losing the PID here would lose the only safe cleanup evidence.
+        recordBackendRuntimePid(runtime, ownership.pid, ownership.parentPid)
+        const markerDecision = observeBackendOwnershipMarker(
+          evidence.ownershipMarkerPid,
+          ownership.pid
+        )
+        evidence.ownershipMarkerPid = markerDecision.markerPid
+        const lineageMatches = backendOwnershipLineageMatches({
+          packaged: app.isPackaged,
+          platform: process.platform,
+          wrapperPid: runtime.process.pid,
+          backendPid: ownership.pid,
+          parentPid: ownership.parentPid
+        })
+        if (markerDecision.conflict || !lineageMatches) {
+          rejectBackendBootstrapAuthority(
+            runtime,
+            markerDecision.conflict
+              ? 'multiple real backend PIDs claimed one generation.'
+              : 'the real backend process lineage did not match its spawned wrapper.'
+          )
+          continue
+        }
+        if (!backendRuntimeAcceptsBootstrap(runtime)) {
+          signalExactlyOwnedBackendProcesses(runtime, 'SIGTERM')
+        }
+      } catch {
+        rejectBackendBootstrapAuthority(runtime, 'process ownership could not be authenticated.')
+      }
+      continue
+    }
+
     if (trimmed.startsWith('READY ')) {
       try {
+        const evidence = backendGenerationEvidence.get(runtime)
+        if (!evidence) {
+          throw new Error('Backend generation evidence is unavailable.')
+        }
         const bootstrap = parseBackendBootstrap(JSON.parse(trimmed.slice('READY '.length)))
+        const readyPid = bootstrap.renderer.pid
+        if (!validOwnedProcessPid(readyPid)) {
+          throw new Error('Backend READY omitted a valid process identity.')
+        }
+        if (evidence.ownershipMarkerPid === undefined) {
+          recordBackendRuntimeProcess(runtime, bootstrap.renderer)
+          rejectBackendBootstrapAuthority(
+            runtime,
+            'READY arrived without the authenticated pre-start process marker.'
+          )
+          continue
+        }
+        if (!backendReadyMatchesOwnershipMarker(evidence.ownershipMarkerPid, readyPid)) {
+          recordBackendRuntimeProcess(runtime, bootstrap.renderer)
+          rejectBackendBootstrapAuthority(
+            runtime,
+            'READY process identity did not match the authenticated pre-start marker.'
+          )
+          continue
+        }
+        if (!backendRuntimeAcceptsBootstrap(runtime)) {
+          // READY may race a pre-bootstrap quit. Keep its real PID evidence,
+          // but never publish socket authority after shutdown began.
+          signalExactlyOwnedBackendProcesses(runtime, 'SIGTERM')
+          logBackend('info', 'Backend READY arrived after shutdown began; authority was rejected.')
+          continue
+        }
+        evidence.authorityEstablished = true
+        evidence.adminConnection = bootstrap.admin
         backendConnection = bootstrap.renderer
         backendAdminConnection = bootstrap.admin
         logBackend('info', `Backend ready on ${backendConnection.host}:${backendConnection.port}`)
-        recordBackendRuntimeProcess(runtime, backendConnection)
+        if (runtime.state === 'awaiting-shutdown-receipt') {
+          logBackend(
+            'info',
+            'Backend READY ownership was captured while app quit awaited its shutdown receipt.'
+          )
+          continue
+        }
         if (process.env.VIDEORC_SMOKE_PRINT_BACKEND_READY === '1') {
           // The admin credential is private bootstrap authority. Even debug
           // smoke output receives only the renderer-scoped connection.
@@ -8638,9 +8886,8 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
             sendToWindows('backend:lifecycle', { state: 'running' })
           }
         })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logBackend('error', `Could not parse backend READY line: ${message}`)
+      } catch {
+        rejectBackendBootstrapAuthority(runtime, 'READY could not be authenticated.')
       }
       continue
     }
@@ -9554,7 +9801,10 @@ async function runSmokePreviewMotionCommand(
     const outcome = params.outcome
     const delayMs =
       typeof params.delayMs === 'number' && Number.isFinite(params.delayMs)
-        ? Math.min(12_000, Math.max(0, Math.round(params.delayMs)))
+        ? Math.min(
+            COMMENTS_COMMAND_RELAY_TIMEOUT_MS - 1_000,
+            Math.max(0, Math.round(params.delayMs))
+          )
         : 100
     const reason =
       typeof params.reason === 'string' && params.reason.trim()
@@ -10362,6 +10612,9 @@ function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record
     nativePreviewIosurfaceImports: status.nativePreviewIosurfaceImports,
     nativePreviewIosurfaceInvalidations: status.nativePreviewIosurfaceInvalidations,
     nativePreviewIosurfaceImportFailures: status.nativePreviewIosurfaceImportFailures,
+    nativePreviewIosurfaceImportLiveCount: status.nativePreviewIosurfaceImportLiveCount,
+    nativePreviewIosurfaceImportPeakCount: status.nativePreviewIosurfaceImportPeakCount,
+    nativePreviewIosurfaceImportCeiling: status.nativePreviewIosurfaceImportCeiling,
     nativePreviewPresentedSceneRevision: status.nativePreviewPresentedSceneRevision,
     framePollingSuppressed: status.framePollingSuppressed,
     sourcePixelsPresent: status.sourcePixelsPresent,
@@ -10609,12 +10862,14 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
       if (${JSON.stringify(command)} === 'enable-synthetic-source') {
         await openTab('sources', '[data-videorc-synthetic-source-toggle]');
         const toggle = await waitFor('[data-videorc-synthetic-source-toggle]');
+        if (toggle.getAttribute('aria-checked') === 'true') {
+          await sleep(Number(params.settleMs ?? 600));
+          return { enabled: true, alreadyEnabled: true };
+        }
         if (toggle.disabled) {
           throw new Error('Synthetic source toggle is disabled.');
         }
-        if (toggle.getAttribute('aria-checked') !== 'true') {
-          toggle.click();
-        }
+        toggle.click();
         const deadline = Date.now() + 5000;
         while (Date.now() < deadline) {
           if (toggle.getAttribute('aria-checked') === 'true') {
@@ -10995,18 +11250,163 @@ function inferBackendLogLevel(line: string): BackendLogEvent['level'] {
   return 'info'
 }
 
+async function waitForBackendShutdownConnection(
+  child: ChildProcessWithoutNullStreams,
+  runtime: BackendRuntime
+): Promise<BackendConnection | null> {
+  while (
+    child.exitCode === null &&
+    child.signalCode === null &&
+    backendRuntimeOwner.isCurrent(runtime) &&
+    runtime.state === 'awaiting-shutdown-receipt'
+  ) {
+    if (backendAdminConnection) {
+      return backendAdminConnection
+    }
+    await delay(25)
+  }
+  return backendAdminConnection
+}
+
+async function requestBackendShutdownPreparation(
+  connection: BackendConnection,
+  requestId: string
+): Promise<unknown> {
+  const query = new URLSearchParams({ token: connection.token, requestId })
+  const response = await net.fetch(
+    `http://${connection.host}:${connection.port}/process/shutdown/prepare?${query.toString()}`,
+    { method: 'POST' }
+  )
+  const text = await response.text()
+  let payload: unknown = null
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    // The status below still supplies a stable failure if the backend closed
+    // before a response body could be completed.
+  }
+  if (!response.ok) {
+    const detail =
+      payload &&
+      typeof payload === 'object' &&
+      typeof (payload as { error?: unknown }).error === 'string'
+        ? (payload as { error: string }).error
+        : `HTTP ${response.status}`
+    throw new Error(`Backend shutdown preparation failed: ${detail}`)
+  }
+  return payload
+}
+
 async function stopBackend(): Promise<BackendShutdownResult> {
   destroyNativePreviewSurface()
   smokePreviewMotionServer?.close()
   smokePreviewMotionServer = null
-  const child = backendProcess
-  const runtime = backendRuntimeOwner.current()
-  if (!child || !runtime || runtime.process !== child) {
+  const target = classifyBackendShutdownTarget(backendProcess, backendRuntimeOwner.current())
+  if (target === 'absent') {
     return 'skipped'
   }
+  if (target === 'inconsistent') {
+    throw new Error(
+      'Backend shutdown ownership is inconsistent; app quit remains blocked to protect any active recording.'
+    )
+  }
+  const child = backendProcess as ChildProcessWithoutNullStreams
+  const runtime = backendRuntimeOwner.current() as BackendRuntime
+  const generationEvidence = backendGenerationEvidence.get(runtime)
+  const authorityEstablished = generationEvidence ? generationEvidence.authorityEstablished : true
 
-  backendRuntimeOwner.beginShutdown(runtime)
-  const result = await stopBackendProcess(child)
+  if (!authorityEstablished) {
+    // READY is the first moment any renderer can receive backend authority, so
+    // capture is impossible before it. Move to `stopping` synchronously before
+    // the first await: a racing late READY is then rejected by
+    // backendRuntimeAcceptsBootstrap instead of upgrading this into an unsafe
+    // receipt-free shutdown after capture might have begun.
+    backendRuntimeOwner.beginShutdown(runtime)
+    signalExactlyOwnedBackendProcesses(runtime, 'SIGTERM')
+    logBackend(
+      'info',
+      `Backend generation ${runtime.generation} is quitting before READY; using bounded pre-bootstrap shutdown.`
+    )
+    const result = await stopPreBootstrapBackendProcess(child)
+    if (result === 'timed-out') {
+      clearBackendConnectionState()
+      logBackend(
+        'error',
+        `Backend generation ${runtime.generation} pre-bootstrap graceful shutdown timed out; forcing only identity-matched processes and waiting for exact death.`
+      )
+      sendToWindows('backend:lifecycle', { state: 'lost' })
+      signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+      await waitForBackendBootstrapOutputDrain(child)
+    }
+
+    signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+    finalizeBackendRuntimeExit(runtime, child.exitCode, child.signalCode)
+    while (backendRuntimeOwner.current() === runtime) {
+      signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+      if (reconcileUnconfirmedBackendRuntime(false)) {
+        break
+      }
+      await delay(250)
+    }
+    return result
+  }
+
+  // Arm provisional fail-closed ownership before the first await. In dev,
+  // `cargo run` is only a wrapper; its close event must retain the real backend
+  // PID until an exact finalization receipt arrives or exact death is proven.
+  backendRuntimeOwner.beginShutdownReceiptWait(runtime)
+  const shutdownConnection =
+    generationEvidence?.adminConnection ??
+    backendAdminConnection ??
+    (await waitForBackendShutdownConnection(child, runtime))
+  let shutdownReceipt: unknown
+  let expectedShutdownReceipt: { requestId: string; backendPid: number } | undefined
+  const requestId = randomUUID()
+  const backendPid = shutdownConnection?.pid
+  if (
+    shutdownConnection &&
+    validOwnedProcessPid(backendPid) &&
+    runtime.ownedProcessPids.has(backendPid) &&
+    backendRuntimeOwner.isCurrent(runtime)
+  ) {
+    expectedShutdownReceipt = { requestId, backendPid }
+    try {
+      shutdownReceipt = await requestBackendShutdownPreparation(shutdownConnection, requestId)
+      if (!backendShutdownAllowsForceKill(shutdownReceipt, expectedShutdownReceipt)) {
+        logBackend(
+          'warn',
+          'Backend shutdown preparation returned without an exact generation-bound capture-finalization acknowledgement; forced termination remains disabled.'
+        )
+      }
+    } catch (error) {
+      // No OS signal is safe here: Node maps signals to TerminateProcess on
+      // Windows. The authenticated endpoint wakes the backend shutdown task;
+      // if no exact receipt returns, keep the app alive until the child exits.
+      logBackend(
+        'warn',
+        `Backend capture-finalization acknowledgement was unavailable; waiting without forced termination: ${errorMessageText(error)}`
+      )
+    }
+  } else {
+    logBackend(
+      'warn',
+      'Backend shutdown authority did not match the owned process; waiting without signalling or forced termination.'
+    )
+  }
+  const receiptConfirmed =
+    expectedShutdownReceipt !== undefined &&
+    backendShutdownAllowsForceKill(shutdownReceipt, expectedShutdownReceipt)
+  if (receiptConfirmed) {
+    backendRuntimeOwner.confirmShutdownReceipt(runtime)
+  } else {
+    // A dev `cargo run` wrapper can exit before the real backend. Preserve
+    // exact PID ownership now so wrapper close alone can never unblock Quit.
+    backendRuntimeOwner.markShutdownUnconfirmed(runtime)
+  }
+  const result = await stopBackendProcess(child, {
+    shutdownReceipt,
+    expectedShutdownReceipt
+  })
   if (result === 'timed-out') {
     backendRuntimeOwner.markShutdownUnconfirmed(runtime)
     clearBackendConnectionState()
@@ -11015,10 +11415,21 @@ async function stopBackend(): Promise<BackendShutdownResult> {
       `Backend generation ${runtime.generation} shutdown timed out after SIGKILL; retaining exact ownership and refusing replacement startup.`
     )
     sendToWindows('backend:lifecycle', { state: 'lost' })
-    return result
   }
 
+  if (receiptConfirmed) {
+    signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+  }
   finalizeBackendRuntimeExit(runtime, child.exitCode, child.signalCode)
+  while (backendRuntimeOwner.current() === runtime) {
+    if (receiptConfirmed) {
+      signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+    }
+    if (reconcileUnconfirmedBackendRuntime(false)) {
+      break
+    }
+    await delay(250)
+  }
   return result
 }
 
@@ -11325,10 +11736,14 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
     trashItem: (target) => shell.trashItem(target)
   })
   const failedPaths = [...(operation.blockedPaths ?? []), ...trash.failures]
-  const completion = await requestBackendAdmin<{ deleted: boolean }>('sessions.delete.complete', {
-    operationId,
-    failedPaths
-  })
+  const completion = await requestBackendAdmin<{ deleted: boolean }>(
+    'sessions.delete.complete',
+    {
+      operationId,
+      failedPaths
+    },
+    BACKEND_FILE_MUTATION_REQUEST_TIMEOUT_MS
+  )
   if (completion.deleted) {
     commentsHistoryCache.delete(operation.sessionId)
     const selectedMode = commentsViewSelection.current()
@@ -12263,12 +12678,16 @@ app.whenReady().then(async () => {
       return Promise.reject(new Error('Comments highlight requires a message id.'))
     }
     assertLiveCommentsCommandSession(command.sessionId)
-    return commentsCommandBroker.request(requestId, () => {
-      if (dispatchSmokeCommentHighlight(command)) return true
-      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
-      sendElectronEvent(mainWindow.webContents, 'comments-window:highlight-request', command)
-      return true
-    })
+    return commentsCommandBroker.request(
+      requestId,
+      () => {
+        if (dispatchSmokeCommentHighlight(command)) return true
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:highlight-request', command)
+        return true
+      },
+      COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS
+    )
   })
   secureIpcHandle(
     'comments-window:highlight-result-push',
@@ -12622,14 +13041,13 @@ app.on('window-all-closed', () => {
 })
 
 // Smoke/performance harnesses stop the isolated process group with SIGTERM.
-// Route that through Electron's normal before-quit path so the backend child
-// and its owned-process ledger are cleared before the launcher escalates.
-for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.once(signal, () => {
-    logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
-    app.quit()
-  })
-}
+// Keep these listeners installed for the entire drain: a repeated signal must
+// remain routed through Electron's prevented before-quit path instead of
+// restoring Node's default immediate process termination while export runs.
+installPersistentBackendShutdownSignalHandlers(process, (signal) => {
+  logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
+  app.quit()
+})
 
 app.on('before-quit', (event) => {
   if (smokeAppQuitGuard.shouldPreventQuit()) {
@@ -12641,15 +13059,14 @@ app.on('before-quit', (event) => {
   accountSignInTransactions?.dispose()
   providerOAuthCallbacks?.dispose()
   cancelBackendRestart()
-  if (backendQuitComplete || backendQuitInProgress) {
-    return
-  }
-
-  event.preventDefault()
-  backendQuitInProgress = true
-  void stopBackend().finally(() => {
-    backendQuitComplete = true
-    backendQuitInProgress = false
-    app.quit()
+  handleBackendBeforeQuit(event, backendQuitState, {
+    stopBackend,
+    quit: () => app.quit(),
+    onFailure: (error) => {
+      logBackend(
+        'error',
+        `Backend shutdown could not be confirmed; app quit remains blocked: ${errorMessageText(error)}`
+      )
+    }
   })
 })

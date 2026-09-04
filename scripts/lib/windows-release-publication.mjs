@@ -1,7 +1,6 @@
 import { createHash } from 'node:crypto'
-import { Readable } from 'node:stream'
 
-import { buildSignedS3Request } from './release-upload-s3.mjs'
+import { buildSignedS3Request, createReleaseUploadS3Transport } from './release-upload-s3.mjs'
 import { compareNumericVersions, updateFeedVersionFromYml } from './windows-alpha-release.mjs'
 
 export class WindowsReleasePublicationError extends Error {
@@ -114,74 +113,119 @@ function acceptedUpdaterVersions(releaseIds) {
 
 export async function readRemoteTextObject({
   config,
-  fetchImpl = fetch,
   maxBytes = 2 * 1024 * 1024,
-  objectKey
+  objectKey,
+  transport = null
 }) {
-  const response = await signedFetch({ config, fetchImpl, method: 'GET', objectKey })
-  if (response.status === 404) return null
-  if (!response.ok) {
-    throw new WindowsReleasePublicationError(
-      'remote-read-failed',
-      `Could not read s3://${config.bucket}/${objectKey}: HTTP ${response.status}.`
-    )
-  }
-  const contentLength = Number(response.headers.get('content-length'))
-  if (Number.isFinite(contentLength) && contentLength > maxBytes) {
-    throw new WindowsReleasePublicationError(
-      'remote-read-too-large',
-      `Refusing oversized text object s3://${config.bucket}/${objectKey}.`
-    )
-  }
-  const bytes = new Uint8Array(await response.arrayBuffer())
-  if (bytes.byteLength > maxBytes) {
-    throw new WindowsReleasePublicationError(
-      'remote-read-too-large',
-      `Refusing oversized text object s3://${config.bucket}/${objectKey}.`
-    )
-  }
+  const activeTransport = transport ?? createReleaseUploadS3Transport({ config })
+  const ownsTransport = transport === null
   try {
-    return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
-  } catch {
-    throw new WindowsReleasePublicationError(
-      'remote-read-invalid-text',
-      `Remote text object s3://${config.bucket}/${objectKey} is not valid UTF-8.`
-    )
+    const response = await signedRequest({
+      config,
+      method: 'GET',
+      objectKey,
+      transport: activeTransport
+    })
+    if (response.status === 404) {
+      await discardBody(response.body)
+      return null
+    }
+    if (!response.ok || !response.body) {
+      await discardBody(response.body)
+      throw new WindowsReleasePublicationError(
+        'remote-read-failed',
+        `Could not read s3://${config.bucket}/${objectKey}: HTTP ${response.status}.`
+      )
+    }
+    const contentLength = Number(response.headers.get('content-length'))
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      await discardBody(response.body)
+      throw new WindowsReleasePublicationError(
+        'remote-read-too-large',
+        `Refusing oversized text object s3://${config.bucket}/${objectKey}.`
+      )
+    }
+    const bytes = await readBoundedBody(response.body, maxBytes, objectKey, config)
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } catch {
+      throw new WindowsReleasePublicationError(
+        'remote-read-invalid-text',
+        `Remote text object s3://${config.bucket}/${objectKey} is not valid UTF-8.`
+      )
+    }
+  } finally {
+    if (ownsTransport) activeTransport.close()
   }
 }
 
-export async function inspectRemoteArtifact({ artifact, config, fetchImpl = fetch }) {
-  const response = await signedFetch({
-    config,
-    fetchImpl,
-    method: 'GET',
-    objectKey: artifact.objectKey
-  })
-  if (response.status === 404) return { state: 'missing' }
-  if (!response.ok || !response.body) {
-    throw new WindowsReleasePublicationError(
-      'remote-verification-failed',
-      `Could not verify s3://${config.bucket}/${artifact.objectKey}: HTTP ${response.status}.`
-    )
-  }
+export async function inspectRemoteArtifact({ artifact, config, transport = null }) {
+  const activeTransport = transport ?? createReleaseUploadS3Transport({ config })
+  const ownsTransport = transport === null
+  try {
+    const response = await signedRequest({
+      config,
+      method: 'GET',
+      objectKey: artifact.objectKey,
+      transport: activeTransport
+    })
+    if (response.status === 404) {
+      await discardBody(response.body)
+      return { state: 'missing' }
+    }
+    if (!response.ok || !response.body) {
+      await discardBody(response.body)
+      throw new WindowsReleasePublicationError(
+        'remote-verification-failed',
+        `Could not verify s3://${config.bucket}/${artifact.objectKey}: HTTP ${response.status}.`
+      )
+    }
 
-  const hash = createHash('sha256')
-  let sizeBytes = 0
-  for await (const chunk of Readable.fromWeb(response.body)) {
-    hash.update(chunk)
-    sizeBytes += chunk.byteLength
+    const hash = createHash('sha256')
+    let sizeBytes = 0
+    for await (const chunk of response.body) {
+      hash.update(chunk)
+      sizeBytes += chunk.byteLength
+    }
+    const sha256 = hash.digest('hex')
+    if (sizeBytes !== artifact.sizeBytes || sha256 !== artifact.sha256) {
+      throw new WindowsReleasePublicationError(
+        'remote-artifact-mismatch',
+        `Existing s3://${config.bucket}/${artifact.objectKey} does not match the local SHA-256 and byte size.`
+      )
+    }
+    return { sha256, sizeBytes, state: 'identical' }
+  } finally {
+    if (ownsTransport) activeTransport.close()
   }
-  const sha256 = hash.digest('hex')
-  if (sizeBytes !== artifact.sizeBytes || sha256 !== artifact.sha256) {
-    throw new WindowsReleasePublicationError(
-      'remote-artifact-mismatch',
-      `Existing s3://${config.bucket}/${artifact.objectKey} does not match the local SHA-256 and byte size.`
-    )
-  }
-  return { sha256, sizeBytes, state: 'identical' }
 }
 
-async function signedFetch({ config, fetchImpl, method, objectKey }) {
+async function signedRequest({ config, method, objectKey, transport }) {
   const signed = buildSignedS3Request({ config, method, objectKey })
-  return fetchImpl(signed.url, { headers: signed.headers, method })
+  return await transport.request(signed.url, { headers: signed.headers, method })
+}
+
+async function readBoundedBody(body, maxBytes, objectKey, config) {
+  const chunks = []
+  let sizeBytes = 0
+  for await (const chunk of body) {
+    sizeBytes += chunk.byteLength
+    if (sizeBytes > maxBytes) {
+      throw new WindowsReleasePublicationError(
+        'remote-read-too-large',
+        `Refusing oversized text object s3://${config.bucket}/${objectKey}.`
+      )
+    }
+    chunks.push(Buffer.from(chunk))
+  }
+  return Buffer.concat(chunks)
+}
+
+async function discardBody(body, maximumBytes = 64 * 1024) {
+  if (!body) return
+  let sizeBytes = 0
+  for await (const chunk of body) {
+    sizeBytes += chunk.byteLength
+    if (sizeBytes > maximumBytes) break
+  }
 }

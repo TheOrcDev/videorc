@@ -192,9 +192,23 @@ pub async fn repair_file(state: AppState, params: RepairFileParams) -> Result<Ga
 }
 
 /// Restores a recording from its hidden backup, returning whether a backup was found.
-pub async fn restore_file(params: RepairRestoreParams) -> Result<bool, String> {
+/// Restoration is a recording-file mutation just like repair, so it owns the
+/// maintenance permit that Library deletion cancels and drains before moving
+/// the exact recording into its durable quarantine.
+pub async fn restore_file(state: AppState, params: RepairRestoreParams) -> Result<bool, String> {
     let path = params.path.clone();
+    let _maintenance = match state.ffmpeg_work.try_begin_maintenance() {
+        Ok(permit) => permit,
+        Err(deferral) => {
+            emit_deferred_status(&state, &path, deferral);
+            return Err(deferral.message().to_string());
+        }
+    };
+    let cancel_token = _maintenance.cancel_token();
     tokio::task::spawn_blocking(move || {
+        if cancel_token.is_cancelled() {
+            return Err(MAINTENANCE_CANCELLED.to_string());
+        }
         restore_from_backup(Path::new(&path)).map_err(|error| error.to_string())
     })
     .await

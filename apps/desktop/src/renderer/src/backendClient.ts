@@ -11,6 +11,7 @@ import type {
   BackendRpcParams,
   BackendRpcResult
 } from '../../shared/backend-rpc-contract'
+import { COMMENTS_SEND_TIMING_CONTRACT } from '../../shared/comments-command-timing'
 
 type BackendContractRuntime = typeof import('../../shared/backend-rpc-contract')
 
@@ -74,15 +75,40 @@ export class BackendAbortError extends Error {
 }
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000
+
+// Warm layout mutations intentionally give the backend's ordered command lane,
+// source transition, and first-fresh-frame proof their own bounded windows.
+// Keep this renderer deadline above the complete backend transaction so a
+// valid slow source reports its authoritative success/failure instead of the
+// renderer abandoning the request with an unknown outcome at 30 seconds.
+export const LIVE_LAYOUT_REQUEST_TIMING_CONTRACT = Object.freeze({
+  backendQueueMaxAgeMs: 5_000,
+  sourceTransitionMaxMs: 15_000,
+  firstFrameReadinessMaxMs: 15_000,
+  responseSlackMs: 10_000
+})
+
+const LIVE_LAYOUT_REQUEST_TIMEOUT_MS = Object.values(LIVE_LAYOUT_REQUEST_TIMING_CONTRACT).reduce(
+  (total, durationMs) => total + durationMs,
+  0
+)
+
 const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   'preview.surface.present': 5_000,
   'preview.surface.status': 5_000,
   'compositor.status': 10_000,
   'diagnostics.stats': 10_000,
   // Provider delivery is bounded at 8s. Leave room for the backend to persist
-  // and publish the terminal operation before Main's 15s relay deadline.
-  'liveChat.send': 12_000,
+  // and publish the terminal operation before Studio reconciles and replies.
+  'liveChat.send': COMMENTS_SEND_TIMING_CONTRACT.backendRequestMs,
   'devices.list': 30_000,
+  'scene.layout.apply_live': LIVE_LAYOUT_REQUEST_TIMEOUT_MS,
+  'scene.layout.apply_preview': LIVE_LAYOUT_REQUEST_TIMEOUT_MS,
+  'scene.source.device.switch': LIVE_LAYOUT_REQUEST_TIMEOUT_MS,
+  // Backend file mutations have a 30s outcome-unknown boundary. Leave 15s
+  // for queue admission, response delivery, and authoritative error parsing.
+  'screens.importImage': 45_000,
+  'sessions.delete': 45_000,
   'stream.output.topology.probe': 120_000,
   'session.start': 120_000,
   'session.stop': 120_000,

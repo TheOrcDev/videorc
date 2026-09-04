@@ -12,11 +12,16 @@ use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use uuid::Uuid;
 
+use crate::capture_health::{
+    CaptureHealthCameraEpoch, CaptureHealthCameraProducerSample, CaptureHealthMonitor,
+    CaptureHealthSample, CaptureHealthScreenEpoch, CaptureHealthScreenProducerSample,
+    CaptureHealthTransition,
+};
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 use crate::compositor_synthetic::SyntheticMovingSource;
 use crate::diagnostics::{
     CompositorCpuFrameCounts, CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
-    CompositorSourceImportStats, apply_active_scene_revision,
+    CompositorSourceImportStats, apply_active_scene_revision, apply_capture_health,
     apply_compositor_live_source_fetch_stats, apply_compositor_outside_render_timing_stats,
     apply_compositor_source_import_stats, apply_compositor_stats, apply_compositor_timing_stats,
     apply_runtime_diagnostics_snapshot,
@@ -24,11 +29,13 @@ use crate::diagnostics::{
 use crate::frame_store::{FrameHandle, FrameStore};
 use crate::preview_camera::{
     PreviewCameraFrameInfo, PreviewCameraFrameSource, PreviewCameraPixelFormat,
-    preview_camera_frame_source, try_preview_camera_frame_source,
+    preview_camera_frame_source, preview_camera_recovery_evidence, preview_camera_restart_snapshot,
+    preview_camera_restart_snapshot_is_frameless_zombie, try_preview_camera_frame_source,
 };
 use crate::preview_screen::{
     PreviewScreenFrameInfo, PreviewScreenFrameSource, PreviewScreenPixelFormat,
-    preview_screen_frame_source, try_preview_screen_frame_source,
+    preview_screen_frame_source, preview_screen_recovery_evidence, preview_screen_restart_snapshot,
+    try_preview_screen_frame_source,
 };
 use crate::protocol::{
     BackgroundFit, CameraShape, CompositorBackend, CompositorFramePipelineStatus,
@@ -46,6 +53,7 @@ use crate::scene_geometry::{
     scene_source_render_transform,
 };
 pub use crate::source_mask::SourceMask;
+use crate::source_registry::SourceKey;
 use crate::state::AppState;
 use crate::windows_d3d11_device::{
     DxgiAdapterLuid, WindowsD3d11MediaRole, WindowsD3d11TextureFormat,
@@ -289,6 +297,12 @@ impl CompositorPixelFormat {
 pub struct CompositorRuntime {
     pub status: CompositorStatus,
     scene: Option<CompositorSceneSnapshot>,
+    /// Process-local arrival order for scene updates. External revisions can
+    /// intentionally repeat, so equal-revision prepares need this second
+    /// fence to ensure the latest request wins without rejecting a later
+    /// sequential reload of that same external revision.
+    scene_request_token: u64,
+    pending_scene_request: Option<PendingCompositorSceneRequest>,
     /// Active scene-motion transition: the previous scene's EFFECTIVE
     /// transforms glide toward the committed scene over `duration`. Applied
     /// once per tick at the snapshot choke point in publish_compositor_frame,
@@ -307,6 +321,17 @@ pub struct CompositorRuntime {
     /// compositors deliberately keep this `None`: their canvas is fixed at
     /// session start and must never follow a later preview-window resize.
     preview_render_dimensions: Option<Arc<AtomicU64>>,
+    /// Latest preview-surface lifecycle revision allowed to resize this run.
+    /// Run-id fencing alone is insufficient because several bounds revisions
+    /// intentionally reuse one preview compositor. This second monotonic
+    /// fence prevents delayed old bounds work from overwriting newer pixels.
+    preview_resize_revision: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingCompositorSceneRequest {
+    token: u64,
+    external_revision: u64,
 }
 
 fn pack_render_dimensions(width: u32, height: u32) -> u64 {
@@ -378,6 +403,8 @@ pub struct CompositorAuxiliaryOutput {
 struct CompositorRenderLoopParams {
     run_id: String,
     target_fps: u32,
+    health_event_sequence: Arc<AtomicU64>,
+    health_heartbeat: Arc<AtomicU64>,
     render_dimensions: Arc<AtomicU64>,
     frame_consumer: CompositorFrameConsumer,
     stream_output: Option<CompositorAuxiliaryOutput>,
@@ -501,6 +528,24 @@ struct CompositorLiveSources {
     screen_fetch: LiveSourceFetchState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompositorCameraSourceChange {
+    Adopted {
+        source_key: SourceKey,
+        generation: u64,
+    },
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompositorScreenSourceChange {
+    Adopted {
+        source_key: SourceKey,
+        generation: u64,
+    },
+    Removed,
+}
+
 #[derive(Debug, Clone, Default)]
 struct LiveSourceFetchState {
     consecutive_try_lock_misses: u32,
@@ -622,22 +667,83 @@ impl CompositorLiveSources {
         self
     }
 
-    fn refresh_sources_nonblocking(mut self, state: &AppState) -> Self {
+    fn initial_camera_adoption(&self) -> Option<CompositorCameraSourceChange> {
+        self.camera.as_ref().and_then(|source| {
+            source
+                .source_key()
+                .cloned()
+                .map(|source_key| CompositorCameraSourceChange::Adopted {
+                    source_key,
+                    generation: source.generation(),
+                })
+        })
+    }
+
+    fn initial_screen_adoption(&self) -> Option<CompositorScreenSourceChange> {
+        self.screen.as_ref().and_then(|source| {
+            source
+                .source_key()
+                .cloned()
+                .map(|source_key| CompositorScreenSourceChange::Adopted {
+                    source_key,
+                    generation: source.generation(),
+                })
+        })
+    }
+
+    fn refresh_sources_nonblocking(
+        mut self,
+        state: &AppState,
+    ) -> (
+        Self,
+        Option<CompositorCameraSourceChange>,
+        Option<CompositorScreenSourceChange>,
+    ) {
+        let mut camera_change = None;
+        let mut screen_change = None;
         if let Ok(camera) = try_preview_camera_frame_source(state) {
             if !same_camera_source(self.camera.as_ref(), camera.as_ref()) {
+                let previous_camera_present = self.camera.is_some();
                 self.last_camera_frame = None;
                 self.camera_fetch = LiveSourceFetchState::default();
+                camera_change = camera
+                    .as_ref()
+                    .and_then(|source| {
+                        source.source_key().cloned().map(|source_key| {
+                            CompositorCameraSourceChange::Adopted {
+                                source_key,
+                                generation: source.generation(),
+                            }
+                        })
+                    })
+                    .or_else(|| {
+                        previous_camera_present.then_some(CompositorCameraSourceChange::Removed)
+                    });
             }
             self.camera = camera;
         }
         if let Ok(screen) = try_preview_screen_frame_source(state) {
             if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
+                let previous_screen_present = self.screen.is_some();
                 self.last_screen_frame = None;
                 self.screen_fetch = LiveSourceFetchState::default();
+                screen_change = screen
+                    .as_ref()
+                    .and_then(|source| {
+                        source.source_key().cloned().map(|source_key| {
+                            CompositorScreenSourceChange::Adopted {
+                                source_key,
+                                generation: source.generation(),
+                            }
+                        })
+                    })
+                    .or_else(|| {
+                        previous_screen_present.then_some(CompositorScreenSourceChange::Removed)
+                    });
             }
             self.screen = screen;
         }
-        self
+        (self, camera_change, screen_change)
     }
 
     fn fetch_stats(&self) -> CompositorLiveSourceFetchStats {
@@ -799,6 +905,28 @@ fn same_camera_source(
 ) -> bool {
     previous.and_then(PreviewCameraFrameSource::source_key)
         == next.and_then(PreviewCameraFrameSource::source_key)
+        && previous.map(PreviewCameraFrameSource::generation)
+            == next.map(PreviewCameraFrameSource::generation)
+}
+
+fn camera_source_matches_health_epoch(
+    source: Option<&PreviewCameraFrameSource>,
+    epoch: &CaptureHealthCameraEpoch,
+) -> bool {
+    source.and_then(PreviewCameraFrameSource::source_key) == Some(&epoch.source_key)
+        && source.map(PreviewCameraFrameSource::generation) == Some(epoch.generation)
+}
+
+fn camera_delivery_health_source_present(
+    camera_is_consumed: bool,
+    camera_has_frame: bool,
+    camera_has_credible_target: bool,
+    exact_producer_present: bool,
+    exact_frameless_zombie: bool,
+) -> bool {
+    camera_is_consumed
+        && camera_has_credible_target
+        && (camera_has_frame || (exact_producer_present && exact_frameless_zombie))
 }
 
 fn same_screen_source(
@@ -807,6 +935,25 @@ fn same_screen_source(
 ) -> bool {
     previous.and_then(PreviewScreenFrameSource::source_key)
         == next.and_then(PreviewScreenFrameSource::source_key)
+        && previous.map(PreviewScreenFrameSource::generation)
+            == next.map(PreviewScreenFrameSource::generation)
+}
+
+fn screen_source_matches_health_epoch(
+    source: Option<&PreviewScreenFrameSource>,
+    epoch: &CaptureHealthScreenEpoch,
+) -> bool {
+    source.and_then(PreviewScreenFrameSource::source_key) == Some(&epoch.source_key)
+        && source.map(PreviewScreenFrameSource::generation) == Some(epoch.generation)
+}
+
+fn screen_delivery_health_source_present(
+    screen_is_consumed: bool,
+    screen_has_frame: bool,
+    screen_has_credible_target: bool,
+    exact_producer_present: bool,
+) -> bool {
+    screen_is_consumed && screen_has_frame && screen_has_credible_target && exact_producer_present
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -984,6 +1131,28 @@ struct CompositorImageSource {
     message: Option<String>,
 }
 
+#[derive(Debug)]
+struct CompositorImagePreparation {
+    role: CompositorImagePreparationRole,
+    cache_key: String,
+    image_path: String,
+    cached: Option<CompositorImageSource>,
+    read_error_prefix: &'static str,
+    missing_message: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompositorImagePreparationRole {
+    ActiveScreen,
+    Background,
+}
+
+#[derive(Debug, Default)]
+struct PreparedCompositorSceneImages {
+    active_screen: Option<(String, CompositorImageSource)>,
+    background: Option<(String, CompositorImageSource)>,
+}
+
 impl CompositorImageSource {
     fn decoded_bytes(&self) -> usize {
         self.rgba
@@ -1042,6 +1211,13 @@ impl CompositorImageCache {
 
     fn get(&self, key: &str) -> Option<&CompositorImageSource> {
         self.entries.get(key).map(|entry| &entry.source)
+    }
+
+    fn source_for_path(&self, key: &str, image_path: &str) -> Option<CompositorImageSource> {
+        self.entries
+            .get(key)
+            .filter(|entry| entry.source.image_path == image_path)
+            .map(|entry| entry.source.clone())
     }
 
     #[cfg(test)]
@@ -1185,6 +1361,8 @@ pub fn initial_compositor_state() -> CompositorRuntime {
     CompositorRuntime {
         status: stopped_status(Some("Compositor is not running.".to_string())),
         scene: None,
+        scene_request_token: 0,
+        pending_scene_request: None,
         scene_transition: None,
         image_sources: CompositorImageCache::new(
             COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES,
@@ -1198,6 +1376,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         render_task: None,
         worker_activity: Arc::new(CompositorWorkerActivity::default()),
         preview_render_dimensions: None,
+        preview_resize_revision: None,
     }
 }
 
@@ -1209,10 +1388,9 @@ pub async fn start_synthetic_compositor(
     start_synthetic_compositor_with_lifecycle(&state, params).await
 }
 
-/// Starts a compositor only when no newer owner has installed a run. This is
-/// used when restoring a preview compositor after a native D3D11 recording:
-/// restoration must never stop or replace a compositor created meanwhile.
-#[cfg(any(target_os = "windows", test))]
+/// Starts a compositor only when no newer owner has installed a run. Preview
+/// lifecycle reconciliation and native D3D11 restoration use this so neither
+/// can stop or replace a compositor created meanwhile.
 pub async fn start_synthetic_compositor_if_idle(
     state: AppState,
     params: CompositorStartParams,
@@ -1246,6 +1424,9 @@ async fn start_synthetic_compositor_with_lifecycle(
     };
     let run_id = Uuid::new_v4().to_string();
     let target_fps = params.target_fps.clamp(30, 120);
+    let health_event_sequence = Arc::new(AtomicU64::new(0));
+    let health_heartbeat = Arc::new(AtomicU64::new(0));
+    crate::capture_recovery::note_compositor_lifecycle_changed(state, Some(run_id.clone())).await;
     let status = CompositorStatus {
         state: CompositorState::Live,
         target_fps,
@@ -1298,6 +1479,7 @@ async fn start_synthetic_compositor_with_lifecycle(
         compositor.run_id = Some(run_id.clone());
         compositor.stop_tx = Some(stop_tx);
         compositor.preview_render_dimensions = preview_render_dimensions;
+        compositor.preview_resize_revision = None;
         // Spawn and publish the worker handle while holding the ownership lock. A concurrent
         // replacement can therefore never observe a live run id without the handle it must
         // await, avoiding the ineffective `abort` race of `spawn_blocking` workers.
@@ -1306,6 +1488,8 @@ async fn start_synthetic_compositor_with_lifecycle(
             CompositorRenderLoopParams {
                 run_id: run_id.clone(),
                 target_fps,
+                health_event_sequence: health_event_sequence.clone(),
+                health_heartbeat: health_heartbeat.clone(),
                 render_dimensions,
                 frame_consumer: params.frame_consumer,
                 stream_output: params.stream_output,
@@ -1314,18 +1498,59 @@ async fn start_synthetic_compositor_with_lifecycle(
                 highlight_overlay_on_primary: params.highlight_overlay_on_primary,
                 highlight_overlay_on_aux: params.highlight_overlay_on_aux,
             },
-            stop_rx,
+            stop_rx.clone(),
             previous_scene_status.6,
         ));
     }
+
+    spawn_compositor_health_supervisor(
+        state.clone(),
+        run_id.clone(),
+        target_fps,
+        health_heartbeat,
+        health_event_sequence,
+        stop_rx.clone(),
+    );
 
     state.emit_event("compositor.status", status.clone());
     status
 }
 
+#[cfg(test)]
 pub async fn resize_preview_compositor_if_run_id(
     state: &AppState,
     expected_run_id: &str,
+    width: u32,
+    height: u32,
+) -> Option<CompositorStatus> {
+    resize_preview_compositor(state, expected_run_id, None, width, height).await
+}
+
+/// Resize a preview run only when both its exact run identity and the
+/// preview-surface lifecycle order still permit the write. Equal revisions
+/// are idempotent; lower revisions observe the current status without
+/// mutating dimensions.
+pub async fn resize_preview_compositor_if_run_id_at_revision(
+    state: &AppState,
+    expected_run_id: &str,
+    lifecycle_revision: u64,
+    width: u32,
+    height: u32,
+) -> Option<CompositorStatus> {
+    resize_preview_compositor(
+        state,
+        expected_run_id,
+        Some(lifecycle_revision),
+        width,
+        height,
+    )
+    .await
+}
+
+async fn resize_preview_compositor(
+    state: &AppState,
+    expected_run_id: &str,
+    lifecycle_revision: Option<u64>,
     width: u32,
     height: u32,
 ) -> Option<CompositorStatus> {
@@ -1335,6 +1560,34 @@ pub async fn resize_preview_compositor_if_run_id(
             return None;
         }
         let dimensions = compositor.preview_render_dimensions.clone()?;
+        let _surface_resize_fence = if let Some(lifecycle_revision) = lifecycle_revision {
+            // Do not await the surface while holding compositor ownership.
+            // A concurrent lifecycle mutation either owns the surface (so
+            // this old write is retried) or is ordered strictly after this
+            // synchronous resize. This closes the check-then-resize window
+            // for several bounds revisions that intentionally share a run.
+            let surface = state.preview_surface.try_lock().ok()?;
+            if !surface.permits_compositor_resize(
+                lifecycle_revision,
+                expected_run_id,
+                width.max(1),
+                height.max(1),
+            ) {
+                return None;
+            }
+            Some(surface)
+        } else {
+            None
+        };
+        if let Some(lifecycle_revision) = lifecycle_revision {
+            if compositor
+                .preview_resize_revision
+                .is_some_and(|current| lifecycle_revision < current)
+            {
+                return Some(compositor.status.clone());
+            }
+            compositor.preview_resize_revision = Some(lifecycle_revision);
+        }
         compositor.status.width = width.max(1);
         compositor.status.height = height.max(1);
         compositor.status.updated_at = Utc::now().to_rfc3339();
@@ -1377,7 +1630,87 @@ pub async fn stop_compositor(state: &AppState) -> CompositorStatus {
         status
     };
     state.emit_event("compositor.status", status.clone());
+    crate::comment_highlight::invalidate_comment_highlight_for_compositor_non_live(
+        state,
+        "compositor-stopped",
+    )
+    .await;
     status
+}
+
+/// Process shutdown must join the compositor's `spawn_blocking` render owner
+/// before the Tokio runtime is dropped. A live blocking task makes runtime
+/// destruction wait forever even after Axum, recording finalization, and all
+/// WebSocket handlers have finished.
+pub async fn shutdown_compositor(state: &AppState) -> bool {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    stop_current_compositor(state).await
+}
+
+#[cfg(test)]
+pub struct NonStoppingCompositorWorkerTestProbe {
+    pub run_id: String,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+impl NonStoppingCompositorWorkerTestProbe {
+    pub fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[cfg(test)]
+impl Drop for NonStoppingCompositorWorkerTestProbe {
+    fn drop(&mut self) {
+        self.release.add_permits(1);
+    }
+}
+
+/// Replace the current render worker with a deterministic task that ignores
+/// its ordinary stop channel until the test releases it. The run identity and
+/// all published compositor state stay unchanged, so lifecycle tests exercise
+/// the real exact-run stop timeout and retained-handle path.
+#[cfg(test)]
+pub async fn replace_current_compositor_worker_with_non_stopping_for_test(
+    state: &AppState,
+) -> NonStoppingCompositorWorkerTestProbe {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    let (run_id, previous_task) = {
+        let mut compositor = state.compositor.lock().await;
+        let run_id = compositor
+            .run_id
+            .clone()
+            .expect("test requires a current compositor run");
+        if let Some(stop_tx) = compositor.stop_tx.take() {
+            let _ = stop_tx.send(true);
+        }
+        (run_id, compositor.render_task.take())
+    };
+    if let Some(previous_task) = previous_task {
+        tokio::time::timeout(COMPOSITOR_WORKER_STOP_TIMEOUT, previous_task)
+            .await
+            .expect("the real test compositor worker stops before replacement")
+            .expect("the real test compositor worker joins cleanly");
+    }
+
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let worker_release = release.clone();
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stubborn_task = tokio::spawn(async move {
+        let _keep_stop_receiver_alive = stop_rx;
+        let _permit = worker_release
+            .acquire()
+            .await
+            .expect("non-stopping test worker release semaphore remains open");
+    });
+    {
+        let mut compositor = state.compositor.lock().await;
+        assert_eq!(compositor.run_id.as_deref(), Some(run_id.as_str()));
+        compositor.stop_tx = Some(stop_tx);
+        compositor.render_task = Some(stubborn_task);
+    }
+    NonStoppingCompositorWorkerTestProbe { run_id, release }
 }
 
 pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option<CompositorStatus> {
@@ -1401,6 +1734,7 @@ pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option
         if compositor.run_id.as_deref() == Some(run_id) {
             compositor.run_id = None;
             compositor.preview_render_dimensions = None;
+            compositor.preview_resize_revision = None;
         }
         compositor.latest_frame_evidence = None;
         compositor.stream_frame_store = None;
@@ -1409,7 +1743,13 @@ pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option
         compositor.status = status.clone();
         status
     };
+    crate::capture_recovery::note_compositor_lifecycle_changed(state, None).await;
     state.emit_event("compositor.status", status.clone());
+    crate::comment_highlight::invalidate_comment_highlight_for_compositor_non_live(
+        state,
+        "compositor-stopped",
+    )
+    .await;
     Some(status)
 }
 
@@ -1436,6 +1776,318 @@ fn spawn_compositor_render_loop(
         };
         runtime.block_on(run_synthetic_compositor_loop(state, params, stop_rx));
     })
+}
+
+fn dispatch_compositor_health_transition(
+    state: &AppState,
+    compositor_run_id: &str,
+    health_event_sequence: &AtomicU64,
+    camera_mutation_epoch: Option<u64>,
+    transition: CaptureHealthTransition,
+) {
+    let sequence = health_event_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+    let recovery_state = state.clone();
+    let event = crate::capture_recovery::CaptureRecoveryHealthEvent {
+        compositor_run_id: compositor_run_id.to_string(),
+        sequence,
+        camera_mutation_epoch,
+        transition,
+    };
+    state.spawn_process_task(async move {
+        crate::capture_recovery::handle_capture_health_transition(recovery_state, event).await;
+    });
+}
+
+fn set_capture_health_stage_latch(
+    state: &AppState,
+    stage: crate::capture_health::CaptureStage,
+    degraded: bool,
+) -> Option<crate::capture_health::CaptureStage> {
+    let mut latches = state
+        .capture_health_stage_latches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    latches.set(stage, degraded);
+    latches.current()
+}
+
+fn current_capture_health_stage(state: &AppState) -> Option<crate::capture_health::CaptureStage> {
+    state
+        .capture_health_stage_latches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .current()
+}
+
+async fn update_capture_health_stage_latch_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+    transition: &CaptureHealthTransition,
+) -> Option<Option<crate::capture_health::CaptureStage>> {
+    let compositor = state.compositor.lock().await;
+    if compositor.run_id.as_deref() != Some(compositor_run_id) {
+        return None;
+    }
+    let stage = match transition {
+        CaptureHealthTransition::Degraded { stage, .. } => {
+            set_capture_health_stage_latch(state, *stage, true)
+        }
+        CaptureHealthTransition::Recovered { stage, .. } => {
+            set_capture_health_stage_latch(state, *stage, false)
+        }
+        CaptureHealthTransition::Advisory { .. } => current_capture_health_stage(state),
+    };
+    drop(compositor);
+    Some(stage)
+}
+
+async fn set_capture_health_stage_latch_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+    stage: crate::capture_health::CaptureStage,
+    degraded: bool,
+) -> Option<Option<crate::capture_health::CaptureStage>> {
+    let compositor = state.compositor.lock().await;
+    if compositor.run_id.as_deref() != Some(compositor_run_id) {
+        return None;
+    }
+    let current = set_capture_health_stage_latch(state, stage, degraded);
+    drop(compositor);
+    Some(current)
+}
+
+/// Publish a compositor cache edge only after the source cache itself has
+/// changed. Startup adoption and periodic refresh must use the same ordered
+/// health-latch + recovery acknowledgement path: a replacement camera can be
+/// installed before a fresh compositor performs its first source refresh, so
+/// waiting only for a later cache difference would strand recovery forever.
+async fn acknowledge_compositor_camera_source_change_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+    capture_health: &mut CaptureHealthMonitor,
+    change: CompositorCameraSourceChange,
+) -> Option<()> {
+    capture_health.rearm_camera_source_epoch();
+    set_capture_health_stage_latch_if_current(
+        state,
+        compositor_run_id,
+        crate::capture_health::CaptureStage::CameraDelivery,
+        false,
+    )
+    .await?;
+
+    match change {
+        CompositorCameraSourceChange::Adopted {
+            source_key,
+            generation,
+        } => {
+            // Keep the exact cache-adoption edge ordered with recovery
+            // verification. A detached task could be scheduler-delayed past
+            // the verification window and falsely latch a healthy restart.
+            crate::capture_recovery::note_compositor_camera_source_adopted(
+                state, source_key, generation,
+            )
+            .await;
+        }
+        CompositorCameraSourceChange::Removed => {
+            crate::capture_recovery::note_compositor_camera_source_removed(state).await;
+        }
+    }
+    Some(())
+}
+
+async fn acknowledge_compositor_screen_source_change_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+    capture_health: &mut CaptureHealthMonitor,
+    change: CompositorScreenSourceChange,
+) -> Option<()> {
+    capture_health.rearm_screen_source_epoch();
+    set_capture_health_stage_latch_if_current(
+        state,
+        compositor_run_id,
+        crate::capture_health::CaptureStage::ScreenDelivery,
+        false,
+    )
+    .await?;
+
+    match change {
+        CompositorScreenSourceChange::Adopted {
+            source_key,
+            generation,
+        } => {
+            crate::capture_recovery::note_compositor_screen_source_adopted(
+                state, source_key, generation,
+            )
+            .await;
+        }
+        CompositorScreenSourceChange::Removed => {
+            crate::capture_recovery::note_compositor_screen_source_removed(state).await;
+        }
+    }
+    Some(())
+}
+
+/// Explicit camera mutations can preserve the native source generation, so
+/// generation identity alone cannot rearm a declared camera incident. Observe
+/// the coordinator-owned mutation mirror at normal source-refresh cadence and
+/// around every asynchronous evidence window. A changed boundary discards the
+/// old accounting baseline and clears only the camera diagnostics authority.
+async fn rearm_camera_health_for_explicit_mutation_if_needed(
+    state: &AppState,
+    compositor_run_id: &str,
+    capture_health: &mut CaptureHealthMonitor,
+    observed_camera_mutation_epoch: &mut u64,
+) -> Option<bool> {
+    let current_camera_mutation_epoch = state.capture_recovery_camera_mutation_epoch();
+    if current_camera_mutation_epoch == *observed_camera_mutation_epoch {
+        return Some(false);
+    }
+
+    capture_health.rearm_camera_source_epoch();
+    set_capture_health_stage_latch_if_current(
+        state,
+        compositor_run_id,
+        crate::capture_health::CaptureStage::CameraDelivery,
+        false,
+    )
+    .await?;
+    *observed_camera_mutation_epoch = current_camera_mutation_epoch;
+    Some(true)
+}
+
+async fn publish_capture_health_diagnostics_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+) -> Option<crate::protocol::DiagnosticStats> {
+    let mut diagnostics = state.diagnostics.lock().await;
+    let compositor = state.compositor.lock().await;
+    if compositor.run_id.as_deref() != Some(compositor_run_id) {
+        return None;
+    }
+    let stage = current_capture_health_stage(state);
+    let next = apply_capture_health(diagnostics.clone(), stage.map(|stage| stage.label()));
+    *diagnostics = next.clone();
+    Some(next)
+}
+
+fn spawn_compositor_health_supervisor(
+    state: AppState,
+    compositor_run_id: String,
+    target_fps: u32,
+    health_heartbeat: Arc<AtomicU64>,
+    health_event_sequence: Arc<AtomicU64>,
+    stop_rx: watch::Receiver<bool>,
+) {
+    let spawn_state = state.clone();
+    state.spawn_process_task(run_compositor_health_supervisor(
+        spawn_state,
+        compositor_run_id,
+        target_fps,
+        health_heartbeat,
+        health_event_sequence,
+        stop_rx,
+        COMPOSITOR_DIAGNOSTIC_WINDOW,
+    ));
+}
+
+/// Independent run-scoped heartbeat observer. It intentionally does not run
+/// on the compositor's dedicated current-thread runtime: a render-loop block
+/// is the failure this supervisor must classify while that loop is still
+/// stuck. The lifecycle token and shared event cursor make all late edges from
+/// a retired run harmless.
+async fn run_compositor_health_supervisor(
+    state: AppState,
+    compositor_run_id: String,
+    target_fps: u32,
+    health_heartbeat: Arc<AtomicU64>,
+    health_event_sequence: Arc<AtomicU64>,
+    mut stop_rx: watch::Receiver<bool>,
+    diagnostic_window: Duration,
+) {
+    let mut capture_health = CaptureHealthMonitor::new();
+    let mut previous_heartbeat = health_heartbeat.load(Ordering::Acquire);
+    let mut window_started = Instant::now();
+    loop {
+        tokio::select! {
+            biased;
+            changed = stop_rx.changed() => {
+                if changed.is_err() || *stop_rx.borrow() {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(diagnostic_window) => {
+                let elapsed = window_started.elapsed().as_secs_f64();
+                window_started = Instant::now();
+                let current_heartbeat = health_heartbeat.load(Ordering::Acquire);
+                let render_fps = current_heartbeat.saturating_sub(previous_heartbeat) as f64 / elapsed;
+                previous_heartbeat = current_heartbeat;
+                if let Some(transition) = capture_health.observe(CaptureHealthSample {
+                    target_fps: f64::from(target_fps),
+                    render_fps,
+                    camera_present: false,
+                    camera_target_fps: None,
+                    camera_fresh_serves: 0,
+                    camera_producer: None,
+                    screen_present: false,
+                    screen_target_fps: None,
+                    screen_fresh_serves: 0,
+                    screen_producer: None,
+                    window_secs: elapsed,
+                }) {
+                    match &transition {
+                        CaptureHealthTransition::Degraded { stage, detail, .. } => tracing::warn!(
+                            "[capture-health] independent compositor heartbeat degraded at {}: {detail}",
+                            stage.label()
+                        ),
+                        CaptureHealthTransition::Recovered { detail, .. } => tracing::info!(
+                            "[capture-health] independent compositor heartbeat recovered: {detail}"
+                        ),
+                        CaptureHealthTransition::Advisory { detail } => tracing::warn!(
+                            "[capture-health] independent compositor heartbeat advisory: {detail}"
+                        ),
+                    }
+                    if !matches!(transition, CaptureHealthTransition::Advisory { .. }) {
+                        if update_capture_health_stage_latch_if_current(
+                            &state,
+                            &compositor_run_id,
+                            &transition,
+                        )
+                        .await
+                        .is_none()
+                        {
+                            break;
+                        }
+                        if let Some(diagnostics) = publish_capture_health_diagnostics_if_current(
+                            &state,
+                            &compositor_run_id,
+                        )
+                        .await
+                        {
+                            emit_runtime_diagnostics_event(&state, diagnostics);
+                        } else {
+                            break;
+                        }
+                        dispatch_compositor_health_transition(
+                            &state,
+                            &compositor_run_id,
+                            &health_event_sequence,
+                            None,
+                            transition,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn source_authority_health_sample(mut sample: CaptureHealthSample) -> CaptureHealthSample {
+    // CompositorRender has exactly one authority: the independent heartbeat
+    // supervisor above. The in-loop monitor owns source delivery/advisories
+    // only, so it cannot emit a conflicting render recovery edge.
+    sample.render_fps = sample.target_fps;
+    sample
 }
 
 pub async fn compositor_status(state: &AppState) -> CompositorStatus {
@@ -1673,6 +2325,14 @@ pub async fn update_compositor_scene(
     state: &AppState,
     params: CompositorSceneUpdateParams,
 ) -> CompositorStatus {
+    update_compositor_scene_with_prepare_hook(state, params, || {}).await
+}
+
+async fn update_compositor_scene_with_prepare_hook(
+    state: &AppState,
+    params: CompositorSceneUpdateParams,
+    before_blocking_image_prepare: impl FnOnce(),
+) -> CompositorStatus {
     let CompositorSceneUpdateParams {
         revision,
         scene,
@@ -1685,13 +2345,54 @@ pub async fn update_compositor_scene(
             .database
             .revalidate_stream_screen_for_compositor(screen)
     });
+    let snapshot = CompositorSceneSnapshot {
+        revision,
+        scene,
+        layout,
+        active_screen,
+    };
+
+    // File metadata, image reads, decoding, and resizing are synchronous. Take
+    // only Arc-backed cache candidates under the compositor mutex, then do all
+    // external work after releasing it. Recording finalization and compositor
+    // shutdown must never wait behind an uploaded screen/background decode.
+    let (request, image_preparations) = {
+        let mut compositor = state.compositor.lock().await;
+        let committed_revision = compositor.scene.as_ref().map(|scene| scene.revision);
+        let pending_revision = compositor
+            .pending_scene_request
+            .map(|request| request.external_revision);
+        if committed_revision.is_some_and(|current| revision < current)
+            || pending_revision.is_some_and(|pending| revision < pending)
+        {
+            return compositor.status.clone();
+        }
+        compositor.scene_request_token = compositor
+            .scene_request_token
+            .checked_add(1)
+            .expect("compositor scene request token exhausted");
+        let request = PendingCompositorSceneRequest {
+            token: compositor.scene_request_token,
+            external_revision: revision,
+        };
+        compositor.pending_scene_request = Some(request);
+        let preparations = compositor_image_preparations(&compositor, &snapshot);
+        (request, preparations)
+    };
+    before_blocking_image_prepare();
+    let prepared_images = prepare_compositor_scene_images(image_preparations);
+
     let status = {
         let mut compositor = state.compositor.lock().await;
+        if compositor.pending_scene_request != Some(request) {
+            return compositor.status.clone();
+        }
         if compositor
             .scene
             .as_ref()
             .is_some_and(|current| revision < current.revision)
         {
+            compositor.pending_scene_request = None;
             return compositor.status.clone();
         }
 
@@ -1714,28 +2415,19 @@ pub async fn update_compositor_scene(
         compositor.scene_transition = next_scene_transition(
             transition_ms,
             previous_effective,
-            scene.is_some(),
+            snapshot.scene.is_some(),
             active_remaining,
             now,
         );
-        let snapshot = CompositorSceneSnapshot {
-            revision,
-            scene,
-            layout,
-            active_screen,
-        };
         compositor
             .image_sources
             .set_pinned_keys(image_cache_pinned_keys(&snapshot));
-        let active_image_source = snapshot
+        let active_image_source = prepared_images
             .active_screen
-            .as_ref()
-            .map(|screen| compositor.cache_image_source(screen));
-        let background_image_source = snapshot
-            .scene
-            .as_ref()
-            .and_then(|scene| scene.background.as_ref())
-            .map(|background| compositor.cache_background_image_source(background));
+            .map(|(cache_key, source)| compositor.cache_prepared_image(cache_key, source));
+        let background_image_source = prepared_images
+            .background
+            .map(|(cache_key, source)| compositor.cache_prepared_image(cache_key, source));
         compositor.status.scene_revision = Some(snapshot.revision);
         compositor.status.scene_id = snapshot.scene.as_ref().map(|scene| scene.id.clone());
         compositor.status.scene_layout = Some(snapshot.layout.clone());
@@ -1751,6 +2443,7 @@ pub async fn update_compositor_scene(
         compositor.status.image_cache = compositor.image_sources.status();
         compositor.status.updated_at = Utc::now().to_rfc3339();
         compositor.scene = Some(snapshot);
+        compositor.pending_scene_request = None;
         compositor.status.clone()
     };
     state.emit_event("compositor.status", status.clone());
@@ -1799,90 +2492,137 @@ impl CompositorRuntime {
             .and_then(|snapshot| snapshot.active_screen.clone())
     }
 
-    fn cache_image_source(&mut self, screen: &StreamScreen) -> CompositorImageSource {
-        self.cache_image_path(
-            &screen.id,
-            &screen.image_path,
-            "Could not read uploaded screen image",
-            "Uploaded screen image file is missing.",
-        )
-    }
-
-    fn cache_background_image_source(
+    fn cache_prepared_image(
         &mut self,
-        background: &EffectiveSceneBackground,
+        cache_key: String,
+        mut source: CompositorImageSource,
     ) -> CompositorImageSource {
-        self.cache_image_path(
-            &background_cache_key(background),
-            &background.managed_asset_path,
-            "Could not read background image",
-            "Background image file is missing.",
-        )
-    }
-
-    fn cache_image_path(
-        &mut self,
-        cache_key: &str,
-        image_path: &str,
-        read_error_prefix: &str,
-        missing_message: &str,
-    ) -> CompositorImageSource {
-        let path = Path::new(image_path);
-        let file_revision = image_file_revision(path);
-        if let Some(cached) =
-            self.image_sources
-                .matching_source(cache_key, image_path, &file_revision)
-        {
+        if let Some(cached) = self.image_sources.matching_source(
+            &cache_key,
+            &source.image_path,
+            &source.file_revision,
+        ) {
             return cached;
         }
+        source.content_revision = self.image_sources.next_content_revision();
+        self.image_sources.insert(cache_key, source.clone());
+        source
+    }
+}
 
-        let content_revision = self.image_sources.next_content_revision();
-        let source = if file_revision.is_some() {
-            match decode_bounded_cache_image(path) {
-                Ok((image, optimization_message)) => {
-                    let (width, height) = image.dimensions();
-                    let mut bgra = image.into_raw();
-                    rgba_to_bgra_in_place(&mut bgra);
-                    CompositorImageSource {
-                        image_path: image_path.to_string(),
-                        file_revision,
-                        width: Some(width),
-                        height: Some(height),
-                        rgba: None,
-                        bgra: Some(Arc::new(bgra)),
-                        content_revision,
-                        state: "live".to_string(),
-                        message: optimization_message,
-                    }
-                }
-                Err(error) => CompositorImageSource {
-                    image_path: image_path.to_string(),
-                    file_revision,
-                    width: None,
-                    height: None,
-                    rgba: None,
-                    bgra: None,
-                    content_revision,
-                    state: "source-missing".to_string(),
-                    message: Some(format!("{read_error_prefix}: {error}")),
-                },
+fn compositor_image_preparations(
+    compositor: &CompositorRuntime,
+    snapshot: &CompositorSceneSnapshot,
+) -> Vec<CompositorImagePreparation> {
+    let mut preparations = Vec::with_capacity(2);
+    if let Some(screen) = snapshot.active_screen.as_ref() {
+        preparations.push(CompositorImagePreparation {
+            role: CompositorImagePreparationRole::ActiveScreen,
+            cache_key: screen.id.clone(),
+            image_path: screen.image_path.clone(),
+            cached: compositor
+                .image_sources
+                .source_for_path(&screen.id, &screen.image_path),
+            read_error_prefix: "Could not read uploaded screen image",
+            missing_message: "Uploaded screen image file is missing.",
+        });
+    }
+    if let Some(background) = snapshot
+        .scene
+        .as_ref()
+        .and_then(|scene| scene.background.as_ref())
+    {
+        let cache_key = background_cache_key(background);
+        preparations.push(CompositorImagePreparation {
+            role: CompositorImagePreparationRole::Background,
+            cached: compositor
+                .image_sources
+                .source_for_path(&cache_key, &background.managed_asset_path),
+            cache_key,
+            image_path: background.managed_asset_path.clone(),
+            read_error_prefix: "Could not read background image",
+            missing_message: "Background image file is missing.",
+        });
+    }
+    preparations
+}
+
+fn prepare_compositor_scene_images(
+    preparations: Vec<CompositorImagePreparation>,
+) -> PreparedCompositorSceneImages {
+    let mut prepared = PreparedCompositorSceneImages::default();
+    for preparation in preparations {
+        let role = preparation.role;
+        let cache_key = preparation.cache_key.clone();
+        let source = prepare_compositor_image(preparation);
+        match role {
+            CompositorImagePreparationRole::ActiveScreen => {
+                prepared.active_screen = Some((cache_key, source));
             }
-        } else {
-            CompositorImageSource {
-                image_path: image_path.to_string(),
+            CompositorImagePreparationRole::Background => {
+                prepared.background = Some((cache_key, source));
+            }
+        }
+    }
+    prepared
+}
+
+fn prepare_compositor_image(preparation: CompositorImagePreparation) -> CompositorImageSource {
+    let CompositorImagePreparation {
+        image_path,
+        cached,
+        read_error_prefix,
+        missing_message,
+        ..
+    } = preparation;
+    let path = Path::new(&image_path);
+    let file_revision = image_file_revision(path);
+    if let Some(cached) = cached.filter(|cached| cached.file_revision == file_revision) {
+        return cached;
+    }
+
+    if file_revision.is_some() {
+        match decode_bounded_cache_image(path) {
+            Ok((image, optimization_message)) => {
+                let (width, height) = image.dimensions();
+                let mut bgra = image.into_raw();
+                rgba_to_bgra_in_place(&mut bgra);
+                CompositorImageSource {
+                    image_path,
+                    file_revision,
+                    width: Some(width),
+                    height: Some(height),
+                    rgba: None,
+                    bgra: Some(Arc::new(bgra)),
+                    content_revision: 0,
+                    state: "live".to_string(),
+                    message: optimization_message,
+                }
+            }
+            Err(error) => CompositorImageSource {
+                image_path,
                 file_revision,
                 width: None,
                 height: None,
                 rgba: None,
                 bgra: None,
-                content_revision,
+                content_revision: 0,
                 state: "source-missing".to_string(),
-                message: Some(missing_message.to_string()),
-            }
-        };
-        self.image_sources
-            .insert(cache_key.to_string(), source.clone());
-        source
+                message: Some(format!("{read_error_prefix}: {error}")),
+            },
+        }
+    } else {
+        CompositorImageSource {
+            image_path,
+            file_revision,
+            width: None,
+            height: None,
+            rgba: None,
+            bgra: None,
+            content_revision: 0,
+            state: "source-missing".to_string(),
+            message: Some(missing_message.to_string()),
+        }
     }
 }
 
@@ -1983,11 +2723,15 @@ async fn stop_current_compositor(state: &AppState) -> bool {
     if !await_compositor_task(state, previous_run_id, previous_task).await {
         return false;
     }
-    let mut compositor = state.compositor.lock().await;
-    compositor.run_id = None;
-    compositor.preview_render_dimensions = None;
-    compositor.latest_frame_evidence = None;
-    compositor.stream_frame_store = None;
+    {
+        let mut compositor = state.compositor.lock().await;
+        compositor.run_id = None;
+        compositor.preview_render_dimensions = None;
+        compositor.preview_resize_revision = None;
+        compositor.latest_frame_evidence = None;
+        compositor.stream_frame_store = None;
+    }
+    crate::capture_recovery::note_compositor_lifecycle_changed(state, None).await;
     true
 }
 
@@ -2030,6 +2774,11 @@ async fn await_compositor_task(
                 compositor.status.clone()
             };
             state.emit_event("compositor.status", status);
+            crate::comment_highlight::invalidate_comment_highlight_for_compositor_non_live(
+                state,
+                "compositor-failed",
+            )
+            .await;
             false
         }
     }
@@ -2076,6 +2825,8 @@ async fn run_synthetic_compositor_loop(
     let CompositorRenderLoopParams {
         run_id,
         target_fps,
+        health_event_sequence,
+        health_heartbeat,
         render_dimensions,
         frame_consumer,
         stream_output,
@@ -2099,7 +2850,36 @@ async fn run_synthetic_compositor_loop(
         matches!(frame_consumer, CompositorFrameConsumer::NativePreview) && stream_output.is_none();
     let mut gpu_compositor = new_gpu_compositor(smooth_preview_scaling);
     let mut stream_gpu_compositor = stream_output.and_then(|_| new_gpu_compositor(false));
+    // Rate-collapse watchdog for the always-on pipeline: the 2026-08-27
+    // incident (33 idle minutes of silent decay to ~6 fresh fps) is exactly
+    // the state every liveness-only watchdog ignores.
+    let mut capture_health = CaptureHealthMonitor::new();
     let mut live_sources = CompositorLiveSources::refresh(&state).await;
+    if let Some(initial_camera_adoption) = live_sources.initial_camera_adoption()
+        && acknowledge_compositor_camera_source_change_if_current(
+            &state,
+            &run_id,
+            &mut capture_health,
+            initial_camera_adoption,
+        )
+        .await
+        .is_none()
+    {
+        return;
+    }
+    if let Some(initial_screen_adoption) = live_sources.initial_screen_adoption()
+        && acknowledge_compositor_screen_source_change_if_current(
+            &state,
+            &run_id,
+            &mut capture_health,
+            initial_screen_adoption,
+        )
+        .await
+        .is_none()
+    {
+        return;
+    }
+    let mut observed_camera_mutation_epoch = state.capture_recovery_camera_mutation_epoch();
     let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
     let mut next_live_source_refresh_at = Instant::now() + COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL;
 
@@ -2164,8 +2944,45 @@ async fn run_synthetic_compositor_loop(
                         .record_compositor_tick(skipped_intervals);
                 }
                 if ticked_at >= next_live_source_refresh_at {
+                    if rearm_camera_health_for_explicit_mutation_if_needed(
+                        &state,
+                        &run_id,
+                        &mut capture_health,
+                        &mut observed_camera_mutation_epoch,
+                    )
+                    .await
+                    .is_none()
+                    {
+                        break;
+                    }
                     let refresh_started_at = Instant::now();
-                    live_sources = live_sources.refresh_sources_nonblocking(&state);
+                    let (refreshed_sources, camera_change, screen_change) =
+                        live_sources.refresh_sources_nonblocking(&state);
+                    live_sources = refreshed_sources;
+                    if let Some(camera_change) = camera_change
+                        && acknowledge_compositor_camera_source_change_if_current(
+                            &state,
+                            &run_id,
+                            &mut capture_health,
+                            camera_change,
+                        )
+                        .await
+                        .is_none()
+                    {
+                        break;
+                    }
+                    if let Some(screen_change) = screen_change
+                        && acknowledge_compositor_screen_source_change_if_current(
+                            &state,
+                            &run_id,
+                            &mut capture_health,
+                            screen_change,
+                        )
+                        .await
+                        .is_none()
+                    {
+                        break;
+                    }
                     live_source_refresh_times_ms
                         .push(refresh_started_at.elapsed().as_secs_f64() * 1000.0);
                     next_live_source_refresh_at =
@@ -2200,6 +3017,32 @@ async fn run_synthetic_compositor_loop(
                         highlight_overlay_on_aux,
                     )
                         .await;
+                health_heartbeat.fetch_add(1, Ordering::Release);
+                let delivery_stats = live_sources.fetch_stats();
+                let delivery_source = live_sources.camera.as_ref().and_then(|source| {
+                    source
+                        .source_key()
+                        .cloned()
+                        .map(|source_key| (source_key, source.generation()))
+                });
+                crate::capture_recovery::record_compositor_camera_delivery_evidence(
+                    &state,
+                    &run_id,
+                    delivery_source,
+                    delivery_stats.camera_fresh_serves,
+                );
+                let screen_delivery_source = live_sources.screen.as_ref().and_then(|source| {
+                    source
+                        .source_key()
+                        .cloned()
+                        .map(|source_key| (source_key, source.generation()))
+                });
+                crate::capture_recovery::record_compositor_screen_delivery_evidence(
+                    &state,
+                    &run_id,
+                    screen_delivery_source,
+                    delivery_stats.screen_fresh_serves,
+                );
                 let fallback_frame_age_ms = published.fallback_frame_age_ms;
                 cpu_frame_counts.record(published.compositor_backend);
                 if is_repeated_compositor_frame(previous_fingerprint, published.fingerprint) {
@@ -2282,6 +3125,249 @@ async fn run_synthetic_compositor_loop(
                 if window_started_at.elapsed() >= COMPOSITOR_DIAGNOSTIC_WINDOW {
                     let elapsed = window_started_at.elapsed().as_secs_f64().max(0.001);
                     let measured_fps = frames_in_window as f64 / elapsed;
+                    {
+                        if rearm_camera_health_for_explicit_mutation_if_needed(
+                            &state,
+                            &run_id,
+                            &mut capture_health,
+                            &mut observed_camera_mutation_epoch,
+                        )
+                        .await
+                        .is_none()
+                        {
+                            break;
+                        }
+                        let sampled_camera_mutation_epoch = observed_camera_mutation_epoch;
+                        let fetch = live_sources.fetch_stats();
+                        let camera_is_consumed = scene_needs_live_camera_frame(
+                            render_cache.snapshot.as_ref(),
+                            render_cache.active_image_source.as_ref(),
+                        );
+                        let camera_target_fps = live_sources
+                            .camera
+                            .as_ref()
+                            .map(|source| f64::from(source.target_fps()))
+                            .filter(|fps| fps.is_finite() && *fps > 0.0);
+                        let (mut camera_producer, exact_frameless_zombie) = if camera_is_consumed {
+                            match preview_camera_restart_snapshot(&state).await {
+                                Some(snapshot) => {
+                                    let frameless_zombie =
+                                        preview_camera_restart_snapshot_is_frameless_zombie(
+                                            &state, &snapshot,
+                                        )
+                                        .await;
+                                    let producer =
+                                        preview_camera_recovery_evidence(&state, &snapshot)
+                                            .await
+                                            .map(|evidence| CaptureHealthCameraProducerSample {
+                                                epoch: CaptureHealthCameraEpoch {
+                                                    source_key: evidence.source_key,
+                                                    generation: evidence.generation,
+                                                },
+                                                source_fps: evidence.source_fps,
+                                                capture_callbacks: evidence.capture_callback_count,
+                                                frame_store_publications: evidence
+                                                    .frame_store_publications,
+                                                did_drop_callback_count: evidence
+                                                    .did_drop_callback_count,
+                                                out_of_buffers: evidence.out_of_buffers,
+                                                surface_backing_live_count: evidence
+                                                    .surface_backing_live_count,
+                                                surface_backing_peak_count: evidence
+                                                    .surface_backing_peak_count,
+                                            })
+                                            .filter(|producer| {
+                                                camera_source_matches_health_epoch(
+                                                    live_sources.camera.as_ref(),
+                                                    &producer.epoch,
+                                                )
+                                            });
+                                    let exact_frameless_zombie =
+                                        frameless_zombie && producer.is_some();
+                                    (producer, exact_frameless_zombie)
+                                }
+                                None => (None, false),
+                            }
+                        } else {
+                            (None, false)
+                        };
+                        let mut camera_fresh_serves = fetch.camera_fresh_serves;
+                        #[cfg(debug_assertions)]
+                        if let Some(producer) = camera_producer.as_mut()
+                            && let Some(stall) =
+                                crate::capture_recovery::apply_camera_delivery_smoke_fault(
+                                    &state,
+                                    &producer.epoch,
+                                    camera_fresh_serves,
+                                    producer.capture_callbacks,
+                                    producer.frame_store_publications,
+                                )
+                        {
+                            if stall.first_sample {
+                                capture_health.arm_camera_producer_stall(
+                                    producer.epoch.clone(),
+                                    stall.fresh_serves,
+                                    stall.capture_callbacks,
+                                    stall.frame_store_publications,
+                                );
+                            }
+                            camera_fresh_serves = stall.fresh_serves;
+                            producer.capture_callbacks = stall.capture_callbacks;
+                            producer.frame_store_publications = stall.frame_store_publications;
+                        }
+                        let screen_is_consumed = scene_needs_live_screen_frame(
+                            render_cache.snapshot.as_ref(),
+                            render_cache.active_image_source.as_ref(),
+                        );
+                        let (screen_target_fps, mut screen_producer) = if screen_is_consumed {
+                            match preview_screen_restart_snapshot(&state).await {
+                                Some(snapshot) => {
+                                    let evidence =
+                                        preview_screen_recovery_evidence(&state, &snapshot).await;
+                                    let target_fps = evidence
+                                        .as_ref()
+                                        .map(|evidence| f64::from(evidence.target_fps))
+                                        .filter(|fps| fps.is_finite() && *fps > 0.0);
+                                    let producer = evidence
+                                        .map(|evidence| CaptureHealthScreenProducerSample {
+                                            epoch: CaptureHealthScreenEpoch {
+                                                source_key: evidence.source_key,
+                                                generation: evidence.generation,
+                                            },
+                                            callback_cadence: evidence.callback_cadence,
+                                            capture_callbacks: evidence.capture_callback_count,
+                                            frame_store_publications: evidence
+                                                .frame_store_publications,
+                                        })
+                                        .filter(|producer| {
+                                            screen_source_matches_health_epoch(
+                                                live_sources.screen.as_ref(),
+                                                &producer.epoch,
+                                            )
+                                        });
+                                    (target_fps, producer)
+                                }
+                                None => (None, None),
+                            }
+                        } else {
+                            (None, None)
+                        };
+                        let mut screen_fresh_serves = fetch.screen_fresh_serves;
+                        #[cfg(debug_assertions)]
+                        if let Some(producer) = screen_producer.as_mut()
+                            && let Some(stall) =
+                                crate::capture_recovery::apply_screen_delivery_smoke_fault(
+                                    &state,
+                                    &producer.epoch,
+                                    screen_fresh_serves,
+                                    producer.capture_callbacks,
+                                    producer.frame_store_publications,
+                                )
+                        {
+                            if stall.first_sample {
+                                capture_health.arm_screen_producer_stall(
+                                    producer.epoch.clone(),
+                                    stall.fresh_serves,
+                                    stall.capture_callbacks,
+                                    stall.frame_store_publications,
+                                );
+                            }
+                            screen_fresh_serves = stall.fresh_serves;
+                            producer.capture_callbacks = stall.capture_callbacks;
+                            producer.frame_store_publications = stall.frame_store_publications;
+                        }
+                        let mutation_changed_during_sample =
+                            match rearm_camera_health_for_explicit_mutation_if_needed(
+                                &state,
+                                &run_id,
+                                &mut capture_health,
+                                &mut observed_camera_mutation_epoch,
+                            )
+                            .await
+                            {
+                                Some(changed) => changed,
+                                None => break,
+                            };
+                        let transition = if mutation_changed_during_sample {
+                            None
+                        } else {
+                            capture_health.observe(source_authority_health_sample(
+                                CaptureHealthSample {
+                                    target_fps: f64::from(target_fps),
+                                    render_fps: measured_fps,
+                                    camera_present: camera_delivery_health_source_present(
+                                        camera_is_consumed,
+                                        live_sources.last_camera_frame.is_some(),
+                                        camera_target_fps.is_some(),
+                                        camera_producer.is_some(),
+                                        exact_frameless_zombie,
+                                    ),
+                                    camera_target_fps,
+                                    camera_fresh_serves,
+                                    camera_producer,
+                                    screen_present: screen_delivery_health_source_present(
+                                        screen_is_consumed,
+                                        live_sources.last_screen_frame.is_some(),
+                                        screen_target_fps.is_some(),
+                                        screen_producer.is_some(),
+                                    ),
+                                    screen_target_fps,
+                                    screen_fresh_serves,
+                                    screen_producer,
+                                    window_secs: elapsed,
+                                },
+                            ))
+                        };
+                        if set_capture_health_stage_latch_if_current(
+                            &state,
+                            &run_id,
+                            crate::capture_health::CaptureStage::CameraDelivery,
+                            capture_health.degraded_stage()
+                                == Some(crate::capture_health::CaptureStage::CameraDelivery),
+                        )
+                        .await
+                        .is_none()
+                        {
+                            break;
+                        }
+                        if set_capture_health_stage_latch_if_current(
+                            &state,
+                            &run_id,
+                            crate::capture_health::CaptureStage::ScreenDelivery,
+                            capture_health.degraded_stage()
+                                == Some(crate::capture_health::CaptureStage::ScreenDelivery),
+                        )
+                        .await
+                        .is_none()
+                        {
+                            break;
+                        }
+                        if let Some(transition) = transition {
+                            match &transition {
+                            CaptureHealthTransition::Degraded { stage, detail, .. } => {
+                                tracing::warn!(
+                                    "[capture-health] pipeline degraded at {}: {detail}",
+                                    stage.label()
+                                );
+                            }
+                            CaptureHealthTransition::Recovered { detail, .. } => {
+                                tracing::info!("[capture-health] pipeline recovered: {detail}");
+                            }
+                            CaptureHealthTransition::Advisory { detail } => {
+                                tracing::warn!("[capture-health] advisory: {detail}");
+                            }
+                            }
+                            if !matches!(transition, CaptureHealthTransition::Advisory { .. }) {
+                                dispatch_compositor_health_transition(
+                                    &state,
+                                    &run_id,
+                                    &health_event_sequence,
+                                    Some(sampled_camera_mutation_epoch),
+                                    transition,
+                                );
+                            }
+                        }
+                    }
                     let (p50, p95, p99) = frame_time_percentiles(&frame_times_ms);
                     let (_, source_fetch_p95, _) = frame_time_percentiles(&source_fetch_times_ms);
                     let (_, scene_snapshot_p95, _) =
@@ -2435,6 +3521,9 @@ async fn run_synthetic_compositor_loop(
                         );
                         let next =
                             apply_compositor_live_source_fetch_stats(next, live_sources.fetch_stats());
+                        let degraded_stage = current_capture_health_stage(&state);
+                        let next =
+                            apply_capture_health(next, degraded_stage.map(|stage| stage.label()));
                         *diagnostics = next.clone();
                         next
                     };
@@ -5825,6 +6914,9 @@ mod tests {
             native_preview_main_scene_mismatch_age_ms: None,
             native_preview_main_last_skipped_scene_revision: None,
             native_preview_main_last_skipped_frame_scene_revision: None,
+            native_preview_iosurface_import_live_count: None,
+            native_preview_iosurface_import_peak_count: None,
+            native_preview_iosurface_import_ceiling: None,
             frame_polling_suppressed,
             source_pixels_present: false,
             pending_host_command_count: 0,
@@ -7375,6 +8467,637 @@ mod tests {
         )
     }
 
+    fn tiny_video() -> VideoSettings {
+        VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 8,
+            height: 4,
+            fps: 30,
+            bitrate_kbps: 2_000,
+        }
+    }
+
+    #[test]
+    fn exact_frameless_live_camera_enters_health_only_after_first_frame_grace() {
+        let epoch = CaptureHealthCameraEpoch {
+            source_key: SourceKey::camera("camera:frameless"),
+            generation: 7,
+        };
+        let sample = |camera_present| CaptureHealthSample {
+            target_fps: 30.0,
+            render_fps: 30.0,
+            camera_present,
+            camera_target_fps: Some(30.0),
+            camera_fresh_serves: 0,
+            camera_producer: Some(CaptureHealthCameraProducerSample {
+                epoch: epoch.clone(),
+                source_fps: None,
+                capture_callbacks: 0,
+                frame_store_publications: 0,
+                did_drop_callback_count: 0,
+                out_of_buffers: 0,
+                surface_backing_live_count: 0,
+                surface_backing_peak_count: 0,
+            }),
+            screen_present: false,
+            screen_target_fps: None,
+            screen_fresh_serves: 0,
+            screen_producer: None,
+            window_secs: COMPOSITOR_DIAGNOSTIC_WINDOW.as_secs_f64(),
+        };
+
+        assert!(
+            !camera_delivery_health_source_present(true, false, true, true, false),
+            "a stable Live generation is protected while its first frame may still warm up"
+        );
+        assert!(
+            !camera_delivery_health_source_present(true, false, true, false, true),
+            "stale/source-switch evidence cannot authorize a frameless recovery"
+        );
+        assert!(camera_delivery_health_source_present(
+            true, false, true, true, true
+        ));
+
+        let mut monitor = CaptureHealthMonitor::new();
+        for _ in 0..8 {
+            assert_eq!(monitor.observe(sample(false)), None);
+        }
+        assert_eq!(monitor.degraded_stage(), None);
+
+        // The first eligible sample establishes exact-generation counter
+        // baselines; the ordinary three-window threshold still owns admission.
+        assert_eq!(monitor.observe(sample(true)), None);
+        let mut transition = None;
+        for _ in 0..crate::capture_health::DEGRADED_WINDOW_THRESHOLD {
+            transition = monitor.observe(sample(true));
+        }
+        assert!(matches!(
+            transition,
+            Some(CaptureHealthTransition::Degraded {
+                stage: crate::capture_health::CaptureStage::CameraDelivery,
+                camera_epoch: Some(ref degraded_epoch),
+                ..
+            }) if degraded_epoch == &epoch
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn independent_heartbeat_declares_blocked_render_before_loop_release() {
+        let state = test_state();
+        let run_id = "blocked-render-run".to_string();
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.clone());
+            compositor.status.run_id = Some(run_id.clone());
+        }
+        crate::capture_recovery::note_compositor_lifecycle_changed(&state, Some(run_id.clone()))
+            .await;
+        let heartbeat = Arc::new(AtomicU64::new(0));
+        let event_sequence = Arc::new(AtomicU64::new(0));
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let supervisor_state = state.clone();
+        let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
+            supervisor_state,
+            run_id.clone(),
+            30,
+            Arc::clone(&heartbeat),
+            Arc::clone(&event_sequence),
+            stop_rx,
+            COMPOSITOR_DIAGNOSTIC_WINDOW,
+        ));
+        tokio::task::yield_now().await;
+
+        for _ in 0..3 {
+            tokio::time::advance(COMPOSITOR_DIAGNOSTIC_WINDOW).await;
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..100 {
+            if state.capture_recovery.lock().await.status().phase
+                == crate::protocol::CaptureRecoveryPhase::Degraded
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let degraded = state.capture_recovery.lock().await.status();
+        assert_eq!(
+            degraded.phase,
+            crate::protocol::CaptureRecoveryPhase::Degraded
+        );
+        assert_eq!(
+            degraded.stage,
+            Some(crate::protocol::CaptureRecoveryStage::CompositorRender)
+        );
+        assert_eq!(
+            heartbeat.load(Ordering::Acquire),
+            0,
+            "degradation must publish while the simulated render loop is still blocked"
+        );
+        assert_eq!(
+            current_capture_health_stage(&state),
+            Some(crate::capture_health::CaptureStage::CompositorRender)
+        );
+
+        let mut in_loop_monitor = CaptureHealthMonitor::new();
+        for render_fps in [0.0, 0.0, 0.0, 30.0, 30.0, 30.0] {
+            assert!(
+                in_loop_monitor
+                    .observe(source_authority_health_sample(CaptureHealthSample {
+                        target_fps: 30.0,
+                        render_fps,
+                        camera_present: false,
+                        camera_target_fps: None,
+                        camera_fresh_serves: 0,
+                        camera_producer: None,
+                        screen_present: false,
+                        screen_target_fps: None,
+                        screen_fresh_serves: 0,
+                        screen_producer: None,
+                        window_secs: 2.0,
+                    }))
+                    .is_none(),
+                "the in-loop camera authority must emit neither render degradation nor recovery"
+            );
+        }
+        assert_eq!(
+            state.capture_recovery.lock().await.status().phase,
+            crate::protocol::CaptureRecoveryPhase::Degraded,
+            "an overlapping in-loop healthy verdict cannot prematurely recover external render authority"
+        );
+
+        // Retirement is authoritative and the run-scoped supervisor cannot
+        // emit either a stale degradation or a false recovery afterward.
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = None;
+            compositor.status.run_id = None;
+        }
+        crate::capture_recovery::note_compositor_lifecycle_changed(&state, None).await;
+        stop_tx.send(true).unwrap();
+        supervisor.await.unwrap();
+        heartbeat.store(300, Ordering::Release);
+        tokio::time::advance(COMPOSITOR_DIAGNOSTIC_WINDOW * 3).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.capture_recovery.lock().await.status().phase,
+            crate::protocol::CaptureRecoveryPhase::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_run_edges_are_rejected_and_diagnostics_stay_camera_first() {
+        let state = test_state();
+        let run_id = "current-run";
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.to_string());
+            compositor.status.run_id = Some(run_id.to_string());
+        }
+        let render_degraded = CaptureHealthTransition::Degraded {
+            stage: crate::capture_health::CaptureStage::CompositorRender,
+            detail: "render stalled".to_string(),
+            camera_epoch: None,
+            screen_epoch: None,
+        };
+        assert!(
+            update_capture_health_stage_latch_if_current(&state, "retired-run", &render_degraded,)
+                .await
+                .is_none()
+        );
+        assert_eq!(current_capture_health_stage(&state), None);
+
+        let camera_epoch = CaptureHealthCameraEpoch {
+            source_key: SourceKey::camera("camera:a"),
+            generation: 7,
+        };
+        let camera_degraded = CaptureHealthTransition::Degraded {
+            stage: crate::capture_health::CaptureStage::CameraDelivery,
+            detail: "camera stalled".to_string(),
+            camera_epoch: Some(camera_epoch.clone()),
+            screen_epoch: None,
+        };
+        update_capture_health_stage_latch_if_current(&state, run_id, &camera_degraded)
+            .await
+            .expect("current camera edge");
+        update_capture_health_stage_latch_if_current(&state, run_id, &render_degraded)
+            .await
+            .expect("current render edge");
+        publish_capture_health_diagnostics_if_current(&state, run_id)
+            .await
+            .expect("current diagnostics commit");
+        assert_eq!(
+            state
+                .diagnostics
+                .lock()
+                .await
+                .capture_pipeline_degraded_stage
+                .as_deref(),
+            Some(crate::capture_health::CaptureStage::CameraDelivery.label())
+        );
+
+        let render_recovered = CaptureHealthTransition::Recovered {
+            stage: crate::capture_health::CaptureStage::CompositorRender,
+            detail: "render recovered".to_string(),
+            camera_epoch: None,
+            screen_epoch: None,
+        };
+        update_capture_health_stage_latch_if_current(&state, run_id, &render_recovered)
+            .await
+            .expect("current render recovery");
+        publish_capture_health_diagnostics_if_current(&state, run_id)
+            .await
+            .expect("current diagnostics commit");
+        assert_eq!(
+            state
+                .diagnostics
+                .lock()
+                .await
+                .capture_pipeline_degraded_stage
+                .as_deref(),
+            Some(crate::capture_health::CaptureStage::CameraDelivery.label()),
+            "render recovery must not transiently clear camera diagnostics"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_camera_mutation_rearms_monitor_and_clears_only_camera_latch() {
+        let state = test_state();
+        let run_id = "epoch-rearm-run";
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.to_string());
+        }
+        set_capture_health_stage_latch_if_current(
+            &state,
+            run_id,
+            crate::capture_health::CaptureStage::CompositorRender,
+            true,
+        )
+        .await
+        .expect("render latch");
+        set_capture_health_stage_latch_if_current(
+            &state,
+            run_id,
+            crate::capture_health::CaptureStage::CameraDelivery,
+            true,
+        )
+        .await
+        .expect("camera latch");
+        assert_eq!(
+            current_capture_health_stage(&state),
+            Some(crate::capture_health::CaptureStage::CameraDelivery)
+        );
+
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut observed_camera_mutation_epoch = state.capture_recovery_camera_mutation_epoch();
+        let sampled_camera_mutation_epoch = observed_camera_mutation_epoch;
+        let explicit_mutation = state.begin_capture_recovery_explicit_camera_mutation();
+        assert_eq!(
+            rearm_camera_health_for_explicit_mutation_if_needed(
+                &state,
+                run_id,
+                &mut monitor,
+                &mut observed_camera_mutation_epoch,
+            )
+            .await,
+            Some(true),
+            "a boundary crossed during evidence collection must discard that mixed sample"
+        );
+        assert_ne!(
+            sampled_camera_mutation_epoch, observed_camera_mutation_epoch,
+            "the exact inside-transaction token is retained for event dispatch"
+        );
+        assert_eq!(
+            current_capture_health_stage(&state),
+            Some(crate::capture_health::CaptureStage::CompositorRender),
+            "transaction begin clears only camera authority"
+        );
+
+        // Decay can be declared again while a long-running transaction is
+        // active. Ending the lease must create a second rearm boundary so the
+        // inside-transaction declaration cannot suppress future detection.
+        set_capture_health_stage_latch_if_current(
+            &state,
+            run_id,
+            crate::capture_health::CaptureStage::CameraDelivery,
+            true,
+        )
+        .await
+        .expect("inside-transaction camera latch");
+        let inside_transaction_epoch = observed_camera_mutation_epoch;
+        explicit_mutation.finish();
+        crate::capture_recovery::note_explicit_camera_configuration_changed(&state).await;
+        assert_eq!(
+            rearm_camera_health_for_explicit_mutation_if_needed(
+                &state,
+                run_id,
+                &mut monitor,
+                &mut observed_camera_mutation_epoch,
+            )
+            .await,
+            Some(true),
+            "transaction end must discard all evidence collected inside the lease"
+        );
+        assert_ne!(inside_transaction_epoch, observed_camera_mutation_epoch);
+        assert_eq!(
+            current_capture_health_stage(&state),
+            Some(crate::capture_health::CaptureStage::CompositorRender),
+            "transaction end also preserves independent render authority"
+        );
+        assert_eq!(
+            rearm_camera_health_for_explicit_mutation_if_needed(
+                &state,
+                run_id,
+                &mut monitor,
+                &mut observed_camera_mutation_epoch,
+            )
+            .await,
+            Some(false),
+            "a stable post-transaction boundary must not repeatedly discard evidence windows"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_key_camera_generation_resets_held_frame_and_fetch_accounting() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let video = tiny_video();
+        let camera_id = "camera:avfoundation:generation-test";
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state, camera_id, &layout, &video,
+        )
+        .await;
+
+        let mut sources = CompositorLiveSources::refresh(&state).await;
+        let initial_generation = sources
+            .camera
+            .as_ref()
+            .expect("installed camera source")
+            .generation();
+        assert!(sources.latest_camera_frame().is_some());
+        sources.camera_fetch.try_lock_misses = 7;
+        sources.camera_fetch.blocking_refreshes = 3;
+        sources.camera_fetch.fresh_serves = 11;
+        sources.camera_fetch.held_serves = 13;
+        sources.camera_fetch.served_age_max_ms = 17;
+
+        let next_generation =
+            crate::preview_camera::test_advance_live_camera_generation(&state, 43).await;
+        assert_ne!(next_generation, initial_generation);
+        let replacement_epoch = CaptureHealthCameraEpoch {
+            source_key: SourceKey::camera(camera_id),
+            generation: next_generation,
+        };
+        assert!(
+            !camera_source_matches_health_epoch(sources.camera.as_ref(), &replacement_epoch),
+            "new-generation producer evidence must stay ambiguous until the compositor consumer adopts it"
+        );
+        let (sources, change, screen_change) = sources.refresh_sources_nonblocking(&state);
+
+        assert_eq!(
+            change,
+            Some(CompositorCameraSourceChange::Adopted {
+                source_key: SourceKey::camera(camera_id),
+                generation: next_generation,
+            })
+        );
+        assert_eq!(screen_change, None);
+        assert_eq!(
+            sources
+                .camera
+                .as_ref()
+                .map(PreviewCameraFrameSource::generation),
+            Some(next_generation)
+        );
+        assert!(camera_source_matches_health_epoch(
+            sources.camera.as_ref(),
+            &replacement_epoch
+        ));
+        assert!(sources.last_camera_frame.is_none());
+        let stats = sources.fetch_stats();
+        assert_eq!(stats.camera_try_lock_misses, 0);
+        assert_eq!(stats.camera_blocking_refreshes, 0);
+        assert_eq!(stats.camera_fresh_serves, 0);
+        assert_eq!(stats.camera_held_serves, 0);
+        assert_eq!(stats.camera_served_age_max_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn initial_source_refresh_acknowledges_replacement_camera_generation() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let video = tiny_video();
+        let camera_id = "camera:avfoundation:initial-adoption";
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state, camera_id, &layout, &video,
+        )
+        .await;
+        let initial_generation = preview_camera_restart_snapshot(&state)
+            .await
+            .expect("initial camera snapshot")
+            .generation;
+        crate::capture_recovery::test_admit_camera_recovery_attempt(
+            &state,
+            SourceKey::camera(camera_id),
+            initial_generation,
+        )
+        .await;
+
+        // The replacement becomes live before the new compositor initializes
+        // its cache, so no later nonblocking refresh will observe a difference.
+        let replacement_generation =
+            crate::preview_camera::test_advance_live_camera_generation(&state, 43).await;
+        let run_id = "replacement-compositor-run";
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.to_string());
+        }
+        crate::capture_recovery::note_compositor_lifecycle_changed(
+            &state,
+            Some(run_id.to_string()),
+        )
+        .await;
+
+        let mut capture_health = CaptureHealthMonitor::new();
+        let sources = CompositorLiveSources::refresh(&state).await;
+        acknowledge_compositor_camera_source_change_if_current(
+            &state,
+            run_id,
+            &mut capture_health,
+            sources
+                .initial_camera_adoption()
+                .expect("replacement camera adoption"),
+        )
+        .await
+        .expect("current compositor adoption");
+
+        assert_eq!(
+            crate::capture_recovery::test_compositor_adopted_camera_scope(&state).await,
+            Some((SourceKey::camera(camera_id), replacement_generation)),
+            "the initial cache fill must publish the exact replacement generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_source_refresh_acknowledges_replacement_screen_generation() {
+        let state = test_state();
+        let video = tiny_video();
+        let screen_id = "screen:screencapturekit:initial-adoption";
+        crate::preview_screen::test_install_live_screen_generation(
+            &state, screen_id, 7, 41, &video,
+        )
+        .await;
+        crate::capture_recovery::test_admit_screen_recovery_attempt(
+            &state,
+            SourceKey::screen(screen_id),
+            7,
+        )
+        .await;
+
+        let replacement_generation =
+            crate::preview_screen::test_advance_live_screen_generation(&state, 42).await;
+        let run_id = "replacement-screen-compositor-run";
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.to_string());
+        }
+        crate::capture_recovery::note_compositor_lifecycle_changed(
+            &state,
+            Some(run_id.to_string()),
+        )
+        .await;
+
+        let mut capture_health = CaptureHealthMonitor::new();
+        let sources = CompositorLiveSources::refresh(&state).await;
+        acknowledge_compositor_screen_source_change_if_current(
+            &state,
+            run_id,
+            &mut capture_health,
+            sources
+                .initial_screen_adoption()
+                .expect("replacement screen adoption"),
+        )
+        .await
+        .expect("current compositor adoption");
+
+        assert_eq!(
+            crate::capture_recovery::test_compositor_adopted_screen_scope(&state).await,
+            Some((SourceKey::screen(screen_id), replacement_generation)),
+            "the initial cache fill must publish the exact replacement screen generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_camera_generation_preserves_held_frame_and_fetch_accounting() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let video = tiny_video();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation:stable-generation",
+            &layout,
+            &video,
+        )
+        .await;
+
+        let mut sources = CompositorLiveSources::refresh(&state).await;
+        assert!(sources.latest_camera_frame().is_some());
+        sources.camera_fetch.held_serves = 5;
+        let cached_identity = sources
+            .last_camera_frame
+            .as_ref()
+            .map(|(frame, _)| frame.as_ptr());
+
+        let (sources, change, screen_change) = sources.refresh_sources_nonblocking(&state);
+
+        assert_eq!(change, None);
+        assert_eq!(screen_change, None);
+        assert_eq!(sources.camera_fetch.held_serves, 5);
+        assert_eq!(
+            sources
+                .last_camera_frame
+                .as_ref()
+                .map(|(frame, _)| frame.as_ptr()),
+            cached_identity
+        );
+    }
+
+    #[tokio::test]
+    async fn camera_generation_removal_is_an_explicit_compositor_edge() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let video = tiny_video();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation:removal",
+            &layout,
+            &video,
+        )
+        .await;
+        let mut sources = CompositorLiveSources::refresh(&state).await;
+        assert!(sources.latest_camera_frame().is_some());
+
+        crate::preview_camera::stop_preview_camera(&state).await;
+        let (sources, change, screen_change) = sources.refresh_sources_nonblocking(&state);
+
+        assert_eq!(change, Some(CompositorCameraSourceChange::Removed));
+        assert_eq!(screen_change, None);
+        assert!(sources.camera.is_none());
+        assert!(sources.last_camera_frame.is_none());
+    }
+
+    #[tokio::test]
+    async fn same_key_screen_generation_resets_held_frame_and_fetch_accounting() {
+        let state = test_state();
+        let video = tiny_video();
+        let screen_id = "screen:screencapturekit:generation-test";
+        crate::preview_screen::test_install_live_screen_generation(
+            &state, screen_id, 7, 41, &video,
+        )
+        .await;
+
+        let mut sources = CompositorLiveSources::refresh(&state).await;
+        let initial_generation = sources
+            .screen
+            .as_ref()
+            .expect("installed screen source")
+            .generation();
+        assert!(sources.latest_screen_frame().is_some());
+        sources.screen_fetch.try_lock_misses = 7;
+        sources.screen_fetch.blocking_refreshes = 3;
+        sources.screen_fetch.fresh_serves = 11;
+        sources.screen_fetch.held_serves = 13;
+        sources.screen_fetch.served_age_max_ms = 17;
+
+        let next_generation =
+            crate::preview_screen::test_advance_live_screen_generation(&state, 42).await;
+        assert_ne!(next_generation, initial_generation);
+        let (sources, camera_change, screen_change) = sources.refresh_sources_nonblocking(&state);
+
+        assert_eq!(camera_change, None);
+        assert_eq!(
+            screen_change,
+            Some(CompositorScreenSourceChange::Adopted {
+                source_key: SourceKey::screen(screen_id),
+                generation: next_generation,
+            })
+        );
+        assert_eq!(
+            sources
+                .screen
+                .as_ref()
+                .map(PreviewScreenFrameSource::generation),
+            Some(next_generation)
+        );
+        assert!(sources.last_screen_frame.is_none());
+        let stats = sources.fetch_stats();
+        assert_eq!(stats.screen_try_lock_misses, 0);
+        assert_eq!(stats.screen_blocking_refreshes, 0);
+        assert_eq!(stats.screen_fresh_serves, 0);
+        assert_eq!(stats.screen_held_serves, 0);
+        assert_eq!(stats.screen_served_age_max_ms, 0);
+    }
+
     #[tokio::test]
     async fn compositor_frame_progress_updates_frame_id_without_resetting_metrics() {
         let state = test_state();
@@ -8494,6 +10217,40 @@ mod tests {
         assert_eq!(activity.stop_timeouts.load(Ordering::Acquire), 0);
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_shutdown_joins_the_compositor_blocking_worker() {
+        let state = test_state();
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                target_fps: 60,
+                width: 64,
+                height: 36,
+                frame_consumer: CompositorFrameConsumer::NativePreview,
+                stream_output: None,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+            },
+        )
+        .await;
+
+        let activity = state.compositor.lock().await.worker_activity.clone();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), shutdown_compositor(&state))
+                .await
+                .expect("process shutdown must not strand the compositor owner")
+        );
+
+        let compositor = state.compositor.lock().await;
+        assert!(compositor.run_id.is_none());
+        assert!(compositor.render_task.is_none());
+        assert_eq!(activity.active.load(Ordering::Acquire), 0);
+        assert_eq!(activity.max_active.load(Ordering::Acquire), 1);
+        assert_eq!(activity.stop_timeouts.load(Ordering::Acquire), 0);
+    }
+
     #[tokio::test]
     async fn concurrent_compositor_starts_serialize_the_full_worker_handoff() {
         let state = test_state();
@@ -8596,6 +10353,125 @@ mod tests {
         stop_compositor(&state).await;
 
         assert!(recording_ready.ready, "{recording_ready:?}");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compositor_shutdown_progresses_while_scene_image_prepare_is_blocked() {
+        let state = test_state();
+        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let blocked_gate = gate.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let update_state = state.clone();
+        let update = tokio::spawn(async move {
+            update_compositor_scene_with_prepare_hook(
+                &update_state,
+                CompositorSceneUpdateParams {
+                    transition_ms: None,
+                    revision: 1,
+                    scene: None,
+                    layout: crate::protocol::default_layout_settings(),
+                    active_screen: Some(test_stream_screen("slow-image")),
+                },
+                move || {
+                    let _ = entered_tx.send(());
+                    let (released, wake) = &*blocked_gate;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                },
+            )
+            .await
+        });
+
+        entered_rx
+            .await
+            .expect("scene update reached blocking image preparation");
+        let shutdown =
+            tokio::time::timeout(Duration::from_millis(500), stop_compositor(&state)).await;
+
+        let (released, wake) = &*gate;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        let _ = update.await.expect("scene update task joined");
+
+        let stopped = shutdown
+            .expect("compositor shutdown must not wait for synchronous scene image preparation");
+        assert_eq!(stopped.state, CompositorState::Stopped);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn equal_revision_scene_prepares_are_latest_token_wins_but_sequential_reload_works() {
+        let state = test_state();
+        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let blocked_gate = gate.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            update_compositor_scene_with_prepare_hook(
+                &first_state,
+                CompositorSceneUpdateParams {
+                    transition_ms: None,
+                    revision: 7,
+                    scene: None,
+                    layout: crate::protocol::default_layout_settings(),
+                    active_screen: Some(test_stream_screen("first-same-revision")),
+                },
+                move || {
+                    let _ = entered_tx.send(());
+                    let (released, wake) = &*blocked_gate;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                },
+            )
+            .await
+        });
+        entered_rx
+            .await
+            .expect("first equal-revision prepare reached the test gate");
+
+        let latest = update_compositor_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                transition_ms: None,
+                revision: 7,
+                scene: None,
+                layout: crate::protocol::default_layout_settings(),
+                active_screen: Some(test_stream_screen("latest-same-revision")),
+            },
+        )
+        .await;
+        assert_eq!(
+            latest.active_screen_id.as_deref(),
+            Some("latest-same-revision")
+        );
+
+        let (released, wake) = &*gate;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        let superseded = first.await.expect("first scene update task joined");
+        assert_eq!(
+            superseded.active_screen_id.as_deref(),
+            Some("latest-same-revision")
+        );
+
+        let sequential = update_compositor_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                transition_ms: None,
+                revision: 7,
+                scene: None,
+                layout: crate::protocol::default_layout_settings(),
+                active_screen: Some(test_stream_screen("sequential-same-revision")),
+            },
+        )
+        .await;
+        assert_eq!(
+            sequential.active_screen_id.as_deref(),
+            Some("sequential-same-revision")
+        );
     }
 
     #[tokio::test]

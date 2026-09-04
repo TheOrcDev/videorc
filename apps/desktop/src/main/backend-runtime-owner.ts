@@ -1,4 +1,9 @@
-export type BackendRuntimeState = 'active' | 'stopping' | 'shutdown-unconfirmed' | 'completed'
+export type BackendRuntimeState =
+  | 'active'
+  | 'awaiting-shutdown-receipt'
+  | 'stopping'
+  | 'shutdown-unconfirmed'
+  | 'completed'
 
 export interface OwnedBackendRuntime<TProcess extends object> {
   readonly generation: number
@@ -35,6 +40,10 @@ export interface BackendRuntimeTerminationOptions<TProcess extends object> {
   readonly runtimePid: number | undefined
   readonly signalExactPid: (pid: number) => boolean
   readonly signalRuntimeProcess: (process: TProcess) => boolean
+}
+
+export function backendRuntimeAcceptsBootstrap(runtime: { state: BackendRuntimeState }): boolean {
+  return runtime.state === 'active' || runtime.state === 'awaiting-shutdown-receipt'
 }
 
 /**
@@ -89,10 +98,15 @@ export function settleBackendRuntimeExit<TProcess extends object>(
     processMayStillBeOwned
   )
 
-  if (runtime.state === 'shutdown-unconfirmed' && classified.stillLive.length > 0) {
+  if (classified.stillLive.length > 0) {
     for (const pid of classified.confirmedDead) {
       runtime.ownedProcessPids.delete(pid)
     }
+    // A wrapper exit is never proof that another process owned by this
+    // generation exited. Even an exact capture-finalization receipt only makes
+    // termination safe; it does not prove process death or permit a replacement
+    // backend to overlap the still-live child.
+    owner.markShutdownUnconfirmed(runtime)
     return { completed: false, wasCurrent, wasIntentional, ...classified }
   }
 
@@ -175,6 +189,18 @@ export class BackendRuntimeOwner<TProcess extends object> {
 
   beginShutdown(runtime: OwnedBackendRuntime<TProcess>): void {
     if (this.isCurrent(runtime) && runtime.state === 'active') {
+      runtime.state = 'stopping'
+    }
+  }
+
+  beginShutdownReceiptWait(runtime: OwnedBackendRuntime<TProcess>): void {
+    if (this.isCurrent(runtime) && runtime.state === 'active') {
+      runtime.state = 'awaiting-shutdown-receipt'
+    }
+  }
+
+  confirmShutdownReceipt(runtime: OwnedBackendRuntime<TProcess>): void {
+    if (this.isCurrent(runtime) && runtime.state === 'awaiting-shutdown-receipt') {
       runtime.state = 'stopping'
     }
   }

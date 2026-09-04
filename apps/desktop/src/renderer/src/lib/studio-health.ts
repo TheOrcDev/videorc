@@ -93,6 +93,11 @@ const PREVIEW_PRESENT_BUDGET_P99_MS = 150
  * are no longer guaranteed. Warn when preview presentation drifts past the live latency
  * budget or is on a non-native fallback transport.
  *
+ * Capture recovery (stall detection, silent restarts, the adaptive format
+ * step-down) deliberately has NO Studio presence at all (owner, 2026-08-31):
+ * no repairing chip, no stalled alert, no retry button. The backend heals
+ * silently and logs; the Diagnostics tab keeps the technical summary.
+ *
  * There is deliberately NO red "requires native CAMetalLayer" state anymore
  * (owner, 2026-07-07): it fired for transient startup states ("unavailable /
  * none") and read as jargon. The preview window's presenting watch (plan 021

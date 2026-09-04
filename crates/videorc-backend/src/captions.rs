@@ -6,10 +6,11 @@
 //! whenever streaming is unavailable. Transcripts broadcast to renderer
 //! clients and accumulate as chunk records for the SRT + burned copy.
 
+use std::ffi::OsString;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use serde::Serialize;
 use tokio::sync::{Mutex, mpsc, watch};
 
@@ -59,6 +60,15 @@ const CAPTION_FINAL_UPLOAD_OVERHEAD: std::time::Duration = std::time::Duration::
 /// truth so normal recording finalization stays near twenty seconds.
 const CAPTION_FINAL_UPLOAD_COUNT: usize = 2;
 const MAX_REALTIME_RECONNECTS: u8 = 2;
+const CAPTION_START_SHUTDOWN_MESSAGE: &str =
+    "Live captions start rejected because backend shutdown is already in progress.";
+const CAPTION_START_SIGN_OUT_MESSAGE: &str = "Live captions start rejected because account sign-out is still cleaning up private caption data.";
+const CAPTION_CANCEL_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const CAPTION_ABORT_JOIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1);
+const CAPTION_PRIVATE_IO_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const CAPTION_PRIVATE_DIRECTORY_KIND: &str = "cue-frame-directory";
+const CAPTION_PRIVATE_PARTIAL_FILE_KIND: &str = "caption-burn-partial";
+const CAPTION_PRIVATE_OWNER_MARKER: &str = ".videorc-caption-owner";
 
 fn caption_final_upload_grace(upload_count: usize) -> std::time::Duration {
     let upload_count = u32::try_from(upload_count.max(1)).unwrap_or(u32::MAX);
@@ -94,6 +104,13 @@ fn caption_contract_idle_session_enabled() -> bool {
 static TAP_ACTIVE: AtomicBool = AtomicBool::new(false);
 static TAP_FRAMES_SEEN: AtomicU64 = AtomicU64::new(0);
 static TAP_FRAMES_DROPPED: AtomicU64 = AtomicU64::new(0);
+#[cfg(test)]
+static CAPTION_LIFECYCLE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+#[cfg(test)]
+pub fn caption_lifecycle_test_lock() -> &'static tokio::sync::Mutex<()> {
+    &CAPTION_LIFECYCLE_TEST_LOCK
+}
 /// Audio intentionally evicted from the bounded chunk queue, in milliseconds.
 /// Zero in normal operation; non-zero is exposed in status and health events.
 static CAPTION_AUDIO_MILLIS_DROPPED: AtomicU64 = AtomicU64::new(0);
@@ -106,6 +123,9 @@ static TAP: std::sync::Mutex<Option<mpsc::Sender<AudioFrame>>> = std::sync::Mute
 /// Without this guard a start racing sign-out could clone the bearer between
 /// teardown and credential removal, then install a fresh provider task.
 static CAPTION_CONTROL: Mutex<()> = Mutex::const_new(());
+/// Serializes sign-out attempts without blocking ordinary capture-finalization
+/// caption control while private artifact cleanup is in progress.
+static CAPTION_SIGN_OUT_SERIAL: Mutex<()> = Mutex::const_new(());
 
 pub fn offer_caption_frame(frame: &AudioFrame) {
     offer_caption_frame_to_tap(
@@ -586,6 +606,40 @@ pub fn captioned_copy_path(recording: &std::path::Path) -> std::path::PathBuf {
     recording.with_file_name(format!("{stem} (captioned).{extension}"))
 }
 
+fn caption_burn_staging_path(recording: &std::path::Path, owner_token: &str) -> std::path::PathBuf {
+    let final_path = captioned_copy_path(recording);
+    let final_name = final_path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("recording-captioned.mp4");
+    final_path.with_file_name(format!(".{final_name}.{owner_token}.partial"))
+}
+
+fn caption_burn_ffmpeg_args(
+    recording_path: &std::path::Path,
+    list_path: &std::path::Path,
+    private_output_path: &std::path::Path,
+) -> [OsString; 14] {
+    [
+        OsString::from("-y"),
+        OsString::from("-i"),
+        recording_path.as_os_str().to_owned(),
+        OsString::from("-f"),
+        OsString::from("concat"),
+        OsString::from("-i"),
+        list_path.as_os_str().to_owned(),
+        OsString::from("-filter_complex"),
+        OsString::from("[0:v][1:v]overlay=eof_action=pass"),
+        OsString::from("-c:a"),
+        OsString::from("copy"),
+        // Private staging deliberately ends in `.partial`, so FFmpeg cannot
+        // infer the output muxer from the filename.
+        OsString::from("-f"),
+        OsString::from("mp4"),
+        private_output_path.as_os_str().to_owned(),
+    ]
+}
+
 fn chunk_cue_window(chunk: &CaptionChunkRecord) -> (f64, f64) {
     let first = chunk.segments.first().map(|segment| segment.start_second);
     let last = chunk.segments.last().map(|segment| segment.end_second);
@@ -704,6 +758,27 @@ pub async fn write_caption_artifacts(
     recording_path: &std::path::Path,
     artifact: FinalizedCaptionArtifact,
 ) -> FinalizedCaptionArtifact {
+    write_caption_artifacts_with_writer(
+        state,
+        session_id,
+        recording_path,
+        artifact,
+        |path, contents| async move { tokio::fs::write(path, contents).await },
+    )
+    .await
+}
+
+async fn write_caption_artifacts_with_writer<Write, WriteFuture>(
+    state: &AppState,
+    session_id: &str,
+    recording_path: &std::path::Path,
+    artifact: FinalizedCaptionArtifact,
+    write: Write,
+) -> FinalizedCaptionArtifact
+where
+    Write: FnOnce(std::path::PathBuf, String) -> WriteFuture,
+    WriteFuture: std::future::Future<Output = std::io::Result<()>>,
+{
     if artifact.chunks.is_empty() {
         return artifact;
     }
@@ -712,18 +787,8 @@ pub async fn write_caption_artifacts(
         return artifact;
     }
     let srt_path = recording_path.with_extension("srt");
-    // Serialize publication with the sign-out generation boundary. If
-    // sign-out wins, this artifact is stale and writes nothing. If this write
-    // wins, sign-out cannot return until the transcript file is fully present.
-    let write_result = {
-        let coordinator = state.captions.lock().await;
-        if coordinator.artifact_generation != artifact.artifact_generation {
-            return artifact;
-        }
-        tokio::fs::write(&srt_path, &srt).await
-    };
-    match write_result {
-        Ok(()) => {
+    match publish_caption_srt(state, &srt_path, artifact.artifact_generation, srt, write).await {
+        Ok(true) => {
             let _ = crate::recording::emit_health_event(
                 state,
                 Some(session_id),
@@ -732,6 +797,7 @@ pub async fn write_caption_artifacts(
                 &format!("Captions saved to {}.", srt_path.display()),
             );
         }
+        Ok(false) => {}
         Err(error) => {
             let _ = crate::recording::emit_health_event(
                 state,
@@ -743,6 +809,156 @@ pub async fn write_caption_artifacts(
         }
     }
     artifact
+}
+
+async fn publish_caption_srt<Write, WriteFuture>(
+    state: &AppState,
+    srt_path: &std::path::Path,
+    artifact_generation: u64,
+    srt: String,
+    write: Write,
+) -> Result<bool>
+where
+    Write: FnOnce(std::path::PathBuf, String) -> WriteFuture,
+    WriteFuture: std::future::Future<Output = std::io::Result<()>>,
+{
+    let publication = {
+        let coordinator = state.captions.lock().await;
+        if coordinator.privacy_teardown_in_progress
+            || coordinator.artifact_generation != artifact_generation
+        {
+            return Ok(false);
+        }
+        coordinator.artifact_publication.clone()
+    };
+    let _publication = publication.lock().await;
+    let publication_is_stale = {
+        let coordinator = state.captions.lock().await;
+        coordinator.privacy_teardown_in_progress
+            || coordinator.artifact_generation != artifact_generation
+    };
+    if publication_is_stale {
+        return Ok(false);
+    }
+
+    let nonce = uuid::Uuid::new_v4().simple();
+    let file_name = srt_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("captions.srt");
+    let staging_path = srt_path.with_file_name(format!(".{file_name}.{nonce}.partial"));
+    let previous_path = srt_path.with_file_name(format!(".{file_name}.{nonce}.previous"));
+    if let Err(error) = write(staging_path.clone(), srt).await {
+        retire_private_caption_file(state, &staging_path).await;
+        return Err(error).context("Could not stage captions sidecar");
+    }
+
+    let publication_is_stale = {
+        let coordinator = state.captions.lock().await;
+        coordinator.privacy_teardown_in_progress
+            || coordinator.artifact_generation != artifact_generation
+    };
+    if publication_is_stale {
+        retire_private_caption_file(state, &staging_path).await;
+        return Ok(false);
+    }
+    let staging_identity = match crate::storage::capture_session_file_object_identity(&staging_path)
+        .and_then(|identity| {
+            identity.context("Staged captions sidecar disappeared before publication")
+        }) {
+        Ok(identity) => identity,
+        Err(error) => {
+            retire_private_caption_file(state, &staging_path).await;
+            return Err(error);
+        }
+    };
+    let had_previous = match srt_path.try_exists() {
+        Ok(exists) => exists,
+        Err(error) => {
+            retire_private_caption_file(state, &staging_path).await;
+            return Err(error).with_context(|| {
+                format!("Could not inspect captions sidecar {}", srt_path.display())
+            });
+        }
+    };
+    if had_previous
+        && let Err(error) =
+            crate::session_ops::rename_session_file_no_replace(srt_path, &previous_path)
+    {
+        retire_private_caption_file(state, &staging_path).await;
+        return Err(error).with_context(|| {
+            format!("Could not preserve captions sidecar {}", srt_path.display())
+        });
+    }
+    if let Err(error) = crate::atomic_file::replace_file(&staging_path, srt_path) {
+        if had_previous
+            && crate::session_ops::rename_session_file_no_replace(&previous_path, srt_path).is_err()
+        {
+            mark_caption_privacy_io_failed(state).await;
+        }
+        retire_private_caption_file(state, &staging_path).await;
+        return Err(error).context("Could not publish captions sidecar");
+    }
+
+    let generation_is_current = {
+        let coordinator = state.captions.lock().await;
+        !coordinator.privacy_teardown_in_progress
+            && coordinator.artifact_generation == artifact_generation
+    };
+    if !generation_is_current {
+        let published_removed =
+            retire_owned_private_caption_file(state, srt_path, &staging_identity).await;
+        if had_previous
+            && (!published_removed
+                || crate::session_ops::rename_session_file_no_replace(&previous_path, srt_path)
+                    .is_err())
+        {
+            mark_caption_privacy_io_failed(state).await;
+        }
+        return Ok(false);
+    }
+
+    if had_previous && !retire_private_caption_file(state, &previous_path).await {
+        return Err(anyhow::anyhow!(
+            "Could not retire the previous captions sidecar after publication"
+        ));
+    }
+    Ok(true)
+}
+
+async fn retire_private_caption_file(state: &AppState, path: &std::path::Path) -> bool {
+    match tokio::fs::remove_file(path).await {
+        Ok(()) => true,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => true,
+        Err(error) => {
+            tracing::warn!(path = %path.display(), "Could not retire private caption file: {error}");
+            mark_caption_privacy_io_failed(state).await;
+            false
+        }
+    }
+}
+
+async fn retire_owned_private_caption_file(
+    state: &AppState,
+    path: &std::path::Path,
+    expected: &crate::storage::SessionFileObjectIdentity,
+) -> bool {
+    match crate::storage::capture_session_file_object_identity(path) {
+        Ok(None) => true,
+        Ok(Some(identity)) if &identity == expected => {
+            retire_private_caption_file(state, path).await
+        }
+        Ok(Some(_)) | Err(_) => {
+            mark_caption_privacy_io_failed(state).await;
+            false
+        }
+    }
+}
+
+async fn mark_caption_privacy_io_failed(state: &AppState) {
+    let mut coordinator = state.captions.lock().await;
+    coordinator.privacy_teardown_in_progress = true;
+    coordinator.privacy_teardown_failed = true;
 }
 
 /// Build the ffconcat playlist for the caption track: transparent gap frames
@@ -777,7 +993,7 @@ pub fn build_caption_track_concat(cues: &[CaptionCue], blank_seq: u64) -> String
 
 /// Kick off the cue-frame render round-trip (R2): ask the renderer for one
 /// full-frame transparent PNG per cue (plus the blank gap frame), collect
-/// them under `<recording>.captions-frames/`, and hand off to the overlay
+/// them under a request-unique private directory, and hand off to the overlay
 /// burn when complete. A watchdog degrades to SRT-only if frames don't
 /// arrive (renderer closed, error) — the session is never affected.
 pub async fn begin_caption_cue_render(
@@ -787,72 +1003,31 @@ pub async fn begin_caption_cue_render(
     recording_path: &std::path::Path,
     artifact: &FinalizedCaptionArtifact,
 ) {
-    let cues = caption_cues(&artifact.chunks);
-    if cues.is_empty() {
-        return;
-    }
-    let frames_dir = recording_path.with_extension("captions-frames");
-    if let Err(error) = tokio::fs::create_dir_all(&frames_dir).await {
-        let _ = crate::recording::emit_health_event(
-            state,
-            Some(session_id),
-            crate::protocol::HealthLevel::Warn,
-            "captions-burn-failed",
-            &format!("Could not prepare caption frames: {error}"),
-        );
-        return;
-    }
-
-    let request_id = format!("cues-{}", uuid::Uuid::new_v4().simple());
+    let request_id = match begin_caption_cue_render_with_preparer(
+        state,
+        session_id,
+        ffmpeg_path,
+        recording_path,
+        artifact,
+        |frames_dir, owner_token| async move {
+            create_owned_caption_frame_dir(&frames_dir, &owner_token).await
+        },
+    )
+    .await
     {
-        let mut coordinator = state.captions.lock().await;
-        if coordinator.artifact_generation != artifact.artifact_generation {
-            drop(coordinator);
-            let _ = tokio::fs::remove_dir_all(&frames_dir).await;
+        Ok(Some(request_id)) => request_id,
+        Ok(None) => return,
+        Err(error) => {
+            let _ = crate::recording::emit_health_event(
+                state,
+                Some(session_id),
+                crate::protocol::HealthLevel::Warn,
+                "captions-burn-failed",
+                &format!("Could not prepare caption frames: {error}"),
+            );
             return;
         }
-        let mut expected: std::collections::BTreeSet<u64> =
-            cues.iter().map(|cue| cue.seq).collect();
-        expected.insert(CAPTION_BLANK_FRAME_SEQ);
-        coordinator.pending_cue_renders.insert(
-            request_id.clone(),
-            PendingCueRender {
-                session_id: session_id.to_string(),
-                ffmpeg_path: ffmpeg_path.to_string(),
-                recording_path: recording_path.to_path_buf(),
-                frames_dir: frames_dir.clone(),
-                cues: cues.clone(),
-                expected,
-                received: std::collections::BTreeSet::new(),
-                artifact_generation: artifact.artifact_generation,
-                last_progress_at: tokio::time::Instant::now(),
-                watchdog_active: false,
-            },
-        );
-        coordinator
-            .pending_cue_render_order
-            .push_back(request_id.clone());
-        // Transcript-bearing emission is part of the same privacy-generation
-        // critical section as registration. Sign-out either observes and
-        // purges this request, or wins first and suppresses the event.
-        state.emit_event(
-            "captions.cues.render-request",
-            serde_json::json!({
-                "requestId": request_id,
-                "canvasWidth": artifact.style.output_width.max(2),
-                "canvasHeight": artifact.style.output_height.max(2),
-                "position": artifact.style.position,
-                "textSize": artifact.style.text_size,
-                "styleId": artifact.style.style_id,
-                "styleRevision": artifact.style.style_revision,
-                "blankSeq": CAPTION_BLANK_FRAME_SEQ,
-                "cues": cues
-                    .iter()
-                    .map(|cue| serde_json::json!({ "seq": cue.seq, "text": cue.text }))
-                    .collect::<Vec<_>>(),
-            }),
-        );
-    }
+    };
 
     // Progress watchdog: a many-cue 4K render may legitimately exceed thirty
     // seconds in total. It only degrades when no new requested frame arrives
@@ -878,33 +1053,24 @@ pub async fn begin_caption_cue_render(
                 CueRenderWatchdogState::ActiveUntil(deadline) => deadline,
             };
             tokio::time::sleep_until(deadline).await;
-            let pending = {
-                let mut coordinator = watchdog_state.captions.lock().await;
-                if coordinator.pending_cue_render_order.front() != Some(&watchdog_request) {
-                    continue;
-                }
-                let Some(pending) = coordinator.pending_cue_renders.get(&watchdog_request) else {
-                    return;
-                };
-                if cue_render_is_inactive(pending.last_progress_at, tokio::time::Instant::now()) {
-                    let pending = remove_pending_cue_render(&mut coordinator, &watchdog_request);
-                    if let Some(pending) = pending.as_ref() {
-                        // Keep the generation coordinator locked until private
-                        // frame cleanup finishes, so sign-out cannot miss an
-                        // already-removed request and return ahead of deletion.
-                        let _ = tokio::fs::remove_dir_all(&pending.frames_dir).await;
-                    }
-                    pending
-                } else {
-                    None
-                }
-            };
-            let Some(pending) = pending else {
-                continue;
+            let session_id = match cleanup_expired_caption_render(
+                &watchdog_state,
+                &watchdog_request,
+                tokio::time::Instant::now(),
+                |frames_dir, owner_token| async move {
+                    remove_owned_caption_frame_dir(&frames_dir, &owner_token).await
+                },
+            )
+            .await
+            {
+                ExpiredCaptionRenderCleanup::Missing => return,
+                ExpiredCaptionRenderCleanup::StillActive => continue,
+                ExpiredCaptionRenderCleanup::Removed(pending) => pending.session_id,
+                ExpiredCaptionRenderCleanup::CleanupFailed(session_id) => session_id,
             };
             let _ = crate::recording::emit_health_event(
                 &watchdog_state,
-                Some(&pending.session_id),
+                Some(&session_id),
                 crate::protocol::HealthLevel::Warn,
                 "captions-burn-failed",
                 "Caption frame rendering stopped making progress; the .srt sidecar is still available.",
@@ -914,11 +1080,299 @@ pub async fn begin_caption_cue_render(
     });
 }
 
+async fn begin_caption_cue_render_with_preparer<Prepare, PrepareFuture>(
+    state: &AppState,
+    session_id: &str,
+    ffmpeg_path: &str,
+    recording_path: &std::path::Path,
+    artifact: &FinalizedCaptionArtifact,
+    prepare: Prepare,
+) -> Result<Option<String>>
+where
+    Prepare: FnOnce(std::path::PathBuf, String) -> PrepareFuture,
+    PrepareFuture: std::future::Future<Output = std::io::Result<()>>,
+{
+    let cues = caption_cues(&artifact.chunks);
+    if cues.is_empty() {
+        return Ok(None);
+    }
+    let request_id = format!("cues-{}", uuid::Uuid::new_v4().simple());
+    let frames_dir = caption_frame_request_dir(recording_path, &request_id);
+    let cleanup_ledger_id = format!("caption-frames-{request_id}");
+    let owner_token = request_id.clone();
+    let frame_io = state.captions.lock().await.private_frame_io.clone();
+    let _frame_io = frame_io.lock().await;
+    {
+        let coordinator = state.captions.lock().await;
+        if coordinator.privacy_teardown_in_progress
+            || coordinator.artifact_generation != artifact.artifact_generation
+        {
+            return Ok(None);
+        }
+    }
+    state.database.register_caption_private_artifact(
+        &crate::storage::CaptionPrivateArtifactRecord {
+            id: cleanup_ledger_id.clone(),
+            kind: CAPTION_PRIVATE_DIRECTORY_KIND.to_string(),
+            path: frames_dir.display().to_string(),
+            owner_token: owner_token.clone(),
+            published_path: None,
+            object_identity: None,
+        },
+    )?;
+    if let Err(error) = prepare(frames_dir.clone(), owner_token.clone()).await {
+        if remove_owned_caption_frame_dir(&frames_dir, &owner_token)
+            .await
+            .is_ok()
+        {
+            let _ = state
+                .database
+                .remove_caption_private_artifact(&cleanup_ledger_id);
+        }
+        return Err(error).context("Could not create the owned caption frame directory");
+    }
+
+    let mut coordinator = state.captions.lock().await;
+    if coordinator.privacy_teardown_in_progress
+        || coordinator.artifact_generation != artifact.artifact_generation
+    {
+        drop(coordinator);
+        if remove_owned_caption_frame_dir(&frames_dir, &owner_token)
+            .await
+            .is_ok()
+        {
+            state
+                .database
+                .remove_caption_private_artifact(&cleanup_ledger_id)?;
+        }
+        return Ok(None);
+    }
+    let mut expected: std::collections::BTreeSet<u64> = cues.iter().map(|cue| cue.seq).collect();
+    expected.insert(CAPTION_BLANK_FRAME_SEQ);
+    coordinator.pending_cue_renders.insert(
+        request_id.clone(),
+        PendingCueRender {
+            session_id: session_id.to_string(),
+            ffmpeg_path: ffmpeg_path.to_string(),
+            recording_path: recording_path.to_path_buf(),
+            frames_dir: frames_dir.clone(),
+            cues: cues.clone(),
+            expected,
+            received: std::collections::BTreeSet::new(),
+            frame_writes_in_flight: std::collections::BTreeSet::new(),
+            artifact_generation: artifact.artifact_generation,
+            last_progress_at: tokio::time::Instant::now(),
+            watchdog_active: false,
+            cleanup_in_progress: false,
+            cleanup_path: None,
+            owner_token,
+            cleanup_ledger_id,
+        },
+    );
+    coordinator
+        .pending_cue_render_order
+        .push_back(request_id.clone());
+    // Transcript-bearing emission is part of the same privacy-generation
+    // critical section as registration. Sign-out either observes and
+    // purges this request, or wins first and suppresses the event.
+    state.emit_event(
+        "captions.cues.render-request",
+        serde_json::json!({
+            "requestId": request_id,
+            "canvasWidth": artifact.style.output_width.max(2),
+            "canvasHeight": artifact.style.output_height.max(2),
+            "position": artifact.style.position,
+            "textSize": artifact.style.text_size,
+            "styleId": artifact.style.style_id,
+            "styleRevision": artifact.style.style_revision,
+            "blankSeq": CAPTION_BLANK_FRAME_SEQ,
+            "cues": cues
+                .iter()
+                .map(|cue| serde_json::json!({ "seq": cue.seq, "text": cue.text }))
+                .collect::<Vec<_>>(),
+        }),
+    );
+    Ok(Some(request_id))
+}
+
+fn caption_frame_request_dir(
+    recording_path: &std::path::Path,
+    request_id: &str,
+) -> std::path::PathBuf {
+    let recording_name = recording_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("recording");
+    recording_path.with_file_name(format!(".{recording_name}.{request_id}.caption-frames"))
+}
+
+async fn create_owned_caption_frame_dir(
+    frames_dir: &std::path::Path,
+    owner_token: &str,
+) -> std::io::Result<()> {
+    tokio::fs::create_dir(frames_dir).await?;
+    let marker_path = frames_dir.join(CAPTION_PRIVATE_OWNER_MARKER);
+    let marker_result = tokio::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&marker_path)
+        .await;
+    match marker_result {
+        Ok(mut marker) => {
+            use tokio::io::AsyncWriteExt as _;
+            marker.write_all(owner_token.as_bytes()).await?;
+            marker.sync_all().await
+        }
+        Err(error) => {
+            let _ = tokio::fs::remove_dir(frames_dir).await;
+            Err(error)
+        }
+    }
+}
+
+async fn remove_owned_caption_frame_dir(
+    frames_dir: &std::path::Path,
+    owner_token: &str,
+) -> std::io::Result<()> {
+    let metadata = match tokio::fs::symlink_metadata(frames_dir).await {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "caption frame ownership path is not an owned directory",
+        ));
+    }
+    let marker = tokio::fs::read(frames_dir.join(CAPTION_PRIVATE_OWNER_MARKER)).await?;
+    if marker != owner_token.as_bytes() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "caption frame ownership marker does not match",
+        ));
+    }
+    tokio::fs::remove_dir_all(frames_dir).await
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CueRenderWatchdogState {
     Missing,
     Queued,
     ActiveUntil(tokio::time::Instant),
+}
+
+enum ExpiredCaptionRenderCleanup {
+    Missing,
+    StillActive,
+    Removed(Box<PendingCueRender>),
+    CleanupFailed(String),
+}
+
+async fn cleanup_expired_caption_render<Cleanup, CleanupFuture>(
+    state: &AppState,
+    request_id: &str,
+    now: tokio::time::Instant,
+    cleanup: Cleanup,
+) -> ExpiredCaptionRenderCleanup
+where
+    Cleanup: FnOnce(std::path::PathBuf, String) -> CleanupFuture,
+    CleanupFuture: std::future::Future<Output = std::io::Result<()>>,
+{
+    let frame_io = state.captions.lock().await.private_frame_io.clone();
+    let _frame_io = frame_io.lock().await;
+    let (frames_dir, cleanup_path, artifact_generation, session_id, owner_token, cleanup_ledger_id) = {
+        let mut coordinator = state.captions.lock().await;
+        if coordinator
+            .pending_cue_render_order
+            .front()
+            .map(String::as_str)
+            != Some(request_id)
+        {
+            return if coordinator.pending_cue_renders.contains_key(request_id) {
+                ExpiredCaptionRenderCleanup::StillActive
+            } else {
+                ExpiredCaptionRenderCleanup::Missing
+            };
+        }
+        let Some(pending) = coordinator.pending_cue_renders.get_mut(request_id) else {
+            return ExpiredCaptionRenderCleanup::Missing;
+        };
+        if pending.cleanup_in_progress {
+            return ExpiredCaptionRenderCleanup::Missing;
+        }
+        if !cue_render_is_inactive(pending.last_progress_at, now) {
+            return ExpiredCaptionRenderCleanup::StillActive;
+        }
+        let frames_name = pending
+            .frames_dir
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("caption-frames");
+        let cleanup_path = pending.frames_dir.with_file_name(format!(
+            ".{frames_name}.{}.retiring",
+            uuid::Uuid::new_v4().simple()
+        ));
+        pending.cleanup_in_progress = true;
+        pending.cleanup_path = Some(cleanup_path.clone());
+        let plan = (
+            pending.frames_dir.clone(),
+            cleanup_path,
+            pending.artifact_generation,
+            pending.session_id.clone(),
+            pending.owner_token.clone(),
+            pending.cleanup_ledger_id.clone(),
+        );
+        coordinator
+            .pending_cue_render_order
+            .retain(|queued| queued != request_id);
+        plan
+    };
+
+    // Move the exact directory we reserved to a unique quarantine before the
+    // potentially slow recursive delete. A replacement created at the public
+    // path can no longer be deleted by this old watchdog generation.
+    let cleanup_result =
+        match crate::session_ops::rename_session_file_no_replace(&frames_dir, &cleanup_path) {
+            Ok(()) => cleanup(cleanup_path.clone(), owner_token.clone()).await,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match cleanup(cleanup_path.clone(), owner_token.clone()).await {
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    result => result,
+                }
+            }
+            Err(error) => Err(error),
+        };
+    let cleanup_result = cleanup_result.and_then(|()| {
+        state
+            .database
+            .remove_caption_private_artifact(&cleanup_ledger_id)
+            .map(|_| ())
+            .map_err(std::io::Error::other)
+    });
+    let mut coordinator = state.captions.lock().await;
+    if let Err(error) = cleanup_result {
+        tracing::warn!(
+            request_id,
+            "Could not remove expired private caption frame cache: {error}"
+        );
+        return ExpiredCaptionRenderCleanup::CleanupFailed(session_id);
+    }
+    let Some(current) = coordinator.pending_cue_renders.get(request_id) else {
+        return ExpiredCaptionRenderCleanup::Missing;
+    };
+    if current.artifact_generation != artifact_generation
+        || !current.cleanup_in_progress
+        || current.cleanup_path.as_ref() != Some(&cleanup_path)
+    {
+        return ExpiredCaptionRenderCleanup::Missing;
+    }
+    ExpiredCaptionRenderCleanup::Removed(Box::new(
+        coordinator
+            .pending_cue_renders
+            .remove(request_id)
+            .expect("expired caption render remains reserved for cleanup"),
+    ))
 }
 
 fn pending_cue_render_watchdog_state(
@@ -929,6 +1383,9 @@ fn pending_cue_render_watchdog_state(
     let Some(pending) = coordinator.pending_cue_renders.get_mut(request_id) else {
         return CueRenderWatchdogState::Missing;
     };
+    if pending.cleanup_in_progress {
+        return CueRenderWatchdogState::Missing;
+    }
     if coordinator
         .pending_cue_render_order
         .front()
@@ -970,42 +1427,160 @@ pub async fn submit_caption_cue_frame(
     if bytes.is_empty() || bytes.len() > OVERLAY_MAX_ENCODED_BYTES {
         bail!("Caption frame payload size is out of range.");
     }
+    submit_caption_cue_frame_with_writer(state, request_id, seq, bytes, |path, bytes| async move {
+        tokio::fs::write(path, bytes).await
+    })
+    .await
+}
 
-    let (completed, finished_burn_tasks) = {
+async fn submit_caption_cue_frame_with_writer<Write, WriteFuture>(
+    state: &AppState,
+    request_id: &str,
+    seq: u64,
+    bytes: Vec<u8>,
+    write: Write,
+) -> Result<bool>
+where
+    Write: FnOnce(std::path::PathBuf, Vec<u8>) -> WriteFuture,
+    WriteFuture: std::future::Future<Output = std::io::Result<()>>,
+{
+    let frame_io = state.captions.lock().await.private_frame_io.clone();
+    let _frame_io = frame_io.lock().await;
+    let (path, staging_path, artifact_generation) = {
         let mut coordinator = state.captions.lock().await;
+        if coordinator.privacy_teardown_in_progress {
+            bail!("Caption frame request is stale.");
+        }
+        let Some(pending) = coordinator.pending_cue_renders.get_mut(request_id) else {
+            bail!("Caption frame request is stale.");
+        };
+        if pending.cleanup_in_progress {
+            bail!("Caption frame request is expiring.");
+        }
+        if !pending.expected.contains(&seq) {
+            bail!("Caption frame seq {seq} was not requested.");
+        }
+        if pending.received.contains(&seq) {
+            return Ok(false);
+        }
+        if !pending.frame_writes_in_flight.insert(seq) {
+            bail!("Caption frame seq {seq} is already being stored.");
+        }
+        let path = pending.frames_dir.join(format!("{seq}.png"));
+        let staging_path = pending
+            .frames_dir
+            .join(format!(".{seq}.{}.partial", uuid::Uuid::new_v4().simple()));
+        (path, staging_path, pending.artifact_generation)
+    };
+
+    // File creation can block on a sick disk. The reservation above keeps the
+    // logical request stable without retaining the coordinator lock.
+    if let Err(error) = write(staging_path.clone(), bytes).await {
+        release_caption_frame_reservation(state, request_id, seq, artifact_generation).await;
+        retire_private_caption_file(state, &staging_path).await;
+        return Err(error).context("Could not stage caption frame");
+    }
+    let staging_identity = match crate::storage::capture_session_file_object_identity(&staging_path)
+        .and_then(|identity| {
+            identity.context("Staged caption frame disappeared before publication")
+        }) {
+        Ok(identity) => identity,
+        Err(error) => {
+            release_caption_frame_reservation(state, request_id, seq, artifact_generation).await;
+            retire_private_caption_file(state, &staging_path).await;
+            return Err(error);
+        }
+    };
+
+    let request_is_current = {
+        let mut coordinator = state.captions.lock().await;
+        let privacy_teardown_in_progress = coordinator.privacy_teardown_in_progress;
+        match coordinator.pending_cue_renders.get_mut(request_id) {
+            Some(pending)
+                if !privacy_teardown_in_progress
+                    && pending.artifact_generation == artifact_generation
+                    && !pending.cleanup_in_progress =>
+            {
+                true
+            }
+            Some(pending) => {
+                pending.frame_writes_in_flight.remove(&seq);
+                false
+            }
+            None => false,
+        }
+    };
+    if !request_is_current {
+        retire_private_caption_file(state, &staging_path).await;
+        bail!("Caption frame request became stale while its frame was stored.");
+    }
+    if let Err(error) = crate::session_ops::rename_session_file_no_replace(&staging_path, &path) {
+        release_caption_frame_reservation(state, request_id, seq, artifact_generation).await;
+        retire_private_caption_file(state, &staging_path).await;
+        return Err(error).context("Could not publish caption frame");
+    }
+
+    let installed = {
+        let mut coordinator = state.captions.lock().await;
+        let privacy_teardown_in_progress = coordinator.privacy_teardown_in_progress;
         let watchdog_active = coordinator
             .pending_cue_render_order
             .front()
             .map(String::as_str)
             == Some(request_id);
-        let Some(pending) = coordinator.pending_cue_renders.get_mut(request_id) else {
-            bail!("Caption frame request is stale.");
-        };
-        if !pending.expected.contains(&seq) {
-            bail!("Caption frame seq {seq} was not requested.");
+        match coordinator.pending_cue_renders.get_mut(request_id) {
+            Some(pending)
+                if !privacy_teardown_in_progress
+                    && pending.artifact_generation == artifact_generation
+                    && !pending.cleanup_in_progress =>
+            {
+                pending.frame_writes_in_flight.remove(&seq);
+                if pending.received.insert(seq) {
+                    pending.last_progress_at = tokio::time::Instant::now();
+                    pending.watchdog_active = watchdog_active;
+                }
+                let completed = pending.received == pending.expected;
+                if completed {
+                    let pending = remove_pending_cue_render(&mut coordinator, request_id)
+                        .expect("completed caption render remains installed");
+                    let finished = take_finished_caption_burn_tasks(&mut coordinator);
+                    register_caption_overlay_burn(state.clone(), pending, &mut coordinator);
+                    Some((true, finished))
+                } else {
+                    Some((false, Vec::new()))
+                }
+            }
+            Some(pending) => {
+                pending.frame_writes_in_flight.remove(&seq);
+                None
+            }
+            None => None,
         }
-        let path = pending.frames_dir.join(format!("{seq}.png"));
-        std::fs::write(&path, &bytes)
-            .map_err(|error| anyhow::anyhow!("Could not store caption frame: {error}"))?;
-        if pending.received.insert(seq) {
-            pending.last_progress_at = tokio::time::Instant::now();
-            pending.watchdog_active = watchdog_active;
-        }
-        if pending.received == pending.expected {
-            let pending = remove_pending_cue_render(&mut coordinator, request_id)
-                .expect("completed caption render remains installed");
-            let finished = take_finished_caption_burn_tasks(&mut coordinator);
-            register_caption_overlay_burn(state.clone(), pending, &mut coordinator);
-            (true, finished)
-        } else {
-            (false, Vec::new())
-        }
+    };
+
+    let Some((completed, finished_burn_tasks)) = installed else {
+        retire_owned_private_caption_file(state, &path, &staging_identity).await;
+        bail!("Caption frame request became stale while its frame was published.");
     };
 
     for task in finished_burn_tasks {
         let _ = task.join.await;
     }
     Ok(completed)
+}
+
+async fn release_caption_frame_reservation(
+    state: &AppState,
+    request_id: &str,
+    seq: u64,
+    artifact_generation: u64,
+) {
+    let mut coordinator = state.captions.lock().await;
+    if let Some(pending) = coordinator.pending_cue_renders.get_mut(request_id)
+        && pending.artifact_generation == artifact_generation
+    {
+        pending.frame_writes_in_flight.remove(&seq);
+    }
 }
 
 /// Burn the aligned captions into a `(captioned)` copy of the recording:
@@ -1023,18 +1598,30 @@ fn register_caption_overlay_burn(
         pending.artifact_generation, coordinator.artifact_generation,
         "sign-out must take a pending render before it can register a burn task"
     );
-    let output_path = captioned_copy_path(&pending.recording_path);
+    let owner_token = format!("caption-burn-{}", uuid::Uuid::new_v4().simple());
+    let cleanup_ledger_id = owner_token.clone();
+    let output_path = caption_burn_staging_path(&pending.recording_path, &owner_token);
     let frames_dir = pending.frames_dir.clone();
     let (cancel, cancel_receiver) = watch::channel(false);
     let task_state = state.clone();
+    let task_output_path = output_path.clone();
+    let task_cleanup_ledger_id = cleanup_ledger_id.clone();
     let join = tokio::spawn(async move {
-        run_caption_overlay_burn(task_state, pending, cancel_receiver).await;
+        run_caption_overlay_burn(
+            task_state,
+            pending,
+            cancel_receiver,
+            task_output_path,
+            task_cleanup_ledger_id,
+        )
+        .await;
     });
     coordinator.caption_burn_tasks.push(CaptionBurnTask {
         cancel,
         join,
         output_path,
         frames_dir,
+        cleanup_ledger_id,
     });
 }
 
@@ -1067,10 +1654,14 @@ fn take_pending_caption_frame_dirs(
     coordinator: &mut CaptionsCoordinator,
 ) -> Vec<std::path::PathBuf> {
     coordinator.pending_cue_render_order.clear();
-    std::mem::take(&mut coordinator.pending_cue_renders)
-        .into_values()
-        .map(|pending| pending.frames_dir)
-        .collect()
+    let mut frames_dirs = std::collections::BTreeSet::new();
+    for pending in std::mem::take(&mut coordinator.pending_cue_renders).into_values() {
+        frames_dirs.insert(pending.frames_dir);
+        if let Some(cleanup_path) = pending.cleanup_path {
+            frames_dirs.insert(cleanup_path);
+        }
+    }
+    frames_dirs.into_iter().collect()
 }
 
 async fn wait_for_caption_burn_cancel(cancel: &mut watch::Receiver<bool>) {
@@ -1119,8 +1710,26 @@ async fn run_caption_overlay_burn(
     state: AppState,
     pending: PendingCueRender,
     mut sign_out_cancel: watch::Receiver<bool>,
+    private_output_path: std::path::PathBuf,
+    cleanup_ledger_id: String,
 ) {
     let output_path = captioned_copy_path(&pending.recording_path);
+    if let Err(error) = state.database.register_caption_private_artifact(
+        &crate::storage::CaptionPrivateArtifactRecord {
+            id: cleanup_ledger_id.clone(),
+            kind: CAPTION_PRIVATE_PARTIAL_FILE_KIND.to_string(),
+            path: private_output_path.display().to_string(),
+            owner_token: cleanup_ledger_id.clone(),
+            published_path: None,
+            object_identity: None,
+        },
+    ) {
+        tracing::error!(
+            "Could not register private caption burn ownership before encoding: {error:#}"
+        );
+        mark_caption_privacy_io_failed(&state).await;
+        return;
+    }
     let outcome = async {
         if caption_burn_cancelled(&sign_out_cancel) {
             return Err("signed out; captioned copy cancelled".to_string());
@@ -1161,18 +1770,11 @@ async fn run_caption_overlay_burn(
 
             let mut command = tokio::process::Command::new(&pending.ffmpeg_path);
             command
-                .arg("-y")
-                .arg("-i")
-                .arg(&pending.recording_path)
-                .arg("-f")
-                .arg("concat")
-                .arg("-i")
-                .arg(&list_path)
-                .arg("-filter_complex")
-                .arg("[0:v][1:v]overlay=eof_action=pass")
-                .arg("-c:a")
-                .arg("copy")
-                .arg(&output_path)
+                .args(caption_burn_ffmpeg_args(
+                    &pending.recording_path,
+                    &list_path,
+                    &private_output_path,
+                ))
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
                 .stderr(std::process::Stdio::null());
@@ -1192,7 +1794,7 @@ async fn run_caption_overlay_burn(
                     }
                     Some(CaptionBurnInterruption::RetryAfterCapture) => {
                         let _ = child.kill().await;
-                        let _ = tokio::fs::remove_file(&output_path).await;
+                        let _ = tokio::fs::remove_file(&private_output_path).await;
                         state.emit_log(
                             "info",
                             "Captioned copy paused for a new capture; it will resume when capture is idle.",
@@ -1220,34 +1822,45 @@ async fn run_caption_overlay_burn(
     }
     .await;
 
-    let _ = tokio::fs::remove_dir_all(&pending.frames_dir).await;
+    if remove_owned_caption_frame_dir(&pending.frames_dir, &pending.owner_token)
+        .await
+        .is_ok()
+    {
+        let _ = state
+            .database
+            .remove_caption_private_artifact(&pending.cleanup_ledger_id);
+    } else {
+        mark_caption_privacy_io_failed(&state).await;
+    }
     match outcome {
         Ok(()) => {
-            // Hold the generation lock through publication. Either this event
-            // wins before sign-out advances the generation, or sign-out wins
-            // and this task removes the output without publishing readiness.
-            let coordinator = state.captions.lock().await;
-            let publish_ready = caption_burn_can_publish_ready(
-                caption_burn_cancelled(&sign_out_cancel),
-                pending.artifact_generation,
-                coordinator.artifact_generation,
-            );
-            if publish_ready {
+            if let Err(error) = publish_caption_burn_output(
+                &state,
+                &pending,
+                &sign_out_cancel,
+                &private_output_path,
+                &output_path,
+                &cleanup_ledger_id,
+            )
+            .await
+            {
                 let _ = crate::recording::emit_health_event(
                     &state,
                     Some(&pending.session_id),
-                    crate::protocol::HealthLevel::Info,
-                    "captions-burned-copy-ready",
-                    &format!("Captioned copy saved to {}.", output_path.display()),
+                    crate::protocol::HealthLevel::Warn,
+                    "captions-burn-failed",
+                    &format!(
+                        "Captioned copy could not be published ({error:#}); the .srt sidecar is still available."
+                    ),
                 );
-            }
-            drop(coordinator);
-            if !publish_ready {
-                let _ = tokio::fs::remove_file(&output_path).await;
             }
         }
         Err(reason) => {
-            let _ = tokio::fs::remove_file(&output_path).await;
+            if retire_private_caption_file(&state, &private_output_path).await {
+                let _ = state
+                    .database
+                    .remove_caption_private_artifact(&cleanup_ledger_id);
+            }
             if !reason.starts_with("signed out") {
                 let _ = crate::recording::emit_health_event(
                     &state,
@@ -1263,7 +1876,84 @@ async fn run_caption_overlay_burn(
     }
 }
 
-async fn cancel_and_join_caption_burn_tasks(tasks: Vec<CaptionBurnTask>) {
+async fn publish_caption_burn_output(
+    state: &AppState,
+    pending: &PendingCueRender,
+    sign_out_cancel: &watch::Receiver<bool>,
+    private_output_path: &std::path::Path,
+    output_path: &std::path::Path,
+    cleanup_ledger_id: &str,
+) -> Result<bool> {
+    let publication = state.captions.lock().await.artifact_publication.clone();
+    let _publication = publication.lock().await;
+    let generation_is_current = {
+        let coordinator = state.captions.lock().await;
+        caption_burn_can_publish_ready(
+            caption_burn_cancelled(sign_out_cancel),
+            pending.artifact_generation,
+            coordinator.artifact_generation,
+        ) && !coordinator.privacy_teardown_in_progress
+    };
+    if !generation_is_current {
+        if retire_private_caption_file(state, private_output_path).await {
+            state
+                .database
+                .remove_caption_private_artifact(cleanup_ledger_id)?;
+        }
+        return Ok(false);
+    }
+
+    let identity = crate::storage::capture_session_file_object_identity(private_output_path)?
+        .context("Caption burn staging output disappeared before publication")?;
+    state.database.update_caption_private_artifact_publication(
+        cleanup_ledger_id,
+        output_path,
+        &identity,
+    )?;
+    crate::atomic_file::replace_file(private_output_path, output_path)
+        .context("Could not publish the captioned copy")?;
+
+    let still_current = {
+        let coordinator = state.captions.lock().await;
+        caption_burn_can_publish_ready(
+            caption_burn_cancelled(sign_out_cancel),
+            pending.artifact_generation,
+            coordinator.artifact_generation,
+        ) && !coordinator.privacy_teardown_in_progress
+    };
+    if !still_current {
+        if retire_owned_private_caption_file(state, output_path, &identity).await {
+            state
+                .database
+                .remove_caption_private_artifact(cleanup_ledger_id)?;
+        }
+        return Ok(false);
+    }
+
+    // The publication lane and second generation check are the adoption
+    // receipt. Only after them may durable truth claim this path is ready.
+    let _ = crate::recording::emit_health_event(
+        state,
+        Some(&pending.session_id),
+        crate::protocol::HealthLevel::Info,
+        "captions-burned-copy-ready",
+        &format!("Captioned copy saved to {}.", output_path.display()),
+    );
+    state
+        .database
+        .remove_caption_private_artifact(cleanup_ledger_id)?;
+    Ok(true)
+}
+
+struct CaptionBurnCleanupResult {
+    complete: bool,
+    unfinished: Vec<CaptionBurnTask>,
+}
+
+async fn cancel_and_join_caption_burn_tasks(
+    state: &AppState,
+    tasks: Vec<CaptionBurnTask>,
+) -> CaptionBurnCleanupResult {
     let tasks = tasks
         .into_iter()
         .map(|task| {
@@ -1275,16 +1965,102 @@ async fn cancel_and_join_caption_burn_tasks(tasks: Vec<CaptionBurnTask>) {
         })
         .collect::<Vec<_>>();
 
+    // Every task receives cancellation before any join. Shared deadlines keep
+    // teardown bounded as one contract even when several prior captures have
+    // finished cue rendering at once.
+    let cancel_deadline = tokio::time::Instant::now() + CAPTION_CANCEL_JOIN_TIMEOUT;
+    let abort_deadline = cancel_deadline + CAPTION_ABORT_JOIN_TIMEOUT;
+    let mut cleanup_complete = true;
+    let mut unfinished = Vec::new();
     for (task, cancelled) in tasks {
-        let _ = task.join.await;
-        let _ = tokio::fs::remove_dir_all(&task.frames_dir).await;
-        if cancelled {
-            let _ = tokio::fs::remove_file(&task.output_path).await;
+        let CaptionBurnTask {
+            cancel,
+            mut join,
+            output_path,
+            frames_dir,
+            cleanup_ledger_id,
+        } = task;
+        let (task_stopped, joined_cleanly) = match tokio::time::timeout_at(
+            cancel_deadline,
+            &mut join,
+        )
+        .await
+        {
+            Ok(Ok(())) => (true, true),
+            Ok(Err(error)) => {
+                tracing::error!("Caption burn task stopped with a join error: {error}");
+                (true, false)
+            }
+            Err(_) => {
+                join.abort();
+                match tokio::time::timeout_at(abort_deadline, &mut join).await {
+                    Ok(Ok(())) => (true, false),
+                    Ok(Err(error)) if error.is_cancelled() => (true, false),
+                    Ok(Err(error)) => {
+                        tracing::error!(
+                            "Caption burn task stopped with a join error after abort: {error}"
+                        );
+                        (true, false)
+                    }
+                    Err(_) => {
+                        tracing::error!(
+                            "Caption burn task did not stop after cancellation and abort deadlines."
+                        );
+                        (false, false)
+                    }
+                }
+            }
+        };
+        if !task_stopped {
+            cleanup_complete = false;
+            unfinished.push(CaptionBurnTask {
+                cancel,
+                join,
+                output_path,
+                frames_dir,
+                cleanup_ledger_id,
+            });
+            continue;
         }
+        if let Err(error) = tokio::fs::remove_dir_all(&frames_dir).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!(
+                "Could not remove private caption frame cache {}: {error}",
+                frames_dir.display()
+            );
+            cleanup_complete = false;
+        }
+        if cancelled || !joined_cleanly {
+            match tokio::fs::remove_file(&output_path).await {
+                Ok(()) => {
+                    let _ = state
+                        .database
+                        .remove_caption_private_artifact(&cleanup_ledger_id);
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    let _ = state
+                        .database
+                        .remove_caption_private_artifact(&cleanup_ledger_id);
+                }
+                Err(error) => {
+                    tracing::error!(
+                        "Could not remove partial private caption output {}: {error}",
+                        output_path.display()
+                    );
+                    cleanup_complete = false;
+                }
+            }
+        }
+    }
+    CaptionBurnCleanupResult {
+        complete: cleanup_complete && unfinished.is_empty(),
+        unfinished,
     }
 }
 
-async fn remove_pending_caption_frame_dirs(frames_dirs: Vec<std::path::PathBuf>) {
+async fn remove_pending_caption_frame_dirs(frames_dirs: Vec<std::path::PathBuf>) -> bool {
+    let mut cleanup_complete = true;
     for frames_dir in frames_dirs {
         if let Err(error) = tokio::fs::remove_dir_all(&frames_dir).await
             && error.kind() != std::io::ErrorKind::NotFound
@@ -1293,8 +2069,132 @@ async fn remove_pending_caption_frame_dirs(frames_dirs: Vec<std::path::PathBuf>)
                 "Could not remove caption frame cache {}: {error}",
                 frames_dir.display()
             );
+            cleanup_complete = false;
         }
     }
+    cleanup_complete
+}
+
+async fn cleanup_registered_caption_private_artifacts(state: &AppState) -> bool {
+    let records = match state.database.caption_private_artifacts() {
+        Ok(records) => records,
+        Err(error) => {
+            tracing::error!("Could not read durable private-caption cleanup ownership: {error:#}");
+            return false;
+        }
+    };
+    let mut complete = true;
+    for record in records {
+        let cleaned = match record.kind.as_str() {
+            CAPTION_PRIVATE_DIRECTORY_KIND => cleanup_registered_caption_directory(&record).await,
+            CAPTION_PRIVATE_PARTIAL_FILE_KIND => cleanup_registered_caption_file(&record).await,
+            other => {
+                tracing::error!(
+                    id = %record.id,
+                    kind = other,
+                    "Unknown durable private-caption artifact kind; cleanup remains fail-closed."
+                );
+                false
+            }
+        };
+        if cleaned {
+            if let Err(error) = state.database.remove_caption_private_artifact(&record.id) {
+                tracing::error!(
+                    id = %record.id,
+                    "Could not retire durable private-caption ownership after cleanup: {error:#}"
+                );
+                complete = false;
+            }
+        } else {
+            complete = false;
+        }
+    }
+    complete
+        && state
+            .database
+            .caption_private_artifacts()
+            .is_ok_and(|records| records.is_empty())
+}
+
+async fn cleanup_registered_caption_directory(
+    record: &crate::storage::CaptionPrivateArtifactRecord,
+) -> bool {
+    let mut candidates = Vec::new();
+    if let Some(path) = record.published_path.as_ref() {
+        candidates.push(std::path::PathBuf::from(path));
+    }
+    candidates.push(std::path::PathBuf::from(&record.path));
+    candidates.sort();
+    candidates.dedup();
+    for candidate in candidates {
+        if let Err(error) = remove_owned_caption_frame_dir(&candidate, &record.owner_token).await {
+            tracing::error!(
+                id = %record.id,
+                path = %candidate.display(),
+                "Could not remove owned private caption directory: {error}"
+            );
+            return false;
+        }
+    }
+    true
+}
+
+async fn cleanup_registered_caption_file(
+    record: &crate::storage::CaptionPrivateArtifactRecord,
+) -> bool {
+    let mut candidates = Vec::new();
+    if let Some(path) = record.published_path.as_ref() {
+        candidates.push(std::path::PathBuf::from(path));
+    }
+    candidates.push(std::path::PathBuf::from(&record.path));
+    candidates.sort();
+    candidates.dedup();
+    for candidate in candidates {
+        let metadata = match tokio::fs::symlink_metadata(&candidate).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                tracing::error!(path = %candidate.display(), "Could not inspect private caption file: {error}");
+                return false;
+            }
+        };
+        if !metadata.is_file() || metadata.file_type().is_symlink() {
+            tracing::error!(
+                path = %candidate.display(),
+                "Private caption cleanup refused a non-regular or symlink path."
+            );
+            return false;
+        }
+        let actual_identity = match crate::storage::capture_session_file_object_identity(&candidate)
+        {
+            Ok(Some(identity)) => identity,
+            Ok(None) => continue,
+            Err(error) => {
+                tracing::error!(path = %candidate.display(), "Could not bind private caption file identity: {error:#}");
+                return false;
+            }
+        };
+        let exact_identity = record.object_identity.as_ref() == Some(&actual_identity);
+        let private_staging_name = candidate == std::path::Path::new(&record.path)
+            && candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains(&record.owner_token));
+        if !exact_identity && !private_staging_name {
+            tracing::error!(
+                path = %candidate.display(),
+                "Private caption cleanup refused a file whose ownership identity changed."
+            );
+            return false;
+        }
+        if let Err(error) = tokio::fs::remove_file(&candidate).await
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::error!(path = %candidate.display(), "Could not remove private caption file: {error}");
+            return false;
+        }
+    }
+    true
 }
 
 // ---------------------------------------------------------------------------
@@ -1441,41 +2341,55 @@ pub fn caption_overlay_error_code(error: &anyhow::Error) -> &'static str {
     }
 }
 
-/// Decode + validate a caption bar and install it in the overlay slot.
-/// Rejects oversized or undecodable payloads without touching the current
-/// overlay. Pure with respect to the slot — unit-tested directly.
-pub fn install_caption_overlay(
+#[cfg(test)]
+pub(crate) fn install_caption_overlay(
     slot: &CaptionOverlaySlot,
     png_base64: &str,
     position: CaptionOverlayPosition,
 ) -> Result<CaptionOverlayInfo> {
-    let decoded = decode_caption_overlay(png_base64)?;
+    let prepared = prepare_caption_overlay(png_base64)?;
+    Ok(install_prepared_caption_overlay(slot, prepared, position))
+}
+
+/// Decode and validate an overlay without holding the destination slot.
+/// Callers which also own higher-level lifecycle locks can do this expensive
+/// work first, revalidate their lifecycle authority, and keep the eventual
+/// slot mutation to one bounded Arc swap.
+pub(crate) fn prepare_caption_overlay(png_base64: &str) -> Result<PreparedCaptionOverlay> {
+    decode_caption_overlay(png_base64)
+}
+
+pub(crate) fn install_prepared_caption_overlay(
+    slot: &CaptionOverlaySlot,
+    prepared: PreparedCaptionOverlay,
+    position: CaptionOverlayPosition,
+) -> CaptionOverlayInfo {
     let mut guard = slot.lock().expect("caption overlay lock");
     let revision = guard.as_ref().map_or(1, |overlay| overlay.revision + 1);
     *guard = Some(CaptionOverlay {
-        rgba: decoded.rgba,
-        bgra: decoded.bgra,
-        width: decoded.width,
-        height: decoded.height,
+        rgba: prepared.rgba,
+        bgra: prepared.bgra,
+        width: prepared.width,
+        height: prepared.height,
         position,
         revision,
     });
-    Ok(CaptionOverlayInfo {
+    CaptionOverlayInfo {
         active: true,
-        width: decoded.width,
-        height: decoded.height,
+        width: prepared.width,
+        height: prepared.height,
         revision,
-    })
+    }
 }
 
-struct DecodedCaptionOverlay {
+pub(crate) struct PreparedCaptionOverlay {
     rgba: Arc<Vec<u8>>,
     bgra: Arc<Vec<u8>>,
     width: u32,
     height: u32,
 }
 
-fn decode_caption_overlay(png_base64: &str) -> Result<DecodedCaptionOverlay> {
+fn decode_caption_overlay(png_base64: &str) -> Result<PreparedCaptionOverlay> {
     use base64::Engine as _;
 
     let encoded_len = png_base64.len();
@@ -1504,7 +2418,7 @@ fn decode_caption_overlay(png_base64: &str) -> Result<DecodedCaptionOverlay> {
             .flat_map(|pixel| [pixel[2], pixel[1], pixel[0], pixel[3]])
             .collect(),
     );
-    Ok(DecodedCaptionOverlay {
+    Ok(PreparedCaptionOverlay {
         rgba,
         bgra,
         width,
@@ -1626,7 +2540,7 @@ fn validate_overlay_style_revision(
 
 fn install_decoded_caption_overlay(
     target: &mut CaptionOverlayTargetState,
-    decoded: &DecodedCaptionOverlay,
+    decoded: &PreparedCaptionOverlay,
     position: CaptionOverlayPosition,
     style_revision: Option<u64>,
 ) {
@@ -1838,6 +2752,10 @@ pub struct CaptionsCoordinator {
     status: Option<CaptionsStatus>,
     desired_enabled: bool,
     language: Option<String>,
+    /// Orders delayed capture auto-start against explicit stop/start, capture
+    /// stop, sign-out, and shutdown. A queued task may commit only the exact
+    /// generation reserved by its session.start request.
+    start_intent_generation: u64,
     /// Transcribed chunks awaiting the post-recording pass (drained +
     /// epoch-filtered at session stop).
     chunks: Vec<CaptionChunkRecord>,
@@ -1868,6 +2786,21 @@ pub struct CaptionsCoordinator {
     /// Invalidates a frame-complete request racing sign-out before it can
     /// install its burn task in `caption_burn_tasks`.
     artifact_generation: u64,
+    /// Orders SRT staging/publication against this coordinator's sign-out
+    /// generation fence. Long writes hold only this purpose-built lane;
+    /// sign-out waits on it after releasing CAPTION_CONTROL.
+    artifact_publication: Arc<Mutex<()>>,
+    /// Orders cue-frame writes and expiry cleanup against this coordinator's
+    /// sign-out. Disk I/O holds neither CAPTION_CONTROL nor the coordinator.
+    private_frame_io: Arc<Mutex<()>>,
+    /// Set at the sign-out privacy boundary before CAPTION_CONTROL is
+    /// released. Starts remain fail-closed until every owned task and private
+    /// artifact is gone and the account credentials have been cleared.
+    privacy_teardown_in_progress: bool,
+    /// A task or private filesystem artifact outlived its hard cleanup
+    /// deadline. The process may no longer prove a safe sign-out without a
+    /// restart, so subsequent starts and sign-out claims remain fail-closed.
+    privacy_teardown_failed: bool,
 }
 
 pub struct PendingCueRender {
@@ -1878,9 +2811,17 @@ pub struct PendingCueRender {
     pub cues: Vec<CaptionCue>,
     pub expected: std::collections::BTreeSet<u64>,
     pub received: std::collections::BTreeSet<u64>,
+    frame_writes_in_flight: std::collections::BTreeSet<u64>,
     artifact_generation: u64,
     last_progress_at: tokio::time::Instant,
     watchdog_active: bool,
+    cleanup_in_progress: bool,
+    /// Unique same-directory quarantine used by expiry cleanup. Retaining it
+    /// in coordinator state lets a racing sign-out clean either pre-rename or
+    /// post-rename ownership without deleting a replacement directory.
+    cleanup_path: Option<std::path::PathBuf>,
+    owner_token: String,
+    cleanup_ledger_id: String,
 }
 
 struct CaptionBurnTask {
@@ -1888,6 +2829,7 @@ struct CaptionBurnTask {
     join: tokio::task::JoinHandle<()>,
     output_path: std::path::PathBuf,
     frames_dir: std::path::PathBuf,
+    cleanup_ledger_id: String,
 }
 
 /// The blank (fully transparent) gap frame's pseudo-seq in a render request.
@@ -1917,6 +2859,28 @@ pub async fn set_caption_session_style(
         output_width,
         output_height,
     };
+}
+
+fn advance_caption_start_intent(coordinator: &mut CaptionsCoordinator) -> u64 {
+    coordinator.start_intent_generation = coordinator.start_intent_generation.wrapping_add(1);
+    coordinator.start_intent_generation
+}
+
+/// Reserves one capture-owned caption auto-start generation. Explicit caption
+/// or privacy commands take the same control lane and invalidate this token.
+pub async fn reserve_caption_session_start(state: &AppState) -> Option<u64> {
+    if state.process_shutdown_requested() {
+        return None;
+    }
+    let _control = CAPTION_CONTROL.lock().await;
+    if state.process_shutdown_requested() {
+        return None;
+    }
+    let mut coordinator = state.captions.lock().await;
+    if coordinator.privacy_teardown_in_progress || coordinator.privacy_teardown_failed {
+        return None;
+    }
+    Some(advance_caption_start_intent(&mut coordinator))
 }
 
 pub async fn update_caption_style(
@@ -2242,13 +3206,136 @@ async fn publish_status(state: &AppState, status: CaptionsStatus) {
 }
 
 pub async fn start_captions(state: &AppState, language: Option<String>) -> Result<CaptionsStatus> {
+    start_captions_with_bearer_for_session(
+        state,
+        None,
+        language,
+        crate::account::stored_session_token,
+    )
+    .await
+    .map(|status| status.expect("unscoped caption start always returns a status"))
+}
+
+#[cfg(test)]
+async fn start_captions_with_bearer(
+    state: &AppState,
+    language: Option<String>,
+    resolve_bearer: impl FnOnce() -> Option<String> + Send,
+) -> Result<CaptionsStatus> {
+    start_captions_with_bearer_for_session(state, None, language, resolve_bearer)
+        .await
+        .map(|status| status.expect("unscoped caption start always returns a status"))
+}
+
+/// Starts captions only while the exact recording generation that requested
+/// them still owns the capture slot. A stale queued task returns `None`
+/// without changing global caption state or attaching to a replacement run.
+pub async fn start_captions_for_session(
+    state: &AppState,
+    session_id: &str,
+    start_intent_generation: u64,
+    language: Option<String>,
+) -> Result<Option<CaptionsStatus>> {
+    start_captions_with_bearer_for_session(
+        state,
+        Some((session_id, start_intent_generation)),
+        language,
+        crate::account::stored_session_token,
+    )
+    .await
+}
+
+async fn start_captions_with_bearer_for_session(
+    state: &AppState,
+    expected_session: Option<(&str, u64)>,
+    language: Option<String>,
+    resolve_bearer: impl FnOnce() -> Option<String> + Send,
+) -> Result<Option<CaptionsStatus>> {
+    if state.process_shutdown_requested() {
+        if expected_session.is_some() {
+            return Ok(None);
+        }
+        bail!(CAPTION_START_SHUTDOWN_MESSAGE);
+    }
     let _control = CAPTION_CONTROL.lock().await;
-    let Some(bearer) = crate::account::stored_session_token() else {
-        bail!("Sign in to use live captions.");
+    // Shutdown takes this same control before its one-shot caption drain. A
+    // start which was already queued must not recreate the tap/provider after
+    // that drain releases the control lock.
+    if state.process_shutdown_requested() {
+        if expected_session.is_some() {
+            return Ok(None);
+        }
+        bail!(CAPTION_START_SHUTDOWN_MESSAGE);
+    }
+    {
+        let mut coordinator = state.captions.lock().await;
+        if coordinator.privacy_teardown_in_progress || coordinator.privacy_teardown_failed {
+            if expected_session.is_some() {
+                return Ok(None);
+            }
+            bail!(CAPTION_START_SIGN_OUT_MESSAGE);
+        }
+        if let Some((_, expected_generation)) = expected_session {
+            if coordinator.start_intent_generation != expected_generation {
+                return Ok(None);
+            }
+        } else {
+            advance_caption_start_intent(&mut coordinator);
+        }
+    }
+    // Hold the exact recording generation until the caption task is installed.
+    // The process monitor cannot retire session A (and session B therefore
+    // cannot replace it) between this check and the global caption commit.
+    let expected_recording = match expected_session {
+        Some((session_id, _)) => {
+            let recording = state.recording.lock().await;
+            if !recording
+                .as_ref()
+                .is_some_and(|active| active.session_id == session_id && !active.stop_requested)
+            {
+                return Ok(None);
+            }
+            Some(recording)
+        }
+        None => None,
     };
-    let client = VideorcApiClient::new()?;
+    let bearer = match resolve_bearer() {
+        Some(bearer) => bearer,
+        None => {
+            let error = anyhow::anyhow!("Sign in to use live captions.");
+            if expected_recording.is_some() {
+                block_captions_after_control(
+                    state,
+                    "captions-start-failed",
+                    format!("Live captions could not start: {error}"),
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
+    let client = match VideorcApiClient::new() {
+        Ok(client) => client,
+        Err(error) => {
+            if expected_recording.is_some() {
+                block_captions_after_control(
+                    state,
+                    "captions-start-failed",
+                    format!("Live captions could not start: {error}"),
+                )
+                .await;
+            }
+            return Err(error);
+        }
+    };
     let language = normalize_caption_language(language);
-    let capture_elapsed_seconds = crate::recording::active_capture_elapsed_seconds(state).await;
+    let capture_elapsed_seconds = if let Some(recording) = expected_recording.as_ref() {
+        recording
+            .as_ref()
+            .map(crate::recording::ActiveRecording::capture_elapsed_seconds)
+    } else {
+        crate::recording::active_capture_elapsed_seconds(state).await
+    };
     let capture_active =
         capture_elapsed_seconds.is_some() || caption_contract_idle_session_enabled();
 
@@ -2263,7 +3350,7 @@ pub async fn start_captions(state: &AppState, language: Option<String>) -> Resul
         remove_tap();
         let status = CaptionsStatus::ready();
         set_status(state, &mut coordinator, status.clone());
-        return Ok(status);
+        return Ok(Some(status));
     }
     if let (Some(task), Some(status)) = (coordinator.task.as_ref(), coordinator.status.as_ref())
         && !task.is_finished()
@@ -2275,7 +3362,7 @@ pub async fn start_captions(state: &AppState, language: Option<String>) -> Resul
                 | CaptionsState::Degraded
         )
     {
-        return Ok(status.clone());
+        return Ok(Some(status.clone()));
     }
     if let Some(task) = coordinator.task.take() {
         task.abort();
@@ -2309,11 +3396,15 @@ pub async fn start_captions(state: &AppState, language: Option<String>) -> Resul
     })));
     coordinator.stop = Some(stop);
 
-    Ok(status)
+    Ok(Some(status))
 }
 
 pub async fn stop_captions(state: &AppState) -> CaptionsStatus {
     let _control = CAPTION_CONTROL.lock().await;
+    {
+        let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
+    }
     // Explicit opt-out is a privacy boundary: do not transcribe audio already
     // queued behind the user's click. Graceful draining is reserved for the
     // capture-finalization path below so its last settled cue can reach SRT.
@@ -2338,32 +3429,141 @@ pub async fn stop_captions_for_sign_out(
     state: &AppState,
     clear_credentials: impl FnOnce(),
 ) -> CaptionsStatus {
-    let _control = CAPTION_CONTROL.lock().await;
-    finish_caption_task(state, false, false).await;
-    let pending_frames_dirs;
-    let caption_burn_tasks;
-    let status = {
+    let _sign_out = CAPTION_SIGN_OUT_SERIAL.lock().await;
+    let (
+        task,
+        stop,
+        pending_frames_dirs,
+        caption_burn_tasks,
+        artifact_publication,
+        private_frame_io,
+    ) = {
+        let _control = CAPTION_CONTROL.lock().await;
         let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
+        // A previous bounded attempt may have failed, but its durable ledger
+        // and retained task handles remain authoritative cleanup ownership.
+        // Every retry still detaches the provider/tap first and then retries
+        // those exact objects; failure is not an unrecoverable in-memory latch.
+        coordinator.privacy_teardown_failed = false;
+        coordinator.privacy_teardown_in_progress = true;
         coordinator.desired_enabled = false;
         coordinator.language = None;
         coordinator.chunks.clear();
         coordinator.capture_epoch = coordinator.capture_epoch.saturating_add(1);
         coordinator.finalized_style = None;
         coordinator.artifact_generation = coordinator.artifact_generation.saturating_add(1);
-        pending_frames_dirs = take_pending_caption_frame_dirs(&mut coordinator);
-        caption_burn_tasks = std::mem::take(&mut coordinator.caption_burn_tasks);
-        remove_tap();
-        TAP_FRAMES_SEEN.store(0, Ordering::Release);
-        TAP_FRAMES_DROPPED.store(0, Ordering::Release);
+        let runtime = (coordinator.task.take(), coordinator.stop.take());
+        let pending_frames_dirs = take_pending_caption_frame_dirs(&mut coordinator);
+        let caption_burn_tasks = std::mem::take(&mut coordinator.caption_burn_tasks);
+        let artifact_publication = coordinator.artifact_publication.clone();
+        let private_frame_io = coordinator.private_frame_io.clone();
         let status = CaptionsStatus::idle();
-        coordinator.status = Some(status.clone());
-        status
+        coordinator.status = Some(status);
+        (
+            runtime.0,
+            runtime.1,
+            pending_frames_dirs,
+            caption_burn_tasks,
+            artifact_publication,
+            private_frame_io,
+        )
     };
-    remove_pending_caption_frame_dirs(pending_frames_dirs).await;
-    cancel_and_join_caption_burn_tasks(caption_burn_tasks).await;
-    publish_caption_boundary(state, &status, "signed-out");
-    clear_credentials();
-    status
+
+    // The generation/fence above is authoritative before any external work.
+    // Capture finalization may now acquire CAPTION_CONTROL while cancellation,
+    // filesystem cleanup, and joins proceed independently.
+    remove_tap();
+    TAP_FRAMES_SEEN.store(0, Ordering::Release);
+    TAP_FRAMES_DROPPED.store(0, Ordering::Release);
+    clear_caption_presentation(state, "signing-out");
+    let runtime_stopped = finish_taken_caption_task(task, stop, false).await;
+    if runtime_stopped {
+        // The provider was detached under the generation fence, but an
+        // already-polled future could have committed one last chunk before
+        // cancellation reached it. Join first, then purge again so credential
+        // removal follows a proven transcript-empty boundary.
+        let mut coordinator = state.captions.lock().await;
+        coordinator.chunks.clear();
+        coordinator.finalized_style = None;
+    }
+    // Any SRT writer which crossed the old generation must finish publication
+    // or remove its identity-bound staging/output before credentials can be
+    // cleared. This wait owns no general caption-control/coordinator lock.
+    let io_deadline = tokio::time::Instant::now() + CAPTION_PRIVATE_IO_DRAIN_TIMEOUT;
+    let (publication_wait, frame_wait) = tokio::join!(
+        tokio::time::timeout_at(io_deadline, artifact_publication.lock()),
+        tokio::time::timeout_at(io_deadline, private_frame_io.lock()),
+    );
+    let publication_drained = publication_wait.is_ok();
+    let frame_io_drained = frame_wait.is_ok();
+    if !publication_drained || !frame_io_drained {
+        tracing::error!(
+            publication_drained,
+            frame_io_drained,
+            "Private caption I/O did not reach its sign-out fence before the bounded deadline."
+        );
+    }
+    let pending_removed = if frame_io_drained {
+        remove_pending_caption_frame_dirs(pending_frames_dirs).await
+    } else {
+        false
+    };
+    let burn_cleanup = cancel_and_join_caption_burn_tasks(state, caption_burn_tasks).await;
+    if !burn_cleanup.unfinished.is_empty() {
+        state
+            .captions
+            .lock()
+            .await
+            .caption_burn_tasks
+            .extend(burn_cleanup.unfinished);
+    }
+    let burns_stopped = burn_cleanup.complete;
+    let durable_cleanup_complete = cleanup_registered_caption_private_artifacts(state).await;
+    let privacy_io_safe = !state.captions.lock().await.privacy_teardown_failed;
+    let cleanup_complete = runtime_stopped
+        && publication_drained
+        && frame_io_drained
+        && pending_removed
+        && burns_stopped
+        && durable_cleanup_complete
+        && privacy_io_safe;
+
+    if cleanup_complete {
+        // Credential removal is deliberately after the private-data barrier.
+        // A failed/unfinished cleanup therefore cannot be reported as a
+        // successful sign-out.
+        clear_credentials();
+        let status = CaptionsStatus::idle();
+        {
+            let _control = CAPTION_CONTROL.lock().await;
+            let mut coordinator = state.captions.lock().await;
+            coordinator.privacy_teardown_in_progress = false;
+            coordinator.privacy_teardown_failed = false;
+            coordinator.status = Some(status.clone());
+        }
+        publish_caption_boundary(state, &status, "signed-out");
+        status
+    } else {
+        let mut status = CaptionsStatus::idle();
+        status.state = CaptionsState::Blocked;
+        status.reason_code = Some("captions-privacy-cleanup-failed".to_string());
+        status.message = Some(
+            "Sign-out was not completed because private caption cleanup did not finish. Try again after the current cleanup settles."
+                .to_string(),
+        );
+        {
+            let _control = CAPTION_CONTROL.lock().await;
+            let mut coordinator = state.captions.lock().await;
+            // Keep the fence set. Starts remain blocked and credentials stay
+            // present rather than claiming a privacy transition we could not
+            // prove complete.
+            coordinator.privacy_teardown_failed = true;
+            coordinator.status = Some(status.clone());
+        }
+        publish_caption_boundary(state, &status, "sign-out-cleanup-failed");
+        status
+    }
 }
 
 /// Stop and join the provider task before backend shutdown takes ownership of
@@ -2373,6 +3573,14 @@ pub async fn stop_captions_for_sign_out(
 /// for the separate artifact teardown below.
 pub async fn shutdown_caption_runtime(state: &AppState) {
     let _control = CAPTION_CONTROL.lock().await;
+    shutdown_caption_runtime_after_control(state).await;
+}
+
+async fn shutdown_caption_runtime_after_control(state: &AppState) {
+    {
+        let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
+    }
     finish_caption_task(state, true, false).await;
     TAP_FRAMES_SEEN.store(0, Ordering::Release);
     TAP_FRAMES_DROPPED.store(0, Ordering::Release);
@@ -2404,7 +3612,8 @@ pub async fn shutdown_caption_artifacts(state: &AppState) {
         )
     };
     remove_pending_caption_frame_dirs(pending_frames_dirs).await;
-    cancel_and_join_caption_burn_tasks(caption_burn_tasks).await;
+    let _ = cancel_and_join_caption_burn_tasks(state, caption_burn_tasks).await;
+    let _ = cleanup_registered_caption_private_artifacts(state).await;
 }
 
 /// Capture sessions own caption audio. Closing the tap lets queued frames drain
@@ -2414,6 +3623,18 @@ pub async fn finish_captions_for_capture(state: &AppState) -> CaptionsStatus {
     let _control = CAPTION_CONTROL.lock().await;
     {
         let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
+        if coordinator.privacy_teardown_in_progress {
+            // Sign-out already took the provider and advanced the artifact
+            // generation. Capture finalization must remain non-blocking but
+            // must not repopulate finalized caption state behind that privacy
+            // boundary.
+            let status = CaptionsStatus::idle();
+            coordinator.status = Some(status.clone());
+            drop(coordinator);
+            clear_caption_presentation(state, "capture-ended-during-sign-out");
+            return status;
+        }
         let style = coordinator.style;
         coordinator.finalized_style = Some(style);
     }
@@ -2438,7 +3659,7 @@ async fn finish_caption_task(
     state: &AppState,
     preserve_desired: bool,
     drain_final_transcript: bool,
-) {
+) -> bool {
     let (task, stop) = {
         let mut coordinator = state.captions.lock().await;
         if !preserve_desired {
@@ -2446,20 +3667,29 @@ async fn finish_caption_task(
         }
         (coordinator.task.take(), coordinator.stop.take())
     };
+    finish_taken_caption_task(task, stop, drain_final_transcript).await
+}
+
+async fn finish_taken_caption_task(
+    task: Option<tokio::task::JoinHandle<()>>,
+    stop: Option<Arc<AtomicBool>>,
+    drain_final_transcript: bool,
+) -> bool {
     if !drain_final_transcript && let Some(stop) = stop.as_ref() {
         stop.store(true, Ordering::Release);
     }
     remove_tap();
     let Some(mut task) = task else {
-        return;
+        return true;
     };
     if !drain_final_transcript {
         // Cancellation drops the receiver and any in-flight upload future at
         // once. Waiting for a cooperative loop turn could otherwise let a
         // queued chunk reach the provider after the user opted out.
         task.abort();
-        let _ = task.await;
-        return;
+        return tokio::time::timeout(CAPTION_ABORT_JOIN_TIMEOUT, &mut task)
+            .await
+            .is_ok();
     }
     // At close the chunked path keeps the current request plus only the final
     // sub-chunk remainder, discarding older backlog with explicit health truth.
@@ -2473,8 +3703,11 @@ async fn finish_caption_task(
             stop.store(true, Ordering::Release);
         }
         task.abort();
-        let _ = task.await;
+        return tokio::time::timeout(CAPTION_ABORT_JOIN_TIMEOUT, &mut task)
+            .await
+            .is_ok();
     }
+    true
 }
 
 pub async fn block_captions_for_audio_path(state: &AppState, message: impl Into<String>) {
@@ -2483,6 +3716,14 @@ pub async fn block_captions_for_audio_path(state: &AppState, message: impl Into<
 
 pub async fn block_captions(state: &AppState, reason_code: &str, message: impl Into<String>) {
     let _control = CAPTION_CONTROL.lock().await;
+    block_captions_after_control(state, reason_code, message.into()).await;
+}
+
+async fn block_captions_after_control(state: &AppState, reason_code: &str, message: String) {
+    {
+        let mut coordinator = state.captions.lock().await;
+        advance_caption_start_intent(&mut coordinator);
+    }
     // A block is terminal for this runtime. Discard pending PCM just like an
     // explicit opt-out; only a normal capture end may drain final audio.
     finish_caption_task(state, true, false).await;
@@ -2492,7 +3733,7 @@ pub async fn block_captions(state: &AppState, reason_code: &str, message: impl I
         let mut status = CaptionsStatus::ready();
         status.state = CaptionsState::Blocked;
         status.reason_code = Some(reason_code.to_string());
-        status.message = Some(message.into());
+        status.message = Some(message);
         coordinator.status = Some(status.clone());
         status
     };
@@ -4300,13 +5541,255 @@ mod tests {
     use super::*;
 
     fn test_caption_app_state() -> AppState {
+        test_caption_app_state_with_database(crate::storage::Database::open_in_memory_for_tests())
+    }
+
+    fn test_caption_app_state_with_database(database: crate::storage::Database) -> AppState {
         let (events, _) = tokio::sync::broadcast::channel(16);
-        AppState::new(
-            "test-token".to_string(),
-            0,
-            events,
-            crate::storage::Database::open_in_memory_for_tests(),
+        AppState::new("test-token".to_string(), 0, events, database)
+    }
+
+    #[tokio::test]
+    async fn queued_caption_start_error_cannot_block_a_replacement_session() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "finished-session",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+
+        let caption_control = CAPTION_CONTROL.lock().await;
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+        let queued_state = state.clone();
+        let queued_start = tokio::spawn(async move {
+            queued_tx.send(()).expect("caption start queue signal");
+            start_captions_with_bearer_for_session(
+                &queued_state,
+                Some(("finished-session", start_intent_generation)),
+                Some("en".to_string()),
+                || None,
+            )
+            .await
+        });
+        queued_rx
+            .await
+            .expect("caption start reached control queue");
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "replacement-session",
+        ));
+        drop(caption_control);
+
+        let status = queued_start
+            .await
+            .expect("queued caption start task")
+            .expect("a stale generation is a quiet no-op");
+
+        assert!(status.is_none());
+        let coordinator = state.captions.lock().await;
+        assert!(!coordinator.desired_enabled);
+        assert!(coordinator.task.is_none());
+        assert!(coordinator.stop.is_none());
+    }
+
+    #[tokio::test]
+    async fn exact_session_caption_start_error_commits_blocked_before_replacement() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "caption-start-failure",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+
+        let error = start_captions_with_bearer_for_session(
+            &state,
+            Some(("caption-start-failure", start_intent_generation)),
+            Some("en".to_string()),
+            || None,
         )
+        .await
+        .expect_err("missing credentials must reject captions");
+
+        assert_eq!(error.to_string(), "Sign in to use live captions.");
+        let coordinator = state.captions.lock().await;
+        let status = coordinator.status.as_ref().expect("blocked caption status");
+        assert_eq!(status.state, CaptionsState::Blocked);
+        assert_eq!(status.reason_code.as_deref(), Some("captions-start-failed"));
+        assert!(
+            status
+                .message
+                .as_deref()
+                .is_some_and(|message| message.contains("Sign in to use live captions"))
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_caption_stop_invalidates_queued_session_auto_start() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "caption-stop-wins",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+
+        let held_control = CAPTION_CONTROL.lock().await;
+        let (stop_queued_tx, stop_queued_rx) = tokio::sync::oneshot::channel();
+        let stop_state = state.clone();
+        let stop = tokio::spawn(async move {
+            stop_queued_tx.send(()).expect("caption stop queue signal");
+            stop_captions(&stop_state).await
+        });
+        stop_queued_rx.await.expect("caption stop reached queue");
+        let start_state = state.clone();
+        let start = tokio::spawn(async move {
+            start_captions_with_bearer_for_session(
+                &start_state,
+                Some(("caption-stop-wins", start_intent_generation)),
+                Some("en".to_string()),
+                || Some("must-not-be-used".to_string()),
+            )
+            .await
+        });
+        drop(held_control);
+
+        assert_eq!(
+            stop.await.expect("caption stop task").state,
+            CaptionsState::Idle
+        );
+        assert!(
+            start
+                .await
+                .expect("queued auto-start task")
+                .expect("invalidated auto-start is a quiet no-op")
+                .is_none()
+        );
+        let coordinator = state.captions.lock().await;
+        assert!(!coordinator.desired_enabled);
+        assert!(coordinator.task.is_none());
+    }
+
+    #[tokio::test]
+    async fn recording_stop_intent_invalidates_queued_caption_auto_start() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "recording-stop-wins",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+        state
+            .recording
+            .lock()
+            .await
+            .as_mut()
+            .expect("active recording")
+            .stop_requested = true;
+
+        let status = start_captions_with_bearer_for_session(
+            &state,
+            Some(("recording-stop-wins", start_intent_generation)),
+            Some("en".to_string()),
+            || None,
+        )
+        .await
+        .expect("stopping recording invalidates auto-start");
+
+        assert!(status.is_none());
+        assert!(!state.captions.lock().await.desired_enabled);
+    }
+
+    #[tokio::test]
+    async fn completed_sign_out_invalidates_queued_caption_auto_start() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "sign-out-wins",
+        ));
+        let start_intent_generation = reserve_caption_session_start(&state)
+            .await
+            .expect("caption start intent");
+
+        let signed_out = stop_captions_for_sign_out(&state, || {}).await;
+        assert_eq!(signed_out.state, CaptionsState::Idle);
+        let status = start_captions_with_bearer_for_session(
+            &state,
+            Some(("sign-out-wins", start_intent_generation)),
+            Some("en".to_string()),
+            || None,
+        )
+        .await
+        .expect("completed sign-out invalidates auto-start");
+
+        assert!(status.is_none());
+        let coordinator = state.captions.lock().await;
+        assert!(!coordinator.desired_enabled);
+        assert!(coordinator.task.is_none());
+    }
+
+    #[tokio::test]
+    async fn shutdown_latch_rejects_caption_start_queued_behind_runtime_drain() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "caption-shutdown",
+        ));
+        let _runtime = install_caption_sign_out_test_session(&state).await;
+        let before = caption_sign_out_test_snapshot(&state).await;
+        assert!(before.task_present);
+        assert!(before.stop_present);
+        assert!(before.tap_active);
+
+        // Hold the same authority as `shutdown_caption_runtime`, then prove a
+        // start entered its wait while the process was still live. The sender
+        // task has no await between this signal and polling the start through
+        // to the contended control lock.
+        let shutdown_control = CAPTION_CONTROL.lock().await;
+        let (queued_tx, queued_rx) = tokio::sync::oneshot::channel();
+        let queued_state = state.clone();
+        let queued_start = tokio::spawn(async move {
+            queued_tx
+                .send(())
+                .expect("caption start queue signal receiver");
+            start_captions_with_bearer(&queued_state, Some("en".to_string()), || {
+                Some("test-caption-bearer".to_string())
+            })
+            .await
+        });
+        queued_rx.await.expect("caption start reached queue poll");
+
+        assert!(state.request_process_shutdown());
+        shutdown_caption_runtime_after_control(&state).await;
+        let drained = caption_sign_out_test_snapshot(&state).await;
+        assert!(!drained.task_present);
+        assert!(!drained.stop_present);
+        assert!(!drained.tap_active);
+
+        drop(shutdown_control);
+        let error = queued_start
+            .await
+            .expect("queued caption start task")
+            .expect_err("shutdown must reject a start queued behind its runtime drain");
+        assert_eq!(error.to_string(), CAPTION_START_SHUTDOWN_MESSAGE);
+
+        let after = caption_sign_out_test_snapshot(&state).await;
+        assert!(
+            !after.task_present,
+            "shutdown must remain the final task owner"
+        );
+        assert!(
+            !after.stop_present,
+            "shutdown must remain the final stop owner"
+        );
+        assert!(
+            !after.tap_active,
+            "shutdown must remain the final tap owner"
+        );
     }
 
     #[test]
@@ -4852,6 +6335,93 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
+    #[tokio::test]
+    async fn blocked_srt_write_releases_caption_control_and_cannot_cross_sign_out_fence() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let root = std::env::temp_dir().join(format!(
+            "videorc-caption-srt-fence-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let recording_path = root.join("recording.mp4");
+        let srt_path = recording_path.with_extension("srt");
+        tokio::fs::write(&srt_path, b"existing saved captions")
+            .await
+            .unwrap();
+        let state = test_caption_app_state();
+        let artifact = FinalizedCaptionArtifact {
+            chunks: vec![chunk(1, 0.0, "private in-flight cue", &[])],
+            style: CaptionStyleSnapshot::default(),
+            artifact_generation: 0,
+        };
+        let (write_started_tx, write_started_rx) = tokio::sync::oneshot::channel();
+        let release_write = Arc::new(tokio::sync::Semaphore::new(0));
+        let writer_release = release_write.clone();
+        let writer_state = state.clone();
+        let writer_recording = recording_path.clone();
+        let writer = tokio::spawn(async move {
+            write_caption_artifacts_with_writer(
+                &writer_state,
+                "srt-fence",
+                &writer_recording,
+                artifact,
+                move |path, contents| async move {
+                    let _ = write_started_tx.send(());
+                    let _permit = writer_release.acquire().await.unwrap();
+                    tokio::fs::write(path, contents).await
+                },
+            )
+            .await
+        });
+        write_started_rx.await.expect("SRT writer reached I/O seam");
+
+        let credentials_cleared = Arc::new(AtomicBool::new(false));
+        let sign_out_cleared = credentials_cleared.clone();
+        let sign_out_state = state.clone();
+        let sign_out = tokio::spawn(async move {
+            stop_captions_for_sign_out(&sign_out_state, move || {
+                sign_out_cleared.store(true, Ordering::Release);
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if state.captions.lock().await.privacy_teardown_in_progress {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("sign-out generation fence must install before SRT I/O is released");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            finish_captions_for_capture(&state),
+        )
+        .await
+        .expect("capture finalization must obtain caption control during blocked SRT I/O");
+        assert!(!credentials_cleared.load(Ordering::Acquire));
+
+        release_write.add_permits(1);
+        writer.await.unwrap();
+        let status = sign_out.await.unwrap();
+        assert_eq!(status.state, CaptionsState::Idle);
+        assert!(credentials_cleared.load(Ordering::Acquire));
+        assert_eq!(
+            tokio::fs::read(&srt_path).await.unwrap(),
+            b"existing saved captions",
+            "stale SRT publication must not replace an existing sidecar"
+        );
+        tokio::fs::remove_file(&srt_path).await.unwrap();
+        let leftovers = std::fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        assert!(leftovers.is_empty(), "staging files must be retired");
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
     #[test]
     fn stream_only_caption_text_is_dropped_while_recorded_sessions_retain_current_epoch() {
         let mut previous = chunk(1, 0.0, "previous", &[]);
@@ -5385,10 +6955,181 @@ mod tests {
             }],
             expected: [1, CAPTION_BLANK_FRAME_SEQ].into_iter().collect(),
             received: std::collections::BTreeSet::new(),
+            frame_writes_in_flight: std::collections::BTreeSet::new(),
             artifact_generation,
             last_progress_at: tokio::time::Instant::now(),
             watchdog_active: false,
+            cleanup_in_progress: false,
+            cleanup_path: None,
+            owner_token: request_id.to_string(),
+            cleanup_ledger_id: format!("caption-frames-{request_id}"),
         }
+    }
+
+    #[tokio::test]
+    async fn blocked_cue_frame_write_releases_control_and_cannot_cross_sign_out_fence() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let root = std::env::temp_dir().join(format!(
+            "videorc-caption-frame-fence-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let frames_dir = root.join("recording.captions-frames");
+        tokio::fs::create_dir_all(&frames_dir).await.unwrap();
+        let state = test_caption_app_state();
+        let mut pending = pending_render_for_test("frame-fence", 0);
+        pending.frames_dir = frames_dir.clone();
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator
+                .pending_cue_renders
+                .insert("frame-fence".to_string(), pending);
+            coordinator
+                .pending_cue_render_order
+                .push_back("frame-fence".to_string());
+        }
+
+        let (write_started_tx, write_started_rx) = tokio::sync::oneshot::channel();
+        let release_write = Arc::new(tokio::sync::Semaphore::new(0));
+        let writer_release = release_write.clone();
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            submit_caption_cue_frame_with_writer(
+                &writer_state,
+                "frame-fence",
+                1,
+                b"private png bytes".to_vec(),
+                move |path, bytes| async move {
+                    let _ = write_started_tx.send(());
+                    let _permit = writer_release.acquire().await.unwrap();
+                    tokio::fs::write(path, bytes).await
+                },
+            )
+            .await
+        });
+        write_started_rx
+            .await
+            .expect("cue-frame writer reached I/O seam");
+
+        let credentials_cleared = Arc::new(AtomicBool::new(false));
+        let sign_out_cleared = credentials_cleared.clone();
+        let sign_out_state = state.clone();
+        let sign_out = tokio::spawn(async move {
+            stop_captions_for_sign_out(&sign_out_state, move || {
+                sign_out_cleared.store(true, Ordering::Release);
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                if state.captions.lock().await.privacy_teardown_in_progress {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("sign-out fence must install during blocked cue-frame I/O");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            finish_captions_for_capture(&state),
+        )
+        .await
+        .expect("capture finalization must obtain control during blocked cue-frame I/O");
+        assert!(!credentials_cleared.load(Ordering::Acquire));
+
+        release_write.add_permits(1);
+        let error = writer
+            .await
+            .unwrap()
+            .expect_err("generation-fenced frame write must become stale");
+        assert!(error.to_string().contains("stale"));
+        assert_eq!(sign_out.await.unwrap().state, CaptionsState::Idle);
+        assert!(credentials_cleared.load(Ordering::Acquire));
+        assert!(!frames_dir.exists());
+        let coordinator = state.captions.lock().await;
+        assert!(coordinator.pending_cue_renders.is_empty());
+        assert!(coordinator.caption_burn_tasks.is_empty());
+        drop(coordinator);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn blocked_watchdog_cleanup_does_not_retain_caption_control_or_coordinator() {
+        let root = std::env::temp_dir().join(format!(
+            "videorc-caption-watchdog-io-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let frames_dir = root.join("recording.captions-frames");
+        tokio::fs::create_dir_all(&frames_dir).await.unwrap();
+        let state = test_caption_app_state();
+        let now = tokio::time::Instant::now();
+        let mut pending = pending_render_for_test("watchdog-io", 0);
+        pending.frames_dir = frames_dir.clone();
+        pending.watchdog_active = true;
+        pending.last_progress_at = now;
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator
+                .pending_cue_renders
+                .insert("watchdog-io".to_string(), pending);
+            coordinator
+                .pending_cue_render_order
+                .push_back("watchdog-io".to_string());
+        }
+
+        let (cleanup_started_tx, cleanup_started_rx) = tokio::sync::oneshot::channel();
+        let release_cleanup = Arc::new(tokio::sync::Semaphore::new(0));
+        let cleanup_release = release_cleanup.clone();
+        let cleanup_state = state.clone();
+        let cleanup = tokio::spawn(async move {
+            cleanup_expired_caption_render(
+                &cleanup_state,
+                "watchdog-io",
+                now + CAPTION_CUE_RENDER_INACTIVITY_TIMEOUT,
+                move |path, _owner_token| async move {
+                    let _ = cleanup_started_tx.send(());
+                    let _permit = cleanup_release.acquire().await.unwrap();
+                    tokio::fs::remove_dir_all(path).await
+                },
+            )
+            .await
+        });
+        cleanup_started_rx
+            .await
+            .expect("watchdog reached external cleanup seam");
+        tokio::fs::create_dir_all(&frames_dir).await.unwrap();
+        let replacement_frame = frames_dir.join("replacement.png");
+        tokio::fs::write(&replacement_frame, b"new request ownership")
+            .await
+            .unwrap();
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            finish_captions_for_capture(&state),
+        )
+        .await
+        .expect("capture finalization must not wait for watchdog filesystem cleanup");
+        assert!(
+            state
+                .captions
+                .lock()
+                .await
+                .pending_cue_renders
+                .contains_key("watchdog-io"),
+            "cleanup ownership stays visible until external deletion finishes"
+        );
+
+        release_cleanup.add_permits(1);
+        assert!(matches!(
+            cleanup.await.unwrap(),
+            ExpiredCaptionRenderCleanup::Removed(_)
+        ));
+        assert!(
+            replacement_frame.exists(),
+            "identity-fenced watchdog cleanup must not delete a replacement directory"
+        );
+        assert!(state.captions.lock().await.pending_cue_renders.is_empty());
+        let _ = tokio::fs::remove_dir_all(root).await;
     }
 
     #[test]
@@ -5559,6 +7300,7 @@ mod tests {
                 join,
                 output_path: partial_output.clone(),
                 frames_dir: burn_frames.clone(),
+                cleanup_ledger_id: "test-shutdown-burn".to_string(),
             });
         }
 
@@ -5574,6 +7316,85 @@ mod tests {
         assert!(!pending_frames.exists());
         assert!(!burn_frames.exists());
         assert!(!partial_output.exists());
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn blocked_sign_out_cleanup_releases_control_for_capture_finalization() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let root = std::env::temp_dir().join(format!(
+            "videorc-caption-sign-out-control-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let frames_dir = root.join("recording.captions-frames");
+        let output_path = root.join("recording (captioned).mp4");
+        tokio::fs::create_dir_all(&frames_dir).await.unwrap();
+        tokio::fs::write(frames_dir.join("1.png"), b"private frame")
+            .await
+            .unwrap();
+        tokio::fs::write(&output_path, b"partial private output")
+            .await
+            .unwrap();
+
+        let state = test_caption_app_state();
+        let (cancel, mut cancel_receiver) = watch::channel(false);
+        let (cancel_seen_tx, cancel_seen_rx) = tokio::sync::oneshot::channel();
+        let release_cleanup = Arc::new(tokio::sync::Semaphore::new(0));
+        let task_release_cleanup = release_cleanup.clone();
+        let join = tokio::spawn(async move {
+            wait_for_caption_burn_cancel(&mut cancel_receiver).await;
+            let _ = cancel_seen_tx.send(());
+            let _permit = task_release_cleanup.acquire().await.unwrap();
+        });
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.caption_burn_tasks.push(CaptionBurnTask {
+                cancel,
+                join,
+                output_path: output_path.clone(),
+                frames_dir: frames_dir.clone(),
+                cleanup_ledger_id: "test-sign-out-burn".to_string(),
+            });
+        }
+
+        let credentials_cleared = Arc::new(AtomicBool::new(false));
+        let cleared_by_sign_out = credentials_cleared.clone();
+        let sign_out_state = state.clone();
+        let sign_out = tokio::spawn(async move {
+            stop_captions_for_sign_out(&sign_out_state, move || {
+                cleared_by_sign_out.store(true, Ordering::Release);
+            })
+            .await
+        });
+        cancel_seen_rx
+            .await
+            .expect("sign-out must cancel the owned burn task");
+
+        let finalized = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            finish_captions_for_capture(&state),
+        )
+        .await
+        .expect("capture finalization must not wait for sign-out artifact cleanup");
+        assert_eq!(finalized.state, CaptionsState::Idle);
+        assert!(
+            !credentials_cleared.load(Ordering::Acquire),
+            "credentials remain present until private cleanup has joined"
+        );
+
+        release_cleanup.add_permits(1);
+        let status = sign_out.await.unwrap();
+        assert_eq!(status.state, CaptionsState::Idle);
+        assert!(credentials_cleared.load(Ordering::Acquire));
+        assert!(!frames_dir.exists());
+        assert!(!output_path.exists());
+        let coordinator = state.captions.lock().await;
+        assert!(!coordinator.privacy_teardown_in_progress);
+        assert!(!coordinator.privacy_teardown_failed);
+        assert!(coordinator.chunks.is_empty());
+        assert!(coordinator.finalized_style.is_none());
+        assert!(coordinator.caption_burn_tasks.is_empty());
+        drop(coordinator);
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
@@ -5601,12 +7422,16 @@ mod tests {
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             task_finished.store(true, Ordering::Release);
         });
-        cancel_and_join_caption_burn_tasks(vec![CaptionBurnTask {
-            cancel,
-            join,
-            output_path: output_path.clone(),
-            frames_dir: frames_dir.clone(),
-        }])
+        cancel_and_join_caption_burn_tasks(
+            &test_caption_app_state(),
+            vec![CaptionBurnTask {
+                cancel,
+                join,
+                output_path: output_path.clone(),
+                frames_dir: frames_dir.clone(),
+                cleanup_ledger_id: "test-cancel-burn".to_string(),
+            }],
+        )
         .await;
 
         assert!(
@@ -5615,6 +7440,406 @@ mod tests {
         );
         assert!(!output_path.exists());
         assert!(!frames_dir.exists());
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn finished_panicked_caption_burn_still_removes_private_output_and_ledger() {
+        let root = std::env::temp_dir().join(format!(
+            "videorc-caption-burn-panic-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let frames_dir = root.join("recording.captions-frames");
+        let owner_token = "test-panicked-burn";
+        let output_path = root.join(format!(".{owner_token}.partial"));
+        tokio::fs::create_dir_all(&frames_dir).await.unwrap();
+        tokio::fs::write(frames_dir.join("1.png"), b"private frame")
+            .await
+            .unwrap();
+        tokio::fs::write(&output_path, b"partial private output")
+            .await
+            .unwrap();
+
+        let state = test_caption_app_state();
+        state
+            .database
+            .register_caption_private_artifact(&crate::storage::CaptionPrivateArtifactRecord {
+                id: owner_token.to_string(),
+                kind: CAPTION_PRIVATE_PARTIAL_FILE_KIND.to_string(),
+                path: output_path.display().to_string(),
+                owner_token: owner_token.to_string(),
+                published_path: None,
+                object_identity: None,
+            })
+            .unwrap();
+        let (cancel, _cancel_receiver) = watch::channel(false);
+        let join = tokio::spawn(async move {
+            panic!("injected finished caption burn panic");
+        });
+        while !join.is_finished() {
+            tokio::task::yield_now().await;
+        }
+
+        let cleanup = cancel_and_join_caption_burn_tasks(
+            &state,
+            vec![CaptionBurnTask {
+                cancel,
+                join,
+                output_path: output_path.clone(),
+                frames_dir: frames_dir.clone(),
+                cleanup_ledger_id: owner_token.to_string(),
+            }],
+        )
+        .await;
+
+        assert!(cleanup.complete);
+        assert!(cleanup.unfinished.is_empty());
+        assert!(!output_path.exists());
+        assert!(!frames_dir.exists());
+        assert!(
+            state
+                .database
+                .caption_private_artifacts()
+                .unwrap()
+                .is_empty()
+        );
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn durable_private_caption_cleanup_survives_database_restart() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let root = std::env::temp_dir().join(format!(
+            "videorc-caption-durable-restart-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let database_path = root.join("videorc.sqlite");
+        let frames_owner = "restart-frame-owner";
+        let frames_dir = root.join(".restart.caption-frames");
+        create_owned_caption_frame_dir(&frames_dir, frames_owner)
+            .await
+            .unwrap();
+        tokio::fs::write(frames_dir.join("1.png"), b"private cue frame")
+            .await
+            .unwrap();
+
+        let burn_owner = "restart-burn-owner";
+        let recording_path = root.join("recording.mp4");
+        let staging_path = caption_burn_staging_path(&recording_path, burn_owner);
+        let published_path = captioned_copy_path(&recording_path);
+        tokio::fs::write(&staging_path, b"private captioned copy")
+            .await
+            .unwrap();
+        let published_identity =
+            crate::storage::capture_session_file_object_identity(&staging_path)
+                .unwrap()
+                .unwrap();
+
+        let first_database = crate::storage::Database::open_file_for_tests(&database_path);
+        first_database
+            .register_caption_private_artifact(&crate::storage::CaptionPrivateArtifactRecord {
+                id: "restart-frames-ledger".to_string(),
+                kind: CAPTION_PRIVATE_DIRECTORY_KIND.to_string(),
+                path: frames_dir.display().to_string(),
+                owner_token: frames_owner.to_string(),
+                published_path: None,
+                object_identity: None,
+            })
+            .unwrap();
+        first_database
+            .register_caption_private_artifact(&crate::storage::CaptionPrivateArtifactRecord {
+                id: burn_owner.to_string(),
+                kind: CAPTION_PRIVATE_PARTIAL_FILE_KIND.to_string(),
+                path: staging_path.display().to_string(),
+                owner_token: burn_owner.to_string(),
+                published_path: None,
+                object_identity: None,
+            })
+            .unwrap();
+        first_database
+            .update_caption_private_artifact_publication(
+                burn_owner,
+                &published_path,
+                &published_identity,
+            )
+            .unwrap();
+        crate::atomic_file::replace_file(&staging_path, &published_path).unwrap();
+        drop(first_database);
+
+        let restarted_database = crate::storage::Database::open_file_for_tests(&database_path);
+        let state = test_caption_app_state_with_database(restarted_database);
+        let credentials_cleared = Arc::new(AtomicBool::new(false));
+        let cleared = credentials_cleared.clone();
+        let status = stop_captions_for_sign_out(&state, move || {
+            cleared.store(true, Ordering::Release);
+        })
+        .await;
+
+        assert_eq!(status.state, CaptionsState::Idle);
+        assert!(credentials_cleared.load(Ordering::Acquire));
+        assert!(!frames_dir.exists());
+        assert!(!staging_path.exists());
+        assert!(!published_path.exists());
+        assert!(
+            state
+                .database
+                .caption_private_artifacts()
+                .unwrap()
+                .is_empty()
+        );
+        drop(state);
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn failed_durable_cleanup_is_retryable_and_clears_credentials_only_after_success() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let root = std::env::temp_dir().join(format!(
+            "videorc-caption-cleanup-retry-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let state = test_caption_app_state();
+        let owner_token = "retry-burn-owner";
+        let private_staging = root.join(format!(".{owner_token}.partial"));
+        let published_path = root.join("recording (captioned).mp4");
+        let expected_identity_path = root.join("expected-private-object");
+        tokio::fs::write(&expected_identity_path, b"expected private object")
+            .await
+            .unwrap();
+        let expected_identity =
+            crate::storage::capture_session_file_object_identity(&expected_identity_path)
+                .unwrap()
+                .unwrap();
+        tokio::fs::write(&published_path, b"replacement user object")
+            .await
+            .unwrap();
+        state
+            .database
+            .register_caption_private_artifact(&crate::storage::CaptionPrivateArtifactRecord {
+                id: owner_token.to_string(),
+                kind: CAPTION_PRIVATE_PARTIAL_FILE_KIND.to_string(),
+                path: private_staging.display().to_string(),
+                owner_token: owner_token.to_string(),
+                published_path: None,
+                object_identity: None,
+            })
+            .unwrap();
+        state
+            .database
+            .update_caption_private_artifact_publication(
+                owner_token,
+                &published_path,
+                &expected_identity,
+            )
+            .unwrap();
+
+        let credentials_cleared = Arc::new(AtomicBool::new(false));
+        let first_cleared = credentials_cleared.clone();
+        let first = stop_captions_for_sign_out(&state, move || {
+            first_cleared.store(true, Ordering::Release);
+        })
+        .await;
+        assert_eq!(first.state, CaptionsState::Blocked);
+        assert_eq!(
+            first.reason_code.as_deref(),
+            Some("captions-privacy-cleanup-failed")
+        );
+        assert!(!credentials_cleared.load(Ordering::Acquire));
+        assert_eq!(
+            tokio::fs::read(&published_path).await.unwrap(),
+            b"replacement user object",
+            "identity mismatch must preserve the replacement file"
+        );
+        assert_eq!(state.database.caption_private_artifacts().unwrap().len(), 1);
+
+        tokio::fs::remove_file(&published_path).await.unwrap();
+        let retry_cleared = credentials_cleared.clone();
+        let retry = stop_captions_for_sign_out(&state, move || {
+            retry_cleared.store(true, Ordering::Release);
+        })
+        .await;
+        assert_eq!(retry.state, CaptionsState::Idle);
+        assert!(credentials_cleared.load(Ordering::Acquire));
+        assert!(
+            state
+                .database
+                .caption_private_artifacts()
+                .unwrap()
+                .is_empty()
+        );
+        tokio::fs::remove_file(&expected_identity_path)
+            .await
+            .unwrap();
+        let _ = tokio::fs::remove_dir_all(root).await;
+    }
+
+    #[tokio::test]
+    async fn prelatched_privacy_failure_still_stops_provider_and_global_tap_on_retry() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        let probe = install_caption_sign_out_test_session(&state).await;
+        offer_caption_frame(&crate::audio::AudioFrame {
+            timestamp_micros: 0,
+            captured_at: std::time::Instant::now(),
+            sample_rate: 48_000,
+            channels: 1,
+            samples: vec![0.1; 960],
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while probe.frames_received() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the provider task is active before the retry begins");
+        {
+            let mut coordinator = state.captions.lock().await;
+            coordinator.privacy_teardown_in_progress = true;
+            coordinator.privacy_teardown_failed = true;
+        }
+        let credentials_cleared = Arc::new(AtomicBool::new(false));
+        let cleared = credentials_cleared.clone();
+        let status = stop_captions_for_sign_out(&state, move || {
+            cleared.store(true, Ordering::Release);
+        })
+        .await;
+
+        assert_eq!(status.state, CaptionsState::Idle);
+        assert!(credentials_cleared.load(Ordering::Acquire));
+        assert!(probe.task_finished());
+        let snapshot = caption_sign_out_test_snapshot(&state).await;
+        assert!(!snapshot.task_present);
+        assert!(!snapshot.stop_present);
+        assert!(!snapshot.tap_active);
+    }
+
+    #[tokio::test]
+    async fn burned_copy_ready_event_requires_current_generation_adoption() {
+        let root = std::env::temp_dir().join(format!(
+            "videorc-caption-burn-adoption-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        tokio::fs::create_dir_all(&root).await.unwrap();
+        let state = test_caption_app_state();
+        state.captions.lock().await.artifact_generation = 2;
+        let mut events = state.events.subscribe();
+        let (_cancel, cancel_receiver) = watch::channel(false);
+
+        let mut stale_pending = pending_render_for_test("stale-burn", 1);
+        stale_pending.recording_path = root.join("stale.mp4");
+        let stale_owner = "stale-burn-owner";
+        let stale_private = caption_burn_staging_path(&stale_pending.recording_path, stale_owner);
+        let stale_output = captioned_copy_path(&stale_pending.recording_path);
+        tokio::fs::write(&stale_private, b"stale private copy")
+            .await
+            .unwrap();
+        state
+            .database
+            .register_caption_private_artifact(&crate::storage::CaptionPrivateArtifactRecord {
+                id: stale_owner.to_string(),
+                kind: CAPTION_PRIVATE_PARTIAL_FILE_KIND.to_string(),
+                path: stale_private.display().to_string(),
+                owner_token: stale_owner.to_string(),
+                published_path: None,
+                object_identity: None,
+            })
+            .unwrap();
+        assert!(
+            !publish_caption_burn_output(
+                &state,
+                &stale_pending,
+                &cancel_receiver,
+                &stale_private,
+                &stale_output,
+                stale_owner,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(!stale_private.exists());
+        assert!(!stale_output.exists());
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.event != "health.event" || event.payload["code"] != "captions-burned-copy-ready"
+        }));
+
+        let mut current_pending = pending_render_for_test("current-burn", 2);
+        current_pending.recording_path = root.join("current.mp4");
+        current_pending.session_id = "caption-burn-adoption-session".to_string();
+        state
+            .database
+            .create_session(&crate::storage::NewSession {
+                id: current_pending.session_id.clone(),
+                title: "Caption burn adoption".to_string(),
+                started_at: "2026-08-28T00:00:00Z".to_string(),
+                mode: "record".to_string(),
+                output_path: Some(current_pending.recording_path.display().to_string()),
+                container: Some("mkv".to_string()),
+                stream_preset: None,
+                sources: serde_json::from_str("{}").unwrap(),
+                layout: crate::protocol::default_layout_settings(),
+                output: serde_json::from_value(serde_json::json!({
+                    "recordEnabled": true,
+                    "streamEnabled": false,
+                    "video": {
+                        "preset": "tutorial-1080p30",
+                        "width": 1920,
+                        "height": 1080,
+                        "fps": 30,
+                        "bitrateKbps": 6000
+                    },
+                    "rtmp": { "preset": "custom", "serverUrl": "", "streamKey": "" }
+                }))
+                .unwrap(),
+            })
+            .unwrap();
+        let current_owner = "current-burn-owner";
+        let current_private =
+            caption_burn_staging_path(&current_pending.recording_path, current_owner);
+        let current_output = captioned_copy_path(&current_pending.recording_path);
+        tokio::fs::write(&current_private, b"current private copy")
+            .await
+            .unwrap();
+        state
+            .database
+            .register_caption_private_artifact(&crate::storage::CaptionPrivateArtifactRecord {
+                id: current_owner.to_string(),
+                kind: CAPTION_PRIVATE_PARTIAL_FILE_KIND.to_string(),
+                path: current_private.display().to_string(),
+                owner_token: current_owner.to_string(),
+                published_path: None,
+                object_identity: None,
+            })
+            .unwrap();
+        assert!(
+            publish_caption_burn_output(
+                &state,
+                &current_pending,
+                &cancel_receiver,
+                &current_private,
+                &current_output,
+                current_owner,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(!current_private.exists());
+        assert_eq!(
+            tokio::fs::read(&current_output).await.unwrap(),
+            b"current private copy"
+        );
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).any(|event| {
+            event.event == "health.event" && event.payload["code"] == "captions-burned-copy-ready"
+        }));
+        assert!(
+            state
+                .database
+                .caption_private_artifacts()
+                .unwrap()
+                .is_empty()
+        );
+        tokio::fs::remove_file(current_output).await.unwrap();
         let _ = tokio::fs::remove_dir_all(root).await;
     }
 
@@ -5630,6 +7855,29 @@ mod tests {
         assert_eq!(
             captioned_copy_path(std::path::Path::new("/tmp/Recording 12.mp4")),
             std::path::PathBuf::from("/tmp/Recording 12 (captioned).mp4")
+        );
+    }
+
+    #[test]
+    fn caption_burn_pins_mp4_muxer_for_private_partial_output() {
+        let recording = std::path::Path::new("/tmp/Recording 12.mp4");
+        let list = std::path::Path::new("/tmp/private-frames/track.ffconcat");
+        let staging = caption_burn_staging_path(recording, "owner-token");
+        assert_eq!(
+            staging.extension(),
+            Some(std::ffi::OsStr::new("partial")),
+            "privacy staging must remain visibly non-final"
+        );
+
+        let args = caption_burn_ffmpeg_args(recording, list, &staging);
+        assert_eq!(
+            &args[11..],
+            &[
+                OsString::from("-f"),
+                OsString::from("mp4"),
+                staging.as_os_str().to_owned(),
+            ],
+            "the explicit muxer must precede an extensionless private output"
         );
     }
 

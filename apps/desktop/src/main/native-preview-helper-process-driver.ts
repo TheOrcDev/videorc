@@ -69,6 +69,9 @@ interface HelperPresentPayload {
   nativePreviewIosurfaceImports?: number
   nativePreviewIosurfaceInvalidations?: number
   nativePreviewIosurfaceImportFailures?: number
+  nativePreviewIosurfaceImportLiveCount?: number
+  nativePreviewIosurfaceImportPeakCount?: number
+  nativePreviewIosurfaceImportCeiling?: number
 }
 
 interface HelperActivation {
@@ -648,6 +651,9 @@ function helperActivationToPreviewSurfaceStatus(
     nativePreviewIosurfaceImports: helperPayload?.nativePreviewIosurfaceImports,
     nativePreviewIosurfaceInvalidations: helperPayload?.nativePreviewIosurfaceInvalidations,
     nativePreviewIosurfaceImportFailures: helperPayload?.nativePreviewIosurfaceImportFailures,
+    nativePreviewIosurfaceImportLiveCount: helperPayload?.nativePreviewIosurfaceImportLiveCount,
+    nativePreviewIosurfaceImportPeakCount: helperPayload?.nativePreviewIosurfaceImportPeakCount,
+    nativePreviewIosurfaceImportCeiling: helperPayload?.nativePreviewIosurfaceImportCeiling,
     bounds,
     updatedAt,
     message: activation.message

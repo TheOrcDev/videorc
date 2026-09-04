@@ -286,6 +286,40 @@ describe('OwnedProcessRegistry', () => {
     )
   })
 
+  it('signals one recorded process only while its exact identity still matches', () => {
+    const records: OwnedProcessRecord[] = [
+      {
+        pid: 111,
+        label: 'backend',
+        startedAt: '2026-06-11T10:00:00.000Z',
+        identity: originalIdentity
+      }
+    ]
+    const kills: Array<{ pid: number; signal: NodeJS.Signals }> = []
+    let probe: OwnedProcessProbeResult = { state: 'live', identity: originalIdentity }
+    const registry = new OwnedProcessRegistry({
+      ledgerPath: '/tmp/videorc-owned.json',
+      currentPid: 222,
+      readFile: () => JSON.stringify(records),
+      writeFile: () => undefined,
+      makeDir: () => undefined,
+      killProcess: (pid, signal) => kills.push({ pid, signal }),
+      probeProcess: () => probe
+    })
+
+    expect(registry.signalRecordedOwnership(111, 'SIGKILL')).toBe('signalled')
+    expect(kills).toEqual([{ pid: 111, signal: 'SIGKILL' }])
+
+    probe = {
+      state: 'live',
+      identity: { ...originalIdentity, birthToken: 'birth-reused' }
+    }
+    expect(registry.signalRecordedOwnership(111, 'SIGKILL')).toBe('gone')
+    probe = { state: 'unprobeable' }
+    expect(registry.signalRecordedOwnership(111, 'SIGKILL')).toBe('unconfirmed')
+    expect(kills).toEqual([{ pid: 111, signal: 'SIGKILL' }])
+  })
+
   it('retains a live legacy record without signalling the unidentified process', () => {
     const records: OwnedProcessRecord[] = [
       { pid: 111, label: 'legacy-backend', startedAt: '2026-06-11T10:00:00.000Z' }

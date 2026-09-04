@@ -8,6 +8,7 @@ import type {
   CohostState,
   CompositorFrameReady,
   CompositorStatus,
+  CaptureRecoveryStatus,
   DeviceList,
   DiagnosticStats,
   EntitlementsSnapshot,
@@ -118,6 +119,8 @@ export interface BackendRpcMethodMap {
   'preview.surface.status': BackendRpcDefinition<undefined, PreviewSurfaceStatus>
   'preview.camera.status': BackendRpcDefinition<undefined, PreviewCameraStatus>
   'preview.screen.status': BackendRpcDefinition<undefined, PreviewScreenStatus>
+  'capture.recovery.status': BackendRpcDefinition<undefined, CaptureRecoveryStatus>
+  'capture.recovery.retry': BackendRpcDefinition<undefined, CaptureRecoveryStatus>
   'diagnostics.stats': BackendRpcDefinition<undefined, DiagnosticStats>
   'sessions.list': BackendRpcDefinition<SessionListParams, SessionListPage>
   'sessions.healthEvents.list': BackendRpcDefinition<
@@ -168,6 +171,7 @@ export interface BackendEventMap {
   'preview.surface.status': PreviewSurfaceStatus
   'preview.camera.status': PreviewCameraStatus
   'preview.screen.status': PreviewScreenStatus
+  'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
 }
@@ -192,6 +196,11 @@ const MAX_BACKEND_WIRE_MESSAGE_CHARS = 16_000_000
 const nonNegativeInteger = numberSchema({
   integer: true,
   min: 0,
+  max: Number.MAX_SAFE_INTEGER
+})
+const positiveSafeInteger = numberSchema({
+  integer: true,
+  min: 1,
   max: Number.MAX_SAFE_INTEGER
 })
 
@@ -834,6 +843,9 @@ const previewSurfaceStatusFieldsSchema = objectSchema(
     framePollingSuppressed: booleanSchema,
     sourcePixelsPresent: booleanSchema,
     pendingHostCommandCount: nonNegativeInteger,
+    nativePreviewIosurfaceImportLiveCount: optionalSchema(nonNegativeInteger),
+    nativePreviewIosurfaceImportPeakCount: optionalSchema(nonNegativeInteger),
+    nativePreviewIosurfaceImportCeiling: optionalSchema(nonNegativeInteger),
     nativePreviewHostKind: optionalSchema(
       enumSchema([
         'in-process',
@@ -1031,6 +1043,34 @@ const previewSourceSurfaceBackingStatsSchema = objectSchema(
   { allowUnknown: false }
 )
 
+const captureRecoveryPhaseSchema = enumSchema([
+  'idle',
+  'degraded',
+  'restarting',
+  'verifying',
+  'recovered',
+  'failed'
+])
+const captureRecoverySourceSchema = enumSchema(['camera', 'screen'])
+const captureRecoveryStatusSchema = objectSchema(
+  {
+    revision: nonNegativeInteger,
+    phase: captureRecoveryPhaseSchema,
+    retryable: booleanSchema,
+    attempts: nonNegativeInteger,
+    stage: optionalSchema(enumSchema(['camera-delivery', 'screen-delivery', 'compositor-render'])),
+    source: optionalSchema(captureRecoverySourceSchema),
+    trigger: optionalSchema(enumSchema(['automatic', 'manual'])),
+    sourceGeneration: optionalSchema(positiveSafeInteger),
+    detectedAt: optionalSchema(timestamp),
+    updatedAt: optionalSchema(timestamp),
+    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 })),
+    lastError: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 })),
+    lastDurationMs: optionalSchema(numberSchema({ min: 0 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CaptureRecoveryStatus>
+
 const diagnosticStatsSchema = boundedSemanticValue(
   'bounded diagnostic statistics',
   objectSchema(
@@ -1049,9 +1089,11 @@ const diagnosticStatsSchema = boundedSemanticValue(
       // regresses the skip_serializing_if on this Windows-only field.
       encoderBridgeMfInputCreditWaitP95Ms: optionalSchema(nullableSchema(numberSchema({ min: 0 }))),
       encoderBridgeOutputQueueHighWaterFrames: optionalSchema(nonNegativeInteger),
-      encoderBridgeOutputQueueOldestFrameAgeMs: optionalSchema(nonNegativeInteger),
-      encoderBridgeOutputQueueOldestFrameAgeHighWaterMs: optionalSchema(nonNegativeInteger),
-      encoderBridgeOutputLastProgressAgeMs: optionalSchema(nonNegativeInteger),
+      encoderBridgeOutputQueueOldestFrameAgeMs: optionalSchema(nullableSchema(nonNegativeInteger)),
+      encoderBridgeOutputQueueOldestFrameAgeHighWaterMs: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      encoderBridgeOutputLastProgressAgeMs: optionalSchema(nullableSchema(nonNegativeInteger)),
       encoderBridgeOutputPressureRecoveryEvents: optionalSchema(nonNegativeInteger),
       encoderBridgeOutputPreEncodeSkippedFrames: optionalSchema(nonNegativeInteger),
       encoderBridgeVideoToolboxPendingEncodeFrames: optionalSchema(nonNegativeInteger),
@@ -1063,6 +1105,30 @@ const diagnosticStatsSchema = boundedSemanticValue(
       compositorCameraSourceCaptureTextureReuses: nonNegativeInteger,
       compositorScreenSourceCaptureTextureReuses: nonNegativeInteger,
       compositorSourceTextureCacheFlushes: nonNegativeInteger,
+      compositorMetalCachedCaptureSourceImportsLiveCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalCachedCaptureSourceImportsPeakCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalCachedCaptureSourceImportsCeiling: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalTargetRingSlotsLiveCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      compositorMetalTargetRingSlotsPeakCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      compositorMetalTargetRingSlotsCeiling: optionalSchema(nullableSchema(nonNegativeInteger)),
+      encoderBridgeMetalTargetRefsInFlightLiveCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      encoderBridgeMetalTargetRefsInFlightPeakCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      encoderBridgeMetalTargetRefsInFlightCeiling: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      nativePreviewIosurfaceImportLiveCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      nativePreviewIosurfaceImportPeakCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      nativePreviewIosurfaceImportCeiling: optionalSchema(nullableSchema(nonNegativeInteger)),
       previewCameraCaptureCallbackCount: nonNegativeInteger,
       previewCameraDidDropCallbackCount: nonNegativeInteger,
       previewCameraFrameStorePublications: nonNegativeInteger,
@@ -1079,6 +1145,18 @@ const diagnosticStatsSchema = boundedSemanticValue(
       previewScreenLatestSequence: optionalSchema(nonNegativeInteger),
       previewScreenFrameStatuses: previewScreenFrameStatusStatsSchema,
       previewScreenSurfaceBacking: previewSourceSurfaceBackingStatsSchema,
+      // Absent while the capture pipeline is healthy; nullable for defense in
+      // depth against the serde-null trap (0.9.68 / 0.9.79 outage class).
+      capturePipelineDegradedStage: optionalSchema(
+        nullableSchema(stringSchema({ minLength: 1, maxLength: 64 }))
+      ),
+      captureRecoveryPhase: optionalSchema(nullableSchema(captureRecoveryPhaseSchema)),
+      captureRecoverySource: optionalSchema(nullableSchema(captureRecoverySourceSchema)),
+      captureRecoveryAttempts: optionalSchema(nullableSchema(nonNegativeInteger)),
+      captureRecoveryLastError: optionalSchema(
+        nullableSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
+      ),
+      captureRecoveryLastDurationMs: optionalSchema(nullableSchema(numberSchema({ min: 0 }))),
       updatedAt: optionalSchema(timestamp)
     },
     { allowUnknown: true }
@@ -1551,6 +1629,8 @@ const runtimeContracts = {
   'preview.surface.status': { params: undefinedSchema, result: previewSurfaceStatusSchema },
   'preview.camera.status': { params: undefinedSchema, result: previewCameraStatusSchema },
   'preview.screen.status': { params: undefinedSchema, result: previewScreenStatusSchema },
+  'capture.recovery.status': { params: undefinedSchema, result: captureRecoveryStatusSchema },
+  'capture.recovery.retry': { params: undefinedSchema, result: captureRecoveryStatusSchema },
   'diagnostics.stats': { params: undefinedSchema, result: diagnosticStatsSchema },
   'sessions.list': {
     params: sessionListParamsSchema,
@@ -1709,6 +1789,7 @@ const runtimeEventSchemas = {
   'preview.surface.status': previewSurfaceStatusSchema,
   'preview.camera.status': previewCameraStatusSchema,
   'preview.screen.status': previewScreenStatusSchema,
+  'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
   'cohost.state': cohostStateSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>

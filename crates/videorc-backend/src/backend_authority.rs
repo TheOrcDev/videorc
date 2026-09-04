@@ -86,17 +86,18 @@ pub fn authorize_backend_method(
     method: &str,
     smoke_rpc_enabled: bool,
 ) -> Result<(), MethodAdmissionError> {
-    if command_lane_smoke_method(method) {
+    if renderer_smoke_method(method) {
         if role == BackendRole::Remote {
             return Err(MethodAdmissionError::AdminOnly);
         }
         if !cfg!(debug_assertions) || !smoke_rpc_enabled {
             return Err(MethodAdmissionError::SmokeDisabled);
         }
-        // The maintained lane smoke must run on one renderer-role socket so
-        // its block and operator probes share the renderer's real dispatcher.
-        // This exception is compiled inert in release builds and requires the
-        // explicit smoke runtime switch in debug builds.
+        // These maintained smokes must run on the renderer-role socket: the
+        // lane probe shares the renderer's real dispatcher, while capture
+        // recovery uses the same public connection marker as the TCC-owned
+        // app. The exact allowlist is compiled inert in release builds and
+        // still requires the explicit smoke runtime switch in debug builds.
         return Ok(());
     }
 
@@ -125,12 +126,17 @@ pub fn authorize_backend_method(
     Ok(())
 }
 
-fn command_lane_smoke_method(method: &str) -> bool {
+fn renderer_smoke_method(method: &str) -> bool {
     matches!(
         method,
         "test.commandLanes.accountMaintenance.block"
             | "test.commandLanes.accountMaintenance.status"
             | "test.commandLanes.accountMaintenance.release"
+            | "test.commandLanes.liveControl.block"
+            | "test.captureRecovery.injectCameraDeliveryDegradation"
+            | "test.captureRecovery.injectScreenDeliveryDegradation"
+            | "test.captureRecovery.cameraCadenceEvidence"
+            | "test.captureRecovery.screenCadenceEvidence"
     )
 }
 
@@ -274,6 +280,11 @@ mod tests {
             "test.commandLanes.accountMaintenance.block",
             "test.commandLanes.accountMaintenance.status",
             "test.commandLanes.accountMaintenance.release",
+            "test.commandLanes.liveControl.block",
+            "test.captureRecovery.injectCameraDeliveryDegradation",
+            "test.captureRecovery.injectScreenDeliveryDegradation",
+            "test.captureRecovery.cameraCadenceEvidence",
+            "test.captureRecovery.screenCadenceEvidence",
         ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Renderer, method, false),
@@ -301,6 +312,11 @@ mod tests {
             "test.commandLanes.accountMaintenance.block",
             "test.commandLanes.accountMaintenance.status",
             "test.commandLanes.accountMaintenance.release",
+            "test.commandLanes.liveControl.block",
+            "test.captureRecovery.injectCameraDeliveryDegradation",
+            "test.captureRecovery.injectScreenDeliveryDegradation",
+            "test.captureRecovery.cameraCadenceEvidence",
+            "test.captureRecovery.screenCadenceEvidence",
         ] {
             assert_eq!(
                 authorize_backend_method(BackendRole::Admin, method, false),

@@ -413,6 +413,7 @@ export function assertWindowsD3d11RustDiscovery(
   discovered,
   { stage = 'preview', allowUnimplementedStages = false } = {}
 ) {
+  const resolvedStage = stage ?? 'preview'
   if (!Array.isArray(discovered) || discovered.length === 0) {
     throw new Error('Windows D3D11 Rust discovery returned zero tests.')
   }
@@ -420,9 +421,9 @@ export function assertWindowsD3d11RustDiscovery(
   if (duplicates.length > 0) {
     throw new Error(`Windows D3D11 Rust discovery returned duplicate test: ${duplicates[0]}`)
   }
-  const expected = requiredWindowsD3d11TestsThrough(stage)
+  const expected = requiredWindowsD3d11TestsThrough(resolvedStage)
   if (expected.length === 0) {
-    throw new Error(`Windows D3D11 Rust manifest for ${stage} contained zero tests.`)
+    throw new Error(`Windows D3D11 Rust manifest for ${resolvedStage} contained zero tests.`)
   }
   const expectedSet = new Set(expected)
   const missing = expected.filter((name) => !discovered.includes(name))
@@ -436,7 +437,7 @@ export function assertWindowsD3d11RustDiscovery(
   if (!allowUnimplementedStages) {
     const through = WINDOWS_D3D11_MEDIA_STAGES.slice(
       0,
-      WINDOWS_D3D11_MEDIA_STAGES.indexOf(stage) + 1
+      WINDOWS_D3D11_MEDIA_STAGES.indexOf(resolvedStage) + 1
     )
     const empty = through.find((name) => WINDOWS_D3D11_REQUIRED_RUST_TESTS[name].length === 0)
     if (empty) throw new Error(`Windows D3D11 Rust manifest stage ${empty} is not implemented.`)

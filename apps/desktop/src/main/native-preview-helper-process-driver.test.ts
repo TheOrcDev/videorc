@@ -402,6 +402,9 @@ describe('native-preview-helper-process-driver', () => {
       nativePreviewIosurfaceImports: 4,
       nativePreviewIosurfaceInvalidations: 1,
       nativePreviewIosurfaceImportFailures: 2,
+      nativePreviewIosurfaceImportLiveCount: 3,
+      nativePreviewIosurfaceImportPeakCount: 4,
+      nativePreviewIosurfaceImportCeiling: 4,
       activation: {
         transport: 'native-surface',
         backing: 'cametal-layer',
@@ -418,7 +421,10 @@ describe('native-preview-helper-process-driver', () => {
       nativePreviewIosurfaceCacheHits: 12,
       nativePreviewIosurfaceImports: 4,
       nativePreviewIosurfaceInvalidations: 1,
-      nativePreviewIosurfaceImportFailures: 2
+      nativePreviewIosurfaceImportFailures: 2,
+      nativePreviewIosurfaceImportLiveCount: 3,
+      nativePreviewIosurfaceImportPeakCount: 4,
+      nativePreviewIosurfaceImportCeiling: 4
     })
     child.respondTo(0, { hasOverlay: true })
     await hostCommand
