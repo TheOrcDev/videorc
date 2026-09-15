@@ -22,11 +22,14 @@ const userDataDir =
   mkdtempSync(join(tmpdir(), 'videorc-multistream-smoke-user-data-'))
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
-const premiumMaxDestinations = Math.max(1, Number(process.env.VIDEORC_SMOKE_MAX_DESTINATIONS ?? 3))
+// Multistreaming is free for every plan: one shared destination cap (5),
+// mirrored from the backend's STREAMING_MAX_DESTINATIONS. The ship gate runs
+// this smoke at the full cap (VIDEORC_SMOKE_TARGETS=5).
+const maxDestinations = Math.max(1, Number(process.env.VIDEORC_SMOKE_MAX_DESTINATIONS ?? 5))
 const targetCount = Math.min(
-  4,
-  premiumMaxDestinations,
-  Math.max(1, Number(process.env.VIDEORC_SMOKE_TARGETS ?? Math.min(2, premiumMaxDestinations)))
+  5,
+  maxDestinations,
+  Math.max(1, Number(process.env.VIDEORC_SMOKE_TARGETS ?? Math.min(2, maxDestinations)))
 )
 const basePort = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 11935)
 const streamMs = Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 5000)
@@ -43,10 +46,13 @@ const targets = Array.from({ length: targetCount }, (_, index) => {
   const port = basePort + index
   const platform = PLATFORMS[index % PLATFORMS.length]
   const streamKey = `smoke${index}`
+  // Beyond the four built-in platforms the cap is filled with extra rows of
+  // the same platforms; target ids must stay unique per session.
+  const round = Math.floor(index / PLATFORMS.length)
   return {
-    id: platform.id,
+    id: round === 0 ? platform.id : `${platform.id}-${round + 1}`,
     platform: platform.id,
-    label: platform.label,
+    label: round === 0 ? platform.label : `${platform.label} ${round + 1}`,
     port,
     streamKey,
     serverUrl: `rtmp://127.0.0.1:${port}/live`,
@@ -62,7 +68,7 @@ const targets = Array.from({ length: targetCount }, (_, index) => {
 const includeBadTarget =
   process.env.VIDEORC_SMOKE_NO_BAD_TARGET !== '1' &&
   targetCount < PLATFORMS.length &&
-  targetCount < premiumMaxDestinations
+  targetCount < maxDestinations
 const badTarget = includeBadTarget
   ? (() => {
       const platform = PLATFORMS[targetCount]
@@ -92,8 +98,10 @@ try {
   //    before the publisher connects (a long idle can trip FFmpeg's accept timeout).
   const launch = await launchDevApp({
     env: {
-      // Dev builds resolve to Developer entitlements (multistream enabled);
-      // VIDEORC_PREMIUM_FEATURES is downgrade-only and unlocks nothing.
+      // Multistreaming is free for every tier, so the entitlement tier no
+      // longer matters for destination count: dev builds resolve to
+      // Developer, VIDEORC_PREMIUM_FEATURES=0 would force Basic, and both
+      // fan out to the same shared cap.
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
       VIDEORC_USER_DATA_DIR: userDataDir
