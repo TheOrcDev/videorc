@@ -421,8 +421,9 @@ async fn run_backend() -> Result<()> {
         );
     }
     // Restore the signed-in account's verified entitlement at boot so a
-    // premium user's multistream limits survive an app restart without
-    // touching the AI tab first (fail-closed: no stored session -> basic).
+    // premium user's cloud AI, co-host, and streaming-quality limits survive
+    // an app restart without touching the AI tab first (fail-closed: no
+    // stored session -> basic). Multistreaming is free and needs no account.
     // The persisted SIGNED token restores premium before any network round
     // trip (offline grace until the token's exp); the refresh then re-verifies
     // against the server and rotates the token.
@@ -10120,7 +10121,8 @@ async fn get_ai_capabilities() -> Result<protocol::AiCapabilities> {
 }
 
 /// Re-verify the signed-in account's entitlement and hydrate the enforcement
-/// snapshot (multistream premium gate). Signed-out clears to basic instantly;
+/// snapshot (the Premium gates: cloud AI, co-host, streaming quality).
+/// Signed-out clears to basic instantly;
 /// a network failure keeps the last verified hydration (bounded by the 24h
 /// staleness ceiling in entitlements.rs) so a flaky connection cannot flap a
 /// paying user back to basic mid-day. Emits `entitlements.updated` on change.

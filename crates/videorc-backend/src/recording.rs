@@ -15231,13 +15231,13 @@ fn validate_session_entitlements(
 ) -> Result<()> {
     if params.output.stream_enabled {
         entitlements::require_feature(snapshot, FeatureId::Livestreaming)?;
+        // Multistreaming is free for every tier; the destination cap is a
+        // shared pipeline limit, not a plan gate, so the wording must never
+        // read as an upgrade prompt (the renderer sniffs "Premium" into one).
         let destination_count = ready_stream_destination_count(params)?;
         if destination_count > snapshot.limits.streaming.max_destinations {
-            if snapshot.limits.streaming.max_destinations <= 1 {
-                entitlements::require_feature(snapshot, FeatureId::Multistreaming)?;
-            }
             bail!(
-                "This plan allows up to {} livestream destination(s); this session has {} ready destination(s).",
+                "You can stream to up to {} destinations at once; this session has {} ready destination(s).",
                 snapshot.limits.streaming.max_destinations,
                 destination_count
             );
@@ -27853,8 +27853,44 @@ mod tests {
         validate_session_entitlements(&params, &snapshot).unwrap();
     }
 
+    /// `count` ready custom RTMP destinations, each with a distinct id and
+    /// server so the resolver treats them as separate tee legs.
+    fn streaming_with_ready_custom_targets(count: usize) -> StreamingSettings {
+        let template = default_stream_targets()
+            .into_iter()
+            .find(|target| target.platform == StreamPlatform::Custom)
+            .expect("custom default target");
+        let targets: Vec<StreamTargetSettings> = (0..count)
+            .map(|index| StreamTargetSettings {
+                id: format!("custom-{index}"),
+                label: format!("Custom RTMP {index}"),
+                enabled: true,
+                server_url: format!("rtmp://127.0.0.1:{}/live", 11935 + index),
+                stream_key: format!("key-{index}"),
+                stream_key_present: true,
+                ..template.clone()
+            })
+            .collect();
+        let enabled_target_ids = targets.iter().map(|t| t.id.clone()).collect();
+        StreamingSettings {
+            enabled: true,
+            mode: StreamMode::Multi,
+            targets,
+            selected_target_id: None,
+            default_output_preset: VideoPreset::Tutorial1080p30,
+            default_bitrate_kbps: 6000,
+            enabled_target_ids,
+        }
+    }
+
+    // Multistreaming is free for every plan (2026-09-15): Basic streams to as
+    // many destinations as the shared cap allows, at Basic quality.
     #[test]
-    fn entitlement_guard_blocks_basic_multistreaming() {
+    fn entitlement_guard_allows_basic_multistreaming_up_to_cap() {
+        let snapshot = entitlements::basic_entitlements();
+        let cap = snapshot.limits.streaming.max_destinations as usize;
+        assert_eq!(cap, 5);
+
         let mut params = base_params(false, true);
         params.streaming = Some(streaming_for(&[
             (
@@ -27868,11 +27904,51 @@ mod tests {
                 "twitch-key",
             ),
         ]));
-        let snapshot = entitlements::basic_entitlements();
-        let error = validate_session_entitlements(&params, &snapshot)
-            .expect_err("Basic should allow only one ready livestream destination");
+        validate_session_entitlements(&params, &snapshot)
+            .expect("Basic streams to two destinations for free");
 
-        assert!(error.to_string().contains("Multistreaming requires"));
+        for count in 2..=cap {
+            let mut params = base_params(false, true);
+            params.streaming = Some(streaming_with_ready_custom_targets(count));
+            validate_session_entitlements(&params, &snapshot)
+                .unwrap_or_else(|error| panic!("Basic should allow {count} destinations: {error}"));
+        }
+    }
+
+    // The over-cap bail is a shared pipeline limit, not a plan gate: same
+    // wording for every tier and never an upgrade prompt.
+    #[test]
+    fn entitlement_guard_blocks_over_cap_for_every_tier() {
+        for snapshot in [
+            entitlements::basic_entitlements(),
+            entitlements::premium_entitlements(EntitlementSource::Creem),
+            entitlements::developer_test_entitlements(),
+        ] {
+            let cap = snapshot.limits.streaming.max_destinations as usize;
+            assert_eq!(cap, 5, "{:?}", snapshot.tier);
+
+            let mut params = base_params(false, true);
+            params.streaming = Some(streaming_with_ready_custom_targets(cap + 1));
+            let error = validate_session_entitlements(&params, &snapshot)
+                .expect_err("six ready destinations must exceed the shared cap");
+            let message = error.to_string();
+
+            assert!(
+                message.contains("up to 5 destinations"),
+                "{:?}: {message}",
+                snapshot.tier
+            );
+            assert!(
+                message.contains("6 ready destination"),
+                "{:?}: {message}",
+                snapshot.tier
+            );
+            assert!(
+                !message.contains("Premium"),
+                "{:?}: over-cap wording must not read as an upgrade prompt: {message}",
+                snapshot.tier
+            );
+        }
     }
 
     #[test]

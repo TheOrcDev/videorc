@@ -10,7 +10,9 @@ pub const PREMIUM_FEATURES_ENV_VAR: &str = "VIDEORC_PREMIUM_FEATURES";
 const ENTITLEMENT_SCHEMA_VERSION: u32 = 1;
 // Local recording is NOT a paid feature: every tier records up to 4K60 (the
 // website promises "free forever — including 4K local recording"; the old
-// 1080p basic cap contradicted it, 2026-07-06). Only streaming is tiered.
+// 1080p basic cap contradicted it, 2026-07-06). Only streaming QUALITY is
+// tiered: multistreaming is free for every plan (2026-09-15) because the tee
+// fan-out runs on the user's machine and costs Videorc nothing to serve.
 const RECORDING_MAX_WIDTH: u32 = 3840;
 const RECORDING_MAX_HEIGHT: u32 = 2160;
 const RECORDING_MAX_FPS: u32 = 60;
@@ -18,26 +20,25 @@ const BASIC_STREAMING_MAX_WIDTH: u32 = 1920;
 const BASIC_STREAMING_MAX_HEIGHT: u32 = 1080;
 const BASIC_STREAMING_MAX_FPS: u32 = 30;
 const BASIC_STREAMING_MAX_BITRATE_KBPS: u32 = 6000;
-const BASIC_STREAMING_MAX_DESTINATIONS: u32 = 1;
 // Premium streams up to the supported 1080p60 profiles and 4K30; Basic stays
-// at one 1080p30 destination. The rectangular 4K×60 entitlement ceiling does
-// not make 4K60 a supported stream profile — recording validation still
-// rejects it.
+// at 1080p30. The rectangular 4K×60 entitlement ceiling does not make 4K60 a
+// supported stream profile — recording validation still rejects it.
 const PREMIUM_STREAMING_MAX_WIDTH: u32 = 3840;
 const PREMIUM_STREAMING_MAX_HEIGHT: u32 = 2160;
 const PREMIUM_STREAMING_MAX_FPS: u32 = 60;
 const PREMIUM_STREAMING_MAX_BITRATE_KBPS: u32 = 30_000;
-const PREMIUM_STREAMING_MAX_DESTINATIONS: u32 = 3;
+// One destination cap for every tier. All tee legs share one encode, so a
+// multistream session runs at the multistream-safe 1080p30 preset; the upload
+// cost (~6 Mbps per leg) is the user's own.
+pub const STREAMING_MAX_DESTINATIONS: u32 = 5;
 
-const MULTISTREAMING_DISABLED_REASON: &str =
-    "Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.";
 const CLOUD_AI_DISABLED_REASON: &str =
     "Cloud AI is a Videorc Premium feature. Sign in with a Premium account to enable it.";
 const NOISE_CLEANUP_DISABLED_REASON: &str = "Noise Cleanup requires Videorc Premium.";
 const LIVE_COHOST_DISABLED_REASON: &str = "Live Co-host requires Videorc Premium.";
 const DEV_BUILD_OVERRIDE_REASON: &str = "Enabled by Videorc debug/dev backend build.";
 
-// --- Account-hydrated entitlement (multistream premium gate) ------------------
+// --- Account-hydrated Premium entitlement (cloud AI, co-host, stream quality) --
 // The signed-in account's server-verified entitlement (from
 // /api/ai/capabilities, fetched with the bearer token) is the ONLY way a
 // packaged build reaches Premium limits. Fail-closed by construction: absent,
@@ -200,8 +201,8 @@ pub fn basic_entitlements() -> EntitlementsSnapshot {
             },
             EntitlementCapability {
                 feature_id: FeatureId::Multistreaming,
-                state: EntitlementState::Disabled,
-                reason: Some(MULTISTREAMING_DISABLED_REASON.to_string()),
+                state: EntitlementState::Enabled,
+                reason: None,
             },
             EntitlementCapability {
                 feature_id: FeatureId::CloudAi,
@@ -286,7 +287,7 @@ fn basic_limits() -> EntitlementLimits {
             max_height: BASIC_STREAMING_MAX_HEIGHT,
             max_fps: BASIC_STREAMING_MAX_FPS,
             max_bitrate_kbps: BASIC_STREAMING_MAX_BITRATE_KBPS,
-            max_destinations: BASIC_STREAMING_MAX_DESTINATIONS,
+            max_destinations: STREAMING_MAX_DESTINATIONS,
         },
     }
 }
@@ -299,7 +300,7 @@ fn premium_limits() -> EntitlementLimits {
             max_height: PREMIUM_STREAMING_MAX_HEIGHT,
             max_fps: PREMIUM_STREAMING_MAX_FPS,
             max_bitrate_kbps: PREMIUM_STREAMING_MAX_BITRATE_KBPS,
-            max_destinations: PREMIUM_STREAMING_MAX_DESTINATIONS,
+            max_destinations: STREAMING_MAX_DESTINATIONS,
         },
     }
 }
@@ -469,7 +470,7 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn entitlement_default_snapshot_is_basic_with_4k_recording_and_one_hd_livestream() {
+    fn entitlement_default_snapshot_is_basic_with_4k_recording_and_free_multistreaming() {
         let snapshot = current_entitlements_from_env_value(None, false);
 
         assert_eq!(snapshot.schema_version, ENTITLEMENT_SCHEMA_VERSION);
@@ -477,10 +478,18 @@ mod tests {
         assert_eq!(snapshot.source, EntitlementSource::LocalDefault);
         assert!(feature_entitled(&snapshot, FeatureId::LocalRecording));
         assert!(feature_entitled(&snapshot, FeatureId::Livestreaming));
-        assert!(!feature_entitled(&snapshot, FeatureId::Multistreaming));
+        // Multistreaming is free for every plan; the capability stays on the
+        // wire (strict enums on both sides) and is simply enabled.
+        assert!(feature_entitled(&snapshot, FeatureId::Multistreaming));
+        assert_eq!(
+            capability(&snapshot, FeatureId::Multistreaming)
+                .expect("multistreaming capability")
+                .reason,
+            None
+        );
         assert!(!feature_entitled(&snapshot, FeatureId::CloudAi));
         // Recording is free at full quality (the website promises free 4K
-        // recording); only the streaming leg is tiered.
+        // recording); only streaming quality is tiered.
         assert_eq!(snapshot.limits.recording.max_width, 3840);
         assert_eq!(snapshot.limits.recording.max_height, 2160);
         assert_eq!(snapshot.limits.recording.max_fps, 60);
@@ -488,7 +497,28 @@ mod tests {
         assert_eq!(snapshot.limits.streaming.max_height, 1080);
         assert_eq!(snapshot.limits.streaming.max_fps, 30);
         assert_eq!(snapshot.limits.streaming.max_bitrate_kbps, 6000);
-        assert_eq!(snapshot.limits.streaming.max_destinations, 1);
+        assert_eq!(
+            snapshot.limits.streaming.max_destinations,
+            STREAMING_MAX_DESTINATIONS
+        );
+        assert_eq!(snapshot.limits.streaming.max_destinations, 5);
+    }
+
+    #[test]
+    fn streaming_destination_cap_is_identical_across_tiers() {
+        let basic = basic_entitlements();
+        let premium = premium_entitlements(EntitlementSource::Creem);
+        let developer = developer_test_entitlements();
+
+        assert_eq!(basic.limits.streaming.max_destinations, 5);
+        assert_eq!(
+            basic.limits.streaming.max_destinations,
+            premium.limits.streaming.max_destinations
+        );
+        assert_eq!(
+            premium.limits.streaming.max_destinations,
+            developer.limits.streaming.max_destinations
+        );
     }
 
     #[test]
@@ -526,7 +556,7 @@ mod tests {
         assert!(feature_entitled(&snapshot, FeatureId::CloudAi));
         assert_eq!(snapshot.limits.recording.max_width, 3840);
         assert_eq!(snapshot.limits.recording.max_height, 2160);
-        assert_eq!(snapshot.limits.streaming.max_destinations, 3);
+        assert_eq!(snapshot.limits.streaming.max_destinations, 5);
     }
 
     // Permanent regression guard: no env value may ever unlock premium in a
@@ -541,10 +571,13 @@ mod tests {
                 EntitlementTier::Basic,
                 "env value {value:?} must not unlock premium"
             );
-            assert!(!feature_entitled(&snapshot, FeatureId::Multistreaming));
+            // Multistreaming is free everywhere; the tiered surface is
+            // streaming quality and cloud AI, which must stay Basic here.
+            assert!(feature_entitled(&snapshot, FeatureId::Multistreaming));
             assert!(!feature_entitled(&snapshot, FeatureId::CloudAi));
-            assert_eq!(snapshot.limits.streaming.max_destinations, 1);
+            assert_eq!(snapshot.limits.streaming.max_destinations, 5);
             assert_eq!(snapshot.limits.streaming.max_height, 1080);
+            assert_eq!(snapshot.limits.streaming.max_fps, 30);
         }
     }
 
@@ -556,7 +589,7 @@ mod tests {
         assert_eq!(snapshot.source, EntitlementSource::EnvOverride);
         assert!(feature_entitled(&snapshot, FeatureId::Multistreaming));
         assert!(feature_entitled(&snapshot, FeatureId::CloudAi));
-        assert_eq!(snapshot.limits.streaming.max_destinations, 3);
+        assert_eq!(snapshot.limits.streaming.max_destinations, 5);
         assert_eq!(
             capability(&snapshot, FeatureId::Multistreaming)
                 .expect("multistreaming capability")
@@ -577,7 +610,9 @@ mod tests {
         let hydrated = current_entitlements_resolved(None, false, true);
         assert_eq!(hydrated.tier, EntitlementTier::Premium);
         assert_eq!(hydrated.source, EntitlementSource::Creem);
-        assert!(hydrated.limits.streaming.max_destinations > 1);
+        // Streaming quality is the tiered surface (destination count is not).
+        assert_eq!(hydrated.limits.streaming.max_height, 2160);
+        assert!(feature_entitled(&hydrated, FeatureId::CloudAi));
         // Env basic override beats everything — account premium and dev build
         // included. It is the only way to test the gates on a dev machine.
         assert_eq!(
@@ -626,7 +661,10 @@ mod tests {
 
         assert_eq!(snapshot.tier, EntitlementTier::Basic);
         assert_eq!(snapshot.source, EntitlementSource::LocalDefault);
-        assert!(!feature_entitled(&snapshot, FeatureId::Multistreaming));
+        assert!(!feature_entitled(&snapshot, FeatureId::CloudAi));
+        assert_eq!(snapshot.limits.streaming.max_height, 1080);
+        // Free for every plan, release builds included.
+        assert!(feature_entitled(&snapshot, FeatureId::Multistreaming));
     }
 
     #[test]
@@ -668,7 +706,7 @@ mod tests {
             value["capabilities"][1]["state"],
             json!("developer-override")
         );
-        assert_eq!(value["limits"]["streaming"]["maxDestinations"], json!(3));
+        assert_eq!(value["limits"]["streaming"]["maxDestinations"], json!(5));
     }
 
     fn test_signing_key() -> ed25519_dalek::SigningKey {
