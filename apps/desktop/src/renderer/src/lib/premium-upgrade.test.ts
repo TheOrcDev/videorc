@@ -11,14 +11,21 @@ describe('premium upgrade helpers', () => {
     expect(VIDEORC_PREMIUM_URL).toBe('https://www.videorc.com/premium')
   })
 
+  // The still-Premium streaming-quality reason (videoProfileEntitlementGate);
+  // multistreaming is free, so its destination-cap copy must NOT match.
+  const premiumProfileReason =
+    '3840x2160 @ 30 FPS requires Videorc Premium. Your streaming limit is 1920x1080 @ 30 FPS and 6000 kbps.'
+
   it('detects premium blocker copy', () => {
-    expect(
-      isPremiumUpgradeMessage(
-        'Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.'
-      )
-    ).toBe(true)
+    expect(isPremiumUpgradeMessage(premiumProfileReason)).toBe(true)
     expect(isPremiumUpgradeMessage('Cloud AI is a Videorc Premium feature.')).toBe(true)
     expect(isPremiumUpgradeMessage('No streaming destination is ready.')).toBe(false)
+    expect(isPremiumUpgradeMessage('You can stream to up to 5 destinations at once.')).toBe(false)
+    expect(
+      isPremiumUpgradeMessage(
+        'You can stream to up to 5 destinations at once; this session has 6 ready destination(s).'
+      )
+    ).toBe(false)
   })
 
   it('returns the first premium error issue from Go Live preflight', () => {
@@ -31,11 +38,14 @@ describe('premium upgrade helpers', () => {
           },
           {
             severity: 'error',
-            message:
-              'Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.'
+            message: 'You can stream to up to 5 destinations at once.'
+          },
+          {
+            severity: 'error',
+            message: premiumProfileReason
           }
         ]
       })
-    ).toBe('Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.')
+    ).toBe(premiumProfileReason)
   })
 })

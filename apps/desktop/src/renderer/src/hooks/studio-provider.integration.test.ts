@@ -1373,8 +1373,9 @@ function enableXOauthForTest(backend: StudioBackend): void {
   ]
 }
 
+// Two destinations on the default (Basic) snapshot: multistreaming is free
+// for every plan, so this helper no longer needs a Premium switch.
 function enableYouTubeAndXOauthForTest(backend: StudioBackend): void {
-  backend.entitlements = premiumEntitlements
   backend.platformAccountValidations = [
     {
       platform: 'youtube',

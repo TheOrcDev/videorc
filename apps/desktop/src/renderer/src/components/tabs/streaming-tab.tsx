@@ -6,7 +6,6 @@ import {
   HeartbeatIcon,
   LinkIcon,
   LivestreamIcon,
-  LockIcon,
   ResetIcon,
   SaveIcon,
   SearchIcon,
@@ -435,8 +434,10 @@ function DestinationCard({
     ? runtimeBadge(runtime)
     : (savedStatusBadge ?? configuredBadge(target.enabled, ready))
   const statusMessage = runtime?.message ?? target.status?.message
+  // Multistreaming is free for every plan: the only enable gate left is the
+  // shared destination cap (or a disabled livestreaming feature), so the
+  // switch is always rendered and the strip below explains why it is off.
   const enableLockGate = !disabled && !target.enabled && !enableGate.allowed ? enableGate : null
-  const enableLockUpgradeUrl = enableLockGate?.upgradeUrl
   const enableSwitchDisabled = disabled || Boolean(enableLockGate)
   const enableLockId = `${target.id}-enable-lock`
   const [manualStreamKeyDraft, setManualStreamKeyDraft] = useState(target.streamKey)
@@ -536,32 +537,13 @@ function DestinationCard({
         onClick={() => setExpanded((value) => !value)}
       >
         <span onClick={(event) => event.stopPropagation()}>
-          {enableLockGate ? (
-            // A dead disabled switch reads as broken; the lock chip says what
-            // this actually is — a Premium feature — and IS the upgrade
-            // affordance (multistream gate UI flow).
-            <button
-              aria-describedby={enableLockId}
-              aria-label={`${target.label} requires Videorc Premium`}
-              className="cursor-pointer"
-              type="button"
-              onClick={() =>
-                enableLockUpgradeUrl ? openExternalUrl(enableLockUpgradeUrl) : undefined
-              }
-            >
-              <Badge variant="outline">
-                <LockIcon className="size-3" weight="fill" />
-                Premium
-              </Badge>
-            </button>
-          ) : (
-            <Switch
-              aria-label={`Enable ${target.label}`}
-              checked={target.enabled}
-              disabled={enableSwitchDisabled}
-              onCheckedChange={patchEnabled}
-            />
-          )}
+          <Switch
+            aria-describedby={enableLockGate ? enableLockId : undefined}
+            aria-label={`Enable ${target.label}`}
+            checked={target.enabled}
+            disabled={enableSwitchDisabled}
+            onCheckedChange={patchEnabled}
+          />
         </span>
         <ChevronDownIcon
           className={cn(
@@ -574,22 +556,14 @@ function DestinationCard({
         <span className="-mt-2 text-xs text-muted-foreground">{statusMessage}</span>
       ) : null}
       {enableLockGate ? (
+        // Neutral limit strip: a pipeline cap, not a plan boundary, so no
+        // warning tint and no upgrade affordance.
         <div
-          className="-mt-2 flex flex-wrap items-center gap-2 border-l-2 border-warning/50 pl-3 text-xs text-warning-foreground dark:text-warning"
+          className="-mt-2 flex flex-wrap items-center gap-2 border-l-2 border-border pl-3 text-xs text-muted-foreground"
           id={enableLockId}
         >
           <AlertIcon className="size-3.5 shrink-0" weight="fill" />
           <span className="min-w-0 flex-1">{enableLockGate.reason}</span>
-          {enableLockUpgradeUrl ? (
-            <Button
-              className="h-auto px-0 text-xs"
-              size="xs"
-              variant="link"
-              onClick={() => openExternalUrl(enableLockUpgradeUrl)}
-            >
-              View Premium
-            </Button>
-          ) : null}
         </div>
       ) : null}
 

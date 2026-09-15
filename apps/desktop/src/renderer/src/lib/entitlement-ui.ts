@@ -53,7 +53,7 @@ export function streamingDestinationEnableGate({
     return { allowed: true }
   }
 
-  return destinationsLimitGate(entitlements, maxDestinations)
+  return destinationsLimitGate(maxDestinations)
 }
 
 export function goLiveEntitlementGate({
@@ -70,7 +70,7 @@ export function goLiveEntitlementGate({
     return { allowed: true }
   }
 
-  const limitGate = destinationsLimitGate(entitlements, maxDestinations)
+  const limitGate = destinationsLimitGate(maxDestinations)
   if (limitGate.allowed) {
     return limitGate
   }
@@ -145,16 +145,15 @@ function featureGate(
   )
 }
 
-function destinationsLimitGate(
-  entitlements: EntitlementsSnapshot | null,
-  maxDestinations: number
-): EntitlementUiGate {
-  const reason = !isFeatureEntitled(entitlements, 'multistreaming')
-    ? (entitlementDisabledReason(entitlements, 'multistreaming') ??
-      'Multistreaming requires Videorc Premium.')
-    : `Your current plan allows up to ${maxDestinations} streaming destinations.`
-
-  return lockedGate('multistreaming', reason)
+// Multistreaming is free for every plan: the destination cap is a shared
+// pipeline limit, not a plan gate. The reason must never mention Premium —
+// lockedGate would otherwise attach an upgrade URL and the toast layer would
+// turn it into an upgrade prompt.
+function destinationsLimitGate(maxDestinations: number): EntitlementUiGate {
+  return lockedGate(
+    'multistreaming',
+    `You can stream to up to ${maxDestinations} destinations at once.`
+  )
 }
 
 function lockedGate(

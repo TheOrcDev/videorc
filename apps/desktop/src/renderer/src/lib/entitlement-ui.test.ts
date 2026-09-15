@@ -8,7 +8,11 @@ import {
   streamingDestinationEnableGate,
   videoProfileEntitlementGate
 } from './entitlement-ui'
-import { DEFAULT_BASIC_ENTITLEMENTS, PREMIUM_STREAMING_LIMITS } from './entitlements'
+import {
+  DEFAULT_BASIC_ENTITLEMENTS,
+  PREMIUM_STREAMING_LIMITS,
+  STREAMING_MAX_DESTINATIONS
+} from './entitlements'
 import { VIDEORC_PREMIUM_URL } from './premium-upgrade'
 
 const basicEntitlements = DEFAULT_BASIC_ENTITLEMENTS
@@ -73,6 +77,13 @@ function destinationGate(
   })
 }
 
+// Multistreaming is free for every plan: the destination cap is a shared
+// pipeline limit, so the over-cap reason is neutral (no "Premium", hence no
+// upgrade URL) and identical across tiers.
+const CAP = STREAMING_MAX_DESTINATIONS
+const capReason = `You can stream to up to ${CAP} destinations at once.`
+const fiveTargets = ['youtube', 'twitch', 'x', 'custom-a', 'custom-b']
+
 describe('entitlement UI gates', () => {
   it('allows Basic users to enable any first streaming destination', () => {
     for (const targetId of ['youtube', 'twitch', 'x', 'custom']) {
@@ -80,60 +91,75 @@ describe('entitlement UI gates', () => {
     }
   })
 
-  it('treats missing entitlement snapshots as Basic', () => {
+  it('treats missing entitlement snapshots as Basic, which still multistreams', () => {
     expect(destinationGate([], 'youtube', null)).toEqual({ allowed: true })
-    expect(destinationGate(['youtube'], 'twitch', null)).toMatchObject({
+    expect(destinationGate(['youtube'], 'twitch', null)).toEqual({ allowed: true })
+    expect(destinationGate(fiveTargets, 'custom-c', null)).toEqual({
       allowed: false,
       featureId: 'multistreaming',
-      upgradeUrl: VIDEORC_PREMIUM_URL
+      reason: capReason
     })
   })
 
-  it('lets Basic users disable the active destination but blocks additional destinations', () => {
-    expect(destinationGate(['youtube'], 'youtube')).toEqual({ allowed: true })
+  it(`allows anyone to enable up to ${CAP} destinations`, () => {
+    expect(CAP).toBe(5)
+    for (const entitlements of [basicEntitlements, premiumEntitlements, developerEntitlements]) {
+      for (let enabled = 0; enabled < CAP; enabled += 1) {
+        expect(
+          destinationGate(fiveTargets.slice(0, enabled), fiveTargets[enabled], entitlements)
+        ).toEqual({ allowed: true })
+      }
+    }
+  })
 
-    for (const targetId of ['twitch', 'x', 'custom']) {
-      expect(destinationGate(['youtube'], targetId)).toEqual({
+  it(`blocks the sixth destination for every tier with a neutral reason and no upgradeUrl`, () => {
+    for (const entitlements of [basicEntitlements, premiumEntitlements, developerEntitlements]) {
+      const gate = destinationGate(fiveTargets, 'custom-c', entitlements)
+      expect(gate).toEqual({
         allowed: false,
         featureId: 'multistreaming',
-        reason:
-          'Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.',
-        upgradeUrl: VIDEORC_PREMIUM_URL
+        reason: capReason
+      })
+      expect(gate).not.toHaveProperty('upgradeUrl')
+      expect(capReason).not.toMatch(/premium/i)
+    }
+  })
+
+  it('keeps stale over-limit destinations fixable', () => {
+    const sixTargets = [...fiveTargets, 'custom-c']
+    for (const targetId of sixTargets) {
+      expect(destinationGate(sixTargets, targetId)).toEqual({ allowed: true })
+    }
+    expect(destinationGate(sixTargets, 'custom-d')).toEqual({
+      allowed: false,
+      featureId: 'multistreaming',
+      reason: capReason
+    })
+
+    for (const entitlements of [basicEntitlements, premiumEntitlements]) {
+      expect(
+        goLiveEntitlementGate({
+          entitlements,
+          streaming: { enabledTargetIds: sixTargets }
+        })
+      ).toEqual({
+        allowed: false,
+        featureId: 'multistreaming',
+        reason: capReason,
+        allowFixAction: true
       })
     }
   })
 
-  it('keeps stale over-limit Basic destinations fixable', () => {
-    expect(destinationGate(['youtube', 'twitch'], 'youtube')).toEqual({ allowed: true })
-    expect(destinationGate(['youtube', 'twitch'], 'twitch')).toEqual({ allowed: true })
-    expect(destinationGate(['youtube', 'twitch'], 'x')).toMatchObject({
-      allowed: false,
-      featureId: 'multistreaming',
-      upgradeUrl: VIDEORC_PREMIUM_URL
-    })
-
-    expect(
-      goLiveEntitlementGate({
-        entitlements: basicEntitlements,
-        streaming: { enabledTargetIds: ['youtube', 'twitch'] }
-      })
-    ).toEqual({
-      allowed: false,
-      featureId: 'multistreaming',
-      reason: 'Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.',
-      upgradeUrl: VIDEORC_PREMIUM_URL,
-      allowFixAction: true
-    })
-  })
-
-  it('uses Premium max destination limits instead of hardcoding one destination', () => {
+  it('gives Premium snapshots the same destination cap as Basic', () => {
+    expect(premiumEntitlements.limits.streaming.maxDestinations).toBe(
+      basicEntitlements.limits.streaming.maxDestinations
+    )
     expect(destinationGate(['youtube', 'twitch'], 'x', premiumEntitlements)).toEqual({
       allowed: true
     })
-    expect(destinationGate(['youtube', 'twitch', 'x'], 'custom', premiumEntitlements)).toEqual({
-      allowed: false,
-      featureId: 'multistreaming',
-      reason: 'Your current plan allows up to 3 streaming destinations.'
+    expect(destinationGate(['youtube', 'twitch'], 'x', basicEntitlements)).toEqual({
+      allowed: true
     })
   })
 
@@ -145,20 +171,27 @@ describe('entitlement UI gates', () => {
     expect(noiseCleanupGate(developerEntitlements)).toEqual({ allowed: true })
   })
 
-  it('allows Basic Go Live with one destination and blocks over-limit configs before preflight', () => {
-    expect(
-      goLiveEntitlementGate({
-        entitlements: basicEntitlements,
-        streaming: { enabledTargetIds: ['youtube'] }
-      })
-    ).toEqual({ allowed: true })
-
-    expect(
-      goLiveEntitlementGate({
-        entitlements: premiumEntitlements,
-        streaming: { enabledTargetIds: ['youtube', 'twitch', 'x'] }
-      })
-    ).toEqual({ allowed: true })
+  it('allows Go Live up to the shared cap for every tier and blocks over-limit configs before preflight', () => {
+    for (const entitlements of [basicEntitlements, premiumEntitlements, developerEntitlements]) {
+      expect(
+        goLiveEntitlementGate({
+          entitlements,
+          streaming: { enabledTargetIds: ['youtube'] }
+        })
+      ).toEqual({ allowed: true })
+      expect(
+        goLiveEntitlementGate({
+          entitlements,
+          streaming: { enabledTargetIds: fiveTargets }
+        })
+      ).toEqual({ allowed: true })
+      expect(
+        goLiveEntitlementGate({
+          entitlements,
+          streaming: { enabledTargetIds: [...fiveTargets, 'custom-c'] }
+        })
+      ).toMatchObject({ allowed: false, featureId: 'multistreaming', allowFixAction: true })
+    }
   })
 
   it('adds Premium upgrade metadata for Cloud AI and Basic media caps', () => {
@@ -333,11 +366,6 @@ describe('entitlement UI gates', () => {
       bitrateKbps: 30000
     }
     const normalLockedGates = [
-      destinationGate(['youtube'], 'twitch'),
-      goLiveEntitlementGate({
-        entitlements: basicEntitlements,
-        streaming: { enabledTargetIds: ['youtube', 'twitch'] }
-      }),
       cloudAiUploadGate(basicEntitlements),
       noiseCleanupGate(basicEntitlements),
       videoProfileEntitlementGate({
