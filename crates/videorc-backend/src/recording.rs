@@ -37,7 +37,8 @@ use crate::capture_interruption::SessionStartAdmission;
 use crate::compositor::{
     CompositorArmParams, CompositorAuxiliaryOutput, CompositorFrameConsumer, CompositorStartParams,
     CompositorStartupBarrierParams, CompositorStartupBarrierResult,
-    CompositorStartupSourceRequirements, arm_compositor_for_capture, compositor_frame_store,
+    CompositorStartupSourceRequirements, arm_compositor_for_capture,
+    compositor_frame_history_proves_live_sources, compositor_frame_store,
     compositor_stream_frame_store, release_compositor_capture_lease, start_synthetic_compositor,
     update_compositor_scene, wait_for_compositor_startup_frames,
 };
@@ -3654,6 +3655,40 @@ async fn start_session_with_timeline(
             let startup_scene_revision = startup_scene.scene_revision;
             recording_startup_scene = Some(startup_scene);
             timeline.mark(RecordingStartPhase::SceneCommit);
+            // Instant record (P4.2): the armed preview run kept its frame
+            // history across the in-place resize. When that history already
+            // proves live, advancing sources inside the cadence budget, one
+            // frame at the output resolution and committed scene revision is
+            // enough to prove the resize and commit took. A fresh run, or a
+            // history that does not prove liveness, keeps the full barrier.
+            let startup_barrier_min_frames = if armed_in_place {
+                match compositor_frame_history_proves_live_sources(
+                    &state,
+                    startup_source_requirements,
+                    recording_startup_frame_gap_budget(params.output.video.fps),
+                    RECORDING_STARTUP_BARRIER_MIN_FRAMES,
+                )
+                .await
+                {
+                    Some(proving_frames) => {
+                        let _ = emit_session_log(
+                            &state,
+                            &session_id,
+                            HealthLevel::Info,
+                            "recording-startup-barrier-fast-path",
+                            &format!(
+                                "Armed preview compositor already proved {proving_frames} fresh frame(s) with live sources; one {}x{} frame at scene revision {startup_scene_revision} completes the startup barrier.",
+                                params.output.video.width, params.output.video.height
+                            ),
+                            None,
+                        );
+                        1
+                    }
+                    None => RECORDING_STARTUP_BARRIER_MIN_FRAMES,
+                }
+            } else {
+                RECORDING_STARTUP_BARRIER_MIN_FRAMES
+            };
             match await_recording_startup_barrier(
                 &state,
                 &session_id,
@@ -3662,6 +3697,7 @@ async fn start_session_with_timeline(
                 params.output.video.fps,
                 Some(startup_scene_revision),
                 startup_source_requirements,
+                startup_barrier_min_frames,
             )
             .await
             {
@@ -9885,6 +9921,7 @@ fn recording_startup_retry_frame_gap_budget(max_frame_gap: Duration) -> Duration
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn await_recording_startup_barrier(
     state: &AppState,
     session_id: &str,
@@ -9893,6 +9930,7 @@ async fn await_recording_startup_barrier(
     target_fps: u32,
     required_scene_revision: Option<u64>,
     requirements: CompositorStartupSourceRequirements,
+    min_consecutive_frames: u32,
 ) -> Result<CompositorStartupBarrierResult> {
     await_recording_startup_barrier_with_budget(
         state,
@@ -9901,6 +9939,7 @@ async fn await_recording_startup_barrier(
         height,
         required_scene_revision,
         requirements,
+        min_consecutive_frames,
         recording_startup_frame_gap_budget(target_fps),
         RECORDING_STARTUP_BARRIER_TIMEOUT,
     )
@@ -9924,6 +9963,7 @@ async fn await_recording_startup_barrier_with_budget(
     height: u32,
     required_scene_revision: Option<u64>,
     requirements: CompositorStartupSourceRequirements,
+    min_consecutive_frames: u32,
     max_frame_gap: Duration,
     timeout: Duration,
 ) -> Result<CompositorStartupBarrierResult> {
@@ -9942,7 +9982,7 @@ async fn await_recording_startup_barrier_with_budget(
                 width,
                 height,
                 required_scene_revision,
-                min_consecutive_frames: RECORDING_STARTUP_BARRIER_MIN_FRAMES,
+                min_consecutive_frames,
                 max_frame_gap: Some(frame_gap),
                 timeout,
                 requirements,
@@ -20572,6 +20612,7 @@ mod tests {
                 target_fps,
                 Some(1),
                 camera_startup_requirements(),
+                RECORDING_STARTUP_BARRIER_MIN_FRAMES,
             )
             .await;
             writer.abort();
@@ -20600,6 +20641,41 @@ mod tests {
         }
     }
 
+    /// Instant-record P4.2: with a one-frame requirement (armed preview run
+    /// whose history already proved live sources) the barrier is ready at
+    /// the first target-resolution frame at the committed scene revision.
+    #[tokio::test]
+    async fn recording_startup_barrier_fast_path_needs_one_target_frame() {
+        let session_id = "session-startup-fast-path";
+        let state = startup_barrier_test_state(session_id);
+        let writer = spawn_startup_frame_writer(state.clone(), Vec::new(), Some(33));
+
+        let result = await_recording_startup_barrier(
+            &state,
+            session_id,
+            1920,
+            1080,
+            30,
+            Some(1),
+            camera_startup_requirements(),
+            1,
+        )
+        .await;
+        writer.abort();
+
+        let result = result.expect("one target frame completes the fast-path barrier");
+        assert!(result.ready, "{result:?}");
+        assert_eq!(result.frames_observed, 1, "{result:?}");
+        assert!(result.wait_ms < 500, "{result:?}");
+        let codes = health_event_codes(&state, session_id);
+        assert!(
+            codes
+                .iter()
+                .any(|code| code == "recording-startup-barrier-ready"),
+            "{codes:?}"
+        );
+    }
+
     /// Cadence-only miss on the first pass, clean on the 1.5× retry: the
     /// session records with no warning, and the retry is logged once.
     #[tokio::test]
@@ -20616,6 +20692,7 @@ mod tests {
             1080,
             Some(1),
             camera_startup_requirements(),
+            RECORDING_STARTUP_BARRIER_MIN_FRAMES,
             Duration::from_millis(200),
             Duration::from_millis(700),
         )
@@ -20668,6 +20745,7 @@ mod tests {
             1080,
             Some(1),
             camera_startup_requirements(),
+            RECORDING_STARTUP_BARRIER_MIN_FRAMES,
             Duration::from_millis(200),
             Duration::from_millis(900),
         )
@@ -20723,6 +20801,7 @@ mod tests {
             1080,
             Some(1),
             camera_startup_requirements(),
+            RECORDING_STARTUP_BARRIER_MIN_FRAMES,
             Duration::from_millis(200),
             Duration::from_millis(300),
         )
@@ -20783,6 +20862,7 @@ mod tests {
             1080,
             Some(1),
             camera_startup_requirements(),
+            RECORDING_STARTUP_BARRIER_MIN_FRAMES,
             Duration::from_millis(200),
             Duration::from_millis(1500),
         )
@@ -20822,6 +20902,7 @@ mod tests {
             1080,
             Some(1),
             camera_startup_requirements(),
+            RECORDING_STARTUP_BARRIER_MIN_FRAMES,
             Duration::from_millis(200),
             Duration::from_millis(300),
         )

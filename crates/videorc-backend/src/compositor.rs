@@ -2619,6 +2619,62 @@ pub async fn wait_for_compositor_startup_frames(
     }
 }
 
+/// Instant-record P4.2: an armed preview compositor keeps its frame history
+/// across the in-place resize and scene commit. When that history already
+/// proves `min_frames` consecutive fresh frames with the required sources
+/// present and advancing inside the cadence budget — judged with the live
+/// barrier rules minus resolution and scene revision, which the resize and
+/// commit intentionally change — the live barrier needs only ONE frame at the
+/// new resolution and revision to prove that the resize and commit took.
+/// Returns the number of proving frames.
+pub fn frame_history_proves_live_sources(
+    history: &[CompositorFrameEvidence],
+    requirements: CompositorStartupSourceRequirements,
+    max_frame_gap: Duration,
+    min_frames: u32,
+    now: Instant,
+) -> Option<u32> {
+    let max_history_age = max_frame_gap * COMPOSITOR_STARTUP_HISTORY_AGE_BUDGETS;
+    let mut accumulator = StartupBarrierAccumulator::new(CompositorStartupBarrierParams {
+        width: 0,
+        height: 0,
+        required_scene_revision: None,
+        min_consecutive_frames: min_frames,
+        max_frame_gap: Some(max_frame_gap),
+        timeout: Duration::ZERO,
+        requirements,
+    });
+    for evidence in history {
+        if now.saturating_duration_since(evidence.published_at) > max_history_age {
+            continue;
+        }
+        // Resolution is deliberately not part of this proof: the entry is
+        // judged at its own canvas size.
+        accumulator.params.width = evidence.width;
+        accumulator.params.height = evidence.height;
+        if accumulator.observe(*evidence, now) == StartupBarrierObservation::Ready {
+            return Some(accumulator.frames_observed);
+        }
+    }
+    None
+}
+
+pub async fn compositor_frame_history_proves_live_sources(
+    state: &AppState,
+    requirements: CompositorStartupSourceRequirements,
+    max_frame_gap: Duration,
+    min_frames: u32,
+) -> Option<u32> {
+    let history = compositor_frame_evidence_history(state).await;
+    frame_history_proves_live_sources(
+        &history,
+        requirements,
+        max_frame_gap,
+        min_frames,
+        Instant::now(),
+    )
+}
+
 /// Keep only the most recent `COMPOSITOR_STARTUP_GAP_HISTORY_LEN` gaps, oldest first.
 fn push_startup_gap(history: &mut Vec<u64>, gap_ms: u64) {
     if history.len() >= COMPOSITOR_STARTUP_GAP_HISTORY_LEN {
@@ -10141,6 +10197,95 @@ mod tests {
     /// Instant-record P3: a compositor that has already produced fresh
     /// target-resolution frames passes the barrier from its evidence ring
     /// without waiting for three NEW frames.
+
+    #[test]
+    fn frame_history_proves_live_sources_ignores_resolution_but_needs_fresh_advancing_frames() {
+        let now = Instant::now();
+        let requirements = CompositorStartupSourceRequirements {
+            require_real_source: true,
+            require_camera_source: true,
+            require_screen_source: false,
+        };
+        let gap = Duration::from_millis(100);
+        let evidence =
+            |sequence: u64, width: u32, camera: Option<u64>, age_ms: u64| CompositorFrameEvidence {
+                sequence,
+                scene_revision: Some(7),
+                width,
+                height: width * 9 / 16,
+                has_real_source: true,
+                camera_sequence: camera,
+                screen_sequence: None,
+                has_image_source: false,
+                published_at: now - Duration::from_millis(age_ms),
+            };
+
+        // Preview-sized frames followed by one capture-sized frame: the
+        // canvas size is irrelevant, the source liveness is what counts.
+        let history = [
+            evidence(1, 640, Some(10), 90),
+            evidence(2, 640, Some(11), 60),
+            evidence(3, 640, Some(12), 30),
+            evidence(4, 1920, Some(13), 5),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&history, requirements, gap, 3, now),
+            Some(3)
+        );
+        assert_eq!(
+            frame_history_proves_live_sources(&history[..2], requirements, gap, 3, now),
+            None,
+            "two frames never prove a three-frame requirement"
+        );
+
+        // Stale entries are not evidence of the current state.
+        let stale = [
+            evidence(1, 640, Some(10), 900),
+            evidence(2, 640, Some(11), 700),
+            evidence(3, 640, Some(12), 500),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&stale, requirements, gap, 3, now),
+            None
+        );
+
+        // A camera that stopped advancing never proves liveness.
+        let frozen = [
+            evidence(1, 640, Some(10), 90),
+            evidence(2, 640, Some(10), 60),
+            evidence(3, 640, Some(10), 30),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&frozen, requirements, gap, 3, now),
+            None
+        );
+
+        // A required source that is missing blocks structurally.
+        let missing = [
+            evidence(1, 640, None, 90),
+            evidence(2, 640, None, 60),
+            evidence(3, 640, None, 30),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&missing, requirements, gap, 3, now),
+            None
+        );
+
+        // A gap over the cadence budget restarts the streak.
+        let choppy = [
+            evidence(1, 640, Some(10), 190),
+            evidence(2, 640, Some(11), 60),
+            evidence(3, 640, Some(12), 30),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&choppy, requirements, gap, 3, now),
+            None
+        );
+        assert_eq!(
+            frame_history_proves_live_sources(&choppy, requirements, gap, 2, now),
+            Some(2)
+        );
+    }
     #[tokio::test]
     async fn startup_barrier_passes_instantly_from_fresh_history() {
         let state = test_state();
