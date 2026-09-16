@@ -1303,7 +1303,6 @@ fn processed_capture_frame_with_handle(
     processed_capture_frame(input, source_channels, settings.load(), timestamp_micros)
 }
 
-#[cfg(debug_assertions)]
 /// Test seam: a hardware-free native source (the caption-contract producer)
 /// for warm-microphone and handoff tests.
 #[cfg(test)]
@@ -1311,6 +1310,7 @@ pub(crate) fn test_native_audio_source(settings: AudioProcessingSettings) -> Nat
     start_caption_contract_test_audio_source(settings).expect("test audio source starts")
 }
 
+#[cfg(debug_assertions)]
 fn start_caption_contract_test_audio_source(
     settings: AudioProcessingSettings,
 ) -> Result<NativeAudioSource> {
