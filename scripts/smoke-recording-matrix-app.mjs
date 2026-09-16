@@ -329,6 +329,7 @@ async function recordCombo({
       ...evaluateTransientFifoPressure({
         activeStatus,
         stoppedStatus: stopped,
+        finalizedOutputPath: outputPath,
         diagnostics,
         qualityMetrics: quality.metrics,
         testPauseFiredCount: transientFifoPauseFiredCount,

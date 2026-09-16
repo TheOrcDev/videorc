@@ -13,6 +13,9 @@ export function countTransientFifoPauseMarkers(line) {
 }
 
 export function evaluateTransientFifoPressure({
+  // The MP4 is published by the background finalization job after the
+  // terminal `idle` (instant-record P2); callers pass the resolved final path.
+  finalizedOutputPath,
   activeStatus,
   stoppedStatus,
   diagnostics,
@@ -45,10 +48,11 @@ export function evaluateTransientFifoPressure({
         `(state=${stoppedStatus?.state ?? 'missing'})`
     )
   }
-  if (extname(stoppedStatus?.outputPath ?? '').toLowerCase() !== '.mp4') {
+  const finalPath = finalizedOutputPath ?? stoppedStatus?.outputPath
+  if (extname(finalPath ?? '').toLowerCase() !== '.mp4') {
     failures.push(
       `transient FIFO pressure session did not produce a finalized MP4 ` +
-        `(path=${stoppedStatus?.outputPath ?? 'missing'})`
+        `(path=${finalPath ?? 'missing'})`
     )
   }
   if (!(diagnostics?.encoderBridgeOutputQueueCapacityPressureEvents > 0)) {

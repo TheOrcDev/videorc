@@ -4,6 +4,9 @@ const SILENT_AUDIO_PEAK_MAX = 0.001
 const SILENT_AUDIO_RMS_MAX = 0.0005
 
 export function evaluateMicrophoneLossContinuity({
+  // The MP4 is published by the background finalization job after the
+  // terminal `idle` (instant-record P2); callers pass the resolved final path.
+  finalizedOutputPath,
   sessionId,
   disconnectResult,
   healthEvents,
@@ -41,10 +44,11 @@ export function evaluateMicrophoneLossContinuity({
         `(state=${stoppedStatus?.state ?? 'missing'})`
     )
   }
-  if (extname(stoppedStatus?.outputPath ?? '').toLowerCase() !== '.mp4') {
+  const finalPath = finalizedOutputPath ?? stoppedStatus?.outputPath
+  if (extname(finalPath ?? '').toLowerCase() !== '.mp4') {
     failures.push(
       `microphone-loss session did not produce a finalized MP4 ` +
-        `(path=${stoppedStatus?.outputPath ?? 'missing'})`
+        `(path=${finalPath ?? 'missing'})`
     )
   }
 

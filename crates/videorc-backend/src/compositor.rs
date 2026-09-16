@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
@@ -312,7 +313,10 @@ pub struct CompositorRuntime {
     image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
-    latest_frame_evidence: Option<CompositorFrameEvidence>,
+    /// Recent frame evidence, oldest first (instant-record P3). The startup
+    /// barrier seeds itself from this ring so a compositor that has been
+    /// producing target-resolution frames passes without waiting for new ones.
+    frame_evidence: VecDeque<CompositorFrameEvidence>,
     run_id: Option<String>,
     stop_tx: Option<watch::Sender<bool>>,
     render_task: Option<JoinHandle<()>>,
@@ -1370,7 +1374,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         ),
         frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         stream_frame_store: None,
-        latest_frame_evidence: None,
+        frame_evidence: VecDeque::new(),
         run_id: None,
         stop_tx: None,
         render_task: None,
@@ -1474,7 +1478,7 @@ async fn start_synthetic_compositor_with_lifecycle(
         let mut compositor = state.compositor.lock().await;
         compositor.frame_store = Arc::new(StdMutex::new(FrameStore::new(2)));
         compositor.stream_frame_store = stream_frame_store;
-        compositor.latest_frame_evidence = None;
+        compositor.frame_evidence.clear();
         compositor.status = status.clone();
         compositor.run_id = Some(run_id.clone());
         compositor.stop_tx = Some(stop_tx);
@@ -1625,7 +1629,7 @@ pub async fn stop_compositor(state: &AppState) -> CompositorStatus {
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
         compositor.status = status.clone();
-        compositor.latest_frame_evidence = None;
+        compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
         status
     };
@@ -1736,7 +1740,7 @@ pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option
             compositor.preview_render_dimensions = None;
             compositor.preview_resize_revision = None;
         }
-        compositor.latest_frame_evidence = None;
+        compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
@@ -2102,128 +2106,240 @@ pub async fn compositor_stream_frame_store(state: &AppState) -> Option<Composito
     state.compositor.lock().await.stream_frame_store.clone()
 }
 
+/// How many recent frame-evidence samples the compositor keeps for the
+/// startup barrier to seed from.
+pub const COMPOSITOR_FRAME_EVIDENCE_HISTORY_LEN: usize = 8;
+
 pub async fn compositor_latest_frame_evidence(state: &AppState) -> Option<CompositorFrameEvidence> {
-    state.compositor.lock().await.latest_frame_evidence
+    state.compositor.lock().await.frame_evidence.back().copied()
 }
+
+/// Recent frame evidence, oldest first.
+pub async fn compositor_frame_evidence_history(state: &AppState) -> Vec<CompositorFrameEvidence> {
+    state
+        .compositor
+        .lock()
+        .await
+        .frame_evidence
+        .iter()
+        .copied()
+        .collect()
+}
+
+fn push_frame_evidence(
+    ring: &mut VecDeque<CompositorFrameEvidence>,
+    evidence: CompositorFrameEvidence,
+) {
+    if ring.len() >= COMPOSITOR_FRAME_EVIDENCE_HISTORY_LEN {
+        ring.pop_front();
+    }
+    ring.push_back(evidence);
+}
+
+/// Accumulates startup-barrier observations. One instance judges both the
+/// seeded history (frames the compositor already produced) and the live poll,
+/// with identical rules, so a warm compositor passes instantly while a stalled
+/// or wrong-resolution one still waits and refuses exactly as before.
+struct StartupBarrierAccumulator {
+    params: CompositorStartupBarrierParams,
+    min_consecutive: u32,
+    frames_observed: u32,
+    fresh_frames_seen: u32,
+    gap_history_ms: Vec<u64>,
+    cadence_violations: u32,
+    /// The latest observation was a structural block (resolution, scene
+    /// revision, missing source). Cleared by the next usable frame.
+    blocked_structurally: bool,
+    last_sequence: Option<u64>,
+    last_accepted_evidence: Option<CompositorFrameEvidence>,
+    last_accepted_published_at: Option<Instant>,
+    first_source_frame_ms: Option<u64>,
+    first_full_resolution_frame_ms: Option<u64>,
+    timeout_reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupBarrierObservation {
+    Pending,
+    Ready,
+    /// The frame arrived but its gap exceeded the cadence budget.
+    CadenceViolation,
+}
+
+impl StartupBarrierAccumulator {
+    fn new(params: CompositorStartupBarrierParams) -> Self {
+        Self {
+            params,
+            min_consecutive: params.min_consecutive_frames.max(1),
+            frames_observed: 0,
+            fresh_frames_seen: 0,
+            gap_history_ms: Vec::with_capacity(COMPOSITOR_STARTUP_GAP_HISTORY_LEN),
+            cadence_violations: 0,
+            blocked_structurally: false,
+            last_sequence: None,
+            last_accepted_evidence: None,
+            last_accepted_published_at: None,
+            first_source_frame_ms: None,
+            first_full_resolution_frame_ms: None,
+            timeout_reason: "waiting for compositor frame".to_string(),
+        }
+    }
+
+    fn observe(
+        &mut self,
+        evidence: CompositorFrameEvidence,
+        started_at: Instant,
+    ) -> StartupBarrierObservation {
+        if evidence.has_real_source && self.first_source_frame_ms.is_none() {
+            self.first_source_frame_ms = Some(started_at.elapsed().as_millis() as u64);
+        }
+
+        if let Some(reason) = startup_frame_block_reason(evidence, self.params) {
+            self.frames_observed = 0;
+            self.blocked_structurally = true;
+            self.last_sequence = None;
+            self.last_accepted_evidence = None;
+            self.last_accepted_published_at = None;
+            self.timeout_reason = reason;
+            return StartupBarrierObservation::Pending;
+        }
+
+        self.blocked_structurally = false;
+        if self.first_full_resolution_frame_ms.is_none() {
+            self.first_full_resolution_frame_ms = Some(started_at.elapsed().as_millis() as u64);
+        }
+        let mut accepted_new_frame = false;
+        if self.last_sequence != Some(evidence.sequence)
+            && startup_frame_advances_required_sources(
+                self.last_accepted_evidence,
+                evidence,
+                self.params.requirements,
+            )
+        {
+            self.fresh_frames_seen = self.fresh_frames_seen.saturating_add(1);
+            if let Some(previous_published_at) = self.last_accepted_published_at {
+                let frame_gap = evidence
+                    .published_at
+                    .saturating_duration_since(previous_published_at);
+                push_startup_gap(&mut self.gap_history_ms, frame_gap.as_millis() as u64);
+                if let Some(max_frame_gap) = self.params.max_frame_gap
+                    && frame_gap > max_frame_gap
+                {
+                    self.cadence_violations = self.cadence_violations.saturating_add(1);
+                    self.frames_observed = 1;
+                    self.last_sequence = Some(evidence.sequence);
+                    self.last_accepted_evidence = Some(evidence);
+                    self.last_accepted_published_at = Some(evidence.published_at);
+                    self.timeout_reason = format!(
+                        "latest compositor frame gap {}ms exceeds startup cadence budget {}ms",
+                        frame_gap.as_millis(),
+                        max_frame_gap.as_millis()
+                    );
+                    return StartupBarrierObservation::CadenceViolation;
+                }
+            }
+            self.frames_observed = self.frames_observed.saturating_add(1);
+            self.last_sequence = Some(evidence.sequence);
+            self.last_accepted_evidence = Some(evidence);
+            self.last_accepted_published_at = Some(evidence.published_at);
+            accepted_new_frame = true;
+        }
+        if self.frames_observed >= self.min_consecutive {
+            return StartupBarrierObservation::Ready;
+        }
+        if accepted_new_frame {
+            self.timeout_reason = format!(
+                "only {}/{} target-resolution compositor frame(s) with advancing required sources observed",
+                self.frames_observed, self.min_consecutive
+            );
+        }
+        StartupBarrierObservation::Pending
+    }
+
+    fn ready_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+        CompositorStartupBarrierResult {
+            ready: true,
+            wait_ms: started_at.elapsed().as_millis() as u64,
+            frames_observed: self.frames_observed,
+            fresh_frames_seen: self.fresh_frames_seen,
+            gap_history_ms: self.gap_history_ms.clone(),
+            cadence_only: false,
+            first_source_frame_ms: self.first_source_frame_ms,
+            first_full_resolution_frame_ms: self.first_full_resolution_frame_ms,
+            timeout_reason: None,
+        }
+    }
+
+    fn timeout_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+        let wait_ms = started_at.elapsed().as_millis() as u64;
+        // Cadence-only: the compositor IS producing usable frames, just
+        // not three in a row inside the budget. Anything structural, or
+        // a wait that never saw a usable frame, is a real block.
+        let cadence_only =
+            !self.blocked_structurally && self.fresh_frames_seen > 0 && self.cadence_violations > 0;
+        let timeout_reason = format!(
+            "{} (recent gaps {} ms; {} fresh frame(s) in {wait_ms}ms)",
+            self.timeout_reason,
+            startup_gap_history_label(&self.gap_history_ms),
+            self.fresh_frames_seen
+        );
+        CompositorStartupBarrierResult {
+            ready: false,
+            wait_ms,
+            frames_observed: self.frames_observed,
+            fresh_frames_seen: self.fresh_frames_seen,
+            gap_history_ms: self.gap_history_ms.clone(),
+            cadence_only,
+            first_source_frame_ms: self.first_source_frame_ms,
+            first_full_resolution_frame_ms: self.first_full_resolution_frame_ms,
+            timeout_reason: Some(timeout_reason),
+        }
+    }
+}
+
+/// History entries older than this many cadence budgets are not evidence of
+/// the compositor's current state and are skipped when seeding.
+const COMPOSITOR_STARTUP_HISTORY_AGE_BUDGETS: u32 = 2;
+const COMPOSITOR_STARTUP_HISTORY_DEFAULT_AGE: Duration = Duration::from_millis(400);
 
 pub async fn wait_for_compositor_startup_frames(
     state: &AppState,
     params: CompositorStartupBarrierParams,
 ) -> CompositorStartupBarrierResult {
     let started_at = Instant::now();
-    let min_consecutive = params.min_consecutive_frames.max(1);
-    let mut frames_observed = 0_u32;
-    let mut fresh_frames_seen = 0_u32;
-    let mut gap_history_ms: Vec<u64> = Vec::with_capacity(COMPOSITOR_STARTUP_GAP_HISTORY_LEN);
-    let mut cadence_violations = 0_u32;
-    // The latest observation was a structural block (resolution, scene
-    // revision, missing source). Cleared by the next usable frame.
-    let mut blocked_structurally = false;
-    let mut last_sequence = None;
-    let mut last_accepted_evidence = None;
-    let mut last_accepted_published_at = None;
-    let mut first_source_frame_ms = None;
-    let mut first_full_resolution_frame_ms = None;
-    let mut timeout_reason = "waiting for compositor frame".to_string();
+    let mut accumulator = StartupBarrierAccumulator::new(params);
+
+    // Seed from frames the compositor already produced (instant-record P3): a
+    // compositor that has been rendering at the target resolution passes
+    // without waiting for three NEW frames. Entries are judged with exactly
+    // the live rules, so wrong-resolution or stale history never counts.
+    let max_history_age = params
+        .max_frame_gap
+        .map(|gap| gap * COMPOSITOR_STARTUP_HISTORY_AGE_BUDGETS)
+        .unwrap_or(COMPOSITOR_STARTUP_HISTORY_DEFAULT_AGE);
+    for evidence in compositor_frame_evidence_history(state).await {
+        if evidence.published_at.elapsed() > max_history_age {
+            continue;
+        }
+        if accumulator.observe(evidence, started_at) == StartupBarrierObservation::Ready {
+            return accumulator.ready_result(started_at);
+        }
+    }
 
     loop {
         if let Some(evidence) = compositor_latest_frame_evidence(state).await {
-            if evidence.has_real_source && first_source_frame_ms.is_none() {
-                first_source_frame_ms = Some(started_at.elapsed().as_millis() as u64);
-            }
-
-            if let Some(reason) = startup_frame_block_reason(evidence, params) {
-                frames_observed = 0;
-                blocked_structurally = true;
-                last_sequence = None;
-                last_accepted_evidence = None;
-                last_accepted_published_at = None;
-                timeout_reason = reason;
-            } else {
-                blocked_structurally = false;
-                if first_full_resolution_frame_ms.is_none() {
-                    first_full_resolution_frame_ms = Some(started_at.elapsed().as_millis() as u64);
+            match accumulator.observe(evidence, started_at) {
+                StartupBarrierObservation::Ready => return accumulator.ready_result(started_at),
+                StartupBarrierObservation::CadenceViolation => {
+                    sleep(Duration::from_millis(10)).await;
+                    continue;
                 }
-                let mut accepted_new_frame = false;
-                if last_sequence != Some(evidence.sequence)
-                    && startup_frame_advances_required_sources(
-                        last_accepted_evidence,
-                        evidence,
-                        params.requirements,
-                    )
-                {
-                    fresh_frames_seen = fresh_frames_seen.saturating_add(1);
-                    if let Some(previous_published_at) = last_accepted_published_at {
-                        let frame_gap = evidence
-                            .published_at
-                            .saturating_duration_since(previous_published_at);
-                        push_startup_gap(&mut gap_history_ms, frame_gap.as_millis() as u64);
-                        if let Some(max_frame_gap) = params.max_frame_gap
-                            && frame_gap > max_frame_gap
-                        {
-                            cadence_violations = cadence_violations.saturating_add(1);
-                            frames_observed = 1;
-                            last_sequence = Some(evidence.sequence);
-                            last_accepted_evidence = Some(evidence);
-                            last_accepted_published_at = Some(evidence.published_at);
-                            timeout_reason = format!(
-                                "latest compositor frame gap {}ms exceeds startup cadence budget {}ms",
-                                frame_gap.as_millis(),
-                                max_frame_gap.as_millis()
-                            );
-                            sleep(Duration::from_millis(10)).await;
-                            continue;
-                        }
-                    }
-                    frames_observed = frames_observed.saturating_add(1);
-                    last_sequence = Some(evidence.sequence);
-                    last_accepted_evidence = Some(evidence);
-                    last_accepted_published_at = Some(evidence.published_at);
-                    accepted_new_frame = true;
-                }
-                if frames_observed >= min_consecutive {
-                    return CompositorStartupBarrierResult {
-                        ready: true,
-                        wait_ms: started_at.elapsed().as_millis() as u64,
-                        frames_observed,
-                        fresh_frames_seen,
-                        gap_history_ms,
-                        cadence_only: false,
-                        first_source_frame_ms,
-                        first_full_resolution_frame_ms,
-                        timeout_reason: None,
-                    };
-                }
-                if accepted_new_frame {
-                    timeout_reason = format!(
-                        "only {frames_observed}/{min_consecutive} target-resolution compositor frame(s) with advancing required sources observed"
-                    );
-                }
+                StartupBarrierObservation::Pending => {}
             }
         }
 
         if started_at.elapsed() >= params.timeout {
-            let wait_ms = started_at.elapsed().as_millis() as u64;
-            // Cadence-only: the compositor IS producing usable frames, just
-            // not three in a row inside the budget. Anything structural, or
-            // a wait that never saw a usable frame, is a real block.
-            let cadence_only =
-                !blocked_structurally && fresh_frames_seen > 0 && cadence_violations > 0;
-            let timeout_reason = format!(
-                "{timeout_reason} (recent gaps {} ms; {fresh_frames_seen} fresh frame(s) in {wait_ms}ms)",
-                startup_gap_history_label(&gap_history_ms)
-            );
-            return CompositorStartupBarrierResult {
-                ready: false,
-                wait_ms,
-                frames_observed,
-                fresh_frames_seen,
-                gap_history_ms,
-                cadence_only,
-                first_source_frame_ms,
-                first_full_resolution_frame_ms,
-                timeout_reason: Some(timeout_reason),
-            };
+            return accumulator.timeout_result(started_at);
         }
 
         sleep(Duration::from_millis(10)).await;
@@ -2245,7 +2361,7 @@ pub(crate) async fn set_latest_frame_evidence_for_tests(
     state: &AppState,
     evidence: CompositorFrameEvidence,
 ) {
-    state.compositor.lock().await.latest_frame_evidence = Some(evidence);
+    push_frame_evidence(&mut state.compositor.lock().await.frame_evidence, evidence);
 }
 
 fn startup_frame_advances_required_sources(
@@ -2728,7 +2844,7 @@ async fn stop_current_compositor(state: &AppState) -> bool {
         compositor.run_id = None;
         compositor.preview_render_dimensions = None;
         compositor.preview_resize_revision = None;
-        compositor.latest_frame_evidence = None;
+        compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
     }
     crate::capture_recovery::note_compositor_lifecycle_changed(state, None).await;
@@ -5241,7 +5357,7 @@ fn set_latest_frame_evidence_if_current_run(
     if compositor.run_id.as_deref() != Some(run_id) {
         return false;
     }
-    compositor.latest_frame_evidence = Some(evidence);
+    push_frame_evidence(&mut compositor.frame_evidence, evidence);
     true
 }
 
@@ -5548,8 +5664,8 @@ fn try_update_compositor_frame_progress(
     compositor.status.state = CompositorState::Live;
     compositor.status.frames_rendered = frames_rendered;
     compositor.status.frame_scene_revision = compositor
-        .latest_frame_evidence
-        .as_ref()
+        .frame_evidence
+        .back()
         .filter(|evidence| evidence.sequence == frames_rendered)
         .and_then(|evidence| evidence.scene_revision);
     compositor.status.frame_age_ms = Some(frame_age_ms);
@@ -5586,8 +5702,8 @@ fn try_update_compositor_status(
     compositor.status.render_fps = Some(metrics.render_fps);
     compositor.status.frames_rendered = metrics.frames_rendered;
     compositor.status.frame_scene_revision = compositor
-        .latest_frame_evidence
-        .as_ref()
+        .frame_evidence
+        .back()
         .filter(|evidence| evidence.sequence == metrics.frames_rendered)
         .and_then(|evidence| evidence.scene_revision);
     compositor.status.repeated_frames = metrics.repeated_frames;
@@ -9115,17 +9231,20 @@ mod tests {
             status.frame_age_ms = Some(9);
             status.frame_time_p95_ms = Some(12.5);
             compositor.status = status;
-            compositor.latest_frame_evidence = Some(CompositorFrameEvidence {
-                sequence: 42,
-                scene_revision: Some(12),
-                width: 640,
-                height: 360,
-                has_real_source: true,
-                camera_sequence: Some(1),
-                screen_sequence: None,
-                has_image_source: false,
-                published_at: Instant::now(),
-            });
+            compositor.frame_evidence.clear();
+            compositor
+                .frame_evidence
+                .push_back(CompositorFrameEvidence {
+                    sequence: 42,
+                    scene_revision: Some(12),
+                    width: 640,
+                    height: 360,
+                    has_real_source: true,
+                    camera_sequence: Some(1),
+                    screen_sequence: None,
+                    has_image_source: false,
+                    published_at: Instant::now(),
+                });
             compositor.run_id = Some("run".to_string());
         }
 
@@ -9172,17 +9291,20 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.run_id = Some("current-run".to_string());
-            compositor.latest_frame_evidence = Some(CompositorFrameEvidence {
-                sequence: 7,
-                scene_revision: Some(2),
-                width: 640,
-                height: 360,
-                has_real_source: true,
-                camera_sequence: None,
-                screen_sequence: Some(3),
-                has_image_source: true,
-                published_at: Instant::now(),
-            });
+            compositor.frame_evidence.clear();
+            compositor
+                .frame_evidence
+                .push_back(CompositorFrameEvidence {
+                    sequence: 7,
+                    scene_revision: Some(2),
+                    width: 640,
+                    height: 360,
+                    has_real_source: true,
+                    camera_sequence: None,
+                    screen_sequence: Some(3),
+                    has_image_source: true,
+                    published_at: Instant::now(),
+                });
 
             let stale_updated = set_latest_frame_evidence_if_current_run(
                 &mut compositor,
@@ -9203,8 +9325,8 @@ mod tests {
             assert!(!stale_updated);
             assert_eq!(
                 compositor
-                    .latest_frame_evidence
-                    .as_ref()
+                    .frame_evidence
+                    .back()
                     .map(|evidence| evidence.width),
                 Some(640)
             );
@@ -9228,8 +9350,8 @@ mod tests {
             assert!(current_updated);
             assert_eq!(
                 compositor
-                    .latest_frame_evidence
-                    .as_ref()
+                    .frame_evidence
+                    .back()
                     .map(|evidence| evidence.sequence),
                 Some(8)
             );
@@ -9339,19 +9461,22 @@ mod tests {
         has_image_source: bool,
     ) {
         let mut compositor = state.compositor.lock().await;
-        compositor.latest_frame_evidence = Some(CompositorFrameEvidence {
-            sequence,
-            scene_revision,
-            width,
-            height,
-            has_real_source: camera_sequence.is_some()
-                || screen_sequence.is_some()
-                || has_image_source,
-            camera_sequence,
-            screen_sequence,
-            has_image_source,
-            published_at: Instant::now(),
-        });
+        compositor.frame_evidence.clear();
+        compositor
+            .frame_evidence
+            .push_back(CompositorFrameEvidence {
+                sequence,
+                scene_revision,
+                width,
+                height,
+                has_real_source: camera_sequence.is_some()
+                    || screen_sequence.is_some()
+                    || has_image_source,
+                camera_sequence,
+                screen_sequence,
+                has_image_source,
+                published_at: Instant::now(),
+            });
     }
 
     fn any_real_source_requirements() -> CompositorStartupSourceRequirements {
@@ -9665,6 +9790,111 @@ mod tests {
 
         assert!(result.ready, "{result:?}");
         assert_eq!(result.frames_observed, 3);
+    }
+
+    /// Instant-record P3: a compositor that has already produced fresh
+    /// target-resolution frames passes the barrier from its evidence ring
+    /// without waiting for three NEW frames.
+    #[tokio::test]
+    async fn startup_barrier_passes_instantly_from_fresh_history() {
+        let state = test_state();
+        let now = Instant::now();
+        for (sequence, offset_ms) in [(1_u64, 66_u64), (2, 33), (3, 0)] {
+            set_latest_frame_evidence_for_tests(
+                &state,
+                CompositorFrameEvidence {
+                    sequence,
+                    scene_revision: Some(1),
+                    width: 1920,
+                    height: 1080,
+                    has_real_source: true,
+                    camera_sequence: None,
+                    screen_sequence: Some(sequence),
+                    has_image_source: false,
+                    published_at: now - Duration::from_millis(offset_ms),
+                },
+            )
+            .await;
+        }
+
+        let result = wait_for_compositor_startup_frames(
+            &state,
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(200)),
+                timeout: Duration::from_millis(2_500),
+                requirements: any_real_source_requirements(),
+            },
+        )
+        .await;
+
+        assert!(result.ready, "{result:?}");
+        assert_eq!(result.frames_observed, 3, "{result:?}");
+        assert!(
+            result.wait_ms < 50,
+            "seeded history must not wait: {result:?}"
+        );
+        assert_eq!(result.gap_history_ms.len(), 2, "{result:?}");
+    }
+
+    /// Stale or wrong-resolution history is not evidence of the current state:
+    /// the barrier still waits (and times out) exactly as before.
+    #[tokio::test]
+    async fn startup_barrier_ignores_stale_and_wrong_resolution_history() {
+        let state = test_state();
+        let now = Instant::now();
+        for (sequence, width, offset_ms) in [
+            (1_u64, 1920_u32, 5_000_u64),
+            (2, 1920, 4_900),
+            (3, 1920, 4_800),
+            (4, 1280, 10),
+        ] {
+            set_latest_frame_evidence_for_tests(
+                &state,
+                CompositorFrameEvidence {
+                    sequence,
+                    scene_revision: Some(1),
+                    width,
+                    height: if width == 1920 { 1080 } else { 720 },
+                    has_real_source: true,
+                    camera_sequence: None,
+                    screen_sequence: Some(sequence),
+                    has_image_source: false,
+                    published_at: now - Duration::from_millis(offset_ms),
+                },
+            )
+            .await;
+        }
+
+        let result = wait_for_compositor_startup_frames(
+            &state,
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(200)),
+                timeout: Duration::from_millis(120),
+                requirements: any_real_source_requirements(),
+            },
+        )
+        .await;
+
+        assert!(!result.ready, "{result:?}");
+        assert!(
+            !result.cadence_only,
+            "a wrong-resolution latest frame is structural: {result:?}"
+        );
+        assert!(
+            result
+                .timeout_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("1280x720")),
+            "{result:?}"
+        );
     }
 
     #[tokio::test]

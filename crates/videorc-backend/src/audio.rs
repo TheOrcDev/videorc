@@ -859,6 +859,64 @@ fn trim_audio_frame_before_epoch(mut frame: AudioFrame, epoch: Instant) -> Trimm
     }
 }
 
+/// Leading silence padding (instant-record P3): when the first audio sample
+/// arrives AFTER the video epoch (a mic still warming up, a slow device open),
+/// write zeros for the gap so audio stays aligned to the first frame instead
+/// of the whole track lagging by the warm-up latency.
+const LEADING_SILENCE_MIN: Duration = Duration::from_millis(2);
+const LEADING_SILENCE_MAX: Duration = Duration::from_secs(2);
+
+/// Frames of silence to write before `first` so its first sample lands at its
+/// true offset from `epoch`. Zero when the frame starts at/before the epoch.
+fn leading_silence_frame_count(first: &AudioFrame, epoch: Instant) -> usize {
+    if first.sample_rate == 0 || first.channels == 0 {
+        return 0;
+    }
+    let frame_start = first
+        .captured_at
+        .checked_sub(first.duration())
+        .unwrap_or(first.captured_at);
+    let gap = frame_start.saturating_duration_since(epoch);
+    if gap < LEADING_SILENCE_MIN {
+        return 0;
+    }
+    let gap = gap.min(LEADING_SILENCE_MAX);
+    (gap.as_secs_f64() * f64::from(first.sample_rate)).round() as usize
+}
+
+fn write_silence_f32le(file: &mut File, frame_count: usize, channels: u16) -> io::Result<()> {
+    if frame_count == 0 || channels == 0 {
+        return Ok(());
+    }
+    let bytes = vec![0_u8; frame_count * usize::from(channels) * std::mem::size_of::<f32>()];
+    file.write_all(&bytes)
+}
+
+/// Pads once, before the very first frame written after the epoch is known.
+fn pad_leading_silence_once(
+    file: &mut File,
+    frame: &AudioFrame,
+    epoch: Option<Instant>,
+    padded: &mut bool,
+) -> io::Result<()> {
+    if *padded {
+        return Ok(());
+    }
+    *padded = true;
+    let Some(epoch) = epoch else {
+        return Ok(());
+    };
+    let frames = leading_silence_frame_count(frame, epoch);
+    if frames > 0 {
+        tracing::info!(
+            "Padding {}ms of leading silence so the microphone stays aligned to the first video frame.",
+            frames as u64 * 1000 / u64::from(frame.sample_rate.max(1))
+        );
+        write_silence_f32le(file, frames, frame.channels)?;
+    }
+    Ok(())
+}
+
 pub fn attach_fifo_writer(
     source: NativeAudioSource,
     fifo_path: PathBuf,
@@ -949,10 +1007,21 @@ fn attach_fifo_writer_with_stall_timeout(
         writer_stats.reset_recording_window();
         writer_stats.mark_live();
         let mut last_source_frame_at = Instant::now();
+        let padding_epoch = video_epoch
+            .as_deref()
+            .and_then(|epoch| epoch.get().copied());
+        let mut leading_silence_padded = false;
 
         for frame in preroll.ready_frames {
             let frame_count = frame.frame_count() as u64;
-            if let Err(error) = write_frame_f32le(&mut file, &frame) {
+            if let Err(error) = pad_leading_silence_once(
+                &mut file,
+                &frame,
+                padding_epoch,
+                &mut leading_silence_padded,
+            )
+            .and_then(|()| write_frame_f32le(&mut file, &frame))
+            {
                 writer_stats
                     .fifo_write_errors
                     .fetch_add(1, Ordering::Relaxed);
@@ -981,7 +1050,14 @@ fn attach_fifo_writer_with_stall_timeout(
                         .iter()
                         .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
                     writer_stats.record_live_peak(frame_peak);
-                    if let Err(error) = write_frame_f32le(&mut file, &frame) {
+                    if let Err(error) = pad_leading_silence_once(
+                        &mut file,
+                        &frame,
+                        padding_epoch,
+                        &mut leading_silence_padded,
+                    )
+                    .and_then(|()| write_frame_f32le(&mut file, &frame))
+                    {
                         writer_stats
                             .fifo_write_errors
                             .fetch_add(1, Ordering::Relaxed);
@@ -1769,6 +1845,49 @@ fn utf16_z(value: &[u16]) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn silence_probe_frame(captured_at: Instant, frames: usize) -> AudioFrame {
+        AudioFrame {
+            timestamp_micros: 0,
+            captured_at,
+            sample_rate: NATIVE_AUDIO_SAMPLE_RATE,
+            channels: NATIVE_AUDIO_CHANNELS,
+            samples: vec![0.0; frames * usize::from(NATIVE_AUDIO_CHANNELS)],
+        }
+    }
+
+    #[test]
+    fn leading_silence_covers_only_a_gap_after_the_epoch() {
+        let epoch = Instant::now();
+        // 10 ms frame that ENDS 130 ms after the epoch -> starts 120 ms after it.
+        let late = silence_probe_frame(
+            epoch + Duration::from_millis(130),
+            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
+        );
+        let expected = (0.120 * f64::from(NATIVE_AUDIO_SAMPLE_RATE)).round() as usize;
+        assert_eq!(leading_silence_frame_count(&late, epoch), expected);
+
+        // A frame straddling the epoch needs no padding (trim handles it).
+        let straddling = silence_probe_frame(
+            epoch + Duration::from_millis(5),
+            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
+        );
+        assert_eq!(leading_silence_frame_count(&straddling, epoch), 0);
+
+        // Sub-threshold jitter is left alone.
+        let jitter = silence_probe_frame(
+            epoch + Duration::from_millis(11),
+            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
+        );
+        assert_eq!(leading_silence_frame_count(&jitter, epoch), 0);
+
+        // Absurd gaps are capped so a stale epoch cannot write seconds of zeros.
+        let very_late = silence_probe_frame(epoch + Duration::from_secs(30), 480);
+        assert_eq!(
+            leading_silence_frame_count(&very_late, epoch),
+            (LEADING_SILENCE_MAX.as_secs_f64() * f64::from(NATIVE_AUDIO_SAMPLE_RATE)) as usize
+        );
+    }
 
     #[cfg(unix)]
     fn test_fifo_path(label: &str) -> PathBuf {

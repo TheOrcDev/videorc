@@ -919,6 +919,65 @@ async fn relay_ffmpeg_stderr<R>(
     }
 }
 
+/// Runs the FFmpeg output-progress proof after `Recording` was published. A
+/// muxer that never reports positive media progress within the startup budget
+/// fails the session: the pipeline is marked failed at the muxer stage and the
+/// FFmpeg child is terminated, so `monitor_session` publishes the exact-session
+/// `Failed` terminal status (which the renderer already surfaces as a
+/// persistent recovery error).
+fn spawn_ffmpeg_output_startup_watchdog(
+    state: AppState,
+    session_id: String,
+    receiver: oneshot::Receiver<std::result::Result<(), String>>,
+    started_at: Instant,
+    pid: u32,
+) {
+    tokio::spawn(async move {
+        match wait_for_ffmpeg_output_startup(receiver, started_at).await {
+            Ok(()) => {
+                let _ = emit_session_log(
+                    &state,
+                    &session_id,
+                    HealthLevel::Info,
+                    "ffmpeg-output-startup-ready",
+                    &format!(
+                        "FFmpeg confirmed positive output media progress after {}ms.",
+                        started_at.elapsed().as_millis()
+                    ),
+                    None,
+                );
+            }
+            Err(error) => {
+                let message = format!("{error:#}");
+                let still_active = {
+                    let mut recording = state.recording.lock().await;
+                    match recording.as_mut() {
+                        Some(active) if active.session_id == session_id => {
+                            active
+                                .pipeline
+                                .mark_failed(RecordingPipelineStage::Muxer, &message);
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if !still_active {
+                    return;
+                }
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Error,
+                    "ffmpeg-output-startup-failed",
+                    &message,
+                );
+                state.emit_log("error", format!("Stopping session {session_id}: {message}"));
+                let _ = send_process_signal(pid, "TERM").await;
+            }
+        }
+    });
+}
+
 async fn wait_for_ffmpeg_output_startup(
     mut receiver: oneshot::Receiver<std::result::Result<(), String>>,
     started_at: Instant,
@@ -3884,7 +3943,24 @@ async fn start_session_with_timeline(
     } else {
         (None, None)
     };
+    // Instant record (P4): on the VideoToolbox bridge the first frame is already
+    // in the encoder once the bridge is ready, so `Recording` no longer waits
+    // for FFmpeg's first output clock (~700 ms of MPEG-TS probing). That proof
+    // becomes a watchdog which fails the session if FFmpeg never reports
+    // progress. Other bridge outputs (raw YUV, Windows Media Foundation) keep
+    // the synchronous proof.
+    let defer_ffmpeg_output_startup = use_encoder_bridge
+        && matches!(
+            encoder_bridge_video_output,
+            EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+                | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+        );
+    let mut deferred_ffmpeg_output_startup = None;
     let ffmpeg_output_startup_result: Result<()> = match ffmpeg_output_startup_receiver.take() {
+        Some(receiver) if defer_ffmpeg_output_startup => {
+            deferred_ffmpeg_output_startup = Some(receiver);
+            Ok(())
+        }
         Some(receiver) => {
             wait_for_ffmpeg_output_startup(receiver, ffmpeg_output_startup_started_at).await
         }
@@ -3934,7 +4010,7 @@ async fn start_session_with_timeline(
         return Err(error);
     }
     timeline.mark(RecordingStartPhase::MuxerProgress);
-    if use_encoder_bridge {
+    if use_encoder_bridge && deferred_ffmpeg_output_startup.is_none() {
         let _ = emit_session_log(
             &state,
             &session_id,
@@ -4082,6 +4158,7 @@ async fn start_session_with_timeline(
     // recording without its reaper.
     let mut recording = state.recording.lock().await;
     let (child, session_start_admission) = uncommitted_capture_process.commit();
+    let watchdog_pid = pending_active.pid;
     *recording = Some(pending_active);
     session_start_admission.commit();
     // A delayed idle capture-config reload that was queued before session start
@@ -4090,6 +4167,15 @@ async fn start_session_with_timeline(
     drop(recording_startup_scene.take());
     timeline.mark(RecordingStartPhase::Running);
     state.emit_event("recording.status", running_status.clone());
+    if let Some(receiver) = deferred_ffmpeg_output_startup.take() {
+        spawn_ffmpeg_output_startup_watchdog(
+            state.clone(),
+            session_id.clone(),
+            receiver,
+            ffmpeg_output_startup_started_at,
+            watchdog_pid,
+        );
+    }
     if matches!(
         capture.microphone.as_ref(),
         Some(MicrophoneInput::WindowsDshow { .. })
@@ -6998,7 +7084,7 @@ async fn monitor_session(
             "FFmpeg exited cleanly with code 0 after the transient FIFO pressure probe.",
         );
         tracing::info!(
-            target: "videorc::recording",
+            target: "videorc_backend::recording",
             session_id = %session_id,
             ffmpeg_exit_code = 0,
             "VIDEORC_TEST_TRANSIENT_FIFO_FFMPEG_EXIT_CODE_0"
@@ -9881,20 +9967,42 @@ async fn await_recording_camera_cadence_ready(
         return Ok(());
     }
 
-    reset_preview_camera_capture_timings(state).await;
+    // The rolling window a healthy camera has been filling for seconds is the
+    // evidence; wiping it here (the pre-instant-record behaviour) forced every
+    // Record click to wait for the 250 ms diagnostics ticker to refill it.
     let mut started_at = Instant::now();
     let mut restarted = false;
 
     loop {
-        let (sample_pts_gap_p95_ms, callback_gap_p95_ms, frame_age_ms, camera_source_fps) = {
-            let diagnostics = state.diagnostics.lock().await;
-            (
-                diagnostics.preview_camera_sample_pts_gap_p95_ms,
-                diagnostics.preview_camera_capture_gap_p95_ms,
-                diagnostics.preview_camera_frame_age_ms,
-                diagnostics.preview_camera_source_fps,
-            )
-        };
+        // Prefer the live capture window (instant verdict); fall back to the
+        // published diagnostics when no camera session is active or the window
+        // is too young to judge (right after a restart).
+        let direct = crate::preview_camera::preview_camera_cadence_evidence(state).await;
+        let (sample_pts_gap_p95_ms, callback_gap_p95_ms, frame_age_ms, camera_source_fps) =
+            match direct {
+                Some(evidence)
+                    if !camera_cadence_evidence_is_stale(
+                        evidence.gap_sample_count,
+                        evidence.frame_age_ms,
+                    ) =>
+                {
+                    (
+                        evidence.sample_pts_gap_p95_ms,
+                        evidence.callback_gap_p95_ms,
+                        evidence.frame_age_ms,
+                        evidence.source_fps,
+                    )
+                }
+                _ => {
+                    let diagnostics = state.diagnostics.lock().await;
+                    (
+                        diagnostics.preview_camera_sample_pts_gap_p95_ms,
+                        diagnostics.preview_camera_capture_gap_p95_ms,
+                        diagnostics.preview_camera_frame_age_ms,
+                        diagnostics.preview_camera_source_fps,
+                    )
+                }
+            };
         let threshold_ms =
             camera_cadence_ready_threshold_with_source_ms(target_fps, camera_source_fps);
 
@@ -10017,6 +10125,17 @@ async fn await_recording_camera_cadence_ready(
 
         sleep(RECORDING_CAMERA_CADENCE_READY_POLL).await;
     }
+}
+
+/// Minimum gap samples the live capture window needs before its p95 is a
+/// verdict rather than noise (~half a second at 30 fps).
+const RECORDING_CAMERA_CADENCE_MIN_GAP_SAMPLES: usize = 15;
+
+/// The live capture window cannot judge cadence yet: too few gap samples (a
+/// fresh or restarted session) or no fresh frame at all.
+fn camera_cadence_evidence_is_stale(gap_sample_count: usize, frame_age_ms: Option<u64>) -> bool {
+    gap_sample_count < RECORDING_CAMERA_CADENCE_MIN_GAP_SAMPLES
+        || frame_age_ms.is_none_or(|age| age > RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS)
 }
 
 fn camera_cadence_ready(
@@ -21378,6 +21497,22 @@ mod tests {
             stop_intent_sender: None,
             stop_requested: false,
         }
+    }
+
+    #[test]
+    fn camera_cadence_evidence_staleness_requires_samples_and_fresh_frames() {
+        assert!(camera_cadence_evidence_is_stale(0, Some(10)));
+        assert!(camera_cadence_evidence_is_stale(14, Some(10)));
+        assert!(camera_cadence_evidence_is_stale(60, None));
+        assert!(camera_cadence_evidence_is_stale(
+            60,
+            Some(RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS + 1)
+        ));
+        assert!(!camera_cadence_evidence_is_stale(15, Some(33)));
+        assert!(!camera_cadence_evidence_is_stale(
+            240,
+            Some(RECORDING_CAMERA_CADENCE_MAX_FRAME_AGE_MS)
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]

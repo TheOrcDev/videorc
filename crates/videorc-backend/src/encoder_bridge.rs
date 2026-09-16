@@ -3541,9 +3541,16 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         next_frame_at = window_started_at + frame_interval;
         first_frame_wait_sequence = None;
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
-    } else {
+    } else if !matches!(
+        video_output,
+        EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
+            | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
+    ) {
         signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
     }
+    // VideoToolbox outputs signal readiness at their FIRST FED FRAME below
+    // (instant-record P4): `Recording` then means "the first frame is in the
+    // encoder", not merely "the writer thread exists".
 
     while !stop.load(Ordering::Relaxed) {
         let loop_started_at = Instant::now();
@@ -3970,6 +3977,8 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
                 // must be trimmed. Using the encoder-observed instant here would
                 // bake source-to-encode latency into the finished recording.
                 let _ = video_epoch.set(captured_at);
+                // No-op for outputs that already signalled at startup.
+                signal_encoder_bridge_startup(&mut startup_ready_tx, Ok(()));
             }
             last_fed_sequence = Some(frame_sequence);
             max_source_to_encode_age_ms =
@@ -5881,8 +5890,11 @@ fn run_video_toolbox_fifo_writer_loop<W: StdWrite>(
             .as_mut()
             .and_then(|pause| pause.take_before_write(written_frames))
         {
+            // Target lives under the crate namespace so the default
+            // `RUST_LOG=videorc_backend=info` filter prints the marker the
+            // recording-matrix transient-FIFO gate counts.
             tracing::warn!(
-                target: "videorc::encoder_bridge",
+                target: "videorc_backend::encoder_bridge",
                 test_hook = "videotoolbox-fifo-pause",
                 written_frames,
                 pause_ms = duration.as_millis() as u64,

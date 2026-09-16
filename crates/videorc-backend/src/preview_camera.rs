@@ -627,6 +627,12 @@ impl CameraCaptureTimingWindow {
         self.frame_bytes = frame_bytes;
     }
 
+    /// Gap samples available for a cadence verdict (the larger of the two
+    /// windows; AVFoundation feeds sample PTS, dshow only callbacks).
+    fn gap_sample_count(&self) -> usize {
+        self.sample_pts_gap_ms.len().max(self.callback_gap_ms.len())
+    }
+
     fn reset(&mut self) {
         self.last_callback_at = None;
         self.last_sample_pts_seconds = None;
@@ -2811,6 +2817,43 @@ pub fn try_preview_camera_frame_source(
         target_fps: active.effective_fps,
         generation,
     }))
+}
+
+/// Rolling camera cadence evidence read straight from the active capture
+/// session (instant-record P3). The record start used to wipe this window and
+/// then wait on the 250 ms diagnostics ticker to refill it; reading it directly
+/// gives an instant verdict on a camera that has been delivering steadily.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CameraCadenceEvidence {
+    pub sample_pts_gap_p95_ms: Option<f64>,
+    pub callback_gap_p95_ms: Option<f64>,
+    pub frame_age_ms: Option<u64>,
+    pub source_fps: Option<f64>,
+    pub gap_sample_count: usize,
+}
+
+pub async fn preview_camera_cadence_evidence(state: &AppState) -> Option<CameraCadenceEvidence> {
+    let shared = {
+        let slot = state.preview_camera.lock().await;
+        slot.active
+            .as_ref()
+            .map(|active| Arc::clone(&active.shared))
+    }?;
+    let guard = shared
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let timings = guard.capture_timings.snapshot();
+    let frame_age_ms = guard
+        .frame_store
+        .latest()
+        .map(|frame| frame.captured_at.elapsed().as_millis() as u64);
+    Some(CameraCadenceEvidence {
+        sample_pts_gap_p95_ms: timings.sample_pts_gap_p95_ms,
+        callback_gap_p95_ms: timings.capture_gap_p95_ms,
+        frame_age_ms,
+        source_fps: guard.source_fps,
+        gap_sample_count: guard.capture_timings.gap_sample_count(),
+    })
 }
 
 pub async fn reset_preview_camera_capture_timings(state: &AppState) {
