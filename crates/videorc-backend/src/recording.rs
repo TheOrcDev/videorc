@@ -1870,6 +1870,10 @@ pub struct LivePreviewState {
     pub status: PreviewLiveStatus,
     pub desired_params: Option<PreviewLiveParams>,
     pub idle_process: Option<ActiveLivePreview>,
+    /// A detached q/TERM/KILL stop of the previous fallback child. Record start
+    /// no longer waits for it (up to 5 s); the next fallback start joins it so
+    /// the app-owned PID is always reaped before a new child is spawned.
+    pub idle_stop_task: Option<tokio::task::JoinHandle<()>>,
     /// Every fallback start owns one generation. Recording/start/stop edges
     /// invalidate it so an awaited stale request cannot install a new child.
     pub generation: u64,
@@ -2095,6 +2099,7 @@ pub async fn update_active_audio_processing(
 
 pub fn initial_live_preview_state() -> LivePreviewState {
     LivePreviewState {
+        idle_stop_task: None,
         status: unavailable_live_preview_status(None),
         desired_params: None,
         idle_process: None,
@@ -2567,7 +2572,14 @@ async fn start_session_with_timeline(
     );
 
     if params.output.record_enabled {
-        emit_disk_space_health_event(&state, &session_id, &output_dir).await?;
+        // Advisory only: `df` and the health-event write stay off the start path.
+        let disk_state = state.clone();
+        let disk_session_id = session_id.clone();
+        let disk_output_dir = output_dir.clone();
+        tokio::spawn(async move {
+            let _ =
+                emit_disk_space_health_event(&disk_state, &disk_session_id, &disk_output_dir).await;
+        });
     }
 
     let recording_preview_generation = stop_idle_live_preview_for_recording(state.clone()).await;
@@ -5828,6 +5840,12 @@ async fn start_idle_live_preview(
     clear_latest_preview_frame(&state).await;
     state.emit_event("preview.live.status", live_preview_status(&state).await);
     stop_live_preview_process(old_process).await;
+    // Join a detached stop from a recording edge before spawning another
+    // fallback child, so the app-owned PID is reaped in order.
+    let pending_stop = state.live_preview.lock().await.idle_stop_task.take();
+    if let Some(pending_stop) = pending_stop {
+        let _ = pending_stop.await;
+    }
 
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
     let session_params = live_preview_session_params(params.clone(), ffmpeg_path.clone());
@@ -5963,7 +5981,19 @@ async fn stop_idle_live_preview_for_recording(state: AppState) -> u64 {
     if process.is_some() {
         state.emit_event("preview.live.status", live_preview_status(&state).await);
     }
-    stop_live_preview_process(process).await;
+    if process.is_some() {
+        // Fire-and-forget: the fallback child's stop ladder (q, TERM, KILL with
+        // 2+2+1 s waits) used to sit on the record start path. Park the join
+        // handle so the next fallback start reaps this PID before spawning.
+        let pending = tokio::spawn(stop_live_preview_process(process));
+        let mut guard = state.live_preview.lock().await;
+        if let Some(previous) = guard.idle_stop_task.replace(pending) {
+            // Two detached stops can only overlap if a fallback child was
+            // started and stopped again within the ladder window; keep the
+            // newer handle authoritative and let the older one finish alone.
+            drop(previous);
+        }
+    }
     recording_generation
 }
 
@@ -26308,6 +26338,7 @@ mod tests {
             video: Some(default_video_settings()),
         };
         let state = LivePreviewState {
+            idle_stop_task: None,
             status: PreviewLiveStatus {
                 state: PreviewLiveState::Connecting,
                 source: PreviewLiveSource::IdlePreview,
@@ -26340,6 +26371,7 @@ mod tests {
             video: Some(default_video_settings()),
         };
         let state = LivePreviewState {
+            idle_stop_task: None,
             status: unavailable_live_preview_status(Some("No frames.".to_string())),
             desired_params: Some(params.clone()),
             idle_process: Some(ActiveLivePreview {

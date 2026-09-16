@@ -100,8 +100,12 @@ export function StudioTab(): ReactElement {
             ? (health.ffmpeg.message ?? 'FFmpeg is not available.')
             : null
 
-  // Two-button start: set the intended mode, then start on the next render so startSession
-  // sees the updated streamEnabled (record vs go-live) instead of a stale closure value.
+  // Two-button start: when the click changes the output mode (record vs go-live),
+  // set it and start on the next render so startSession and its blocked-reason
+  // gate see the updated streamEnabled instead of a stale closure value. When the
+  // config already matches the button, start in the same task — the extra
+  // render+commit of the whole Studio provider was a measurable slice of the
+  // Record click → recording path.
   const [pendingStart, setPendingStart] = useState(false)
   useEffect(() => {
     if (!pendingStart) {
@@ -113,6 +117,10 @@ export function StudioTab(): ReactElement {
 
   const handleRecord = (): void => {
     noteRecordClick('start')
+    if (captureConfig.recordEnabled && !captureConfig.streamEnabled) {
+      void startSession()
+      return
+    }
     setCaptureConfig((current) => ({ ...current, recordEnabled: true, streamEnabled: false }))
     setPendingStart(true)
   }
@@ -121,6 +129,10 @@ export function StudioTab(): ReactElement {
       return
     }
     noteRecordClick('start')
+    if (captureConfig.streamEnabled) {
+      void startSession()
+      return
+    }
     setCaptureConfig((current) => ({ ...current, streamEnabled: true }))
     setPendingStart(true)
   }

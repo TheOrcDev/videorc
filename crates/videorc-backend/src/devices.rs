@@ -1,5 +1,6 @@
 use std::process::Stdio;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use tokio::process::Command;
 use tokio::time::timeout;
@@ -79,7 +80,16 @@ async fn list_macos_devices(ffmpeg_path: &str) -> DeviceList {
     warnings.extend(native_cameras.warnings);
     devices.extend(native_cameras.devices);
 
-    match probe_avfoundation_devices(ffmpeg_path).await {
+    let probed = probe_avfoundation_devices_uncached(ffmpeg_path).await;
+    if let Ok(av_devices) = probed.as_ref() {
+        avfoundation_probe_cache()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .store(ffmpeg_path, av_devices, Instant::now());
+    } else {
+        invalidate_avfoundation_probe_cache();
+    }
+    match probed {
         Ok(av_devices) => {
             let screens =
                 avfoundation_screen_devices(&av_devices, screen_capture_permission_required);
@@ -584,7 +594,92 @@ pub async fn sample_native_audio_meters(
     }
 }
 
+/// `ffmpeg -list_devices` costs 300-1500 ms per spawn and the recording start
+/// path used to run it up to three times per click. Device identity changes
+/// rarely; the cache is refreshed by every full `devices.list` enumeration and
+/// invalidated explicitly when the device list changes.
+const AVFOUNDATION_PROBE_CACHE_TTL: Duration = Duration::from_secs(30);
+
+#[derive(Debug, Default)]
+struct AvFoundationProbeCache {
+    entry: Option<AvFoundationProbeCacheEntry>,
+}
+
+#[derive(Debug, Clone)]
+struct AvFoundationProbeCacheEntry {
+    ffmpeg_path: String,
+    probed_at: Instant,
+    devices: Vec<AvFoundationDevice>,
+}
+
+impl AvFoundationProbeCache {
+    fn get(
+        &self,
+        ffmpeg_path: &str,
+        now: Instant,
+        ttl: Duration,
+    ) -> Option<Vec<AvFoundationDevice>> {
+        let entry = self.entry.as_ref()?;
+        if entry.ffmpeg_path != ffmpeg_path {
+            return None;
+        }
+        if now.saturating_duration_since(entry.probed_at) > ttl {
+            return None;
+        }
+        Some(entry.devices.clone())
+    }
+
+    fn store(&mut self, ffmpeg_path: &str, devices: &[AvFoundationDevice], now: Instant) {
+        self.entry = Some(AvFoundationProbeCacheEntry {
+            ffmpeg_path: ffmpeg_path.to_string(),
+            probed_at: now,
+            devices: devices.to_vec(),
+        });
+    }
+
+    fn invalidate(&mut self) {
+        self.entry = None;
+    }
+}
+
+fn avfoundation_probe_cache() -> &'static Mutex<AvFoundationProbeCache> {
+    static CACHE: OnceLock<Mutex<AvFoundationProbeCache>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(AvFoundationProbeCache::default()))
+}
+
+/// Drops the cached device probe so the next lookup spawns FFmpeg again. Called
+/// whenever the device inventory is known to have changed.
+pub fn invalidate_avfoundation_probe_cache() {
+    avfoundation_probe_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .invalidate();
+}
+
+/// Cached device probe for the recording start path: identity lookups (screen
+/// ordinal, camera name, microphone name) reuse the last enumeration within the
+/// TTL instead of paying a fresh FFmpeg spawn per lookup.
 pub async fn probe_avfoundation_devices(
+    ffmpeg_path: &str,
+) -> Result<Vec<AvFoundationDevice>, String> {
+    let cached = avfoundation_probe_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get(ffmpeg_path, Instant::now(), AVFOUNDATION_PROBE_CACHE_TTL);
+    if let Some(devices) = cached {
+        return Ok(devices);
+    }
+    let devices = probe_avfoundation_devices_uncached(ffmpeg_path).await?;
+    avfoundation_probe_cache()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .store(ffmpeg_path, &devices, Instant::now());
+    Ok(devices)
+}
+
+/// Always spawns FFmpeg. The device picker uses this so a freshly plugged device
+/// appears immediately; its result refreshes the cache for the start path.
+pub async fn probe_avfoundation_devices_uncached(
     ffmpeg_path: &str,
 ) -> Result<Vec<AvFoundationDevice>, String> {
     let mut command = Command::new(ffmpeg_path);
@@ -734,6 +829,60 @@ fn parse_indexed_device_line(line: &str) -> Option<(usize, String)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn probe_fixture() -> Vec<AvFoundationDevice> {
+        vec![AvFoundationDevice {
+            index: 0,
+            name: "FaceTime HD Camera".to_string(),
+            kind: AvFoundationDeviceKind::Video,
+        }]
+    }
+
+    #[test]
+    fn probe_cache_serves_within_ttl_for_the_same_ffmpeg_and_expires_after() {
+        let mut cache = AvFoundationProbeCache::default();
+        let now = Instant::now();
+        assert!(cache.get("ffmpeg", now, Duration::from_secs(30)).is_none());
+
+        cache.store("ffmpeg", &probe_fixture(), now);
+        assert_eq!(
+            cache.get(
+                "ffmpeg",
+                now + Duration::from_secs(29),
+                Duration::from_secs(30)
+            ),
+            Some(probe_fixture())
+        );
+        assert!(
+            cache
+                .get(
+                    "ffmpeg",
+                    now + Duration::from_secs(31),
+                    Duration::from_secs(30)
+                )
+                .is_none(),
+            "stale probes must not be served"
+        );
+    }
+
+    #[test]
+    fn probe_cache_is_keyed_by_ffmpeg_path_and_invalidates() {
+        let mut cache = AvFoundationProbeCache::default();
+        let now = Instant::now();
+        cache.store("/bundled/ffmpeg", &probe_fixture(), now);
+        assert!(
+            cache
+                .get("/other/ffmpeg", now, Duration::from_secs(30))
+                .is_none(),
+            "a different FFmpeg binary enumerates independently"
+        );
+        cache.invalidate();
+        assert!(
+            cache
+                .get("/bundled/ffmpeg", now, Duration::from_secs(30))
+                .is_none()
+        );
+    }
 
     #[test]
     fn parses_avfoundation_device_listing() {

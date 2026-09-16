@@ -102,6 +102,7 @@ import {
 import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
 import { isRetryableBackgroundSurfaceSyncError } from '@/lib/surface-sync-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
+import { buildStartSessionParams } from '@/lib/session-params'
 import {
   clickEpochMs,
   createRecordLatencyTracker,
@@ -10600,7 +10601,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               'The selected output folder is unavailable. Choose it again in Settings.'
             )
           }
-          const { buildStartSessionParams } = await import('@/lib/session-params')
           const sessionParams = buildStartSessionParams({
             captureConfig,
             scene: sceneWithBackground,
@@ -10716,7 +10716,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           if (await settleTerminalStart(startResolution)) {
             return false
           }
-          await refreshSessions(client)
+          if (streamingForStart) {
+            // Go-live keeps the awaited refresh: a terminal status landing during
+            // it must be observed before any broadcast is activated below.
+            await refreshSessions(client)
+          } else {
+            // Record-only: the recording.status transition handler refreshes the
+            // Library too; do not hold startRequestPending (the disabled Record
+            // button) on a second sessions.list round trip.
+            void refreshSessions(client)
+          }
           startResolution = reconcileLatestStartStatus()
           if (await settleTerminalStart(startResolution)) {
             return false
