@@ -35,10 +35,11 @@ use crate::capture_input::{
 };
 use crate::capture_interruption::SessionStartAdmission;
 use crate::compositor::{
-    CompositorAuxiliaryOutput, CompositorFrameConsumer, CompositorStartParams,
+    CompositorArmParams, CompositorAuxiliaryOutput, CompositorFrameConsumer, CompositorStartParams,
     CompositorStartupBarrierParams, CompositorStartupBarrierResult,
-    CompositorStartupSourceRequirements, compositor_frame_store, compositor_stream_frame_store,
-    start_synthetic_compositor, update_compositor_scene, wait_for_compositor_startup_frames,
+    CompositorStartupSourceRequirements, arm_compositor_for_capture, compositor_frame_store,
+    compositor_stream_frame_store, release_compositor_capture_lease, start_synthetic_compositor,
+    update_compositor_scene, wait_for_compositor_startup_frames,
 };
 use crate::devices::{
     find_avfoundation_camera_index, find_avfoundation_microphone_index_for_native_name,
@@ -1604,6 +1605,61 @@ pub struct ActiveRecording {
     /// Renderer/status hint only. Successful finalization uses the ordered
     /// monitor result above rather than sampling this flag after process exit.
     pub stop_requested: bool,
+    /// Capture lease over the preview compositor run when the session armed
+    /// it in place (instant-record P4.1). Released after bridge teardown so
+    /// the preview returns to its own dimensions and fps.
+    compositor_capture_lease: Option<CompositorCaptureLeaseGuard>,
+}
+
+/// Owns a compositor capture lease for exactly one session. Every rejected
+/// start path drops the guard, which schedules the release; the success path
+/// moves it into `ActiveRecording` and `monitor_session` releases it
+/// explicitly after the encoder bridge is torn down.
+pub(crate) struct CompositorCaptureLeaseGuard {
+    state: AppState,
+    session_id: String,
+    released: bool,
+}
+
+impl std::fmt::Debug for CompositorCaptureLeaseGuard {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("CompositorCaptureLeaseGuard")
+            .field("session_id", &self.session_id)
+            .field("released", &self.released)
+            .finish()
+    }
+}
+
+impl CompositorCaptureLeaseGuard {
+    fn new(state: AppState, session_id: String) -> Self {
+        Self {
+            state,
+            session_id,
+            released: false,
+        }
+    }
+
+    async fn release(mut self) {
+        self.released = true;
+        let _ = release_compositor_capture_lease(&self.state, &self.session_id).await;
+    }
+}
+
+impl Drop for CompositorCaptureLeaseGuard {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let state = self.state.clone();
+        let session_id = std::mem::take(&mut self.session_id);
+        handle.spawn(async move {
+            let _ = release_compositor_capture_lease(&state, &session_id).await;
+        });
+    }
 }
 
 /// Test-only stub of an active capture session, crate-visible so guards in
@@ -1649,6 +1705,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
+        compositor_capture_lease: None,
     }
 }
 
@@ -3428,6 +3485,7 @@ async fn start_session_with_timeline(
     }
     let mut startup_barrier_result: Option<CompositorStartupBarrierResult> = None;
     let mut recording_startup_scene: Option<RecordingStartupSceneLease> = None;
+    let mut compositor_capture_lease: Option<CompositorCaptureLeaseGuard> = None;
     let (encoder_bridge_frame_store, encoder_bridge_stream_frame_store) =
         if direct_d3d11_recording_source.is_some() {
             // The direct path owns the retained WGC source and schedules it on
@@ -3443,36 +3501,104 @@ async fn start_session_with_timeline(
                         .map(|profile| profile.fps)
                         .unwrap_or_default(),
                 );
-            start_synthetic_compositor(
-                state.clone(),
-                CompositorStartParams {
-                    target_fps,
-                    width: params.output.video.width,
-                    height: params.output.video.height,
-                    frame_consumer: if matches!(
-                        encoder_bridge_video_output,
-                        EncoderBridgeVideoOutput::RawYuv420p
-                    ) {
-                        CompositorFrameConsumer::RawYuvEncoder
-                    } else if matches!(
-                        encoder_bridge_video_output,
-                        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-                    ) {
-                        CompositorFrameConsumer::MediaFoundationEncoder
-                    } else {
-                        CompositorFrameConsumer::VideoToolboxEncoder
+            let compositor_frame_consumer = if matches!(
+                encoder_bridge_video_output,
+                EncoderBridgeVideoOutput::RawYuv420p
+            ) {
+                CompositorFrameConsumer::RawYuvEncoder
+            } else if matches!(
+                encoder_bridge_video_output,
+                EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+            ) {
+                CompositorFrameConsumer::MediaFoundationEncoder
+            } else {
+                CompositorFrameConsumer::VideoToolboxEncoder
+            };
+            // Instant record (P4.1): a single-output VideoToolbox session arms
+            // the live preview compositor in place — same run id, frame store
+            // and frame history — instead of stopping it and building a new
+            // run. Any refusal falls back to the restart path below, so the
+            // Record button is never a dead click.
+            let armed_in_place = if cfg!(target_os = "macos")
+                && encoder_bridge_stream_output.is_none()
+                && compositor_frame_consumer == CompositorFrameConsumer::VideoToolboxEncoder
+                && !recording_compositor_arm_disabled()
+            {
+                match arm_compositor_for_capture(
+                    &state,
+                    &session_id,
+                    CompositorArmParams {
+                        target_fps,
+                        width: params.output.video.width,
+                        height: params.output.video.height,
+                        frame_consumer: compositor_frame_consumer,
+                        caption_overlay_on_primary: session_caption_plan.primary,
+                        caption_overlay_on_aux: session_caption_plan.aux,
+                        highlight_overlay_on_primary: highlight_overlay_plan.0,
+                        highlight_overlay_on_aux: highlight_overlay_plan.1,
                     },
-                    stream_output: encoder_bridge_stream_output,
-                    // Per-leg overlay plan (R1): primary is the clean source
-                    // recording (or the stream when stream-only); aux is the
-                    // captioned stream leg for combined sessions.
-                    caption_overlay_on_primary: session_caption_plan.primary,
-                    caption_overlay_on_aux: session_caption_plan.aux,
-                    highlight_overlay_on_primary: highlight_overlay_plan.0,
-                    highlight_overlay_on_aux: highlight_overlay_plan.1,
-                },
-            )
-            .await;
+                )
+                .await
+                {
+                    Ok(status) => {
+                        compositor_capture_lease = Some(CompositorCaptureLeaseGuard::new(
+                            state.clone(),
+                            session_id.clone(),
+                        ));
+                        let _ = emit_session_log(
+                            &state,
+                            &session_id,
+                            HealthLevel::Info,
+                            "recording-compositor-armed",
+                            &format!(
+                                "Armed the live preview compositor in place (run {}) at {}x{} @ {} fps.",
+                                status.run_id.as_deref().unwrap_or("unknown-run"),
+                                status.width,
+                                status.height,
+                                status.target_fps
+                            ),
+                            None,
+                        );
+                        true
+                    }
+                    Err(refusal) => {
+                        let _ = emit_session_log(
+                            &state,
+                            &session_id,
+                            HealthLevel::Info,
+                            "recording-compositor-restarted",
+                            &format!(
+                                "Preview compositor could not be armed in place ({}); starting a recording compositor run.",
+                                refusal.label()
+                            ),
+                            None,
+                        );
+                        false
+                    }
+                }
+            } else {
+                false
+            };
+            if !armed_in_place {
+                start_synthetic_compositor(
+                    state.clone(),
+                    CompositorStartParams {
+                        target_fps,
+                        width: params.output.video.width,
+                        height: params.output.video.height,
+                        frame_consumer: compositor_frame_consumer,
+                        stream_output: encoder_bridge_stream_output,
+                        // Per-leg overlay plan (R1): primary is the clean source
+                        // recording (or the stream when stream-only); aux is the
+                        // captioned stream leg for combined sessions.
+                        caption_overlay_on_primary: session_caption_plan.primary,
+                        caption_overlay_on_aux: session_caption_plan.aux,
+                        highlight_overlay_on_primary: highlight_overlay_plan.0,
+                        highlight_overlay_on_aux: highlight_overlay_plan.1,
+                    },
+                )
+                .await;
+            }
             timeline.mark(RecordingStartPhase::CompositorArm);
             let scene = params.scene.clone().unwrap_or_else(|| {
                 scene_from_capture_config(SceneConfigParams {
@@ -4126,6 +4252,7 @@ async fn start_session_with_timeline(
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
+        compositor_capture_lease: compositor_capture_lease.take(),
     };
     // The fully-constructed pipeline is now committed to becoming an active
     // capture. Advance the caption epoch only here, after every fallible startup
@@ -7240,14 +7367,20 @@ async fn monitor_session(
             &mut active.encoder_bridge_stream,
             ENCODER_BRIDGE_TEARDOWN_GRACE,
         );
+        let compositor_capture_lease = active.compositor_capture_lease.take();
         drop(active);
-        if let Some(report) = finish_recording_encoder_bridge_teardown(
+        let teardown_report = finish_recording_encoder_bridge_teardown(
             &state,
             bridge_teardown,
             "recording-process-exit",
         )
-        .await
-        {
+        .await;
+        // The bridge writer no longer reads the frame store: hand the armed
+        // preview compositor back (or stop it when no surface is live).
+        if let Some(lease) = compositor_capture_lease {
+            lease.release().await;
+        }
+        if let Some(report) = teardown_report {
             encoder_bridge_teardown_duration_ms = report.teardown_duration_ms;
             encoder_bridge_detached_writers = report
                 .reports
@@ -11456,6 +11589,18 @@ async fn wait_for_recording_encoder_bridge_sources_ready(
         }
         sleep(RECORDING_ENCODER_BRIDGE_SOURCE_READY_POLL).await;
     }
+}
+
+/// `VIDEORC_RECORDING_COMPOSITOR_ARM=0` forces the pre-P4.1 restart path
+/// (diagnostics/escape hatch only).
+fn recording_compositor_arm_disabled() -> bool {
+    matches!(
+        std::env::var("VIDEORC_RECORDING_COMPOSITOR_ARM")
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .as_deref(),
+        Some("0" | "false" | "off" | "no")
+    )
 }
 
 async fn recording_compositor_target_fps(_state: &AppState, video: &VideoSettings) -> u32 {
@@ -21496,6 +21641,7 @@ mod tests {
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
+            compositor_capture_lease: None,
         }
     }
 
@@ -26839,6 +26985,7 @@ mod tests {
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,
+            compositor_capture_lease: None,
         });
 
         let update_state = state.clone();

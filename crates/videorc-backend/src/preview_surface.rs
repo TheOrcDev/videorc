@@ -1318,6 +1318,24 @@ pub async fn register_preview_surface_resize(state: &AppState) {
     );
 }
 
+/// A capture armed the preview run in place (instant-record P4.1): the surface
+/// stops tracking it for the lease's lifetime. No retirement is queued — the
+/// run is alive and owned by the capture; `release_compositor_capture_lease`
+/// hands it back and the reconciler re-adopts the same run id.
+pub(crate) async fn detach_preview_run_for_capture_lease(state: &AppState, run_id: &str) {
+    let mut slot = state.preview_surface.lock().await;
+    if slot.run_id.as_deref() == Some(run_id) {
+        slot.run_id = None;
+    }
+    slot.retiring_run_ids.retain(|queued| queued != run_id);
+}
+
+/// After a capture lease is released the run is preview-labelled again at the
+/// surface's dimensions; one reconcile pass adopts it and converges.
+pub(crate) async fn reconcile_preview_after_capture_release(state: &AppState) {
+    reconcile_live_preview_compositor(state).await;
+}
+
 fn queue_retiring_preview_run(slot: &mut PreviewSurfaceRuntime, run_id: String) {
     if !slot.retiring_run_ids.iter().any(|queued| queued == &run_id) {
         slot.retiring_run_ids.push(run_id);
@@ -1354,6 +1372,21 @@ async fn try_retire_preview_run(state: &AppState, run_id: &str) -> PreviewRetire
         .iter()
         .any(|queued| queued == run_id)
     {
+        return PreviewRetirementAttempt::Retired;
+    }
+    // A run leased to a capture is not preview debt: the capture returns or
+    // stops it on release. Drop the queued retirement instead of stopping the
+    // compositor underneath the encoder.
+    if crate::compositor::compositor_capture_lease_run_id(state)
+        .await
+        .as_deref()
+        == Some(run_id)
+    {
+        let mut slot = state.preview_surface.lock().await;
+        slot.retiring_run_ids.retain(|queued| queued != run_id);
+        if slot.run_id.as_deref() == Some(run_id) {
+            slot.run_id = None;
+        }
         return PreviewRetirementAttempt::Retired;
     }
 
@@ -3798,6 +3831,132 @@ mod tests {
         assert_eq!(status.run_id, recording_status.run_id);
         assert_eq!(status.width, 160);
         assert_eq!(status.height, 90);
+    }
+
+    #[tokio::test]
+    async fn leased_preview_run_survives_reconcile_and_returns_to_the_surface() {
+        use crate::compositor::{
+            CompositorArmParams, arm_compositor_for_capture, compositor_capture_lease_run_id,
+            release_compositor_capture_lease,
+        };
+
+        let state = test_state();
+        create_preview_surface(
+            state.clone(),
+            PreviewSurfaceCreateParams {
+                bounds: bounds(160.0, 90.0),
+                target_fps: 60,
+                source: PreviewSurfaceSource::Synthetic,
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        let preview_frame = wait_for_frame_dimensions_after(&state, 320, 180, None)
+            .await
+            .expect("preview compositor publishes at the surface size");
+        let preview_run_id = compositor_status(&state)
+            .await
+            .run_id
+            .expect("preview compositor run id");
+        assert_eq!(
+            state.preview_surface.lock().await.run_id.as_deref(),
+            Some(preview_run_id.as_str())
+        );
+
+        // Capture admission is held for the whole take, exactly as start_session does.
+        let capture = state.ffmpeg_work.begin_capture_when_available().await;
+        let armed = arm_compositor_for_capture(
+            &state,
+            "session-lease",
+            CompositorArmParams {
+                target_fps: 30,
+                width: 640,
+                height: 360,
+                frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+            },
+        )
+        .await
+        .expect("live preview run arms in place");
+        assert_eq!(armed.run_id.as_deref(), Some(preview_run_id.as_str()));
+        assert_eq!(
+            state.preview_surface.lock().await.run_id,
+            None,
+            "the surface stops tracking a leased run"
+        );
+        wait_for_frame_dimensions_after(&state, 640, 360, Some(preview_frame.sequence))
+            .await
+            .expect("the armed run renders the capture canvas");
+
+        // A bounds update mid-take reconciles without touching the leased run.
+        update_preview_surface_bounds(
+            &state,
+            PreviewSurfaceBoundsParams {
+                bounds: bounds(90.0, 160.0),
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        let during = compositor_status(&state).await;
+        assert_eq!(during.run_id.as_deref(), Some(preview_run_id.as_str()));
+        assert_eq!(during.state, CompositorState::Live);
+        assert_eq!(
+            (during.width, during.height, during.target_fps),
+            (640, 360, 30)
+        );
+        assert_eq!(
+            compositor_capture_lease_run_id(&state).await.as_deref(),
+            Some(preview_run_id.as_str())
+        );
+        assert!(
+            state
+                .preview_surface
+                .lock()
+                .await
+                .retiring_run_ids
+                .is_empty(),
+            "reconcile must not queue the leased run for retirement"
+        );
+
+        drop(capture);
+        let released = release_compositor_capture_lease(&state, "session-lease")
+            .await
+            .expect("release restores the live surface");
+        assert_eq!(released.run_id.as_deref(), Some(preview_run_id.as_str()));
+        assert_eq!(
+            released.frame_pipeline.consumer.as_deref(),
+            Some("native-preview")
+        );
+        assert_eq!(
+            (released.width, released.height, released.target_fps),
+            (180, 320, 60)
+        );
+        assert_eq!(
+            state.preview_surface.lock().await.run_id.as_deref(),
+            Some(preview_run_id.as_str()),
+            "the reconciler re-adopts the same run id"
+        );
+        wait_for_frame_dimensions_after(&state, 180, 320, Some(preview_frame.sequence))
+            .await
+            .expect("the released run renders at the latest surface size");
+        assert!(compositor_capture_lease_run_id(&state).await.is_none());
+
+        // Ordinary preview ownership is back: a later bounds update resizes the run.
+        update_preview_surface_bounds(
+            &state,
+            PreviewSurfaceBoundsParams {
+                bounds: bounds(200.0, 100.0),
+            },
+        )
+        .await
+        .expect("preview surface lifecycle available");
+        let after = compositor_status(&state).await;
+        assert_eq!(after.run_id.as_deref(), Some(preview_run_id.as_str()));
+        assert_eq!((after.width, after.height), (400, 200));
+        stop_compositor(&state).await;
     }
 
     #[tokio::test]

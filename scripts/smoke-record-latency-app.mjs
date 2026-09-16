@@ -234,7 +234,14 @@ async function seedRendererVideoProfile(smoke) {
         const key = 'videorc.captureConfig';
         let current = {};
         try { current = JSON.parse(localStorage.getItem(key) ?? '{}') ?? {}; } catch {}
-        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, recordEnabled: true, streamEnabled: false }));
+        // Screen-only scene: the dev app has no camera permission grant and the
+        // renderer auto-selects the first listed camera, which would make the
+        // start preflight refuse ("camera preview source produced no frames")
+        // whenever any camera device happens to be attached. The synthetic
+        // diagnostic pattern replaces the screen, so the scene is fully
+        // deterministic.
+        const layout = { ...(current.layout ?? {}), layoutPreset: 'screen-only' };
+        localStorage.setItem(key, JSON.stringify({ ...current, video: params.video, layout, recordEnabled: true, streamEnabled: false }));
         setTimeout(() => location.reload(), 50);
         return true;
       `,
@@ -484,6 +491,7 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
   await sleep(300)
   const stopTimeline = timelineSnapshotFor(recorder, 'recordingStopTimeline', sessionId)
   const artifact = await verifyArtifact({ mp4Path: finalization.mp4Path, cycleIndex })
+  const compositor = compositorPathForSession(recorder, sessionId)
 
   const cycle = {
     index: cycleIndex,
@@ -498,6 +506,8 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
     idleToFinalizedMs: round(finalization.finalizedAt - terminalRecord.at),
     finalizationSource: finalization.source,
     mp4Path: finalization.mp4Path,
+    compositorPath: compositor.path,
+    compositorPathDetail: compositor.detail,
     artifact,
     backend: {
       startTimeline,
@@ -510,9 +520,32 @@ async function runCycle({ cycleIndex, renderer, remote, recorder, smoke }) {
     `cycle ${cycleIndex + 1}/${cycles} (${cold ? 'cold' : 'warm'}) ` +
       `start click→starting ${formatMs(cycle.clickToStartingMs)} click→recording ${formatMs(cycle.clickToRecordingMs)} · ` +
       `stop click→stopping ${formatMs(cycle.stopClickToStoppingMs)} click→idle ${formatMs(cycle.stopClickToIdleMs)} · ` +
-      `idle→mp4 ${formatMs(cycle.idleToFinalizedMs)} (${finalization.source}) · ${artifact.width}x${artifact.height} ${artifact.durationSeconds.toFixed(2)}s`
+      `idle→mp4 ${formatMs(cycle.idleToFinalizedMs)} (${finalization.source}) · ${artifact.width}x${artifact.height} ${artifact.durationSeconds.toFixed(2)}s · ` +
+      `compositor ${compositor.path ?? 'unknown'}`
   )
   return cycle
+}
+
+/**
+ * Instant-record P4.1: the backend logs whether the live preview compositor
+ * was armed in place (`recording-compositor-armed`) or a recording run was
+ * started instead (`recording-compositor-restarted`, with the refusal
+ * reason). Report-only: both paths are valid, but the armed path is what the
+ * warm budget is calibrated against.
+ */
+function compositorPathForSession(recorder, sessionId) {
+  const entry = recorder.events.find(
+    (record) =>
+      record.event === 'session.log' &&
+      record.payload?.sessionId === sessionId &&
+      (record.payload?.code === 'recording-compositor-armed' ||
+        record.payload?.code === 'recording-compositor-restarted')
+  )
+  if (!entry) return { path: null, detail: null }
+  return {
+    path: entry.payload.code === 'recording-compositor-armed' ? 'armed' : 'restarted',
+    detail: entry.payload.message ?? null
+  }
 }
 
 function round(value) {
@@ -609,6 +642,11 @@ try {
   console.log('')
   console.log(formatSummaryTable(summary))
   console.log('')
+  const armedCycles = measured.filter((cycle) => cycle.compositorPath === 'armed').length
+  const restartedCycles = measured.filter((cycle) => cycle.compositorPath === 'restarted').length
+  log(
+    `compositor path: ${armedCycles} armed in place, ${restartedCycles} restarted, ${measured.length - armedCycles - restartedCycles} unknown`
+  )
   log(`report written to ${reportPath}`)
   if (!verdict.pass) {
     for (const failure of verdict.failures) log(`budget: ${failure}`)

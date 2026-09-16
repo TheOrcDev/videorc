@@ -748,6 +748,7 @@ pub struct MetalSceneCompositor {
     /// for `GpuSource::blend` overlays (caption bar, comment highlight).
     blend_pipeline: Retained<ProtocolObject<dyn MTLRenderPipelineState>>,
     sampler: Retained<ProtocolObject<dyn MTLSamplerState>>,
+    smooth_scaling: bool,
     targets: Vec<CachedTargetTexture>,
     // Index of the LAST-RENDERED slot; advanced at the start of each compose.
     target_cursor: usize,
@@ -1122,6 +1123,7 @@ impl MetalSceneCompositor {
             pipeline,
             blend_pipeline,
             sampler,
+            smooth_scaling,
             targets: Vec::new(),
             target_cursor: 0,
             target_width: 0,
@@ -1135,6 +1137,29 @@ impl MetalSceneCompositor {
             #[cfg(test)]
             force_next_pixel_buffer_import_failure: false,
         })
+    }
+
+    /// Swaps the scene sampler in place (instant-record P4): an armed preview
+    /// compositor switches to the recording's nearest sampler and back without
+    /// rebuilding the device, pipelines or texture caches. Returns false when
+    /// the new sampler state could not be built (the current one is kept).
+    pub fn set_smooth_scaling(&mut self, smooth_scaling: bool) -> bool {
+        if self.smooth_scaling == smooth_scaling {
+            return true;
+        }
+        let sampler = if smooth_scaling {
+            build_preview_sampler(&self.device)
+        } else {
+            build_sampler(&self.device)
+        };
+        match sampler {
+            Some(sampler) => {
+                self.sampler = sampler;
+                self.smooth_scaling = smooth_scaling;
+                true
+            }
+            None => false,
+        }
     }
 
     /// Composite `sources` over `background` into an offscreen BGRA8 target and read back.

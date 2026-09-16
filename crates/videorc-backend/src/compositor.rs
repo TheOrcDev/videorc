@@ -330,6 +330,14 @@ pub struct CompositorRuntime {
     /// intentionally reuse one preview compositor. This second monotonic
     /// fence prevents delayed old bounds work from overwriting newer pixels.
     preview_resize_revision: Option<u64>,
+    /// Live render-loop configuration (instant-record P4). The loop swaps
+    /// fps, consumer and overlay flags in place, so a capture can arm the
+    /// preview compositor instead of replacing the run.
+    loop_config_tx: Option<watch::Sender<CompositorLoopConfig>>,
+    /// Capture lease over the preview run: while present the run renders the
+    /// session's output canvas and the preview reconciler must neither
+    /// resize nor retire it.
+    capture_lease: Option<CompositorCaptureLease>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -406,16 +414,72 @@ pub struct CompositorAuxiliaryOutput {
 #[derive(Debug, Clone)]
 struct CompositorRenderLoopParams {
     run_id: String,
-    target_fps: u32,
     health_event_sequence: Arc<AtomicU64>,
     health_heartbeat: Arc<AtomicU64>,
     render_dimensions: Arc<AtomicU64>,
-    frame_consumer: CompositorFrameConsumer,
+    /// Hot-swappable loop configuration; see [`CompositorLoopConfig`].
+    config: watch::Receiver<CompositorLoopConfig>,
     stream_output: Option<CompositorAuxiliaryOutput>,
-    caption_overlay_on_primary: bool,
-    caption_overlay_on_aux: bool,
-    highlight_overlay_on_primary: bool,
-    highlight_overlay_on_aux: bool,
+}
+
+/// Render-loop settings a live run can change without a restart
+/// (instant-record P4). Dimensions travel separately through the packed
+/// `render_dimensions` atomic; the split stream leg stays fixed for the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositorLoopConfig {
+    pub target_fps: u32,
+    pub frame_consumer: CompositorFrameConsumer,
+    pub caption_overlay_on_primary: bool,
+    pub caption_overlay_on_aux: bool,
+    pub highlight_overlay_on_primary: bool,
+    pub highlight_overlay_on_aux: bool,
+}
+
+/// Capture ownership of the preview compositor run.
+#[derive(Debug)]
+struct CompositorCaptureLease {
+    session_id: String,
+    run_id: String,
+    /// The preview run's writable dimensions, parked here so bounds updates
+    /// cannot resize the canvas underneath the encoder.
+    render_dimensions: Arc<AtomicU64>,
+    /// Loop configuration to restore (fps is refreshed from the live
+    /// preview surface at release time).
+    preview_config: CompositorLoopConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompositorArmParams {
+    pub target_fps: u32,
+    pub width: u32,
+    pub height: u32,
+    pub frame_consumer: CompositorFrameConsumer,
+    pub caption_overlay_on_primary: bool,
+    pub caption_overlay_on_aux: bool,
+    pub highlight_overlay_on_primary: bool,
+    pub highlight_overlay_on_aux: bool,
+}
+
+/// Why a capture could not arm the preview compositor in place. Callers fall
+/// back to a fresh recording run; the Record button is never a dead click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorArmRefusal {
+    /// No live run with a render worker exists.
+    NoLiveRun,
+    /// The live run is not a preview-owned single-output run.
+    NotPreviewOwned,
+    /// Another capture already holds the lease.
+    AlreadyLeased,
+}
+
+impl CompositorArmRefusal {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NoLiveRun => "no-live-run",
+            Self::NotPreviewOwned => "not-preview-owned",
+            Self::AlreadyLeased => "already-leased",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1381,6 +1445,8 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         worker_activity: Arc::new(CompositorWorkerActivity::default()),
         preview_render_dimensions: None,
         preview_resize_revision: None,
+        loop_config_tx: None,
+        capture_lease: None,
     }
 }
 
@@ -1462,6 +1528,14 @@ async fn start_synthetic_compositor_with_lifecycle(
         message: Some("Synthetic compositor running.".to_string()),
     };
     let (stop_tx, stop_rx) = watch::channel(false);
+    let (loop_config_tx, loop_config_rx) = watch::channel(CompositorLoopConfig {
+        target_fps,
+        frame_consumer: params.frame_consumer,
+        caption_overlay_on_primary: params.caption_overlay_on_primary,
+        caption_overlay_on_aux: params.caption_overlay_on_aux,
+        highlight_overlay_on_primary: params.highlight_overlay_on_primary,
+        highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+    });
     let stream_frame_store = params
         .stream_output
         .map(|_| Arc::new(StdMutex::new(FrameStore::new(2))));
@@ -1484,6 +1558,8 @@ async fn start_synthetic_compositor_with_lifecycle(
         compositor.stop_tx = Some(stop_tx);
         compositor.preview_render_dimensions = preview_render_dimensions;
         compositor.preview_resize_revision = None;
+        compositor.loop_config_tx = Some(loop_config_tx);
+        compositor.capture_lease = None;
         // Spawn and publish the worker handle while holding the ownership lock. A concurrent
         // replacement can therefore never observe a live run id without the handle it must
         // await, avoiding the ineffective `abort` race of `spawn_blocking` workers.
@@ -1491,16 +1567,11 @@ async fn start_synthetic_compositor_with_lifecycle(
             state.clone(),
             CompositorRenderLoopParams {
                 run_id: run_id.clone(),
-                target_fps,
                 health_event_sequence: health_event_sequence.clone(),
                 health_heartbeat: health_heartbeat.clone(),
                 render_dimensions,
-                frame_consumer: params.frame_consumer,
+                config: loop_config_rx.clone(),
                 stream_output: params.stream_output,
-                caption_overlay_on_primary: params.caption_overlay_on_primary,
-                caption_overlay_on_aux: params.caption_overlay_on_aux,
-                highlight_overlay_on_primary: params.highlight_overlay_on_primary,
-                highlight_overlay_on_aux: params.highlight_overlay_on_aux,
             },
             stop_rx.clone(),
             previous_scene_status.6,
@@ -1510,7 +1581,7 @@ async fn start_synthetic_compositor_with_lifecycle(
     spawn_compositor_health_supervisor(
         state.clone(),
         run_id.clone(),
-        target_fps,
+        loop_config_rx,
         health_heartbeat,
         health_event_sequence,
         stop_rx.clone(),
@@ -1719,6 +1790,13 @@ pub async fn replace_current_compositor_worker_with_non_stopping_for_test(
 
 pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option<CompositorStatus> {
     let _lifecycle = state.compositor_lifecycle.lock().await;
+    stop_compositor_if_run_id_with_lifecycle(state, run_id).await
+}
+
+async fn stop_compositor_if_run_id_with_lifecycle(
+    state: &AppState,
+    run_id: &str,
+) -> Option<CompositorStatus> {
     let previous_task = {
         let mut compositor = state.compositor.lock().await;
         if compositor.run_id.as_deref() != Some(run_id) {
@@ -1739,6 +1817,8 @@ pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option
             compositor.run_id = None;
             compositor.preview_render_dimensions = None;
             compositor.preview_resize_revision = None;
+            compositor.loop_config_tx = None;
+            compositor.capture_lease = None;
         }
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
@@ -1755,6 +1835,198 @@ pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option
     )
     .await;
     Some(status)
+}
+
+/// Arms the live preview compositor for a capture without replacing the run
+/// (instant-record P4.1): the loop switches to the session's canvas, fps and
+/// consumer in place, keeping its run id, frame store and frame history. The
+/// preview surface stops tracking the run for the lease's lifetime so a bounds
+/// update can neither resize nor retire it.
+pub async fn arm_compositor_for_capture(
+    state: &AppState,
+    session_id: &str,
+    params: CompositorArmParams,
+) -> Result<CompositorStatus, CompositorArmRefusal> {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    let (status, run_id) = {
+        let mut compositor = state.compositor.lock().await;
+        let Some(run_id) = compositor.run_id.clone() else {
+            return Err(CompositorArmRefusal::NoLiveRun);
+        };
+        if compositor.status.state != CompositorState::Live
+            || compositor.render_task.is_none()
+            || compositor.stop_tx.is_none()
+        {
+            return Err(CompositorArmRefusal::NoLiveRun);
+        }
+        if compositor.capture_lease.is_some() {
+            return Err(CompositorArmRefusal::AlreadyLeased);
+        }
+        let Some(preview_config) = compositor
+            .loop_config_tx
+            .as_ref()
+            .map(|config_tx| *config_tx.borrow())
+        else {
+            return Err(CompositorArmRefusal::NotPreviewOwned);
+        };
+        if preview_config.frame_consumer != CompositorFrameConsumer::NativePreview
+            || compositor.stream_frame_store.is_some()
+            || compositor.preview_render_dimensions.is_none()
+        {
+            return Err(CompositorArmRefusal::NotPreviewOwned);
+        }
+        let next = CompositorLoopConfig {
+            target_fps: params.target_fps.clamp(30, 120),
+            frame_consumer: params.frame_consumer,
+            caption_overlay_on_primary: params.caption_overlay_on_primary,
+            caption_overlay_on_aux: params.caption_overlay_on_aux,
+            highlight_overlay_on_primary: params.highlight_overlay_on_primary,
+            highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+        };
+        let config_sent = compositor
+            .loop_config_tx
+            .as_ref()
+            .is_some_and(|config_tx| config_tx.send(next).is_ok());
+        if !config_sent {
+            return Err(CompositorArmRefusal::NoLiveRun);
+        }
+        let render_dimensions = compositor
+            .preview_render_dimensions
+            .take()
+            .expect("checked above");
+        render_dimensions.store(
+            pack_render_dimensions(params.width.max(1), params.height.max(1)),
+            Ordering::Relaxed,
+        );
+        compositor.preview_resize_revision = None;
+        compositor.capture_lease = Some(CompositorCaptureLease {
+            session_id: session_id.to_string(),
+            run_id: run_id.clone(),
+            render_dimensions,
+            preview_config,
+        });
+        compositor.status.width = params.width.max(1);
+        compositor.status.height = params.height.max(1);
+        compositor.status.target_fps = next.target_fps;
+        compositor.status.frame_pipeline.consumer = Some(params.frame_consumer.label().to_string());
+        compositor.status.updated_at = Utc::now().to_rfc3339();
+        compositor.status.message = Some("Preview compositor armed for capture.".to_string());
+        (compositor.status.clone(), run_id)
+    };
+    crate::preview_surface::detach_preview_run_for_capture_lease(state, &run_id).await;
+    tracing::info!(
+        "compositor {run_id} armed in place for session {session_id}: {}x{} @ {} fps, consumer {}",
+        status.width,
+        status.height,
+        status.target_fps,
+        params.frame_consumer.label()
+    );
+    state.emit_event("compositor.status", status.clone());
+    Ok(status)
+}
+
+enum CompositorLeaseRelease {
+    Restored(Box<CompositorStatus>),
+    Stop(String),
+}
+
+/// Returns an armed run to preview ownership. With a live preview surface the
+/// loop is switched back to preview fps/consumer at the surface's current
+/// dimensions and the reconciler re-adopts the same run id; without one the
+/// run is stopped exactly like a retired preview run. A missing or foreign
+/// lease is a no-op.
+pub async fn release_compositor_capture_lease(
+    state: &AppState,
+    session_id: &str,
+) -> Option<CompositorStatus> {
+    // Read the surface before taking compositor ownership: the resize path
+    // never awaits the surface under the compositor lock, and neither may we.
+    let surface = crate::preview_surface::preview_surface_status(state).await;
+    let release = {
+        let _lifecycle = state.compositor_lifecycle.lock().await;
+        let mut compositor = state.compositor.lock().await;
+        let lease_matches = compositor.capture_lease.as_ref().is_some_and(|lease| {
+            lease.session_id == session_id
+                && compositor.run_id.as_deref() == Some(lease.run_id.as_str())
+        });
+        if !lease_matches {
+            if compositor
+                .capture_lease
+                .as_ref()
+                .is_some_and(|lease| lease.session_id == session_id)
+            {
+                compositor.capture_lease = None;
+            }
+            return None;
+        }
+        let lease = compositor.capture_lease.take()?;
+        let surface_live = surface.state == PreviewSurfaceState::Live
+            && compositor.render_task.is_some()
+            && compositor.stop_tx.is_some();
+        if !surface_live {
+            CompositorLeaseRelease::Stop(lease.run_id)
+        } else {
+            let restored = CompositorLoopConfig {
+                target_fps: surface.target_fps.clamp(30, 120),
+                ..lease.preview_config
+            };
+            let config_sent = compositor
+                .loop_config_tx
+                .as_ref()
+                .is_some_and(|config_tx| config_tx.send(restored).is_ok());
+            if !config_sent {
+                CompositorLeaseRelease::Stop(lease.run_id)
+            } else {
+                lease.render_dimensions.store(
+                    pack_render_dimensions(surface.width.max(1), surface.height.max(1)),
+                    Ordering::Relaxed,
+                );
+                compositor.preview_render_dimensions = Some(lease.render_dimensions);
+                compositor.preview_resize_revision = None;
+                compositor.status.width = surface.width.max(1);
+                compositor.status.height = surface.height.max(1);
+                compositor.status.target_fps = restored.target_fps;
+                compositor.status.frame_pipeline.consumer =
+                    Some(restored.frame_consumer.label().to_string());
+                compositor.status.updated_at = Utc::now().to_rfc3339();
+                compositor.status.message = Some("Synthetic compositor running.".to_string());
+                CompositorLeaseRelease::Restored(Box::new(compositor.status.clone()))
+            }
+        }
+    };
+    match release {
+        CompositorLeaseRelease::Restored(status) => {
+            let status = *status;
+            tracing::info!(
+                "compositor {} released to preview after session {session_id}: {}x{} @ {} fps",
+                status.run_id.as_deref().unwrap_or("unknown-run"),
+                status.width,
+                status.height,
+                status.target_fps
+            );
+            state.emit_event("compositor.status", status.clone());
+            crate::preview_surface::reconcile_preview_after_capture_release(state).await;
+            Some(status)
+        }
+        CompositorLeaseRelease::Stop(run_id) => {
+            tracing::info!(
+                "compositor {run_id} stopped after session {session_id}: no live preview surface to return to"
+            );
+            let _lifecycle = state.compositor_lifecycle.lock().await;
+            stop_compositor_if_run_id_with_lifecycle(state, &run_id).await
+        }
+    }
+}
+
+/// Run id currently leased to a capture, if any.
+pub async fn compositor_capture_lease_run_id(state: &AppState) -> Option<String> {
+    state
+        .compositor
+        .lock()
+        .await
+        .capture_lease
+        .as_ref()
+        .map(|lease| lease.run_id.clone())
 }
 
 fn spawn_compositor_render_loop(
@@ -1978,7 +2250,7 @@ async fn publish_capture_health_diagnostics_if_current(
 fn spawn_compositor_health_supervisor(
     state: AppState,
     compositor_run_id: String,
-    target_fps: u32,
+    loop_config: watch::Receiver<CompositorLoopConfig>,
     health_heartbeat: Arc<AtomicU64>,
     health_event_sequence: Arc<AtomicU64>,
     stop_rx: watch::Receiver<bool>,
@@ -1987,7 +2259,7 @@ fn spawn_compositor_health_supervisor(
     state.spawn_process_task(run_compositor_health_supervisor(
         spawn_state,
         compositor_run_id,
-        target_fps,
+        loop_config,
         health_heartbeat,
         health_event_sequence,
         stop_rx,
@@ -2003,7 +2275,7 @@ fn spawn_compositor_health_supervisor(
 async fn run_compositor_health_supervisor(
     state: AppState,
     compositor_run_id: String,
-    target_fps: u32,
+    loop_config: watch::Receiver<CompositorLoopConfig>,
     health_heartbeat: Arc<AtomicU64>,
     health_event_sequence: Arc<AtomicU64>,
     mut stop_rx: watch::Receiver<bool>,
@@ -2026,6 +2298,7 @@ async fn run_compositor_health_supervisor(
                 let current_heartbeat = health_heartbeat.load(Ordering::Acquire);
                 let render_fps = current_heartbeat.saturating_sub(previous_heartbeat) as f64 / elapsed;
                 previous_heartbeat = current_heartbeat;
+                let target_fps = loop_config.borrow().target_fps;
                 if let Some(transition) = capture_health.observe(CaptureHealthSample {
                     target_fps: f64::from(target_fps),
                     render_fps,
@@ -2844,6 +3117,8 @@ async fn stop_current_compositor(state: &AppState) -> bool {
         compositor.run_id = None;
         compositor.preview_render_dimensions = None;
         compositor.preview_resize_revision = None;
+        compositor.loop_config_tx = None;
+        compositor.capture_lease = None;
         compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
     }
@@ -2940,23 +3215,31 @@ async fn run_synthetic_compositor_loop(
 ) {
     let CompositorRenderLoopParams {
         run_id,
-        target_fps,
         health_event_sequence,
         health_heartbeat,
         render_dimensions,
-        frame_consumer,
+        config: mut config_rx,
         stream_output,
-        caption_overlay_on_primary,
-        caption_overlay_on_aux,
-        highlight_overlay_on_primary,
-        highlight_overlay_on_aux,
     } = params;
-    let frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
+    // Loop configuration is hot-swappable (instant-record P4): a capture arms
+    // the preview run in place, so fps, consumer and overlay flags are plain
+    // mutable locals refreshed from the watch channel at the top of the loop.
+    let CompositorLoopConfig {
+        mut target_fps,
+        mut frame_consumer,
+        mut caption_overlay_on_primary,
+        mut caption_overlay_on_aux,
+        mut highlight_overlay_on_primary,
+        mut highlight_overlay_on_aux,
+    } = *config_rx.borrow_and_update();
+    let mut pending_loop_config: Option<CompositorLoopConfig> = None;
+    let mut loop_config_closed = false;
+    let mut frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
     let mut ticker = tokio::time::interval(frame_interval);
     ticker.set_missed_tick_behavior(compositor_missed_tick_behavior(frame_consumer));
     // Only the record/stream compositor feeds the session's frame accounting;
     // a preview-only loop must not inflate "ticks" for a session it never fed.
-    let accounts_session_frames = frame_consumer.requires_cpu_fallback();
+    let mut accounts_session_frames = frame_consumer.requires_cpu_fallback();
     // Persisted GPU compositor (Some only on macOS when not disabled and a GPU exists);
     // built once and reused per frame. Held across the loop's awaits (it is Send).
     // Preview-owned compositors minify the scene into a small canvas; smooth
@@ -3034,10 +3317,51 @@ async fn run_synthetic_compositor_loop(
     };
 
     loop {
+        if let Some(next) = pending_loop_config.take() {
+            if next.target_fps != target_fps {
+                target_fps = next.target_fps;
+                frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
+                ticker = tokio::time::interval(frame_interval);
+                // Measure the next diagnostic window purely at the new cadence
+                // so the rate-collapse watchdog never compares mixed windows.
+                frames_in_window = 0;
+                window_started_at = Instant::now();
+                previous_tick_at = None;
+            }
+            if next.frame_consumer != frame_consumer {
+                frame_consumer = next.frame_consumer;
+                accounts_session_frames = frame_consumer.requires_cpu_fallback();
+                frame_pipeline.consumer = Some(frame_consumer.label().to_string());
+                set_gpu_compositor_smooth_scaling(
+                    gpu_compositor.as_mut(),
+                    matches!(frame_consumer, CompositorFrameConsumer::NativePreview)
+                        && stream_output.is_none(),
+                );
+            }
+            ticker.set_missed_tick_behavior(compositor_missed_tick_behavior(frame_consumer));
+            caption_overlay_on_primary = next.caption_overlay_on_primary;
+            caption_overlay_on_aux = next.caption_overlay_on_aux;
+            highlight_overlay_on_primary = next.highlight_overlay_on_primary;
+            highlight_overlay_on_aux = next.highlight_overlay_on_aux;
+            tracing::info!(
+                "compositor {run_id} loop config swapped in place: {} fps, consumer {}",
+                target_fps,
+                frame_consumer.label()
+            );
+        }
         tokio::select! {
             changed = stop_rx.changed() => {
                 if changed.is_err() || *stop_rx.borrow() {
                     break;
+                }
+            }
+            changed = config_rx.changed(), if !loop_config_closed => {
+                if changed.is_err() {
+                    // The runtime dropped the sender (run retired); keep the
+                    // last configuration and stop polling the channel.
+                    loop_config_closed = true;
+                } else {
+                    pending_loop_config = Some(*config_rx.borrow_and_update());
                 }
             }
             _ = ticker.tick() => {
@@ -3915,6 +4239,20 @@ fn new_gpu_compositor(smooth_scaling: bool) -> Option<GpuCompositor> {
 fn new_gpu_compositor(_smooth_scaling: bool) -> Option<GpuCompositor> {
     None
 }
+
+#[cfg(target_os = "macos")]
+fn set_gpu_compositor_smooth_scaling(gpu: Option<&mut GpuCompositor>, smooth_scaling: bool) {
+    if let Some(gpu) = gpu
+        && !gpu.set_smooth_scaling(smooth_scaling)
+    {
+        tracing::warn!(
+            "Metal compositor could not rebuild its sampler for smooth_scaling={smooth_scaling}; keeping the current sampler"
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_gpu_compositor_smooth_scaling(_gpu: Option<&mut GpuCompositor>, _smooth_scaling: bool) {}
 
 #[cfg(test)]
 fn missing_scene_source_frame_reason(source: &SceneSource) -> String {
@@ -8671,11 +9009,19 @@ mod tests {
         let heartbeat = Arc::new(AtomicU64::new(0));
         let event_sequence = Arc::new(AtomicU64::new(0));
         let (stop_tx, stop_rx) = watch::channel(false);
+        let (_loop_config_tx, loop_config_rx) = watch::channel(CompositorLoopConfig {
+            target_fps: 30,
+            frame_consumer: CompositorFrameConsumer::NativePreview,
+            caption_overlay_on_primary: false,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        });
         let supervisor_state = state.clone();
         let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
             supervisor_state,
             run_id.clone(),
-            30,
+            loop_config_rx,
             Arc::clone(&heartbeat),
             Arc::clone(&event_sequence),
             stop_rx,
@@ -10445,6 +10791,187 @@ mod tests {
         assert_eq!(activity.active.load(Ordering::Acquire), 0);
         assert_eq!(activity.max_active.load(Ordering::Acquire), 1);
         assert_eq!(activity.stop_timeouts.load(Ordering::Acquire), 0);
+    }
+
+    fn preview_params(width: u32, height: u32) -> CompositorStartParams {
+        CompositorStartParams {
+            target_fps: 60,
+            width,
+            height,
+            frame_consumer: CompositorFrameConsumer::NativePreview,
+            stream_output: None,
+            caption_overlay_on_primary: false,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        }
+    }
+
+    fn arm_params(width: u32, height: u32) -> CompositorArmParams {
+        CompositorArmParams {
+            target_fps: 30,
+            width,
+            height,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            caption_overlay_on_primary: true,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        }
+    }
+
+    async fn wait_for_frame_dimensions(
+        state: &AppState,
+        width: u32,
+        height: u32,
+        after_sequence: u64,
+    ) -> CompositorFrameEvidence {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let latest = compositor_latest_frame_evidence(state).await;
+            if let Some(evidence) = latest
+                && evidence.width == width
+                && evidence.height == height
+                && evidence.sequence > after_sequence
+            {
+                return evidence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "compositor never published a {width}x{height} frame after {after_sequence} (latest {latest:?})"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn arm_compositor_for_capture_keeps_the_run_and_swaps_the_loop_config() {
+        let state = test_state();
+        let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        let preview_run_id = preview.run_id.clone().expect("preview run id");
+        let before = wait_for_frame_dimensions(&state, 64, 36, 0).await;
+
+        let armed = arm_compositor_for_capture(&state, "session-arm", arm_params(128, 72))
+            .await
+            .expect("preview run arms in place");
+        assert_eq!(armed.run_id.as_deref(), Some(preview_run_id.as_str()));
+        assert_eq!((armed.width, armed.height, armed.target_fps), (128, 72, 30));
+        assert_eq!(
+            armed.frame_pipeline.consumer.as_deref(),
+            Some("videotoolbox-encoder")
+        );
+        assert_eq!(
+            compositor_capture_lease_run_id(&state).await.as_deref(),
+            Some(preview_run_id.as_str())
+        );
+        // The same run keeps rendering, now at the capture canvas, and the
+        // status refresh keeps the encoder label the loop adopted.
+        let armed_frame = wait_for_frame_dimensions(&state, 128, 72, before.sequence).await;
+        let status = compositor_status(&state).await;
+        assert_eq!(status.run_id.as_deref(), Some(preview_run_id.as_str()));
+        assert_eq!(status.state, CompositorState::Live);
+        assert_eq!(
+            status.frame_pipeline.consumer.as_deref(),
+            Some("videotoolbox-encoder"),
+            "{status:?}"
+        );
+        // Preview bounds cannot resize a leased run.
+        assert!(
+            resize_preview_compositor_if_run_id(&state, &preview_run_id, 32, 18)
+                .await
+                .is_none()
+        );
+        assert_eq!(compositor_status(&state).await.width, 128);
+        // A second capture cannot take the lease.
+        assert_eq!(
+            arm_compositor_for_capture(&state, "session-other", arm_params(128, 72)).await,
+            Err(CompositorArmRefusal::AlreadyLeased)
+        );
+        // Frame history survives arming (wrong-dims entries are ignored by
+        // the barrier, target-dims entries accumulate).
+        let history = compositor_frame_evidence_history(&state).await;
+        assert!(history.iter().any(|evidence| evidence.width == 64));
+        assert!(
+            history
+                .iter()
+                .any(|evidence| evidence.sequence == armed_frame.sequence)
+        );
+
+        // No live preview surface: the release stops the run like a retired
+        // preview run would be stopped.
+        let released = release_compositor_capture_lease(&state, "session-arm").await;
+        assert_eq!(
+            released.map(|status| status.state),
+            Some(CompositorState::Stopped)
+        );
+        assert!(compositor_status(&state).await.run_id.is_none());
+        assert!(compositor_capture_lease_run_id(&state).await.is_none());
+        assert!(
+            release_compositor_capture_lease(&state, "session-arm")
+                .await
+                .is_none(),
+            "a second release is a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn arm_compositor_for_capture_refuses_non_preview_runs() {
+        let state = test_state();
+        assert_eq!(
+            arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
+            Err(CompositorArmRefusal::NoLiveRun)
+        );
+
+        let recording = start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        assert_eq!(
+            arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
+            Err(CompositorArmRefusal::NotPreviewOwned)
+        );
+        assert_eq!(compositor_status(&state).await.run_id, recording.run_id);
+
+        let split = start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                stream_output: Some(CompositorAuxiliaryOutput {
+                    width: 32,
+                    height: 18,
+                    frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                }),
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        assert_eq!(
+            arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
+            Err(CompositorArmRefusal::NotPreviewOwned)
+        );
+        assert_eq!(compositor_status(&state).await.run_id, split.run_id);
+        stop_compositor(&state).await;
+        assert!(compositor_capture_lease_run_id(&state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_leased_run_clears_the_lease() {
+        let state = test_state();
+        let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        let run_id = preview.run_id.expect("preview run id");
+        arm_compositor_for_capture(&state, "session-arm", arm_params(128, 72))
+            .await
+            .expect("preview run arms in place");
+        assert!(stop_compositor_if_run_id(&state, &run_id).await.is_some());
+        assert!(compositor_capture_lease_run_id(&state).await.is_none());
+        assert!(
+            release_compositor_capture_lease(&state, "session-arm")
+                .await
+                .is_none()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
