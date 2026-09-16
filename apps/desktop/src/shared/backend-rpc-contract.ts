@@ -39,6 +39,7 @@ import type {
   SessionListParams,
   SessionLogsPage,
   SessionStorageTotals,
+  SessionStopParams,
   StartSessionParams,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
@@ -103,7 +104,7 @@ export interface BackendRpcMethodMap {
   >
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
-  'session.stop': BackendRpcDefinition<undefined, RecordingStatus>
+  'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
   'scene.get': BackendRpcDefinition<undefined, Scene>
   'scene.load_from_capture_config': BackendRpcDefinition<SceneConfigParams, SceneCommitStatus>
   'scene.layout.apply_preview': BackendRpcDefinition<
@@ -1409,9 +1410,14 @@ const sessionStartParamsSchema = objectSchema(
     ),
     audio: optionalSchema(boundedBackendParamValueSchema),
     streaming: optionalSchema(boundedBackendParamValueSchema),
-    captions: optionalSchema(boundedBackendParamValueSchema)
+    captions: optionalSchema(boundedBackendParamValueSchema),
+    requestedAtMs: optionalSchema(nonNegativeInteger)
   },
   { allowUnknown: false }
+)
+
+const sessionStopParamsSchema = optionalSchema(
+  objectSchema({ requestedAtMs: optionalSchema(nonNegativeInteger) }, { allowUnknown: false })
 )
 
 const undefinedOrFfmpegPathSchema = unionSchema([
@@ -1610,7 +1616,7 @@ const runtimeContracts = {
     result: streamTargetsSnapshotSchema
   },
   'session.start': { params: sessionStartParamsSchema, result: recordingStatusSchema },
-  'session.stop': { params: undefinedSchema, result: recordingStatusSchema },
+  'session.stop': { params: sessionStopParamsSchema, result: recordingStatusSchema },
   'scene.get': { params: undefinedSchema, result: sceneSchema },
   'scene.load_from_capture_config': {
     params: sceneConfigSchema,

@@ -43,6 +43,7 @@ export function StudioTab(): ReactElement {
     visibleStartBlockedReason,
     startSession,
     stopSession,
+    noteRecordClick,
     captureConfig,
     setCaptureConfig,
     entitlements,
@@ -111,6 +112,7 @@ export function StudioTab(): ReactElement {
   }, [pendingStart, startSession])
 
   const handleRecord = (): void => {
+    noteRecordClick('start')
     setCaptureConfig((current) => ({ ...current, recordEnabled: true, streamEnabled: false }))
     setPendingStart(true)
   }
@@ -118,8 +120,13 @@ export function StudioTab(): ReactElement {
     if (liveStreamBlockedReason) {
       return
     }
+    noteRecordClick('start')
     setCaptureConfig((current) => ({ ...current, streamEnabled: true }))
     setPendingStart(true)
+  }
+  const handleStop = (): void => {
+    noteRecordClick('stop')
+    void stopSession()
   }
 
   const stopLabel = stopRequestPending
@@ -182,7 +189,7 @@ export function StudioTab(): ReactElement {
               onLiveStream={handleLiveStream}
               onRecord={handleRecord}
               onRetryStart={retrySessionStart}
-              onStop={stopSession}
+              onStop={handleStop}
             />
           </div>
 

@@ -103,6 +103,14 @@ import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
 import { isRetryableBackgroundSurfaceSyncError } from '@/lib/surface-sync-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import {
+  clickEpochMs,
+  createRecordLatencyTracker,
+  formatRecordLatencyLog,
+  type RecordLatencyKind,
+  type RecordLatencyOrigin,
+  type RecordLatencySample
+} from '@/lib/record-latency'
+import {
   INITIAL_ACCOUNT_READY_REFRESH_STATE,
   reduceAccountReadyRefresh,
   type AccountReadyRefreshState
@@ -1118,6 +1126,8 @@ export type StudioContextValue = {
   sampleAudioMeter: () => Promise<boolean>
   startSession: () => Promise<boolean>
   stopSession: () => Promise<boolean>
+  /** Arms the record start/stop latency clock at the moment of a user click. */
+  noteRecordClick: (kind: RecordLatencyKind, origin?: RecordLatencyOrigin) => void
   remuxSession: (sessionId: string) => Promise<void>
   ensureSessionPoster: (sessionId: string) => Promise<boolean>
   renameSession: (sessionId: string, title: string) => Promise<void>
@@ -1185,10 +1195,17 @@ export type StudioPreviewContextValue = Pick<
   'previewLiveStatus' | 'previewCameraStatus' | 'previewScreenStatus'
 >
 
+type RecordLatencyState = {
+  start: RecordLatencySample | null
+  stop: RecordLatencySample | null
+}
+
 interface StudioDiagnosticsContextValue {
   captureRecoveryStatus: CaptureRecoveryStatus
   captureRecoveryRetryPending: boolean
   diagnosticStats: DiagnosticStats
+  /** Latest renderer-measured Record/Stop click latency samples. */
+  recordLatency: RecordLatencyState
   healthEvents: HealthEvent[]
   logs: BackendLogEvent[]
   streamHealth: StreamHealth | null
@@ -3741,14 +3758,57 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     []
   )
 
-  const applyRecordingStatus = useCallback((status: RecordingStatus) => {
-    if (status.state === 'recording' || status.state === 'streaming') {
-      lastSessionActivityRef.current = status.state === 'streaming' ? 'live-stream' : 'recording'
-    }
-    recordingRef.current = status
-    setRecording(status)
-    syncFramePollingSuppressionRef.current?.()
+  // Record start/stop latency (instant-record plan): a click arms the clock,
+  // the authoritative status that completes the transition closes the sample.
+  const recordLatencyTrackerRef = useRef(createRecordLatencyTracker())
+  const recordClickAtRef = useRef<{ start: number | null; stop: number | null }>({
+    start: null,
+    stop: null
+  })
+  const [recordLatency, setRecordLatency] = useState<RecordLatencyState>({
+    start: null,
+    stop: null
+  })
+  const noteRecordClick = useCallback(
+    (kind: RecordLatencyKind, origin: RecordLatencyOrigin = 'click') => {
+      const now = performance.now()
+      recordLatencyTrackerRef.current.markClick(kind, now, origin)
+      if (origin === 'click') {
+        recordClickAtRef.current[kind] = now
+      }
+    },
+    []
+  )
+  const takeRecordClickEpochMs = useCallback((kind: RecordLatencyKind): number => {
+    const perfNow = performance.now()
+    const clickAt = recordClickAtRef.current[kind] ?? perfNow
+    recordClickAtRef.current[kind] = null
+    return clickEpochMs(clickAt, perfNow, Date.now())
   }, [])
+
+  const applyRecordingStatus = useCallback(
+    (status: RecordingStatus) => {
+      if (status.state === 'recording' || status.state === 'streaming') {
+        lastSessionActivityRef.current = status.state === 'streaming' ? 'live-stream' : 'recording'
+      }
+      recordingRef.current = status
+      setRecording(status)
+      syncFramePollingSuppressionRef.current?.()
+      const latencySample = recordLatencyTrackerRef.current.observe(status, performance.now())
+      if (latencySample) {
+        setRecordLatency((current) => ({ ...current, [latencySample.kind]: latencySample }))
+        appendLog({
+          level: 'info',
+          message: formatRecordLatencyLog(latencySample),
+          timestamp: new Date().toISOString()
+        })
+        if (typeof performance.mark === 'function') {
+          performance.mark(`videorc:record-${status.state}`)
+        }
+      }
+    },
+    [appendLog]
+  )
 
   // Smoke-only state hydration for harnesses that start a capture through a
   // second backend client. It uses the same authoritative status query and
@@ -10418,6 +10478,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   >(null)
   const runStartSession = useCallback(
     (streamingOverride?: StreamingSettings) => {
+      recordLatencyTrackerRef.current.markClick('start', performance.now(), 'session-call')
       const requestSnapshot = {
         captureConfig,
         sceneWithBackground,
@@ -10576,7 +10637,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sessionStartLifecycleActiveRef.current = true
           let status: RecordingStatus
           try {
-            status = await client.requestTyped('session.start', nextSessionParams)
+            status = await client.requestTyped('session.start', {
+              ...nextSessionParams,
+              requestedAtMs: takeRecordClickEpochMs('start')
+            })
           } finally {
             liveAudioProcessingStartRequestInFlightRef.current = false
           }
@@ -10739,6 +10803,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return startPromise
     },
     [
+      takeRecordClickEpochMs,
       activatePreparedYouTubeBroadcasts,
       activatePreparedXBroadcasts,
       applyRecordingStatus,
@@ -11170,6 +11235,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         setLastError(null)
         platformLifecycleRun.current += 1
         setStopRequestPending(true)
+        recordLatencyTrackerRef.current.markClick('stop', performance.now(), 'session-call')
+        const stopRequestedAtMs = takeRecordClickEpochMs('stop')
         liveAudioProcessingSyncRef.current?.queue.stop()
         const pendingStart = sessionStartInFlightRef.current
         const currentSessionId = recordingRef.current.sessionId
@@ -11192,7 +11259,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               resolvedOwner.sessionId,
               4000
             )
-            const status = await client.requestTyped('session.stop')
+            const status = await client.requestTyped('session.stop', {
+              requestedAtMs: stopRequestedAtMs
+            })
             if (
               sessionStartLifecycleActiveRef.current &&
               status.sessionId &&
@@ -11225,7 +11294,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           clearLiveChatForTerminalSession(sessionId)
           return true
         }
-        const status = await client.requestTyped('session.stop')
+        const status = await client.requestTyped('session.stop', {
+          requestedAtMs: stopRequestedAtMs
+        })
         if (
           sessionStartLifecycleActiveRef.current &&
           status.sessionId &&
@@ -11252,6 +11323,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     void stopPromise.then(clearStopPromise, clearStopPromise)
     return stopPromise
   }, [
+    takeRecordClickEpochMs,
     applyRecordingStatus,
     claimPlatformLifecycleOwner,
     clearLiveChatForTerminalSession,
@@ -12194,6 +12266,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return true
       }
     }
+    const intentKind = (payload as { kind?: unknown } | null)?.kind
+    if (intentKind === 'recordStart' || intentKind === 'streamStart') {
+      noteRecordClick('start')
+    } else if (intentKind === 'recordStop' || intentKind === 'streamStop') {
+      noteRecordClick('stop')
+    } else if (intentKind === 'recordToggle') {
+      noteRecordClick(context.sessionActive ? 'stop' : 'start')
+    }
     try {
       const { executeRemoteIntent } = await import('@/lib/remote-surface')
       await executeRemoteIntent(payload, context)
@@ -12361,6 +12441,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       healthEvents,
       logs,
       previewSurfaceStatus,
+      recordLatency,
       retryCaptureRecovery,
       streamHealth
     }),
@@ -12371,6 +12452,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       healthEvents,
       logs,
       previewSurfaceStatus,
+      recordLatency,
       retryCaptureRecovery,
       streamHealth
     ]
@@ -12560,6 +12642,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       registerPreviewSurfaceResize,
       syncNativePreviewSurfaceBounds,
       sampleAudioMeter,
+      noteRecordClick,
       startSession,
       stopSession,
       remuxSession,
@@ -12756,6 +12839,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       registerPreviewSurfaceResize,
       syncNativePreviewSurfaceBounds,
       sampleAudioMeter,
+      noteRecordClick,
       startSession,
       stopSession,
       remuxSession,

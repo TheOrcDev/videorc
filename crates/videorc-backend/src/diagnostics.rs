@@ -12,7 +12,7 @@ use crate::protocol::{
     DiagnosticBottleneck, DiagnosticStats, PermissionPane, PreviewCameraDropReasonStats,
     PreviewCameraStatus, PreviewImagePollCounts, PreviewScreenFrameStatusStats,
     PreviewScreenStatus, PreviewSourceSurfaceBackingStats, PreviewSurfaceBacking, PreviewTransport,
-    StreamHealth,
+    RecordingTimelineSnapshot, StreamHealth,
 };
 use crate::source_registry::SourceRegistrySnapshot;
 
@@ -839,6 +839,8 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         first_source_frame_ms: None,
         first_full_resolution_compositor_frame_ms: None,
         first_encoded_frame_ms: None,
+        recording_start_timeline: None,
+        recording_stop_timeline: None,
         updated_at: Utc::now().to_rfc3339(),
     }
 }
@@ -1572,6 +1574,21 @@ pub fn apply_recording_startup_barrier_stats(
     stats
 }
 
+/// Folds a start/stop latency timeline into the diagnostics snapshot. Routed
+/// by `snapshot.kind`; unknown kinds are ignored so telemetry can never fail.
+pub fn apply_recording_timeline_stats(
+    mut stats: DiagnosticStats,
+    snapshot: RecordingTimelineSnapshot,
+) -> DiagnosticStats {
+    match snapshot.kind.as_str() {
+        "start" => stats.recording_start_timeline = Some(snapshot),
+        "stop" => stats.recording_stop_timeline = Some(snapshot),
+        _ => return stats,
+    }
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
 pub fn apply_preview_camera_source_stats(
     mut stats: DiagnosticStats,
     status: &PreviewCameraStatus,
@@ -2286,7 +2303,9 @@ fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{PreviewCameraState, PreviewScreenSourceKind, PreviewScreenState};
+    use crate::protocol::{
+        PreviewCameraState, PreviewScreenSourceKind, PreviewScreenState, RecordingTimelineMark,
+    };
 
     #[test]
     fn preview_transport_counters_track_each_route_independently() {
@@ -2630,6 +2649,51 @@ mod tests {
         assert_eq!(stats.first_source_frame_ms, Some(10));
         assert_eq!(stats.first_full_resolution_compositor_frame_ms, Some(20));
         assert_eq!(stats.first_encoded_frame_ms, Some(43));
+    }
+
+    #[test]
+    fn record_timelines_are_recorded_in_diagnostics_by_kind() {
+        let start = RecordingTimelineSnapshot {
+            kind: "start".to_string(),
+            session_id: Some("s".to_string()),
+            cold: Some(true),
+            requested_at_epoch_ms: None,
+            click_to_origin_ms: Some(12),
+            total_ms: 400,
+            outcome: "running".to_string(),
+            marks: vec![RecordingTimelineMark {
+                phase: "running".to_string(),
+                at_ms: 400,
+            }],
+        };
+        let stop = RecordingTimelineSnapshot {
+            kind: "stop".to_string(),
+            total_ms: 90,
+            outcome: "idle".to_string(),
+            ..start.clone()
+        };
+        let unknown = RecordingTimelineSnapshot {
+            kind: "mystery".to_string(),
+            ..start.clone()
+        };
+
+        let stats = apply_recording_timeline_stats(starting_diagnostics("s", 30, "record"), start);
+        let stats = apply_recording_timeline_stats(stats, stop);
+        let stats = apply_recording_timeline_stats(stats, unknown);
+
+        assert_eq!(
+            stats.recording_start_timeline.as_ref().unwrap().total_ms,
+            400
+        );
+        assert_eq!(
+            stats.recording_start_timeline.as_ref().unwrap().cold,
+            Some(true)
+        );
+        assert_eq!(stats.recording_stop_timeline.as_ref().unwrap().total_ms, 90);
+        assert_eq!(
+            stats.recording_stop_timeline.as_ref().unwrap().outcome,
+            "idle"
+        );
     }
 
     #[test]

@@ -40,6 +40,7 @@ import type {
 } from '@/lib/backend'
 import { backendCrashView, latestBackendCrash } from '@/lib/backend-crash-view'
 import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
+import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/lib/record-latency'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isNativePreviewCapability } from '../../../../shared/native-preview-capability'
 
@@ -63,7 +64,7 @@ export function DiagnosticsTab(): ReactElement {
   const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
   const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
-  const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, streamHealth } =
+  const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, recordLatency, streamHealth } =
     useStudioDiagnostics()
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
   const activeSessionSummary =
@@ -316,6 +317,38 @@ export function DiagnosticsTab(): ReactElement {
             <DiagnosticMetric
               label="Bridge error"
               value={diagnosticStats.encoderBridgeError ?? 'None'}
+            />
+          </MetricGroup>
+          <MetricGroup title="Record latency">
+            <DiagnosticMetric
+              label="Click → recording"
+              value={formatLatencyMs(
+                recordLatency.start?.kind === 'start'
+                  ? recordLatency.start.clickToRecordingMs
+                  : undefined
+              )}
+            />
+            <DiagnosticMetric
+              label="Click → idle"
+              value={formatLatencyMs(
+                recordLatency.stop?.kind === 'stop' ? recordLatency.stop.clickToIdleMs : undefined
+              )}
+            />
+            <DiagnosticMetric
+              label="Backend start"
+              value={formatTimelineSummary(diagnosticStats.recordingStartTimeline)}
+            />
+            <DiagnosticMetric
+              label="Slowest start phase"
+              value={formatSlowestPhase(diagnosticStats.recordingStartTimeline)}
+            />
+            <DiagnosticMetric
+              label="Backend stop"
+              value={formatTimelineSummary(diagnosticStats.recordingStopTimeline)}
+            />
+            <DiagnosticMetric
+              label="Slowest stop phase"
+              value={formatSlowestPhase(diagnosticStats.recordingStopTimeline)}
             />
           </MetricGroup>
           <MetricGroup title="WebSocket transport">
@@ -1287,6 +1320,11 @@ function formatDuplicateCapture(sources: string[]): string {
 
 function formatSourceTryLocks(cameraMisses: number, screenMisses: number): string {
   return `cam ${cameraMisses}, screen ${screenMisses}`
+}
+
+export function formatSlowestPhase(snapshot: Parameters<typeof slowestTimelinePhase>[0]): string {
+  const slowest = slowestTimelinePhase(snapshot)
+  return slowest ? `${slowest.phase} · ${formatLatencyMs(slowest.deltaMs)}` : '--'
 }
 
 export function formatWebSocketQueue(queue: WebSocketQueueDiagnosticStats): string {

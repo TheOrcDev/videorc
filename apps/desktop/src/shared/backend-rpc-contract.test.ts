@@ -708,6 +708,15 @@ describe('backend RPC contract', () => {
     ).toThrow()
   })
 
+  it('accepts the optional record-latency click timestamps on session start and stop', () => {
+    expect(validateBackendRpcParams('session.stop', undefined)).toBeUndefined()
+    expect(validateBackendRpcParams('session.stop', { requestedAtMs: 1_700_000_000_000 })).toEqual({
+      requestedAtMs: 1_700_000_000_000
+    })
+    expect(() => validateBackendRpcParams('session.stop', { requestedAtMs: -1 })).toThrow()
+    expect(() => validateBackendRpcParams('session.stop', { unexpected: true })).toThrow()
+  })
+
   it('validates every destructive contract named in the runtime registry', () => {
     expect(runtimeValidatedBackendRpcMethods).toEqual(
       expect.arrayContaining([

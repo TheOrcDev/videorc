@@ -891,6 +891,19 @@ pub struct StartSessionParams {
     pub streaming: Option<StreamingSettings>,
     #[serde(default)]
     pub captions: Option<CaptionsSessionParams>,
+    /// Renderer click timestamp (epoch ms) for latency attribution. Telemetry
+    /// only: never load-bearing for the start itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_ms: Option<u64>,
+}
+
+/// Optional `session.stop` params. Older renderers send none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStopParams {
+    /// Renderer Stop click timestamp (epoch ms) for latency attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_ms: Option<u64>,
 }
 
 /// Live-caption output intent for this session. Stream selection shapes the
@@ -2502,7 +2515,45 @@ pub struct DiagnosticStats {
     pub first_full_resolution_compositor_frame_ms: Option<u64>,
     #[serde(default)]
     pub first_encoded_frame_ms: Option<u64>,
+    /// Phase timeline of the most recent `session.start` (instant-record plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_start_timeline: Option<RecordingTimelineSnapshot>,
+    /// Phase timeline of the most recent stop, including background finalization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_stop_timeline: Option<RecordingTimelineSnapshot>,
     pub updated_at: String,
+}
+
+/// One phase boundary of a start/stop timeline, milliseconds since the
+/// timeline origin (backend admission of the request).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingTimelineMark {
+    pub phase: String,
+    pub at_ms: u64,
+}
+
+/// Typed start/stop latency timeline published in `diagnostics.stats`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingTimelineSnapshot {
+    /// `start` | `stop`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// True for the first start in this backend process (start timelines only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold: Option<bool>,
+    /// Renderer click time (epoch ms) when the renderer supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_epoch_ms: Option<u64>,
+    /// Renderer click → backend admission, when plausible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_to_origin_ms: Option<u64>,
+    pub total_ms: u64,
+    pub outcome: String,
+    #[serde(default)]
+    pub marks: Vec<RecordingTimelineMark>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

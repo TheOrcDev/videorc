@@ -1082,6 +1082,13 @@ pub struct AppState {
     pub x_oauth1: Arc<crate::x_oauth1::XOauth1Sessions>,
     pub ffmpeg_work: Arc<FfmpegWorkCoordinator>,
     pub noise_cleanup: Arc<crate::noise_cleanup::NoiseCleanupRegistry>,
+    /// Set once the first session start is admitted in this process; the
+    /// start latency timeline reports that first start as `cold`.
+    pub recording_started_once: Arc<AtomicBool>,
+    /// Stop latency timeline handed from the stop request to `monitor_session`,
+    /// which publishes it with the terminal status.
+    pub recording_stop_timeline:
+        Arc<StdMutex<Option<crate::recording_timeline::RecordingStopTimeline>>>,
     pub live_chat: LiveChatSlot,
     pub live_chat_persistence: LiveChatPersistence,
     /// In-memory product-account session override (deep-link sign-in / Sign out).
@@ -1203,6 +1210,8 @@ impl AppState {
             x_oauth1: Arc::new(crate::x_oauth1::XOauth1Sessions::default()),
             ffmpeg_work: Arc::new(FfmpegWorkCoordinator::new()),
             noise_cleanup: Arc::new(crate::noise_cleanup::NoiseCleanupRegistry::default()),
+            recording_started_once: Arc::new(AtomicBool::new(false)),
+            recording_stop_timeline: Arc::new(StdMutex::new(None)),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),

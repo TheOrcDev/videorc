@@ -1162,6 +1162,35 @@ export interface StartSessionParams {
   audio?: AudioSettings
   streaming?: StreamingSettings
   captions?: CaptionsSessionParams
+  /** Renderer click timestamp (epoch ms) for start-latency attribution. Telemetry only. */
+  requestedAtMs?: number
+}
+
+/** Optional `session.stop` params; older renderers send none. */
+export interface SessionStopParams {
+  /** Renderer Stop click timestamp (epoch ms) for stop-latency attribution. */
+  requestedAtMs?: number
+}
+
+/** One phase boundary of a start/stop latency timeline (ms since backend admission). */
+export interface RecordingTimelineMark {
+  phase: string
+  atMs: number
+}
+
+/** Typed start/stop latency timeline published in `diagnostics.stats`. */
+export interface RecordingTimelineSnapshot {
+  /** `start` | `stop`. */
+  kind: string
+  sessionId?: string
+  /** True for the first start in this backend process (start timelines only). */
+  cold?: boolean
+  requestedAtEpochMs?: number
+  /** Renderer click → backend admission when the renderer supplied a plausible timestamp. */
+  clickToOriginMs?: number
+  totalMs: number
+  outcome: string
+  marks: RecordingTimelineMark[]
 }
 
 /** Burn-in intent for the session (shapes output legs; see burn-in plan A0/R1)
@@ -2263,6 +2292,10 @@ export interface DiagnosticStats {
   firstSourceFrameMs?: number
   firstFullResolutionCompositorFrameMs?: number
   firstEncodedFrameMs?: number
+  /** Phase timeline of the most recent session start (instant-record plan). */
+  recordingStartTimeline?: RecordingTimelineSnapshot
+  /** Phase timeline of the most recent stop, including finalization. */
+  recordingStopTimeline?: RecordingTimelineSnapshot
   previewTargetFps?: number
   previewFrameAgeMs?: number
   previewTransport: PreviewTransport

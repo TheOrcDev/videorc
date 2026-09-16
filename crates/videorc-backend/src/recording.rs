@@ -47,8 +47,8 @@ use crate::devices::{
 use crate::diagnostics::{
     RecordingStartupBarrierDiagnosticSnapshot, apply_active_scene_revision, apply_audio_stats,
     apply_duplicate_capture_sources, apply_preview_frame_age, apply_preview_stats,
-    apply_recording_startup_barrier_stats, apply_runtime_diagnostics_snapshot, apply_stream_health,
-    starting_diagnostics,
+    apply_recording_startup_barrier_stats, apply_recording_timeline_stats,
+    apply_runtime_diagnostics_snapshot, apply_stream_health, starting_diagnostics,
 };
 #[cfg(target_os = "windows")]
 use crate::encoder_bridge::DirectD3D11CameraOverlay;
@@ -89,11 +89,15 @@ use crate::protocol::{
     LayoutPreset, LayoutSettings, PreviewCameraState, PreviewLiveParams, PreviewLiveSource,
     PreviewLiveState, PreviewLiveStatus, PreviewScreenSourceKind, PreviewScreenState,
     PreviewSnapshot, PreviewSnapshotParams, PreviewSurfaceBacking, PreviewTransport,
-    RecordingPipelineStage, RecordingState, RecordingStatus, RemuxSessionParams, RtmpPreset,
-    RtmpSettings, Scene, SceneConfigParams, SceneSourceKind, SideBySideCameraSide,
-    StartSessionParams, StreamHealth, StreamOutputBridge, StreamOutputTopologyProbeParams,
-    StreamOutputTopologyProbeResult, StreamOutputTopologyProbeState, StreamOutputTopologyRole,
-    StreamScreen, VideoPreset, VideoSettings,
+    RecordingPipelineStage, RecordingState, RecordingStatus, RecordingTimelineSnapshot,
+    RemuxSessionParams, RtmpPreset, RtmpSettings, Scene, SceneConfigParams, SceneSourceKind,
+    SessionStopParams, SideBySideCameraSide, StartSessionParams, StreamHealth, StreamOutputBridge,
+    StreamOutputTopologyProbeParams, StreamOutputTopologyProbeResult,
+    StreamOutputTopologyProbeState, StreamOutputTopologyRole, StreamScreen, VideoPreset,
+    VideoSettings,
+};
+use crate::recording_timeline::{
+    RecordingStartPhase, RecordingStartTimeline, RecordingStopPhase, RecordingStopTimeline,
 };
 use crate::repair::{
     GateStatus, MAINTENANCE_CANCELLED, QualityExpectations, QualityThresholds, QualityVerdict,
@@ -2374,9 +2378,35 @@ async fn commit_recording_startup_scene_at_time(
     }
 }
 
-pub async fn start_session(
+pub async fn start_session(state: AppState, params: StartSessionParams) -> Result<RecordingStatus> {
+    // Latency timeline (instant-record plan): marks are first-wins and the
+    // publish runs after the user-visible edge, so telemetry cannot delay or
+    // fail the start.
+    let cold = !state
+        .recording_started_once
+        .swap(true, std::sync::atomic::Ordering::AcqRel);
+    let mut timeline = RecordingStartTimeline::start(params.requested_at_ms, cold);
+    let result = start_session_with_timeline(state.clone(), params, &mut timeline).await;
+    let outcome = if result.is_ok() { "running" } else { "refused" };
+    let snapshot = timeline.snapshot(outcome);
+    let summary = timeline.summary_line(outcome);
+    let publish_state = state.clone();
+    tokio::spawn(async move {
+        publish_recording_timeline(
+            &publish_state,
+            snapshot,
+            &summary,
+            "recording-start-timeline",
+        )
+        .await;
+    });
+    result
+}
+
+async fn start_session_with_timeline(
     state: AppState,
     mut params: StartSessionParams,
+    timeline: &mut RecordingStartTimeline,
 ) -> Result<RecordingStatus> {
     // Once armed at the Starting edge this guard owns the admission itself, so
     // every uncommitted return publishes the exact-session terminal replacement
@@ -2391,6 +2421,7 @@ pub async fn start_session(
         _session_start_publication_fence,
         _session_start_source_transition_fence,
     ) = admit_session_start(&state).await?;
+    timeline.mark(RecordingStartPhase::Admission);
     let mut session_start_admission = Some(session_start_admission);
     // SessionStarting becomes authoritative before `state.recording` is
     // populated. Invalidate any reserved fallback child under the same lock
@@ -2421,6 +2452,7 @@ pub async fn start_session(
     // native audio, or FFmpeg. A detached writer remains visible until its
     // outer and nested FIFO threads have actually released their resources.
     let session_id = Uuid::new_v4().to_string();
+    timeline.set_session_id(&session_id);
     wait_for_encoder_bridge_start_admission(&session_id, Duration::from_secs(2)).await?;
 
     let capture_permit = state.ffmpeg_work.begin_capture_when_available().await;
@@ -2542,8 +2574,10 @@ pub async fn start_session(
 
     let mut startup_resources = CaptureStartupResources::default();
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &params).await;
+    timeline.mark(RecordingStartPhase::DeviceResolve);
     let mut native_audio_source =
         prepare_native_audio_source(&state, &session_id, &mut capture, &params).await;
+    timeline.mark(RecordingStartPhase::AudioOpen);
     // Warm up the microphone before the video pipeline starts so audio and video begin in
     // lockstep. CoreAudio takes a few hundred ms to deliver its first callback while video
     // frames flow immediately; without this wait the recorded audio lags the picture by
@@ -2597,6 +2631,7 @@ pub async fn start_session(
         }
         let _ = crate::fifo::cleanup(&prepared.fifo_path);
     }
+    timeline.mark(RecordingStartPhase::MicWarm);
     if let Some(prepared) = native_audio_source.as_ref() {
         startup_resources.track_fifo(&prepared.fifo_path);
     }
@@ -3362,6 +3397,7 @@ pub async fn start_session(
                 },
             )
             .await;
+            timeline.mark(RecordingStartPhase::CompositorArm);
             let scene = params.scene.clone().unwrap_or_else(|| {
                 scene_from_capture_config(SceneConfigParams {
                     transition_ms: None,
@@ -3404,6 +3440,7 @@ pub async fn start_session(
                 }
                 return Err(error);
             }
+            timeline.mark(RecordingStartPhase::CameraCadence);
             let startup_scene = commit_recording_startup_scene_at_time(
                 &state,
                 &scene,
@@ -3414,6 +3451,7 @@ pub async fn start_session(
             .await;
             let startup_scene_revision = startup_scene.scene_revision;
             recording_startup_scene = Some(startup_scene);
+            timeline.mark(RecordingStartPhase::SceneCommit);
             match await_recording_startup_barrier(
                 &state,
                 &session_id,
@@ -3447,6 +3485,7 @@ pub async fn start_session(
                     return Err(error);
                 }
             }
+            timeline.mark(RecordingStartPhase::StartupBarrier);
             let recording_store = Some(compositor_frame_store(&state).await);
             let stream_store = if encoder_bridge_stream_output.is_some() {
                 Some(
@@ -3571,6 +3610,7 @@ pub async fn start_session(
             .expect("session start admission is transferred at publication"),
     );
 
+    timeline.mark(RecordingStartPhase::StartingPublished);
     let mut command = ffmpeg_command(&ffmpeg_path);
     command
         .args(&args)
@@ -3595,6 +3635,7 @@ pub async fn start_session(
             }
         };
 
+    timeline.mark(RecordingStartPhase::FfmpegSpawn);
     let stderr = child.stderr.take();
     let stdout = child.stdout.take();
     let mut stdin = retain_ffmpeg_stdin.then(|| child.stdin.take()).flatten();
@@ -3803,6 +3844,7 @@ pub async fn start_session(
             Ok(())
         }
         .await;
+        timeline.mark(RecordingStartPhase::BridgeReady);
         if let Err(error) = bridge_startup_result {
             uncommitted_capture_process.set_failure(
                 PublishedSessionStartFailureOrigin::EncoderBridge,
@@ -3874,6 +3916,7 @@ pub async fn start_session(
         let _ = finish_recording_encoder_bridge_teardown(&state, batch, teardown_origin).await;
         return Err(error);
     }
+    timeline.mark(RecordingStartPhase::MuxerProgress);
     if use_encoder_bridge {
         let _ = emit_session_log(
             &state,
@@ -4028,6 +4071,7 @@ pub async fn start_session(
     // may resume only after `recording` is authoritative; the idle-only commit
     // path will then reject it instead of silently replacing the startup scene.
     drop(recording_startup_scene.take());
+    timeline.mark(RecordingStartPhase::Running);
     state.emit_event("recording.status", running_status.clone());
     if matches!(
         capture.microphone.as_ref(),
@@ -4468,6 +4512,23 @@ fn hydrate_stream_key_secret_refs_from_credentials(
 }
 
 pub async fn stop_recording(state: AppState) -> Result<RecordingStatus> {
+    stop_recording_with_intent(state, SessionStopParams::default()).await
+}
+
+/// Stop with the renderer's click timestamp for latency attribution. The
+/// timeline is parked on `AppState` so `monitor_session` can finish it at the
+/// terminal status.
+pub async fn stop_recording_with_intent(
+    state: AppState,
+    params: SessionStopParams,
+) -> Result<RecordingStatus> {
+    {
+        let mut timeline = RecordingStopTimeline::stop(params.requested_at_ms);
+        timeline.mark(RecordingStopPhase::Intent);
+        if let Ok(mut slot) = state.recording_stop_timeline.lock() {
+            *slot = Some(timeline);
+        }
+    }
     // A direct stop caller must observe the same publication ordering as the
     // WebSocket stop lane. During startup, `state.recording` is intentionally
     // empty until FFmpeg has proven output progress; waiting on this fence
@@ -4499,6 +4560,7 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     let output_path = active.output_path.clone();
     let session_id = active.session_id.clone();
     let wait_session_id = session_id.clone();
+    set_stop_timeline_session(&state, &session_id);
     let mut force_stop_now = false;
     let mut ffmpeg_live_audio_stop_session = None;
     let mut legacy_ffmpeg_stdin = None;
@@ -4666,6 +4728,7 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
     // Publish the authoritative user-visible stop edge before any session
     // mutex or FFmpeg I/O can wait behind an in-flight command acknowledgement.
     state.emit_event("recording.status", status.clone());
+    mark_stop_timeline(&state, RecordingStopPhase::StoppingPublished);
     let _ = emit_session_log(
         &state,
         &wait_session_id,
@@ -5264,6 +5327,7 @@ pub async fn create_preview_snapshot(
         layout: params.layout,
         scene: None,
         captions: None,
+        requested_at_ms: None,
         output: crate::protocol::OutputSettings {
             record_enabled: true,
             stream_enabled: false,
@@ -5844,6 +5908,7 @@ fn live_preview_session_params(
         layout: params.layout,
         scene: None,
         captions: None,
+        requested_at_ms: None,
         output: crate::protocol::OutputSettings {
             record_enabled: true,
             stream_enabled: false,
@@ -6862,6 +6927,8 @@ async fn monitor_session(
     } = context;
     let (status, stop_intent_preceded_exit) =
         wait_for_process_exit_ordered(child.wait(), stop_intent).await;
+    mark_stop_timeline(&state, RecordingStopPhase::FfmpegExit);
+    let stop_timeline_session_id = session_id.clone();
     if !drain_ffmpeg_stderr_monitor(ffmpeg_stderr_monitor, FFMPEG_STDERR_DRAIN_TIMEOUT).await {
         let _ = emit_session_log(
             &state,
@@ -7109,10 +7176,12 @@ async fn monitor_session(
         }
     }
 
+    mark_stop_timeline(&state, RecordingStopPhase::BridgeStopped);
     // Dropping ActiveRecording stops the native post-controls audio producer.
     // Close the caption bus now, drain the provider's final utterance within a
     // bounded grace period, and only then generate SRT/captioned artifacts.
     crate::captions::finish_captions_for_capture(&state).await;
+    mark_stop_timeline(&state, RecordingStopPhase::CaptionsDrained);
     let finalized_caption_artifact =
         crate::captions::take_finalized_caption_artifact_for_capture(&state).await;
     let _ = crate::captions::clear_caption_overlays(
@@ -7295,6 +7364,7 @@ async fn monitor_session(
                     }
                 }
             });
+            mark_stop_timeline(&state, RecordingStopPhase::MkvBound);
             let mut finalization_recovery_path = None;
             let published_mp4 = if let Some(output_path) = output_path.as_ref() {
                 match export_completed_recording_to_mp4(
@@ -7333,6 +7403,7 @@ async fn monitor_session(
             } else {
                 None
             };
+            mark_stop_timeline(&state, RecordingStopPhase::Mp4Export);
             let mp4_path = published_mp4
                 .as_ref()
                 .map(|published| published.path.clone());
@@ -7350,6 +7421,7 @@ async fn monitor_session(
                     finalized_caption_artifact,
                 )
                 .await;
+                mark_stop_timeline(&state, RecordingStopPhase::Captions);
                 if should_begin_captioned_copy_render(
                     monitored_recording.captioned_copy_requested,
                     caption_artifact.chunks.len(),
@@ -7403,6 +7475,7 @@ async fn monitor_session(
                 },
                 None => duration_ms,
             };
+            mark_stop_timeline(&state, RecordingStopPhase::Probe);
             let persistence_error = SessionFinalization::new(
                 &session_id,
                 "completed",
@@ -7453,6 +7526,7 @@ async fn monitor_session(
                 )
             })
             .err();
+            mark_stop_timeline(&state, RecordingStopPhase::DbCommit);
             if let Some(message) = persistence_error.as_deref() {
                 let _ = emit_health_event(
                     &state,
@@ -7469,6 +7543,7 @@ async fn monitor_session(
                     "recording-finalized",
                     "Recording pipeline finalized and output metadata was saved.",
                 );
+                mark_stop_timeline(&state, RecordingStopPhase::Finalized);
             }
             let terminal_status = RecordingStatus {
                 state: if persistence_error.is_some() {
@@ -7637,8 +7712,14 @@ async fn monitor_session(
     // and post-recording maintenance scheduling are complete. Keep the
     // finalizing lease through publication so process shutdown's lifecycle
     // join cannot return before this exact terminal contract is observable.
+    let terminal_outcome = match terminal_status.state {
+        RecordingState::Idle => "idle",
+        RecordingState::Failed => "failed",
+        _ => "non-terminal",
+    };
     state.capture_interruption.capture_finished();
     state.emit_event("recording.status", terminal_status);
+    publish_stop_timeline(&state, &stop_timeline_session_id, terminal_outcome).await;
     drop(finalizing_permit);
 
     restart_idle_live_preview_if_desired(state).await;
@@ -8806,6 +8887,19 @@ async fn resolve_primary_screen_video_input(
 
 /// Maximum time to wait for the microphone to warm up before starting the video pipeline.
 const MICROPHONE_WARMUP_TIMEOUT: Duration = Duration::from_millis(1500);
+/// Opening a CoreAudio input is a blocking call that can park on the OS
+/// microphone permission check. It runs off the async runtime and is bounded
+/// so a stalled device open degrades to video-only instead of holding the
+/// start (and the whole ordered command lane) indefinitely.
+const NATIVE_AUDIO_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
+/// Smoke/dev switch: skip the native microphone entirely. The dev app has no
+/// microphone TCC grant, so renderer-driven smokes set this to keep Record
+/// honest instead of waiting out the permission-blind device open.
+const SMOKE_DISABLE_NATIVE_MICROPHONE_ENV: &str = "VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE";
+
+fn native_microphone_disabled_for_smoke() -> bool {
+    std::env::var(SMOKE_DISABLE_NATIVE_MICROPHONE_ENV).is_ok_and(|value| value == "1")
+}
 /// Maximum time to wait for fresh target-resolution compositor frames before encoding.
 const RECORDING_STARTUP_BARRIER_TIMEOUT: Duration = Duration::from_millis(2500);
 /// Consecutive target-resolution real-source compositor frames required before encoding.
@@ -10238,6 +10332,17 @@ async fn prepare_native_audio_source(
         return None;
     };
 
+    if native_microphone_disabled_for_smoke() {
+        state.emit_log(
+            "info",
+            format!(
+                "Native microphone skipped: {SMOKE_DISABLE_NATIVE_MICROPHONE_ENV}=1 (smoke/dev environment)."
+            ),
+        );
+        capture.microphone = None;
+        return None;
+    }
+
     let path = native_audio_fifo_path(session_id);
     if let Err(error) = create_native_audio_fifo(&path) {
         let consequence = if live_captions_requested(params) {
@@ -10261,7 +10366,23 @@ async fn prepare_native_audio_source(
     }
 
     let settings = audio_processing_settings(params);
-    match start_native_audio_source(*device_id, settings) {
+    let open_device_id = *device_id;
+    let opened = tokio::time::timeout(
+        NATIVE_AUDIO_OPEN_TIMEOUT,
+        tokio::task::spawn_blocking(move || start_native_audio_source(open_device_id, settings)),
+    )
+    .await;
+    let opened = match opened {
+        Ok(Ok(result)) => result,
+        Ok(Err(join_error)) => Err(anyhow::anyhow!(
+            "CoreAudio device open task failed: {join_error}"
+        )),
+        Err(_) => Err(anyhow::anyhow!(
+            "CoreAudio input device did not open within {}s (waiting on a microphone permission prompt or a stalled device)",
+            NATIVE_AUDIO_OPEN_TIMEOUT.as_secs()
+        )),
+    };
+    match opened {
         Ok(source) => {
             let device_name = source.device_name.clone();
             *fifo_path = Some(path.clone());
@@ -17105,6 +17226,79 @@ pub fn emit_health_event(
     Ok(())
 }
 
+/// Folds a start/stop latency timeline into `diagnostics.stats` and persists
+/// its `key=value` summary as an Info health event / session log line. Called
+/// only after the user-visible status edge; every failure is swallowed.
+async fn publish_recording_timeline(
+    state: &AppState,
+    snapshot: RecordingTimelineSnapshot,
+    summary: &str,
+    code: &str,
+) {
+    let session_id = snapshot.session_id.clone();
+    let diagnostic_stats = {
+        let mut diagnostics = state.diagnostics.lock().await;
+        let next = apply_recording_timeline_stats(diagnostics.clone(), snapshot);
+        *diagnostics = next.clone();
+        next
+    };
+    state.emit_event(
+        "diagnostics.stats",
+        apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
+    );
+    let _ = emit_health_event(
+        state,
+        session_id.as_deref(),
+        HealthLevel::Info,
+        code,
+        summary,
+    );
+}
+
+fn mark_stop_timeline(state: &AppState, phase: RecordingStopPhase) {
+    if let Ok(mut slot) = state.recording_stop_timeline.lock()
+        && let Some(timeline) = slot.as_mut()
+    {
+        timeline.mark(phase);
+    }
+}
+
+fn set_stop_timeline_session(state: &AppState, session_id: &str) {
+    if let Ok(mut slot) = state.recording_stop_timeline.lock()
+        && let Some(timeline) = slot.as_mut()
+    {
+        timeline.set_session_id(session_id);
+    }
+}
+
+/// Takes the parked stop timeline for this session (if any), marks the
+/// terminal edge, and publishes it. A session that ended without an operator
+/// stop (FFmpeg exit, failure) leaves no timeline and publishes nothing.
+async fn publish_stop_timeline(state: &AppState, session_id: &str, outcome: &str) {
+    let timeline = match state.recording_stop_timeline.lock() {
+        Ok(mut slot) => {
+            let matches = slot
+                .as_ref()
+                .is_some_and(|timeline| timeline.session_id().is_none_or(|id| id == session_id));
+            if matches { slot.take() } else { None }
+        }
+        Err(_) => None,
+    };
+    let Some(mut timeline) = timeline else {
+        return;
+    };
+    timeline.set_session_id(session_id);
+    timeline.mark(RecordingStopPhase::Terminal);
+    let summary = timeline.summary_line(outcome);
+    publish_recording_timeline(
+        state,
+        timeline.snapshot(outcome),
+        &summary,
+        "recording-stop-timeline",
+    )
+    .await;
+}
+
 fn emit_session_log(
     state: &AppState,
     session_id: &str,
@@ -19826,6 +20020,7 @@ mod tests {
 
     fn base_params(record_enabled: bool, stream_enabled: bool) -> StartSessionParams {
         StartSessionParams {
+            requested_at_ms: None,
             captions: None,
             sources: SourceSelection {
                 screen_id: Some("screen:avfoundation:3".to_string()),

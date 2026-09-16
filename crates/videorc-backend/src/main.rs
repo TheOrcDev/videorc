@@ -53,6 +53,7 @@ mod process_job;
 mod protocol;
 mod publish_clips;
 mod recording;
+mod recording_timeline;
 mod remote_control;
 mod repair;
 mod repair_service;
@@ -142,8 +143,8 @@ use recording::{
     create_preview_snapshot, current_stream_targets_snapshot, idle_status, live_preview_status,
     preview_file_path, probe_stream_output_topology, remux_session, resume_pending_repair_jobs,
     shutdown_capture_processes, start_live_preview, start_session, stop_live_preview,
-    stop_recording, subscribe_live_preview_frames, update_active_audio_processing,
-    update_preview_frame_age,
+    stop_recording, stop_recording_with_intent, subscribe_live_preview_frames,
+    update_active_audio_processing, update_preview_frame_age,
 };
 use scene::{
     nudge_source, reorder_sources, reset_source_transform, scene_from_capture_config,
@@ -8694,7 +8695,15 @@ async fn handle_text_message_with_role(
         }
         "session.stop" => {
             live_chat::stop_live_chat(state).await;
-            match stop_recording(state.clone()).await {
+            // Older renderers send no params; the click timestamp is telemetry
+            // only, so a malformed payload degrades to "no timestamp".
+            let stop_params = if command.params.is_null() {
+                protocol::SessionStopParams::default()
+            } else {
+                serde_json::from_value::<protocol::SessionStopParams>(command.params)
+                    .unwrap_or_default()
+            };
+            match stop_recording_with_intent(state.clone(), stop_params).await {
                 Ok(status) => ServerResponse::ok(command.id, status),
                 Err(error) => {
                     ServerResponse::error(command.id, "session-stop-failed", error.to_string())
