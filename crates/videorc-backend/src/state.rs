@@ -1092,6 +1092,9 @@ pub struct AppState {
     /// Background MP4 finalization jobs (instant-record P2). Consulted by the
     /// Library, the quit path and the updater gate.
     pub recording_finalization: Arc<crate::recording_finalization::RecordingFinalizationRegistry>,
+    /// Microphone kept open while Studio is visible (instant-record P5);
+    /// `session.start` takes it instead of opening the device.
+    pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
     pub live_chat: LiveChatSlot,
     pub live_chat_persistence: LiveChatPersistence,
     /// In-memory product-account session override (deep-link sign-in / Sign out).
@@ -1218,6 +1221,7 @@ impl AppState {
             recording_finalization: Arc::new(
                 crate::recording_finalization::RecordingFinalizationRegistry::default(),
             ),
+            warm_microphone: Arc::new(crate::warm_microphone::WarmMicrophoneSlot::default()),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),

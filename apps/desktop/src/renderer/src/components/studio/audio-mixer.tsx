@@ -67,7 +67,8 @@ export function AudioMixer(): ReactElement {
     handleSystemPermission,
     mediaAccess,
     runtimeInfo,
-    isSessionActive
+    isSessionActive,
+    warmMicrophone
   } = useStudioCore()
   const { audioMeter, audioMeterLoading } = useStudioAudio()
   const { diagnosticStats } = useStudioDiagnostics()
@@ -189,6 +190,15 @@ export function AudioMixer(): ReactElement {
             {monitorLabel}
           </span>
         </div>
+        {!isSessionActive && warmMicrophone?.armed ? (
+          <p
+            className="text-xs text-muted-foreground/70"
+            data-videorc-mic-warm="ready"
+            title="The microphone is open and ready, so Record starts instantly."
+          >
+            Mic ready for instant Record
+          </p>
+        ) : null}
         {/* The meter runs whenever the mixer is visible, so there is nothing
             to arm. "Check level" stays: it is the BACKEND's own reading, the
             answer when the browser analyser cannot open the device at all. */}

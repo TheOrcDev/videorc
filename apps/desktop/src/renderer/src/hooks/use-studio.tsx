@@ -261,6 +261,7 @@ import type {
   VideoPreset,
   VideoSettings,
   VideorcAccountSnapshot,
+  WarmMicrophoneStatus,
   XNativeLiveCapability,
   XEndResult,
   XLiveAuthorizationStart,
@@ -1126,6 +1127,13 @@ export type StudioContextValue = {
     generation?: number
   ) => Promise<void>
   sampleAudioMeter: () => Promise<boolean>
+  /**
+   * Instant record (P5): keep the selected CoreAudio microphone open while
+   * Studio is visible so `session.start` takes it warm. Never load-bearing.
+   */
+  armWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
+  disarmWarmMicrophone: () => Promise<WarmMicrophoneStatus | null>
+  warmMicrophone: WarmMicrophoneStatus | null
   startSession: () => Promise<boolean>
   stopSession: () => Promise<boolean>
   /** Arms the record start/stop latency clock at the moment of a user click. */
@@ -8305,6 +8313,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     reportError
   ])
 
+  const [warmMicrophone, setWarmMicrophone] = useState<WarmMicrophoneStatus | null>(null)
+  const armWarmMicrophone = useCallback(async () => {
+    const activeClient = clientRef.current
+    if (!activeClient) return null
+    const config = captureConfigRef.current
+    try {
+      const status = await activeClient.request<WarmMicrophoneStatus>('audio.mic.arm', {
+        microphoneId: config.sources.microphoneId,
+        microphoneGainDb: config.audio.microphoneGainDb,
+        microphoneMuted: config.audio.microphoneMuted
+      })
+      if (clientRef.current === activeClient) setWarmMicrophone(status)
+      return status
+    } catch {
+      // A cold open at Record is the fallback; never surface this.
+      return null
+    }
+  }, [])
+  const disarmWarmMicrophone = useCallback(async () => {
+    const activeClient = clientRef.current
+    if (!activeClient) return null
+    try {
+      const status = await activeClient.request<WarmMicrophoneStatus>('audio.mic.disarm', {})
+      if (clientRef.current === activeClient) setWarmMicrophone(status)
+      return status
+    } catch {
+      return null
+    }
+  }, [])
+
   const outputEnabled = captureConfig.recordEnabled || captureConfig.streamEnabled
   const profileCompatibility = videoProfileCompatibility(captureConfig)
   const streamReady =
@@ -12675,6 +12713,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       registerPreviewSurfaceResize,
       syncNativePreviewSurfaceBounds,
       sampleAudioMeter,
+      armWarmMicrophone,
+      disarmWarmMicrophone,
+      warmMicrophone,
       noteRecordClick,
       startSession,
       stopSession,
@@ -12872,6 +12913,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       registerPreviewSurfaceResize,
       syncNativePreviewSurfaceBounds,
       sampleAudioMeter,
+      armWarmMicrophone,
+      disarmWarmMicrophone,
+      warmMicrophone,
       noteRecordClick,
       startSession,
       stopSession,

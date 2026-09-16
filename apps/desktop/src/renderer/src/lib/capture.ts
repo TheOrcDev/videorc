@@ -34,6 +34,12 @@ export type SettingsState = {
    */
   keepOriginalRecording: boolean
   /**
+   * Keep the selected CoreAudio microphone open while Studio is visible so
+   * Record starts instantly (instant-record P5). macOS shows its microphone
+   * indicator while Studio is on screen; hiding the window releases it.
+   */
+  keepMicrophoneWarm?: boolean
+  /**
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
    */
@@ -335,6 +341,7 @@ export const defaultSettings: SettingsState = {
   outputDirectory: '',
   outputDirectoryHandle: undefined,
   keepOriginalRecording: false,
+  keepMicrophoneWarm: true,
   animateSceneChanges: false,
   audioMixer: { monitorWhenIdle: false }
 }

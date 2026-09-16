@@ -78,6 +78,7 @@ mod twitch_chat;
 mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
+mod warm_microphone;
 #[allow(dead_code)]
 mod windows_d3d11_capture;
 #[allow(dead_code)]
@@ -4551,6 +4552,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.screen.start"
         | "preview.screen.stop"
         | "audio.meter.sample"
+        | "audio.mic.arm"
+        | "audio.mic.disarm"
         | "audio.processing.update"
         | "audio.test.disconnect"
         | "audio.test.inject-pcm"
@@ -8299,6 +8302,20 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        "audio.mic.arm" => {
+            match serde_json::from_value::<protocol::WarmMicrophoneArmParams>(command.params) {
+                Ok(params) => ServerResponse::ok(
+                    command.id,
+                    warm_microphone::arm_warm_microphone(state, params).await,
+                ),
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "audio.mic.disarm" => {
+            ServerResponse::ok(command.id, warm_microphone::disarm_warm_microphone(state))
         }
         "audio.meter.probeNative" => {
             match serde_json::from_value::<protocol::AudioMeterProbeParams>(command.params) {
@@ -12522,6 +12539,13 @@ mod tests {
         let audio_processing =
             json!({ "id": "audio", "method": "audio.processing.update", "params": {} }).to_string();
         assert!(websocket_command_mutation_max_execution_age(audio_processing.as_str()).is_some());
+        for method in ["audio.mic.arm", "audio.mic.disarm"] {
+            let command = json!({ "id": method, "method": method, "params": {} }).to_string();
+            assert!(
+                websocket_command_mutation_max_execution_age(command.as_str()).is_some(),
+                "{method} opens/releases a CoreAudio device and must run as a bounded mutation"
+            );
+        }
         let account_refresh =
             json!({ "id": "account", "method": "account.refresh", "params": {} }).to_string();
         assert_eq!(

@@ -12,6 +12,7 @@ import {
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore } from '@/hooks/use-studio'
 import { micVisualAnalyserEnabled } from '@/lib/mic-visual-gate'
+import { warmMicrophoneWanted } from '@/lib/warm-microphone-gate'
 import { createMicVisualFrameBuffer, type MicVisualFrameBuffer } from '@/lib/mic-visual-frame'
 import type {
   MicVisualLifecycleSnapshot,
@@ -64,12 +65,49 @@ export function StudioMicVisualProvider({
   enabled: boolean
   children: ReactNode
 }): ReactElement {
-  const { captureConfig, selectedMicrophone, mediaAccess, isSessionActive } = useStudioCore()
+  const {
+    captureConfig,
+    selectedMicrophone,
+    mediaAccess,
+    isSessionActive,
+    settings,
+    armWarmMicrophone,
+    disarmWarmMicrophone
+  } = useStudioCore()
   const documentVisible = useDocumentVisible()
   const [pipeline, setPipeline] = useState<MicVisualPipeline | null>(null)
   const selectionKey = selectedMicrophone?.id
   const deviceName = selectedMicrophone?.name
   const permissionStatus = mediaAccess?.microphone
+  // Instant record (P5): the backend keeps the selected CoreAudio microphone
+  // open under the same visibility discipline as the analyser. A running
+  // session owns the device (start_session takes the warm source), so the
+  // effect only re-arms once the session ends; every other change that turns
+  // the gate off releases the device immediately.
+  const warmWanted = warmMicrophoneWanted({
+    keepWarm: settings.keepMicrophoneWarm !== false,
+    workspaceVisible: enabled,
+    documentVisible,
+    microphoneId: selectionKey,
+    muted: captureConfig.audio.microphoneMuted
+  })
+  const microphoneGainDb = captureConfig.audio.microphoneGainDb
+  useEffect(() => {
+    if (!warmWanted) {
+      void disarmWarmMicrophone()
+      return
+    }
+    if (isSessionActive) return
+    void armWarmMicrophone()
+  }, [
+    armWarmMicrophone,
+    disarmWarmMicrophone,
+    isSessionActive,
+    microphoneGainDb,
+    selectionKey,
+    warmWanted
+  ])
+  useEffect(() => () => void disarmWarmMicrophone(), [disarmWarmMicrophone])
   const source = {
     selectionKey,
     deviceName,

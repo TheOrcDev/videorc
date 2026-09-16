@@ -4,16 +4,25 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 const providerState = vi.hoisted(() => ({
   microphoneMuted: false,
-  sessionActive: false
+  sessionActive: false,
+  microphoneId: 'backend-mic-1',
+  keepMicrophoneWarm: true as boolean | undefined,
+  armWarmMicrophone: vi.fn(async () => null),
+  disarmWarmMicrophone: vi.fn(async () => null)
 }))
 
 vi.mock('@/hooks/use-document-visible', () => ({ useDocumentVisible: () => true }))
 vi.mock('@/hooks/use-studio', () => ({
   useStudioCore: () => ({
-    captureConfig: { audio: { microphoneMuted: providerState.microphoneMuted } },
+    captureConfig: {
+      audio: { microphoneMuted: providerState.microphoneMuted, microphoneGainDb: 0 }
+    },
     mediaAccess: { microphone: 'granted' },
-    selectedMicrophone: { id: 'backend-mic-1', name: 'Studio microphone' },
-    isSessionActive: providerState.sessionActive
+    selectedMicrophone: { id: providerState.microphoneId, name: 'Studio microphone' },
+    isSessionActive: providerState.sessionActive,
+    settings: { keepMicrophoneWarm: providerState.keepMicrophoneWarm },
+    armWarmMicrophone: providerState.armWarmMicrophone,
+    disarmWarmMicrophone: providerState.disarmWarmMicrophone
   })
 }))
 
@@ -47,6 +56,105 @@ describe('StudioMicVisualProvider', () => {
     restoreEnvironment = undefined
     providerState.microphoneMuted = false
     providerState.sessionActive = false
+    providerState.microphoneId = 'backend-mic-1'
+    providerState.keepMicrophoneWarm = true
+    providerState.armWarmMicrophone.mockClear()
+    providerState.disarmWarmMicrophone.mockClear()
+  })
+
+  // Instant record (P5): the backend keeps a CoreAudio microphone open under
+  // the analyser's visibility discipline; a running session owns it. The
+  // assertions are order-based because StrictMode double-invokes mount
+  // effects (mount → simulated unmount → mount), which legitimately calls
+  // disarm once between two arms.
+  describe('warm microphone', () => {
+    const lastCall = (spy: { mock: { invocationCallOrder: number[] } }): number =>
+      spy.mock.invocationCallOrder.at(-1) ?? -1
+    const armedLast = (): boolean =>
+      lastCall(providerState.armWarmMicrophone) > lastCall(providerState.disarmWarmMicrophone)
+    const renderProvider = async (environment: { container: Element }, enabled: boolean) => {
+      await act(async () => {
+        root ??= createRoot(environment.container)
+        root.render(
+          createElement(
+            StrictMode,
+            null,
+            createElement(StudioMicVisualProvider, { enabled, children: null })
+          )
+        )
+        await Promise.resolve()
+      })
+    }
+
+    it('arms a CoreAudio microphone while Studio is visible and releases it when it leaves', async () => {
+      const environment = installBrowserAudioEnvironment()
+      restoreEnvironment = environment.restore
+      providerState.microphoneId = 'microphone:coreaudio:42'
+
+      await renderProvider(environment, true)
+      expect(providerState.armWarmMicrophone).toHaveBeenCalled()
+      expect(armedLast()).toBe(true)
+
+      const armCallsBefore = providerState.armWarmMicrophone.mock.calls.length
+      await renderProvider(environment, false)
+      expect(armedLast()).toBe(false)
+      expect(providerState.armWarmMicrophone.mock.calls.length).toBe(armCallsBefore)
+    })
+
+    it('leaves a running session alone and re-arms once it ends', async () => {
+      const environment = installBrowserAudioEnvironment()
+      restoreEnvironment = environment.restore
+      providerState.microphoneId = 'microphone:coreaudio:42'
+
+      await renderProvider(environment, true)
+      expect(armedLast()).toBe(true)
+      const armCalls = providerState.armWarmMicrophone.mock.calls.length
+      const disarmCalls = providerState.disarmWarmMicrophone.mock.calls.length
+
+      providerState.sessionActive = true
+      await renderProvider(environment, true)
+      expect(providerState.armWarmMicrophone.mock.calls.length).toBe(armCalls)
+      expect(providerState.disarmWarmMicrophone.mock.calls.length).toBe(disarmCalls)
+
+      providerState.sessionActive = false
+      await renderProvider(environment, true)
+      expect(providerState.armWarmMicrophone.mock.calls.length).toBeGreaterThan(armCalls)
+      expect(armedLast()).toBe(true)
+    })
+
+    it('releases the microphone when muted, when the setting is off, or for a non-CoreAudio input', async () => {
+      const environment = installBrowserAudioEnvironment()
+      restoreEnvironment = environment.restore
+
+      for (const mutate of [
+        () => (providerState.microphoneMuted = true),
+        () => (providerState.keepMicrophoneWarm = false),
+        () => (providerState.microphoneId = 'microphone:avfoundation:0')
+      ]) {
+        providerState.microphoneMuted = false
+        providerState.keepMicrophoneWarm = true
+        providerState.microphoneId = 'microphone:coreaudio:42'
+        await renderProvider(environment, true)
+        expect(armedLast()).toBe(true)
+        const armCalls = providerState.armWarmMicrophone.mock.calls.length
+
+        mutate()
+        await renderProvider(environment, true)
+        expect(armedLast()).toBe(false)
+        expect(providerState.armWarmMicrophone.mock.calls.length).toBe(armCalls)
+      }
+    })
+
+    it('releases the microphone on unmount', async () => {
+      const environment = installBrowserAudioEnvironment()
+      restoreEnvironment = environment.restore
+      providerState.microphoneId = 'microphone:coreaudio:42'
+      await renderProvider(environment, true)
+      expect(armedLast()).toBe(true)
+      await act(async () => root?.unmount())
+      root = null
+      expect(armedLast()).toBe(false)
+    })
   })
 
   it('meters an idle mixer and releases the microphone when the mixer leaves', async () => {

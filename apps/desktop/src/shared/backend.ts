@@ -1900,6 +1900,23 @@ export interface AudioMeterParams {
   microphoneMuted?: boolean
 }
 
+/** `audio.mic.arm` params (instant record: keep the mic open while Studio is visible). */
+export type WarmMicrophoneArmParams = {
+  microphoneId?: string
+  microphoneGainDb?: number
+  microphoneMuted?: boolean
+}
+
+export type WarmMicrophoneStatus = {
+  armed: boolean
+  deviceId?: number
+  deviceName?: string
+  /** `not-coreaudio` | `session-active` | `disabled-for-smoke` | `open-failed` | `disarmed`. */
+  reason?: string
+  capturedFrames: number
+  armedForMs?: number
+}
+
 export type AudioMeterStatus =
   | 'ready'
   | 'silent'

@@ -9808,7 +9808,7 @@ const NATIVE_AUDIO_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// honest instead of waiting out the permission-blind device open.
 const SMOKE_DISABLE_NATIVE_MICROPHONE_ENV: &str = "VIDEORC_SMOKE_DISABLE_NATIVE_MICROPHONE";
 
-fn native_microphone_disabled_for_smoke() -> bool {
+pub(crate) fn native_microphone_disabled_for_smoke() -> bool {
     std::env::var(SMOKE_DISABLE_NATIVE_MICROPHONE_ENV).is_ok_and(|value| value == "1")
 }
 /// Maximum time to wait for fresh target-resolution compositor frames before encoding.
@@ -11315,20 +11315,35 @@ async fn prepare_native_audio_source(
 
     let settings = audio_processing_settings(params);
     let open_device_id = *device_id;
-    let opened = tokio::time::timeout(
-        NATIVE_AUDIO_OPEN_TIMEOUT,
-        tokio::task::spawn_blocking(move || start_native_audio_source(open_device_id, settings)),
-    )
-    .await;
-    let opened = match opened {
-        Ok(Ok(result)) => result,
-        Ok(Err(join_error)) => Err(anyhow::anyhow!(
-            "CoreAudio device open task failed: {join_error}"
-        )),
-        Err(_) => Err(anyhow::anyhow!(
-            "CoreAudio input device did not open within {}s (waiting on a microphone permission prompt or a stalled device)",
-            NATIVE_AUDIO_OPEN_TIMEOUT.as_secs()
-        )),
+    // Instant record (P5): a microphone kept warm while Studio was visible is
+    // handed over directly — no CoreAudio open, no wait for the first
+    // callback. The slot is empty afterwards; the renderer re-arms after the
+    // session ends.
+    let warm_source = state
+        .warm_microphone
+        .take_for_capture(open_device_id, settings);
+    let taken_warm = warm_source.is_some();
+    let opened = match warm_source {
+        Some(source) => Ok(source),
+        None => {
+            let opened = tokio::time::timeout(
+                NATIVE_AUDIO_OPEN_TIMEOUT,
+                tokio::task::spawn_blocking(move || {
+                    start_native_audio_source(open_device_id, settings)
+                }),
+            )
+            .await;
+            match opened {
+                Ok(Ok(result)) => result,
+                Ok(Err(join_error)) => Err(anyhow::anyhow!(
+                    "CoreAudio device open task failed: {join_error}"
+                )),
+                Err(_) => Err(anyhow::anyhow!(
+                    "CoreAudio input device did not open within {}s (waiting on a microphone permission prompt or a stalled device)",
+                    NATIVE_AUDIO_OPEN_TIMEOUT.as_secs()
+                )),
+            }
+        }
     };
     match opened {
         Ok(source) => {
@@ -11336,10 +11351,17 @@ async fn prepare_native_audio_source(
             *fifo_path = Some(path.clone());
             state.emit_log(
                 "info",
-                format!(
-                    "Native CoreAudio microphone capture started for {device_name} at {} Hz float32 stereo.",
-                    NATIVE_AUDIO_SAMPLE_RATE
-                ),
+                if taken_warm {
+                    format!(
+                        "Native CoreAudio microphone {device_name} taken from the warm standby (instant record); {} frame(s) already captured.",
+                        source.stats_handle().captured_frames()
+                    )
+                } else {
+                    format!(
+                        "Native CoreAudio microphone capture started for {device_name} at {} Hz float32 stereo.",
+                        NATIVE_AUDIO_SAMPLE_RATE
+                    )
+                },
             );
             Some(PreparedNativeAudioSource {
                 source,
@@ -21894,6 +21916,65 @@ mod tests {
                 .is_some_and(|error| error.contains("missing")),
             "{item:?}"
         );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn prepare_native_audio_source_takes_the_warm_microphone() {
+        let state = test_state();
+        let params = base_params(true, false);
+        let warm = crate::audio::test_native_audio_source(audio_processing_settings(&params));
+        let warm_stats = warm.stats_handle();
+        state.warm_microphone.install(4242, warm);
+
+        let mut capture = CaptureInputs {
+            video: VideoInput::MacScreen { index: 0 },
+            camera_index: None,
+            microphone: Some(MicrophoneInput::CoreAudio {
+                device_id: 4242,
+                fifo_path: None,
+            }),
+        };
+        let prepared = prepare_native_audio_source(&state, "warm-handoff", &mut capture, &params)
+            .await
+            .expect("the warm microphone is handed to the capture");
+        assert!(
+            Arc::ptr_eq(&prepared.source.stats_handle(), &warm_stats),
+            "the capture must receive the very source that was kept warm"
+        );
+        assert!(
+            !state.warm_microphone.status().armed,
+            "the slot is empty after the handoff"
+        );
+        assert!(
+            matches!(
+                capture.microphone,
+                Some(MicrophoneInput::CoreAudio {
+                    fifo_path: Some(_),
+                    ..
+                })
+            ),
+            "{:?}",
+            capture.microphone
+        );
+        let _ = crate::fifo::cleanup(&prepared.fifo_path);
+
+        // A different selected device leaves a warm source alone and opens cold.
+        let other = crate::audio::test_native_audio_source(audio_processing_settings(&params));
+        state.warm_microphone.install(7, other);
+        let mut capture = CaptureInputs {
+            video: VideoInput::MacScreen { index: 0 },
+            camera_index: None,
+            microphone: Some(MicrophoneInput::CoreAudio {
+                device_id: 4243,
+                fifo_path: None,
+            }),
+        };
+        let cold =
+            prepare_native_audio_source(&state, "warm-mismatch", &mut capture, &params).await;
+        assert!(state.warm_microphone.is_armed_for(7));
+        if let Some(prepared) = cold {
+            let _ = crate::fifo::cleanup(&prepared.fifo_path);
+        }
     }
 
     fn test_state_with_file_database(directory: &Path) -> AppState {

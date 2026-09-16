@@ -527,6 +527,12 @@ impl NativeAudioSource {
     pub fn stats_handle(&self) -> Arc<AudioCaptureStats> {
         self.stats.clone()
     }
+
+    /// Applies gain/mute to a source that is not attached to a session yet
+    /// (the warm standby microphone, instant-record P5).
+    pub fn update_processing_settings(&self, settings: AudioProcessingSettings) {
+        self.processing_settings.update(settings);
+    }
 }
 
 impl std::fmt::Debug for NativeAudioSource {
@@ -1298,6 +1304,13 @@ fn processed_capture_frame_with_handle(
 }
 
 #[cfg(debug_assertions)]
+/// Test seam: a hardware-free native source (the caption-contract producer)
+/// for warm-microphone and handoff tests.
+#[cfg(test)]
+pub(crate) fn test_native_audio_source(settings: AudioProcessingSettings) -> NativeAudioSource {
+    start_caption_contract_test_audio_source(settings).expect("test audio source starts")
+}
+
 fn start_caption_contract_test_audio_source(
     settings: AudioProcessingSettings,
 ) -> Result<NativeAudioSource> {

@@ -1184,6 +1184,37 @@ pub struct AudioMeterProbeParams {
     pub microphone_muted: bool,
 }
 
+/// `audio.mic.arm` (instant-record P5): keep the selected CoreAudio
+/// microphone open while Studio is visible so `session.start` takes it
+/// warm instead of opening the device and waiting for its first callback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmMicrophoneArmParams {
+    pub microphone_id: Option<String>,
+    #[serde(default)]
+    pub microphone_gain_db: f32,
+    #[serde(default)]
+    pub microphone_muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmMicrophoneStatus {
+    pub armed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    /// Why the microphone is not armed (`not-coreaudio`, `session-active`,
+    /// `disabled-for-smoke`, `open-failed`, `disarmed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub captured_frames: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armed_for_ms: Option<u64>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AudioMeterResult {

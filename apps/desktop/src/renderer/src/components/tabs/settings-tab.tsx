@@ -245,6 +245,27 @@ export function SettingsTab({
               <Field>
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex min-w-0 flex-col gap-0.5">
+                    <FieldLabel htmlFor="keep-microphone-warm">
+                      Keep microphone ready while Studio is visible
+                    </FieldLabel>
+                    <p className="text-xs text-muted-foreground">
+                      Opens the selected microphone as soon as Studio is on screen so Record starts
+                      instantly. macOS shows its microphone indicator while Studio is visible;
+                      hiding the window releases the microphone.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={settings.keepMicrophoneWarm !== false}
+                    id="keep-microphone-warm"
+                    onCheckedChange={(checked) =>
+                      setSettings((current) => ({ ...current, keepMicrophoneWarm: checked }))
+                    }
+                  />
+                </div>
+              </Field>
+              <Field>
+                <div className="flex items-center justify-between gap-3">
+                  <div className="flex min-w-0 flex-col gap-0.5">
                     <FieldLabel htmlFor="animate-scene-changes">Animate scene changes</FieldLabel>
                     <p className="text-xs text-muted-foreground">
                       Layout switches glide into place instead of cutting — visible live on stream
