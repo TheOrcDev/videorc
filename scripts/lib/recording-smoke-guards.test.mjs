@@ -6,6 +6,7 @@ import { afterEach, describe, it } from 'node:test'
 
 import {
   assertFinalizedRecordingStop,
+  awaitPublishedRecordingMp4,
   assertNoZeroByteMkvsCreatedAfter,
   assertNoZeroByteScenarioMkvs,
   assertPublishedRecordingMp4,
@@ -270,3 +271,90 @@ function makeTemporaryDirectory() {
   temporaryDirectories.push(directory)
   return directory
 }
+
+describe('recording smoke background finalization guard', () => {
+  const finalizingStop = {
+    sessionId: 'session-bg',
+    state: 'idle',
+    outputPath: '/tmp/take.mkv',
+    pipeline: { container: 'mkv', finalization: 'finalizing', stages: [] }
+  }
+
+  it('returns the MP4 from the stop reply without polling', async () => {
+    const result = await awaitPublishedRecordingMp4({
+      stopped: { sessionId: 's', state: 'idle', outputPath: '/tmp/take.mp4' },
+      loadSessionItem: async () => {
+        throw new Error('must not poll')
+      }
+    })
+    assert.deepEqual(result, { mp4Path: '/tmp/take.mp4', source: 'stop-reply' })
+  })
+
+  it('polls sessions.list until the background export publishes the MP4', async () => {
+    const items = [
+      { id: 'session-bg', finalizationState: 'finalizing' },
+      { id: 'session-bg', finalizationState: 'finalizing', finalizationProgressPercent: 60 },
+      { id: 'session-bg', finalizationState: 'finalized', mp4Path: '/tmp/take.mp4' }
+    ]
+    let polls = 0
+    const result = await awaitPublishedRecordingMp4({
+      scenarioLabel: 'Take',
+      stopped: finalizingStop,
+      loadSessionItem: async () => items[Math.min(polls++, items.length - 1)],
+      sleep: async () => {},
+      timeoutMs: 10_000
+    })
+    assert.deepEqual(result, { mp4Path: '/tmp/take.mp4', source: 'sessions.list' })
+    assert.equal(polls, 3)
+  })
+
+  it('fails fast when the background export reports failure', async () => {
+    await assert.rejects(
+      () =>
+        awaitPublishedRecordingMp4({
+          scenarioLabel: 'Take',
+          stopped: finalizingStop,
+          loadSessionItem: async () => ({
+            id: 'session-bg',
+            finalizationState: 'failed',
+            finalizationError: 'disk full'
+          }),
+          sleep: async () => {}
+        }),
+      /Take.*finalization failed for session-bg.*disk full/
+    )
+  })
+
+  it('times out naming the session and its last state', async () => {
+    let clock = 0
+    await assert.rejects(
+      () =>
+        awaitPublishedRecordingMp4({
+          scenarioLabel: 'Take',
+          stopped: finalizingStop,
+          loadSessionItem: async () => ({ id: 'session-bg', finalizationState: 'finalizing' }),
+          sleep: async () => {
+            clock += 1000
+          },
+          now: () => clock,
+          timeoutMs: 2500
+        }),
+      /Take.*session-bg did not publish an MP4 within 2500ms \(state finalizing\)/
+    )
+  })
+
+  it('assertFinalizedRecordingStop resolves the background MP4 path', async () => {
+    const mp4Path = await assertFinalizedRecordingStop({
+      scenarioLabel: 'Take',
+      started: { sessionId: 'session-bg', state: 'recording' },
+      stopped: finalizingStop,
+      loadHealthEvents: async () => [],
+      loadSessionItem: async () => ({
+        id: 'session-bg',
+        finalizationState: 'finalized',
+        mp4Path: '/tmp/take.mp4'
+      })
+    })
+    assert.equal(mp4Path, '/tmp/take.mp4')
+  })
+})

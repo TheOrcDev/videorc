@@ -2881,6 +2881,24 @@ export interface SessionListItem {
   derivedFromSessionId?: string
   sourceTitle?: string
   processingKind?: 'noise-cleanup'
+  /** Background MP4 finalization (instant-record P2); absent for legacy rows. */
+  finalizationState?: RecordingFinalizationState
+  /** Live export progress from the backend registry (only while finalizing). */
+  finalizationProgressPercent?: number
+  finalizationError?: string
+}
+
+/** Progress of a background recording finalization job (`recording.finalization`). */
+export interface RecordingFinalizationEvent {
+  sessionId: string
+  state: RecordingFinalizationState
+  progressPercent?: number
+  mp4Path?: string
+  outputPath?: string
+  durationMs?: number
+  fileSizeBytes?: number
+  error?: string
+  updatedAt: string
 }
 
 /** Backwards-compatible name for renderer consumers while the Library model

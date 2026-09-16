@@ -162,6 +162,17 @@ pub enum PlatformAccountCasOutcome {
     Stale(PlatformAccountWriteExpectation),
 }
 
+/// A row left in `finalizing` by an interrupted background export.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingRecordingFinalization {
+    pub session_id: String,
+    pub output_path: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub diagnostics_json: String,
+    pub keep_original_mkv: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFinalization {
@@ -219,6 +230,12 @@ pub struct SessionFinalization {
     /// deleting by the original user-visible path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_cleanup_path: Option<String>,
+    /// Background finalization state (`finalizing` | `finalized` | `failed`).
+    /// `None` leaves the column untouched (legacy inline finalization).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
 }
 
 impl SessionFinalization {
@@ -249,7 +266,20 @@ impl SessionFinalization {
             mp4_staging_directory_cleanup_path: None,
             remove_output_after_commit: false,
             output_cleanup_path: None,
+            finalization_state: None,
+            finalization_error: None,
         })
+    }
+
+    /// Marks the row's background finalization state alongside the commit.
+    pub fn with_finalization_state(
+        mut self,
+        state: impl Into<String>,
+        error: Option<String>,
+    ) -> Self {
+        self.finalization_state = Some(state.into());
+        self.finalization_error = error;
+        self
     }
 
     pub fn with_media_ownership(
@@ -1464,7 +1494,9 @@ impl Database {
                      ELSE COALESCE(?4, mp4_path)
                  END,
                  duration_ms = COALESCE(?5, duration_ms),
-                 diagnostics_json = ?6
+                 diagnostics_json = ?6,
+                 finalization_state = COALESCE(?8, finalization_state),
+                 finalization_error = CASE WHEN ?8 IS NULL THEN finalization_error ELSE ?9 END
              WHERE id = ?1",
             params![
                 finalization.session_id,
@@ -1474,6 +1506,8 @@ impl Database {
                 finalization.duration_ms,
                 finalization.diagnostics_json,
                 clear_mp4_path_if_matches,
+                finalization.finalization_state,
+                finalization.finalization_error,
             ],
         )?;
         if updated != 1 {
@@ -2095,6 +2129,51 @@ impl Database {
     /// advances only the session's MP4 path. Keeping the existing diagnostics
     /// in the recovery record prevents a later crash replay from substituting
     /// the current studio's diagnostics for an older recording.
+    /// Marks a session's background finalization state without touching the
+    /// media columns (used for `failed` and cancellation).
+    pub fn set_session_finalization_state(
+        &self,
+        session_id: &str,
+        state: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE sessions SET finalization_state = ?2, finalization_error = ?3 WHERE id = ?1",
+            params![session_id, state, error],
+        )?;
+        Ok(())
+    }
+
+    /// Sessions whose MP4 export was interrupted (backend exit mid-job).
+    pub fn sessions_pending_finalization(&self) -> Result<Vec<PendingRecordingFinalization>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, output_path, ended_at, duration_ms, COALESCE(diagnostics_json, '{}'),
+                    output_json
+             FROM sessions
+             WHERE finalization_state = 'finalizing'
+             ORDER BY started_at ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let output_json: String = row.get(5)?;
+            let keep_original_mkv = serde_json::from_str::<serde_json::Value>(&output_json)
+                .ok()
+                .and_then(|value| value.get("keepOriginalMkv")?.as_bool())
+                .unwrap_or(false);
+            Ok(PendingRecordingFinalization {
+                session_id: row.get(0)?,
+                output_path: row.get(1)?,
+                ended_at: row.get(2)?,
+                duration_ms: row.get(3)?,
+                diagnostics_json: row.get(4)?,
+                keep_original_mkv,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)
+    }
+
     pub fn session_finalization_snapshot(&self, session_id: &str) -> Result<SessionFinalization> {
         let conn = self.lock()?;
         conn.query_row(
@@ -2122,6 +2201,8 @@ impl Database {
                     mp4_staging_directory_cleanup_path: None,
                     remove_output_after_commit: false,
                     output_cleanup_path: None,
+                    finalization_state: None,
+                    finalization_error: None,
                 })
             },
         )
@@ -3189,7 +3270,7 @@ impl Database {
             "SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                     stream_preset, container, duration_ms, sources_json, layout_json,
                     diagnostics_json, file_size_bytes, derived_from_session_id, source_title,
-                    processing_kind
+                    processing_kind, finalization_state, finalization_error
              FROM sessions
              WHERE library_hidden = 0
              ORDER BY started_at DESC
@@ -3219,6 +3300,8 @@ impl Database {
                 row.get::<_, Option<String>>(15)?,
                 row.get::<_, Option<String>>(16)?,
                 row.get::<_, Option<String>>(17)?,
+                row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<String>>(19)?,
             ))
         })?;
 
@@ -3243,6 +3326,8 @@ impl Database {
                 derived_from_session_id,
                 source_title,
                 processing_kind,
+                finalization_state,
+                finalization_error,
             ) = row?;
 
             // Size truth (Library rewrite L1): stat the VISIBLE file live while
@@ -3274,6 +3359,10 @@ impl Database {
                 derived_from_session_id,
                 source_title,
                 processing_kind,
+                finalization_state: crate::recording_finalization::finalization_state_from_column(
+                    finalization_state.as_deref(),
+                ),
+                finalization_error,
                 quality_status: self.latest_quality_status_for_session_locked(
                     &conn,
                     output_path.as_deref(),
@@ -3323,7 +3412,8 @@ impl Database {
                 page_sessions AS (
                     SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                            stream_preset, container, duration_ms, layout_json, file_size_bytes,
-                           derived_from_session_id, source_title, processing_kind
+                           derived_from_session_id, source_title, processing_kind,
+                           finalization_state, finalization_error
                     FROM sessions
                     WHERE library_hidden = 0
                       AND (
@@ -3458,7 +3548,8 @@ impl Database {
                     quality_candidates.outcome_json,
                     COALESCE(health_counts.count, 0), COALESCE(log_counts.count, 0),
                     COALESCE(artifact_summaries.count, 0), artifact_summaries.ready_kinds,
-                    COALESCE(comment_counts.count, 0)
+                    COALESCE(comment_counts.count, 0),
+                    page_sessions.finalization_state, page_sessions.finalization_error
              FROM page_sessions
              LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
              LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
@@ -3516,6 +3607,12 @@ impl Database {
                     derived_from_session_id: row.get(13)?,
                     source_title: row.get(14)?,
                     processing_kind: row.get(15)?,
+                    finalization_state:
+                        crate::recording_finalization::finalization_state_from_column(
+                            row.get::<_, Option<String>>(22)?.as_deref(),
+                        ),
+                    finalization_progress_percent: None,
+                    finalization_error: row.get(23)?,
                 })
             })?;
         let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
@@ -5707,6 +5804,20 @@ impl Database {
         )?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
+        // Background MP4 finalization (instant-record P2). Never write into
+        // `container` (the 0.9.55 "mp4" row bricked sessions.list).
+        ensure_column(
+            &conn,
+            "sessions",
+            "finalization_state",
+            "finalization_state TEXT",
+        )?;
+        ensure_column(
+            &conn,
+            "sessions",
+            "finalization_error",
+            "finalization_error TEXT",
+        )?;
         ensure_column(
             &conn,
             "noise_cleanup_jobs",

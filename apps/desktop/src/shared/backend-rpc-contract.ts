@@ -39,6 +39,7 @@ import type {
   SessionListParams,
   SessionLogsPage,
   SessionStorageTotals,
+  RecordingFinalizationEvent,
   SessionStopParams,
   StartSessionParams,
   StreamOutputTopologyProbeParams,
@@ -163,6 +164,7 @@ export interface BackendEventMap {
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
   'noiseCleanup.status': NoiseCleanupJob
+  'recording.finalization': RecordingFinalizationEvent
   'platformAccounts.oauth.callback': OAuthCallbackResult
   'recording.status': RecordingStatus
   'stream.targets': StreamTargetsSnapshot
@@ -1198,6 +1200,26 @@ const sceneCommitStatusSchema = boundedSemanticValue(
   )
 )
 
+const recordingFinalizationStateSchema = enumSchema(['none', 'finalizing', 'finalized', 'failed'])
+
+const recordingFinalizationEventSchema = boundedSemanticValue(
+  'a recording finalization event',
+  objectSchema(
+    {
+      sessionId: boundedString,
+      state: recordingFinalizationStateSchema,
+      progressPercent: optionalSchema(numberSchema({ min: 0, max: 100 })),
+      mp4Path: optionalSchema(boundedPath),
+      outputPath: optionalSchema(boundedPath),
+      durationMs: optionalSchema(nonNegativeInteger),
+      fileSizeBytes: optionalSchema(nonNegativeInteger),
+      error: optionalSchema(stringSchema({ maxLength: 16_384 })),
+      updatedAt: timestamp
+    },
+    { allowUnknown: false }
+  )
+) as RuntimeSchema<RecordingFinalizationEvent>
+
 const sessionSummarySchema = boundedSemanticValue(
   'a session summary',
   objectSchema(
@@ -1240,7 +1262,10 @@ const sessionSummarySchema = boundedSemanticValue(
       commentCount: nonNegativeInteger,
       derivedFromSessionId: optionalSchema(boundedString),
       sourceTitle: optionalSchema(stringSchema({ maxLength: 16_384 })),
-      processingKind: optionalSchema(literalSchema('noise-cleanup'))
+      processingKind: optionalSchema(literalSchema('noise-cleanup')),
+      finalizationState: optionalSchema(recordingFinalizationStateSchema),
+      finalizationProgressPercent: optionalSchema(numberSchema({ min: 0, max: 100 })),
+      finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 }))
     },
     { allowUnknown: false }
   )
@@ -1786,6 +1811,7 @@ const runtimeEventSchemas = {
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,
   'noiseCleanup.status': noiseCleanupJobSchema,
+  'recording.finalization': recordingFinalizationEventSchema,
   'platformAccounts.oauth.callback': oauthCallbackResultSchema,
   'recording.status': recordingStatusSchema,
   'stream.targets': streamTargetsSnapshotSchema,

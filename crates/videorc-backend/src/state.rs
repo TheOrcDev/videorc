@@ -1089,6 +1089,9 @@ pub struct AppState {
     /// which publishes it with the terminal status.
     pub recording_stop_timeline:
         Arc<StdMutex<Option<crate::recording_timeline::RecordingStopTimeline>>>,
+    /// Background MP4 finalization jobs (instant-record P2). Consulted by the
+    /// Library, the quit path and the updater gate.
+    pub recording_finalization: Arc<crate::recording_finalization::RecordingFinalizationRegistry>,
     pub live_chat: LiveChatSlot,
     pub live_chat_persistence: LiveChatPersistence,
     /// In-memory product-account session override (deep-link sign-in / Sign out).
@@ -1212,6 +1215,9 @@ impl AppState {
             noise_cleanup: Arc::new(crate::noise_cleanup::NoiseCleanupRegistry::default()),
             recording_started_once: Arc::new(AtomicBool::new(false)),
             recording_stop_timeline: Arc::new(StdMutex::new(None)),
+            recording_finalization: Arc::new(
+                crate::recording_finalization::RecordingFinalizationRegistry::default(),
+            ),
             live_chat: Arc::new(tokio::sync::Mutex::new(LiveChatCoordinator::default())),
             account_session: Arc::new(tokio::sync::Mutex::new(
                 crate::account::restore_persisted_account(),

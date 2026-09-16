@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -100,7 +101,7 @@ try {
 
     await sleep(1200)
     const stopped = await request(ws, timeoutMs, 'session.stop')
-    const outputPath = stopped.outputPath ?? started.outputPath
+    const outputPath = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
     verifyOutput(outputPath, statuses, sessionId)
   } finally {
     if (redScreen?.id) {

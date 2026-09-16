@@ -53,6 +53,7 @@ mod process_job;
 mod protocol;
 mod publish_clips;
 mod recording;
+mod recording_finalization;
 mod recording_timeline;
 mod remote_control;
 mod repair;
@@ -469,6 +470,7 @@ async fn run_backend() -> Result<()> {
     // Resume interrupted repair jobs through the idle-only maintenance queue.
     tokio::spawn(resume_pending_repair_jobs(state.clone()));
     noise_cleanup::resume_interrupted(&state);
+    recording::resume_pending_recording_finalizations(&state);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal(state.clone()))
         .await?;
@@ -959,6 +961,18 @@ async fn acquire_interruption_lease_handler(
             .into_response();
     }
 
+    // Background MP4 exports are part of "capture not idle" for the updater /
+    // restart gate: the terminal recording status is published before they run.
+    if state.recording_finalization.has_active_jobs() {
+        return (
+            StatusCode::CONFLICT,
+            Json(InterruptionLeaseErrorResponse {
+                code: "capture-not-idle",
+                message: "Finishing the MP4 export for the last recording.".to_string(),
+            }),
+        )
+            .into_response();
+    }
     match state
         .capture_interruption
         .try_acquire_interruption(&query.owner_id, &query.action)
@@ -8716,7 +8730,20 @@ async fn handle_text_message_with_role(
                     .database
                     .list_session_items_page(params.cursor.as_deref(), params.limit)
                 {
-                    Ok(page) => ServerResponse::ok(command.id, page),
+                    Ok(mut page) => {
+                        // Live export progress comes from the registry, never
+                        // from the database.
+                        for item in &mut page.items {
+                            if let Some(percent) =
+                                state.recording_finalization.progress_for_session(&item.id)
+                            {
+                                item.finalization_progress_percent = Some(percent);
+                                item.finalization_state =
+                                    Some(protocol::RecordingFinalizationState::Finalizing);
+                            }
+                        }
+                        ServerResponse::ok(command.id, page)
+                    }
                     Err(error) => {
                         ServerResponse::error(command.id, "sessions-list-failed", error.to_string())
                     }
@@ -8868,6 +8895,14 @@ async fn handle_text_message_with_role(
                     )
                 }
                 Ok(params) => {
+                    // A deletion wins over an in-flight background export: stop
+                    // the export so it cannot publish an MP4 into a Trashed row.
+                    for session_id in &params.session_ids {
+                        let _ = state
+                            .recording_finalization
+                            .cancel_and_wait(session_id, Duration::from_secs(5))
+                            .await;
+                    }
                     match prepare_session_deletions_exclusively(state, &params.session_ids).await {
                         Ok(operations) => ServerResponse::ok(
                             command.id,
@@ -9809,6 +9844,18 @@ async fn handle_text_message_with_role(
         }
         "session.remux_mp4" => {
             match serde_json::from_value::<protocol::RemuxSessionParams>(command.params) {
+                Ok(params)
+                    if state
+                        .recording_finalization
+                        .active_for_session(&params.session_id)
+                        .is_some() =>
+                {
+                    ServerResponse::error(
+                        command.id,
+                        "finalization-in-progress",
+                        "This recording is still exporting its MP4 in the background.",
+                    )
+                }
                 Ok(params)
                     if noise_cleanup::session_mutation_blocked(state, &params.session_id)
                         .unwrap_or(true) =>

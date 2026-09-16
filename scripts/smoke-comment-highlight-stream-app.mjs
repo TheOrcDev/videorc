@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -267,7 +268,11 @@ async function runScenario(ws, smoke, scenario, index) {
     }
 
     if (scenario.recordEnabled) {
-      const recordingPath = stopped.outputPath ?? started.outputPath
+      const recordingPath = await resolveFinalRecordingPath({
+        started,
+        stopped,
+        timeoutMs: 120_000
+      })
       assertArtifactFile(scenario.label, recordingPath, 'local recording')
       const recordingQuality = await analyzeRecording(recordingPath, {
         ffmpegPath,

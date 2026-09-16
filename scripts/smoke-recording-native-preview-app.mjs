@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -470,7 +471,7 @@ async function runNativePreviewRecordingScenario(
   if (!surfaceDuring) {
     throw new Error(`[${scenario.label}] Preview surface evidence was unavailable after recording.`)
   }
-  const outputPath = stopped.outputPath ?? started.outputPath
+  const outputPath = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error(
       `[${scenario.label}] Recording output was not created: ${outputPath ?? 'missing path'}`

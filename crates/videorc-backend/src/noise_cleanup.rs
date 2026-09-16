@@ -1106,7 +1106,7 @@ fn read_bounded_tail(mut reader: impl Read, limit: usize) -> Vec<u8> {
     tail
 }
 
-fn parse_progress_line(line: &str, duration_seconds: f64) -> Option<u8> {
+pub(crate) fn parse_progress_line(line: &str, duration_seconds: f64) -> Option<u8> {
     let (key, value) = line.trim().split_once('=')?;
     if !matches!(key, "out_time_us" | "out_time_ms") || duration_seconds <= 0.0 {
         return None;

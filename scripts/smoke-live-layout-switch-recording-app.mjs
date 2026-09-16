@@ -206,9 +206,13 @@ async function runSwitchScenario(ws, smoke, { label, sources, streamTarget, dura
     stopping = true
   }
   const stopped = await request(ws, timeoutMs, 'session.stop')
-  await assertRecordingArtifact(label, stopped.outputPath ?? started.outputPath, {
-    minVideoSeconds: 2
-  })
+  await assertRecordingArtifact(
+    label,
+    await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 }),
+    {
+      minVideoSeconds: 2
+    }
+  )
 }
 
 function sessionParams({ sources, streamTarget, outputDirectoryCapability }) {

@@ -57,6 +57,11 @@ import {
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore, useStudioRecording, useStudioRecordingState } from '@/hooks/use-studio'
 import type { FileAssessment, GateStatus, SessionSummary } from '@/lib/backend'
+import {
+  finalizationFailed,
+  finalizingBadgeLabel,
+  isFinalizingSession
+} from '@/lib/session-finalization'
 import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
 import {
   LIBRARY_FILTERS,
@@ -516,6 +521,10 @@ function LibraryRow({
   // A live row shows the capture's ticking elapsed time; the session row only
   // gets duration_ms at finalize.
   const live = isLiveSession(session, recording)
+  // Background MP4 export (instant-record P2): Idle arrives while the export
+  // still runs; the row says so instead of claiming an MKV.
+  const finalizing = isFinalizingSession(session)
+  const exportFailed = finalizationFailed(session)
   return (
     <div
       ref={registerRow}
@@ -570,6 +579,15 @@ function LibraryRow({
       <div>
         {live ? (
           <StatusDot pulse label={liveSessionLabel(recording.state)} tone="error" />
+        ) : finalizing ? (
+          <Badge variant="outline">
+            <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+            {finalizingBadgeLabel(session)}
+          </Badge>
+        ) : exportFailed ? (
+          <Badge title={session.finalizationError} variant="destructive">
+            MP4 failed
+          </Badge>
         ) : format ? (
           <Badge variant={session.mp4Path ? 'success' : 'outline'}>{format}</Badge>
         ) : null}
@@ -602,13 +620,15 @@ function LiveSessionDuration(): ReactElement {
 export function SessionPoster({
   session
 }: {
-  session: Pick<SessionSummary, 'id' | 'durationMs' | 'status'>
+  session: Pick<SessionSummary, 'id' | 'durationMs' | 'status' | 'finalizationState'>
 }): ReactElement {
   const { connection, ensureSessionPoster } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const [attempt, setAttempt] = useState(0)
   const [failed, setFailed] = useState(false)
-  const running = session.status === 'running'
+  // Posters are extracted after finalization; while the MP4 is still exporting
+  // the request would 404, so treat a finalizing row like a running one.
+  const running = session.status === 'running' || isFinalizingSession(session)
   const url = running ? null : sessionPosterUrl(connection, session)
   const source = url && attempt > 0 ? `${url}&attempt=${attempt}` : url
   return (
@@ -700,9 +720,13 @@ function RowActions({
   const live = isLiveSession(session, recording)
   const canRepair = assessment?.repairable ?? false
   const persistedRepaired = session.qualityStatus?.status === 'repaired'
-  const canExportMp4 = Boolean(
-    session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
-  )
+  // Background finalization (instant-record P2): the file is still being
+  // produced, so play/duplicate/export wait; a failed export gets a retry.
+  const finalizing = isFinalizingSession(session)
+  const canExportMp4 =
+    Boolean(
+      session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
+    ) && !finalizing
   const canOpenComments = session.commentCount > 0
   const cleanupJob = latestNoiseCleanupJobForSession(noiseCleanupJobs, session.id)
   const cleanupView = withNoiseCleanupConnectionState(
@@ -714,7 +738,7 @@ function RowActions({
     }),
     wsStatus === 'connected'
   )
-  const fileActionsBusy = busy || cleanupView.conflictsWithFileActions
+  const fileActionsBusy = busy || cleanupView.conflictsWithFileActions || finalizing
   const cleanupMenuAction = cleanupView.menuAction
 
   const playFile = async (): Promise<void> => {
@@ -907,7 +931,7 @@ function RowActions({
               onClick={() => void remuxSession(session.id)}
             >
               <VideoFileIcon />
-              Export MP4
+              {finalizationFailed(session) ? 'Retry MP4 export' : 'Export MP4'}
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={!canOpenComments || busy || disconnected}

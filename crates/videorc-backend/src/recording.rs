@@ -64,6 +64,7 @@ use crate::encoder_bridge::{
 };
 use crate::entitlements;
 use crate::ffmpeg::{ffprobe_path_for, resolve_ffmpeg_path};
+use crate::ffmpeg_work::ExportPermit;
 use crate::ffmpeg_work::{CapturePermit, MaintenanceCancelToken};
 use crate::h264_profile::{h264_high_level_label, quality_posture_canvas_envelope};
 #[cfg(target_os = "windows")]
@@ -95,6 +96,10 @@ use crate::protocol::{
     StreamOutputTopologyProbeParams, StreamOutputTopologyProbeResult,
     StreamOutputTopologyProbeState, StreamOutputTopologyRole, StreamScreen, VideoPreset,
     VideoSettings,
+};
+use crate::recording_finalization::{
+    FINALIZATION_STATE_FAILED, FINALIZATION_STATE_FINALIZED, FINALIZATION_STATE_FINALIZING,
+    FinalizationEventDetail, FinalizationJobControl, emit_finalization_event,
 };
 use crate::recording_timeline::{
     RecordingStartPhase, RecordingStartTimeline, RecordingStopPhase, RecordingStopTimeline,
@@ -5719,6 +5724,9 @@ pub async fn finalize_active_recording_for_shutdown(state: &AppState) -> Result<
         .ffmpeg_work
         .wait_for_capture_and_finalization_idle()
         .await;
+    // Belt and braces with the export permit: every background finalization
+    // job must have left the registry before shutdown may proceed.
+    state.recording_finalization.wait_idle().await;
     if state.recording.lock().await.is_some() {
         bail!("Recording lifecycle became idle while an active recording slot remained");
     }
@@ -6543,6 +6551,11 @@ async fn wait_for_final_recording_status(
     .flatten()
 }
 
+/// Stops a background finalization export child (its session is being deleted).
+pub(crate) async fn signal_finalization_child(pid: u32) -> Result<()> {
+    send_process_signal(pid, "TERM").await
+}
+
 async fn send_process_signal(pid: u32, signal: &str) -> Result<()> {
     if pid == 0 {
         bail!("Refusing to signal reserved process id 0");
@@ -6568,7 +6581,7 @@ async fn wait_for_process_exit(pid: u32, wait: Duration) -> bool {
 /// What the post-recording quality gate (slice 8) needs to judge a finalized file:
 /// the session's intended fps and whether an audio source was selected.
 #[derive(Debug, Clone, Copy)]
-struct PostRecordingGate {
+pub(crate) struct PostRecordingGate {
     intended_fps: Option<f64>,
     expect_audio: bool,
 }
@@ -7353,6 +7366,10 @@ async fn monitor_session(
             ),
         );
     }
+    // Instant stop (instant-record P2): a recording leg hands MP4 export and the
+    // rest of finalization to a background job that is spawned only after the
+    // terminal status is published.
+    let mut pending_finalization_job: Option<PendingRecordingFinalizationJob> = None;
     let terminal_status = match status {
         Ok(exit_status)
             if should_finalize_recording_session(
@@ -7395,104 +7412,230 @@ async fn monitor_session(
                 }
             });
             mark_stop_timeline(&state, RecordingStopPhase::MkvBound);
-            let mut finalization_recovery_path = None;
-            let published_mp4 = if let Some(output_path) = output_path.as_ref() {
-                match export_completed_recording_to_mp4(
-                    &state,
+            if let Some(input_mkv) = output_path.clone() {
+                // The MKV is closed and bound. Commit the row now (status
+                // completed, MKV as the visible file, finalization = finalizing)
+                // and publish Idle; the MP4 export, caption artifacts, final
+                // duration probe and poster run in the background job below.
+                monitored_recording
+                    .pipeline
+                    .mark_finalizing("Exporting MP4 in the background.");
+                let mut inline_recovery_path = None;
+                let inline_commit = SessionFinalization::new(
                     &session_id,
-                    &monitored_recording.ffmpeg_path,
-                    output_path,
-                    Mp4ExportFinalizationContext {
-                        ended_at: &ended_at,
-                        duration_ms,
-                        diagnostics: &final_diagnostics,
-                        output_ownership: output_ownership.clone(),
-                        keep_original_media: monitored_recording.keep_original_media,
-                    },
-                    &mut finalization_recovery_path,
+                    "completed",
+                    Some(ended_at.clone()),
+                    None,
+                    duration_ms,
+                    &final_diagnostics,
                 )
-                .await
-                {
-                    Ok(path) => path,
-                    Err(error) => {
-                        let message = format!(
-                            "MP4 export failed; keeping MKV recovery file at {}. {error}",
-                            output_path.display()
-                        );
-                        state.emit_log("warn", &message);
+                .map_err(|error| format!("Could not serialize final session metadata: {error:#}"))
+                .map(|finalization| {
+                    let mut finalization = finalization
+                        .with_media_ownership(
+                            Some(input_mkv.display().to_string()),
+                            output_ownership
+                                .as_ref()
+                                .map(|ownership| ownership.content_identity.clone()),
+                            None,
+                            None,
+                            false,
+                        )
+                        .with_finalization_state(FINALIZATION_STATE_FINALIZING, None);
+                    if let Some(ownership) = output_ownership.as_ref() {
+                        finalization = finalization
+                            .with_output_file_object_identity(ownership.object_identity.clone());
+                    }
+                    finalization
+                })
+                .and_then(|finalization| {
+                    persist_finalization_or_recovery(
+                        &state,
+                        &finalization,
+                        &mut inline_recovery_path,
+                    )
+                });
+                mark_stop_timeline(&state, RecordingStopPhase::DbCommit);
+                match inline_commit {
+                    Err(message) => {
                         let _ = emit_health_event(
                             &state,
                             Some(&session_id),
-                            HealthLevel::Warn,
-                            "mp4-export-failed",
+                            HealthLevel::Error,
+                            "recording-metadata-recovery-required",
                             &message,
                         );
-                        None
+                        RecordingStatus {
+                            state: RecordingState::Failed,
+                            session_id: Some(session_id.clone()),
+                            output_path: Some(input_mkv.display().to_string()),
+                            stream_url: None,
+                            started_at: None,
+                            audio_tracks: Vec::new(),
+                            pipeline: Some(monitored_recording.pipeline.status()),
+                            duration_ms,
+                            message: Some(message),
+                        }
+                    }
+                    Ok(()) => {
+                        // Permit and registry entry exist BEFORE the terminal
+                        // status so the quit/updater gates never observe an
+                        // idle gap between "capture idle" and "export running".
+                        let export_permit = state.ffmpeg_work.begin_background_export();
+                        let control = state.recording_finalization.register(&session_id);
+                        emit_finalization_event(
+                            &state,
+                            &session_id,
+                            crate::protocol::RecordingFinalizationState::Finalizing,
+                            FinalizationEventDetail {
+                                progress_percent: Some(0),
+                                output_path: Some(input_mkv.display().to_string()),
+                                ..FinalizationEventDetail::default()
+                            },
+                        );
+                        pending_finalization_job = Some(PendingRecordingFinalizationJob {
+                            request: RecordingFinalizationRequest {
+                                session_id: session_id.clone(),
+                                ffmpeg_path: monitored_recording.ffmpeg_path.clone(),
+                                input_mkv: input_mkv.clone(),
+                                output_ownership: output_ownership.clone(),
+                                keep_original_media: monitored_recording.keep_original_media,
+                                ended_at: ended_at.clone(),
+                                wall_duration_ms: duration_ms,
+                                final_diagnostics: final_diagnostics.clone(),
+                                finalized_caption_artifact: Some(finalized_caption_artifact),
+                                captioned_copy_requested: monitored_recording
+                                    .captioned_copy_requested,
+                                post_recording_gate: Some(gate),
+                                pipeline_reported_freezes: pipeline_reported_frozen_output(
+                                    &final_diagnostics,
+                                ),
+                            },
+                            control,
+                            export_permit,
+                        });
+                        let _ = emit_health_event(
+                            &state,
+                            Some(&session_id),
+                            HealthLevel::Info,
+                            "recording-finalized",
+                            "Recording saved; exporting the MP4 in the background.",
+                        );
+                        mark_stop_timeline(&state, RecordingStopPhase::Finalized);
+                        RecordingStatus {
+                            state: RecordingState::Idle,
+                            session_id: Some(session_id.clone()),
+                            output_path: Some(input_mkv.display().to_string()),
+                            stream_url: None,
+                            started_at: None,
+                            audio_tracks: Vec::new(),
+                            pipeline: Some(monitored_recording.pipeline.status()),
+                            duration_ms,
+                            message: Some(
+                                "Recording saved; exporting the MP4 in the background.".to_string(),
+                            ),
+                        }
                     }
                 }
             } else {
-                None
-            };
-            mark_stop_timeline(&state, RecordingStopPhase::Mp4Export);
-            let mp4_path = published_mp4
-                .as_ref()
-                .map(|published| published.path.clone());
-            let final_path = mp4_path.clone().or(output_path.clone());
+                let mut finalization_recovery_path = None;
+                let published_mp4 = if let Some(output_path) = output_path.as_ref() {
+                    match export_completed_recording_to_mp4(
+                        &state,
+                        &session_id,
+                        &monitored_recording.ffmpeg_path,
+                        output_path,
+                        Mp4ExportFinalizationContext {
+                            ended_at: &ended_at,
+                            duration_ms,
+                            diagnostics: &final_diagnostics,
+                            output_ownership: output_ownership.clone(),
+                            keep_original_media: monitored_recording.keep_original_media,
+                        },
+                        &mut finalization_recovery_path,
+                    )
+                    .await
+                    {
+                        Ok(path) => path,
+                        Err(error) => {
+                            let message = format!(
+                                "MP4 export failed; keeping MKV recovery file at {}. {error}",
+                                output_path.display()
+                            );
+                            state.emit_log("warn", &message);
+                            let _ = emit_health_event(
+                                &state,
+                                Some(&session_id),
+                                HealthLevel::Warn,
+                                "mp4-export-failed",
+                                &message,
+                            );
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                mark_stop_timeline(&state, RecordingStopPhase::Mp4Export);
+                let mp4_path = published_mp4
+                    .as_ref()
+                    .map(|published| published.path.clone());
+                let final_path = mp4_path.clone().or(output_path.clone());
 
-            // Establish ownership of every finalized caption artifact before
-            // publishing Idle. The renderer may start another capture as soon
-            // as it sees Idle; by then this request must already survive as an
-            // independent queued render rather than borrowing the next epoch.
-            if let Some(final_path) = final_path.as_ref() {
-                let caption_artifact = crate::captions::write_caption_artifacts(
-                    &state,
-                    &gate_session_id,
-                    final_path,
-                    finalized_caption_artifact,
-                )
-                .await;
-                mark_stop_timeline(&state, RecordingStopPhase::Captions);
-                if should_begin_captioned_copy_render(
-                    monitored_recording.captioned_copy_requested,
-                    caption_artifact.chunks.len(),
-                ) {
-                    crate::captions::begin_caption_cue_render(
+                // Establish ownership of every finalized caption artifact before
+                // publishing Idle. The renderer may start another capture as soon
+                // as it sees Idle; by then this request must already survive as an
+                // independent queued render rather than borrowing the next epoch.
+                if let Some(final_path) = final_path.as_ref() {
+                    let caption_artifact = crate::captions::write_caption_artifacts(
                         &state,
                         &gate_session_id,
-                        &monitored_recording.ffmpeg_path,
                         final_path,
-                        &caption_artifact,
+                        finalized_caption_artifact,
                     )
                     .await;
-                }
-            } else {
-                let dropped = finalized_caption_artifact.chunks.len();
-                if dropped > 0 {
-                    state.emit_log(
+                    mark_stop_timeline(&state, RecordingStopPhase::Captions);
+                    if should_begin_captioned_copy_render(
+                        monitored_recording.captioned_copy_requested,
+                        caption_artifact.chunks.len(),
+                    ) {
+                        crate::captions::begin_caption_cue_render(
+                            &state,
+                            &gate_session_id,
+                            &monitored_recording.ffmpeg_path,
+                            final_path,
+                            &caption_artifact,
+                        )
+                        .await;
+                    }
+                } else {
+                    let dropped = finalized_caption_artifact.chunks.len();
+                    if dropped > 0 {
+                        state.emit_log(
                         "info",
                         format!(
                             "Discarded {dropped} ephemeral live-caption cue(s) after the stream-only session ended."
                         ),
                     );
+                    }
                 }
-            }
-            // The Library describes the media file, not how long the record
-            // button was active. A stalled encoder can produce a much shorter
-            // timeline than wall time, so persist the probed finalized duration
-            // and retain elapsed time only as a fallback when probing fails.
-            let duration_ms = match mp4_path.as_ref().or(output_path.as_ref()) {
-                Some(final_path) => match timeout(
-                    FINAL_DURATION_PROBE_TIMEOUT,
-                    crate::session_ops::probe_duration_ms(
-                        &monitored_recording.ffmpeg_path,
-                        final_path,
-                    ),
-                )
-                .await
-                {
-                    Ok(probed) => probed.or(duration_ms),
-                    Err(_) => {
-                        state.emit_log(
+                // The Library describes the media file, not how long the record
+                // button was active. A stalled encoder can produce a much shorter
+                // timeline than wall time, so persist the probed finalized duration
+                // and retain elapsed time only as a fallback when probing fails.
+                let duration_ms = match mp4_path.as_ref().or(output_path.as_ref()) {
+                    Some(final_path) => match timeout(
+                        FINAL_DURATION_PROBE_TIMEOUT,
+                        crate::session_ops::probe_duration_ms(
+                            &monitored_recording.ffmpeg_path,
+                            final_path,
+                        ),
+                    )
+                    .await
+                    {
+                        Ok(probed) => probed.or(duration_ms),
+                        Err(_) => {
+                            state.emit_log(
                             "warn",
                             format!(
                                 "Final duration probe timed out after {}s for {}; keeping the wall-duration fallback.",
@@ -7500,134 +7643,138 @@ async fn monitor_session(
                                 final_path.display()
                             ),
                         );
-                        duration_ms
-                    }
-                },
-                None => duration_ms,
-            };
-            mark_stop_timeline(&state, RecordingStopPhase::Probe);
-            let persistence_error = SessionFinalization::new(
-                &session_id,
-                "completed",
-                Some(ended_at.clone()),
-                mp4_path.as_ref().map(|path| path.display().to_string()),
-                duration_ms,
-                &final_diagnostics,
-            )
-            .map_err(|error| format!("Could not serialize final session metadata: {error:#}"))
-            .map(|finalization| {
-                let mut finalization = finalization.with_media_ownership(
-                    output_path.as_ref().map(|path| path.display().to_string()),
-                    output_ownership
-                        .as_ref()
-                        .map(|ownership| ownership.content_identity.clone()),
-                    published_mp4
-                        .as_ref()
-                        .map(|published| published.staging_path.display().to_string()),
-                    published_mp4
-                        .as_ref()
-                        .map(|published| published.identity.clone()),
-                    published_mp4.is_some(),
-                );
-                if let Some(ownership) = output_ownership.as_ref() {
-                    finalization = finalization
-                        .with_output_file_object_identity(ownership.object_identity.clone());
-                }
-                if let Some(published) = published_mp4.as_ref() {
-                    finalization
-                        .with_mp4_staging_file_object_identity(published.object_identity.clone())
-                        .with_mp4_staging_directory_ownership(
-                            published.staging_directory_path.display().to_string(),
-                            published.staging_directory_object_identity.clone(),
-                            published
-                                .staging_directory_cleanup_path
-                                .display()
-                                .to_string(),
-                        )
-                } else {
-                    finalization
-                }
-            })
-            .and_then(|finalization| {
-                persist_finalization_or_recovery(
-                    &state,
-                    &finalization,
-                    &mut finalization_recovery_path,
+                            duration_ms
+                        }
+                    },
+                    None => duration_ms,
+                };
+                mark_stop_timeline(&state, RecordingStopPhase::Probe);
+                let persistence_error = SessionFinalization::new(
+                    &session_id,
+                    "completed",
+                    Some(ended_at.clone()),
+                    mp4_path.as_ref().map(|path| path.display().to_string()),
+                    duration_ms,
+                    &final_diagnostics,
                 )
-            })
-            .err();
-            mark_stop_timeline(&state, RecordingStopPhase::DbCommit);
-            if let Some(message) = persistence_error.as_deref() {
-                let _ = emit_health_event(
-                    &state,
-                    Some(&session_id),
-                    HealthLevel::Error,
-                    "recording-metadata-recovery-required",
-                    message,
-                );
-            } else {
-                let _ = emit_health_event(
-                    &state,
-                    Some(&session_id),
-                    HealthLevel::Info,
-                    "recording-finalized",
-                    "Recording pipeline finalized and output metadata was saved.",
-                );
-                mark_stop_timeline(&state, RecordingStopPhase::Finalized);
-            }
-            let terminal_status = RecordingStatus {
-                state: if persistence_error.is_some() {
-                    RecordingState::Failed
+                .map_err(|error| format!("Could not serialize final session metadata: {error:#}"))
+                .map(|finalization| {
+                    let mut finalization = finalization.with_media_ownership(
+                        output_path.as_ref().map(|path| path.display().to_string()),
+                        output_ownership
+                            .as_ref()
+                            .map(|ownership| ownership.content_identity.clone()),
+                        published_mp4
+                            .as_ref()
+                            .map(|published| published.staging_path.display().to_string()),
+                        published_mp4
+                            .as_ref()
+                            .map(|published| published.identity.clone()),
+                        published_mp4.is_some(),
+                    );
+                    if let Some(ownership) = output_ownership.as_ref() {
+                        finalization = finalization
+                            .with_output_file_object_identity(ownership.object_identity.clone());
+                    }
+                    if let Some(published) = published_mp4.as_ref() {
+                        finalization
+                            .with_mp4_staging_file_object_identity(
+                                published.object_identity.clone(),
+                            )
+                            .with_mp4_staging_directory_ownership(
+                                published.staging_directory_path.display().to_string(),
+                                published.staging_directory_object_identity.clone(),
+                                published
+                                    .staging_directory_cleanup_path
+                                    .display()
+                                    .to_string(),
+                            )
+                    } else {
+                        finalization
+                    }
+                })
+                .and_then(|finalization| {
+                    persist_finalization_or_recovery(
+                        &state,
+                        &finalization,
+                        &mut finalization_recovery_path,
+                    )
+                })
+                .err();
+                mark_stop_timeline(&state, RecordingStopPhase::DbCommit);
+                if let Some(message) = persistence_error.as_deref() {
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Error,
+                        "recording-metadata-recovery-required",
+                        message,
+                    );
                 } else {
-                    RecordingState::Idle
-                },
-                session_id: Some(session_id.clone()),
-                output_path: mp4_path
-                    .as_ref()
-                    .or(output_path.as_ref())
-                    .map(|path| path.display().to_string()),
-                stream_url: None,
-                started_at: None,
-                audio_tracks: Vec::new(),
-                pipeline: Some(monitored_recording.pipeline.status()),
-                duration_ms,
-                message: Some(
-                    persistence_error.unwrap_or_else(|| "Capture session finalized.".to_string()),
-                ),
-            };
-            // Slice 8: check (and, if needed, repair in place) the finalized file off
-            // the hot path. The recording is already marked complete; the gate only ever
-            // replaces the visible file with a validated better version, keeping a backup.
-            if let Some(final_path) = final_path {
-                // Library poster (L2): one thumbnail frame per recording,
-                // extracted off the hot path under the idle ffmpeg permit.
-                {
-                    let poster_state = state.clone();
-                    let poster_session_id = gate_session_id.clone();
-                    let poster_path = final_path.display().to_string();
-                    let poster_ffmpeg = monitored_recording.ffmpeg_path.clone();
-                    tokio::spawn(async move {
-                        crate::posters::ensure_session_poster(
-                            &poster_state,
-                            &poster_session_id,
-                            &poster_path,
-                            duration_ms,
-                            &poster_ffmpeg,
-                        )
-                        .await;
-                    });
+                    let _ = emit_health_event(
+                        &state,
+                        Some(&session_id),
+                        HealthLevel::Info,
+                        "recording-finalized",
+                        "Recording pipeline finalized and output metadata was saved.",
+                    );
+                    mark_stop_timeline(&state, RecordingStopPhase::Finalized);
                 }
-                enqueue_post_recording_gate(
-                    state.clone(),
-                    gate_session_id,
-                    monitored_recording.ffmpeg_path.clone(),
-                    final_path,
-                    gate,
-                    pipeline_reported_frozen_output(&final_diagnostics),
-                    duration_ms.and_then(|ms| u64::try_from(ms).ok()),
-                );
+                let terminal_status = RecordingStatus {
+                    state: if persistence_error.is_some() {
+                        RecordingState::Failed
+                    } else {
+                        RecordingState::Idle
+                    },
+                    session_id: Some(session_id.clone()),
+                    output_path: mp4_path
+                        .as_ref()
+                        .or(output_path.as_ref())
+                        .map(|path| path.display().to_string()),
+                    stream_url: None,
+                    started_at: None,
+                    audio_tracks: Vec::new(),
+                    pipeline: Some(monitored_recording.pipeline.status()),
+                    duration_ms,
+                    message: Some(
+                        persistence_error
+                            .unwrap_or_else(|| "Capture session finalized.".to_string()),
+                    ),
+                };
+                // Slice 8: check (and, if needed, repair in place) the finalized file off
+                // the hot path. The recording is already marked complete; the gate only ever
+                // replaces the visible file with a validated better version, keeping a backup.
+                if let Some(final_path) = final_path {
+                    // Library poster (L2): one thumbnail frame per recording,
+                    // extracted off the hot path under the idle ffmpeg permit.
+                    {
+                        let poster_state = state.clone();
+                        let poster_session_id = gate_session_id.clone();
+                        let poster_path = final_path.display().to_string();
+                        let poster_ffmpeg = monitored_recording.ffmpeg_path.clone();
+                        tokio::spawn(async move {
+                            crate::posters::ensure_session_poster(
+                                &poster_state,
+                                &poster_session_id,
+                                &poster_path,
+                                duration_ms,
+                                &poster_ffmpeg,
+                            )
+                            .await;
+                        });
+                    }
+                    enqueue_post_recording_gate(
+                        state.clone(),
+                        gate_session_id,
+                        monitored_recording.ffmpeg_path.clone(),
+                        final_path,
+                        gate,
+                        pipeline_reported_frozen_output(&final_diagnostics),
+                        duration_ms.and_then(|ms| u64::try_from(ms).ok()),
+                    );
+                }
+                terminal_status
             }
-            terminal_status
         }
         Ok(exit_status) => {
             // Only the RECORDING bridge condemns the session here — a stream
@@ -7750,6 +7897,9 @@ async fn monitor_session(
     state.capture_interruption.capture_finished();
     state.emit_event("recording.status", terminal_status);
     publish_stop_timeline(&state, &stop_timeline_session_id, terminal_outcome).await;
+    if let Some(job) = pending_finalization_job.take() {
+        tokio::spawn(run_recording_finalization_job(state.clone(), job));
+    }
     drop(finalizing_permit);
 
     restart_idle_live_preview_if_desired(state).await;
@@ -7767,6 +7917,482 @@ fn cancel_deleted_quality_check(job: &mut RepairJob, path: &Path, now: String) -
         now,
     );
     true
+}
+
+/// Everything a stopped recording still needs after its MKV is closed.
+pub(crate) struct RecordingFinalizationRequest {
+    pub session_id: String,
+    pub ffmpeg_path: String,
+    pub input_mkv: PathBuf,
+    pub output_ownership: Option<SessionFileBoundIdentity>,
+    pub keep_original_media: bool,
+    pub ended_at: String,
+    pub wall_duration_ms: Option<i64>,
+    pub final_diagnostics: DiagnosticStats,
+    pub finalized_caption_artifact: Option<crate::captions::FinalizedCaptionArtifact>,
+    pub captioned_copy_requested: bool,
+    pub post_recording_gate: Option<PostRecordingGate>,
+    pub pipeline_reported_freezes: bool,
+}
+
+pub(crate) struct PendingRecordingFinalizationJob {
+    pub request: RecordingFinalizationRequest,
+    pub control: Arc<FinalizationJobControl>,
+    /// Held for the job's lifetime: defers maintenance and the shutdown
+    /// lifecycle join without blocking the next capture.
+    pub export_permit: ExportPermit,
+}
+
+/// Background finalization job (instant-record P2). Runs after the terminal
+/// `recording.status`; reports through `recording.finalization` events and the
+/// `sessions.finalization_state` column, then leaves the registry.
+pub(crate) async fn run_recording_finalization_job(
+    state: AppState,
+    job: PendingRecordingFinalizationJob,
+) {
+    let PendingRecordingFinalizationJob {
+        request,
+        control,
+        export_permit,
+    } = job;
+    let session_id = request.session_id.clone();
+    let output_path = request.input_mkv.display().to_string();
+    match finalize_recording_media(&state, request, &control).await {
+        Ok(detail) => {
+            emit_finalization_event(
+                &state,
+                &session_id,
+                crate::protocol::RecordingFinalizationState::Finalized,
+                detail,
+            );
+        }
+        Err(error) => {
+            let message = format!("{error:#}");
+            if let Err(db_error) = state.database.set_session_finalization_state(
+                &session_id,
+                FINALIZATION_STATE_FAILED,
+                Some(&message),
+            ) {
+                state.emit_log(
+                    "warn",
+                    format!("Could not record the failed finalization state: {db_error:#}"),
+                );
+            }
+            let _ = emit_health_event(
+                &state,
+                Some(&session_id),
+                HealthLevel::Warn,
+                "mp4-export-failed",
+                &format!(
+                    "MP4 export failed; keeping MKV recovery file at {output_path}. {message}"
+                ),
+            );
+            emit_finalization_event(
+                &state,
+                &session_id,
+                crate::protocol::RecordingFinalizationState::Failed,
+                FinalizationEventDetail {
+                    output_path: Some(output_path),
+                    error: Some(message),
+                    ..FinalizationEventDetail::default()
+                },
+            );
+        }
+    }
+    state.recording_finalization.finish(&session_id);
+    drop(export_permit);
+}
+
+/// The post-MKV finalization sequence, verbatim from the former inline stop
+/// path: MP4 export -> caption artifacts -> final duration probe -> row commit
+/// -> poster -> post-recording quality gate.
+async fn finalize_recording_media(
+    state: &AppState,
+    request: RecordingFinalizationRequest,
+    control: &FinalizationJobControl,
+) -> Result<FinalizationEventDetail> {
+    let RecordingFinalizationRequest {
+        session_id,
+        ffmpeg_path,
+        input_mkv,
+        output_ownership,
+        keep_original_media,
+        ended_at,
+        wall_duration_ms,
+        final_diagnostics,
+        finalized_caption_artifact,
+        captioned_copy_requested,
+        post_recording_gate,
+        pipeline_reported_freezes,
+    } = request;
+    if control.is_cancelled() {
+        bail!("Finalization was cancelled before the MP4 export started");
+    }
+    let mut finalization_recovery_path = None;
+    let export_result = {
+        let _export_slot = state.recording_finalization.export_slot().await;
+        export_completed_recording_to_mp4_tracked(
+            state,
+            &session_id,
+            &ffmpeg_path,
+            &input_mkv,
+            Mp4ExportFinalizationContext {
+                ended_at: &ended_at,
+                duration_ms: wall_duration_ms,
+                diagnostics: &final_diagnostics,
+                output_ownership: output_ownership.clone(),
+                keep_original_media,
+            },
+            &mut finalization_recovery_path,
+            control,
+        )
+        .await
+    };
+    mark_stop_timeline(state, RecordingStopPhase::Mp4Export);
+    let (published_mp4, export_error) = match export_result {
+        Ok(published) => (published, None),
+        Err(error) => (None, Some(format!("{error:#}"))),
+    };
+    if control.is_cancelled() {
+        bail!("Finalization was cancelled while the MP4 was exporting");
+    }
+    let mp4_path = published_mp4
+        .as_ref()
+        .map(|published| published.path.clone());
+    let final_path = mp4_path.clone().unwrap_or_else(|| input_mkv.clone());
+
+    if let Some(artifact) = finalized_caption_artifact {
+        let caption_artifact =
+            crate::captions::write_caption_artifacts(state, &session_id, &final_path, artifact)
+                .await;
+        mark_stop_timeline(state, RecordingStopPhase::Captions);
+        if should_begin_captioned_copy_render(
+            captioned_copy_requested,
+            caption_artifact.chunks.len(),
+        ) {
+            crate::captions::begin_caption_cue_render(
+                state,
+                &session_id,
+                &ffmpeg_path,
+                &final_path,
+                &caption_artifact,
+            )
+            .await;
+        }
+    }
+
+    // The Library describes the media file, not how long the record button was
+    // active; probe the finalized file and keep wall time as the fallback.
+    let duration_ms = match timeout(
+        FINAL_DURATION_PROBE_TIMEOUT,
+        crate::session_ops::probe_duration_ms(&ffmpeg_path, &final_path),
+    )
+    .await
+    {
+        Ok(probed) => probed.or(wall_duration_ms),
+        Err(_) => {
+            state.emit_log(
+                "warn",
+                format!(
+                    "Final duration probe timed out after {}s for {}; keeping the wall-duration fallback.",
+                    FINAL_DURATION_PROBE_TIMEOUT.as_secs(),
+                    final_path.display()
+                ),
+            );
+            wall_duration_ms
+        }
+    };
+    mark_stop_timeline(state, RecordingStopPhase::Probe);
+
+    let finalization = SessionFinalization::new(
+        &session_id,
+        "completed",
+        Some(ended_at.clone()),
+        mp4_path.as_ref().map(|path| path.display().to_string()),
+        duration_ms,
+        &final_diagnostics,
+    )
+    .context("Could not serialize final session metadata")?;
+    let mut finalization = finalization.with_media_ownership(
+        Some(input_mkv.display().to_string()),
+        output_ownership
+            .as_ref()
+            .map(|ownership| ownership.content_identity.clone()),
+        published_mp4
+            .as_ref()
+            .map(|published| published.staging_path.display().to_string()),
+        published_mp4
+            .as_ref()
+            .map(|published| published.identity.clone()),
+        published_mp4.is_some() && output_ownership.is_some() && !keep_original_media,
+    );
+    if let Some(ownership) = output_ownership.as_ref() {
+        finalization =
+            finalization.with_output_file_object_identity(ownership.object_identity.clone());
+    }
+    if let Some(published) = published_mp4.as_ref() {
+        finalization = finalization
+            .with_mp4_staging_file_object_identity(published.object_identity.clone())
+            .with_mp4_staging_directory_ownership(
+                published.staging_directory_path.display().to_string(),
+                published.staging_directory_object_identity.clone(),
+                published
+                    .staging_directory_cleanup_path
+                    .display()
+                    .to_string(),
+            );
+    }
+    let finalization = match export_error.as_ref() {
+        Some(error) => {
+            finalization.with_finalization_state(FINALIZATION_STATE_FAILED, Some(error.clone()))
+        }
+        None => finalization.with_finalization_state(FINALIZATION_STATE_FINALIZED, None),
+    };
+    persist_finalization_or_recovery(state, &finalization, &mut finalization_recovery_path)
+        .map_err(|message| {
+            let _ = emit_health_event(
+                state,
+                Some(&session_id),
+                HealthLevel::Error,
+                "recording-metadata-recovery-required",
+                &message,
+            );
+            anyhow::anyhow!(message)
+        })?;
+    mark_stop_timeline(state, RecordingStopPhase::DbCommit);
+    if let Some(error) = export_error {
+        bail!("{error}");
+    }
+    let _ = emit_health_event(
+        state,
+        Some(&session_id),
+        HealthLevel::Info,
+        "recording-finalized",
+        "Recording pipeline finalized and output metadata was saved.",
+    );
+
+    // Library poster: one thumbnail frame, extracted under the idle ffmpeg permit.
+    {
+        let poster_state = state.clone();
+        let poster_session_id = session_id.clone();
+        let poster_path = final_path.display().to_string();
+        let poster_ffmpeg = ffmpeg_path.clone();
+        tokio::spawn(async move {
+            crate::posters::ensure_session_poster(
+                &poster_state,
+                &poster_session_id,
+                &poster_path,
+                duration_ms,
+                &poster_ffmpeg,
+            )
+            .await;
+        });
+    }
+    if let Some(gate) = post_recording_gate {
+        enqueue_post_recording_gate(
+            state.clone(),
+            session_id.clone(),
+            ffmpeg_path.clone(),
+            final_path.clone(),
+            gate,
+            pipeline_reported_freezes,
+            duration_ms.and_then(|ms| u64::try_from(ms).ok()),
+        );
+    }
+    let file_size_bytes = std::fs::metadata(&final_path)
+        .ok()
+        .map(|metadata| metadata.len() as i64);
+    Ok(FinalizationEventDetail {
+        progress_percent: Some(100),
+        mp4_path: mp4_path.map(|path| path.display().to_string()),
+        output_path: Some(input_mkv.display().to_string()),
+        duration_ms,
+        file_size_bytes,
+        error: None,
+    })
+}
+
+/// Rows left in `finalizing` by a backend exit mid-export: re-run the job.
+pub fn resume_pending_recording_finalizations(state: &AppState) {
+    let pending = match state.database.sessions_pending_finalization() {
+        Ok(pending) => pending,
+        Err(error) => {
+            state.emit_log(
+                "warn",
+                format!("Could not list interrupted recording finalizations: {error:#}"),
+            );
+            return;
+        }
+    };
+    for row in pending {
+        let session_id = row.session_id.clone();
+        let input_mkv = row.output_path.as_deref().map(PathBuf::from);
+        let Some(input_mkv) = input_mkv.filter(|path| path.exists()) else {
+            let _ = state.database.set_session_finalization_state(
+                &session_id,
+                FINALIZATION_STATE_FAILED,
+                Some("The capture file was missing when the interrupted MP4 export resumed."),
+            );
+            continue;
+        };
+        let final_diagnostics: DiagnosticStats = serde_json::from_str(&row.diagnostics_json)
+            .unwrap_or_else(|_| crate::diagnostics::idle_diagnostics());
+        let output_ownership = capture_session_file_bound_identity(&input_mkv)
+            .ok()
+            .flatten();
+        state.emit_log(
+            "info",
+            format!("Resuming the interrupted MP4 export for session {session_id}."),
+        );
+        let export_permit = state.ffmpeg_work.begin_background_export();
+        let control = state.recording_finalization.register(&session_id);
+        tokio::spawn(run_recording_finalization_job(
+            state.clone(),
+            PendingRecordingFinalizationJob {
+                request: RecordingFinalizationRequest {
+                    session_id,
+                    ffmpeg_path: resolve_ffmpeg_path(None),
+                    input_mkv,
+                    output_ownership,
+                    keep_original_media: row.keep_original_mkv,
+                    ended_at: row.ended_at.unwrap_or_else(|| Utc::now().to_rfc3339()),
+                    wall_duration_ms: row.duration_ms,
+                    final_diagnostics,
+                    finalized_caption_artifact: None,
+                    captioned_copy_requested: false,
+                    post_recording_gate: None,
+                    pipeline_reported_freezes: false,
+                },
+                control,
+                export_permit,
+            },
+        ));
+    }
+}
+
+/// MP4 export whose FFmpeg child is tracked on the job control so a deletion
+/// can stop it, and which honours cancellation.
+async fn export_completed_recording_to_mp4_tracked(
+    state: &AppState,
+    session_id: &str,
+    ffmpeg_path: &str,
+    input: &Path,
+    context: Mp4ExportFinalizationContext<'_>,
+    recovery_path: &mut Option<PathBuf>,
+    control: &FinalizationJobControl,
+) -> Result<Option<PublishedRecordingMp4>> {
+    let Mp4ExportFinalizationContext {
+        ended_at,
+        duration_ms,
+        diagnostics,
+        output_ownership,
+        keep_original_media,
+    } = context;
+    let base_finalization = SessionFinalization::new(
+        session_id,
+        "completed",
+        Some(ended_at.to_string()),
+        None,
+        duration_ms,
+        diagnostics,
+    )?;
+    let ffmpeg_path = ffmpeg_path.to_string();
+    export_recording_to_mp4_with_exporter(
+        state,
+        Mp4ExportRequest {
+            session_id,
+            input,
+            base_finalization,
+            remove_output_after_commit: output_ownership.is_some() && !keep_original_media,
+            output_ownership,
+            fault: Mp4FinalizationFault::None,
+        },
+        recovery_path,
+        move |input, output| async move {
+            export_mp4_from_mkv_tracked(state, session_id, &ffmpeg_path, &input, &output, control)
+                .await
+        },
+    )
+    .await
+}
+
+/// Progress events are throttled to this step so a long export does not flood
+/// the renderer.
+const FINALIZATION_PROGRESS_STEP_PERCENT: u8 = 5;
+
+async fn export_mp4_from_mkv_tracked(
+    state: &AppState,
+    session_id: &str,
+    ffmpeg_path: &str,
+    input: &Path,
+    output: &Path,
+    control: &FinalizationJobControl,
+) -> Result<()> {
+    if output
+        .try_exists()
+        .with_context(|| format!("Could not inspect MP4 output {}", output.display()))?
+    {
+        bail!(
+            "Refusing to start FFmpeg because MP4 output {} already exists",
+            output.display()
+        );
+    }
+    let trim_seconds = mp4_export_trim_seconds(&ffprobe_path_for(ffmpeg_path), input).await;
+    let total_seconds = match trim_seconds {
+        Some(trim) => Some(trim),
+        None => crate::session_ops::probe_duration_ms(ffmpeg_path, input)
+            .await
+            .map(|ms| ms as f64 / 1000.0),
+    }
+    .filter(|seconds| *seconds > 0.0);
+    let mut command = Command::new(ffmpeg_path);
+    command
+        .args(["-nostats", "-progress", "pipe:1"])
+        .args(mp4_export_args(input, output, trim_seconds))
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = spawn_owned_tokio(&mut command)
+        .with_context(|| format!("Could not start {ffmpeg_path} for MP4 export"))?;
+    if let Some(pid) = child.id() {
+        control.set_child_pid(pid);
+    }
+    if let Some(stdout) = child.stdout.take() {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut last_reported = 0_u8;
+        while let Ok(Some(line)) = lines.next_line().await {
+            let Some(total_seconds) = total_seconds else {
+                continue;
+            };
+            if let Some(percent) = crate::noise_cleanup::parse_progress_line(&line, total_seconds)
+                && percent >= last_reported.saturating_add(FINALIZATION_PROGRESS_STEP_PERCENT)
+            {
+                last_reported = percent;
+                control.set_progress_percent(percent);
+                emit_finalization_event(
+                    state,
+                    session_id,
+                    crate::protocol::RecordingFinalizationState::Finalizing,
+                    FinalizationEventDetail {
+                        progress_percent: Some(percent),
+                        ..FinalizationEventDetail::default()
+                    },
+                );
+            }
+        }
+    }
+    let status = child
+        .wait()
+        .await
+        .with_context(|| format!("Could not wait for {ffmpeg_path} MP4 export"))?;
+    control.set_child_pid(0);
+    if control.is_cancelled() {
+        bail!("MP4 export was cancelled");
+    }
+    if !status.success() {
+        bail!("FFmpeg MP4 export failed with {status}");
+    }
+    Ok(())
 }
 
 fn enqueue_post_recording_gate(
@@ -20752,6 +21378,160 @@ mod tests {
             stop_intent_sender: None,
             stop_requested: false,
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_finalization_job_marks_failure_and_leaves_registry() {
+        let state = test_state();
+        let session_id = format!("bg-finalize-fail-{}", Uuid::new_v4());
+        let params = base_params(true, false);
+        let missing_mkv = std::env::temp_dir().join(format!("{session_id}.mkv"));
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.clone(),
+                title: "Background finalization".to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                mode: "record".to_string(),
+                output_path: Some(missing_mkv.display().to_string()),
+                container: Some("mkv".to_string()),
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .expect("create session row");
+        let mut events = state.events.subscribe();
+        let export_permit = state.ffmpeg_work.begin_background_export();
+        let control = state.recording_finalization.register(&session_id);
+        assert!(state.recording_finalization.has_active_jobs());
+
+        run_recording_finalization_job(
+            state.clone(),
+            PendingRecordingFinalizationJob {
+                request: RecordingFinalizationRequest {
+                    session_id: session_id.clone(),
+                    ffmpeg_path: "/nonexistent/videorc-test-ffmpeg".to_string(),
+                    input_mkv: missing_mkv.clone(),
+                    output_ownership: None,
+                    keep_original_media: false,
+                    ended_at: Utc::now().to_rfc3339(),
+                    wall_duration_ms: Some(1_000),
+                    final_diagnostics: crate::diagnostics::idle_diagnostics(),
+                    finalized_caption_artifact: None,
+                    captioned_copy_requested: false,
+                    post_recording_gate: None,
+                    pipeline_reported_freezes: false,
+                },
+                control,
+                export_permit,
+            },
+        )
+        .await;
+
+        assert!(
+            !state.recording_finalization.has_active_jobs(),
+            "the job must leave the registry"
+        );
+        assert_eq!(
+            state.ffmpeg_work.snapshot().export_active,
+            0,
+            "the export permit must be released"
+        );
+        let page = state
+            .database
+            .list_session_items_page(None, 10)
+            .expect("list sessions");
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.id == session_id)
+            .expect("session row");
+        assert_eq!(
+            item.finalization_state,
+            Some(crate::protocol::RecordingFinalizationState::Failed)
+        );
+        assert!(
+            item.finalization_error
+                .as_deref()
+                .is_some_and(|error| !error.is_empty()),
+            "{item:?}"
+        );
+        assert!(item.mp4_path.is_none(), "{item:?}");
+        assert_eq!(item.status, "completed", "the MKV row stays completed");
+        let emitted = std::iter::from_fn(|| events.try_recv().ok()).collect::<Vec<_>>();
+        assert!(
+            emitted.iter().any(|event| {
+                event.event == "recording.finalization"
+                    && event.payload["state"] == "failed"
+                    && event.payload["sessionId"] == session_id.as_str()
+            }),
+            "{emitted:?}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn resume_pending_recording_finalizations_marks_missing_capture_failed() {
+        let state = test_state();
+        let session_id = format!("bg-finalize-resume-{}", Uuid::new_v4());
+        let params = base_params(true, false);
+        state
+            .database
+            .create_session(&NewSession {
+                id: session_id.clone(),
+                title: "Interrupted finalization".to_string(),
+                started_at: Utc::now().to_rfc3339(),
+                mode: "record".to_string(),
+                output_path: Some("/nonexistent/videorc-resume-test.mkv".to_string()),
+                container: Some("mkv".to_string()),
+                stream_preset: None,
+                sources: params.sources,
+                layout: params.layout,
+                output: params.output,
+            })
+            .expect("create session row");
+        state
+            .database
+            .set_session_finalization_state(&session_id, FINALIZATION_STATE_FINALIZING, None)
+            .expect("mark finalizing");
+        assert_eq!(
+            state
+                .database
+                .sessions_pending_finalization()
+                .expect("pending")
+                .len(),
+            1
+        );
+
+        resume_pending_recording_finalizations(&state);
+
+        assert!(!state.recording_finalization.has_active_jobs());
+        assert!(
+            state
+                .database
+                .sessions_pending_finalization()
+                .expect("pending")
+                .is_empty()
+        );
+        let page = state
+            .database
+            .list_session_items_page(None, 10)
+            .expect("list sessions");
+        let item = page
+            .items
+            .iter()
+            .find(|item| item.id == session_id)
+            .expect("session row");
+        assert_eq!(
+            item.finalization_state,
+            Some(crate::protocol::RecordingFinalizationState::Failed)
+        );
+        assert!(
+            item.finalization_error
+                .as_deref()
+                .is_some_and(|error| error.contains("missing")),
+            "{item:?}"
+        );
     }
 
     fn test_state_with_file_database(directory: &Path) -> AppState {

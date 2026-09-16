@@ -264,7 +264,10 @@ async function runSmoke() {
 
     const heldDatabaseRow = await readSessionRow(databasePath, sessionId)
     assert.ok(heldDatabaseRow, `Session ${sessionId} is missing while finalization is held.`)
-    assert.equal(heldDatabaseRow.status, 'running')
+    // Instant stop: the row is committed (completed, MKV visible) before the
+    // background MP4 export runs, and stays `finalizing` while it is held.
+    assert.equal(heldDatabaseRow.status, 'completed')
+    assert.equal(heldDatabaseRow.finalization_state, 'finalizing')
     assert.equal(heldDatabaseRow.mp4_path, null)
 
     const heldForMs = await assertProcessesAliveFor({
@@ -302,6 +305,7 @@ async function runSmoke() {
     const completedRow = await readSessionRow(databasePath, sessionId)
     assert.ok(completedRow, `Session ${sessionId} is missing after app exit.`)
     assert.equal(completedRow.status, 'completed')
+    assert.equal(completedRow.finalization_state, 'finalized')
     assert.ok(completedRow.ended_at, 'Completed session row has no ended_at timestamp.')
     const mp4Path = requiredString(completedRow.mp4_path, 'completed session MP4 path')
     assert.equal(extname(mp4Path).toLowerCase(), '.mp4')
@@ -545,7 +549,7 @@ export async function readSessionRow(databasePath, sessionId) {
   try {
     return database
       .prepare(
-        'SELECT id, status, started_at, ended_at, output_path, mp4_path, duration_ms FROM sessions WHERE id = ?'
+        'SELECT id, status, started_at, ended_at, output_path, mp4_path, duration_ms, finalization_state FROM sessions WHERE id = ?'
       )
       .get(sessionId)
   } finally {

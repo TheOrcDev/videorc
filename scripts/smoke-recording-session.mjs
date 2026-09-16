@@ -253,7 +253,7 @@ export async function recordScenario({
   await sleep(recordingMs)
 
   const stopped = await request(ws, timeoutMs, 'session.stop')
-  await assertFinalizedRecordingStop({
+  const finalizedPath = await assertFinalizedRecordingStop({
     scenarioLabel: scenario.label,
     started,
     stopped,
@@ -263,7 +263,9 @@ export async function recordScenario({
         limit: 120
       })
       return health?.events ?? []
-    }
+    },
+    loadSessionItem: (sessionId) => loadSessionListItem(ws, timeoutMs, sessionId),
+    finalizationTimeoutMs: timeoutMs
   })
 
   assertNoZeroByteScenarioMkvs({
@@ -273,7 +275,7 @@ export async function recordScenario({
     outputPaths: [started.outputPath, stopped.outputPath]
   })
 
-  const outputPath = stopped.outputPath ?? started.outputPath
+  const outputPath = finalizedPath ?? stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error(
       `[${scenario.label}] Recording output was not created: ${outputPath ?? 'missing path'}`
@@ -421,6 +423,12 @@ async function assertSessionPoster({ ws, connection, timeoutMs, ffmpegPath, labe
     throw new Error(`Poster assert: response is not a JPEG (${bytes.length} bytes).`)
   }
   console.log(`${label} smoke poster PASS: ${bytes.length}-byte JPEG served for ${latest.id}`)
+}
+
+/** One Library row by id (the background finalization state lives there). */
+export async function loadSessionListItem(ws, timeoutMs, sessionId) {
+  const page = await request(ws, Math.min(timeoutMs, 10_000), 'sessions.list', { limit: 50 })
+  return page?.items?.find((item) => item.id === sessionId) ?? null
 }
 
 export function connectBackend(connection, timeoutMs) {

@@ -52,17 +52,100 @@ export function isTerminalRecordingStop({ started, stopped } = {}) {
   )
 }
 
+/**
+ * Since the instant-stop change the terminal `idle` arrives while the MP4 is
+ * still exporting in the background: the stop reply carries the MKV and
+ * `pipeline.finalization === 'finalizing'`. Callers that need the MP4 pass
+ * `loadSessionItem(sessionId)` (a `sessions.list` lookup) and this helper polls
+ * until the row reports `finalized` with an `mp4Path`, or fails fast on
+ * `failed`. A stop reply that already carries the MP4 resolves immediately.
+ */
+export async function awaitPublishedRecordingMp4({
+  scenarioLabel = 'Recording',
+  stopped,
+  loadSessionItem,
+  loadHealthEvents,
+  timeoutMs = 60_000,
+  pollMs = 250,
+  sleep = defaultSleep,
+  now = Date.now
+} = {}) {
+  const outputPath = nonemptyString(stopped?.outputPath)
+  if (outputPath && extname(outputPath).toLowerCase() === '.mp4') {
+    return { mp4Path: outputPath, source: 'stop-reply' }
+  }
+  const sessionId = nonemptyString(stopped?.sessionId)
+  const finalizing = stopped?.pipeline?.finalization === 'finalizing'
+  if (!sessionId || !finalizing || typeof loadSessionItem !== 'function') {
+    let healthEvents = []
+    let healthLookupError
+    if (typeof loadHealthEvents === 'function') {
+      try {
+        healthEvents = (await loadHealthEvents(sessionId)) ?? []
+      } catch (error) {
+        healthLookupError = error
+      }
+    }
+    assertPublishedRecordingMp4({ scenarioLabel, stopped, healthEvents, healthLookupError })
+    return { mp4Path: outputPath, source: 'stop-reply' }
+  }
+  const startedAt = now()
+  for (;;) {
+    const item = await loadSessionItem(sessionId)
+    const mp4Path = nonemptyString(item?.mp4Path)
+    if (item?.finalizationState === 'failed') {
+      throw new Error(
+        `[${scenarioLabel}] Background MP4 finalization failed for ${sessionId}: ` +
+          `${compactDiagnostic(item.finalizationError) ?? 'no error recorded'}.`
+      )
+    }
+    if (mp4Path && item?.finalizationState !== 'finalizing') {
+      return { mp4Path, source: 'sessions.list' }
+    }
+    if (now() - startedAt > timeoutMs) {
+      throw new Error(
+        `[${scenarioLabel}] Background MP4 finalization for ${sessionId} did not publish an MP4 ` +
+          `within ${timeoutMs}ms (state ${item?.finalizationState ?? 'unknown'}).`
+      )
+    }
+    await sleep(pollMs)
+  }
+}
+
+function defaultSleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 export async function assertFinalizedRecordingStop({
   scenarioLabel = 'Recording',
   started,
   stopped,
-  loadHealthEvents
+  loadHealthEvents,
+  loadSessionItem,
+  finalizationTimeoutMs = 60_000
 } = {}) {
   let healthEvents = []
   let healthLookupError
   const terminalStop = isTerminalRecordingStop({ started, stopped })
   const outputPath = nonemptyString(stopped?.outputPath)
   const publishedMp4 = outputPath && extname(outputPath).toLowerCase() === '.mp4'
+  // Background finalization: the terminal reply names the MKV while the MP4 is
+  // still exporting. Wait for the row to publish it before judging the MP4.
+  if (
+    terminalStop &&
+    !publishedMp4 &&
+    stopped?.pipeline?.finalization === 'finalizing' &&
+    typeof loadSessionItem === 'function'
+  ) {
+    const published = await awaitPublishedRecordingMp4({
+      scenarioLabel,
+      stopped,
+      loadSessionItem,
+      loadHealthEvents,
+      timeoutMs: finalizationTimeoutMs
+    })
+    return published.mp4Path
+  }
 
   if ((!terminalStop || !publishedMp4) && typeof loadHealthEvents === 'function') {
     try {
@@ -88,6 +171,7 @@ export async function assertFinalizedRecordingStop({
     healthEvents,
     healthLookupError
   })
+  return outputPath
 }
 
 export function assertNoZeroByteScenarioMkvs(options = {}) {

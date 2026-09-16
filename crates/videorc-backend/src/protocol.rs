@@ -3335,6 +3335,10 @@ pub struct SessionSummary {
     pub source_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_state: Option<RecordingFinalizationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
 }
 
 /// Bounded, renderer-facing Library row. Histories intentionally live behind
@@ -3378,6 +3382,35 @@ pub struct SessionListItem {
     pub source_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing_kind: Option<String>,
+    /// Background MP4 finalization (instant-record P2). Absent for rows that
+    /// finished inline (legacy) or never recorded a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_state: Option<RecordingFinalizationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_progress_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
+}
+
+/// Progress of a background recording finalization job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingFinalizationEvent {
+    pub session_id: String,
+    pub state: RecordingFinalizationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mp4_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

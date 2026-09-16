@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
@@ -297,7 +298,11 @@ async function recordCombo({
     const lifecycleLogs = await waitForEncoderBridgeLifecycleLogs(ws, sessionId)
     lifecycleEntries = lifecycleLogs.entries ?? []
   }
-  const outputPath = stopped.outputPath ?? started.outputPath
+  const outputPath = await resolveFinalRecordingPath({
+    started,
+    stopped,
+    timeoutMs: Math.min(timeoutMs, 120_000)
+  })
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error('recording produced no output file')
   }

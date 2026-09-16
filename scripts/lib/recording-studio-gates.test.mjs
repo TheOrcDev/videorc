@@ -201,7 +201,11 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(source, /requestSmokeCommand\(smoke, 'app-quit'/)
     assert.match(source, /Electron begins teardown/)
     assert.match(source, /recovery\.value\.status, 'completed'/)
-    assert.match(source, /heldDatabaseRow\.status, 'running'/)
+    // Instant stop (instant-record P2): the row is committed before the
+    // background export, so the held row is completed + finalizing.
+    assert.match(source, /heldDatabaseRow\.status, 'completed'/)
+    assert.match(source, /heldDatabaseRow\.finalization_state, 'finalizing'/)
+    assert.match(source, /completedRow\.finalization_state, 'finalized'/)
     assert.match(source, /completedRow\.status, 'completed'/)
     assert.match(source, /remainingRecoveryRecords/)
     assert.match(source, /analyzeRecording\(mp4Path/)

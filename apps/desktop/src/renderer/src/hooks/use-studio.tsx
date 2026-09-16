@@ -103,6 +103,7 @@ import { providerOAuthRetryDelayMs } from '@/lib/provider-oauth-retry'
 import { isRetryableBackgroundSurfaceSyncError } from '@/lib/surface-sync-retry'
 import { accountCallbackRetryDelayMs } from '@/lib/account-callback-retry'
 import { buildStartSessionParams } from '@/lib/session-params'
+import { applyFinalizationEvent, finalizationEventNeedsRefresh } from '@/lib/session-finalization'
 import {
   clickEpochMs,
   createRecordLatencyTracker,
@@ -1869,6 +1870,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     []
   )
   const [sessions, setSessions] = useState<SessionSummary[]>([])
+  const sessionsRef = useRef<SessionSummary[]>([])
+  sessionsRef.current = sessions
+  const remuxSessionRef = useRef<((sessionId: string) => Promise<void>) | null>(null)
   const [sessionsNextCursor, setSessionsNextCursor] = useState<string | null>(null)
   const [sessionsLoadingMore, setSessionsLoadingMore] = useState(false)
   const sessionListGenerationRef = useRef(0)
@@ -5282,6 +5286,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('entitlements.updated', (payload) => {
         commitEntitlementsSnapshot(payload)
+      }),
+      nextClient.on('recording.finalization', (payload) => {
+        // Background MP4 export (instant-record P2): patch the Library row in
+        // place; refetch only when a finalized row is not loaded yet.
+        const event = payload
+        setSessions((current) => applyFinalizationEvent(current, event))
+        if (finalizationEventNeedsRefresh(sessionsRef.current, event)) {
+          void refreshSessions(nextClient)
+        }
+        if (event.state === 'failed') {
+          toast.error('MP4 export failed', {
+            id: `finalization-${event.sessionId}`,
+            description: event.error ?? 'The original MKV recording was kept.',
+            action: {
+              label: 'Retry export',
+              onClick: () => void remuxSessionRef.current?.(event.sessionId)
+            }
+          })
+        }
       }),
       nextClient.on('noiseCleanup.status', (payload) => {
         const job = payload
@@ -11557,13 +11580,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sessionId
         })
         await Promise.all([refreshSessions(client), refreshNoiseCleanupJobs(client)])
-        toast.success('Remuxed recording to MP4.')
+        toast.success('Exported MP4.', { id: `finalization-${sessionId}` })
       } catch (error) {
         reportError(error)
       }
     },
     [client, refreshNoiseCleanupJobs, refreshSessions, reportError]
   )
+  remuxSessionRef.current = remuxSession
 
   const runAiWorkflow = useCallback(
     async (sessionId: string, options?: { outputs?: string[]; tone?: string }) => {

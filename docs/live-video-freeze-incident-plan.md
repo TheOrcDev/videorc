@@ -98,6 +98,11 @@ or vice versa.
   2. close audio fan-out,
   3. wait for recording muxer and stream muxer,
   4. remux/repair only after the recording muxer finishes.
+  Since the instant-record work (2026-09) the terminal `recording.status`
+  is published as soon as the MKV muxer has exited and the row is committed;
+  the MKV→MP4 remux, caption artifacts, final probe and poster run in the
+  background finalization job (`recording.finalization` events,
+  `sessions.finalization_state`). Quit and updater gates wait for that job.
 - Stream target status must be driven by the stream muxer only; local recording
   failure must not mark RTMP targets failed.
 - Gate: focused Rust tests plus a synthetic split-output smoke.

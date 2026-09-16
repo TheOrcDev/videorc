@@ -676,6 +676,8 @@ mod tests {
             derived_from_session_id: None,
             source_title: None,
             processing_kind: None,
+            finalization_state: None,
+            finalization_error: None,
         };
 
         let (sessions, summary) = redact_sessions(vec![session]);

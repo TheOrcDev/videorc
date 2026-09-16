@@ -306,7 +306,9 @@ export function AiTab({
   function SessionActions({ session }: { session: SessionWithDetails }): ReactElement {
     const { signIn } = useVideorcAccount()
     const canRunAi = Boolean(
-      session.status === 'completed' && (session.mp4Path || session.outputPath)
+      session.status === 'completed' &&
+      (session.mp4Path || session.outputPath) &&
+      session.finalizationState !== 'finalizing'
     )
     const hasReviewableArtifacts = session.aiArtifacts.some(
       (artifact) => artifact.status === 'ready' && artifact.kind !== 'audio-extract'

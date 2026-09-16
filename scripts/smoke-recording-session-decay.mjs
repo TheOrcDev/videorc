@@ -250,7 +250,7 @@ async function recordSession({ ws, smoke, index, sources, backendEvents }) {
     ])
   )
   const stopped = await backendRequest(ws, 'session.stop', undefined, finalizationTimeoutMs)
-  await assertFinalizedRecordingStop({
+  const finalizedPath = await assertFinalizedRecordingStop({
     scenarioLabel: `Session decay ${index + 1}/${sessionCount}`,
     started,
     stopped,
@@ -262,7 +262,17 @@ async function recordSession({ ws, smoke, index, sources, backendEvents }) {
         Math.min(rpcTimeoutMs, 5000)
       )
       return health?.events ?? []
-    }
+    },
+    loadSessionItem: async (sessionId) => {
+      const page = await backendRequest(
+        ws,
+        'sessions.list',
+        { limit: 50 },
+        Math.min(rpcTimeoutMs, 10_000)
+      )
+      return page?.items?.find((item) => item.id === sessionId) ?? null
+    },
+    finalizationTimeoutMs
   })
   const terminalStatus = await waitForSessionTerminalStatus({
     events: backendEvents,
@@ -275,7 +285,7 @@ async function recordSession({ ws, smoke, index, sources, backendEvents }) {
   })
   const finalAccounting = lifecycle.accounting
   const bridge = finalAccounting?.diagnostics ?? {}
-  const outputPath = stopped.outputPath ?? started.outputPath
+  const outputPath = finalizedPath ?? stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error('recording produced no output file')
   }
