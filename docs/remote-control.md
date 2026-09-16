@@ -80,7 +80,8 @@ UI surfaces track the remote-control state without polling.
 
 `pnpm smoke:record-latency` pairs a fake client the same way and drives real
 `recordStart` / `recordStop` intents through the renderer to measure Record
-button latency (report-only budgets until calibrated).
+button latency; `pnpm smoke:record-latency:gate` enforces the calibrated OBS-parity
+budgets (`docs/acceptance/2026-09-16-record-latency-calibration.md`).
 
 `pnpm smoke:remote-control` (part of `smoke:local-gates`) drives the real
 app: discovery-file contract (0600, port/token match), allowlist enforcement,

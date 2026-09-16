@@ -3,22 +3,25 @@
 // covers the arithmetic and the budget evaluation.
 
 /**
- * Proposed OBS-parity budgets (milliseconds). They stay REPORT-ONLY until a
- * calibration document exists: `calibratedFrom` must name a reviewed
- * docs/acceptance note built from three fresh-process runs on the finished
- * build, with explicit headroom over the observed p95 (never copied maxima).
- * Local investigation may override any value with VIDEORC_RECORD_LATENCY_*.
+ * OBS-parity budgets (milliseconds), ENFORCED by `pnpm smoke:record-latency:gate`.
+ * `calibratedFrom` names the reviewed docs/acceptance note built from three
+ * fresh-process runs on the finished build (debug dev backend, the owner's
+ * packaged app running concurrently); every value carries explicit headroom
+ * over the observed p95 — never a copied maximum. Local investigation may
+ * override any value with VIDEORC_RECORD_LATENCY_*.
  */
 export const RECORD_LATENCY_BUDGETS = Object.freeze({
   // Click → `recording` on a warm Studio (cycle 2+ in one process).
+  // Calibrated p95 ≈ 97 ms on the debug backend.
   warmStartClickToRecordingP95Ms: 350,
   // First start after launch pays one-off costs (chunk loads, device probes).
-  coldStartClickToRecordingMs: 1200,
-  // Stop click → terminal `idle` (Record enabled again).
+  // Calibrated max ≈ 141 ms.
+  coldStartClickToRecordingMs: 1000,
+  // Stop click → terminal `idle` (Record enabled again). Calibrated p95 ≈ 126 ms.
   stopClickToIdleP95Ms: 300,
-  // Background finalization (MP4 export) for a ~4 s clip.
+  // Background finalization (MP4 export) for a ~4 s clip. Calibrated p95 ≈ 268 ms.
   finalizationIdleToFinalizedP95Ms: 5000,
-  calibratedFrom: null
+  calibratedFrom: 'docs/acceptance/2026-09-16-record-latency-calibration.md'
 })
 
 // Same-kind remote intents are debounced per family (remote_control.rs); start

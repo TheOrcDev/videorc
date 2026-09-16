@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, it } from 'node:test'
 
@@ -62,7 +62,7 @@ describe('record latency budget', () => {
     const verdict = evaluateRecordLatencyBudget(summary, budgets)
     assert.equal(verdict.pass, false)
     assert.match(verdict.failures.join('\n'), /warm start click→recording p95 1900ms exceeds 350ms/)
-    assert.match(verdict.failures.join('\n'), /cold start click→recording 2600ms exceeds 1200ms/)
+    assert.match(verdict.failures.join('\n'), /cold start click→recording 2600ms exceeds 1000ms/)
     assert.match(verdict.failures.join('\n'), /stop click→idle p95 4200ms exceeds 300ms/)
     assert.match(
       verdict.failures.join('\n'),
@@ -92,8 +92,27 @@ describe('record latency budget', () => {
     )
   })
 
-  it('stays report-only until a calibration document is named', () => {
-    assert.equal(RECORD_LATENCY_BUDGETS.calibratedFrom, null)
+  it('is calibrated against a real acceptance note before it may enforce', () => {
+    // `--enforce` (smoke:record-latency:gate) is only honest while the named
+    // calibration document exists: budgets carry headroom over the observed
+    // p95 recorded there, so a missing or renamed note means the numbers are
+    // no longer traceable.
+    assert.equal(typeof RECORD_LATENCY_BUDGETS.calibratedFrom, 'string')
+    const calibrationPath = join(process.cwd(), RECORD_LATENCY_BUDGETS.calibratedFrom)
+    assert.ok(existsSync(calibrationPath), `${RECORD_LATENCY_BUDGETS.calibratedFrom} must exist`)
+    const note = readFileSync(calibrationPath, 'utf8')
+    for (const key of [
+      'warmStartClickToRecordingP95Ms',
+      'coldStartClickToRecordingMs',
+      'stopClickToIdleP95Ms',
+      'finalizationIdleToFinalizedP95Ms'
+    ]) {
+      assert.match(
+        note,
+        new RegExp(key + '[^\\n]*\\b' + RECORD_LATENCY_BUDGETS[key] + '\\b'),
+        `${key} = ${RECORD_LATENCY_BUDGETS[key]} must be recorded in the calibration note`
+      )
+    }
   })
 })
 

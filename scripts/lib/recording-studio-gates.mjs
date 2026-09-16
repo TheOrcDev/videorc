@@ -93,6 +93,14 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:app-quit-recording']
       },
       {
+        // Instant-record contract: renderer-path Record/Stop cycles must stay
+        // inside the calibrated OBS-parity budgets (record-latency-gate.mjs),
+        // and every artifact must pass the analyzer + startup-resolution gates.
+        label: 'record start/stop latency gate',
+        command: 'pnpm',
+        args: ['smoke:record-latency:gate']
+      },
+      {
         label: 'imported screen image recording smoke',
         command: 'pnpm',
         args: ['smoke:screens']
