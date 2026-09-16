@@ -153,6 +153,35 @@ it prints the visible OBS sources before launch and warns if the chosen scene is
 - [ ] **Voice/mouth sync** — mouth and voice stay aligned for the full clip.
 - [ ] **No voice gaps** — no dropouts or skips in the audio.
 
+### Record start/stop feel — OBS side-by-side
+
+Videorc's Record and Stop must feel as instant as OBS. This cannot be automated
+here (OBS websocket is off and its CLI has no stop-recording command), so time it
+from a screen recording of the desktop instead of by feel alone. The automated
+counterpart is `pnpm smoke:record-latency` (renderer-path click → `recording` /
+click → `idle`, report JSON with cold/warm p50/p95); run it before and after the
+manual pass and quote both in the acceptance note.
+
+1. Match scene, camera, screen/window and output fps in both apps (as above).
+2. Start a 60 fps screen recording of the whole desktop (QuickTime → New Screen
+   Recording, or `screencapture -v <file>.mov`) with a visible mouse cursor and a
+   stopwatch app in frame as a cross-check.
+3. In each app perform five Record clicks and five Stop clicks, holding each
+   recording about five seconds.
+4. Frame-step the screen recording (QuickTime arrow keys, or
+   `ffmpeg -i <file>.mov -vf showinfo -f null -` and read frame times) from the
+   frame the button visibly depresses to the frame the app's recording indicator
+   first changes — OBS: red dot + timer; Videorc: Stop button + session timer.
+   Milliseconds = frames × 1000 / 60. Do the same from Stop click to the app being
+   ready to record again (OBS: REC indicator gone; Videorc: Record button enabled).
+5. Record the median of the five for each app and each direction in the acceptance
+   note next to the `smoke:record-latency` numbers.
+
+- [ ] **Start feel** — Videorc's start indicator changes within +100 ms of the OBS median.
+- [ ] **Stop feel** — Videorc's Record button is enabled again within +100 ms of the OBS median.
+- [ ] **No pre-roll** — the first second of the Videorc file has no black/placeholder frames and is at the requested resolution (startup-resolution report).
+- [ ] **Indistinguishable** — the operator cannot tell which app is faster without the frame-stepped numbers.
+
 ### Done gate
 
 - [ ] All automated metric gates pass for 1080p30, 1440p30, (1080p60 if supported), and the 10-min endurance run.

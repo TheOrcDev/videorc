@@ -78,6 +78,10 @@ UI surfaces track the remote-control state without polling.
 
 ## Gates
 
+`pnpm smoke:record-latency` pairs a fake client the same way and drives real
+`recordStart` / `recordStop` intents through the renderer to measure Record
+button latency (report-only budgets until calibrated).
+
 `pnpm smoke:remote-control` (part of `smoke:local-gates`) drives the real
 app: discovery-file contract (0600, port/token match), allowlist enforcement,
 filter-lock enforcement, micToggle + sceneApply round trips against

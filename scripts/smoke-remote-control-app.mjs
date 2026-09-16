@@ -16,9 +16,12 @@
 import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import WebSocket from 'ws'
-
 import { launchDevApp } from './lib/app-launcher.mjs'
+import {
+  connectRemote as connectRemoteClient,
+  remoteRequest as remoteRequestClient,
+  waitForRemoteEvent as waitForRemoteEventClient
+} from './lib/remote-control-client.mjs'
 import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -30,54 +33,10 @@ function fail(message) {
   throw new Error(`remote-control smoke FAIL: ${message}`)
 }
 
-function connectRemote(host, port, token) {
-  return new Promise((resolveConnection, rejectConnection) => {
-    const ws = new WebSocket(`ws://${host}:${port}/ws?token=${encodeURIComponent(token)}`)
-    const timer = setTimeout(() => rejectConnection(new Error('remote connect timeout')), timeoutMs)
-    ws.once('open', () => {
-      clearTimeout(timer)
-      resolveConnection(ws)
-    })
-    ws.once('error', (error) => {
-      clearTimeout(timer)
-      rejectConnection(error)
-    })
-  })
-}
-
-function remoteRequest(ws, method, params) {
-  const id = `rc-${Math.random().toString(36).slice(2)}`
-  return new Promise((resolveRequest, rejectRequest) => {
-    const timer = setTimeout(() => rejectRequest(new Error(`${method} timed out`)), timeoutMs)
-    const onMessage = (raw) => {
-      const message = JSON.parse(String(raw))
-      if (message.id !== id) return
-      clearTimeout(timer)
-      ws.off('message', onMessage)
-      resolveRequest(message)
-    }
-    ws.on('message', onMessage)
-    ws.send(JSON.stringify({ id, method, ...(params ? { params } : {}) }))
-  })
-}
-
-function waitForRemoteEvent(ws, event, predicate = () => true) {
-  return new Promise((resolveEvent, rejectEvent) => {
-    const timer = setTimeout(
-      () => rejectEvent(new Error(`timed out waiting for ${event}`)),
-      timeoutMs
-    )
-    const onMessage = (raw) => {
-      const message = JSON.parse(String(raw))
-      if (message.event === event && predicate(message.payload)) {
-        clearTimeout(timer)
-        ws.off('message', onMessage)
-        resolveEvent(message.payload)
-      }
-    }
-    ws.on('message', onMessage)
-  })
-}
+const connectRemote = (host, port, token) => connectRemoteClient(host, port, token, { timeoutMs })
+const remoteRequest = (ws, method, params) => remoteRequestClient(ws, method, params, { timeoutMs })
+const waitForRemoteEvent = (ws, event, predicate) =>
+  waitForRemoteEventClient(ws, event, predicate, { timeoutMs })
 
 async function waitForBackendState(connection, method, predicate, label) {
   const deadline = Date.now() + timeoutMs
