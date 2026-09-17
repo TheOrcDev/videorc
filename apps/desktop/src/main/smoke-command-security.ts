@@ -34,7 +34,12 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-state',
   'comments-window-submit-message',
   'comments-window-toggle',
+  'captions-window-close',
+  'captions-window-open',
+  'captions-window-set-bounds',
+  'captions-window-state',
   'destroy-native-preview-surface',
+  'drain-native-preview-host-commands',
   'dispatch-preview-shortcut',
   'enable-synthetic-source',
   'eval-js',
@@ -96,7 +101,9 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'select-screen-device',
   'set-vibrancy',
   'suspend-native-preview-surface',
-  'window-bounds-storm'
+  'window-bounds-storm',
+  'windows-preview-os-input-probe',
+  'windows-live-audio-harness'
 ])
 
 /**
@@ -106,6 +113,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
  * from becoming a generic admin proxy.
  */
 export const SMOKE_BACKEND_RPC_METHOD_NAMES = new Set([
+  'audio.test.disconnect',
   'audio.test.inject-pcm',
   'captions.test.inject-audio',
   'captions.test.snapshot',
@@ -228,7 +236,13 @@ export function validateSmokeBackendRpcRequest(
 
 /** Minimal command surface used by packaged preview/recording acceptance gates. */
 export const PACKAGED_SMOKE_COMMAND_NAMES = new Set([
+  'app-quit',
+  'captions-window-open',
+  'captions-window-set-bounds',
+  'comments-window-open',
+  'comments-window-set-bounds',
   'destroy-native-preview-surface',
+  'drain-native-preview-host-commands',
   'exercise-main-present-pump-reconnect',
   'exercise-native-preview-scene',
   'exercise-native-preview-scene-after-surface-loss',
@@ -238,16 +252,22 @@ export const PACKAGED_SMOKE_COMMAND_NAMES = new Set([
   'inspect-preview-stage-badges',
   'inspect-packaged-bundled-background',
   'measure-native-preview-surface',
+  'main-window-focus',
+  'main-window-set-bounds',
   'minimize-window',
   'move-window',
   'native-preview-surface-status',
+  'notes-window-open',
+  'notes-window-save-document',
+  'notes-window-set-bounds',
   'open-tab',
   'preview-window-state',
   'preview-window-open',
   'resize-window',
   'restore-window',
   'resume-native-preview-surface',
-  'suspend-native-preview-surface'
+  'suspend-native-preview-surface',
+  'windows-live-audio-harness'
 ])
 
 export type ValidatedSmokeCommand = {

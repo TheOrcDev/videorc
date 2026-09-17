@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="72" height="72" viewBox="0 0 72 72">
+  <rect width="72" height="72" rx="14" fill="#0D0D0F"/>
+  <rect x="1" y="1" width="70" height="70" rx="13" fill="none" stroke="rgba(255,255,255,0.10)" stroke-width="2"/>
+  <text x="36" y="43" font-family="-apple-system, Helvetica, Arial" font-size="18" font-weight="600" fill="#F4F4F5" text-anchor="middle">BRB</text>
+</svg>

@@ -42,6 +42,51 @@ test('waits for a later finalized recording status path', async () => {
   assert.equal(path, mp4)
 })
 
+test('waits through the gap after the temporary MKV disappears before MP4 is visible', async () => {
+  const mkv = '/tmp/videorc-session.mkv'
+  const mp4 = '/tmp/videorc-session.mp4'
+  let now = 0
+
+  const path = await resolveFinalRecordingPath({
+    started: { sessionId: 's1', outputPath: mkv },
+    stopped: { sessionId: 's1', outputPath: mkv },
+    stopRequestedAt: 10,
+    timeoutMs: 100,
+    pollMs: 10,
+    exists: (candidate) => {
+      if (candidate === mkv) return now === 0
+      if (candidate === mp4) return now >= 20
+      return false
+    },
+    sleep: async (ms) => {
+      now += ms
+    },
+    now: () => now,
+  })
+
+  assert.equal(path, mp4)
+})
+
+test('does not return a temporary MKV without an MP4 export failure event', async () => {
+  const mkv = '/tmp/videorc-session.mkv'
+  let now = 0
+
+  const path = await resolveFinalRecordingPath({
+    started: { sessionId: 's1', outputPath: mkv },
+    stopped: { sessionId: 's1', outputPath: mkv },
+    stopRequestedAt: 10,
+    timeoutMs: 20,
+    pollMs: 10,
+    exists: (candidate) => candidate === mkv,
+    sleep: async (ms) => {
+      now += ms
+    },
+    now: () => now,
+  })
+
+  assert.equal(path, null)
+})
+
 test('falls back to an existing MKV when MP4 export fails', async () => {
   const mkv = '/tmp/videorc-session.mkv'
   const path = await resolveFinalRecordingPath({

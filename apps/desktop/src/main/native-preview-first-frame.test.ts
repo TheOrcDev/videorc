@@ -1,16 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import {
+  assessWindowsD3d11FirstPresent,
+  assessProofPresentationWatch,
   assessProofSourceFrame,
   assessFirstFrame,
   assessPresenting,
+  boundedProofWatchdogRead,
   DEFAULT_FIRST_FRAME_BUDGETS,
   DEFAULT_PRESENTING_WATCH_BUDGETS,
+  DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS,
   emptyFirstFrameLedger,
   emptyPresentingWatch,
   firstFrameBlockedReason,
   firstFrameContractMet,
   nativePreviewFirstFrameWatchdogEnabled,
+  nativePreviewProofWatchdogEnabled,
+  ProofWatchdogRendererReadSingleFlight,
+  proofPresentationFallbackReason,
+  proofWatchdogRendererReadAllowed,
+  WatchdogTickOwnership,
   type FirstFrameSnapshot,
   type PresentingWatchState
 } from './native-preview-first-frame'
@@ -38,6 +47,64 @@ describe('nativePreviewFirstFrameWatchdogEnabled', () => {
   })
 })
 
+describe('nativePreviewProofWatchdogEnabled', () => {
+  it('runs the independent proof liveness watch only for the Windows fallback', () => {
+    expect(nativePreviewProofWatchdogEnabled('win32')).toBe(true)
+    expect(
+      nativePreviewProofWatchdogEnabled('win32', {
+        transport: 'd3d11-shared-texture',
+        backing: 'directcomposition-swapchain',
+        nativePreviewHostKind: 'backend-d3d11-presenter'
+      })
+    ).toBe(false)
+    expect(nativePreviewProofWatchdogEnabled('darwin')).toBe(false)
+    expect(nativePreviewProofWatchdogEnabled('linux')).toBe(false)
+  })
+})
+
+describe('assessWindowsD3d11FirstPresent', () => {
+  const status = {
+    state: 'live' as const,
+    transport: 'd3d11-shared-texture' as const,
+    backing: 'directcomposition-swapchain' as const,
+    nativePreviewHostKind: 'backend-d3d11-presenter' as const,
+    nativePreviewHostAttached: true,
+    sourcePixelsPresent: true,
+    presentedFrameId: 1,
+    firstFrameContract: 'pending' as const
+  }
+
+  it('requires first present and source liveness before Windows native is met', () => {
+    expect(assessWindowsD3d11FirstPresent({ status, elapsedMs: 100 })).toBe('met')
+    expect(
+      assessWindowsD3d11FirstPresent({
+        status: { ...status, presentedFrameId: undefined },
+        elapsedMs: 100
+      })
+    ).toBe('pending')
+    expect(
+      assessWindowsD3d11FirstPresent({
+        status: { ...status, sourcePixelsPresent: false },
+        elapsedMs: 15_000
+      })
+    ).toBe('fallback')
+  })
+
+  it('never lets the Electron proof fallback satisfy the D3D11 contract', () => {
+    expect(
+      assessWindowsD3d11FirstPresent({
+        status: {
+          ...status,
+          transport: 'electron-proof-surface',
+          backing: 'electron-browser-window',
+          nativePreviewHostKind: 'proof-surface'
+        },
+        elapsedMs: 15_000
+      })
+    ).toBe('not-applicable')
+  })
+})
+
 describe('assessProofSourceFrame', () => {
   it('treats fresh Windows source frames as live and sustained gaps as stalled', () => {
     expect(
@@ -46,6 +113,7 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourcePollerCount: 1,
         freshSourceLayerCount: 1,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 125
       })
     ).toBe('met')
@@ -55,6 +123,7 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourcePollerCount: 1,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 1_501
       })
     ).toBe('stalled')
@@ -67,6 +136,7 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: true,
         sourcePollerCount: 1,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 10_000
       })
     ).toBe('paused')
@@ -76,6 +146,7 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourcePollerCount: 1,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 10_000
       })
     ).toBe('not-applicable')
@@ -86,11 +157,26 @@ describe('assessProofSourceFrame', () => {
       assessProofSourceFrame({
         platform: 'win32',
         framePollingSuppressed: false,
+        sourceExpected: false,
         sourcePollerCount: 0,
         freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
         sourceFrameAgeMs: 10_000
       })
     ).toBe('not-applicable')
+  })
+
+  it('keeps an expected Windows source pending while its poller initializes', () => {
+    expect(
+      assessProofSourceFrame({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        sourceExpected: true,
+        sourcePollerCount: 0,
+        freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false
+      })
+    ).toBe('pending')
   })
 
   it('requires every active source poller to remain fresh', () => {
@@ -100,9 +186,286 @@ describe('assessProofSourceFrame', () => {
         framePollingSuppressed: false,
         sourcePollerCount: 2,
         freshSourceLayerCount: 1,
+        sourceFrameHistoryComplete: true,
         sourceFrameAgeMs: 1_501
       })
     ).toBe('stalled')
+  })
+
+  it('keeps a started poller pending until its first decoded frame reaches the startup budget', () => {
+    expect(
+      assessProofSourceFrame({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        sourceExpected: true,
+        sourcePollerCount: 1,
+        freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
+        sourceFrameAgeMs: 1_501
+      })
+    ).toBe('pending')
+  })
+})
+
+describe('assessProofPresentationWatch', () => {
+  it('declares a stalled Windows proof surface when the first frame never arrives', () => {
+    expect(
+      assessProofPresentationWatch({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        surfaceReady: false,
+        sourceExpected: true,
+        sourcePollerCount: 0,
+        freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
+        pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
+      })
+    ).toBe('stalled')
+  })
+
+  it('detects a dropped Windows proof pump after delivered source frames become stale', () => {
+    expect(
+      assessProofPresentationWatch({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        surfaceReady: true,
+        sourceExpected: true,
+        sourcePollerCount: 1,
+        freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: true,
+        sourceFrameAgeMs: 1_501,
+        pendingElapsedMs: 0
+      })
+    ).toBe('stalled')
+  })
+
+  it('times out an expected source whose proof poller never initializes', () => {
+    expect(
+      assessProofPresentationWatch({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        surfaceReady: true,
+        sourceExpected: true,
+        sourcePollerCount: 0,
+        freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
+        pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
+      })
+    ).toBe('stalled')
+  })
+
+  it('accepts compositor-only output when the scene expects no polled source', () => {
+    expect(
+      assessProofPresentationWatch({
+        platform: 'win32',
+        framePollingSuppressed: false,
+        surfaceReady: true,
+        sourceExpected: false,
+        sourcePollerCount: 0,
+        freshSourceLayerCount: 0,
+        sourceFrameHistoryComplete: false,
+        pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
+      })
+    ).toBe('not-applicable')
+  })
+
+  it('gives an initialized poller the full first-frame budget before declaring fallback', () => {
+    const startup = {
+      platform: 'win32' as const,
+      framePollingSuppressed: false,
+      surfaceReady: true,
+      sourceExpected: true,
+      sourcePollerCount: 1,
+      freshSourceLayerCount: 0,
+      sourceFrameHistoryComplete: false,
+      sourceFrameAgeMs: 1_501
+    }
+
+    expect(
+      assessProofPresentationWatch({
+        ...startup,
+        pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS - 1
+      })
+    ).toBe('pending')
+    expect(
+      assessProofPresentationWatch({
+        ...startup,
+        pendingElapsedMs: DEFAULT_PROOF_FIRST_FRAME_TIMEOUT_MS
+      })
+    ).toBe('stalled')
+  })
+})
+
+describe('proofPresentationFallbackReason', () => {
+  it('does not claim a last good frame when startup never delivered one', () => {
+    const reason = proofPresentationFallbackReason({
+      sourceFrameHistoryComplete: false,
+      sourceFrameAgeMs: 15_000,
+      pendingElapsedMs: 15_000
+    })
+
+    expect(reason).toBe('Windows preview did not deliver a first frame within 15000ms.')
+    expect(reason).not.toContain('last good frame')
+  })
+
+  it('identifies a post-live source stall and retained frame', () => {
+    expect(
+      proofPresentationFallbackReason({
+        sourceFrameHistoryComplete: true,
+        sourceFrameAgeMs: 1_501,
+        pendingElapsedMs: 200
+      })
+    ).toBe(
+      'Windows preview source frames have not advanced for 1501ms; keeping the last good frame while polling retries.'
+    )
+  })
+})
+
+describe('boundedProofWatchdogRead', () => {
+  it('releases the watchdog when the proof renderer never answers', async () => {
+    vi.useFakeTimers()
+    try {
+      const result = boundedProofWatchdogRead(new Promise<never>(() => undefined), 500)
+      await vi.advanceTimersByTimeAsync(500)
+      await expect(result).resolves.toBeNull()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
+describe('ProofWatchdogRendererReadSingleFlight', () => {
+  it('reuses one unresolved renderer read across repeated bounded timeouts', async () => {
+    vi.useFakeTimers()
+    try {
+      const reads = new ProofWatchdogRendererReadSingleFlight<never>()
+      const owner = { watchdogRun: {}, webContents: {} }
+      const startRead = vi.fn(() => new Promise<never>(() => undefined))
+
+      const first = reads.read(owner, startRead, 500)
+      await vi.advanceTimersByTimeAsync(500)
+      await expect(first).resolves.toBeNull()
+
+      const second = reads.read(owner, startRead, 500)
+      expect(second).toBe(first)
+      expect(startRead).toHaveBeenCalledTimes(1)
+      await expect(second).resolves.toBeNull()
+      expect(startRead).toHaveBeenCalledTimes(1)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('retires an old run without letting its deferred settlement clear the reopened read', async () => {
+    let resolveOld!: (value: string) => void
+    let resolveReopened!: (value: string) => void
+    const oldRead = new Promise<string>((resolve) => {
+      resolveOld = resolve
+    })
+    const reopenedRead = new Promise<string>((resolve) => {
+      resolveReopened = resolve
+    })
+    const reads = new ProofWatchdogRendererReadSingleFlight<string>()
+    const webContents = {}
+    const oldOwner = { watchdogRun: {}, webContents }
+    const reopenedOwner = { watchdogRun: {}, webContents }
+    const startRead = vi.fn().mockReturnValueOnce(oldRead).mockReturnValueOnce(reopenedRead)
+
+    const oldResult = reads.read(oldOwner, startRead)
+    reads.retire(oldOwner)
+    const reopenedResult = reads.read(reopenedOwner, startRead)
+    resolveOld('old')
+    await expect(oldResult).resolves.toBe('old')
+
+    const reusedReopenedResult = reads.read(reopenedOwner, startRead)
+    expect(startRead).toHaveBeenCalledTimes(2)
+    resolveReopened('reopened')
+    await expect(reopenedResult).resolves.toBe('reopened')
+    await expect(reusedReopenedResult).resolves.toBe('reopened')
+  })
+
+  it('supersedes an unresolved read when the proof WebContents changes', async () => {
+    let resolveOld!: (value: string) => void
+    let resolveReplacement!: (value: string) => void
+    const oldRead = new Promise<string>((resolve) => {
+      resolveOld = resolve
+    })
+    const replacementRead = new Promise<string>((resolve) => {
+      resolveReplacement = resolve
+    })
+    const reads = new ProofWatchdogRendererReadSingleFlight<string>()
+    const watchdogRun = {}
+    const oldOwner = { watchdogRun, webContents: {} }
+    const replacementOwner = { watchdogRun, webContents: {} }
+    const startRead = vi.fn().mockReturnValueOnce(oldRead).mockReturnValueOnce(replacementRead)
+
+    const oldResult = reads.read(oldOwner, startRead)
+    const replacementResult = reads.read(replacementOwner, startRead)
+    expect(startRead).toHaveBeenCalledTimes(2)
+
+    resolveOld('old')
+    await expect(oldResult).resolves.toBe('old')
+    const reusedReplacementResult = reads.read(replacementOwner, startRead)
+    expect(startRead).toHaveBeenCalledTimes(2)
+
+    resolveReplacement('replacement')
+    await expect(replacementResult).resolves.toBe('replacement')
+    await expect(reusedReplacementResult).resolves.toBe('replacement')
+  })
+})
+
+describe('WatchdogTickOwnership', () => {
+  it('does not let a deferred old tick release the reopened watchdog tick', () => {
+    const ownership = new WatchdogTickOwnership()
+    const oldRun = ownership.startRun()
+    const oldTick = ownership.tryAcquire(oldRun)
+    expect(oldTick).not.toBeNull()
+
+    ownership.stopRun(oldRun)
+    const reopenedRun = ownership.startRun()
+    const reopenedTick = ownership.tryAcquire(reopenedRun)
+    expect(reopenedTick).not.toBeNull()
+    expect(ownership.isCurrent(oldTick!)).toBe(false)
+
+    ownership.stopRun(oldRun)
+    ownership.release(oldTick!)
+    expect(ownership.tryAcquire(reopenedRun)).toBeNull()
+
+    ownership.release(reopenedTick!)
+    expect(ownership.tryAcquire(reopenedRun)).not.toBeNull()
+  })
+})
+
+describe('proofWatchdogRendererReadAllowed', () => {
+  it('never waits on an intentionally hidden, suppressed, or non-painting proof window', () => {
+    expect(
+      proofWatchdogRendererReadAllowed({
+        framePollingSuppressed: true,
+        intentionallyHidden: false,
+        proofWindowVisible: true
+      })
+    ).toBe(false)
+    expect(
+      proofWatchdogRendererReadAllowed({
+        framePollingSuppressed: false,
+        intentionallyHidden: true,
+        proofWindowVisible: true
+      })
+    ).toBe(false)
+    expect(
+      proofWatchdogRendererReadAllowed({
+        framePollingSuppressed: false,
+        intentionallyHidden: false,
+        proofWindowVisible: false
+      })
+    ).toBe(false)
+    expect(
+      proofWatchdogRendererReadAllowed({
+        framePollingSuppressed: false,
+        intentionallyHidden: false,
+        proofWindowVisible: true
+      })
+    ).toBe(true)
   })
 })
 

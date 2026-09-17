@@ -75,6 +75,61 @@ describe('caption audio amplitude evidence', () => {
       }
     }
   )
+
+  it(
+    'measures a bounded time window from a finished media artifact',
+    { skip: ffmpegAvailable(ffmpegPath) ? false : 'ffmpeg not installed' },
+    async () => {
+      const directory = mkdtempSync(join(tmpdir(), 'videorc-caption-audio-window-'))
+      const artifact = join(directory, 'tone-then-silence.wav')
+      try {
+        const encoded = spawnSync(
+          ffmpegPath,
+          [
+            '-y',
+            '-hide_banner',
+            '-loglevel',
+            'error',
+            '-f',
+            'lavfi',
+            '-i',
+            'sine=frequency=440:sample_rate=48000:duration=0.25',
+            '-f',
+            'lavfi',
+            '-i',
+            'anullsrc=r=48000:cl=mono:d=0.25',
+            '-filter_complex',
+            '[0:a][1:a]concat=n=2:v=0:a=1[out]',
+            '-map',
+            '[out]',
+            artifact
+          ],
+          { encoding: 'utf8' }
+        )
+        assert.equal(encoded.status, 0, encoded.stderr)
+
+        const tone = await analyzeMediaAudioAmplitude(artifact, {
+          ffmpegPath,
+          startSeconds: 0,
+          durationSeconds: 0.2
+        })
+        const silence = await analyzeMediaAudioAmplitude(artifact, {
+          ffmpegPath,
+          startSeconds: 0.3,
+          durationSeconds: 0.15
+        })
+
+        assert.ok(tone.peak > 0.1, `tone peak=${tone.peak}`)
+        assert.ok(silence.sampleCount >= 2_300)
+        assert.equal(silence.peak, 0)
+        assert.equal(silence.rms, 0)
+        assert.equal(silence.startSeconds, 0.3)
+        assert.equal(silence.durationSeconds, 0.15)
+      } finally {
+        rmSync(directory, { force: true, recursive: true })
+      }
+    }
+  )
 })
 
 function pcm16(samples) {

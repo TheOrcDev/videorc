@@ -1,15 +1,10 @@
-import type {
-  EntitlementsSnapshot,
-  FeatureId,
-  StreamOutputOrientation,
-  StreamTargetSettings,
-  VideoSettings
-} from './backend'
+import type { EntitlementsSnapshot, FeatureId, StreamingSettings, VideoSettings } from './backend'
 import {
   DEFAULT_BASIC_ENTITLEMENTS,
   entitlementDisabledReason,
   isFeatureEntitled
 } from './entitlements'
+import { streamVideoProfileValidationReason } from './capture'
 import { isPremiumUpgradeMessage, VIDEORC_PREMIUM_URL } from './premium-upgrade'
 
 export type EntitlementUiGate =
@@ -22,22 +17,15 @@ export type EntitlementUiGate =
       allowFixAction?: boolean
     }
 
-/** The slice of streaming settings the destination gates read: enabled ids
- *  plus each target's leg binding (absent = horizontal). */
-export interface StreamingGateSettings {
-  enabledTargetIds: string[]
-  targets: ReadonlyArray<Pick<StreamTargetSettings, 'id' | 'outputOrientation'>>
-}
-
 export interface StreamingDestinationEnableGateInput {
   entitlements: EntitlementsSnapshot | null
-  streaming: StreamingGateSettings
+  streaming: Pick<StreamingSettings, 'enabledTargetIds'>
   targetId: string
 }
 
 export interface GoLiveEntitlementGateInput {
   entitlements: EntitlementsSnapshot | null
-  streaming: StreamingGateSettings
+  streaming: Pick<StreamingSettings, 'enabledTargetIds'>
 }
 
 export interface VideoProfileEntitlementGateInput {
@@ -61,19 +49,11 @@ export function streamingDestinationEnableGate({
   }
 
   const maxDestinations = streamingMaxDestinations(entitlements)
-  if (streaming.enabledTargetIds.length >= maxDestinations) {
-    return destinationsLimitGate(entitlements, maxDestinations)
+  if (streaming.enabledTargetIds.length < maxDestinations) {
+    return { allowed: true }
   }
 
-  // Per-orientation cap: each composed leg fans out ONE encode; 3 targets per
-  // leg is the tested shape, so enabling counts against the target's leg.
-  const orientation = targetOrientation(streaming, targetId)
-  const perOrientationCap = streamingMaxDestinationsPerOrientation(entitlements)
-  if (enabledCountForOrientation(streaming, orientation) >= perOrientationCap) {
-    return destinationsLimitGate(entitlements, perOrientationCap, orientation)
-  }
-
-  return { allowed: true }
+  return destinationsLimitGate(maxDestinations)
 }
 
 export function goLiveEntitlementGate({
@@ -86,17 +66,11 @@ export function goLiveEntitlementGate({
   }
 
   const maxDestinations = streamingMaxDestinations(entitlements)
-  const perOrientationCap = streamingMaxDestinationsPerOrientation(entitlements)
-  const overOrientation = (['horizontal', 'vertical'] as const).find(
-    (orientation) => enabledCountForOrientation(streaming, orientation) > perOrientationCap
-  )
-  if (streaming.enabledTargetIds.length <= maxDestinations && !overOrientation) {
+  if (streaming.enabledTargetIds.length <= maxDestinations) {
     return { allowed: true }
   }
 
-  const limitGate = overOrientation
-    ? destinationsLimitGate(entitlements, perOrientationCap, overOrientation)
-    : destinationsLimitGate(entitlements, maxDestinations)
+  const limitGate = destinationsLimitGate(maxDestinations)
   if (limitGate.allowed) {
     return limitGate
   }
@@ -113,6 +87,11 @@ export function cloudAiUploadGate(entitlements: EntitlementsSnapshot | null): En
 
 export function noiseCleanupGate(entitlements: EntitlementsSnapshot | null): EntitlementUiGate {
   return featureGate(entitlements, 'noise-cleanup')
+}
+
+/** Live Chat Co-host (Premium): fail-closed like every other cloud-AI gate. */
+export function liveCohostGate(entitlements: EntitlementsSnapshot | null): EntitlementUiGate {
+  return featureGate(entitlements, 'live-cohost')
 }
 
 export function videoProfileEntitlementGate({
@@ -141,7 +120,9 @@ export function videoProfileEntitlementGate({
     (bitrateLimit !== undefined && video.bitrateKbps > bitrateLimit)
 
   if (!overLimit) {
-    return { allowed: true }
+    const unsupportedReason =
+      kind === 'streaming' ? streamVideoProfileValidationReason(video) : null
+    return unsupportedReason ? lockedGate(featureId, unsupportedReason, true) : { allowed: true }
   }
 
   const reason = shouldOfferPremiumForProfileLimit(entitlements)
@@ -164,35 +145,15 @@ function featureGate(
   )
 }
 
-function destinationsLimitGate(
-  entitlements: EntitlementsSnapshot | null,
-  maxDestinations: number,
-  orientation?: StreamOutputOrientation
-): EntitlementUiGate {
-  const scope = orientation ? `${orientation} streaming destinations` : 'streaming destinations'
-  const reason = !isFeatureEntitled(entitlements, 'multistreaming')
-    ? (entitlementDisabledReason(entitlements, 'multistreaming') ??
-      'Multistreaming requires Videorc Premium.')
-    : `Your current plan allows up to ${maxDestinations} ${scope}.`
-
-  return lockedGate('multistreaming', reason)
-}
-
-function targetOrientation(
-  streaming: Pick<StreamingGateSettings, 'targets'>,
-  targetId: string
-): StreamOutputOrientation {
-  return (
-    streaming.targets.find((target) => target.id === targetId)?.outputOrientation ?? 'horizontal'
+// Multistreaming is free for every plan: the destination cap is a shared
+// pipeline limit, not a plan gate. The reason must never mention Premium —
+// lockedGate would otherwise attach an upgrade URL and the toast layer would
+// turn it into an upgrade prompt.
+function destinationsLimitGate(maxDestinations: number): EntitlementUiGate {
+  return lockedGate(
+    'multistreaming',
+    `You can stream to up to ${maxDestinations} destinations at once.`
   )
-}
-
-function enabledCountForOrientation(
-  streaming: StreamingGateSettings,
-  orientation: StreamOutputOrientation
-): number {
-  return streaming.enabledTargetIds.filter((id) => targetOrientation(streaming, id) === orientation)
-    .length
 }
 
 function lockedGate(
@@ -213,13 +174,6 @@ function streamingMaxDestinations(entitlements: EntitlementsSnapshot | null): nu
   return (
     entitlements?.limits.streaming.maxDestinations ??
     DEFAULT_BASIC_ENTITLEMENTS.limits.streaming.maxDestinations
-  )
-}
-
-function streamingMaxDestinationsPerOrientation(entitlements: EntitlementsSnapshot | null): number {
-  return (
-    entitlements?.limits.streaming.maxDestinationsPerOrientation ??
-    DEFAULT_BASIC_ENTITLEMENTS.limits.streaming.maxDestinationsPerOrientation
   )
 }
 

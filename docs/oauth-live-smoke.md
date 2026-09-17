@@ -10,8 +10,13 @@ This runbook is the release acceptance path for first-class OAuth/native livestr
   until Google approves the app. A verification candidate can explicitly enable
   the complete flow so reviewers can exercise consent, channel selection,
   broadcast management, chat, and revocation before approval.
-- **Twitch:** The developer app must register the OAuth redirect URL(s), and
-  broadcaster actions use user access tokens with scoped permissions. The
+- **Twitch:** Videorc's app is registered as a PUBLIC client, which has no
+  client secret. Twitch's authorization-code grant rejects a secretless public
+  client (`Invalid client credentials`, returned AFTER the user approves,
+  with or without PKCE), so connect uses the **device code flow**: the app
+  opens Twitch's `verification_uri` — which already embeds the user code — and
+  polls until the user approves. Refresh works with the client id alone.
+  Broadcaster actions use user access tokens with scoped permissions. The
   existing Videorc scopes still map to the current docs:
   `channel:manage:broadcast` for broadcast metadata and
   `channel:read:stream_key` for reading the stream key. Twitch still treats

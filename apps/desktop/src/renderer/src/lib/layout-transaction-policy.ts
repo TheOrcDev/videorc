@@ -29,6 +29,14 @@ export function layoutTransactionProofDisposition(input: {
   return input.proofSucceeded ? 'apply-proven' : 'apply-unproven'
 }
 
+// Idle scene commits are authoritative immediately. Only wait for the compositor
+// presentation proof when the detached preview can actually receive a frame;
+// with no preview window open, the compositor intentionally has no presentation
+// consumer and a proof would be impossible.
+export function idlePreviewLayoutProofRequired(input: { surfaceCanPresent: boolean }): boolean {
+  return input.surfaceCanPresent
+}
+
 // Instant background apply while live: commit only when a session is active,
 // only after the session's own start armed the watcher (start params already
 // carry the background), and only when the resolved background VALUE changed —
@@ -72,6 +80,61 @@ export function layoutTransactionUnprovenSeverity(
 export type LayoutTransactionFailureReconciliation<T> = {
   source: 'backend-truth' | 'latest-commit'
   snapshot: T
+}
+
+export type LayoutTransactionFailureDisposition =
+  | 'requested-scene-applied'
+  | 'backend-scene-different'
+  | 'backend-truth-unavailable'
+  | 'terminal-evidence-unavailable'
+  | 'definitely-not-applied'
+
+/**
+ * Only a post-send outcome-unknown failure is eligible for reconciliation.
+ * A stable scene read must both advance beyond the pre-command revision and
+ * exactly match every observable part of the requested scene transaction.
+ */
+export function layoutTransactionFailureDisposition<T>(input: {
+  failureCode?: string
+  sceneRevisionBeforeRequest?: number
+  requestedScene: T
+  backendTruth: { sceneRevision: number; scene: T } | null
+}): LayoutTransactionFailureDisposition {
+  if (input.failureCode !== 'request-outcome-unknown') return 'definitely-not-applied'
+  if (!input.backendTruth) return 'backend-truth-unavailable'
+  if (
+    input.sceneRevisionBeforeRequest === undefined ||
+    input.backendTruth.sceneRevision <= input.sceneRevisionBeforeRequest
+  ) {
+    return 'terminal-evidence-unavailable'
+  }
+  return semanticJsonEqual(input.requestedScene, input.backendTruth.scene)
+    ? 'requested-scene-applied'
+    : 'backend-scene-different'
+}
+
+function semanticJsonEqual(left: unknown, right: unknown): boolean {
+  if (Object.is(left, right)) return true
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((value, index) => semanticJsonEqual(value, right[index]))
+    )
+  }
+  if (!left || !right || typeof left !== 'object' || typeof right !== 'object') return false
+  const leftRecord = left as Record<string, unknown>
+  const rightRecord = right as Record<string, unknown>
+  const leftKeys = Object.keys(leftRecord).sort()
+  const rightKeys = Object.keys(rightRecord).sort()
+  return (
+    leftKeys.length === rightKeys.length &&
+    leftKeys.every(
+      (key, index) =>
+        key === rightKeys[index] && semanticJsonEqual(leftRecord[key], rightRecord[key])
+    )
+  )
 }
 
 export function latestLayoutTransactionCommit<T extends { sceneRevision: number }>(

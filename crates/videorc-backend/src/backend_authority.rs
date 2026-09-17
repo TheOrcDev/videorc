@@ -11,6 +11,11 @@ use serde::Serialize;
 pub enum BackendRole {
     Renderer,
     Admin,
+    /// Remote-control clients (Stream Deck plugin, Companion, ...). Hard
+    /// allowlist: `remote.describe` + `remote.intent` only, and the event
+    /// stream is locked to `remote.state`/`remote.ack` at connection setup.
+    /// Assume hostile local software probes the port — everything else 403s.
+    Remote,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +86,21 @@ pub fn authorize_backend_method(
     method: &str,
     smoke_rpc_enabled: bool,
 ) -> Result<(), MethodAdmissionError> {
+    if renderer_smoke_method(method) {
+        if role == BackendRole::Remote {
+            return Err(MethodAdmissionError::AdminOnly);
+        }
+        if !cfg!(debug_assertions) || !smoke_rpc_enabled {
+            return Err(MethodAdmissionError::SmokeDisabled);
+        }
+        // These maintained smokes must run on the renderer-role socket: the
+        // lane probe shares the renderer's real dispatcher, while capture
+        // recovery uses the same public connection marker as the TCC-owned
+        // app. The exact allowlist is compiled inert in release builds and
+        // still requires the explicit smoke runtime switch in debug builds.
+        return Ok(());
+    }
+
     if smoke_or_test_method(method) {
         if role != BackendRole::Admin {
             return Err(MethodAdmissionError::AdminOnly);
@@ -91,10 +111,49 @@ pub fn authorize_backend_method(
         return Ok(());
     }
 
+    if role == BackendRole::Remote {
+        // Default-deny: the remote surface is an allowlist, never a blocklist.
+        return if remote_allowed_method(method) {
+            Ok(())
+        } else {
+            Err(MethodAdmissionError::AdminOnly)
+        };
+    }
+
     if admin_only_method(method) && role != BackendRole::Admin {
         return Err(MethodAdmissionError::AdminOnly);
     }
     Ok(())
+}
+
+fn renderer_smoke_method(method: &str) -> bool {
+    matches!(
+        method,
+        "test.commandLanes.accountMaintenance.block"
+            | "test.commandLanes.accountMaintenance.status"
+            | "test.commandLanes.accountMaintenance.release"
+            | "test.commandLanes.liveControl.block"
+            | "test.captureRecovery.injectCameraDeliveryDegradation"
+            | "test.captureRecovery.injectScreenDeliveryDegradation"
+            | "test.captureRecovery.cameraCadenceEvidence"
+            | "test.captureRecovery.screenCadenceEvidence"
+    )
+}
+
+fn remote_allowed_method(method: &str) -> bool {
+    matches!(method, "remote.describe" | "remote.intent")
+}
+
+/// Constant-time check of a supplied token against the (optional, runtime-
+/// rotatable) remote-control token. Disabled surface or absent token never
+/// authenticates.
+pub fn authenticate_remote_token(supplied: &str, remote_token: Option<&str>) -> bool {
+    match remote_token {
+        Some(token) if !token.is_empty() => {
+            constant_time_equal(supplied.as_bytes(), token.as_bytes())
+        }
+        _ => false,
+    }
 }
 
 fn smoke_or_test_method(method: &str) -> bool {
@@ -111,6 +170,7 @@ fn admin_only_method(method: &str) -> bool {
         || matches!(
             method,
             "account.auth.begin_intent"
+                | "account.refresh"
                 | "account.sign_out"
                 | "compositor.scene.update"
                 | "preview.surface.take_native_host_commands"
@@ -197,10 +257,12 @@ mod tests {
             "preview.surface.take_native_host_commands",
             "compositor.scene.update",
             "account.auth.begin_intent",
+            "account.refresh",
             "account.sign_out",
             "encoder_bridge.synthetic_record",
             "recording.start_test",
             "captions.test.inject-audio",
+            "audio.test.disconnect",
             "audio.test.inject-pcm",
             "test.future.mutation",
         ] {
@@ -213,17 +275,64 @@ mod tests {
     }
 
     #[test]
+    fn renderer_command_lane_smoke_seam_requires_debug_and_explicit_opt_in() {
+        for method in [
+            "test.commandLanes.accountMaintenance.block",
+            "test.commandLanes.accountMaintenance.status",
+            "test.commandLanes.accountMaintenance.release",
+            "test.commandLanes.liveControl.block",
+            "test.captureRecovery.injectCameraDeliveryDegradation",
+            "test.captureRecovery.injectScreenDeliveryDegradation",
+            "test.captureRecovery.cameraCadenceEvidence",
+            "test.captureRecovery.screenCadenceEvidence",
+        ] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Renderer, method, false),
+                Err(MethodAdmissionError::SmokeDisabled),
+                "renderer seam must stay inert without the runtime switch"
+            );
+            let admitted = authorize_backend_method(BackendRole::Renderer, method, true);
+            if cfg!(debug_assertions) {
+                assert_eq!(admitted, Ok(()), "debug smoke should admit {method}");
+            } else {
+                assert_eq!(admitted, Err(MethodAdmissionError::SmokeDisabled));
+            }
+            assert_eq!(
+                authorize_backend_method(BackendRole::Remote, method, true),
+                Err(MethodAdmissionError::AdminOnly),
+                "remote-control clients must never reach {method}"
+            );
+        }
+    }
+
+    #[test]
     fn smoke_methods_need_debug_build_and_explicit_runtime_switch() {
-        assert_eq!(
-            authorize_backend_method(BackendRole::Admin, "encoder_bridge.synthetic_record", false),
-            Err(MethodAdmissionError::SmokeDisabled)
-        );
-        let admitted =
-            authorize_backend_method(BackendRole::Admin, "encoder_bridge.synthetic_record", true);
-        if cfg!(debug_assertions) {
-            assert_eq!(admitted, Ok(()));
-        } else {
-            assert_eq!(admitted, Err(MethodAdmissionError::SmokeDisabled));
+        for method in [
+            "encoder_bridge.synthetic_record",
+            "test.commandLanes.accountMaintenance.block",
+            "test.commandLanes.accountMaintenance.status",
+            "test.commandLanes.accountMaintenance.release",
+            "test.commandLanes.liveControl.block",
+            "test.captureRecovery.injectCameraDeliveryDegradation",
+            "test.captureRecovery.injectScreenDeliveryDegradation",
+            "test.captureRecovery.cameraCadenceEvidence",
+            "test.captureRecovery.screenCadenceEvidence",
+        ] {
+            assert_eq!(
+                authorize_backend_method(BackendRole::Admin, method, false),
+                Err(MethodAdmissionError::SmokeDisabled),
+                "{method} must require the explicit smoke switch"
+            );
+            let admitted = authorize_backend_method(BackendRole::Admin, method, true);
+            if cfg!(debug_assertions) {
+                assert_eq!(admitted, Ok(()), "debug smoke should admit {method}");
+            } else {
+                assert_eq!(
+                    admitted,
+                    Err(MethodAdmissionError::SmokeDisabled),
+                    "release builds must never admit {method}"
+                );
+            }
         }
     }
 
@@ -274,5 +383,52 @@ mod tests {
         assert!(serialized.contains("renderer-only"));
         assert!(!serialized.contains("admin"));
         assert!(!serialized.contains("adminToken"));
+    }
+}
+
+#[cfg(test)]
+mod remote_role_tests {
+    use super::*;
+
+    #[test]
+    fn remote_role_is_a_hard_allowlist() {
+        for allowed in ["remote.describe", "remote.intent"] {
+            assert!(authorize_backend_method(BackendRole::Remote, allowed, false).is_ok());
+        }
+        // The public repo assumption: hostile local software probes the port.
+        for forbidden in [
+            "session.start",
+            "session.stop",
+            "sessions.delete.resolve",
+            "account.auth.begin_intent",
+            "account.sign_out",
+            "recordings.list",
+            "health.ping",
+            "preview.surface.status",
+            "remote.control.enable",
+            "remote.control.regenerate",
+            "remote.surface.publish",
+            "remote.intent.ack",
+            "resource.capability.mint",
+            "test.anything",
+        ] {
+            assert!(
+                authorize_backend_method(BackendRole::Remote, forbidden, false).is_err(),
+                "remote role must not reach {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_token_authentication_is_optional_and_exact() {
+        assert!(authenticate_remote_token("tok", Some("tok")));
+        assert!(!authenticate_remote_token("tok", Some("other")));
+        assert!(!authenticate_remote_token("tok", Some("")));
+        assert!(!authenticate_remote_token("tok", None));
+        // The renderer/admin tokens never authenticate as remote implicitly.
+        assert_eq!(
+            authenticate_backend_token("remote-tok", "renderer", "admin"),
+            None
+        );
     }
 }

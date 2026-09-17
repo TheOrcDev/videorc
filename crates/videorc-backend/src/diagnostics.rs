@@ -8,9 +8,11 @@ use chrono::Utc;
 use crate::ffmpeg_work::FfmpegWorkSnapshot;
 use crate::frame_store::FrameStoreStats;
 use crate::protocol::{
-    CameraCapabilityFormat, CompositorBackend, DiagnosticBottleneck, DiagnosticStats,
-    PermissionPane, PreviewCameraStatus, PreviewImagePollCounts, PreviewScreenStatus,
-    PreviewSurfaceBacking, PreviewTransport, StreamHealth,
+    CameraCapabilityFormat, CaptureRecoveryPhase, CaptureRecoveryStatus, CompositorBackend,
+    DiagnosticBottleneck, DiagnosticStats, PermissionPane, PreviewCameraDropReasonStats,
+    PreviewCameraStatus, PreviewImagePollCounts, PreviewScreenFrameStatusStats,
+    PreviewScreenStatus, PreviewSourceSurfaceBackingStats, PreviewSurfaceBacking, PreviewTransport,
+    RecordingTimelineSnapshot, StreamHealth,
 };
 use crate::source_registry::SourceRegistrySnapshot;
 
@@ -19,6 +21,10 @@ pub struct CompositorSourceImportStats {
     pub iosurface_frames: u64,
     pub cvpixelbuffer_frames: u64,
     pub byte_upload_frames: u64,
+    pub capture_texture_reuses: u64,
+    pub camera_capture_texture_reuses: u64,
+    pub screen_capture_texture_reuses: u64,
+    pub texture_cache_flushes: u64,
     pub import_failures: u64,
     pub camera_iosurface_frames: u64,
     pub camera_cvpixelbuffer_frames: u64,
@@ -40,6 +46,18 @@ impl CompositorSourceImportStats {
         self.byte_upload_frames = self
             .byte_upload_frames
             .saturating_add(other.byte_upload_frames);
+        self.capture_texture_reuses = self
+            .capture_texture_reuses
+            .saturating_add(other.capture_texture_reuses);
+        self.camera_capture_texture_reuses = self
+            .camera_capture_texture_reuses
+            .saturating_add(other.camera_capture_texture_reuses);
+        self.screen_capture_texture_reuses = self
+            .screen_capture_texture_reuses
+            .saturating_add(other.screen_capture_texture_reuses);
+        self.texture_cache_flushes = self
+            .texture_cache_flushes
+            .saturating_add(other.texture_cache_flushes);
         self.import_failures = self.import_failures.saturating_add(other.import_failures);
         self.camera_iosurface_frames = self
             .camera_iosurface_frames
@@ -145,6 +163,377 @@ impl PreviewTransportCounters {
 /// into every emitted [`DiagnosticStats`] by [`apply_runtime_resource_snapshot`].
 pub static PREVIEW_POLL_COUNTS: PreviewTransportCounters = PreviewTransportCounters::new();
 
+/// Which kind of frame a bridge writer tick fed to its encoder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BridgeInputKind {
+    Fresh,
+    Repeated,
+    Synthetic,
+}
+
+/// Bounded sample window for the Media Foundation input-credit wait P95.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+const MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT: usize = 1024;
+
+/// Process-global per-stage frame counters for the ACTIVE capture session,
+/// reset at every session start. The record compositor loop, the
+/// recording-leg bridge writer thread, and the Media Foundation encoder each
+/// bump their own stage; the stop path reads one snapshot into
+/// [`DiagnosticStats`] and the `recording-frame-accounting` health event.
+/// Relaxed atomics on the hot paths; no lock is taken per frame except the
+/// bounded MF wait sample push, which only the Windows writer thread does.
+/// Const-constructible, so it needs no runtime init.
+#[derive(Debug)]
+pub struct RecordingFrameAccounting {
+    compositor_ticks: AtomicU64,
+    compositor_tick_skipped: AtomicU64,
+    bridge_fresh_frames: AtomicU64,
+    bridge_repeated_frames: AtomicU64,
+    bridge_synthetic_frames: AtomicU64,
+    mf_submitted_frames: AtomicU64,
+    mf_input_credit_timeouts: AtomicU64,
+    mf_input_credit_wait_ms: std::sync::Mutex<Vec<f64>>,
+}
+
+/// One scalar read of [`RecordingFrameAccounting`].
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct RecordingFrameAccountingSnapshot {
+    pub compositor_ticks: u64,
+    pub compositor_tick_skipped: u64,
+    pub bridge_fresh_frames: u64,
+    pub bridge_repeated_frames: u64,
+    pub bridge_synthetic_frames: u64,
+    pub mf_submitted_frames: u64,
+    pub mf_input_credit_timeouts: u64,
+    pub mf_input_credit_wait_p95_ms: Option<f64>,
+}
+
+impl RecordingFrameAccounting {
+    const fn new() -> Self {
+        Self {
+            compositor_ticks: AtomicU64::new(0),
+            compositor_tick_skipped: AtomicU64::new(0),
+            bridge_fresh_frames: AtomicU64::new(0),
+            bridge_repeated_frames: AtomicU64::new(0),
+            bridge_synthetic_frames: AtomicU64::new(0),
+            mf_submitted_frames: AtomicU64::new(0),
+            mf_input_credit_timeouts: AtomicU64::new(0),
+            mf_input_credit_wait_ms: std::sync::Mutex::new(Vec::new()),
+        }
+    }
+
+    /// Session start: every stage counts from zero for the new session.
+    pub fn reset(&self) {
+        self.compositor_ticks.store(0, Ordering::Relaxed);
+        self.compositor_tick_skipped.store(0, Ordering::Relaxed);
+        self.bridge_fresh_frames.store(0, Ordering::Relaxed);
+        self.bridge_repeated_frames.store(0, Ordering::Relaxed);
+        self.bridge_synthetic_frames.store(0, Ordering::Relaxed);
+        self.mf_submitted_frames.store(0, Ordering::Relaxed);
+        self.mf_input_credit_timeouts.store(0, Ordering::Relaxed);
+        if let Ok(mut samples) = self.mf_input_credit_wait_ms.lock() {
+            samples.clear();
+        }
+    }
+
+    /// One record/stream compositor render tick, plus the whole frame
+    /// intervals the loop missed since its previous tick.
+    pub fn record_compositor_tick(&self, skipped_intervals: u64) {
+        self.compositor_ticks.fetch_add(1, Ordering::Relaxed);
+        if skipped_intervals > 0 {
+            self.compositor_tick_skipped
+                .fetch_add(skipped_intervals, Ordering::Relaxed);
+        }
+    }
+
+    pub fn record_bridge_input(&self, kind: BridgeInputKind) {
+        let counter = match kind {
+            BridgeInputKind::Fresh => &self.bridge_fresh_frames,
+            BridgeInputKind::Repeated => &self.bridge_repeated_frames,
+            BridgeInputKind::Synthetic => &self.bridge_synthetic_frames,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn record_mf_submitted_frame(&self) {
+        self.mf_submitted_frames.fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn record_mf_input_credit_timeout(&self) {
+        self.mf_input_credit_timeouts
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub fn record_mf_input_credit_wait(&self, waited: Duration) {
+        if let Ok(mut samples) = self.mf_input_credit_wait_ms.lock() {
+            if samples.len() >= MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT {
+                let overflow = samples.len() + 1 - MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT;
+                samples.drain(0..overflow);
+            }
+            samples.push(waited.as_secs_f64() * 1000.0);
+        }
+    }
+
+    pub fn snapshot(&self) -> RecordingFrameAccountingSnapshot {
+        let mf_input_credit_wait_p95_ms = self
+            .mf_input_credit_wait_ms
+            .lock()
+            .ok()
+            .and_then(|samples| percentile_ms(&samples, 0.95));
+        RecordingFrameAccountingSnapshot {
+            compositor_ticks: self.compositor_ticks.load(Ordering::Relaxed),
+            compositor_tick_skipped: self.compositor_tick_skipped.load(Ordering::Relaxed),
+            bridge_fresh_frames: self.bridge_fresh_frames.load(Ordering::Relaxed),
+            bridge_repeated_frames: self.bridge_repeated_frames.load(Ordering::Relaxed),
+            bridge_synthetic_frames: self.bridge_synthetic_frames.load(Ordering::Relaxed),
+            mf_submitted_frames: self.mf_submitted_frames.load(Ordering::Relaxed),
+            mf_input_credit_timeouts: self.mf_input_credit_timeouts.load(Ordering::Relaxed),
+            mf_input_credit_wait_p95_ms,
+        }
+    }
+}
+
+fn percentile_ms(samples: &[f64], percentile: f64) -> Option<f64> {
+    if samples.is_empty() {
+        return None;
+    }
+    let mut sorted = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let rank = ((sorted.len() as f64 - 1.0) * percentile).round() as usize;
+    sorted.get(rank.min(sorted.len() - 1)).copied()
+}
+
+/// The single process-wide instance. Reset by the recording start path and
+/// read into every emitted [`DiagnosticStats`] by [`apply_runtime_resource_snapshot`].
+pub static RECORDING_FRAME_ACCOUNTING: RecordingFrameAccounting = RecordingFrameAccounting::new();
+
+pub fn apply_recording_frame_accounting(
+    mut stats: DiagnosticStats,
+    accounting: RecordingFrameAccountingSnapshot,
+) -> DiagnosticStats {
+    stats.compositor_ticks = accounting.compositor_ticks;
+    stats.compositor_tick_skipped = accounting.compositor_tick_skipped;
+    stats.encoder_bridge_fresh_frames = accounting.bridge_fresh_frames;
+    stats.encoder_bridge_mf_submitted_frames = accounting.mf_submitted_frames;
+    stats.encoder_bridge_mf_input_credit_timeouts = accounting.mf_input_credit_timeouts;
+    stats.encoder_bridge_mf_input_credit_wait_p95_ms = accounting.mf_input_credit_wait_p95_ms;
+    stats
+}
+
+/// Session over: the Windows D3D11 media authority for `session_id` no longer
+/// exists, so its `live`/`draining` state and fallback reason must not stay
+/// pinned to the idle diagnostics until the next session. A snapshot that
+/// already belongs to a different session is left untouched.
+pub fn apply_windows_d3d11_media_session_end(
+    mut stats: DiagnosticStats,
+    session_id: &str,
+) -> DiagnosticStats {
+    if stats.session_id.as_deref() != Some(session_id) {
+        return stats;
+    }
+    stats.windows_d3d11_media.state = crate::protocol::WindowsD3d11MediaState::Unavailable;
+    stats.windows_d3d11_media.fallback_reason = None;
+    stats.windows_d3d11_media.generation = None;
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
+fn format_optional_fps(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1}"))
+}
+
+fn format_optional_ms(value: Option<f64>) -> String {
+    value
+        .filter(|value| value.is_finite())
+        .map_or_else(|| "n/a".to_string(), |value| format!("{value:.1}ms"))
+}
+
+fn format_optional_count(value: Option<u64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| value.to_string())
+}
+
+fn format_optional_age_ms(value: Option<u64>) -> String {
+    value.map_or_else(|| "n/a".to_string(), |value| format!("{value}ms"))
+}
+
+fn format_optional_dimensions(width: Option<u32>, height: Option<u32>) -> String {
+    match (width, height) {
+        (Some(width), Some(height)) => format!("{width}x{height}"),
+        _ => "n/a".to_string(),
+    }
+}
+
+fn estimated_frames(fps: Option<f64>, duration_ms: i64) -> Option<u64> {
+    let fps = fps.filter(|fps| fps.is_finite() && *fps > 0.0)?;
+    if duration_ms <= 0 {
+        return None;
+    }
+    Some((fps * duration_ms as f64 / 1000.0).round() as u64)
+}
+
+/// One-line per-stage frame accounting for the `recording-frame-accounting`
+/// health event emitted at session stop. Pure: reads the final
+/// [`DiagnosticStats`] snapshot only, so the next support bundle shows WHERE
+/// the target cadence was lost (capture -> compositor -> bridge -> encoder).
+pub fn format_recording_frame_accounting(stats: &DiagnosticStats, duration_ms: i64) -> String {
+    let duration_s = duration_ms.max(0) as f64 / 1000.0;
+    let bridge_input = stats
+        .encoder_bridge_fresh_frames
+        .saturating_add(stats.encoder_bridge_repeated_frames)
+        .saturating_add(stats.encoder_bridge_synthetic_frames);
+    let mut parts = vec![
+        format!(
+            "duration {duration_s:.1}s @ target {} fps (~{} frames)",
+            format_optional_fps(stats.target_fps),
+            format_optional_count(estimated_frames(stats.target_fps, duration_ms))
+        ),
+        format!(
+            "captured: screen {} fps (~{}), camera {} fps (~{})",
+            format_optional_fps(stats.preview_screen_source_fps),
+            format_optional_count(estimated_frames(
+                stats.preview_screen_source_fps,
+                duration_ms
+            )),
+            format_optional_fps(stats.preview_camera_source_fps),
+            format_optional_count(estimated_frames(
+                stats.preview_camera_source_fps,
+                duration_ms
+            ))
+        ),
+        format!(
+            "compositor: {} ticks, {} intervals skipped, render {} fps, {} dropped, {} cpu, {} cpu-fallback",
+            stats.compositor_ticks,
+            stats.compositor_tick_skipped,
+            format_optional_fps(stats.render_fps),
+            stats.preview_dropped_frames,
+            stats.compositor_cpu_frames,
+            stats.compositor_cpu_fallback_frames
+        ),
+        format!(
+            "source serves: screen {} fresh / {} held (oldest {}ms), camera {} fresh / {} held (oldest {}ms)",
+            stats.compositor_screen_source_fresh_serves,
+            stats.compositor_screen_source_held_serves,
+            stats.compositor_screen_source_served_age_max_ms,
+            stats.compositor_camera_source_fresh_serves,
+            stats.compositor_camera_source_held_serves,
+            stats.compositor_camera_source_served_age_max_ms
+        ),
+        format!(
+            "capture detail: camera {} callbacks / {} didDrop / {} published, PTS gap max {}, native {}, output {}, pixel {}; screen {} callbacks / {} published, callback gap max {}",
+            stats.preview_camera_capture_callback_count,
+            stats.preview_camera_did_drop_callback_count,
+            stats.preview_camera_frame_store_publications,
+            format_optional_ms(stats.preview_camera_sample_pts_gap_max_ms),
+            format_optional_dimensions(
+                stats.preview_camera_selected_format_width,
+                stats.preview_camera_selected_format_height
+            ),
+            format_optional_dimensions(
+                stats.preview_camera_actual_width,
+                stats.preview_camera_actual_height
+            ),
+            stats
+                .preview_camera_capture_pixel_format
+                .as_deref()
+                .unwrap_or("n/a"),
+            stats.preview_screen_capture_callback_count,
+            stats.preview_screen_frame_store_publications,
+            format_optional_ms(stats.preview_screen_capture_gap_max_ms)
+        ),
+        format!(
+            "capture attribution: camera late {} / out-of-buffers {} / discontinuity {} / unknown {}; screen complete {} / idle {} / blank {} / suspended {} / started {} / stopped {} / unknown {}",
+            stats.preview_camera_drop_reasons.frame_was_late,
+            stats.preview_camera_drop_reasons.out_of_buffers,
+            stats.preview_camera_drop_reasons.discontinuity,
+            stats.preview_camera_drop_reasons.unknown,
+            stats.preview_screen_frame_statuses.complete,
+            stats.preview_screen_frame_statuses.idle,
+            stats.preview_screen_frame_statuses.blank,
+            stats.preview_screen_frame_statuses.suspended,
+            stats.preview_screen_frame_statuses.started,
+            stats.preview_screen_frame_statuses.stopped,
+            stats.preview_screen_frame_statuses.unknown
+        ),
+        format!(
+            "Metal sources: {} IOSurface imports / {} CVPixelBuffer imports / {} held reuses (camera {}, screen {}) / {} cache flushes / {} import failures",
+            stats.compositor_source_iosurface_import_frames,
+            stats.compositor_source_cvpixelbuffer_import_frames,
+            stats.compositor_source_capture_texture_reuses,
+            stats.compositor_camera_source_capture_texture_reuses,
+            stats.compositor_screen_source_capture_texture_reuses,
+            stats.compositor_source_texture_cache_flushes,
+            stats.compositor_source_import_failures
+        ),
+        format!(
+            "surface backing: camera {} live / {} peak ({} live bytes / {} peak bytes, oldest {}), screen {} live / {} peak ({} live bytes / {} peak bytes, oldest {})",
+            stats.preview_camera_surface_backing.live_count,
+            stats.preview_camera_surface_backing.peak_count,
+            stats.preview_camera_surface_backing.estimated_bytes,
+            stats.preview_camera_surface_backing.peak_estimated_bytes,
+            format_optional_age_ms(stats.preview_camera_surface_backing.oldest_age_ms),
+            stats.preview_screen_surface_backing.live_count,
+            stats.preview_screen_surface_backing.peak_count,
+            stats.preview_screen_surface_backing.estimated_bytes,
+            stats.preview_screen_surface_backing.peak_estimated_bytes,
+            format_optional_age_ms(stats.preview_screen_surface_backing.oldest_age_ms)
+        ),
+        format!(
+            "bridge input: {bridge_input} ({} fresh, {} repeat, {} synthetic) at {} fps",
+            stats.encoder_bridge_fresh_frames,
+            stats.encoder_bridge_repeated_frames,
+            stats.encoder_bridge_synthetic_frames,
+            format_optional_fps(stats.encoder_bridge_input_fps)
+        ),
+        format!(
+            "submitted: {} (mf {}), coalesced-dropped {}, encoder-dropped {}",
+            stats
+                .encoder_bridge_zero_copy_frames
+                .saturating_add(stats.encoder_bridge_raw_video_copied_frames),
+            stats.encoder_bridge_mf_submitted_frames,
+            stats.encoder_bridge_output_queue_dropped_frames,
+            stats.encoder_bridge_dropped_frames
+        ),
+        format!(
+            "output pressure: depth {} (high-water {}), oldest {} (high-water {}), last progress {}, pressure {} / recoveries {} / pre-encode skips {}, stages encode {} + fifo {}, encoded-AU drops {}",
+            stats.encoder_bridge_queue_depth,
+            stats.encoder_bridge_output_queue_high_water_frames,
+            format_optional_age_ms(stats.encoder_bridge_output_queue_oldest_frame_age_ms),
+            format_optional_age_ms(
+                stats.encoder_bridge_output_queue_oldest_frame_age_high_water_ms
+            ),
+            format_optional_age_ms(stats.encoder_bridge_output_last_progress_age_ms),
+            stats.encoder_bridge_output_queue_capacity_pressure_events,
+            stats.encoder_bridge_output_pressure_recovery_events,
+            stats.encoder_bridge_output_pre_encode_skipped_frames,
+            stats.encoder_bridge_video_toolbox_pending_encode_frames,
+            stats.encoder_bridge_video_toolbox_pending_fifo_frames,
+            stats.encoder_bridge_encoded_access_unit_dropped_frames,
+        ),
+        format!(
+            "encoded output: {} frames ({} bytes, {} errors)",
+            stats.encoder_bridge_encoded_output_frames,
+            stats.encoder_bridge_encoded_output_bytes,
+            stats.encoder_bridge_encoded_output_errors
+        ),
+    ];
+    if stats.encoder_bridge_mf_submitted_frames > 0
+        || stats.encoder_bridge_mf_input_credit_timeouts > 0
+        || stats.encoder_bridge_mf_input_credit_wait_p95_ms.is_some()
+    {
+        parts.push(format!(
+            "mf input credit: wait p95 {}, {} timeouts",
+            format_optional_ms(stats.encoder_bridge_mf_input_credit_wait_p95_ms),
+            stats.encoder_bridge_mf_input_credit_timeouts
+        ));
+    }
+    format!("Frame accounting: {}.", parts.join("; "))
+}
+
 pub fn idle_diagnostics() -> DiagnosticStats {
     DiagnosticStats {
         session_id: None,
@@ -157,11 +546,27 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         dropped_frames: 0,
         encoder_speed: None,
         encoder_bridge_queue_depth: 0,
+        encoder_bridge_output_queue_high_water_frames: 0,
         encoder_bridge_output_queue_oldest_frame_age_ms: None,
+        encoder_bridge_output_queue_oldest_frame_age_high_water_ms: None,
+        encoder_bridge_output_last_progress_age_ms: None,
         encoder_bridge_output_queue_capacity_pressure_events: 0,
+        encoder_bridge_output_pressure_recovery_events: 0,
         encoder_bridge_output_queue_dropped_frames: 0,
+        encoder_bridge_output_pre_encode_skipped_frames: 0,
+        encoder_bridge_video_toolbox_pending_encode_frames: 0,
+        encoder_bridge_video_toolbox_pending_fifo_frames: 0,
+        encoder_bridge_encoded_access_unit_dropped_frames: 0,
+        encoder_bridge_recording_output_pressure: Default::default(),
+        encoder_bridge_stream_output_pressure: Default::default(),
+        encoder_bridge_recording_role_diagnostics: Default::default(),
+        encoder_bridge_stream_role_diagnostics: Default::default(),
         encoder_bridge_input_fps: None,
         encoder_bridge_dropped_frames: 0,
+        encoder_bridge_recording_dropped_frames: 0,
+        encoder_bridge_stream_dropped_frames: 0,
+        encoder_bridge_recording_encoder_speed: None,
+        encoder_bridge_stream_encoder_speed: None,
         encoder_bridge_repeated_frames: 0,
         encoder_bridge_repeated_frame_bursts: 0,
         encoder_bridge_max_repeated_frame_run: 0,
@@ -172,6 +577,8 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encoder_bridge_repeated_frame_age_max_ms: None,
         encoder_bridge_metal_target_frames: 0,
         encoder_bridge_raw_video_copied_frames: 0,
+        encoder_bridge_recording_raw_video_copied_frames: 0,
+        encoder_bridge_stream_raw_video_copied_frames: 0,
         encoder_bridge_metal_target_copied_frames: 0,
         encoder_bridge_metal_target_handle_frames: 0,
         encoder_bridge_zero_copy_frames: 0,
@@ -181,6 +588,22 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encoder_bridge_video_toolbox_output_frames: 0,
         encoder_bridge_video_toolbox_output_bytes: 0,
         encoder_bridge_video_toolbox_output_encode_ms: None,
+        encoder_bridge_encoded_output_backend: None,
+        encoder_bridge_requested_video_output: None,
+        encoder_bridge_effective_video_output: None,
+        encoder_bridge_encoded_output_encoder_identity: None,
+        encoder_bridge_encoded_output_input_subtype: None,
+        encoder_bridge_encoded_output_fallback_reason: None,
+        encoder_bridge_encoded_output_frames: 0,
+        encoder_bridge_encoded_output_bytes: 0,
+        encoder_bridge_encoded_output_errors: 0,
+        encoder_bridge_encoded_submit_p95_ms: None,
+        encoder_bridge_encoded_fifo_write_p95_ms: None,
+        encoder_bridge_active_encoded_output_encoders: 0,
+        encoder_bridge_recording_encoded_output_frames: 0,
+        encoder_bridge_recording_encoded_output_bytes: 0,
+        encoder_bridge_stream_encoded_output_frames: 0,
+        encoder_bridge_stream_encoded_output_bytes: 0,
         recording_output_width: None,
         recording_output_height: None,
         recording_output_fps: None,
@@ -189,6 +612,11 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         stream_output_height: None,
         stream_output_fps: None,
         stream_output_bitrate_kbps: None,
+        stream_measured_bitrate_kbps: None,
+        stream_measured_bitrate_min_kbps: None,
+        stream_measured_bitrate_max_kbps: None,
+        stream_output_total_bytes: 0,
+        stream_duplicated_frames: 0,
         encoder_bridge_active_video_toolbox_output_encoders: 0,
         encoder_bridge_recording_video_toolbox_output_frames: 0,
         encoder_bridge_recording_video_toolbox_output_bytes: 0,
@@ -230,7 +658,15 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encode_backend: None,
         compositor_backend: None,
         compositor_fallback_reason: None,
+        compositor_cpu_frames: 0,
         compositor_cpu_fallback_frames: 0,
+        compositor_ticks: 0,
+        compositor_tick_skipped: 0,
+        encoder_bridge_fresh_frames: 0,
+        encoder_bridge_mf_submitted_frames: 0,
+        encoder_bridge_mf_input_credit_timeouts: 0,
+        encoder_bridge_mf_input_credit_wait_p95_ms: None,
+        windows_d3d11_media: Default::default(),
         websocket_transport: Default::default(),
         preview_image_poll_counts: PreviewImagePollCounts::default(),
         preview_target_fps: None,
@@ -258,6 +694,22 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_source_iosurface_import_frames: 0,
         compositor_source_cvpixelbuffer_import_frames: 0,
         compositor_source_byte_upload_frames: 0,
+        compositor_source_capture_texture_reuses: 0,
+        compositor_camera_source_capture_texture_reuses: 0,
+        compositor_screen_source_capture_texture_reuses: 0,
+        compositor_source_texture_cache_flushes: 0,
+        compositor_metal_cached_capture_source_imports_live_count: None,
+        compositor_metal_cached_capture_source_imports_peak_count: None,
+        compositor_metal_cached_capture_source_imports_ceiling: None,
+        compositor_metal_target_ring_slots_live_count: None,
+        compositor_metal_target_ring_slots_peak_count: None,
+        compositor_metal_target_ring_slots_ceiling: None,
+        encoder_bridge_metal_target_refs_in_flight_live_count: None,
+        encoder_bridge_metal_target_refs_in_flight_peak_count: None,
+        encoder_bridge_metal_target_refs_in_flight_ceiling: None,
+        native_preview_iosurface_import_live_count: None,
+        native_preview_iosurface_import_peak_count: None,
+        native_preview_iosurface_import_ceiling: None,
         compositor_source_import_failures: 0,
         compositor_camera_source_iosurface_import_frames: 0,
         compositor_camera_source_cvpixelbuffer_import_frames: 0,
@@ -282,6 +734,18 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         compositor_screen_source_try_lock_misses: 0,
         compositor_camera_source_blocking_refreshes: 0,
         compositor_screen_source_blocking_refreshes: 0,
+        compositor_camera_source_fresh_serves: 0,
+        compositor_camera_source_held_serves: 0,
+        compositor_camera_source_served_age_max_ms: 0,
+        compositor_screen_source_fresh_serves: 0,
+        compositor_screen_source_held_serves: 0,
+        compositor_screen_source_served_age_max_ms: 0,
+        capture_pipeline_degraded_stage: None,
+        capture_recovery_phase: None,
+        capture_recovery_source: None,
+        capture_recovery_attempts: None,
+        capture_recovery_last_error: None,
+        capture_recovery_last_duration_ms: None,
         preview_repeated_frames: 0,
         preview_surface_resize_count: 0,
         preview_latency_ms: None,
@@ -289,6 +753,14 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_camera_frame_age_ms: None,
         preview_camera_source_fps: None,
         preview_camera_dropped_frames: 0,
+        preview_camera_capture_callback_count: 0,
+        preview_camera_did_drop_callback_count: 0,
+        preview_camera_frame_store_publications: 0,
+        preview_camera_capture_callback_age_ms: None,
+        preview_camera_latest_sequence: None,
+        preview_camera_capture_pixel_format: None,
+        preview_camera_drop_reasons: PreviewCameraDropReasonStats::default(),
+        preview_camera_surface_backing: PreviewSourceSurfaceBackingStats::default(),
         preview_camera_state: None,
         preview_camera_device_unique_id: None,
         preview_camera_status_message: None,
@@ -316,6 +788,12 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_screen_frame_age_ms: None,
         preview_screen_source_fps: None,
         preview_screen_dropped_frames: 0,
+        preview_screen_capture_callback_count: 0,
+        preview_screen_frame_store_publications: 0,
+        preview_screen_capture_callback_age_ms: None,
+        preview_screen_latest_sequence: None,
+        preview_screen_frame_statuses: PreviewScreenFrameStatusStats::default(),
+        preview_screen_surface_backing: PreviewSourceSurfaceBackingStats::default(),
         preview_screen_message: None,
         preview_screen_native_width: None,
         preview_screen_native_height: None,
@@ -324,6 +802,7 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         preview_screen_actual_width: None,
         preview_screen_actual_height: None,
         preview_screen_iosurface_available: None,
+        preview_screen_d3d11_texture_available: None,
         preview_screen_capture_gap_p95_ms: None,
         preview_screen_capture_gap_max_ms: None,
         preview_screen_pixel_buffer_lock_p95_ms: None,
@@ -360,6 +839,8 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         first_source_frame_ms: None,
         first_full_resolution_compositor_frame_ms: None,
         first_encoded_frame_ms: None,
+        recording_start_timeline: None,
+        recording_stop_timeline: None,
         updated_at: Utc::now().to_rfc3339(),
     }
 }
@@ -368,7 +849,35 @@ pub fn apply_runtime_diagnostics_snapshot(
     stats: DiagnosticStats,
     snapshot: FfmpegWorkSnapshot,
 ) -> DiagnosticStats {
-    apply_runtime_resource_snapshot(apply_ffmpeg_work_snapshot(stats, snapshot))
+    apply_metal_retention_snapshot(apply_runtime_resource_snapshot(apply_ffmpeg_work_snapshot(
+        stats, snapshot,
+    )))
+}
+
+fn apply_metal_retention_snapshot(mut stats: DiagnosticStats) -> DiagnosticStats {
+    #[cfg(target_os = "macos")]
+    {
+        let retention = crate::metal_compositor::metal_retention_snapshot();
+        stats.compositor_metal_cached_capture_source_imports_live_count =
+            Some(retention.cached_capture_source_imports_live_count);
+        stats.compositor_metal_cached_capture_source_imports_peak_count =
+            Some(retention.cached_capture_source_imports_peak_count);
+        stats.compositor_metal_cached_capture_source_imports_ceiling =
+            Some(retention.cached_capture_source_imports_ceiling);
+        stats.compositor_metal_target_ring_slots_live_count =
+            Some(retention.target_ring_slots_live_count);
+        stats.compositor_metal_target_ring_slots_peak_count =
+            Some(retention.target_ring_slots_peak_count);
+        stats.compositor_metal_target_ring_slots_ceiling =
+            Some(retention.target_ring_slots_ceiling);
+        stats.encoder_bridge_metal_target_refs_in_flight_live_count =
+            Some(retention.encoder_in_flight_target_refs_live_count);
+        stats.encoder_bridge_metal_target_refs_in_flight_peak_count =
+            Some(retention.encoder_in_flight_target_refs_peak_count);
+        stats.encoder_bridge_metal_target_refs_in_flight_ceiling =
+            Some(retention.encoder_in_flight_target_refs_ceiling);
+    }
+    stats
 }
 
 pub fn apply_websocket_transport_stats(
@@ -399,6 +908,7 @@ pub fn apply_runtime_resource_snapshot(mut stats: DiagnosticStats) -> Diagnostic
     let snapshot = runtime_resource_sampler().snapshot();
     apply_runtime_resource_snapshot_value(&mut stats, snapshot);
     stats.preview_image_poll_counts = PREVIEW_POLL_COUNTS.snapshot();
+    let mut stats = apply_recording_frame_accounting(stats, RECORDING_FRAME_ACCOUNTING.snapshot());
     let (at_risk, reasons) = classify_recording_risk(&stats);
     stats.recording_at_risk = at_risk;
     stats.recording_risk_reasons = reasons;
@@ -726,17 +1236,51 @@ pub fn apply_stream_health(
     health: &StreamHealth,
     target_fps: u32,
 ) -> DiagnosticStats {
+    let new_session = stats.session_id.as_deref() != Some(health.session_id.as_str());
+    if new_session {
+        stats.stream_measured_bitrate_kbps = None;
+        stats.stream_measured_bitrate_min_kbps = None;
+        stats.stream_measured_bitrate_max_kbps = None;
+        stats.stream_output_total_bytes = 0;
+        stats.stream_duplicated_frames = 0;
+    }
     stats.session_id = Some(health.session_id.clone());
     stats.target_fps = Some(f64::from(target_fps));
-    if let Some(fps) = health.fps {
-        stats.capture_fps = Some(fps);
-        stats.render_fps = Some(fps);
-    }
+    // FFmpeg's progress `fps` is delivered-output cadence, not evidence for
+    // either the capture or render stage. Those fields remain owned by their
+    // stage-specific samplers; aliasing output cadence into both makes
+    // attribution report healthy media stages when capture/render are unknown.
     if let Some(dropped_frames) = health.dropped_frames {
         stats.dropped_frames = dropped_frames;
         stats.skipped_frames = dropped_frames;
     }
-    stats.encoder_speed = health.speed;
+    if let Some(bitrate_kbps) = health
+        .bitrate_kbps
+        .filter(|bitrate_kbps| bitrate_kbps.is_finite() && *bitrate_kbps >= 0.0)
+    {
+        stats.stream_measured_bitrate_kbps = Some(bitrate_kbps);
+        if bitrate_kbps > 0.0 {
+            stats.stream_measured_bitrate_min_kbps = Some(
+                stats
+                    .stream_measured_bitrate_min_kbps
+                    .map_or(bitrate_kbps, |minimum| minimum.min(bitrate_kbps)),
+            );
+            stats.stream_measured_bitrate_max_kbps = Some(
+                stats
+                    .stream_measured_bitrate_max_kbps
+                    .map_or(bitrate_kbps, |maximum| maximum.max(bitrate_kbps)),
+            );
+        }
+    }
+    if let Some(total_bytes) = health.total_bytes {
+        stats.stream_output_total_bytes = stats.stream_output_total_bytes.max(total_bytes);
+    }
+    if let Some(duplicated_frames) = health.duplicated_frames {
+        stats.stream_duplicated_frames = stats.stream_duplicated_frames.max(duplicated_frames);
+    }
+    stats.encoder_speed = health
+        .speed
+        .filter(|speed| speed.is_finite() && *speed >= 0.0);
     stats.bottleneck = classify_bottleneck(
         stats.capture_fps,
         stats.render_fps,
@@ -750,15 +1294,31 @@ pub fn apply_stream_health(
     stats
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EncoderBridgeDiagnosticSnapshot {
     pub queue_depth: u64,
+    pub output_queue_high_water_frames: u64,
     pub output_queue_oldest_frame_age_ms: Option<u64>,
+    pub output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    pub output_last_progress_age_ms: Option<u64>,
     pub output_queue_capacity_pressure_events: u64,
+    pub output_pressure_recovery_events: u64,
     pub output_queue_dropped_frames: u64,
+    pub output_pre_encode_skipped_frames: u64,
+    pub video_toolbox_pending_encode_frames: u64,
+    pub video_toolbox_pending_fifo_frames: u64,
+    pub encoded_access_unit_dropped_frames: u64,
+    pub recording_output_pressure: crate::protocol::EncoderBridgeRoleOutputPressureStats,
+    pub stream_output_pressure: crate::protocol::EncoderBridgeRoleOutputPressureStats,
+    pub recording_role_diagnostics: crate::protocol::EncoderBridgeRoleDiagnosticStats,
+    pub stream_role_diagnostics: crate::protocol::EncoderBridgeRoleDiagnosticStats,
     pub input_fps: Option<f64>,
     pub dropped_frames: u64,
     pub encoder_speed: Option<f64>,
+    pub recording_dropped_frames: u64,
+    pub stream_dropped_frames: u64,
+    pub recording_encoder_speed: Option<f64>,
+    pub stream_encoder_speed: Option<f64>,
     pub repeated_fed_frames: u64,
     pub repeated_frame_bursts: u64,
     pub max_repeated_frame_run: u64,
@@ -769,6 +1329,8 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub repeated_frame_age_max_ms: Option<u64>,
     pub metal_target_frames: u64,
     pub raw_video_copied_frames: u64,
+    pub recording_raw_video_copied_frames: u64,
+    pub stream_raw_video_copied_frames: u64,
     pub metal_target_copied_frames: u64,
     pub metal_target_handle_frames: u64,
     pub zero_copy_frames: u64,
@@ -787,6 +1349,7 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub stream_output_fps: Option<u32>,
     pub stream_output_bitrate_kbps: Option<u32>,
     pub active_video_toolbox_output_encoders: u64,
+    pub active_encoded_output_encoders: u64,
     pub recording_video_toolbox_output_frames: u64,
     pub recording_video_toolbox_output_bytes: u64,
     pub stream_video_toolbox_output_frames: u64,
@@ -826,18 +1389,49 @@ pub struct EncoderBridgeDiagnosticSnapshot {
     pub error: Option<String>,
 }
 
+fn finite_non_negative_encoder_stat(value: Option<f64>) -> Option<f64> {
+    value.filter(|value| value.is_finite() && *value >= 0.0)
+}
+
 pub fn apply_encoder_bridge_stats(
     mut stats: DiagnosticStats,
     bridge: EncoderBridgeDiagnosticSnapshot,
     target_fps: u32,
 ) -> DiagnosticStats {
+    let input_fps = finite_non_negative_encoder_stat(bridge.input_fps);
+    let encoder_speed = finite_non_negative_encoder_stat(bridge.encoder_speed);
+    let recording_encoder_speed = finite_non_negative_encoder_stat(bridge.recording_encoder_speed);
+    let stream_encoder_speed = finite_non_negative_encoder_stat(bridge.stream_encoder_speed);
+    let recording_input_fps = finite_non_negative_encoder_stat(bridge.recording_input_fps);
+    let stream_input_fps = finite_non_negative_encoder_stat(bridge.stream_input_fps);
+
     stats.encoder_bridge_queue_depth = bridge.queue_depth;
+    stats.encoder_bridge_output_queue_high_water_frames = bridge.output_queue_high_water_frames;
     stats.encoder_bridge_output_queue_oldest_frame_age_ms = bridge.output_queue_oldest_frame_age_ms;
+    stats.encoder_bridge_output_queue_oldest_frame_age_high_water_ms =
+        bridge.output_queue_oldest_frame_age_high_water_ms;
+    stats.encoder_bridge_output_last_progress_age_ms = bridge.output_last_progress_age_ms;
     stats.encoder_bridge_output_queue_capacity_pressure_events =
         bridge.output_queue_capacity_pressure_events;
+    stats.encoder_bridge_output_pressure_recovery_events = bridge.output_pressure_recovery_events;
     stats.encoder_bridge_output_queue_dropped_frames = bridge.output_queue_dropped_frames;
-    stats.encoder_bridge_input_fps = bridge.input_fps;
+    stats.encoder_bridge_output_pre_encode_skipped_frames = bridge.output_pre_encode_skipped_frames;
+    stats.encoder_bridge_video_toolbox_pending_encode_frames =
+        bridge.video_toolbox_pending_encode_frames;
+    stats.encoder_bridge_video_toolbox_pending_fifo_frames =
+        bridge.video_toolbox_pending_fifo_frames;
+    stats.encoder_bridge_encoded_access_unit_dropped_frames =
+        bridge.encoded_access_unit_dropped_frames;
+    stats.encoder_bridge_recording_output_pressure = bridge.recording_output_pressure;
+    stats.encoder_bridge_stream_output_pressure = bridge.stream_output_pressure;
+    stats.encoder_bridge_recording_role_diagnostics = bridge.recording_role_diagnostics;
+    stats.encoder_bridge_stream_role_diagnostics = bridge.stream_role_diagnostics;
+    stats.encoder_bridge_input_fps = input_fps;
     stats.encoder_bridge_dropped_frames = bridge.dropped_frames;
+    stats.encoder_bridge_recording_dropped_frames = bridge.recording_dropped_frames;
+    stats.encoder_bridge_stream_dropped_frames = bridge.stream_dropped_frames;
+    stats.encoder_bridge_recording_encoder_speed = recording_encoder_speed;
+    stats.encoder_bridge_stream_encoder_speed = stream_encoder_speed;
     stats.encoder_bridge_repeated_frames = bridge.repeated_fed_frames;
     stats.encoder_bridge_repeated_frame_bursts = bridge.repeated_frame_bursts;
     stats.encoder_bridge_max_repeated_frame_run = bridge.max_repeated_frame_run;
@@ -848,6 +1442,9 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_repeated_frame_age_max_ms = bridge.repeated_frame_age_max_ms;
     stats.encoder_bridge_metal_target_frames = bridge.metal_target_frames;
     stats.encoder_bridge_raw_video_copied_frames = bridge.raw_video_copied_frames;
+    stats.encoder_bridge_recording_raw_video_copied_frames =
+        bridge.recording_raw_video_copied_frames;
+    stats.encoder_bridge_stream_raw_video_copied_frames = bridge.stream_raw_video_copied_frames;
     stats.encoder_bridge_metal_target_copied_frames = bridge.metal_target_copied_frames;
     stats.encoder_bridge_metal_target_handle_frames = bridge.metal_target_handle_frames;
     stats.encoder_bridge_zero_copy_frames = bridge.zero_copy_frames;
@@ -867,6 +1464,18 @@ pub fn apply_encoder_bridge_stats(
     stats.stream_output_bitrate_kbps = bridge.stream_output_bitrate_kbps;
     stats.encoder_bridge_active_video_toolbox_output_encoders =
         bridge.active_video_toolbox_output_encoders;
+    stats.encoder_bridge_active_encoded_output_encoders = bridge.active_encoded_output_encoders;
+    stats.encoder_bridge_encoded_output_frames = bridge.video_toolbox_output_frames;
+    stats.encoder_bridge_encoded_output_bytes = bridge.video_toolbox_output_bytes;
+    stats.encoder_bridge_encoded_output_errors = bridge.video_toolbox_probe_errors;
+    stats.encoder_bridge_encoded_submit_p95_ms = bridge.video_toolbox_submit_p95_ms;
+    stats.encoder_bridge_encoded_fifo_write_p95_ms = bridge.video_toolbox_fifo_write_p95_ms;
+    stats.encoder_bridge_recording_encoded_output_frames =
+        bridge.recording_video_toolbox_output_frames;
+    stats.encoder_bridge_recording_encoded_output_bytes =
+        bridge.recording_video_toolbox_output_bytes;
+    stats.encoder_bridge_stream_encoded_output_frames = bridge.stream_video_toolbox_output_frames;
+    stats.encoder_bridge_stream_encoded_output_bytes = bridge.stream_video_toolbox_output_bytes;
     stats.encoder_bridge_recording_video_toolbox_output_frames =
         bridge.recording_video_toolbox_output_frames;
     stats.encoder_bridge_recording_video_toolbox_output_bytes =
@@ -891,8 +1500,8 @@ pub fn apply_encoder_bridge_stats(
     stats.encoder_bridge_deadline_lag_max_ms = bridge.deadline_lag_max_ms;
     stats.encoder_bridge_late_deadline_ticks = bridge.late_deadline_ticks;
     stats.encoder_bridge_schedule_skipped_ms = bridge.schedule_skipped_ms;
-    stats.encoder_bridge_recording_input_fps = bridge.recording_input_fps;
-    stats.encoder_bridge_stream_input_fps = bridge.stream_input_fps;
+    stats.encoder_bridge_recording_input_fps = recording_input_fps;
+    stats.encoder_bridge_stream_input_fps = stream_input_fps;
     stats.encoder_bridge_recording_queue_depth = bridge.recording_queue_depth;
     stats.encoder_bridge_recording_queue_oldest_frame_age_ms =
         bridge.recording_queue_oldest_frame_age_ms;
@@ -920,8 +1529,9 @@ pub fn apply_encoder_bridge_stats(
     stats.capture_fps = stats.encoder_bridge_input_fps;
     stats.dropped_frames = bridge.dropped_frames;
     stats.skipped_frames = bridge.dropped_frames;
+    stats.encoder_speed = finite_non_negative_encoder_stat(stats.encoder_speed);
     if bridge.encoder_speed.is_some() {
-        stats.encoder_speed = bridge.encoder_speed;
+        stats.encoder_speed = encoder_speed;
     }
     stats.bottleneck = classify_bottleneck(
         stats.capture_fps,
@@ -964,6 +1574,21 @@ pub fn apply_recording_startup_barrier_stats(
     stats
 }
 
+/// Folds a start/stop latency timeline into the diagnostics snapshot. Routed
+/// by `snapshot.kind`; unknown kinds are ignored so telemetry can never fail.
+pub fn apply_recording_timeline_stats(
+    mut stats: DiagnosticStats,
+    snapshot: RecordingTimelineSnapshot,
+) -> DiagnosticStats {
+    match snapshot.kind.as_str() {
+        "start" => stats.recording_start_timeline = Some(snapshot),
+        "stop" => stats.recording_stop_timeline = Some(snapshot),
+        _ => return stats,
+    }
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
 pub fn apply_preview_camera_source_stats(
     mut stats: DiagnosticStats,
     status: &PreviewCameraStatus,
@@ -985,6 +1610,32 @@ pub fn apply_preview_camera_source_stats(
     if status.dropped_frames > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PreviewCameraCaptureStats {
+    pub callback_count: u64,
+    pub did_drop_callback_count: u64,
+    pub frame_store_publications: u64,
+    pub callback_age_ms: Option<u64>,
+    pub latest_sequence: Option<u64>,
+    pub pixel_format: Option<String>,
+    pub drop_reasons: PreviewCameraDropReasonStats,
+}
+
+pub fn apply_preview_camera_capture_stats(
+    mut stats: DiagnosticStats,
+    capture: PreviewCameraCaptureStats,
+) -> DiagnosticStats {
+    stats.preview_camera_capture_callback_count = capture.callback_count;
+    stats.preview_camera_did_drop_callback_count = capture.did_drop_callback_count;
+    stats.preview_camera_frame_store_publications = capture.frame_store_publications;
+    stats.preview_camera_capture_callback_age_ms = capture.callback_age_ms;
+    stats.preview_camera_latest_sequence = capture.latest_sequence;
+    stats.preview_camera_capture_pixel_format = capture.pixel_format;
+    stats.preview_camera_drop_reasons = capture.drop_reasons;
     stats.updated_at = Utc::now().to_rfc3339();
     stats
 }
@@ -1049,9 +1700,32 @@ pub fn apply_preview_screen_source_stats(
     stats.preview_screen_actual_width = status.actual_width;
     stats.preview_screen_actual_height = status.actual_height;
     stats.preview_screen_iosurface_available = status.iosurface_available;
+    stats.preview_screen_d3d11_texture_available = status.d3d11_texture_available;
     if status.dropped_frames > 0 {
         stats.bottleneck = DiagnosticBottleneck::Capture;
     }
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PreviewScreenCaptureStats {
+    pub callback_count: u64,
+    pub frame_store_publications: u64,
+    pub callback_age_ms: Option<u64>,
+    pub latest_sequence: Option<u64>,
+    pub frame_statuses: PreviewScreenFrameStatusStats,
+}
+
+pub fn apply_preview_screen_capture_stats(
+    mut stats: DiagnosticStats,
+    capture: PreviewScreenCaptureStats,
+) -> DiagnosticStats {
+    stats.preview_screen_capture_callback_count = capture.callback_count;
+    stats.preview_screen_frame_store_publications = capture.frame_store_publications;
+    stats.preview_screen_capture_callback_age_ms = capture.callback_age_ms;
+    stats.preview_screen_latest_sequence = capture.latest_sequence;
+    stats.preview_screen_frame_statuses = capture.frame_statuses;
     stats.updated_at = Utc::now().to_rfc3339();
     stats
 }
@@ -1087,6 +1761,8 @@ pub fn apply_preview_source_frame_store_stats(
     camera: FrameStoreStats,
     screen: FrameStoreStats,
 ) -> DiagnosticStats {
+    stats.preview_camera_surface_backing = surface_backing_stats(camera);
+    stats.preview_screen_surface_backing = surface_backing_stats(screen);
     stats.preview_source_frame_buffer_count =
         camera.buffer_count.saturating_add(screen.buffer_count);
     stats.preview_source_frame_bytes = camera.bytes_retained.saturating_add(screen.bytes_retained);
@@ -1094,6 +1770,16 @@ pub fn apply_preview_source_frame_store_stats(
         camera.frames_dropped.saturating_add(screen.frames_dropped);
     stats.updated_at = Utc::now().to_rfc3339();
     stats
+}
+
+fn surface_backing_stats(stats: FrameStoreStats) -> PreviewSourceSurfaceBackingStats {
+    PreviewSourceSurfaceBackingStats {
+        live_count: stats.surface_backing_live_count,
+        peak_count: stats.surface_backing_peak_count,
+        estimated_bytes: stats.surface_backing_estimated_bytes,
+        peak_estimated_bytes: stats.surface_backing_peak_estimated_bytes,
+        oldest_age_ms: stats.surface_backing_oldest_age_ms,
+    }
 }
 
 pub fn apply_preview_stats(
@@ -1152,6 +1838,28 @@ pub fn apply_preview_surface_resize(
     stats
 }
 
+/// Cumulative CPU-rendered frames of one compositor run, split by meaning:
+/// `cpu` is the platform's expected path (no GPU compositor exists off macOS)
+/// and never a fault; `fallback` means a GPU compositor was expected and not
+/// reached. Windows used to count every frame as `fallback`, so a healthy
+/// session read as degraded.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CompositorCpuFrameCounts {
+    pub cpu: u64,
+    pub fallback: u64,
+}
+
+impl CompositorCpuFrameCounts {
+    /// Attribute one published frame to its CPU bucket (GPU frames count nowhere).
+    pub fn record(&mut self, backend: CompositorBackend) {
+        match backend {
+            CompositorBackend::Cpu => self.cpu = self.cpu.saturating_add(1),
+            CompositorBackend::CpuFallback => self.fallback = self.fallback.saturating_add(1),
+            CompositorBackend::Metal | CompositorBackend::D3d11 => {}
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn apply_compositor_stats(
     mut stats: DiagnosticStats,
@@ -1160,7 +1868,7 @@ pub fn apply_compositor_stats(
     preview_surface_backing: PreviewSurfaceBacking,
     compositor_backend: CompositorBackend,
     compositor_fallback_reason: Option<String>,
-    compositor_cpu_fallback_frames: u64,
+    compositor_cpu_frame_counts: CompositorCpuFrameCounts,
     render_fps: f64,
     frame_age_ms: u64,
     repeated_frames: u64,
@@ -1180,7 +1888,8 @@ pub fn apply_compositor_stats(
     }
     stats.compositor_backend = Some(compositor_backend);
     stats.compositor_fallback_reason = compositor_fallback_reason;
-    stats.compositor_cpu_fallback_frames = compositor_cpu_fallback_frames;
+    stats.compositor_cpu_frames = compositor_cpu_frame_counts.cpu;
+    stats.compositor_cpu_fallback_frames = compositor_cpu_frame_counts.fallback;
     stats
         .preview_source_fps
         .insert("synthetic-compositor".to_string(), render_fps);
@@ -1252,6 +1961,12 @@ pub fn apply_compositor_source_import_stats(
     stats.compositor_source_iosurface_import_frames = source_import.iosurface_frames;
     stats.compositor_source_cvpixelbuffer_import_frames = source_import.cvpixelbuffer_frames;
     stats.compositor_source_byte_upload_frames = source_import.byte_upload_frames;
+    stats.compositor_source_capture_texture_reuses = source_import.capture_texture_reuses;
+    stats.compositor_camera_source_capture_texture_reuses =
+        source_import.camera_capture_texture_reuses;
+    stats.compositor_screen_source_capture_texture_reuses =
+        source_import.screen_capture_texture_reuses;
+    stats.compositor_source_texture_cache_flushes = source_import.texture_cache_flushes;
     stats.compositor_source_import_failures = source_import.import_failures;
     stats.compositor_camera_source_iosurface_import_frames = source_import.camera_iosurface_frames;
     stats.compositor_camera_source_cvpixelbuffer_import_frames =
@@ -1296,6 +2011,12 @@ pub struct CompositorLiveSourceFetchStats {
     pub screen_try_lock_misses: u64,
     pub camera_blocking_refreshes: u64,
     pub screen_blocking_refreshes: u64,
+    pub camera_fresh_serves: u64,
+    pub camera_held_serves: u64,
+    pub camera_served_age_max_ms: u64,
+    pub screen_fresh_serves: u64,
+    pub screen_held_serves: u64,
+    pub screen_served_age_max_ms: u64,
 }
 
 pub fn apply_compositor_live_source_fetch_stats(
@@ -1306,6 +2027,50 @@ pub fn apply_compositor_live_source_fetch_stats(
     stats.compositor_screen_source_try_lock_misses = fetch.screen_try_lock_misses;
     stats.compositor_camera_source_blocking_refreshes = fetch.camera_blocking_refreshes;
     stats.compositor_screen_source_blocking_refreshes = fetch.screen_blocking_refreshes;
+    stats.compositor_camera_source_fresh_serves = fetch.camera_fresh_serves;
+    stats.compositor_camera_source_held_serves = fetch.camera_held_serves;
+    stats.compositor_camera_source_served_age_max_ms = fetch.camera_served_age_max_ms;
+    stats.compositor_screen_source_fresh_serves = fetch.screen_fresh_serves;
+    stats.compositor_screen_source_held_serves = fetch.screen_held_serves;
+    stats.compositor_screen_source_served_age_max_ms = fetch.screen_served_age_max_ms;
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
+/// Publishes the capture-health monitor's verdict: the currently degraded
+/// stage label, or `None` while the pipeline is healthy (field omitted on the
+/// wire — see the serde note on the struct field).
+pub fn apply_capture_health(
+    mut stats: DiagnosticStats,
+    degraded_stage: Option<&'static str>,
+) -> DiagnosticStats {
+    stats.capture_pipeline_degraded_stage = degraded_stage.map(str::to_string);
+    stats.updated_at = Utc::now().to_rfc3339();
+    stats
+}
+
+/// Mirrors the authoritative recovery coordinator into the broad diagnostics
+/// snapshot. Idle values are omitted, and an invalid duration is discarded at
+/// this boundary instead of becoming JSON `null` in a strict renderer schema.
+pub fn apply_capture_recovery_status(
+    mut stats: DiagnosticStats,
+    status: &CaptureRecoveryStatus,
+) -> DiagnosticStats {
+    if status.phase == CaptureRecoveryPhase::Idle {
+        stats.capture_recovery_phase = None;
+        stats.capture_recovery_source = None;
+        stats.capture_recovery_attempts = None;
+        stats.capture_recovery_last_error = None;
+        stats.capture_recovery_last_duration_ms = None;
+    } else {
+        stats.capture_recovery_phase = Some(status.phase);
+        stats.capture_recovery_source = status.source;
+        stats.capture_recovery_attempts = (status.attempts > 0).then_some(status.attempts);
+        stats.capture_recovery_last_error = status.last_error.clone();
+        stats.capture_recovery_last_duration_ms = status
+            .last_duration_ms
+            .filter(|duration| duration.is_finite() && *duration >= 0.0);
+    }
     stats.updated_at = Utc::now().to_rfc3339();
     stats
 }
@@ -1538,7 +2303,9 @@ fn parse_process_sample_row(line: &str) -> Option<ProcessSampleRow> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::{PreviewCameraState, PreviewScreenSourceKind, PreviewScreenState};
+    use crate::protocol::{
+        PreviewCameraState, PreviewScreenSourceKind, PreviewScreenState, RecordingTimelineMark,
+    };
 
     #[test]
     fn preview_transport_counters_track_each_route_independently() {
@@ -1605,16 +2372,108 @@ mod tests {
                 fps: Some(29.7),
                 dropped_frames: Some(4),
                 speed: Some(0.82),
+                bitrate_kbps: Some(5_900.0),
+                total_bytes: Some(1_024),
+                duplicated_frames: Some(2),
                 created_at: "now".to_string(),
             },
             30,
         );
 
         assert_eq!(stats.session_id.as_deref(), Some("session"));
-        assert_eq!(stats.capture_fps, Some(29.7));
+        assert_eq!(stats.capture_fps, None);
+        assert_eq!(stats.render_fps, None);
         assert_eq!(stats.dropped_frames, 4);
         assert_eq!(stats.skipped_frames, 4);
+        assert_eq!(stats.stream_measured_bitrate_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_measured_bitrate_min_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_measured_bitrate_max_kbps, Some(5_900.0));
+        assert_eq!(stats.stream_output_total_bytes, 1_024);
+        assert_eq!(stats.stream_duplicated_frames, 2);
         assert_eq!(stats.bottleneck, DiagnosticBottleneck::Encoder);
+    }
+
+    #[test]
+    fn stream_health_never_publishes_non_finite_encoder_speed() {
+        for speed in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            let stats = apply_stream_health(
+                idle_diagnostics(),
+                &StreamHealth {
+                    session_id: "session".to_string(),
+                    fps: None,
+                    dropped_frames: None,
+                    speed: Some(speed),
+                    bitrate_kbps: None,
+                    total_bytes: None,
+                    duplicated_frames: None,
+                    created_at: "now".to_string(),
+                },
+                30,
+            );
+            assert_eq!(stats.encoder_speed, None);
+        }
+    }
+
+    #[test]
+    fn stream_health_tracks_bitrate_range_and_resets_session_counters() {
+        let first = apply_stream_health(
+            idle_diagnostics(),
+            &StreamHealth {
+                session_id: "session-a".to_string(),
+                fps: Some(60.0),
+                dropped_frames: Some(0),
+                speed: Some(1.0),
+                bitrate_kbps: Some(12_100.0),
+                total_bytes: Some(10_000),
+                duplicated_frames: Some(3),
+                created_at: "first".to_string(),
+            },
+            60,
+        );
+        let same_session = apply_stream_health(
+            first,
+            &StreamHealth {
+                session_id: "session-a".to_string(),
+                fps: None,
+                dropped_frames: None,
+                speed: None,
+                bitrate_kbps: Some(11_900.0),
+                total_bytes: Some(9_000),
+                duplicated_frames: Some(1),
+                created_at: "second".to_string(),
+            },
+            60,
+        );
+        assert_eq!(
+            same_session.stream_measured_bitrate_min_kbps,
+            Some(11_900.0)
+        );
+        assert_eq!(
+            same_session.stream_measured_bitrate_max_kbps,
+            Some(12_100.0)
+        );
+        assert_eq!(same_session.stream_output_total_bytes, 10_000);
+        assert_eq!(same_session.stream_duplicated_frames, 3);
+
+        let new_session = apply_stream_health(
+            same_session,
+            &StreamHealth {
+                session_id: "session-b".to_string(),
+                fps: None,
+                dropped_frames: None,
+                speed: None,
+                bitrate_kbps: Some(0.0),
+                total_bytes: Some(25),
+                duplicated_frames: Some(0),
+                created_at: "third".to_string(),
+            },
+            60,
+        );
+        assert_eq!(new_session.stream_measured_bitrate_kbps, Some(0.0));
+        assert_eq!(new_session.stream_measured_bitrate_min_kbps, None);
+        assert_eq!(new_session.stream_measured_bitrate_max_kbps, None);
+        assert_eq!(new_session.stream_output_total_bytes, 25);
+        assert_eq!(new_session.stream_duplicated_frames, 0);
     }
 
     #[test]
@@ -1793,6 +2652,51 @@ mod tests {
     }
 
     #[test]
+    fn record_timelines_are_recorded_in_diagnostics_by_kind() {
+        let start = RecordingTimelineSnapshot {
+            kind: "start".to_string(),
+            session_id: Some("s".to_string()),
+            cold: Some(true),
+            requested_at_epoch_ms: None,
+            click_to_origin_ms: Some(12),
+            total_ms: 400,
+            outcome: "running".to_string(),
+            marks: vec![RecordingTimelineMark {
+                phase: "running".to_string(),
+                at_ms: 400,
+            }],
+        };
+        let stop = RecordingTimelineSnapshot {
+            kind: "stop".to_string(),
+            total_ms: 90,
+            outcome: "idle".to_string(),
+            ..start.clone()
+        };
+        let unknown = RecordingTimelineSnapshot {
+            kind: "mystery".to_string(),
+            ..start.clone()
+        };
+
+        let stats = apply_recording_timeline_stats(starting_diagnostics("s", 30, "record"), start);
+        let stats = apply_recording_timeline_stats(stats, stop);
+        let stats = apply_recording_timeline_stats(stats, unknown);
+
+        assert_eq!(
+            stats.recording_start_timeline.as_ref().unwrap().total_ms,
+            400
+        );
+        assert_eq!(
+            stats.recording_start_timeline.as_ref().unwrap().cold,
+            Some(true)
+        );
+        assert_eq!(stats.recording_stop_timeline.as_ref().unwrap().total_ms, 90);
+        assert_eq!(
+            stats.recording_stop_timeline.as_ref().unwrap().outcome,
+            "idle"
+        );
+    }
+
+    #[test]
     fn permission_logs_map_to_specific_panes() {
         assert_eq!(
             permission_pane_for_log("screen-capture-fallback", "permission denied"),
@@ -1850,6 +2754,11 @@ mod tests {
         assert_eq!(stats.compositor_screen_source_byte_upload_frames, 0);
         assert_eq!(stats.compositor_screen_source_import_failures, 0);
         assert_eq!(stats.compositor_source_import_p95_ms, None);
+        assert_eq!(stats.capture_recovery_phase, None);
+        assert_eq!(stats.capture_recovery_source, None);
+        assert_eq!(stats.capture_recovery_attempts, None);
+        assert_eq!(stats.capture_recovery_last_error, None);
+        assert_eq!(stats.capture_recovery_last_duration_ms, None);
         assert_eq!(stats.preview_compositor_frame_lag, None);
         assert!(!stats.preview_frame_polling_suppressed);
         assert!(!stats.preview_source_pixels_present);
@@ -1880,6 +2789,7 @@ mod tests {
         assert_eq!(stats.preview_screen_actual_width, None);
         assert_eq!(stats.preview_screen_actual_height, None);
         assert_eq!(stats.preview_screen_iosurface_available, None);
+        assert_eq!(stats.preview_screen_d3d11_texture_available, None);
         assert_eq!(stats.preview_screen_capture_gap_p95_ms, None);
         assert_eq!(stats.preview_screen_capture_gap_max_ms, None);
         assert_eq!(stats.preview_screen_pixel_buffer_lock_p95_ms, None);
@@ -1895,6 +2805,80 @@ mod tests {
         assert_eq!(stats.active_ffprobe_processes, 0);
         assert!(stats.duplicate_capture_sources.is_empty());
         assert!(stats.source_registry.entries.is_empty());
+    }
+
+    #[test]
+    fn capture_recovery_diagnostics_omit_idle_and_sanitize_non_finite_duration() {
+        let idle = CaptureRecoveryStatus {
+            revision: 1,
+            phase: CaptureRecoveryPhase::Idle,
+            retryable: false,
+            attempts: 0,
+            stage: None,
+            source: None,
+            trigger: None,
+            source_generation: None,
+            detected_at: None,
+            updated_at: None,
+            message: None,
+            last_error: None,
+            last_duration_ms: Some(f64::NAN),
+        };
+        let stats = apply_capture_recovery_status(idle_diagnostics(), &idle);
+        let wire = serde_json::to_value(stats).expect("idle recovery diagnostics serialize");
+        for field in [
+            "captureRecoveryPhase",
+            "captureRecoverySource",
+            "captureRecoveryAttempts",
+            "captureRecoveryLastError",
+            "captureRecoveryLastDurationMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "idle recovery field {field} must be omitted"
+            );
+        }
+
+        let failed = CaptureRecoveryStatus {
+            revision: 2,
+            phase: CaptureRecoveryPhase::Failed,
+            retryable: true,
+            attempts: 1,
+            stage: Some(crate::protocol::CaptureRecoveryStage::CameraDelivery),
+            source: Some(crate::protocol::CaptureRecoverySource::Camera),
+            trigger: Some(crate::protocol::CaptureRecoveryTrigger::Automatic),
+            source_generation: Some(8),
+            detected_at: Some("2026-08-28T10:00:00Z".to_string()),
+            updated_at: Some("2026-08-28T10:00:03Z".to_string()),
+            message: Some("Restart did not restore cadence.".to_string()),
+            last_error: Some("cadence remained below threshold".to_string()),
+            last_duration_ms: Some(f64::INFINITY),
+        };
+        let stats = apply_capture_recovery_status(idle_diagnostics(), &failed);
+        let wire = serde_json::to_value(stats).expect("failed recovery diagnostics serialize");
+        assert_eq!(wire["captureRecoveryPhase"], "failed");
+        assert_eq!(wire["captureRecoverySource"], "camera");
+        assert_eq!(wire["captureRecoveryAttempts"], 1);
+        assert_eq!(
+            wire["captureRecoveryLastError"],
+            "cadence remained below threshold"
+        );
+        assert!(
+            wire.get("captureRecoveryLastDurationMs").is_none(),
+            "non-finite recovery duration must be omitted, never serialized as null"
+        );
+
+        let failed_screen = CaptureRecoveryStatus {
+            stage: Some(crate::protocol::CaptureRecoveryStage::ScreenDelivery),
+            source: Some(crate::protocol::CaptureRecoverySource::Screen),
+            ..failed
+        };
+        let wire = serde_json::to_value(apply_capture_recovery_status(
+            idle_diagnostics(),
+            &failed_screen,
+        ))
+        .expect("screen recovery diagnostics serialize");
+        assert_eq!(wire["captureRecoverySource"], "screen");
     }
 
     #[test]
@@ -1920,7 +2904,10 @@ mod tests {
             PreviewSurfaceBacking::ElectronBrowserWindow,
             CompositorBackend::CpuFallback,
             Some("VIDEORC_METAL_COMPOSITOR disabled".to_string()),
-            12,
+            CompositorCpuFrameCounts {
+                cpu: 0,
+                fallback: 12,
+            },
             29.9,
             17,
             0,
@@ -1939,10 +2926,225 @@ mod tests {
             Some("VIDEORC_METAL_COMPOSITOR disabled")
         );
         assert_eq!(stats.compositor_cpu_fallback_frames, 12);
+        assert_eq!(stats.compositor_cpu_frames, 0);
         assert_eq!(
             stats.preview_surface_backing,
             PreviewSurfaceBacking::ElectronBrowserWindow
         );
+    }
+
+    #[test]
+    fn compositor_cpu_frame_counts_split_expected_cpu_from_fallback() {
+        // Windows has no GPU compositor: its CPU frames are the expected path
+        // and must never land in the fallback (fault) bucket. GPU frames
+        // count nowhere.
+        let mut counts = CompositorCpuFrameCounts::default();
+        counts.record(CompositorBackend::Cpu);
+        counts.record(CompositorBackend::Cpu);
+        counts.record(CompositorBackend::CpuFallback);
+        counts.record(CompositorBackend::Metal);
+        counts.record(CompositorBackend::D3d11);
+        assert_eq!(
+            counts,
+            CompositorCpuFrameCounts {
+                cpu: 2,
+                fallback: 1
+            }
+        );
+
+        let stats = apply_compositor_stats(
+            idle_diagnostics(),
+            60,
+            PreviewTransport::Unavailable,
+            PreviewSurfaceBacking::None,
+            CompositorBackend::Cpu,
+            None,
+            counts,
+            59.5,
+            17,
+            0,
+            0,
+            4.0,
+            8.0,
+            12.0,
+        );
+        assert_eq!(stats.compositor_cpu_frames, 2);
+        assert_eq!(stats.compositor_cpu_fallback_frames, 1);
+    }
+
+    #[test]
+    fn windows_d3d11_media_session_end_resets_only_the_ended_session() {
+        let mut stats = starting_diagnostics("session-a", 60, "record");
+        stats.windows_d3d11_media.state = crate::protocol::WindowsD3d11MediaState::Draining;
+        stats.windows_d3d11_media.fallback_reason = Some("encoder stalled".to_string());
+        stats.windows_d3d11_media.generation = Some(7);
+        stats.windows_d3d11_media.texture_import_frames = 120;
+
+        // A different session's snapshot is not ours to clear.
+        let untouched = apply_windows_d3d11_media_session_end(stats.clone(), "session-b");
+        assert_eq!(
+            untouched.windows_d3d11_media.state,
+            crate::protocol::WindowsD3d11MediaState::Draining
+        );
+        assert_eq!(untouched.windows_d3d11_media.generation, Some(7));
+
+        let ended = apply_windows_d3d11_media_session_end(stats, "session-a");
+        assert_eq!(
+            ended.windows_d3d11_media.state,
+            crate::protocol::WindowsD3d11MediaState::Unavailable
+        );
+        assert_eq!(ended.windows_d3d11_media.fallback_reason, None);
+        assert_eq!(ended.windows_d3d11_media.generation, None);
+        // Session counters stay readable after stop; only the live identity goes.
+        assert_eq!(ended.windows_d3d11_media.texture_import_frames, 120);
+    }
+
+    #[test]
+    fn recording_frame_accounting_counters_reset_and_snapshot() {
+        let accounting = RecordingFrameAccounting::new();
+        accounting.record_compositor_tick(0);
+        accounting.record_compositor_tick(2);
+        accounting.record_bridge_input(BridgeInputKind::Fresh);
+        accounting.record_bridge_input(BridgeInputKind::Repeated);
+        accounting.record_bridge_input(BridgeInputKind::Repeated);
+        accounting.record_bridge_input(BridgeInputKind::Synthetic);
+        accounting.record_mf_submitted_frame();
+        accounting.record_mf_input_credit_timeout();
+        for wait_ms in [1.0, 2.0, 3.0, 4.0, 50.0] {
+            accounting.record_mf_input_credit_wait(Duration::from_secs_f64(wait_ms / 1000.0));
+        }
+        let snapshot = accounting.snapshot();
+        assert_eq!(snapshot.compositor_ticks, 2);
+        assert_eq!(snapshot.compositor_tick_skipped, 2);
+        assert_eq!(snapshot.bridge_fresh_frames, 1);
+        assert_eq!(snapshot.bridge_repeated_frames, 2);
+        assert_eq!(snapshot.bridge_synthetic_frames, 1);
+        assert_eq!(snapshot.mf_submitted_frames, 1);
+        assert_eq!(snapshot.mf_input_credit_timeouts, 1);
+        assert_eq!(snapshot.mf_input_credit_wait_p95_ms, Some(50.0));
+
+        accounting.reset();
+        assert_eq!(
+            accounting.snapshot(),
+            RecordingFrameAccountingSnapshot::default()
+        );
+
+        // The wait window stays bounded under a long session.
+        for _ in 0..(MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT * 2) {
+            accounting.record_mf_input_credit_wait(Duration::from_millis(1));
+        }
+        assert_eq!(
+            accounting.mf_input_credit_wait_ms.lock().unwrap().len(),
+            MF_INPUT_CREDIT_WAIT_SAMPLE_LIMIT
+        );
+    }
+
+    #[test]
+    fn recording_frame_accounting_message_names_every_stage() {
+        let mut stats = starting_diagnostics("session-a", 60, "record");
+        stats.preview_screen_source_fps = Some(59.0);
+        stats.preview_camera_source_fps = None;
+        stats.render_fps = Some(32.0);
+        stats.encoder_bridge_input_fps = Some(17.7);
+        stats.encoder_bridge_repeated_frames = 3;
+        stats.encoder_bridge_synthetic_frames = 0;
+        stats.encoder_bridge_zero_copy_frames = 119;
+        stats.encoder_bridge_output_queue_dropped_frames = 0;
+        stats.encoder_bridge_dropped_frames = 0;
+        stats.encoder_bridge_encoded_output_frames = 119;
+        stats.encoder_bridge_encoded_output_bytes = 4_096;
+        stats.compositor_cpu_frames = 214;
+        stats.preview_camera_capture_callback_count = 101;
+        stats.preview_camera_did_drop_callback_count = 4;
+        stats.preview_camera_frame_store_publications = 97;
+        stats.preview_camera_sample_pts_gap_max_ms = Some(66.7);
+        stats.preview_camera_selected_format_width = Some(3840);
+        stats.preview_camera_selected_format_height = Some(2160);
+        stats.preview_camera_actual_width = Some(1920);
+        stats.preview_camera_actual_height = Some(1080);
+        stats.preview_camera_capture_pixel_format = Some("BGRA".to_string());
+        stats.preview_camera_drop_reasons = PreviewCameraDropReasonStats {
+            frame_was_late: 1,
+            out_of_buffers: 2,
+            discontinuity: 1,
+            unknown: 0,
+        };
+        stats.preview_screen_capture_callback_count = 103;
+        stats.preview_screen_frame_store_publications = 100;
+        stats.preview_screen_capture_gap_max_ms = Some(91.2);
+        stats.preview_screen_frame_statuses = PreviewScreenFrameStatusStats {
+            complete: 100,
+            idle: 1,
+            blank: 1,
+            suspended: 0,
+            started: 1,
+            stopped: 0,
+            unknown: 0,
+        };
+        stats.compositor_source_iosurface_import_frames = 60;
+        stats.compositor_source_cvpixelbuffer_import_frames = 40;
+        stats.compositor_source_capture_texture_reuses = 23;
+        stats.compositor_camera_source_capture_texture_reuses = 11;
+        stats.compositor_screen_source_capture_texture_reuses = 12;
+        stats.compositor_source_texture_cache_flushes = 3;
+        stats.compositor_source_import_failures = 2;
+        stats.preview_camera_surface_backing = PreviewSourceSurfaceBackingStats {
+            live_count: 2,
+            peak_count: 4,
+            estimated_bytes: 64,
+            peak_estimated_bytes: 128,
+            oldest_age_ms: Some(42),
+        };
+        stats.preview_screen_surface_backing = PreviewSourceSurfaceBackingStats {
+            live_count: 3,
+            peak_count: 6,
+            estimated_bytes: 96,
+            peak_estimated_bytes: 192,
+            oldest_age_ms: Some(31),
+        };
+        let stats = apply_recording_frame_accounting(
+            stats,
+            RecordingFrameAccountingSnapshot {
+                compositor_ticks: 214,
+                compositor_tick_skipped: 188,
+                bridge_fresh_frames: 116,
+                bridge_repeated_frames: 3,
+                bridge_synthetic_frames: 0,
+                mf_submitted_frames: 119,
+                mf_input_credit_timeouts: 2,
+                mf_input_credit_wait_p95_ms: Some(12.5),
+            },
+        );
+
+        let message = format_recording_frame_accounting(&stats, 6_700);
+        assert_eq!(
+            message,
+            "Frame accounting: duration 6.7s @ target 60.0 fps (~402 frames); \
+             captured: screen 59.0 fps (~395), camera n/a fps (~n/a); \
+             compositor: 214 ticks, 188 intervals skipped, render 32.0 fps, 0 dropped, 214 cpu, 0 cpu-fallback; \
+             source serves: screen 0 fresh / 0 held (oldest 0ms), camera 0 fresh / 0 held (oldest 0ms); \
+             capture detail: camera 101 callbacks / 4 didDrop / 97 published, PTS gap max 66.7ms, native 3840x2160, output 1920x1080, pixel BGRA; screen 103 callbacks / 100 published, callback gap max 91.2ms; \
+             capture attribution: camera late 1 / out-of-buffers 2 / discontinuity 1 / unknown 0; screen complete 100 / idle 1 / blank 1 / suspended 0 / started 1 / stopped 0 / unknown 0; \
+             Metal sources: 60 IOSurface imports / 40 CVPixelBuffer imports / 23 held reuses (camera 11, screen 12) / 3 cache flushes / 2 import failures; \
+             surface backing: camera 2 live / 4 peak (64 live bytes / 128 peak bytes, oldest 42ms), screen 3 live / 6 peak (96 live bytes / 192 peak bytes, oldest 31ms); \
+             bridge input: 119 (116 fresh, 3 repeat, 0 synthetic) at 17.7 fps; \
+             submitted: 119 (mf 119), coalesced-dropped 0, encoder-dropped 0; \
+             output pressure: depth 0 (high-water 0), oldest n/a (high-water n/a), last progress n/a, pressure 0 / recoveries 0 / pre-encode skips 0, stages encode 0 + fifo 0, encoded-AU drops 0; \
+             encoded output: 119 frames (4096 bytes, 0 errors); \
+             mf input credit: wait p95 12.5ms, 2 timeouts."
+        );
+
+        // Without a Media Foundation encoder (macOS) the MF clause is omitted
+        // rather than printing zeros that read like a measurement.
+        let macos = apply_recording_frame_accounting(
+            starting_diagnostics("session-b", 30, "record"),
+            RecordingFrameAccountingSnapshot::default(),
+        );
+        let message = format_recording_frame_accounting(&macos, 0);
+        assert!(
+            message.starts_with("Frame accounting: duration 0.0s @ target 30.0 fps (~n/a frames);")
+        );
+        assert!(!message.contains("mf input credit"));
     }
 
     #[test]
@@ -1983,6 +3185,10 @@ mod tests {
                 iosurface_frames: 11,
                 cvpixelbuffer_frames: 7,
                 byte_upload_frames: 5,
+                capture_texture_reuses: 13,
+                camera_capture_texture_reuses: 8,
+                screen_capture_texture_reuses: 5,
+                texture_cache_flushes: 3,
                 import_failures: 2,
                 camera_iosurface_frames: 1,
                 camera_cvpixelbuffer_frames: 7,
@@ -2000,6 +3206,10 @@ mod tests {
         assert_eq!(stats.compositor_source_iosurface_import_frames, 11);
         assert_eq!(stats.compositor_source_cvpixelbuffer_import_frames, 7);
         assert_eq!(stats.compositor_source_byte_upload_frames, 5);
+        assert_eq!(stats.compositor_source_capture_texture_reuses, 13);
+        assert_eq!(stats.compositor_camera_source_capture_texture_reuses, 8);
+        assert_eq!(stats.compositor_screen_source_capture_texture_reuses, 5);
+        assert_eq!(stats.compositor_source_texture_cache_flushes, 3);
         assert_eq!(stats.compositor_source_import_failures, 2);
         assert_eq!(stats.compositor_camera_source_iosurface_import_frames, 1);
         assert_eq!(
@@ -2043,6 +3253,73 @@ mod tests {
     }
 
     #[test]
+    fn capture_pressure_stats_preserve_callback_status_and_surface_accounting() {
+        let stats = apply_preview_camera_capture_stats(
+            idle_diagnostics(),
+            PreviewCameraCaptureStats {
+                callback_count: 101,
+                did_drop_callback_count: 4,
+                frame_store_publications: 97,
+                callback_age_ms: Some(11),
+                latest_sequence: Some(97),
+                pixel_format: Some("BGRA".to_string()),
+                drop_reasons: PreviewCameraDropReasonStats {
+                    frame_was_late: 1,
+                    out_of_buffers: 2,
+                    discontinuity: 1,
+                    unknown: 0,
+                },
+            },
+        );
+        let stats = apply_preview_screen_capture_stats(
+            stats,
+            PreviewScreenCaptureStats {
+                callback_count: 103,
+                frame_store_publications: 100,
+                callback_age_ms: Some(8),
+                latest_sequence: Some(100),
+                frame_statuses: PreviewScreenFrameStatusStats {
+                    complete: 100,
+                    idle: 1,
+                    blank: 1,
+                    suspended: 0,
+                    started: 1,
+                    stopped: 0,
+                    unknown: 0,
+                },
+            },
+        );
+        let stats = apply_preview_source_frame_store_stats(
+            stats,
+            FrameStoreStats {
+                surface_backing_live_count: 2,
+                surface_backing_peak_count: 4,
+                surface_backing_estimated_bytes: 64,
+                surface_backing_peak_estimated_bytes: 128,
+                surface_backing_oldest_age_ms: Some(42),
+                ..Default::default()
+            },
+            FrameStoreStats {
+                surface_backing_live_count: 3,
+                surface_backing_peak_count: 6,
+                surface_backing_estimated_bytes: 96,
+                surface_backing_peak_estimated_bytes: 192,
+                surface_backing_oldest_age_ms: Some(31),
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(stats.preview_camera_capture_callback_count, 101);
+        assert_eq!(stats.preview_camera_did_drop_callback_count, 4);
+        assert_eq!(stats.preview_camera_drop_reasons.out_of_buffers, 2);
+        assert_eq!(stats.preview_camera_surface_backing.live_count, 2);
+        assert_eq!(stats.preview_camera_surface_backing.oldest_age_ms, Some(42));
+        assert_eq!(stats.preview_screen_capture_callback_count, 103);
+        assert_eq!(stats.preview_screen_frame_statuses.complete, 100);
+        assert_eq!(stats.preview_screen_surface_backing.peak_count, 6);
+    }
+
+    #[test]
     fn preview_screen_source_stats_record_dimension_evidence() {
         let stats = apply_preview_screen_source_stats(
             idle_diagnostics(),
@@ -2060,6 +3337,7 @@ mod tests {
                 actual_width: Some(3840),
                 actual_height: Some(2160),
                 iosurface_available: Some(true),
+                d3d11_texture_available: Some(true),
                 source_fps: Some(30.0),
                 frame_age_ms: Some(12),
                 frames_captured: 90,
@@ -2079,6 +3357,7 @@ mod tests {
         assert_eq!(stats.preview_screen_actual_width, Some(3840));
         assert_eq!(stats.preview_screen_actual_height, Some(2160));
         assert_eq!(stats.preview_screen_iosurface_available, Some(true));
+        assert_eq!(stats.preview_screen_d3d11_texture_available, Some(true));
         assert_eq!(
             stats.preview_screen_message.as_deref(),
             Some("screen stream started")
@@ -2189,7 +3468,7 @@ mod tests {
             PreviewSurfaceBacking::ElectronBrowserWindow,
             CompositorBackend::Metal,
             None,
-            0,
+            CompositorCpuFrameCounts::default(),
             60.0,
             12,
             1,
@@ -2206,7 +3485,7 @@ mod tests {
             PreviewSurfaceBacking::None,
             CompositorBackend::Metal,
             None,
-            0,
+            CompositorCpuFrameCounts::default(),
             60.0,
             13,
             3,
@@ -2231,17 +3510,102 @@ mod tests {
     }
 
     #[test]
+    fn idle_encoder_bridge_role_process_diagnostics_keep_camel_case_wire_contract() {
+        let wire = serde_json::to_value(idle_diagnostics()).expect("diagnostics serialize");
+
+        assert_eq!(wire["encoderBridgeRecordingRawVideoCopiedFrames"], 0);
+        assert_eq!(wire["encoderBridgeStreamRawVideoCopiedFrames"], 0);
+        assert_eq!(wire["encoderBridgeRecordingDroppedFrames"], 0);
+        assert_eq!(wire["encoderBridgeStreamDroppedFrames"], 0);
+        assert!(wire["encoderBridgeRecordingEncoderSpeed"].is_null());
+        assert!(wire["encoderBridgeStreamEncoderSpeed"].is_null());
+        assert_eq!(wire["encoderBridgeOutputQueueHighWaterFrames"], 0);
+        for field in [
+            "encoderBridgeOutputQueueOldestFrameAgeMs",
+            "encoderBridgeOutputQueueOldestFrameAgeHighWaterMs",
+            "encoderBridgeOutputLastProgressAgeMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unobserved encoder output age {field} must be absent, not null"
+            );
+        }
+        assert_eq!(wire["encoderBridgeOutputPressureRecoveryEvents"], 0);
+        assert_eq!(wire["encoderBridgeOutputPreEncodeSkippedFrames"], 0);
+        assert_eq!(wire["encoderBridgeEncodedAccessUnitDroppedFrames"], 0);
+    }
+
+    #[test]
+    fn encoder_bridge_stats_filter_invalid_speed_and_fps_before_wire() {
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.5] {
+            let stats = apply_encoder_bridge_stats(
+                starting_diagnostics("invalid-bridge", 30, "encoder-bridge"),
+                EncoderBridgeDiagnosticSnapshot {
+                    input_fps: Some(invalid),
+                    encoder_speed: Some(invalid),
+                    recording_encoder_speed: Some(invalid),
+                    stream_encoder_speed: Some(invalid),
+                    recording_input_fps: Some(invalid),
+                    stream_input_fps: Some(invalid),
+                    ..Default::default()
+                },
+                30,
+            );
+
+            assert_eq!(stats.capture_fps, None);
+            assert_eq!(stats.encoder_speed, None);
+            assert_eq!(stats.encoder_bridge_input_fps, None);
+            assert_eq!(stats.encoder_bridge_recording_encoder_speed, None);
+            assert_eq!(stats.encoder_bridge_stream_encoder_speed, None);
+            assert_eq!(stats.encoder_bridge_recording_input_fps, None);
+            assert_eq!(stats.encoder_bridge_stream_input_fps, None);
+
+            let wire = serde_json::to_value(stats).expect("finite diagnostics serialize");
+            for field in [
+                "captureFps",
+                "encoderSpeed",
+                "encoderBridgeInputFps",
+                "encoderBridgeRecordingEncoderSpeed",
+                "encoderBridgeStreamEncoderSpeed",
+                "encoderBridgeRecordingInputFps",
+                "encoderBridgeStreamInputFps",
+            ] {
+                assert!(
+                    wire[field].is_null(),
+                    "invalid encoder statistic {field} must not reach the wire"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn encoder_bridge_stats_feed_capture_and_encoder_health() {
         let stats = apply_encoder_bridge_stats(
             starting_diagnostics("bridge", 30, "encoder-bridge"),
             EncoderBridgeDiagnosticSnapshot {
                 queue_depth: 1,
+                output_queue_high_water_frames: 1,
                 output_queue_oldest_frame_age_ms: Some(10),
+                output_queue_oldest_frame_age_high_water_ms: Some(10),
+                output_last_progress_age_ms: Some(2),
                 output_queue_capacity_pressure_events: 0,
+                output_pressure_recovery_events: 0,
                 output_queue_dropped_frames: 0,
+                output_pre_encode_skipped_frames: 0,
+                video_toolbox_pending_encode_frames: 1,
+                video_toolbox_pending_fifo_frames: 0,
+                encoded_access_unit_dropped_frames: 0,
+                recording_output_pressure: Default::default(),
+                stream_output_pressure: Default::default(),
+                recording_role_diagnostics: Default::default(),
+                stream_role_diagnostics: Default::default(),
                 input_fps: Some(29.8),
                 dropped_frames: 0,
                 encoder_speed: Some(1.02),
+                recording_dropped_frames: 0,
+                stream_dropped_frames: 0,
+                recording_encoder_speed: Some(1.02),
+                stream_encoder_speed: None,
                 repeated_fed_frames: 0,
                 repeated_frame_bursts: 0,
                 max_repeated_frame_run: 0,
@@ -2252,6 +3616,8 @@ mod tests {
                 repeated_frame_age_max_ms: None,
                 metal_target_frames: 0,
                 raw_video_copied_frames: 0,
+                recording_raw_video_copied_frames: 0,
+                stream_raw_video_copied_frames: 0,
                 metal_target_copied_frames: 0,
                 metal_target_handle_frames: 0,
                 zero_copy_frames: 0,
@@ -2270,6 +3636,7 @@ mod tests {
                 stream_output_fps: None,
                 stream_output_bitrate_kbps: None,
                 active_video_toolbox_output_encoders: 0,
+                active_encoded_output_encoders: 0,
                 recording_video_toolbox_output_frames: 0,
                 recording_video_toolbox_output_bytes: 0,
                 stream_video_toolbox_output_frames: 0,
@@ -2321,12 +3688,28 @@ mod tests {
             stats,
             EncoderBridgeDiagnosticSnapshot {
                 queue_depth: 5,
+                output_queue_high_water_frames: 16,
                 output_queue_oldest_frame_age_ms: Some(180),
+                output_queue_oldest_frame_age_high_water_ms: Some(528),
+                output_last_progress_age_ms: Some(12),
                 output_queue_capacity_pressure_events: 4,
+                output_pressure_recovery_events: 1,
                 output_queue_dropped_frames: 2,
+                output_pre_encode_skipped_frames: 3,
+                video_toolbox_pending_encode_frames: 2,
+                video_toolbox_pending_fifo_frames: 3,
+                encoded_access_unit_dropped_frames: 0,
+                recording_output_pressure: Default::default(),
+                stream_output_pressure: Default::default(),
+                recording_role_diagnostics: Default::default(),
+                stream_role_diagnostics: Default::default(),
                 input_fps: Some(28.0),
                 dropped_frames: 3,
                 encoder_speed: Some(0.5),
+                recording_dropped_frames: 1,
+                stream_dropped_frames: 2,
+                recording_encoder_speed: Some(0.75),
+                stream_encoder_speed: Some(0.5),
                 repeated_fed_frames: 5,
                 repeated_frame_bursts: 3,
                 max_repeated_frame_run: 2,
@@ -2337,6 +3720,8 @@ mod tests {
                 repeated_frame_age_max_ms: Some(38),
                 metal_target_frames: 24,
                 raw_video_copied_frames: 80,
+                recording_raw_video_copied_frames: 50,
+                stream_raw_video_copied_frames: 30,
                 metal_target_copied_frames: 24,
                 metal_target_handle_frames: 24,
                 zero_copy_frames: 0,
@@ -2355,6 +3740,7 @@ mod tests {
                 stream_output_fps: Some(30),
                 stream_output_bitrate_kbps: Some(6000),
                 active_video_toolbox_output_encoders: 2,
+                active_encoded_output_encoders: 2,
                 recording_video_toolbox_output_frames: 10,
                 recording_video_toolbox_output_bytes: 8192,
                 stream_video_toolbox_output_frames: 8,
@@ -2397,16 +3783,34 @@ mod tests {
         );
 
         assert_eq!(lagging.encoder_bridge_dropped_frames, 3);
+        assert_eq!(lagging.encoder_bridge_recording_dropped_frames, 1);
+        assert_eq!(lagging.encoder_bridge_stream_dropped_frames, 2);
+        assert_eq!(lagging.encoder_bridge_recording_encoder_speed, Some(0.75));
+        assert_eq!(lagging.encoder_bridge_stream_encoder_speed, Some(0.5));
         assert_eq!(lagging.encoder_bridge_queue_depth, 5);
+        assert_eq!(lagging.encoder_bridge_output_queue_high_water_frames, 16);
         assert_eq!(
             lagging.encoder_bridge_output_queue_oldest_frame_age_ms,
             Some(180)
         );
         assert_eq!(
+            lagging.encoder_bridge_output_queue_oldest_frame_age_high_water_ms,
+            Some(528)
+        );
+        assert_eq!(lagging.encoder_bridge_output_last_progress_age_ms, Some(12));
+        assert_eq!(
             lagging.encoder_bridge_output_queue_capacity_pressure_events,
             4
         );
+        assert_eq!(lagging.encoder_bridge_output_pressure_recovery_events, 1);
         assert_eq!(lagging.encoder_bridge_output_queue_dropped_frames, 2);
+        assert_eq!(lagging.encoder_bridge_output_pre_encode_skipped_frames, 3);
+        assert_eq!(
+            lagging.encoder_bridge_video_toolbox_pending_encode_frames,
+            2
+        );
+        assert_eq!(lagging.encoder_bridge_video_toolbox_pending_fifo_frames, 3);
+        assert_eq!(lagging.encoder_bridge_encoded_access_unit_dropped_frames, 0);
         assert_eq!(lagging.encoder_bridge_recording_queue_depth, 2);
         assert_eq!(
             lagging.encoder_bridge_recording_queue_oldest_frame_age_ms,
@@ -2437,6 +3841,8 @@ mod tests {
         assert_eq!(lagging.encoder_bridge_repeated_frame_age_max_ms, Some(38));
         assert_eq!(lagging.encoder_bridge_metal_target_frames, 24);
         assert_eq!(lagging.encoder_bridge_raw_video_copied_frames, 80);
+        assert_eq!(lagging.encoder_bridge_recording_raw_video_copied_frames, 50);
+        assert_eq!(lagging.encoder_bridge_stream_raw_video_copied_frames, 30);
         assert_eq!(lagging.encoder_bridge_metal_target_copied_frames, 24);
         assert_eq!(lagging.encoder_bridge_metal_target_handle_frames, 24);
         assert_eq!(lagging.encoder_bridge_zero_copy_frames, 0);
@@ -2552,6 +3958,7 @@ mod tests {
                 coalesced_count: 11,
                 evicted_or_dropped_count: 2,
             },
+            command_lanes: std::collections::BTreeMap::new(),
             slow_pressure_disconnect_count: 6,
         };
 

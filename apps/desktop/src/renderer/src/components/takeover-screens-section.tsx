@@ -1,4 +1,4 @@
-import { FloppyDisk, ImageBroken, ImageSquare, Trash, UploadSimple } from '@phosphor-icons/react'
+import { DeleteIcon, ImageBrokenIcon, ImageIcon, SaveIcon, UploadIcon } from '@/components/icons'
 import { useEffect, useState, type DragEvent, type ReactElement } from 'react'
 
 import { Gallery } from '@/components/page'
@@ -39,18 +39,18 @@ export function TakeoverScreensSection(): ReactElement {
     <PanelSection
       action={
         <Button disabled={uploadDisabled} onClick={() => void importScreenImage()}>
-          <UploadSimple data-icon="inline-start" weight="bold" />
+          <UploadIcon data-icon="inline-start" weight="bold" />
           {screenImportPending ? 'Importing' : 'Upload'}
         </Button>
       }
       description="Full-frame images that cover the output — flip them on from the Studio session panel. Drag tiles to reorder. Management is locked while a session is live."
-      icon={ImageSquare}
+      icon={ImageIcon}
       title="Takeover screens"
     >
       {screens.length === 0 ? (
         <Empty className="py-12">
           <EmptyMedia variant="icon">
-            <ImageSquare weight="duotone" />
+            <ImageIcon weight="duotone" />
           </EmptyMedia>
           <EmptyTitle>No takeovers yet</EmptyTitle>
           <EmptyDescription>
@@ -175,7 +175,7 @@ function ScreenTile({
           />
         ) : (
           <div className="flex size-full items-center justify-center text-muted-foreground">
-            <ImageBroken className="size-8" weight="duotone" />
+            <ImageBrokenIcon className="size-8" weight="duotone" />
           </div>
         )}
         <Badge className="absolute right-2 top-2" variant={missing ? 'destructive' : 'success'}>
@@ -209,7 +209,7 @@ function ScreenTile({
             type="submit"
             variant="outline"
           >
-            <FloppyDisk />
+            <SaveIcon />
           </Button>
         </div>
         <span className="truncate text-xs text-muted-foreground">{screen.imagePath}</span>
@@ -227,7 +227,7 @@ function ScreenTile({
             variant="destructive"
             onClick={onDelete}
           >
-            <Trash />
+            <DeleteIcon />
           </Button>
         </div>
       </form>

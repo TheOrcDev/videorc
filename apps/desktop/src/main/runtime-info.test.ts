@@ -78,7 +78,8 @@ describe('runtime info helpers', () => {
         VIDEORC_NOTES_WINDOW: '1',
         VIDEORC_NOTES_RECORDING_OVERLAY: '1',
         VIDEORC_COMMENTS_WINDOW: '1',
-        VIDEORC_COMMENTS_RECORDING_OVERLAY: '1'
+        VIDEORC_COMMENTS_RECORDING_OVERLAY: '1',
+        VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE: '1'
       }
     })
 
@@ -92,6 +93,7 @@ describe('runtime info helpers', () => {
       commentsWindowEnabled: true,
       commentsWindowRecordingOverlayAllowed: true,
       previewSmokeMode: true,
+      windowsLiveAudioSmokeMode: true,
       disableAutoPreview: true,
       disableAutoSourcePreview: true,
       nativePreviewSurfaceStageSuspended: true
@@ -133,6 +135,50 @@ describe('runtime info helpers', () => {
     })
   })
 
+  it('carries persisted backend crash records into the bundle-bound runtime info', () => {
+    const crash = {
+      at: '2026-08-23T10:00:00.000Z',
+      generation: 2,
+      code: null,
+      signal: 'SIGKILL',
+      attempt: 1,
+      uptimeMs: 12_345,
+      intentional: false,
+      stderrTail: ['{"panic":"boom","location":"main.rs:1","thread":"main"}']
+    }
+    const info = buildRuntimeInfo({
+      appVersion: '9.9.9-test',
+      execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+      backendCrashes: [crash],
+      env: {}
+    })
+
+    // Contract pinned by the support bundle: rendererDiagnostics.runtimeInfo
+    // is forwarded verbatim, so the record shape IS the bundle shape.
+    expect(info.backendCrashes).toEqual([crash])
+    expect(info.backendCrashes).not.toBe([crash])
+    expect(JSON.parse(JSON.stringify(info)).backendCrashes).toEqual([crash])
+    expect(Object.keys(crash).sort()).toEqual([
+      'at',
+      'attempt',
+      'code',
+      'generation',
+      'intentional',
+      'signal',
+      'stderrTail',
+      'uptimeMs'
+    ])
+  })
+
+  it('defaults backendCrashes to an empty list so the bundle field is always present', () => {
+    const info = buildRuntimeInfo({
+      appVersion: '9.9.9-test',
+      execPath: '/Applications/Videorc.app/Contents/MacOS/Videorc',
+      env: {}
+    })
+    expect(info.backendCrashes).toEqual([])
+  })
+
   it('surfaces the running app version', () => {
     const info = buildRuntimeInfo({
       appVersion: '1.2.3',
@@ -167,6 +213,42 @@ describe('runtime info helpers', () => {
         description: 'NVIDIA RTX'
       }
     ])
+    expect(info.gpuFallback).toEqual({
+      source: 'none',
+      reason: null,
+      crashCount: 0,
+      updatedAt: null,
+      retryScheduled: false,
+      retryAttempts: 0
+    })
+  })
+
+  it('surfaces graphics fallback evidence and recovery state', () => {
+    const info = buildRuntimeInfo({
+      appVersion: '1.2.3',
+      execPath: 'C:\\Program Files\\Videorc\\Videorc.exe',
+      platform: 'win32',
+      hardwareAccelerationDisabled: true,
+      gpuFallback: {
+        source: 'persisted',
+        reason: 'gpu-process-crashes',
+        crashCount: 2,
+        updatedAt: '2026-07-20T00:00:00.000Z',
+        retryScheduled: true,
+        retryAttempts: 1
+      },
+      env: {}
+    })
+
+    expect(info).toMatchObject({
+      hardwareAccelerationDisabled: true,
+      gpuFallback: {
+        source: 'persisted',
+        reason: 'gpu-process-crashes',
+        retryScheduled: true,
+        retryAttempts: 1
+      }
+    })
   })
 
   it('drops malformed GPU entries from runtime diagnostics', () => {

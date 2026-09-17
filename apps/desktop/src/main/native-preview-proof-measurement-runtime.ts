@@ -4,6 +4,24 @@
  * a fresh percentile epoch so startup and encoder-probe stalls cannot leak into
  * a later steady-state sample window.
  */
+import type { PreviewSurfaceStatus } from '../shared/backend'
+
+export function resetNativePreviewProofMeasurementStatus(
+  status: PreviewSurfaceStatus
+): PreviewSurfaceStatus {
+  return {
+    ...status,
+    droppedFrames: 0,
+    inputToPresentLatencyMs: undefined,
+    inputToPresentLatencyP50Ms: undefined,
+    inputToPresentLatencyP95Ms: undefined,
+    inputToPresentLatencyP99Ms: undefined,
+    presentFps: undefined,
+    intervalP95Ms: undefined,
+    intervalP99Ms: undefined
+  }
+}
+
 export const NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT = String.raw`
 function createNativePreviewProofMeasurementEpoch(now, blankFrames, skippedFrames) {
   return {

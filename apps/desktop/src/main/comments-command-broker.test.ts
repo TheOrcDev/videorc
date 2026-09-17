@@ -6,6 +6,12 @@ import {
   liveCommentsCommandAllowed,
   parseCommentsViewMode
 } from './comments-command-broker'
+import {
+  COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
+  COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS,
+  COMMENTS_HIGHLIGHT_TIMING_CONTRACT,
+  COMMENTS_SEND_TIMING_CONTRACT
+} from '../shared/comments-command-timing'
 
 afterEach(() => vi.useRealTimers())
 
@@ -52,6 +58,57 @@ describe('CommentsCommandBroker', () => {
     await vi.advanceTimersByTimeAsync(51)
     await rejection
     expect(broker.pendingCount).toBe(0)
+  })
+
+  it('does not time out while Studio reconciles an outcome-unknown send', async () => {
+    vi.useFakeTimers()
+    const broker = new CommentsCommandBroker()
+    const pending = broker.request('send-request-1', () => true)
+    const result = pending.then(
+      (value) => ({ ok: true as const, value }),
+      (error: unknown) => ({ ok: false as const, error })
+    )
+
+    // Studio can consume 12s awaiting the durable backend send, another 2s
+    // reconciling an unknown outcome, and several seconds of renderer/IPC
+    // scheduling margin before Main may truthfully declare it unresponsive.
+    expect(COMMENTS_COMMAND_RELAY_TIMEOUT_MS).toBe(
+      COMMENTS_SEND_TIMING_CONTRACT.backendRequestMs +
+        COMMENTS_SEND_TIMING_CONTRACT.reconciliationMs +
+        COMMENTS_SEND_TIMING_CONTRACT.rendererIpcMarginMs
+    )
+    await vi.advanceTimersByTimeAsync(COMMENTS_COMMAND_RELAY_TIMEOUT_MS - 1)
+    expect(broker.pendingCount).toBe(1)
+
+    expect(broker.resolve({ requestId: 'send-request-1', ok: true, value: 'sent' })).toBe(true)
+    await expect(result).resolves.toEqual({ ok: true, value: 'sent' })
+    expect(broker.pendingCount).toBe(0)
+  })
+
+  it('gives highlight preprocessing and backend commit their complete outer envelope', async () => {
+    vi.useFakeTimers()
+    const broker = new CommentsCommandBroker()
+    const pending = broker.request(
+      'highlight-request-1',
+      () => true,
+      COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS
+    )
+
+    expect(COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS).toBe(
+      COMMENTS_HIGHLIGHT_TIMING_CONTRACT.avatarFetchMs +
+        COMMENTS_HIGHLIGHT_TIMING_CONTRACT.backendQueueMaxAgeMs +
+        COMMENTS_HIGHLIGHT_TIMING_CONTRACT.backendExecutionMaxMs +
+        COMMENTS_HIGHLIGHT_TIMING_CONTRACT.reconciliationMs +
+        COMMENTS_HIGHLIGHT_TIMING_CONTRACT.rendererIpcMarginMs
+    )
+    expect(COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS).toBeGreaterThan(COMMENTS_COMMAND_RELAY_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(COMMENTS_COMMAND_RELAY_TIMEOUT_MS + 1)
+    expect(broker.pendingCount).toBe(1)
+
+    expect(
+      broker.resolve({ requestId: 'highlight-request-1', ok: true, value: 'highlighted' })
+    ).toBe(true)
+    await expect(pending).resolves.toBe('highlighted')
   })
 
   it('propagates a correlated renderer/backend failure to the caller', async () => {

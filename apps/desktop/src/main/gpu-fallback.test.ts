@@ -6,6 +6,8 @@ import {
   gpuFallbackStatePath,
   isGpuCrashReason,
   readGpuFallbackState,
+  scheduleGpuFallbackRetry,
+  startGpuFallbackRetry,
   shouldPersistGpuFallback,
   writeGpuFallbackState,
   type GpuFallbackState
@@ -53,6 +55,46 @@ describe('decideGpuFallback', () => {
     expect(decideGpuFallback({ env: {}, persisted: null })).toEqual({
       disable: false,
       source: 'none',
+      clearPersisted: false
+    })
+  })
+
+  it('runs one explicit accelerated retry without clearing the failure evidence', () => {
+    const retry = scheduleGpuFallbackRetry(persisted, '2026-07-10T00:00:00.000Z')
+
+    expect(retry).toEqual({
+      ...persisted,
+      disableHardwareAcceleration: false,
+      retryRequestedAt: '2026-07-10T00:00:00.000Z',
+      retryAttempts: 1
+    })
+    expect(decideGpuFallback({ env: {}, persisted: retry })).toEqual({
+      disable: false,
+      source: 'retry',
+      clearPersisted: false
+    })
+  })
+
+  it('increments explicit retries without creating an automatic launch loop', () => {
+    const first = scheduleGpuFallbackRetry(persisted, '2026-07-10T00:00:00.000Z')
+    const failed: GpuFallbackState = {
+      ...first,
+      disableHardwareAcceleration: true,
+      reason: 'gpu-retry-failed',
+      updatedAt: '2026-07-10T00:01:00.000Z'
+    }
+
+    expect(decideGpuFallback({ env: {}, persisted: failed }).source).toBe('persisted')
+    expect(scheduleGpuFallbackRetry(failed, '2026-07-11T00:00:00.000Z').retryAttempts).toBe(2)
+  })
+
+  it('fails closed on the next launch when a retry never reached stability', () => {
+    const retry = scheduleGpuFallbackRetry(persisted, '2026-07-10T00:00:00.000Z')
+    const started = startGpuFallbackRetry(retry, '2026-07-10T00:00:01.000Z')
+
+    expect(decideGpuFallback({ env: {}, persisted: started })).toEqual({
+      disable: true,
+      source: 'persisted',
       clearPersisted: false
     })
   })

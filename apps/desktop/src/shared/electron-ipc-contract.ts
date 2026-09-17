@@ -6,6 +6,9 @@ import type {
   CaptionWindowSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
+  CohostActionCommand,
+  CohostEnableCommand,
+  CohostWindowState,
   CommentHighlightCommand,
   CommentHighlightState,
   CommentsClearCommand,
@@ -22,6 +25,7 @@ import type {
   VideorcApi,
   ViewerSample
 } from './backend'
+import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
@@ -52,6 +56,7 @@ export const electronInvokeApiMethods = {
   'backend:get-connection': 'getBackendConnection',
   'backend:get-logs': 'getBackendLogs',
   'app:get-runtime-info': 'getRuntimeInfo',
+  'app:retry-hardware-acceleration': 'retryHardwareAcceleration',
   'app:set-native-theme': 'setNativeTheme',
   'screens:pick-image': 'pickScreenImage',
   'backgrounds:import-image': 'importBackgroundImage',
@@ -59,6 +64,7 @@ export const electronInvokeApiMethods = {
   'backgrounds:bundled-assets': 'getBundledBackgroundAssets',
   'avatars:cache': 'cacheChatAvatar',
   'account:begin-sign-in': 'beginAccountSignIn',
+  'account:refresh': 'refreshAccount',
   'account:sign-out': 'signOutAccount',
   'account:callbacks-list': 'getPendingAccountCallbacks',
   'account:callback-ack': 'acknowledgeAccountCallback',
@@ -88,6 +94,7 @@ export const electronInvokeApiMethods = {
   'preview-window:set-dock-overlay': 'setPreviewDockOverlayOpen',
   'preview-window:set-aspect-ratio': 'setPreviewWindowAspectRatio',
   'notes-window:open': 'openNotesWindow',
+  'global-shortcuts:set': 'setGlobalShortcuts',
   'notes-window:close': 'closeNotesWindow',
   'notes-window:get-state': 'getNotesWindowState',
   'notes-window:set-always-on-top': 'setNotesWindowAlwaysOnTop',
@@ -112,6 +119,12 @@ export const electronInvokeApiMethods = {
   'comments-window:clear-result-push': 'pushCommentsClearResult',
   'comments-window:viewers-push': 'pushViewerSample',
   'comments-window:viewers-get': 'getViewerSample',
+  'comments-window:cohost-push': 'pushCohostWindowState',
+  'comments-window:cohost-get': 'getCohostWindowState',
+  'comments-window:cohost-action': 'sendCohostAction',
+  'comments-window:cohost-action-result-push': 'pushCohostActionResult',
+  'comments-window:cohost-enable': 'sendCohostEnable',
+  'comments-window:cohost-enable-result-push': 'pushCohostEnableResult',
   'captions-window:open': 'openCaptionsWindow',
   'captions-window:close': 'closeCaptionsWindow',
   'captions-window:toggle': 'toggleCaptionsWindow',
@@ -155,6 +168,10 @@ export type ElectronInvokeArgs<TChannel extends ElectronInvokeChannel> =
 export type ElectronInvokeResult<TChannel extends ElectronInvokeChannel> =
   ElectronIpcInvokeMap[TChannel]['result']
 
+/** OS-global shortcut actions (registered via globalShortcut, work with the
+ * app unfocused — Stream Deck's native Hotkey action drives these). */
+export type GlobalShortcutAction = 'record-toggle' | 'stream-toggle' | 'mic-toggle'
+
 export interface ElectronIpcEventMap {
   'account:callback': AccountCallbackEnvelope
   'backend:connection': BackendConnection
@@ -172,11 +189,17 @@ export interface ElectronIpcEventMap {
   'comments-window:send-request': CommentsSendCommand
   'comments-window:clear-request': CommentsClearCommand
   'comments-window:viewers': ViewerSample | null
+  'comments-window:cohost': CohostWindowState
+  'comments-window:cohost-action-request': CohostActionCommand
+  'comments-window:cohost-enable-request': CohostEnableCommand
   'captions-window:state': CaptionsWindowState
   'captions-window:snapshot': CaptionWindowSnapshot
   'captions-window:lines': CaptionsUpdate[]
   'oauth:callback-url': OAuthCallbackEnvelope
   'shortcut:navigate': string
+  'shortcut:modifier': boolean
+  'window:visible': boolean
+  'global-shortcuts:triggered': GlobalShortcutAction
   'preview-surface:pump-mode': boolean
   'preview-surface:resync-scene': undefined
   'glass:wallpaper': GlassWallpaperState
@@ -203,11 +226,17 @@ export const electronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:viewers',
+  'comments-window:cohost',
+  'comments-window:cohost-action-request',
+  'comments-window:cohost-enable-request',
   'captions-window:state',
   'captions-window:snapshot',
   'captions-window:lines',
   'oauth:callback-url',
   'shortcut:navigate',
+  'shortcut:modifier',
+  'window:visible',
+  'global-shortcuts:triggered',
   'preview-surface:pump-mode',
   'preview-surface:resync-scene',
   'glass:wallpaper',
@@ -497,6 +526,7 @@ const previewBoundsSchema = objectSchema(
     clipY: optionalSchema(numberSchema()),
     clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
     clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 })),
     visible: optionalSchema(booleanSchema),
     orderAboveWindowId: optionalSchema(nonNegativeSafeIntegerSchema),
     elevated: optionalSchema(booleanSchema)
@@ -538,6 +568,11 @@ const layoutSettingsSchema = objectSchema(
     cameraShape: enumSchema(['rectangle', 'rounded', 'circle']),
     cameraCornerRadiusPct: numberSchema(),
     cameraAspect: enumSchema(['source', 'square', 'portrait']),
+    cameraChromaKeyEnabled: booleanSchema,
+    cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
+    cameraChromaKeySimilarityPct: numberSchema(),
+    cameraChromaKeySmoothnessPct: numberSchema(),
+    cameraChromaKeySpillPct: numberSchema(),
     cameraMargin: numberSchema(),
     cameraFit: enumSchema(['fit', 'fill']),
     cameraMirror: booleanSchema,
@@ -690,34 +725,89 @@ const previewCompositorUpdateSchema = boundedSemanticValue(
   )
 )
 
-const previewSurfaceStatusSchema = boundedSemanticValue(
-  'a native preview surface status',
-  objectSchema(
-    {
-      state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
-      source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
-      transport: enumSchema([
-        'native-surface',
-        'electron-proof-surface',
-        'latest-jpeg-polling',
-        'mjpeg-stream',
-        'unavailable'
-      ]),
-      backing: enumSchema(['cametal-layer', 'electron-browser-window', 'none']),
-      targetFps: numberSchema({ min: 0, max: 1_000 }),
-      width: numberSchema({ min: 0, max: 65_536 }),
-      height: numberSchema({ min: 0, max: 65_536 }),
-      framesRendered: nonNegativeSafeIntegerSchema,
-      droppedFrames: nonNegativeSafeIntegerSchema,
-      framePollingSuppressed: booleanSchema,
-      sourcePixelsPresent: booleanSchema,
-      pendingHostCommandCount: nonNegativeSafeIntegerSchema,
-      bounds: optionalSchema(previewBoundsSchema),
-      updatedAt: stringSchema({ minLength: 1, maxLength: 128 })
-    },
-    { allowUnknown: true }
-  )
+const previewSurfaceStatusFieldsSchema = objectSchema(
+  {
+    state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
+    source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
+    transport: enumSchema([
+      'native-surface',
+      'd3d11-shared-texture',
+      'electron-proof-surface',
+      'latest-jpeg-polling',
+      'mjpeg-stream',
+      'unavailable'
+    ]),
+    backing: enumSchema([
+      'cametal-layer',
+      'directcomposition-swapchain',
+      'electron-browser-window',
+      'none'
+    ]),
+    targetFps: numberSchema({ min: 0, max: 1_000 }),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    framesRendered: nonNegativeSafeIntegerSchema,
+    droppedFrames: nonNegativeSafeIntegerSchema,
+    framePollingSuppressed: booleanSchema,
+    sourcePixelsPresent: booleanSchema,
+    pendingHostCommandCount: nonNegativeSafeIntegerSchema,
+    nativePreviewHostKind: optionalSchema(
+      enumSchema([
+        'in-process',
+        'helper-process',
+        'external-module',
+        'proof-surface',
+        'backend-d3d11-presenter'
+      ])
+    ),
+    bounds: optionalSchema(previewBoundsSchema),
+    updatedAt: stringSchema({ minLength: 1, maxLength: 128 })
+  },
+  { allowUnknown: true }
 )
+
+const previewSurfaceStatusSchema = boundedSemanticValue(
+  'a renderer-safe native preview surface status',
+  runtimeSchema('a renderer-safe native preview surface status', (value, path) => {
+    rejectPrivilegedPreviewIdentity(value, path)
+    previewSurfaceStatusFieldsSchema.parse(value, path)
+    return value
+  })
+)
+
+function rejectPrivilegedPreviewIdentity(value: unknown, path: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return
+  }
+  const record = value as Record<string, unknown>
+  for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+    if (field in record) {
+      throw new RuntimeSchemaError(`${path}.${field}`, 'absent from renderer-facing state')
+    }
+  }
+  const bounds = record.bounds
+  if (typeof bounds === 'object' && bounds !== null && !Array.isArray(bounds)) {
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in bounds) {
+        throw new RuntimeSchemaError(
+          `${path}.bounds.${field}`,
+          'absent from renderer-facing bounds'
+        )
+      }
+    }
+  }
+  const presenter = record.windowsD3d11Presenter
+  if (typeof presenter === 'object' && presenter !== null && !Array.isArray(presenter)) {
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in presenter) {
+        throw new RuntimeSchemaError(
+          `${path}.windowsD3d11Presenter.${field}`,
+          'absent from renderer-facing presenter diagnostics'
+        )
+      }
+    }
+  }
+}
 
 const nativePreviewHostCommandSchema = runtimeSchema<unknown>(
   'a native preview host command',
@@ -767,10 +857,21 @@ const optionalGenerationArgs = runtimeSchema<unknown[]>(
 const optionalGenerationOnlyArgs = tupleSchema([optionalSchema(nonNegativeSafeIntegerSchema)])
 
 const noArgs = tupleSchema([])
+const videorcAccountSnapshotSchema = objectSchema(
+  {
+    status: enumSchema(['signed-out', 'signed-in']),
+    username: optionalSchema(stringSchema({ maxLength: 4096 })),
+    displayName: optionalSchema(stringSchema({ maxLength: 4096 })),
+    email: optionalSchema(stringSchema({ maxLength: 4096 })),
+    avatarUrl: optionalSchema(stringSchema({ maxLength: 16_384 }))
+  },
+  { allowUnknown: false }
+)
 const boundedFallbackInvokeContract = invokeContract(boundedIpcArgsSchema)
 const specificRuntimeInvokeContracts = {
   'account:begin-sign-in': invokeContract(tupleSchema([accountAuthorizeUrl])),
-  'account:sign-out': invokeContract(noArgs),
+  'account:refresh': invokeContract(noArgs, videorcAccountSnapshotSchema),
+  'account:sign-out': invokeContract(noArgs, videorcAccountSnapshotSchema),
   'account:callback-ack': invokeContract(tupleSchema([boundedIdentifier])),
   'account:callbacks-list': invokeContract(noArgs),
   'oauth:callback-ack': invokeContract(tupleSchema([oauthCallbackIdentifierSchema]), booleanSchema),
@@ -806,7 +907,7 @@ const specificRuntimeInvokeContracts = {
     previewSurfaceStatusSchema
   ),
   'preview-surface:set-frame-polling-suppressed': invokeContract(
-    tupleSchema([booleanSchema, optionalSchema(booleanSchema)]),
+    tupleSchema([booleanSchema, nonNegativeSafeIntegerSchema, optionalSchema(booleanSchema)]),
     previewSurfaceStatusSchema
   ),
   'preview-surface:destroy': invokeContract(optionalGenerationOnlyArgs, previewSurfaceStatusSchema),
@@ -832,6 +933,7 @@ export const boundedPassthroughElectronInvokeChannels = [
   'backend:get-connection',
   'backend:get-logs',
   'app:get-runtime-info',
+  'app:retry-hardware-acceleration',
   'app:set-native-theme',
   'screens:pick-image',
   'backgrounds:import-image',
@@ -850,6 +952,7 @@ export const boundedPassthroughElectronInvokeChannels = [
   'preview-window:report-dock-slot',
   'preview-window:set-dock-overlay',
   'notes-window:open',
+  'global-shortcuts:set',
   'notes-window:close',
   'notes-window:get-state',
   'notes-window:set-always-on-top',
@@ -872,6 +975,12 @@ export const boundedPassthroughElectronInvokeChannels = [
   'comments-window:clear-result-push',
   'comments-window:viewers-push',
   'comments-window:viewers-get',
+  'comments-window:cohost-push',
+  'comments-window:cohost-get',
+  'comments-window:cohost-action',
+  'comments-window:cohost-action-result-push',
+  'comments-window:cohost-enable',
+  'comments-window:cohost-enable-result-push',
   'captions-window:open',
   'captions-window:close',
   'captions-window:toggle',
@@ -958,6 +1067,16 @@ const specificRuntimeEventSchemas = {
   'notes-window:flush-request': undefinedSchema,
   'oauth:callback-url': oauthCallbackEnvelopeSchema,
   'shortcut:navigate': enumSchema(['1', '2', '3', '4', '5', '6', '7', '8', '9', ',']),
+  // Whether the command modifier is physically down. Main is the only place
+  // that can know: it intercepts ⌘1–⌘9 in before-input-event, so the renderer
+  // never receives those chords — nor, in practice, the keyup that ends them.
+  'shortcut:modifier': booleanSchema,
+  // Whether the main window is actually on screen. The renderer cannot tell:
+  // the window runs with backgroundThrottling disabled, which also freezes the
+  // Page Visibility API, so document.visibilityState reads 'visible' even when
+  // the window is minimised or hidden.
+  'window:visible': booleanSchema,
+  'global-shortcuts:triggered': enumSchema(['record-toggle', 'stream-toggle', 'mic-toggle']),
   'preview-surface:pump-mode': booleanSchema,
   'preview-surface:resync-scene': undefinedSchema,
   'captions-window:lines': runtimeSchema<unknown[]>('bounded caption lines', (value, path) => {
@@ -983,6 +1102,9 @@ export const boundedPassthroughElectronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:viewers',
+  'comments-window:cohost',
+  'comments-window:cohost-action-request',
+  'comments-window:cohost-enable-request',
   'captions-window:state',
   'captions-window:snapshot',
   'glass:wallpaper',

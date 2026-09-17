@@ -1,23 +1,18 @@
-import { ArrowSquareOut, PushPinSimple, WarningCircle } from '@phosphor-icons/react'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
+import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
-import { LiveChatRail } from '@/components/live-chat-rail'
-import { ObsImportNudge } from '@/components/obs-import-nudge'
 import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { StatusBadge } from '@/components/status-badge'
-import { AudioMixer } from '@/components/studio/audio-mixer'
 import { QuickSettings } from '@/components/studio/quick-settings'
-import { ScenesGallery } from '@/components/studio/scenes-gallery'
-import { VerticalLegMonitor } from '@/components/studio/vertical-leg-monitor'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
 import { SessionPanel } from '@/components/studio/session-panel'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
 import {
-  useStudioChat,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
@@ -26,13 +21,17 @@ import {
 import { videoProfileCompatibility } from '@/lib/capture'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
-import { liveChatRailAvailable, shouldAutoOpenLiveChatRail } from '@/lib/live-chat-surface'
 import { studioHealth } from '@/lib/studio-health'
 import {
   isSessionTransportActive,
   sessionStatusLabel,
   sessionStatusTone
 } from '@/lib/studio-session-view'
+
+const StudioDashboardBottomRow = lazy(async () => ({
+  default: (await import('@/components/studio/studio-dashboard-bottom-row'))
+    .StudioDashboardBottomRow
+}))
 
 export function StudioTab(): ReactElement {
   const studio = useStudioCore()
@@ -44,6 +43,7 @@ export function StudioTab(): ReactElement {
     visibleStartBlockedReason,
     startSession,
     stopSession,
+    noteRecordClick,
     captureConfig,
     setCaptureConfig,
     entitlements,
@@ -60,7 +60,12 @@ export function StudioTab(): ReactElement {
     confirmGoLive,
     continueGoLiveWithReadyDestinations,
     continueGoLiveWithoutCaptions,
-    resolveGoLiveBlocker
+    resolveGoLiveBlocker,
+    sessionStartFailure,
+    dismissSessionStartFailure,
+    sessionRuntimeNotice,
+    dismissSessionRuntimeNotice,
+    retrySessionStart
   } = studio
 
   const active = isSessionTransportActive(recording.state)
@@ -95,8 +100,12 @@ export function StudioTab(): ReactElement {
             ? (health.ffmpeg.message ?? 'FFmpeg is not available.')
             : null
 
-  // Two-button start: set the intended mode, then start on the next render so startSession
-  // sees the updated streamEnabled (record vs go-live) instead of a stale closure value.
+  // Two-button start: when the click changes the output mode (record vs go-live),
+  // set it and start on the next render so startSession and its blocked-reason
+  // gate see the updated streamEnabled instead of a stale closure value. When the
+  // config already matches the button, start in the same task — the extra
+  // render+commit of the whole Studio provider was a measurable slice of the
+  // Record click → recording path.
   const [pendingStart, setPendingStart] = useState(false)
   useEffect(() => {
     if (!pendingStart) {
@@ -107,6 +116,11 @@ export function StudioTab(): ReactElement {
   }, [pendingStart, startSession])
 
   const handleRecord = (): void => {
+    noteRecordClick('start')
+    if (captureConfig.recordEnabled && !captureConfig.streamEnabled) {
+      void startSession()
+      return
+    }
     setCaptureConfig((current) => ({ ...current, recordEnabled: true, streamEnabled: false }))
     setPendingStart(true)
   }
@@ -114,8 +128,17 @@ export function StudioTab(): ReactElement {
     if (liveStreamBlockedReason) {
       return
     }
+    noteRecordClick('start')
+    if (captureConfig.streamEnabled) {
+      void startSession()
+      return
+    }
     setCaptureConfig((current) => ({ ...current, streamEnabled: true }))
     setPendingStart(true)
+  }
+  const handleStop = (): void => {
+    noteRecordClick('stop')
+    void stopSession()
   }
 
   const stopLabel = stopRequestPending
@@ -150,7 +173,6 @@ export function StudioTab(): ReactElement {
         <PageStack>
           {/* Fresh-profile OBS hint (O5): quiet, dismissible, gone forever once
               a capture source exists — never a nag. */}
-          <ObsImportNudge />
           {/* Hard blocks surface INSIDE the Session panel next to the disabled
               buttons (quiet inline line + jump link) — the yellow top banner
               made the Studio read as broken (post-0.9.4 fix batch F8). */}
@@ -170,11 +192,16 @@ export function StudioTab(): ReactElement {
               canStop={canStop}
               liveStreamBlockedReason={liveStreamBlockedReason}
               recordBlockedReason={recordBlockedReason}
+              startFailure={sessionStartFailure}
+              runtimeNotice={sessionRuntimeNotice}
               startRequestPending={startRequestPending}
               stopLabel={stopLabel}
+              onDismissStartFailure={dismissSessionStartFailure}
+              onDismissRuntimeNotice={dismissSessionRuntimeNotice}
               onLiveStream={handleLiveStream}
               onRecord={handleRecord}
-              onStop={stopSession}
+              onRetryStart={retrySessionStart}
+              onStop={handleStop}
             />
           </div>
 
@@ -184,15 +211,24 @@ export function StudioTab(): ReactElement {
 
           {/* Scenes + Audio mixer — the dashboard's bottom row. Collapses to a
               single column below lg. */}
-          <div className="grid gap-5 lg:grid-cols-2">
-            <ScenesGallery />
-            <VerticalLegMonitor />
-            <AudioMixer />
-          </div>
+          <Suspense fallback={<StudioDashboardBottomRowFallback />}>
+            <StudioDashboardBottomRow />
+          </Suspense>
         </PageStack>
       </div>
+    </div>
+  )
+}
 
-      <StudioLiveChatRail />
+function StudioDashboardBottomRowFallback(): ReactElement {
+  return (
+    <div className="grid gap-5 lg:grid-cols-2" aria-label="Loading Studio controls">
+      <PanelSection title="Scenes">
+        <div className="h-24 rounded-row border bg-muted/20" />
+      </PanelSection>
+      <PanelSection title="Audio mixer">
+        <div className="h-24 rounded-row border bg-muted/20" />
+      </PanelSection>
     </div>
   )
 }
@@ -201,7 +237,7 @@ function StudioPreviewPanel(): ReactElement {
   const {
     captureConfig,
     nativePreviewSurfaceEnabled,
-    openPreviewPermissions,
+    handleSystemPermission,
     openPreviewWindow,
     previewWindow,
     refreshPreview,
@@ -214,7 +250,12 @@ function StudioPreviewPanel(): ReactElement {
   const { previewLiveStatus } = useStudioPreview()
   const { diagnosticStats, previewSurfaceStatus } = useStudioDiagnostics()
   const active = isSessionTransportActive(recording.state)
-  const previewHealth = studioHealth(diagnosticStats, active, runtimeInfo?.platform)
+  const previewHealth = studioHealth(
+    diagnosticStats,
+    active,
+    runtimeInfo?.platform,
+    previewSurfaceStatus.nativePreviewHostKind
+  )
   const docked =
     nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
 
@@ -241,10 +282,15 @@ function StudioPreviewPanel(): ReactElement {
 
   const healthErrorRow =
     previewHealth.tone === 'error' && previewHealth.detail ? (
-      <div className="flex items-center gap-2 rounded-row border border-destructive/30 bg-destructive/10 px-3 py-1.5 text-xs font-medium text-destructive">
-        <WarningCircle className="size-4 shrink-0" weight="fill" />
-        <span className="min-w-0">{previewHealth.detail}</span>
-      </div>
+      <Alert data-testid="capture-health-alert" variant="destructive">
+        <AlertIcon weight="fill" />
+        <AlertTitle>{previewHealth.value}</AlertTitle>
+        <AlertDescription className="min-w-0">
+          <p className="line-clamp-3" title={previewHealth.detail}>
+            {previewHealth.detail}
+          </p>
+        </AlertDescription>
+      </Alert>
     ) : null
 
   const previewStage = (
@@ -253,7 +299,7 @@ function StudioPreviewPanel(): ReactElement {
       nativePreviewSurfaceEnabled={nativePreviewSurfaceEnabled}
       previewLiveStatus={previewLiveStatus}
       previewSurfaceStatus={previewSurfaceStatus}
-      onOpenPermissions={openPreviewPermissions}
+      onOpenPermissions={(pane) => void handleSystemPermission(pane)}
       onRetry={refreshPreview}
     />
   )
@@ -285,7 +331,7 @@ function StudioPreviewPanel(): ReactElement {
               variant="ghost"
               onClick={() => void setPreviewWindowMode('docked')}
             >
-              <PushPinSimple className="size-4" />
+              <PinIcon className="size-4" />
             </Button>
           ) : previewWindow.open ? (
             <Button
@@ -296,7 +342,7 @@ function StudioPreviewPanel(): ReactElement {
               variant="ghost"
               onClick={() => void setPreviewWindowMode('floating')}
             >
-              <ArrowSquareOut className="size-4" />
+              <ExternalLinkIcon className="size-4" />
             </Button>
           ) : (
             <Button
@@ -307,7 +353,7 @@ function StudioPreviewPanel(): ReactElement {
               variant="ghost"
               onClick={() => void openPreviewWindow()}
             >
-              <ArrowSquareOut className="size-4" />
+              <ExternalLinkIcon className="size-4" />
             </Button>
           )}
         </div>
@@ -316,69 +362,6 @@ function StudioPreviewPanel(): ReactElement {
       {previewStage}
       {healthErrorRow}
     </PanelSection>
-  )
-}
-
-function StudioLiveChatRail(): ReactElement | null {
-  const studio = useStudioCore()
-  const { recording } = useStudioRecordingState()
-  const { liveChatSnapshot } = useStudioChat()
-  const chatProvidersAttached = liveChatSnapshot.providers.length > 0
-  const chatRailAvailable = liveChatRailAvailable(recording.state, liveChatSnapshot)
-  const [chatRailOpen, setChatRailOpen] = useState(false)
-  const chatAutoOpened = useRef(false)
-
-  // Live while streaming, retained after stop while the in-memory transcript
-  // still has comments. It clears once the local chat view is cleared.
-  useEffect(() => {
-    if (!chatRailAvailable) {
-      chatAutoOpened.current = false
-      setChatRailOpen(false)
-      return
-    }
-    if (
-      shouldAutoOpenLiveChatRail({
-        alreadyAutoOpened: chatAutoOpened.current,
-        providersAttached: chatProvidersAttached,
-        recordingState: recording.state,
-        snapshot: liveChatSnapshot
-      })
-    ) {
-      chatAutoOpened.current = true
-      setChatRailOpen(true)
-    }
-  }, [chatRailAvailable, chatProvidersAttached, liveChatSnapshot, recording.state])
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent): void => {
-      if (event.key.toLowerCase() === 'j' && !event.shiftKey && (event.metaKey || event.ctrlKey)) {
-        event.preventDefault()
-        if (chatRailAvailable) {
-          setChatRailOpen((value) => !value)
-        }
-      }
-    }
-    document.addEventListener('keydown', onKeyDown)
-    return () => document.removeEventListener('keydown', onKeyDown)
-  }, [chatRailAvailable])
-
-  if (!chatRailOpen || !chatRailAvailable) {
-    return null
-  }
-
-  return (
-    <LiveChatRail
-      highlightedId={studio.highlightedCommentId}
-      highlightApplyingId={studio.commentHighlightApplyingId}
-      highlightFailure={studio.commentHighlightFailure}
-      highlightState={studio.commentHighlightState}
-      snapshot={liveChatSnapshot}
-      windowOpen={studio.commentsWindow.open}
-      onClearLocal={studio.clearLiveChat}
-      onClose={() => setChatRailOpen(false)}
-      onHighlight={studio.toggleCommentHighlight}
-      onPopOut={studio.toggleCommentsWindow}
-      platform={studio.runtimeInfo?.platform}
-    />
   )
 }
 

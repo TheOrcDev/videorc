@@ -15,7 +15,6 @@ export async function resolveFinalRecordingPath({
   now = Date.now,
 } = {}) {
   const startedWaitingAt = now()
-  let fallbackPath = null
 
   while (now() - startedWaitingAt <= timeoutMs) {
     const candidates = orderedRecordingPathCandidates({
@@ -28,7 +27,7 @@ export async function resolveFinalRecordingPath({
     const finalPath = candidates.find((path) => !isTemporaryMkvPath(path) && exists(path))
     if (finalPath) return finalPath
 
-    fallbackPath = candidates.find((path) => exists(path)) ?? fallbackPath
+    const fallbackPath = candidates.find((path) => isTemporaryMkvPath(path) && exists(path))
     if (fallbackPath && mp4ExportFailed(healthEvents, stopRequestedAt, stopped?.sessionId ?? started?.sessionId)) {
       return fallbackPath
     }
@@ -36,7 +35,7 @@ export async function resolveFinalRecordingPath({
     await sleep(pollMs)
   }
 
-  return fallbackPath
+  return null
 }
 
 export function orderedRecordingPathCandidates({ started, stopped, recordingStatusEvents = [], stopRequestedAt = 0 } = {}) {

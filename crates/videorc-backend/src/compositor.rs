@@ -1,3 +1,4 @@
+use std::collections::VecDeque;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::Path;
@@ -6,16 +7,22 @@ use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Instant, SystemTime};
 
 use chrono::Utc;
+use rayon::prelude::*;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::{Duration, MissedTickBehavior, sleep};
 use uuid::Uuid;
 
-use crate::color::rgb_to_yuv_full_range_bt601 as rgb_to_yuv;
+use crate::capture_health::{
+    CaptureHealthCameraEpoch, CaptureHealthCameraProducerSample, CaptureHealthMonitor,
+    CaptureHealthSample, CaptureHealthScreenEpoch, CaptureHealthScreenProducerSample,
+    CaptureHealthTransition,
+};
+use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 use crate::compositor_synthetic::SyntheticMovingSource;
 use crate::diagnostics::{
-    CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
-    CompositorSourceImportStats, apply_active_scene_revision,
+    CompositorCpuFrameCounts, CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
+    CompositorSourceImportStats, apply_active_scene_revision, apply_capture_health,
     apply_compositor_live_source_fetch_stats, apply_compositor_outside_render_timing_stats,
     apply_compositor_source_import_stats, apply_compositor_stats, apply_compositor_timing_stats,
     apply_runtime_diagnostics_snapshot,
@@ -23,11 +30,13 @@ use crate::diagnostics::{
 use crate::frame_store::{FrameHandle, FrameStore};
 use crate::preview_camera::{
     PreviewCameraFrameInfo, PreviewCameraFrameSource, PreviewCameraPixelFormat,
-    preview_camera_frame_source, try_preview_camera_frame_source,
+    preview_camera_frame_source, preview_camera_recovery_evidence, preview_camera_restart_snapshot,
+    preview_camera_restart_snapshot_is_frameless_zombie, try_preview_camera_frame_source,
 };
 use crate::preview_screen::{
     PreviewScreenFrameInfo, PreviewScreenFrameSource, PreviewScreenPixelFormat,
-    preview_screen_frame_source, try_preview_screen_frame_source,
+    preview_screen_frame_source, preview_screen_recovery_evidence, preview_screen_restart_snapshot,
+    try_preview_screen_frame_source,
 };
 use crate::protocol::{
     BackgroundFit, CameraShape, CompositorBackend, CompositorFramePipelineStatus,
@@ -39,11 +48,18 @@ use crate::protocol::{
     PreviewTransport, Scene, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
-    PixelRect, SceneCrop, SceneFit, SceneMask, background_stage_margin, background_zoom_crop,
-    camera_mask, scene_crop_from_transform, scene_mask_allows, scene_source_fit,
-    scene_source_rect_pixels, scene_source_render_transform,
+    ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, background_stage_margin,
+    background_zoom_crop, camera_chroma_key, camera_mask, chroma_key_alpha, chroma_key_despill,
+    scene_crop_from_transform, scene_mask_allows, scene_source_fit, scene_source_rect_pixels,
+    scene_source_render_transform,
 };
+pub use crate::source_mask::SourceMask;
+use crate::source_registry::SourceKey;
 use crate::state::AppState;
+use crate::windows_d3d11_device::{
+    DxgiAdapterLuid, WindowsD3d11MediaRole, WindowsD3d11TextureFormat,
+    WindowsD3d11TextureLeaseTicket,
+};
 
 #[cfg(test)]
 use crate::protocol::{LayoutPreset, SceneSource};
@@ -79,6 +95,7 @@ pub type CompositorFrameStore =
 pub struct CompositorFrameExportHandle {
     #[cfg(target_os = "macos")]
     metal_target: Option<Arc<crate::metal_compositor::MetalCompositorTargetPixelBuffer>>,
+    d3d11_texture: Option<WindowsD3d11TextureLeaseTicket>,
 }
 
 impl CompositorFrameExportHandle {
@@ -88,6 +105,16 @@ impl CompositorFrameExportHandle {
     ) -> Self {
         Self {
             metal_target: Some(Arc::new(target)),
+            d3d11_texture: None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn d3d11_texture(ticket: WindowsD3d11TextureLeaseTicket) -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            metal_target: None,
+            d3d11_texture: Some(ticket),
         }
     }
 
@@ -120,6 +147,35 @@ impl CompositorFrameExportHandle {
         }
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn has_d3d11_texture(&self) -> bool {
+        self.d3d11_texture.is_some()
+    }
+
+    pub(crate) fn d3d11_texture_handoff(&self) -> Option<CompositorD3d11TextureHandoff> {
+        let metadata = self.d3d11_texture.as_ref()?.metadata();
+        Some(CompositorD3d11TextureHandoff {
+            adapter_luid: metadata.adapter_luid,
+            generation: metadata.generation,
+            lease_id: metadata.lease_id.as_u64(),
+            width: metadata.width,
+            height: metadata.height,
+            format: metadata.format,
+            sequence: metadata.sequence,
+            fence_value: metadata.synchronization.fence_value,
+            role: metadata.role,
+        })
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn d3d11_texture_for_role(
+        &self,
+        role: WindowsD3d11MediaRole,
+    ) -> Option<WindowsD3d11TextureLeaseTicket> {
+        let ticket = self.d3d11_texture.as_ref()?;
+        (ticket.metadata().role == role).then(|| ticket.clone())
+    }
+
     fn metal_target_handoff(&self) -> Option<CompositorMetalTargetHandoff> {
         let (width, height) = self.metal_target_dimensions()?;
         Some(CompositorMetalTargetHandoff {
@@ -145,17 +201,43 @@ pub(crate) struct CompositorMetalTargetHandoff {
     height: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CompositorD3d11TextureHandoff {
+    pub(crate) adapter_luid: DxgiAdapterLuid,
+    pub(crate) generation: u64,
+    pub(crate) lease_id: u64,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) format: WindowsD3d11TextureFormat,
+    pub(crate) sequence: u64,
+    pub(crate) fence_value: u64,
+    pub(crate) role: WindowsD3d11MediaRole,
+}
+
 impl fmt::Debug for CompositorFrameExportHandle {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("CompositorFrameExportHandle")
             .field("metal_target_dimensions", &self.metal_target_dimensions())
+            .field("d3d11_texture", &self.d3d11_texture_handoff())
             .finish()
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompositorPixelFormat {
-    Yuv420p { export: CompositorFrameExportKind },
+    Yuv420p {
+        export: CompositorFrameExportKind,
+    },
+    #[allow(dead_code)]
+    D3d11Bgra8 {
+        width: u32,
+        height: u32,
+    },
+    #[allow(dead_code)]
+    D3d11Nv12 {
+        width: u32,
+        height: u32,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -185,6 +267,31 @@ impl CompositorPixelFormat {
             }
         )
     }
+
+    #[allow(dead_code)]
+    pub const fn d3d11_bgra8(width: u32, height: u32) -> Self {
+        Self::D3d11Bgra8 { width, height }
+    }
+
+    #[allow(dead_code)]
+    pub const fn d3d11_nv12(width: u32, height: u32) -> Self {
+        Self::D3d11Nv12 { width, height }
+    }
+
+    #[allow(dead_code)]
+    pub const fn d3d11_dimensions(self) -> Option<(u32, u32)> {
+        match self {
+            Self::D3d11Bgra8 { width, height } | Self::D3d11Nv12 { width, height } => {
+                Some((width, height))
+            }
+            Self::Yuv420p { .. } => None,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub const fn has_d3d11_texture(self) -> bool {
+        self.d3d11_dimensions().is_some()
+    }
 }
 
 #[derive(Debug)]
@@ -195,20 +302,67 @@ pub struct CompositorRuntime {
     /// auxiliary output when it is simulcast-bound; independent of (and never
     /// a rescale of) the primary snapshot.
     simulcast_scene: Option<CompositorSceneSnapshot>,
+    /// Process-local arrival order for scene updates. External revisions can
+    /// intentionally repeat, so equal-revision prepares need this second
+    /// fence to ensure the latest request wins without rejecting a later
+    /// sequential reload of that same external revision.
+    scene_request_token: u64,
+    pending_scene_request: Option<PendingCompositorSceneRequest>,
+    /// Active scene-motion transition: the previous scene's EFFECTIVE
+    /// transforms glide toward the committed scene over `duration`. Applied
+    /// once per tick at the snapshot choke point in publish_compositor_frame,
+    /// so every render path (Metal, CPU, preview, stream, recording) sees
+    /// identical geometry by construction.
+    scene_transition: Option<SceneTransition>,
     image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
-    latest_frame_evidence: Option<CompositorFrameEvidence>,
+    /// Recent frame evidence, oldest first (instant-record P3). The startup
+    /// barrier seeds itself from this ring so a compositor that has been
+    /// producing target-resolution frames passes without waiting for new ones.
+    frame_evidence: VecDeque<CompositorFrameEvidence>,
     run_id: Option<String>,
     stop_tx: Option<watch::Sender<bool>>,
     render_task: Option<JoinHandle<()>>,
     worker_activity: Arc<CompositorWorkerActivity>,
+    /// Writable dimensions for the current preview-only render loop. Recording
+    /// compositors deliberately keep this `None`: their canvas is fixed at
+    /// session start and must never follow a later preview-window resize.
+    preview_render_dimensions: Option<Arc<AtomicU64>>,
+    /// Latest preview-surface lifecycle revision allowed to resize this run.
+    /// Run-id fencing alone is insufficient because several bounds revisions
+    /// intentionally reuse one preview compositor. This second monotonic
+    /// fence prevents delayed old bounds work from overwriting newer pixels.
+    preview_resize_revision: Option<u64>,
+    /// Live render-loop configuration (instant-record P4). The loop swaps
+    /// fps, consumer and overlay flags in place, so a capture can arm the
+    /// preview compositor instead of replacing the run.
+    loop_config_tx: Option<watch::Sender<CompositorLoopConfig>>,
+    /// Capture lease over the preview run: while present the run renders the
+    /// session's output canvas and the preview reconciler must neither
+    /// resize nor retire it.
+    capture_lease: Option<CompositorCaptureLease>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct PendingCompositorSceneRequest {
+    token: u64,
+    external_revision: u64,
+}
+
+fn pack_render_dimensions(width: u32, height: u32) -> u64 {
+    (u64::from(width.max(1)) << 32) | u64::from(height.max(1))
+}
+
+fn unpack_render_dimensions(packed: u64) -> (u32, u32) {
+    (((packed >> 32) as u32).max(1), (packed as u32).max(1))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CompositorFrameConsumer {
     NativePreview,
     VideoToolboxEncoder,
+    MediaFoundationEncoder,
     RawYuvEncoder,
     #[allow(dead_code)] // Reserved for the explicit JPEG debug/fallback attachment path.
     JpegFallback,
@@ -216,7 +370,10 @@ pub enum CompositorFrameConsumer {
 
 impl CompositorFrameConsumer {
     const fn publishes_cpu_yuv(self) -> bool {
-        matches!(self, Self::RawYuvEncoder | Self::JpegFallback)
+        matches!(
+            self,
+            Self::MediaFoundationEncoder | Self::RawYuvEncoder | Self::JpegFallback
+        )
     }
 
     const fn requires_cpu_fallback(self) -> bool {
@@ -227,6 +384,7 @@ impl CompositorFrameConsumer {
         match self {
             Self::NativePreview => "native-preview",
             Self::VideoToolboxEncoder => "videotoolbox-encoder",
+            Self::MediaFoundationEncoder => "media-foundation-encoder",
             Self::RawYuvEncoder => "raw-yuv-encoder",
             Self::JpegFallback => "jpeg-fallback",
         }
@@ -263,15 +421,72 @@ pub struct CompositorAuxiliaryOutput {
 #[derive(Debug, Clone)]
 struct CompositorRenderLoopParams {
     run_id: String,
-    target_fps: u32,
-    width: u32,
-    height: u32,
-    frame_consumer: CompositorFrameConsumer,
+    health_event_sequence: Arc<AtomicU64>,
+    health_heartbeat: Arc<AtomicU64>,
+    render_dimensions: Arc<AtomicU64>,
+    /// Hot-swappable loop configuration; see [`CompositorLoopConfig`].
+    config: watch::Receiver<CompositorLoopConfig>,
     stream_output: Option<CompositorAuxiliaryOutput>,
-    caption_overlay_on_primary: bool,
-    caption_overlay_on_aux: bool,
-    highlight_overlay_on_primary: bool,
-    highlight_overlay_on_aux: bool,
+}
+
+/// Render-loop settings a live run can change without a restart
+/// (instant-record P4). Dimensions travel separately through the packed
+/// `render_dimensions` atomic; the split stream leg stays fixed for the run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompositorLoopConfig {
+    pub target_fps: u32,
+    pub frame_consumer: CompositorFrameConsumer,
+    pub caption_overlay_on_primary: bool,
+    pub caption_overlay_on_aux: bool,
+    pub highlight_overlay_on_primary: bool,
+    pub highlight_overlay_on_aux: bool,
+}
+
+/// Capture ownership of the preview compositor run.
+#[derive(Debug)]
+struct CompositorCaptureLease {
+    session_id: String,
+    run_id: String,
+    /// The preview run's writable dimensions, parked here so bounds updates
+    /// cannot resize the canvas underneath the encoder.
+    render_dimensions: Arc<AtomicU64>,
+    /// Loop configuration to restore (fps is refreshed from the live
+    /// preview surface at release time).
+    preview_config: CompositorLoopConfig,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CompositorArmParams {
+    pub target_fps: u32,
+    pub width: u32,
+    pub height: u32,
+    pub frame_consumer: CompositorFrameConsumer,
+    pub caption_overlay_on_primary: bool,
+    pub caption_overlay_on_aux: bool,
+    pub highlight_overlay_on_primary: bool,
+    pub highlight_overlay_on_aux: bool,
+}
+
+/// Why a capture could not arm the preview compositor in place. Callers fall
+/// back to a fresh recording run; the Record button is never a dead click.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompositorArmRefusal {
+    /// No live run with a render worker exists.
+    NoLiveRun,
+    /// The live run is not a preview-owned single-output run.
+    NotPreviewOwned,
+    /// Another capture already holds the lease.
+    AlreadyLeased,
+}
+
+impl CompositorArmRefusal {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NoLiveRun => "no-live-run",
+            Self::NotPreviewOwned => "not-preview-owned",
+            Self::AlreadyLeased => "already-leased",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -309,10 +524,60 @@ pub struct CompositorStartupSourceRequirements {
 pub struct CompositorStartupBarrierResult {
     pub ready: bool,
     pub wait_ms: u64,
+    /// Current streak of consecutive accepted frames (reset by any block or
+    /// cadence violation) — the value the readiness threshold is judged on.
     pub frames_observed: u32,
+    /// Total fresh target-resolution frames with advancing required sources
+    /// seen during the wait, regardless of streak resets. Zero means the
+    /// compositor never produced a usable frame (a true stall).
+    pub fresh_frames_seen: u32,
+    /// Publish gaps (ms) between the last few accepted fresh frames, oldest
+    /// first, including the gaps that exceeded the cadence budget.
+    pub gap_history_ms: Vec<u64>,
+    /// True when the wait timed out on the cadence budget ALONE: at least one
+    /// fresh frame was observed, a gap exceeded the budget, and the latest
+    /// observation was not a resolution / scene-revision / missing-source
+    /// block. False for every structural block and for zero-frame stalls.
+    pub cadence_only: bool,
     pub first_source_frame_ms: Option<u64>,
     pub first_full_resolution_frame_ms: Option<u64>,
     pub timeout_reason: Option<String>,
+}
+
+/// How many recent inter-frame gaps the startup barrier remembers for its
+/// diagnostics; enough to tell one hiccup from a pattern.
+pub const COMPOSITOR_STARTUP_GAP_HISTORY_LEN: usize = 3;
+
+impl CompositorStartupBarrierResult {
+    pub fn empty() -> Self {
+        Self {
+            ready: false,
+            wait_ms: 0,
+            frames_observed: 0,
+            fresh_frames_seen: 0,
+            gap_history_ms: Vec::new(),
+            cadence_only: false,
+            first_source_frame_ms: None,
+            first_full_resolution_frame_ms: None,
+            timeout_reason: None,
+        }
+    }
+
+    /// `166/120/98` style rendering of the recent gap ring, oldest first.
+    pub fn gap_history_label(&self) -> String {
+        startup_gap_history_label(&self.gap_history_ms)
+    }
+}
+
+fn startup_gap_history_label(history: &[u64]) -> String {
+    if history.is_empty() {
+        return "none".to_string();
+    }
+    history
+        .iter()
+        .map(u64::to_string)
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[derive(Debug, Clone)]
@@ -338,12 +603,44 @@ struct CompositorLiveSources {
     screen_fetch: LiveSourceFetchState,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompositorCameraSourceChange {
+    Adopted {
+        source_key: SourceKey,
+        generation: u64,
+    },
+    Removed,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum CompositorScreenSourceChange {
+    Adopted {
+        source_key: SourceKey,
+        generation: u64,
+    },
+    Removed,
+}
+
 #[derive(Debug, Clone, Default)]
 struct LiveSourceFetchState {
     consecutive_try_lock_misses: u32,
     try_lock_misses: u64,
     blocking_refreshes: u64,
+    // Freshness accounting for the 0.9.71 second-session-lag diagnosis: a
+    // "serve" is one compositor fetch of this source; it is fresh when the
+    // capture pipeline replaced the stored frame since the previous serve and
+    // held when the identical frame handle is re-served. Held ≫ fresh with a
+    // healthy lock (few try-lock misses) means the PRODUCER stopped
+    // delivering — the frozen-recording signature.
+    fresh_serves: u64,
+    held_serves: u64,
+    served_age_max_ms: u64,
+    last_served_frame: Option<*const ()>,
 }
+
+// The raw pointer is only ever compared for identity, never dereferenced, so
+// the fetch state stays safe to move across the compositor loop's await points.
+unsafe impl Send for LiveSourceFetchState {}
 
 impl LiveSourceFetchState {
     fn record_fresh_lock(&mut self) {
@@ -359,6 +656,16 @@ impl LiveSourceFetchState {
         self.consecutive_try_lock_misses = 0;
         self.blocking_refreshes = self.blocking_refreshes.saturating_add(1);
     }
+
+    fn record_serve(&mut self, frame_identity: *const (), captured_age_ms: u64) {
+        if self.last_served_frame == Some(frame_identity) {
+            self.held_serves = self.held_serves.saturating_add(1);
+        } else {
+            self.fresh_serves = self.fresh_serves.saturating_add(1);
+            self.last_served_frame = Some(frame_identity);
+        }
+        self.served_age_max_ms = self.served_age_max_ms.max(captured_age_ms);
+    }
 }
 
 #[derive(Clone)]
@@ -367,6 +674,7 @@ struct CompositorRenderCache {
     stream_frame_store: Option<CompositorFrameStore>,
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
+    transition: Option<SceneTransition>,
     active_image_source: Option<CompositorImageSource>,
     background_image_source: Option<CompositorImageSource>,
 }
@@ -406,6 +714,7 @@ impl CompositorRenderCache {
             stream_frame_store: compositor.stream_frame_store.clone(),
             snapshot: compositor.scene.clone(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
+            transition: compositor.scene_transition.clone(),
             active_image_source,
             background_image_source,
         }
@@ -435,22 +744,83 @@ impl CompositorLiveSources {
         self
     }
 
-    fn refresh_sources_nonblocking(mut self, state: &AppState) -> Self {
+    fn initial_camera_adoption(&self) -> Option<CompositorCameraSourceChange> {
+        self.camera.as_ref().and_then(|source| {
+            source
+                .source_key()
+                .cloned()
+                .map(|source_key| CompositorCameraSourceChange::Adopted {
+                    source_key,
+                    generation: source.generation(),
+                })
+        })
+    }
+
+    fn initial_screen_adoption(&self) -> Option<CompositorScreenSourceChange> {
+        self.screen.as_ref().and_then(|source| {
+            source
+                .source_key()
+                .cloned()
+                .map(|source_key| CompositorScreenSourceChange::Adopted {
+                    source_key,
+                    generation: source.generation(),
+                })
+        })
+    }
+
+    fn refresh_sources_nonblocking(
+        mut self,
+        state: &AppState,
+    ) -> (
+        Self,
+        Option<CompositorCameraSourceChange>,
+        Option<CompositorScreenSourceChange>,
+    ) {
+        let mut camera_change = None;
+        let mut screen_change = None;
         if let Ok(camera) = try_preview_camera_frame_source(state) {
             if !same_camera_source(self.camera.as_ref(), camera.as_ref()) {
+                let previous_camera_present = self.camera.is_some();
                 self.last_camera_frame = None;
                 self.camera_fetch = LiveSourceFetchState::default();
+                camera_change = camera
+                    .as_ref()
+                    .and_then(|source| {
+                        source.source_key().cloned().map(|source_key| {
+                            CompositorCameraSourceChange::Adopted {
+                                source_key,
+                                generation: source.generation(),
+                            }
+                        })
+                    })
+                    .or_else(|| {
+                        previous_camera_present.then_some(CompositorCameraSourceChange::Removed)
+                    });
             }
             self.camera = camera;
         }
         if let Ok(screen) = try_preview_screen_frame_source(state) {
             if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
+                let previous_screen_present = self.screen.is_some();
                 self.last_screen_frame = None;
                 self.screen_fetch = LiveSourceFetchState::default();
+                screen_change = screen
+                    .as_ref()
+                    .and_then(|source| {
+                        source.source_key().cloned().map(|source_key| {
+                            CompositorScreenSourceChange::Adopted {
+                                source_key,
+                                generation: source.generation(),
+                            }
+                        })
+                    })
+                    .or_else(|| {
+                        previous_screen_present.then_some(CompositorScreenSourceChange::Removed)
+                    });
             }
             self.screen = screen;
         }
-        self
+        (self, camera_change, screen_change)
     }
 
     fn fetch_stats(&self) -> CompositorLiveSourceFetchStats {
@@ -459,6 +829,12 @@ impl CompositorLiveSources {
             screen_try_lock_misses: self.screen_fetch.try_lock_misses,
             camera_blocking_refreshes: self.camera_fetch.blocking_refreshes,
             screen_blocking_refreshes: self.screen_fetch.blocking_refreshes,
+            camera_fresh_serves: self.camera_fetch.fresh_serves,
+            camera_held_serves: self.camera_fetch.held_serves,
+            camera_served_age_max_ms: self.camera_fetch.served_age_max_ms,
+            screen_fresh_serves: self.screen_fetch.fresh_serves,
+            screen_held_serves: self.screen_fetch.held_serves,
+            screen_served_age_max_ms: self.screen_fetch.served_age_max_ms,
         }
     }
 
@@ -497,6 +873,12 @@ impl CompositorLiveSources {
                 }
             }
         }
+        if let Some((frame, _layout)) = self.last_camera_frame.as_ref() {
+            self.camera_fetch.record_serve(
+                frame.as_ptr().cast::<()>(),
+                frame.captured_at.elapsed().as_millis() as u64,
+            );
+        }
         self.last_camera_frame.clone()
     }
 
@@ -530,6 +912,12 @@ impl CompositorLiveSources {
                     self.screen_fetch.record_blocking_refresh();
                 }
             }
+        }
+        if let Some(frame) = self.last_screen_frame.as_ref() {
+            self.screen_fetch.record_serve(
+                frame.as_ptr().cast::<()>(),
+                frame.captured_at.elapsed().as_millis() as u64,
+            );
         }
         self.last_screen_frame.clone()
     }
@@ -594,6 +982,28 @@ fn same_camera_source(
 ) -> bool {
     previous.and_then(PreviewCameraFrameSource::source_key)
         == next.and_then(PreviewCameraFrameSource::source_key)
+        && previous.map(PreviewCameraFrameSource::generation)
+            == next.map(PreviewCameraFrameSource::generation)
+}
+
+fn camera_source_matches_health_epoch(
+    source: Option<&PreviewCameraFrameSource>,
+    epoch: &CaptureHealthCameraEpoch,
+) -> bool {
+    source.and_then(PreviewCameraFrameSource::source_key) == Some(&epoch.source_key)
+        && source.map(PreviewCameraFrameSource::generation) == Some(epoch.generation)
+}
+
+fn camera_delivery_health_source_present(
+    camera_is_consumed: bool,
+    camera_has_frame: bool,
+    camera_has_credible_target: bool,
+    exact_producer_present: bool,
+    exact_frameless_zombie: bool,
+) -> bool {
+    camera_is_consumed
+        && camera_has_credible_target
+        && (camera_has_frame || (exact_producer_present && exact_frameless_zombie))
 }
 
 fn same_screen_source(
@@ -602,6 +1012,179 @@ fn same_screen_source(
 ) -> bool {
     previous.and_then(PreviewScreenFrameSource::source_key)
         == next.and_then(PreviewScreenFrameSource::source_key)
+        && previous.map(PreviewScreenFrameSource::generation)
+            == next.map(PreviewScreenFrameSource::generation)
+}
+
+fn screen_source_matches_health_epoch(
+    source: Option<&PreviewScreenFrameSource>,
+    epoch: &CaptureHealthScreenEpoch,
+) -> bool {
+    source.and_then(PreviewScreenFrameSource::source_key) == Some(&epoch.source_key)
+        && source.map(PreviewScreenFrameSource::generation) == Some(epoch.generation)
+}
+
+fn screen_delivery_health_source_present(
+    screen_is_consumed: bool,
+    screen_has_frame: bool,
+    screen_has_credible_target: bool,
+    exact_producer_present: bool,
+) -> bool {
+    screen_is_consumed && screen_has_frame && screen_has_credible_target && exact_producer_present
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct SceneTransition {
+    /// The scene being left, with EFFECTIVE transforms captured at commit
+    /// time (a commit landing mid-transition re-anchors from wherever the
+    /// glide currently is, so rapid preset clicks stay smooth).
+    from: Scene,
+    started_at: Instant,
+    duration: Duration,
+}
+
+/// Soft start, soft landing, no overshoot — the design language's
+/// nothing-bounces rule for on-air motion.
+fn ease_in_out_cubic(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
+fn scene_transition_progress(transition: &SceneTransition, now: Instant) -> f64 {
+    let duration = transition.duration.as_secs_f64();
+    if duration <= 0.0 {
+        return 1.0;
+    }
+    (now.saturating_duration_since(transition.started_at)
+        .as_secs_f64()
+        / duration)
+        .clamp(0.0, 1.0)
+}
+
+fn lerp_f64(from: f64, to: f64, p: f64) -> f64 {
+    from + (to - from) * p
+}
+
+/// Full-geometry interpolation: position, size, AND crops, so zoom/pan
+/// framing glides with the layout instead of popping.
+fn lerp_scene_transform(from: &SceneTransform, to: &SceneTransform, p: f64) -> SceneTransform {
+    SceneTransform {
+        x: lerp_f64(from.x, to.x, p),
+        y: lerp_f64(from.y, to.y, p),
+        width: lerp_f64(from.width, to.width, p),
+        height: lerp_f64(from.height, to.height, p),
+        crop_left: lerp_f64(from.crop_left, to.crop_left, p),
+        crop_top: lerp_f64(from.crop_top, to.crop_top, p),
+        crop_right: lerp_f64(from.crop_right, to.crop_right, p),
+        crop_bottom: lerp_f64(from.crop_bottom, to.crop_bottom, p),
+    }
+}
+
+/// A source with no predecessor grows in from 92% about its own center —
+/// pure geometry, no shader/opacity work (that is the V2 fade).
+fn synthetic_enter_from(to: &SceneTransform) -> SceneTransform {
+    const ENTER_SCALE: f64 = 0.92;
+    let width = to.width * ENTER_SCALE;
+    let height = to.height * ENTER_SCALE;
+    SceneTransform {
+        x: to.x + (to.width - width) / 2.0,
+        y: to.y + (to.height - height) / 2.0,
+        width,
+        height,
+        crop_left: to.crop_left,
+        crop_top: to.crop_top,
+        crop_right: to.crop_right,
+        crop_bottom: to.crop_bottom,
+    }
+}
+
+/// Camera glides to camera; the base capture (screen/window/test pattern)
+/// glides to the base, even when the preset swaps which kind fills it.
+fn scene_motion_family(kind: &SceneSourceKind) -> u8 {
+    match kind {
+        SceneSourceKind::Camera => 0,
+        SceneSourceKind::Screen | SceneSourceKind::Window | SceneSourceKind::TestPattern => 1,
+    }
+}
+
+/// The per-tick effective scene: every visible target source's transform is
+/// eased from its predecessor (matched by motion family) or from a grow-in
+/// origin when it just entered. Exited sources vanish on the first frame by
+/// construction (only target sources render).
+fn scene_with_transition(scene: Scene, transition: &SceneTransition, now: Instant) -> Scene {
+    let progress = ease_in_out_cubic(scene_transition_progress(transition, now));
+    if progress >= 1.0 {
+        return scene;
+    }
+    let mut scene = scene;
+    for source in scene.sources.iter_mut() {
+        if !source.visible {
+            continue;
+        }
+        let from = transition
+            .from
+            .sources
+            .iter()
+            .find(|previous| {
+                previous.visible
+                    && scene_motion_family(&previous.kind) == scene_motion_family(&source.kind)
+            })
+            .map(|previous| previous.transform.clone())
+            .unwrap_or_else(|| synthetic_enter_from(&source.transform));
+        source.transform = lerp_scene_transform(&from, &source.transform, progress);
+    }
+    scene
+}
+
+/// Decide what transition a scene commit installs. A commit that asks for
+/// motion glides from the current effective transforms over the requested
+/// duration. A commit that DOESN'T mention motion (config reloads, camera
+/// installs, source rebinds routinely re-commit in the background) must not
+/// snap a running glide — it carries the glide forward from the current
+/// effective transforms across the remaining time. An explicit 0 means
+/// "instant, now" and cancels any glide.
+fn next_scene_transition(
+    transition_ms: Option<u32>,
+    previous_effective: Option<Scene>,
+    has_target_scene: bool,
+    active_remaining: Option<Duration>,
+    now: Instant,
+) -> Option<SceneTransition> {
+    if !has_target_scene {
+        return None;
+    }
+    match (transition_ms, previous_effective) {
+        (Some(duration_ms), Some(from)) if duration_ms > 0 => Some(SceneTransition {
+            from,
+            started_at: now,
+            duration: Duration::from_millis(u64::from(duration_ms.min(1_000))),
+        }),
+        (None, Some(from)) => active_remaining.map(|remaining| SceneTransition {
+            from,
+            started_at: now,
+            duration: remaining,
+        }),
+        _ => None,
+    }
+}
+
+fn snapshot_with_transition(
+    snapshot: Option<CompositorSceneSnapshot>,
+    transition: Option<&SceneTransition>,
+    now: Instant,
+) -> Option<CompositorSceneSnapshot> {
+    let Some(transition) = transition else {
+        return snapshot;
+    };
+    let mut snapshot = snapshot?;
+    if let Some(scene) = snapshot.scene.take() {
+        snapshot.scene = Some(scene_with_transition(scene, transition, now));
+    }
+    Some(snapshot)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -623,6 +1206,28 @@ struct CompositorImageSource {
     content_revision: u64,
     state: String,
     message: Option<String>,
+}
+
+#[derive(Debug)]
+struct CompositorImagePreparation {
+    role: CompositorImagePreparationRole,
+    cache_key: String,
+    image_path: String,
+    cached: Option<CompositorImageSource>,
+    read_error_prefix: &'static str,
+    missing_message: &'static str,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompositorImagePreparationRole {
+    ActiveScreen,
+    Background,
+}
+
+#[derive(Debug, Default)]
+struct PreparedCompositorSceneImages {
+    active_screen: Option<(String, CompositorImageSource)>,
+    background: Option<(String, CompositorImageSource)>,
 }
 
 impl CompositorImageSource {
@@ -683,6 +1288,13 @@ impl CompositorImageCache {
 
     fn get(&self, key: &str) -> Option<&CompositorImageSource> {
         self.entries.get(key).map(|entry| &entry.source)
+    }
+
+    fn source_for_path(&self, key: &str, image_path: &str) -> Option<CompositorImageSource> {
+        self.entries
+            .get(key)
+            .filter(|entry| entry.source.image_path == image_path)
+            .map(|entry| entry.source.clone())
     }
 
     #[cfg(test)]
@@ -827,17 +1439,24 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         status: stopped_status(Some("Compositor is not running.".to_string())),
         scene: None,
         simulcast_scene: None,
+        scene_request_token: 0,
+        pending_scene_request: None,
+        scene_transition: None,
         image_sources: CompositorImageCache::new(
             COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES,
             COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET,
         ),
         frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         stream_frame_store: None,
-        latest_frame_evidence: None,
+        frame_evidence: VecDeque::new(),
         run_id: None,
         stop_tx: None,
         render_task: None,
         worker_activity: Arc::new(CompositorWorkerActivity::default()),
+        preview_render_dimensions: None,
+        preview_resize_revision: None,
+        loop_config_tx: None,
+        capture_lease: None,
     }
 }
 
@@ -846,7 +1465,28 @@ pub async fn start_synthetic_compositor(
     params: CompositorStartParams,
 ) -> CompositorStatus {
     let _lifecycle = state.compositor_lifecycle.lock().await;
-    if !stop_current_compositor(&state).await {
+    start_synthetic_compositor_with_lifecycle(&state, params).await
+}
+
+/// Starts a compositor only when no newer owner has installed a run. Preview
+/// lifecycle reconciliation and native D3D11 restoration use this so neither
+/// can stop or replace a compositor created meanwhile.
+pub async fn start_synthetic_compositor_if_idle(
+    state: AppState,
+    params: CompositorStartParams,
+) -> Option<CompositorStatus> {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    if state.compositor.lock().await.run_id.is_some() {
+        return None;
+    }
+    Some(start_synthetic_compositor_with_lifecycle(&state, params).await)
+}
+
+async fn start_synthetic_compositor_with_lifecycle(
+    state: &AppState,
+    params: CompositorStartParams,
+) -> CompositorStatus {
+    if !stop_current_compositor(state).await {
         return state.compositor.lock().await.status.clone();
     }
 
@@ -864,6 +1504,9 @@ pub async fn start_synthetic_compositor(
     };
     let run_id = Uuid::new_v4().to_string();
     let target_fps = params.target_fps.clamp(30, 120);
+    let health_event_sequence = Arc::new(AtomicU64::new(0));
+    let health_heartbeat = Arc::new(AtomicU64::new(0));
+    crate::capture_recovery::note_compositor_lifecycle_changed(state, Some(run_id.clone())).await;
     let status = CompositorStatus {
         state: CompositorState::Live,
         target_fps,
@@ -895,18 +1538,38 @@ pub async fn start_synthetic_compositor(
         message: Some("Synthetic compositor running.".to_string()),
     };
     let (stop_tx, stop_rx) = watch::channel(false);
+    let (loop_config_tx, loop_config_rx) = watch::channel(CompositorLoopConfig {
+        target_fps,
+        frame_consumer: params.frame_consumer,
+        caption_overlay_on_primary: params.caption_overlay_on_primary,
+        caption_overlay_on_aux: params.caption_overlay_on_aux,
+        highlight_overlay_on_primary: params.highlight_overlay_on_primary,
+        highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+    });
     let stream_frame_store = params
         .stream_output
         .map(|_| Arc::new(StdMutex::new(FrameStore::new(2))));
+    let render_dimensions = Arc::new(AtomicU64::new(pack_render_dimensions(
+        status.width,
+        status.height,
+    )));
+    let preview_render_dimensions = (params.frame_consumer
+        == CompositorFrameConsumer::NativePreview
+        && params.stream_output.is_none())
+    .then(|| render_dimensions.clone());
 
     {
         let mut compositor = state.compositor.lock().await;
         compositor.frame_store = Arc::new(StdMutex::new(FrameStore::new(2)));
         compositor.stream_frame_store = stream_frame_store;
-        compositor.latest_frame_evidence = None;
+        compositor.frame_evidence.clear();
         compositor.status = status.clone();
         compositor.run_id = Some(run_id.clone());
         compositor.stop_tx = Some(stop_tx);
+        compositor.preview_render_dimensions = preview_render_dimensions;
+        compositor.preview_resize_revision = None;
+        compositor.loop_config_tx = Some(loop_config_tx);
+        compositor.capture_lease = None;
         // Spawn and publish the worker handle while holding the ownership lock. A concurrent
         // replacement can therefore never observe a live run id without the handle it must
         // await, avoiding the ineffective `abort` race of `spawn_blocking` workers.
@@ -914,35 +1577,112 @@ pub async fn start_synthetic_compositor(
             state.clone(),
             CompositorRenderLoopParams {
                 run_id: run_id.clone(),
-                target_fps,
-                width: status.width,
-                height: status.height,
-                frame_consumer: params.frame_consumer,
+                health_event_sequence: health_event_sequence.clone(),
+                health_heartbeat: health_heartbeat.clone(),
+                render_dimensions,
+                config: loop_config_rx.clone(),
                 stream_output: params.stream_output,
-                caption_overlay_on_primary: params.caption_overlay_on_primary,
-                caption_overlay_on_aux: params.caption_overlay_on_aux,
-                highlight_overlay_on_primary: params.highlight_overlay_on_primary,
-                highlight_overlay_on_aux: params.highlight_overlay_on_aux,
             },
-            stop_rx,
+            stop_rx.clone(),
             previous_scene_status.6,
         ));
     }
+
+    spawn_compositor_health_supervisor(
+        state.clone(),
+        run_id.clone(),
+        loop_config_rx,
+        health_heartbeat,
+        health_event_sequence,
+        stop_rx.clone(),
+    );
 
     state.emit_event("compositor.status", status.clone());
     status
 }
 
-pub async fn update_compositor_surface_size(
+#[cfg(test)]
+pub async fn resize_preview_compositor_if_run_id(
     state: &AppState,
+    expected_run_id: &str,
     width: u32,
     height: u32,
-) -> CompositorStatus {
+) -> Option<CompositorStatus> {
+    resize_preview_compositor(state, expected_run_id, None, width, height).await
+}
+
+/// Resize a preview run only when both its exact run identity and the
+/// preview-surface lifecycle order still permit the write. Equal revisions
+/// are idempotent; lower revisions observe the current status without
+/// mutating dimensions.
+pub async fn resize_preview_compositor_if_run_id_at_revision(
+    state: &AppState,
+    expected_run_id: &str,
+    lifecycle_revision: u64,
+    width: u32,
+    height: u32,
+) -> Option<CompositorStatus> {
+    resize_preview_compositor(
+        state,
+        expected_run_id,
+        Some(lifecycle_revision),
+        width,
+        height,
+    )
+    .await
+}
+
+async fn resize_preview_compositor(
+    state: &AppState,
+    expected_run_id: &str,
+    lifecycle_revision: Option<u64>,
+    width: u32,
+    height: u32,
+) -> Option<CompositorStatus> {
     let status = {
         let mut compositor = state.compositor.lock().await;
+        if compositor.run_id.as_deref() != Some(expected_run_id) {
+            return None;
+        }
+        let dimensions = compositor.preview_render_dimensions.clone()?;
+        let _surface_resize_fence = if let Some(lifecycle_revision) = lifecycle_revision {
+            // Do not await the surface while holding compositor ownership.
+            // A concurrent lifecycle mutation either owns the surface (so
+            // this old write is retried) or is ordered strictly after this
+            // synchronous resize. This closes the check-then-resize window
+            // for several bounds revisions that intentionally share a run.
+            let surface = state.preview_surface.try_lock().ok()?;
+            if !surface.permits_compositor_resize(
+                lifecycle_revision,
+                expected_run_id,
+                width.max(1),
+                height.max(1),
+            ) {
+                return None;
+            }
+            Some(surface)
+        } else {
+            None
+        };
+        if let Some(lifecycle_revision) = lifecycle_revision {
+            if compositor
+                .preview_resize_revision
+                .is_some_and(|current| lifecycle_revision < current)
+            {
+                return Some(compositor.status.clone());
+            }
+            compositor.preview_resize_revision = Some(lifecycle_revision);
+        }
         compositor.status.width = width.max(1);
         compositor.status.height = height.max(1);
         compositor.status.updated_at = Utc::now().to_rfc3339();
+        // One packed atomic keeps width/height coherent without tying the hot
+        // render loop to the compositor mutex. Relaxed ordering is sufficient:
+        // no other state is published through this value.
+        dimensions.store(
+            pack_render_dimensions(compositor.status.width, compositor.status.height),
+            Ordering::Relaxed,
+        );
         compositor.status.clone()
     };
     state.emit_event("compositor.status", status.clone());
@@ -956,7 +1696,7 @@ pub async fn update_compositor_surface_size(
         "diagnostics.stats",
         apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
     );
-    status
+    Some(status)
 }
 
 #[cfg(test)]
@@ -970,16 +1710,103 @@ pub async fn stop_compositor(state: &AppState) -> CompositorStatus {
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
         compositor.status = status.clone();
-        compositor.latest_frame_evidence = None;
+        compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
         status
     };
     state.emit_event("compositor.status", status.clone());
+    crate::comment_highlight::invalidate_comment_highlight_for_compositor_non_live(
+        state,
+        "compositor-stopped",
+    )
+    .await;
     status
+}
+
+/// Process shutdown must join the compositor's `spawn_blocking` render owner
+/// before the Tokio runtime is dropped. A live blocking task makes runtime
+/// destruction wait forever even after Axum, recording finalization, and all
+/// WebSocket handlers have finished.
+pub async fn shutdown_compositor(state: &AppState) -> bool {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    stop_current_compositor(state).await
+}
+
+#[cfg(test)]
+pub struct NonStoppingCompositorWorkerTestProbe {
+    pub run_id: String,
+    release: Arc<tokio::sync::Semaphore>,
+}
+
+#[cfg(test)]
+impl NonStoppingCompositorWorkerTestProbe {
+    pub fn release(&self) {
+        self.release.add_permits(1);
+    }
+}
+
+#[cfg(test)]
+impl Drop for NonStoppingCompositorWorkerTestProbe {
+    fn drop(&mut self) {
+        self.release.add_permits(1);
+    }
+}
+
+/// Replace the current render worker with a deterministic task that ignores
+/// its ordinary stop channel until the test releases it. The run identity and
+/// all published compositor state stay unchanged, so lifecycle tests exercise
+/// the real exact-run stop timeout and retained-handle path.
+#[cfg(test)]
+pub async fn replace_current_compositor_worker_with_non_stopping_for_test(
+    state: &AppState,
+) -> NonStoppingCompositorWorkerTestProbe {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    let (run_id, previous_task) = {
+        let mut compositor = state.compositor.lock().await;
+        let run_id = compositor
+            .run_id
+            .clone()
+            .expect("test requires a current compositor run");
+        if let Some(stop_tx) = compositor.stop_tx.take() {
+            let _ = stop_tx.send(true);
+        }
+        (run_id, compositor.render_task.take())
+    };
+    if let Some(previous_task) = previous_task {
+        tokio::time::timeout(COMPOSITOR_WORKER_STOP_TIMEOUT, previous_task)
+            .await
+            .expect("the real test compositor worker stops before replacement")
+            .expect("the real test compositor worker joins cleanly");
+    }
+
+    let release = Arc::new(tokio::sync::Semaphore::new(0));
+    let worker_release = release.clone();
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let stubborn_task = tokio::spawn(async move {
+        let _keep_stop_receiver_alive = stop_rx;
+        let _permit = worker_release
+            .acquire()
+            .await
+            .expect("non-stopping test worker release semaphore remains open");
+    });
+    {
+        let mut compositor = state.compositor.lock().await;
+        assert_eq!(compositor.run_id.as_deref(), Some(run_id.as_str()));
+        compositor.stop_tx = Some(stop_tx);
+        compositor.render_task = Some(stubborn_task);
+    }
+    NonStoppingCompositorWorkerTestProbe { run_id, release }
 }
 
 pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option<CompositorStatus> {
     let _lifecycle = state.compositor_lifecycle.lock().await;
+    stop_compositor_if_run_id_with_lifecycle(state, run_id).await
+}
+
+async fn stop_compositor_if_run_id_with_lifecycle(
+    state: &AppState,
+    run_id: &str,
+) -> Option<CompositorStatus> {
     let previous_task = {
         let mut compositor = state.compositor.lock().await;
         if compositor.run_id.as_deref() != Some(run_id) {
@@ -998,16 +1825,218 @@ pub async fn stop_compositor_if_run_id(state: &AppState, run_id: &str) -> Option
         let mut compositor = state.compositor.lock().await;
         if compositor.run_id.as_deref() == Some(run_id) {
             compositor.run_id = None;
+            compositor.preview_render_dimensions = None;
+            compositor.preview_resize_revision = None;
+            compositor.loop_config_tx = None;
+            compositor.capture_lease = None;
         }
-        compositor.latest_frame_evidence = None;
+        compositor.frame_evidence.clear();
         compositor.stream_frame_store = None;
         let mut status = stopped_status(Some("Compositor stopped.".to_string()));
         status.image_cache = compositor.image_sources.status();
         compositor.status = status.clone();
         status
     };
+    crate::capture_recovery::note_compositor_lifecycle_changed(state, None).await;
     state.emit_event("compositor.status", status.clone());
+    crate::comment_highlight::invalidate_comment_highlight_for_compositor_non_live(
+        state,
+        "compositor-stopped",
+    )
+    .await;
     Some(status)
+}
+
+/// Arms the live preview compositor for a capture without replacing the run
+/// (instant-record P4.1): the loop switches to the session's canvas, fps and
+/// consumer in place, keeping its run id, frame store and frame history. The
+/// preview surface stops tracking the run for the lease's lifetime so a bounds
+/// update can neither resize nor retire it.
+pub async fn arm_compositor_for_capture(
+    state: &AppState,
+    session_id: &str,
+    params: CompositorArmParams,
+) -> Result<CompositorStatus, CompositorArmRefusal> {
+    let _lifecycle = state.compositor_lifecycle.lock().await;
+    let (status, run_id) = {
+        let mut compositor = state.compositor.lock().await;
+        let Some(run_id) = compositor.run_id.clone() else {
+            return Err(CompositorArmRefusal::NoLiveRun);
+        };
+        if compositor.status.state != CompositorState::Live
+            || compositor.render_task.is_none()
+            || compositor.stop_tx.is_none()
+        {
+            return Err(CompositorArmRefusal::NoLiveRun);
+        }
+        if compositor.capture_lease.is_some() {
+            return Err(CompositorArmRefusal::AlreadyLeased);
+        }
+        let Some(preview_config) = compositor
+            .loop_config_tx
+            .as_ref()
+            .map(|config_tx| *config_tx.borrow())
+        else {
+            return Err(CompositorArmRefusal::NotPreviewOwned);
+        };
+        if preview_config.frame_consumer != CompositorFrameConsumer::NativePreview
+            || compositor.stream_frame_store.is_some()
+            || compositor.preview_render_dimensions.is_none()
+        {
+            return Err(CompositorArmRefusal::NotPreviewOwned);
+        }
+        let next = CompositorLoopConfig {
+            target_fps: params.target_fps.clamp(30, 120),
+            frame_consumer: params.frame_consumer,
+            caption_overlay_on_primary: params.caption_overlay_on_primary,
+            caption_overlay_on_aux: params.caption_overlay_on_aux,
+            highlight_overlay_on_primary: params.highlight_overlay_on_primary,
+            highlight_overlay_on_aux: params.highlight_overlay_on_aux,
+        };
+        let config_sent = compositor
+            .loop_config_tx
+            .as_ref()
+            .is_some_and(|config_tx| config_tx.send(next).is_ok());
+        if !config_sent {
+            return Err(CompositorArmRefusal::NoLiveRun);
+        }
+        let render_dimensions = compositor
+            .preview_render_dimensions
+            .take()
+            .expect("checked above");
+        render_dimensions.store(
+            pack_render_dimensions(params.width.max(1), params.height.max(1)),
+            Ordering::Relaxed,
+        );
+        compositor.preview_resize_revision = None;
+        compositor.capture_lease = Some(CompositorCaptureLease {
+            session_id: session_id.to_string(),
+            run_id: run_id.clone(),
+            render_dimensions,
+            preview_config,
+        });
+        compositor.status.width = params.width.max(1);
+        compositor.status.height = params.height.max(1);
+        compositor.status.target_fps = next.target_fps;
+        compositor.status.frame_pipeline.consumer = Some(params.frame_consumer.label().to_string());
+        compositor.status.updated_at = Utc::now().to_rfc3339();
+        compositor.status.message = Some("Preview compositor armed for capture.".to_string());
+        (compositor.status.clone(), run_id)
+    };
+    crate::preview_surface::detach_preview_run_for_capture_lease(state, &run_id).await;
+    tracing::info!(
+        "compositor {run_id} armed in place for session {session_id}: {}x{} @ {} fps, consumer {}",
+        status.width,
+        status.height,
+        status.target_fps,
+        params.frame_consumer.label()
+    );
+    state.emit_event("compositor.status", status.clone());
+    Ok(status)
+}
+
+enum CompositorLeaseRelease {
+    Restored(Box<CompositorStatus>),
+    Stop(String),
+}
+
+/// Returns an armed run to preview ownership. With a live preview surface the
+/// loop is switched back to preview fps/consumer at the surface's current
+/// dimensions and the reconciler re-adopts the same run id; without one the
+/// run is stopped exactly like a retired preview run. A missing or foreign
+/// lease is a no-op.
+pub async fn release_compositor_capture_lease(
+    state: &AppState,
+    session_id: &str,
+) -> Option<CompositorStatus> {
+    // Read the surface before taking compositor ownership: the resize path
+    // never awaits the surface under the compositor lock, and neither may we.
+    let surface = crate::preview_surface::preview_surface_status(state).await;
+    let release = {
+        let _lifecycle = state.compositor_lifecycle.lock().await;
+        let mut compositor = state.compositor.lock().await;
+        let lease_matches = compositor.capture_lease.as_ref().is_some_and(|lease| {
+            lease.session_id == session_id
+                && compositor.run_id.as_deref() == Some(lease.run_id.as_str())
+        });
+        if !lease_matches {
+            if compositor
+                .capture_lease
+                .as_ref()
+                .is_some_and(|lease| lease.session_id == session_id)
+            {
+                compositor.capture_lease = None;
+            }
+            return None;
+        }
+        let lease = compositor.capture_lease.take()?;
+        let surface_live = surface.state == PreviewSurfaceState::Live
+            && compositor.render_task.is_some()
+            && compositor.stop_tx.is_some();
+        if !surface_live {
+            CompositorLeaseRelease::Stop(lease.run_id)
+        } else {
+            let restored = CompositorLoopConfig {
+                target_fps: surface.target_fps.clamp(30, 120),
+                ..lease.preview_config
+            };
+            let config_sent = compositor
+                .loop_config_tx
+                .as_ref()
+                .is_some_and(|config_tx| config_tx.send(restored).is_ok());
+            if !config_sent {
+                CompositorLeaseRelease::Stop(lease.run_id)
+            } else {
+                lease.render_dimensions.store(
+                    pack_render_dimensions(surface.width.max(1), surface.height.max(1)),
+                    Ordering::Relaxed,
+                );
+                compositor.preview_render_dimensions = Some(lease.render_dimensions);
+                compositor.preview_resize_revision = None;
+                compositor.status.width = surface.width.max(1);
+                compositor.status.height = surface.height.max(1);
+                compositor.status.target_fps = restored.target_fps;
+                compositor.status.frame_pipeline.consumer =
+                    Some(restored.frame_consumer.label().to_string());
+                compositor.status.updated_at = Utc::now().to_rfc3339();
+                compositor.status.message = Some("Synthetic compositor running.".to_string());
+                CompositorLeaseRelease::Restored(Box::new(compositor.status.clone()))
+            }
+        }
+    };
+    match release {
+        CompositorLeaseRelease::Restored(status) => {
+            let status = *status;
+            tracing::info!(
+                "compositor {} released to preview after session {session_id}: {}x{} @ {} fps",
+                status.run_id.as_deref().unwrap_or("unknown-run"),
+                status.width,
+                status.height,
+                status.target_fps
+            );
+            state.emit_event("compositor.status", status.clone());
+            crate::preview_surface::reconcile_preview_after_capture_release(state).await;
+            Some(status)
+        }
+        CompositorLeaseRelease::Stop(run_id) => {
+            tracing::info!(
+                "compositor {run_id} stopped after session {session_id}: no live preview surface to return to"
+            );
+            let _lifecycle = state.compositor_lifecycle.lock().await;
+            stop_compositor_if_run_id_with_lifecycle(state, &run_id).await
+        }
+    }
+}
+
+/// Run id currently leased to a capture, if any.
+pub async fn compositor_capture_lease_run_id(state: &AppState) -> Option<String> {
+    state
+        .compositor
+        .lock()
+        .await
+        .capture_lease
+        .as_ref()
+        .map(|lease| lease.run_id.clone())
 }
 
 fn spawn_compositor_render_loop(
@@ -1035,6 +2064,319 @@ fn spawn_compositor_render_loop(
     })
 }
 
+fn dispatch_compositor_health_transition(
+    state: &AppState,
+    compositor_run_id: &str,
+    health_event_sequence: &AtomicU64,
+    camera_mutation_epoch: Option<u64>,
+    transition: CaptureHealthTransition,
+) {
+    let sequence = health_event_sequence.fetch_add(1, Ordering::AcqRel) + 1;
+    let recovery_state = state.clone();
+    let event = crate::capture_recovery::CaptureRecoveryHealthEvent {
+        compositor_run_id: compositor_run_id.to_string(),
+        sequence,
+        camera_mutation_epoch,
+        transition,
+    };
+    state.spawn_process_task(async move {
+        crate::capture_recovery::handle_capture_health_transition(recovery_state, event).await;
+    });
+}
+
+fn set_capture_health_stage_latch(
+    state: &AppState,
+    stage: crate::capture_health::CaptureStage,
+    degraded: bool,
+) -> Option<crate::capture_health::CaptureStage> {
+    let mut latches = state
+        .capture_health_stage_latches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    latches.set(stage, degraded);
+    latches.current()
+}
+
+fn current_capture_health_stage(state: &AppState) -> Option<crate::capture_health::CaptureStage> {
+    state
+        .capture_health_stage_latches
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .current()
+}
+
+async fn update_capture_health_stage_latch_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+    transition: &CaptureHealthTransition,
+) -> Option<Option<crate::capture_health::CaptureStage>> {
+    let compositor = state.compositor.lock().await;
+    if compositor.run_id.as_deref() != Some(compositor_run_id) {
+        return None;
+    }
+    let stage = match transition {
+        CaptureHealthTransition::Degraded { stage, .. } => {
+            set_capture_health_stage_latch(state, *stage, true)
+        }
+        CaptureHealthTransition::Recovered { stage, .. } => {
+            set_capture_health_stage_latch(state, *stage, false)
+        }
+        CaptureHealthTransition::Advisory { .. } => current_capture_health_stage(state),
+    };
+    drop(compositor);
+    Some(stage)
+}
+
+async fn set_capture_health_stage_latch_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+    stage: crate::capture_health::CaptureStage,
+    degraded: bool,
+) -> Option<Option<crate::capture_health::CaptureStage>> {
+    let compositor = state.compositor.lock().await;
+    if compositor.run_id.as_deref() != Some(compositor_run_id) {
+        return None;
+    }
+    let current = set_capture_health_stage_latch(state, stage, degraded);
+    drop(compositor);
+    Some(current)
+}
+
+/// Publish a compositor cache edge only after the source cache itself has
+/// changed. Startup adoption and periodic refresh must use the same ordered
+/// health-latch + recovery acknowledgement path: a replacement camera can be
+/// installed before a fresh compositor performs its first source refresh, so
+/// waiting only for a later cache difference would strand recovery forever.
+async fn acknowledge_compositor_camera_source_change_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+    capture_health: &mut CaptureHealthMonitor,
+    change: CompositorCameraSourceChange,
+) -> Option<()> {
+    capture_health.rearm_camera_source_epoch();
+    set_capture_health_stage_latch_if_current(
+        state,
+        compositor_run_id,
+        crate::capture_health::CaptureStage::CameraDelivery,
+        false,
+    )
+    .await?;
+
+    match change {
+        CompositorCameraSourceChange::Adopted {
+            source_key,
+            generation,
+        } => {
+            // Keep the exact cache-adoption edge ordered with recovery
+            // verification. A detached task could be scheduler-delayed past
+            // the verification window and falsely latch a healthy restart.
+            crate::capture_recovery::note_compositor_camera_source_adopted(
+                state, source_key, generation,
+            )
+            .await;
+        }
+        CompositorCameraSourceChange::Removed => {
+            crate::capture_recovery::note_compositor_camera_source_removed(state).await;
+        }
+    }
+    Some(())
+}
+
+async fn acknowledge_compositor_screen_source_change_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+    capture_health: &mut CaptureHealthMonitor,
+    change: CompositorScreenSourceChange,
+) -> Option<()> {
+    capture_health.rearm_screen_source_epoch();
+    set_capture_health_stage_latch_if_current(
+        state,
+        compositor_run_id,
+        crate::capture_health::CaptureStage::ScreenDelivery,
+        false,
+    )
+    .await?;
+
+    match change {
+        CompositorScreenSourceChange::Adopted {
+            source_key,
+            generation,
+        } => {
+            crate::capture_recovery::note_compositor_screen_source_adopted(
+                state, source_key, generation,
+            )
+            .await;
+        }
+        CompositorScreenSourceChange::Removed => {
+            crate::capture_recovery::note_compositor_screen_source_removed(state).await;
+        }
+    }
+    Some(())
+}
+
+/// Explicit camera mutations can preserve the native source generation, so
+/// generation identity alone cannot rearm a declared camera incident. Observe
+/// the coordinator-owned mutation mirror at normal source-refresh cadence and
+/// around every asynchronous evidence window. A changed boundary discards the
+/// old accounting baseline and clears only the camera diagnostics authority.
+async fn rearm_camera_health_for_explicit_mutation_if_needed(
+    state: &AppState,
+    compositor_run_id: &str,
+    capture_health: &mut CaptureHealthMonitor,
+    observed_camera_mutation_epoch: &mut u64,
+) -> Option<bool> {
+    let current_camera_mutation_epoch = state.capture_recovery_camera_mutation_epoch();
+    if current_camera_mutation_epoch == *observed_camera_mutation_epoch {
+        return Some(false);
+    }
+
+    capture_health.rearm_camera_source_epoch();
+    set_capture_health_stage_latch_if_current(
+        state,
+        compositor_run_id,
+        crate::capture_health::CaptureStage::CameraDelivery,
+        false,
+    )
+    .await?;
+    *observed_camera_mutation_epoch = current_camera_mutation_epoch;
+    Some(true)
+}
+
+async fn publish_capture_health_diagnostics_if_current(
+    state: &AppState,
+    compositor_run_id: &str,
+) -> Option<crate::protocol::DiagnosticStats> {
+    let mut diagnostics = state.diagnostics.lock().await;
+    let compositor = state.compositor.lock().await;
+    if compositor.run_id.as_deref() != Some(compositor_run_id) {
+        return None;
+    }
+    let stage = current_capture_health_stage(state);
+    let next = apply_capture_health(diagnostics.clone(), stage.map(|stage| stage.label()));
+    *diagnostics = next.clone();
+    Some(next)
+}
+
+fn spawn_compositor_health_supervisor(
+    state: AppState,
+    compositor_run_id: String,
+    loop_config: watch::Receiver<CompositorLoopConfig>,
+    health_heartbeat: Arc<AtomicU64>,
+    health_event_sequence: Arc<AtomicU64>,
+    stop_rx: watch::Receiver<bool>,
+) {
+    let spawn_state = state.clone();
+    state.spawn_process_task(run_compositor_health_supervisor(
+        spawn_state,
+        compositor_run_id,
+        loop_config,
+        health_heartbeat,
+        health_event_sequence,
+        stop_rx,
+        COMPOSITOR_DIAGNOSTIC_WINDOW,
+    ));
+}
+
+/// Independent run-scoped heartbeat observer. It intentionally does not run
+/// on the compositor's dedicated current-thread runtime: a render-loop block
+/// is the failure this supervisor must classify while that loop is still
+/// stuck. The lifecycle token and shared event cursor make all late edges from
+/// a retired run harmless.
+async fn run_compositor_health_supervisor(
+    state: AppState,
+    compositor_run_id: String,
+    loop_config: watch::Receiver<CompositorLoopConfig>,
+    health_heartbeat: Arc<AtomicU64>,
+    health_event_sequence: Arc<AtomicU64>,
+    mut stop_rx: watch::Receiver<bool>,
+    diagnostic_window: Duration,
+) {
+    let mut capture_health = CaptureHealthMonitor::new();
+    let mut previous_heartbeat = health_heartbeat.load(Ordering::Acquire);
+    let mut window_started = Instant::now();
+    loop {
+        tokio::select! {
+            biased;
+            changed = stop_rx.changed() => {
+                if changed.is_err() || *stop_rx.borrow() {
+                    break;
+                }
+            }
+            _ = tokio::time::sleep(diagnostic_window) => {
+                let elapsed = window_started.elapsed().as_secs_f64();
+                window_started = Instant::now();
+                let current_heartbeat = health_heartbeat.load(Ordering::Acquire);
+                let render_fps = current_heartbeat.saturating_sub(previous_heartbeat) as f64 / elapsed;
+                previous_heartbeat = current_heartbeat;
+                let target_fps = loop_config.borrow().target_fps;
+                if let Some(transition) = capture_health.observe(CaptureHealthSample {
+                    target_fps: f64::from(target_fps),
+                    render_fps,
+                    camera_present: false,
+                    camera_target_fps: None,
+                    camera_fresh_serves: 0,
+                    camera_producer: None,
+                    screen_present: false,
+                    screen_target_fps: None,
+                    screen_fresh_serves: 0,
+                    screen_producer: None,
+                    window_secs: elapsed,
+                }) {
+                    match &transition {
+                        CaptureHealthTransition::Degraded { stage, detail, .. } => tracing::warn!(
+                            "[capture-health] independent compositor heartbeat degraded at {}: {detail}",
+                            stage.label()
+                        ),
+                        CaptureHealthTransition::Recovered { detail, .. } => tracing::info!(
+                            "[capture-health] independent compositor heartbeat recovered: {detail}"
+                        ),
+                        CaptureHealthTransition::Advisory { detail } => tracing::warn!(
+                            "[capture-health] independent compositor heartbeat advisory: {detail}"
+                        ),
+                    }
+                    if !matches!(transition, CaptureHealthTransition::Advisory { .. }) {
+                        if update_capture_health_stage_latch_if_current(
+                            &state,
+                            &compositor_run_id,
+                            &transition,
+                        )
+                        .await
+                        .is_none()
+                        {
+                            break;
+                        }
+                        if let Some(diagnostics) = publish_capture_health_diagnostics_if_current(
+                            &state,
+                            &compositor_run_id,
+                        )
+                        .await
+                        {
+                            emit_runtime_diagnostics_event(&state, diagnostics);
+                        } else {
+                            break;
+                        }
+                        dispatch_compositor_health_transition(
+                            &state,
+                            &compositor_run_id,
+                            &health_event_sequence,
+                            None,
+                            transition,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn source_authority_health_sample(mut sample: CaptureHealthSample) -> CaptureHealthSample {
+    // CompositorRender has exactly one authority: the independent heartbeat
+    // supervisor above. The in-loop monitor owns source delivery/advisories
+    // only, so it cannot emit a conflicting render recovery edge.
+    sample.render_fps = sample.target_fps;
+    sample
+}
+
 pub async fn compositor_status(state: &AppState) -> CompositorStatus {
     state.compositor.lock().await.status.clone()
 }
@@ -1047,105 +2389,318 @@ pub async fn compositor_stream_frame_store(state: &AppState) -> Option<Composito
     state.compositor.lock().await.stream_frame_store.clone()
 }
 
+/// How many recent frame-evidence samples the compositor keeps for the
+/// startup barrier to seed from.
+pub const COMPOSITOR_FRAME_EVIDENCE_HISTORY_LEN: usize = 8;
+
 pub async fn compositor_latest_frame_evidence(state: &AppState) -> Option<CompositorFrameEvidence> {
-    state.compositor.lock().await.latest_frame_evidence
+    state.compositor.lock().await.frame_evidence.back().copied()
 }
+
+/// Recent frame evidence, oldest first.
+pub async fn compositor_frame_evidence_history(state: &AppState) -> Vec<CompositorFrameEvidence> {
+    state
+        .compositor
+        .lock()
+        .await
+        .frame_evidence
+        .iter()
+        .copied()
+        .collect()
+}
+
+fn push_frame_evidence(
+    ring: &mut VecDeque<CompositorFrameEvidence>,
+    evidence: CompositorFrameEvidence,
+) {
+    if ring.len() >= COMPOSITOR_FRAME_EVIDENCE_HISTORY_LEN {
+        ring.pop_front();
+    }
+    ring.push_back(evidence);
+}
+
+/// Accumulates startup-barrier observations. One instance judges both the
+/// seeded history (frames the compositor already produced) and the live poll,
+/// with identical rules, so a warm compositor passes instantly while a stalled
+/// or wrong-resolution one still waits and refuses exactly as before.
+struct StartupBarrierAccumulator {
+    params: CompositorStartupBarrierParams,
+    min_consecutive: u32,
+    frames_observed: u32,
+    fresh_frames_seen: u32,
+    gap_history_ms: Vec<u64>,
+    cadence_violations: u32,
+    /// The latest observation was a structural block (resolution, scene
+    /// revision, missing source). Cleared by the next usable frame.
+    blocked_structurally: bool,
+    last_sequence: Option<u64>,
+    last_accepted_evidence: Option<CompositorFrameEvidence>,
+    last_accepted_published_at: Option<Instant>,
+    first_source_frame_ms: Option<u64>,
+    first_full_resolution_frame_ms: Option<u64>,
+    timeout_reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StartupBarrierObservation {
+    Pending,
+    Ready,
+    /// The frame arrived but its gap exceeded the cadence budget.
+    CadenceViolation,
+}
+
+impl StartupBarrierAccumulator {
+    fn new(params: CompositorStartupBarrierParams) -> Self {
+        Self {
+            params,
+            min_consecutive: params.min_consecutive_frames.max(1),
+            frames_observed: 0,
+            fresh_frames_seen: 0,
+            gap_history_ms: Vec::with_capacity(COMPOSITOR_STARTUP_GAP_HISTORY_LEN),
+            cadence_violations: 0,
+            blocked_structurally: false,
+            last_sequence: None,
+            last_accepted_evidence: None,
+            last_accepted_published_at: None,
+            first_source_frame_ms: None,
+            first_full_resolution_frame_ms: None,
+            timeout_reason: "waiting for compositor frame".to_string(),
+        }
+    }
+
+    fn observe(
+        &mut self,
+        evidence: CompositorFrameEvidence,
+        started_at: Instant,
+    ) -> StartupBarrierObservation {
+        if evidence.has_real_source && self.first_source_frame_ms.is_none() {
+            self.first_source_frame_ms = Some(started_at.elapsed().as_millis() as u64);
+        }
+
+        if let Some(reason) = startup_frame_block_reason(evidence, self.params) {
+            self.frames_observed = 0;
+            self.blocked_structurally = true;
+            self.last_sequence = None;
+            self.last_accepted_evidence = None;
+            self.last_accepted_published_at = None;
+            self.timeout_reason = reason;
+            return StartupBarrierObservation::Pending;
+        }
+
+        self.blocked_structurally = false;
+        if self.first_full_resolution_frame_ms.is_none() {
+            self.first_full_resolution_frame_ms = Some(started_at.elapsed().as_millis() as u64);
+        }
+        let mut accepted_new_frame = false;
+        if self.last_sequence != Some(evidence.sequence)
+            && startup_frame_advances_required_sources(
+                self.last_accepted_evidence,
+                evidence,
+                self.params.requirements,
+            )
+        {
+            self.fresh_frames_seen = self.fresh_frames_seen.saturating_add(1);
+            if let Some(previous_published_at) = self.last_accepted_published_at {
+                let frame_gap = evidence
+                    .published_at
+                    .saturating_duration_since(previous_published_at);
+                push_startup_gap(&mut self.gap_history_ms, frame_gap.as_millis() as u64);
+                if let Some(max_frame_gap) = self.params.max_frame_gap
+                    && frame_gap > max_frame_gap
+                {
+                    self.cadence_violations = self.cadence_violations.saturating_add(1);
+                    self.frames_observed = 1;
+                    self.last_sequence = Some(evidence.sequence);
+                    self.last_accepted_evidence = Some(evidence);
+                    self.last_accepted_published_at = Some(evidence.published_at);
+                    self.timeout_reason = format!(
+                        "latest compositor frame gap {}ms exceeds startup cadence budget {}ms",
+                        frame_gap.as_millis(),
+                        max_frame_gap.as_millis()
+                    );
+                    return StartupBarrierObservation::CadenceViolation;
+                }
+            }
+            self.frames_observed = self.frames_observed.saturating_add(1);
+            self.last_sequence = Some(evidence.sequence);
+            self.last_accepted_evidence = Some(evidence);
+            self.last_accepted_published_at = Some(evidence.published_at);
+            accepted_new_frame = true;
+        }
+        if self.frames_observed >= self.min_consecutive {
+            return StartupBarrierObservation::Ready;
+        }
+        if accepted_new_frame {
+            self.timeout_reason = format!(
+                "only {}/{} target-resolution compositor frame(s) with advancing required sources observed",
+                self.frames_observed, self.min_consecutive
+            );
+        }
+        StartupBarrierObservation::Pending
+    }
+
+    fn ready_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+        CompositorStartupBarrierResult {
+            ready: true,
+            wait_ms: started_at.elapsed().as_millis() as u64,
+            frames_observed: self.frames_observed,
+            fresh_frames_seen: self.fresh_frames_seen,
+            gap_history_ms: self.gap_history_ms.clone(),
+            cadence_only: false,
+            first_source_frame_ms: self.first_source_frame_ms,
+            first_full_resolution_frame_ms: self.first_full_resolution_frame_ms,
+            timeout_reason: None,
+        }
+    }
+
+    fn timeout_result(&self, started_at: Instant) -> CompositorStartupBarrierResult {
+        let wait_ms = started_at.elapsed().as_millis() as u64;
+        // Cadence-only: the compositor IS producing usable frames, just
+        // not three in a row inside the budget. Anything structural, or
+        // a wait that never saw a usable frame, is a real block.
+        let cadence_only =
+            !self.blocked_structurally && self.fresh_frames_seen > 0 && self.cadence_violations > 0;
+        let timeout_reason = format!(
+            "{} (recent gaps {} ms; {} fresh frame(s) in {wait_ms}ms)",
+            self.timeout_reason,
+            startup_gap_history_label(&self.gap_history_ms),
+            self.fresh_frames_seen
+        );
+        CompositorStartupBarrierResult {
+            ready: false,
+            wait_ms,
+            frames_observed: self.frames_observed,
+            fresh_frames_seen: self.fresh_frames_seen,
+            gap_history_ms: self.gap_history_ms.clone(),
+            cadence_only,
+            first_source_frame_ms: self.first_source_frame_ms,
+            first_full_resolution_frame_ms: self.first_full_resolution_frame_ms,
+            timeout_reason: Some(timeout_reason),
+        }
+    }
+}
+
+/// History entries older than this many cadence budgets are not evidence of
+/// the compositor's current state and are skipped when seeding.
+const COMPOSITOR_STARTUP_HISTORY_AGE_BUDGETS: u32 = 2;
+const COMPOSITOR_STARTUP_HISTORY_DEFAULT_AGE: Duration = Duration::from_millis(400);
 
 pub async fn wait_for_compositor_startup_frames(
     state: &AppState,
     params: CompositorStartupBarrierParams,
 ) -> CompositorStartupBarrierResult {
     let started_at = Instant::now();
-    let min_consecutive = params.min_consecutive_frames.max(1);
-    let mut frames_observed = 0_u32;
-    let mut last_sequence = None;
-    let mut last_accepted_evidence = None;
-    let mut last_accepted_published_at = None;
-    let mut first_source_frame_ms = None;
-    let mut first_full_resolution_frame_ms = None;
-    let mut timeout_reason = "waiting for compositor frame".to_string();
+    let mut accumulator = StartupBarrierAccumulator::new(params);
+
+    // Seed from frames the compositor already produced (instant-record P3): a
+    // compositor that has been rendering at the target resolution passes
+    // without waiting for three NEW frames. Entries are judged with exactly
+    // the live rules, so wrong-resolution or stale history never counts.
+    let max_history_age = params
+        .max_frame_gap
+        .map(|gap| gap * COMPOSITOR_STARTUP_HISTORY_AGE_BUDGETS)
+        .unwrap_or(COMPOSITOR_STARTUP_HISTORY_DEFAULT_AGE);
+    for evidence in compositor_frame_evidence_history(state).await {
+        if evidence.published_at.elapsed() > max_history_age {
+            continue;
+        }
+        if accumulator.observe(evidence, started_at) == StartupBarrierObservation::Ready {
+            return accumulator.ready_result(started_at);
+        }
+    }
 
     loop {
         if let Some(evidence) = compositor_latest_frame_evidence(state).await {
-            if evidence.has_real_source && first_source_frame_ms.is_none() {
-                first_source_frame_ms = Some(started_at.elapsed().as_millis() as u64);
-            }
-
-            if let Some(reason) = startup_frame_block_reason(evidence, params) {
-                frames_observed = 0;
-                last_sequence = None;
-                last_accepted_evidence = None;
-                last_accepted_published_at = None;
-                timeout_reason = reason;
-            } else {
-                if first_full_resolution_frame_ms.is_none() {
-                    first_full_resolution_frame_ms = Some(started_at.elapsed().as_millis() as u64);
+            match accumulator.observe(evidence, started_at) {
+                StartupBarrierObservation::Ready => return accumulator.ready_result(started_at),
+                StartupBarrierObservation::CadenceViolation => {
+                    sleep(Duration::from_millis(10)).await;
+                    continue;
                 }
-                let mut accepted_new_frame = false;
-                if last_sequence != Some(evidence.sequence)
-                    && startup_frame_advances_required_sources(
-                        last_accepted_evidence,
-                        evidence,
-                        params.requirements,
-                    )
-                {
-                    if let Some(max_frame_gap) = params.max_frame_gap
-                        && let Some(previous_published_at) = last_accepted_published_at
-                    {
-                        let frame_gap = evidence
-                            .published_at
-                            .saturating_duration_since(previous_published_at);
-                        if frame_gap > max_frame_gap {
-                            frames_observed = 1;
-                            last_sequence = Some(evidence.sequence);
-                            last_accepted_evidence = Some(evidence);
-                            last_accepted_published_at = Some(evidence.published_at);
-                            timeout_reason = format!(
-                                "latest compositor frame gap {}ms exceeds startup cadence budget {}ms",
-                                frame_gap.as_millis(),
-                                max_frame_gap.as_millis()
-                            );
-                            sleep(Duration::from_millis(10)).await;
-                            continue;
-                        }
-                    }
-                    frames_observed = frames_observed.saturating_add(1);
-                    last_sequence = Some(evidence.sequence);
-                    last_accepted_evidence = Some(evidence);
-                    last_accepted_published_at = Some(evidence.published_at);
-                    accepted_new_frame = true;
-                }
-                if frames_observed >= min_consecutive {
-                    return CompositorStartupBarrierResult {
-                        ready: true,
-                        wait_ms: started_at.elapsed().as_millis() as u64,
-                        frames_observed,
-                        first_source_frame_ms,
-                        first_full_resolution_frame_ms,
-                        timeout_reason: None,
-                    };
-                }
-                if accepted_new_frame {
-                    timeout_reason = format!(
-                        "only {frames_observed}/{min_consecutive} target-resolution compositor frame(s) with advancing required sources observed"
-                    );
-                }
+                StartupBarrierObservation::Pending => {}
             }
         }
 
         if started_at.elapsed() >= params.timeout {
-            return CompositorStartupBarrierResult {
-                ready: false,
-                wait_ms: started_at.elapsed().as_millis() as u64,
-                frames_observed,
-                first_source_frame_ms,
-                first_full_resolution_frame_ms,
-                timeout_reason: Some(timeout_reason),
-            };
+            return accumulator.timeout_result(started_at);
         }
 
         sleep(Duration::from_millis(10)).await;
     }
+}
+
+/// Instant-record P4.2: an armed preview compositor keeps its frame history
+/// across the in-place resize and scene commit. When that history already
+/// proves `min_frames` consecutive fresh frames with the required sources
+/// present and advancing inside the cadence budget — judged with the live
+/// barrier rules minus resolution and scene revision, which the resize and
+/// commit intentionally change — the live barrier needs only ONE frame at the
+/// new resolution and revision to prove that the resize and commit took.
+/// Returns the number of proving frames.
+pub fn frame_history_proves_live_sources(
+    history: &[CompositorFrameEvidence],
+    requirements: CompositorStartupSourceRequirements,
+    max_frame_gap: Duration,
+    min_frames: u32,
+    now: Instant,
+) -> Option<u32> {
+    let max_history_age = max_frame_gap * COMPOSITOR_STARTUP_HISTORY_AGE_BUDGETS;
+    let mut accumulator = StartupBarrierAccumulator::new(CompositorStartupBarrierParams {
+        width: 0,
+        height: 0,
+        required_scene_revision: None,
+        min_consecutive_frames: min_frames,
+        max_frame_gap: Some(max_frame_gap),
+        timeout: Duration::ZERO,
+        requirements,
+    });
+    for evidence in history {
+        if now.saturating_duration_since(evidence.published_at) > max_history_age {
+            continue;
+        }
+        // Resolution is deliberately not part of this proof: the entry is
+        // judged at its own canvas size.
+        accumulator.params.width = evidence.width;
+        accumulator.params.height = evidence.height;
+        if accumulator.observe(*evidence, now) == StartupBarrierObservation::Ready {
+            return Some(accumulator.frames_observed);
+        }
+    }
+    None
+}
+
+pub async fn compositor_frame_history_proves_live_sources(
+    state: &AppState,
+    requirements: CompositorStartupSourceRequirements,
+    max_frame_gap: Duration,
+    min_frames: u32,
+) -> Option<u32> {
+    let history = compositor_frame_evidence_history(state).await;
+    frame_history_proves_live_sources(
+        &history,
+        requirements,
+        max_frame_gap,
+        min_frames,
+        Instant::now(),
+    )
+}
+
+/// Keep only the most recent `COMPOSITOR_STARTUP_GAP_HISTORY_LEN` gaps, oldest first.
+fn push_startup_gap(history: &mut Vec<u64>, gap_ms: u64) {
+    if history.len() >= COMPOSITOR_STARTUP_GAP_HISTORY_LEN {
+        history.remove(0);
+    }
+    history.push(gap_ms);
+}
+
+/// Test seam: inject one compositor frame-evidence sample without running a
+/// compositor, so startup-barrier callers in other modules can drive cadence.
+#[cfg(test)]
+pub(crate) async fn set_latest_frame_evidence_for_tests(
+    state: &AppState,
+    evidence: CompositorFrameEvidence,
+) {
+    push_frame_evidence(&mut state.compositor.lock().await.frame_evidence, evidence);
 }
 
 fn startup_frame_advances_required_sources(
@@ -1225,45 +2780,109 @@ pub async fn update_compositor_scene(
     state: &AppState,
     params: CompositorSceneUpdateParams,
 ) -> CompositorStatus {
+    update_compositor_scene_with_prepare_hook(state, params, || {}).await
+}
+
+async fn update_compositor_scene_with_prepare_hook(
+    state: &AppState,
+    params: CompositorSceneUpdateParams,
+    before_blocking_image_prepare: impl FnOnce(),
+) -> CompositorStatus {
     let CompositorSceneUpdateParams {
         revision,
         scene,
         layout,
         active_screen,
+        transition_ms,
     } = params;
     let active_screen = active_screen.map(|screen| {
         state
             .database
             .revalidate_stream_screen_for_compositor(screen)
     });
+    let snapshot = CompositorSceneSnapshot {
+        revision,
+        scene,
+        layout,
+        active_screen,
+    };
+
+    // File metadata, image reads, decoding, and resizing are synchronous. Take
+    // only Arc-backed cache candidates under the compositor mutex, then do all
+    // external work after releasing it. Recording finalization and compositor
+    // shutdown must never wait behind an uploaded screen/background decode.
+    let (request, image_preparations) = {
+        let mut compositor = state.compositor.lock().await;
+        let committed_revision = compositor.scene.as_ref().map(|scene| scene.revision);
+        let pending_revision = compositor
+            .pending_scene_request
+            .map(|request| request.external_revision);
+        if committed_revision.is_some_and(|current| revision < current)
+            || pending_revision.is_some_and(|pending| revision < pending)
+        {
+            return compositor.status.clone();
+        }
+        compositor.scene_request_token = compositor
+            .scene_request_token
+            .checked_add(1)
+            .expect("compositor scene request token exhausted");
+        let request = PendingCompositorSceneRequest {
+            token: compositor.scene_request_token,
+            external_revision: revision,
+        };
+        compositor.pending_scene_request = Some(request);
+        let preparations = compositor_image_preparations(&compositor, &snapshot);
+        (request, preparations)
+    };
+    before_blocking_image_prepare();
+    let prepared_images = prepare_compositor_scene_images(image_preparations);
+
     let status = {
         let mut compositor = state.compositor.lock().await;
+        if compositor.pending_scene_request != Some(request) {
+            return compositor.status.clone();
+        }
         if compositor
             .scene
             .as_ref()
             .is_some_and(|current| revision < current.revision)
         {
+            compositor.pending_scene_request = None;
             return compositor.status.clone();
         }
 
-        let snapshot = CompositorSceneSnapshot {
-            revision,
-            scene,
-            layout,
-            active_screen,
-        };
+        // Scene motion: capture the OUTGOING scene's effective transforms so
+        // the new scene glides from wherever things currently are (including
+        // mid-flight re-anchoring when commits interrupt a running glide).
+        let now = Instant::now();
+        let active_remaining = compositor.scene_transition.as_ref().and_then(|active| {
+            let remaining = active.duration.saturating_sub(now - active.started_at);
+            (!remaining.is_zero()).then_some(remaining)
+        });
+        let previous_effective = compositor.scene.as_ref().and_then(|previous| {
+            previous.scene.clone().map(|previous_scene| {
+                match compositor.scene_transition.as_ref() {
+                    Some(active) => scene_with_transition(previous_scene, active, now),
+                    None => previous_scene,
+                }
+            })
+        });
+        compositor.scene_transition = next_scene_transition(
+            transition_ms,
+            previous_effective,
+            snapshot.scene.is_some(),
+            active_remaining,
+            now,
+        );
         compositor
             .image_sources
             .set_pinned_keys(image_cache_pinned_keys(&snapshot));
-        let active_image_source = snapshot
+        let active_image_source = prepared_images
             .active_screen
-            .as_ref()
-            .map(|screen| compositor.cache_image_source(screen));
-        let background_image_source = snapshot
-            .scene
-            .as_ref()
-            .and_then(|scene| scene.background.as_ref())
-            .map(|background| compositor.cache_background_image_source(background));
+            .map(|(cache_key, source)| compositor.cache_prepared_image(cache_key, source));
+        let background_image_source = prepared_images
+            .background
+            .map(|(cache_key, source)| compositor.cache_prepared_image(cache_key, source));
         compositor.status.scene_revision = Some(snapshot.revision);
         compositor.status.scene_id = snapshot.scene.as_ref().map(|scene| scene.id.clone());
         compositor.status.scene_layout = Some(snapshot.layout.clone());
@@ -1279,6 +2898,7 @@ pub async fn update_compositor_scene(
         compositor.status.image_cache = compositor.image_sources.status();
         compositor.status.updated_at = Utc::now().to_rfc3339();
         compositor.scene = Some(snapshot);
+        compositor.pending_scene_request = None;
         compositor.status.clone()
     };
     state.emit_event("compositor.status", status.clone());
@@ -1298,6 +2918,9 @@ pub async fn update_compositor_simulcast_scene(
         scene,
         layout,
         active_screen,
+        // Scene motion is a primary-leg feature; the vertical leg switches
+        // instantly (no transition state exists for it).
+        transition_ms: _,
     } = params;
     let mut compositor = state.compositor.lock().await;
     if compositor
@@ -1354,6 +2977,7 @@ pub async fn update_compositor_active_screen(
             scene,
             layout,
             active_screen,
+            transition_ms: None,
         },
     )
     .await
@@ -1368,90 +2992,137 @@ impl CompositorRuntime {
             .and_then(|snapshot| snapshot.active_screen.clone())
     }
 
-    fn cache_image_source(&mut self, screen: &StreamScreen) -> CompositorImageSource {
-        self.cache_image_path(
-            &screen.id,
-            &screen.image_path,
-            "Could not read uploaded screen image",
-            "Uploaded screen image file is missing.",
-        )
-    }
-
-    fn cache_background_image_source(
+    fn cache_prepared_image(
         &mut self,
-        background: &EffectiveSceneBackground,
+        cache_key: String,
+        mut source: CompositorImageSource,
     ) -> CompositorImageSource {
-        self.cache_image_path(
-            &background_cache_key(background),
-            &background.managed_asset_path,
-            "Could not read background image",
-            "Background image file is missing.",
-        )
-    }
-
-    fn cache_image_path(
-        &mut self,
-        cache_key: &str,
-        image_path: &str,
-        read_error_prefix: &str,
-        missing_message: &str,
-    ) -> CompositorImageSource {
-        let path = Path::new(image_path);
-        let file_revision = image_file_revision(path);
-        if let Some(cached) =
-            self.image_sources
-                .matching_source(cache_key, image_path, &file_revision)
-        {
+        if let Some(cached) = self.image_sources.matching_source(
+            &cache_key,
+            &source.image_path,
+            &source.file_revision,
+        ) {
             return cached;
         }
+        source.content_revision = self.image_sources.next_content_revision();
+        self.image_sources.insert(cache_key, source.clone());
+        source
+    }
+}
 
-        let content_revision = self.image_sources.next_content_revision();
-        let source = if file_revision.is_some() {
-            match decode_bounded_cache_image(path) {
-                Ok((image, optimization_message)) => {
-                    let (width, height) = image.dimensions();
-                    let mut bgra = image.into_raw();
-                    rgba_to_bgra_in_place(&mut bgra);
-                    CompositorImageSource {
-                        image_path: image_path.to_string(),
-                        file_revision,
-                        width: Some(width),
-                        height: Some(height),
-                        rgba: None,
-                        bgra: Some(Arc::new(bgra)),
-                        content_revision,
-                        state: "live".to_string(),
-                        message: optimization_message,
-                    }
-                }
-                Err(error) => CompositorImageSource {
-                    image_path: image_path.to_string(),
-                    file_revision,
-                    width: None,
-                    height: None,
-                    rgba: None,
-                    bgra: None,
-                    content_revision,
-                    state: "source-missing".to_string(),
-                    message: Some(format!("{read_error_prefix}: {error}")),
-                },
+fn compositor_image_preparations(
+    compositor: &CompositorRuntime,
+    snapshot: &CompositorSceneSnapshot,
+) -> Vec<CompositorImagePreparation> {
+    let mut preparations = Vec::with_capacity(2);
+    if let Some(screen) = snapshot.active_screen.as_ref() {
+        preparations.push(CompositorImagePreparation {
+            role: CompositorImagePreparationRole::ActiveScreen,
+            cache_key: screen.id.clone(),
+            image_path: screen.image_path.clone(),
+            cached: compositor
+                .image_sources
+                .source_for_path(&screen.id, &screen.image_path),
+            read_error_prefix: "Could not read uploaded screen image",
+            missing_message: "Uploaded screen image file is missing.",
+        });
+    }
+    if let Some(background) = snapshot
+        .scene
+        .as_ref()
+        .and_then(|scene| scene.background.as_ref())
+    {
+        let cache_key = background_cache_key(background);
+        preparations.push(CompositorImagePreparation {
+            role: CompositorImagePreparationRole::Background,
+            cached: compositor
+                .image_sources
+                .source_for_path(&cache_key, &background.managed_asset_path),
+            cache_key,
+            image_path: background.managed_asset_path.clone(),
+            read_error_prefix: "Could not read background image",
+            missing_message: "Background image file is missing.",
+        });
+    }
+    preparations
+}
+
+fn prepare_compositor_scene_images(
+    preparations: Vec<CompositorImagePreparation>,
+) -> PreparedCompositorSceneImages {
+    let mut prepared = PreparedCompositorSceneImages::default();
+    for preparation in preparations {
+        let role = preparation.role;
+        let cache_key = preparation.cache_key.clone();
+        let source = prepare_compositor_image(preparation);
+        match role {
+            CompositorImagePreparationRole::ActiveScreen => {
+                prepared.active_screen = Some((cache_key, source));
             }
-        } else {
-            CompositorImageSource {
-                image_path: image_path.to_string(),
+            CompositorImagePreparationRole::Background => {
+                prepared.background = Some((cache_key, source));
+            }
+        }
+    }
+    prepared
+}
+
+fn prepare_compositor_image(preparation: CompositorImagePreparation) -> CompositorImageSource {
+    let CompositorImagePreparation {
+        image_path,
+        cached,
+        read_error_prefix,
+        missing_message,
+        ..
+    } = preparation;
+    let path = Path::new(&image_path);
+    let file_revision = image_file_revision(path);
+    if let Some(cached) = cached.filter(|cached| cached.file_revision == file_revision) {
+        return cached;
+    }
+
+    if file_revision.is_some() {
+        match decode_bounded_cache_image(path) {
+            Ok((image, optimization_message)) => {
+                let (width, height) = image.dimensions();
+                let mut bgra = image.into_raw();
+                rgba_to_bgra_in_place(&mut bgra);
+                CompositorImageSource {
+                    image_path,
+                    file_revision,
+                    width: Some(width),
+                    height: Some(height),
+                    rgba: None,
+                    bgra: Some(Arc::new(bgra)),
+                    content_revision: 0,
+                    state: "live".to_string(),
+                    message: optimization_message,
+                }
+            }
+            Err(error) => CompositorImageSource {
+                image_path,
                 file_revision,
                 width: None,
                 height: None,
                 rgba: None,
                 bgra: None,
-                content_revision,
+                content_revision: 0,
                 state: "source-missing".to_string(),
-                message: Some(missing_message.to_string()),
-            }
-        };
-        self.image_sources
-            .insert(cache_key.to_string(), source.clone());
-        source
+                message: Some(format!("{read_error_prefix}: {error}")),
+            },
+        }
+    } else {
+        CompositorImageSource {
+            image_path,
+            file_revision,
+            width: None,
+            height: None,
+            rgba: None,
+            bgra: None,
+            content_revision: 0,
+            state: "source-missing".to_string(),
+            message: Some(missing_message.to_string()),
+        }
     }
 }
 
@@ -1552,10 +3223,17 @@ async fn stop_current_compositor(state: &AppState) -> bool {
     if !await_compositor_task(state, previous_run_id, previous_task).await {
         return false;
     }
-    let mut compositor = state.compositor.lock().await;
-    compositor.run_id = None;
-    compositor.latest_frame_evidence = None;
-    compositor.stream_frame_store = None;
+    {
+        let mut compositor = state.compositor.lock().await;
+        compositor.run_id = None;
+        compositor.preview_render_dimensions = None;
+        compositor.preview_resize_revision = None;
+        compositor.loop_config_tx = None;
+        compositor.capture_lease = None;
+        compositor.frame_evidence.clear();
+        compositor.stream_frame_store = None;
+    }
+    crate::capture_recovery::note_compositor_lifecycle_changed(state, None).await;
     true
 }
 
@@ -1598,6 +3276,11 @@ async fn await_compositor_task(
                 compositor.status.clone()
             };
             state.emit_event("compositor.status", status);
+            crate::comment_highlight::invalidate_comment_highlight_for_compositor_non_live(
+                state,
+                "compositor-failed",
+            )
+            .await;
             false
         }
     }
@@ -1614,6 +3297,28 @@ fn emit_runtime_diagnostics_event(state: &AppState, diagnostic_stats: Diagnostic
     }));
 }
 
+/// Windows record/stream compositor loops skip missed ticks instead of
+/// replaying them. The Windows CPU compositor renders 1080p60 below cadence
+/// (tester: 32 fps rendered for a 60 fps target); with `Delay` every late
+/// tick also shifts the whole schedule, so the bridge sees frames that are
+/// both late and bunched. `Skip` keeps the next tick on the wall-clock grid
+/// and the loss is counted honestly in `compositor_tick_skipped`. macOS keeps
+/// `Delay`: the Metal compositor holds cadence there and the preview
+/// smoothness gates were tuned against it (B5b, live feedback batch 3).
+#[cfg(target_os = "windows")]
+const WINDOWS_RECORD_COMPOSITOR_MISSED_TICK_BEHAVIOR: MissedTickBehavior = MissedTickBehavior::Skip;
+
+fn compositor_missed_tick_behavior(frame_consumer: CompositorFrameConsumer) -> MissedTickBehavior {
+    #[cfg(target_os = "windows")]
+    {
+        if frame_consumer.requires_cpu_fallback() {
+            return WINDOWS_RECORD_COMPOSITOR_MISSED_TICK_BEHAVIOR;
+        }
+    }
+    let _ = frame_consumer;
+    MissedTickBehavior::Delay
+}
+
 async fn run_synthetic_compositor_loop(
     state: AppState,
     params: CompositorRenderLoopParams,
@@ -1621,24 +3326,70 @@ async fn run_synthetic_compositor_loop(
 ) {
     let CompositorRenderLoopParams {
         run_id,
-        target_fps,
-        width,
-        height,
-        frame_consumer,
+        health_event_sequence,
+        health_heartbeat,
+        render_dimensions,
+        config: mut config_rx,
         stream_output,
-        caption_overlay_on_primary,
-        caption_overlay_on_aux,
-        highlight_overlay_on_primary,
-        highlight_overlay_on_aux,
     } = params;
-    let frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
+    // Loop configuration is hot-swappable (instant-record P4): a capture arms
+    // the preview run in place, so fps, consumer and overlay flags are plain
+    // mutable locals refreshed from the watch channel at the top of the loop.
+    let CompositorLoopConfig {
+        mut target_fps,
+        mut frame_consumer,
+        mut caption_overlay_on_primary,
+        mut caption_overlay_on_aux,
+        mut highlight_overlay_on_primary,
+        mut highlight_overlay_on_aux,
+    } = *config_rx.borrow_and_update();
+    let mut pending_loop_config: Option<CompositorLoopConfig> = None;
+    let mut loop_config_closed = false;
+    let mut frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
     let mut ticker = tokio::time::interval(frame_interval);
-    ticker.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    ticker.set_missed_tick_behavior(compositor_missed_tick_behavior(frame_consumer));
+    // Only the record/stream compositor feeds the session's frame accounting;
+    // a preview-only loop must not inflate "ticks" for a session it never fed.
+    let mut accounts_session_frames = frame_consumer.requires_cpu_fallback();
     // Persisted GPU compositor (Some only on macOS when not disabled and a GPU exists);
     // built once and reused per frame. Held across the loop's awaits (it is Send).
-    let mut gpu_compositor = new_gpu_compositor();
-    let mut stream_gpu_compositor = stream_output.and_then(|_| new_gpu_compositor());
+    // Preview-owned compositors minify the scene into a small canvas; smooth
+    // (linear) sampling there kills the crawling-grain aliasing of a nearest
+    // minification. Recording/stream compositors keep nearest for exact crops.
+    let smooth_preview_scaling =
+        matches!(frame_consumer, CompositorFrameConsumer::NativePreview) && stream_output.is_none();
+    let mut gpu_compositor = new_gpu_compositor(smooth_preview_scaling);
+    let mut stream_gpu_compositor = stream_output.and_then(|_| new_gpu_compositor(false));
+    // Rate-collapse watchdog for the always-on pipeline: the 2026-08-27
+    // incident (33 idle minutes of silent decay to ~6 fresh fps) is exactly
+    // the state every liveness-only watchdog ignores.
+    let mut capture_health = CaptureHealthMonitor::new();
     let mut live_sources = CompositorLiveSources::refresh(&state).await;
+    if let Some(initial_camera_adoption) = live_sources.initial_camera_adoption()
+        && acknowledge_compositor_camera_source_change_if_current(
+            &state,
+            &run_id,
+            &mut capture_health,
+            initial_camera_adoption,
+        )
+        .await
+        .is_none()
+    {
+        return;
+    }
+    if let Some(initial_screen_adoption) = live_sources.initial_screen_adoption()
+        && acknowledge_compositor_screen_source_change_if_current(
+            &state,
+            &run_id,
+            &mut capture_health,
+            initial_screen_adoption,
+        )
+        .await
+        .is_none()
+    {
+        return;
+    }
+    let mut observed_camera_mutation_epoch = state.capture_recovery_camera_mutation_epoch();
     let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
     let mut next_live_source_refresh_at = Instant::now() + COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL;
 
@@ -1669,7 +3420,7 @@ async fn run_synthetic_compositor_loop(
     let mut preview_surface_active = false;
     let mut latest_surface_status: Option<PreviewSurfaceStatus> = None;
     let mut latest_source_statuses: Vec<CompositorSourceStatus> = Vec::new();
-    let mut cpu_fallback_frames = 0_u64;
+    let mut cpu_frame_counts = CompositorCpuFrameCounts::default();
     let mut source_import_stats = CompositorSourceImportStats::default();
     let mut frame_pipeline = CompositorFramePipelineStatus {
         consumer: Some(frame_consumer.label().to_string()),
@@ -1677,14 +3428,56 @@ async fn run_synthetic_compositor_loop(
     };
 
     loop {
+        if let Some(next) = pending_loop_config.take() {
+            if next.target_fps != target_fps {
+                target_fps = next.target_fps;
+                frame_interval = Duration::from_secs_f64(1.0 / f64::from(target_fps.max(1)));
+                ticker = tokio::time::interval(frame_interval);
+                // Measure the next diagnostic window purely at the new cadence
+                // so the rate-collapse watchdog never compares mixed windows.
+                frames_in_window = 0;
+                window_started_at = Instant::now();
+                previous_tick_at = None;
+            }
+            if next.frame_consumer != frame_consumer {
+                frame_consumer = next.frame_consumer;
+                accounts_session_frames = frame_consumer.requires_cpu_fallback();
+                frame_pipeline.consumer = Some(frame_consumer.label().to_string());
+                set_gpu_compositor_smooth_scaling(
+                    gpu_compositor.as_mut(),
+                    matches!(frame_consumer, CompositorFrameConsumer::NativePreview)
+                        && stream_output.is_none(),
+                );
+            }
+            ticker.set_missed_tick_behavior(compositor_missed_tick_behavior(frame_consumer));
+            caption_overlay_on_primary = next.caption_overlay_on_primary;
+            caption_overlay_on_aux = next.caption_overlay_on_aux;
+            highlight_overlay_on_primary = next.highlight_overlay_on_primary;
+            highlight_overlay_on_aux = next.highlight_overlay_on_aux;
+            tracing::info!(
+                "compositor {run_id} loop config swapped in place: {} fps, consumer {}",
+                target_fps,
+                frame_consumer.label()
+            );
+        }
         tokio::select! {
             changed = stop_rx.changed() => {
                 if changed.is_err() || *stop_rx.borrow() {
                     break;
                 }
             }
+            changed = config_rx.changed(), if !loop_config_closed => {
+                if changed.is_err() {
+                    // The runtime dropped the sender (run retired); keep the
+                    // last configuration and stop polling the channel.
+                    loop_config_closed = true;
+                } else {
+                    pending_loop_config = Some(*config_rx.borrow_and_update());
+                }
+            }
             _ = ticker.tick() => {
                 let ticked_at = Instant::now();
+                let mut skipped_intervals = 0_u64;
                 if let Some(previous_tick_at) = previous_tick_at {
                     let tick_gap_ms =
                         ticked_at.duration_since(previous_tick_at).as_secs_f64() * 1000.0;
@@ -1692,13 +3485,55 @@ async fn run_synthetic_compositor_loop(
                     let expected_frames =
                         (tick_gap_ms / (frame_interval.as_secs_f64() * 1000.0)).floor() as u64;
                     if expected_frames > 1 {
-                        dropped_frames = dropped_frames.saturating_add(expected_frames - 1);
+                        skipped_intervals = expected_frames - 1;
+                        dropped_frames = dropped_frames.saturating_add(skipped_intervals);
                     }
                 }
                 previous_tick_at = Some(ticked_at);
+                if accounts_session_frames {
+                    crate::diagnostics::RECORDING_FRAME_ACCOUNTING
+                        .record_compositor_tick(skipped_intervals);
+                }
                 if ticked_at >= next_live_source_refresh_at {
+                    if rearm_camera_health_for_explicit_mutation_if_needed(
+                        &state,
+                        &run_id,
+                        &mut capture_health,
+                        &mut observed_camera_mutation_epoch,
+                    )
+                    .await
+                    .is_none()
+                    {
+                        break;
+                    }
                     let refresh_started_at = Instant::now();
-                    live_sources = live_sources.refresh_sources_nonblocking(&state);
+                    let (refreshed_sources, camera_change, screen_change) =
+                        live_sources.refresh_sources_nonblocking(&state);
+                    live_sources = refreshed_sources;
+                    if let Some(camera_change) = camera_change
+                        && acknowledge_compositor_camera_source_change_if_current(
+                            &state,
+                            &run_id,
+                            &mut capture_health,
+                            camera_change,
+                        )
+                        .await
+                        .is_none()
+                    {
+                        break;
+                    }
+                    if let Some(screen_change) = screen_change
+                        && acknowledge_compositor_screen_source_change_if_current(
+                            &state,
+                            &run_id,
+                            &mut capture_health,
+                            screen_change,
+                        )
+                        .await
+                        .is_none()
+                    {
+                        break;
+                    }
                     live_source_refresh_times_ms
                         .push(refresh_started_at.elapsed().as_secs_f64() * 1000.0);
                     next_live_source_refresh_at =
@@ -1708,6 +3543,12 @@ async fn run_synthetic_compositor_loop(
                 let render_started_at = Instant::now();
                 frames_rendered = frames_rendered.saturating_add(1);
                 frames_in_window = frames_in_window.saturating_add(1);
+                // Preview bounds can change without restarting the compositor
+                // (including portrait <-> landscape). Re-read every tick so
+                // the next published frame and Metal target adopt the new
+                // canvas instead of retaining the loop's startup dimensions.
+                let (width, height) =
+                    unpack_render_dimensions(render_dimensions.load(Ordering::Relaxed));
                 let published =
                     publish_compositor_frame(
                         &state,
@@ -1727,13 +3568,34 @@ async fn run_synthetic_compositor_loop(
                         highlight_overlay_on_aux,
                     )
                         .await;
+                health_heartbeat.fetch_add(1, Ordering::Release);
+                let delivery_stats = live_sources.fetch_stats();
+                let delivery_source = live_sources.camera.as_ref().and_then(|source| {
+                    source
+                        .source_key()
+                        .cloned()
+                        .map(|source_key| (source_key, source.generation()))
+                });
+                crate::capture_recovery::record_compositor_camera_delivery_evidence(
+                    &state,
+                    &run_id,
+                    delivery_source,
+                    delivery_stats.camera_fresh_serves,
+                );
+                let screen_delivery_source = live_sources.screen.as_ref().and_then(|source| {
+                    source
+                        .source_key()
+                        .cloned()
+                        .map(|source_key| (source_key, source.generation()))
+                });
+                crate::capture_recovery::record_compositor_screen_delivery_evidence(
+                    &state,
+                    &run_id,
+                    screen_delivery_source,
+                    delivery_stats.screen_fresh_serves,
+                );
                 let fallback_frame_age_ms = published.fallback_frame_age_ms;
-                if matches!(
-                    published.compositor_backend,
-                    CompositorBackend::CpuFallback | CompositorBackend::Cpu
-                ) {
-                    cpu_fallback_frames = cpu_fallback_frames.saturating_add(1);
-                }
+                cpu_frame_counts.record(published.compositor_backend);
                 if is_repeated_compositor_frame(previous_fingerprint, published.fingerprint) {
                     repeated_frames = repeated_frames.saturating_add(1);
                 }
@@ -1814,6 +3676,249 @@ async fn run_synthetic_compositor_loop(
                 if window_started_at.elapsed() >= COMPOSITOR_DIAGNOSTIC_WINDOW {
                     let elapsed = window_started_at.elapsed().as_secs_f64().max(0.001);
                     let measured_fps = frames_in_window as f64 / elapsed;
+                    {
+                        if rearm_camera_health_for_explicit_mutation_if_needed(
+                            &state,
+                            &run_id,
+                            &mut capture_health,
+                            &mut observed_camera_mutation_epoch,
+                        )
+                        .await
+                        .is_none()
+                        {
+                            break;
+                        }
+                        let sampled_camera_mutation_epoch = observed_camera_mutation_epoch;
+                        let fetch = live_sources.fetch_stats();
+                        let camera_is_consumed = scene_needs_live_camera_frame(
+                            render_cache.snapshot.as_ref(),
+                            render_cache.active_image_source.as_ref(),
+                        );
+                        let camera_target_fps = live_sources
+                            .camera
+                            .as_ref()
+                            .map(|source| f64::from(source.target_fps()))
+                            .filter(|fps| fps.is_finite() && *fps > 0.0);
+                        let (mut camera_producer, exact_frameless_zombie) = if camera_is_consumed {
+                            match preview_camera_restart_snapshot(&state).await {
+                                Some(snapshot) => {
+                                    let frameless_zombie =
+                                        preview_camera_restart_snapshot_is_frameless_zombie(
+                                            &state, &snapshot,
+                                        )
+                                        .await;
+                                    let producer =
+                                        preview_camera_recovery_evidence(&state, &snapshot)
+                                            .await
+                                            .map(|evidence| CaptureHealthCameraProducerSample {
+                                                epoch: CaptureHealthCameraEpoch {
+                                                    source_key: evidence.source_key,
+                                                    generation: evidence.generation,
+                                                },
+                                                source_fps: evidence.source_fps,
+                                                capture_callbacks: evidence.capture_callback_count,
+                                                frame_store_publications: evidence
+                                                    .frame_store_publications,
+                                                did_drop_callback_count: evidence
+                                                    .did_drop_callback_count,
+                                                out_of_buffers: evidence.out_of_buffers,
+                                                surface_backing_live_count: evidence
+                                                    .surface_backing_live_count,
+                                                surface_backing_peak_count: evidence
+                                                    .surface_backing_peak_count,
+                                            })
+                                            .filter(|producer| {
+                                                camera_source_matches_health_epoch(
+                                                    live_sources.camera.as_ref(),
+                                                    &producer.epoch,
+                                                )
+                                            });
+                                    let exact_frameless_zombie =
+                                        frameless_zombie && producer.is_some();
+                                    (producer, exact_frameless_zombie)
+                                }
+                                None => (None, false),
+                            }
+                        } else {
+                            (None, false)
+                        };
+                        let mut camera_fresh_serves = fetch.camera_fresh_serves;
+                        #[cfg(debug_assertions)]
+                        if let Some(producer) = camera_producer.as_mut()
+                            && let Some(stall) =
+                                crate::capture_recovery::apply_camera_delivery_smoke_fault(
+                                    &state,
+                                    &producer.epoch,
+                                    camera_fresh_serves,
+                                    producer.capture_callbacks,
+                                    producer.frame_store_publications,
+                                )
+                        {
+                            if stall.first_sample {
+                                capture_health.arm_camera_producer_stall(
+                                    producer.epoch.clone(),
+                                    stall.fresh_serves,
+                                    stall.capture_callbacks,
+                                    stall.frame_store_publications,
+                                );
+                            }
+                            camera_fresh_serves = stall.fresh_serves;
+                            producer.capture_callbacks = stall.capture_callbacks;
+                            producer.frame_store_publications = stall.frame_store_publications;
+                        }
+                        let screen_is_consumed = scene_needs_live_screen_frame(
+                            render_cache.snapshot.as_ref(),
+                            render_cache.active_image_source.as_ref(),
+                        );
+                        let (screen_target_fps, mut screen_producer) = if screen_is_consumed {
+                            match preview_screen_restart_snapshot(&state).await {
+                                Some(snapshot) => {
+                                    let evidence =
+                                        preview_screen_recovery_evidence(&state, &snapshot).await;
+                                    let target_fps = evidence
+                                        .as_ref()
+                                        .map(|evidence| f64::from(evidence.target_fps))
+                                        .filter(|fps| fps.is_finite() && *fps > 0.0);
+                                    let producer = evidence
+                                        .map(|evidence| CaptureHealthScreenProducerSample {
+                                            epoch: CaptureHealthScreenEpoch {
+                                                source_key: evidence.source_key,
+                                                generation: evidence.generation,
+                                            },
+                                            callback_cadence: evidence.callback_cadence,
+                                            capture_callbacks: evidence.capture_callback_count,
+                                            frame_store_publications: evidence
+                                                .frame_store_publications,
+                                        })
+                                        .filter(|producer| {
+                                            screen_source_matches_health_epoch(
+                                                live_sources.screen.as_ref(),
+                                                &producer.epoch,
+                                            )
+                                        });
+                                    (target_fps, producer)
+                                }
+                                None => (None, None),
+                            }
+                        } else {
+                            (None, None)
+                        };
+                        let mut screen_fresh_serves = fetch.screen_fresh_serves;
+                        #[cfg(debug_assertions)]
+                        if let Some(producer) = screen_producer.as_mut()
+                            && let Some(stall) =
+                                crate::capture_recovery::apply_screen_delivery_smoke_fault(
+                                    &state,
+                                    &producer.epoch,
+                                    screen_fresh_serves,
+                                    producer.capture_callbacks,
+                                    producer.frame_store_publications,
+                                )
+                        {
+                            if stall.first_sample {
+                                capture_health.arm_screen_producer_stall(
+                                    producer.epoch.clone(),
+                                    stall.fresh_serves,
+                                    stall.capture_callbacks,
+                                    stall.frame_store_publications,
+                                );
+                            }
+                            screen_fresh_serves = stall.fresh_serves;
+                            producer.capture_callbacks = stall.capture_callbacks;
+                            producer.frame_store_publications = stall.frame_store_publications;
+                        }
+                        let mutation_changed_during_sample =
+                            match rearm_camera_health_for_explicit_mutation_if_needed(
+                                &state,
+                                &run_id,
+                                &mut capture_health,
+                                &mut observed_camera_mutation_epoch,
+                            )
+                            .await
+                            {
+                                Some(changed) => changed,
+                                None => break,
+                            };
+                        let transition = if mutation_changed_during_sample {
+                            None
+                        } else {
+                            capture_health.observe(source_authority_health_sample(
+                                CaptureHealthSample {
+                                    target_fps: f64::from(target_fps),
+                                    render_fps: measured_fps,
+                                    camera_present: camera_delivery_health_source_present(
+                                        camera_is_consumed,
+                                        live_sources.last_camera_frame.is_some(),
+                                        camera_target_fps.is_some(),
+                                        camera_producer.is_some(),
+                                        exact_frameless_zombie,
+                                    ),
+                                    camera_target_fps,
+                                    camera_fresh_serves,
+                                    camera_producer,
+                                    screen_present: screen_delivery_health_source_present(
+                                        screen_is_consumed,
+                                        live_sources.last_screen_frame.is_some(),
+                                        screen_target_fps.is_some(),
+                                        screen_producer.is_some(),
+                                    ),
+                                    screen_target_fps,
+                                    screen_fresh_serves,
+                                    screen_producer,
+                                    window_secs: elapsed,
+                                },
+                            ))
+                        };
+                        if set_capture_health_stage_latch_if_current(
+                            &state,
+                            &run_id,
+                            crate::capture_health::CaptureStage::CameraDelivery,
+                            capture_health.degraded_stage()
+                                == Some(crate::capture_health::CaptureStage::CameraDelivery),
+                        )
+                        .await
+                        .is_none()
+                        {
+                            break;
+                        }
+                        if set_capture_health_stage_latch_if_current(
+                            &state,
+                            &run_id,
+                            crate::capture_health::CaptureStage::ScreenDelivery,
+                            capture_health.degraded_stage()
+                                == Some(crate::capture_health::CaptureStage::ScreenDelivery),
+                        )
+                        .await
+                        .is_none()
+                        {
+                            break;
+                        }
+                        if let Some(transition) = transition {
+                            match &transition {
+                            CaptureHealthTransition::Degraded { stage, detail, .. } => {
+                                tracing::warn!(
+                                    "[capture-health] pipeline degraded at {}: {detail}",
+                                    stage.label()
+                                );
+                            }
+                            CaptureHealthTransition::Recovered { detail, .. } => {
+                                tracing::info!("[capture-health] pipeline recovered: {detail}");
+                            }
+                            CaptureHealthTransition::Advisory { detail } => {
+                                tracing::warn!("[capture-health] advisory: {detail}");
+                            }
+                            }
+                            if !matches!(transition, CaptureHealthTransition::Advisory { .. }) {
+                                dispatch_compositor_health_transition(
+                                    &state,
+                                    &run_id,
+                                    &health_event_sequence,
+                                    Some(sampled_camera_mutation_epoch),
+                                    transition,
+                                );
+                            }
+                        }
+                    }
                     let (p50, p95, p99) = frame_time_percentiles(&frame_times_ms);
                     let (_, source_fetch_p95, _) = frame_time_percentiles(&source_fetch_times_ms);
                     let (_, scene_snapshot_p95, _) =
@@ -1926,7 +4031,7 @@ async fn run_synthetic_compositor_loop(
                             preview_surface_backing,
                             published.compositor_backend,
                             published.compositor_fallback_reason.clone(),
-                            cpu_fallback_frames,
+                            cpu_frame_counts,
                             measured_fps,
                             frame_age_ms,
                             repeated_frames,
@@ -1967,6 +4072,9 @@ async fn run_synthetic_compositor_loop(
                         );
                         let next =
                             apply_compositor_live_source_fetch_stats(next, live_sources.fetch_stats());
+                        let degraded_stage = current_capture_health_stage(&state);
+                        let next =
+                            apply_capture_health(next, degraded_stage.map(|stage| stage.label()));
                         *diagnostics = next.clone();
                         next
                     };
@@ -2113,6 +4221,7 @@ struct CompositorPublishTimings {
 
 impl CompositorPublishTimings {
     fn merge_gpu(&mut self, timings: GpuCompositorTimings) {
+        self.source_import_stats.merge(timings.source_import_stats);
         self.gpu_readbacks = self.gpu_readbacks.saturating_add(timings.gpu_readbacks);
         self.bgra_bytes_copied = self
             .bgra_bytes_copied
@@ -2134,6 +4243,11 @@ enum PreparedGpuSourcePixels<'a> {
     Borrowed(&'a [u8]),
     Owned(Vec<u8>),
 }
+
+#[cfg(target_os = "macos")]
+const CAMERA_CAPTURE_STORAGE_CONTENT_NAMESPACE: u64 = 4;
+#[cfg(target_os = "macos")]
+const SCREEN_CAPTURE_STORAGE_CONTENT_NAMESPACE: u64 = 5;
 
 #[cfg(target_os = "macos")]
 impl<'a> PreparedGpuSourcePixels<'a> {
@@ -2161,17 +4275,36 @@ struct PreparedGpuSource<'a> {
     /// Straight-alpha source-over blend (overlay bitmaps only — capture sources
     /// must keep the opaque overwrite; see `GpuSource::blend`).
     blend: bool,
+    /// Camera chroma key; forces `blend` semantics via the shader's computed
+    /// alpha, so keyed camera quads set both.
+    chroma_key: Option<crate::metal_compositor::GpuChromaKey>,
 }
 
 #[cfg(target_os = "macos")]
-fn scene_mask_into_metal(mask: SceneMask) -> crate::metal_compositor::SourceMask {
+fn scene_mask_into_metal(mask: SceneMask) -> SourceMask {
     match mask {
-        SceneMask::None => crate::metal_compositor::SourceMask::None,
-        SceneMask::Circle => crate::metal_compositor::SourceMask::Circle,
-        SceneMask::Rounded { radius_pct } => {
-            crate::metal_compositor::SourceMask::Rounded { radius_pct }
-        }
+        SceneMask::None => SourceMask::None,
+        SceneMask::Circle => SourceMask::Circle,
+        SceneMask::Rounded { radius_pct } => SourceMask::Rounded { radius_pct },
     }
+}
+
+/// f32 projection of the shared keyer spec for the shader. The spec from
+/// `camera_chroma_key` stays the single source of truth. A grey key color has
+/// no chroma direction — returns None so the quad renders unkeyed.
+#[cfg(target_os = "macos")]
+fn scene_chroma_key_into_metal(
+    spec: &crate::scene_geometry::ChromaKeySpec,
+) -> Option<crate::metal_compositor::GpuChromaKey> {
+    let (dir_cb, dir_cr) = spec.key_direction()?;
+    Some(crate::metal_compositor::GpuChromaKey {
+        key_dir_cb: dir_cb as f32,
+        key_dir_cr: dir_cr as f32,
+        max_angle_rad: spec.max_angle_deg.to_radians() as f32,
+        band_rad: spec.band_deg.to_radians() as f32,
+        spill: spec.spill as f32,
+        spill_is_blue: spec.spill_is_blue(),
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -2190,16 +4323,17 @@ impl<'a> PreparedGpuSource<'a> {
             mirror: self.mirror,
             mask: scene_mask_into_metal(self.mask),
             blend: self.blend,
+            chroma_key: self.chroma_key,
         }
     }
 }
 
 #[cfg(target_os = "macos")]
-fn new_gpu_compositor() -> Option<GpuCompositor> {
+fn new_gpu_compositor(smooth_scaling: bool) -> Option<GpuCompositor> {
     if !metal_compositor_enabled() {
         return None;
     }
-    match GpuCompositor::new() {
+    match GpuCompositor::new_with_smooth_scaling(smooth_scaling) {
         Some(compositor) => {
             tracing::info!("Metal GPU compositor enabled");
             Some(compositor)
@@ -2213,9 +4347,23 @@ fn new_gpu_compositor() -> Option<GpuCompositor> {
     }
 }
 #[cfg(not(target_os = "macos"))]
-fn new_gpu_compositor() -> Option<GpuCompositor> {
+fn new_gpu_compositor(_smooth_scaling: bool) -> Option<GpuCompositor> {
     None
 }
+
+#[cfg(target_os = "macos")]
+fn set_gpu_compositor_smooth_scaling(gpu: Option<&mut GpuCompositor>, smooth_scaling: bool) {
+    if let Some(gpu) = gpu
+        && !gpu.set_smooth_scaling(smooth_scaling)
+    {
+        tracing::warn!(
+            "Metal compositor could not rebuild its sampler for smooth_scaling={smooth_scaling}; keeping the current sampler"
+        );
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn set_gpu_compositor_smooth_scaling(_gpu: Option<&mut GpuCompositor>, _smooth_scaling: bool) {}
 
 #[cfg(test)]
 fn missing_scene_source_frame_reason(source: &SceneSource) -> String {
@@ -2308,6 +4456,7 @@ fn push_caption_overlay_gpu_source<'a>(
         },
         false,
         SceneCrop::none(),
+        (0.0, 0.0),
         canvas_width,
         canvas_height,
     ) else {
@@ -2334,6 +4483,7 @@ fn push_caption_overlay_gpu_source<'a>(
         // The bar/card is rasterized on a transparent canvas; without blending
         // its alpha-0 pixels overwrite the frame as an opaque black box.
         blend: true,
+        chroma_key: None,
     });
 }
 
@@ -2382,6 +4532,7 @@ fn try_gpu_compose(
                     },
                     matches!(background.fit, BackgroundFit::Fit),
                     background_zoom_crop(Some(background)),
+                    (0.0, 0.0),
                     inputs.width,
                     inputs.height,
                 )
@@ -2403,6 +4554,7 @@ fn try_gpu_compose(
                     mirror: false,
                     mask: SceneMask::None,
                     blend: false,
+                    chroma_key: None,
                 });
                 true
             } else {
@@ -2440,6 +4592,7 @@ fn try_gpu_compose(
                 CompositorSceneSourceFit::Contain
             ),
             SceneCrop::none(),
+            (0.0, 0.0),
             inputs.width,
             inputs.height,
         )
@@ -2461,6 +4614,7 @@ fn try_gpu_compose(
             mirror: false,
             mask: SceneMask::None,
             blend: false,
+            chroma_key: None,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -2514,6 +4668,7 @@ fn try_gpu_compose(
                 CompositorSceneSourceFit::Contain
             ),
             SceneCrop::none(),
+            (0.0, 0.0),
             inputs.width,
             inputs.height,
         )
@@ -2531,6 +4686,7 @@ fn try_gpu_compose(
             mirror: false,
             mask: SceneMask::None,
             blend: false,
+            chroma_key: None,
         });
         if let Some(overlay) = inputs.caption_overlay {
             let safe_inset = caption_overlay_safe_inset(
@@ -2595,6 +4751,7 @@ fn try_gpu_compose(
                             SceneFit::Contain
                         ),
                         source_crop,
+                        source_cover_pan(&SceneSourceKind::Camera, layout),
                         inputs.width,
                         inputs.height,
                     )
@@ -2602,7 +4759,11 @@ fn try_gpu_compose(
                     prepared_sources.push(PreparedGpuSource {
                         pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                         kind: crate::metal_compositor::GpuSourceKind::Camera,
-                        content_key: None,
+                        content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                            namespace: CAMERA_CAPTURE_STORAGE_CONTENT_NAMESPACE,
+                            revision: frame.storage_identity(),
+                            variant: 0,
+                        }),
                         iosurface: frame.source_iosurface.as_ref(),
                         pixel_buffer: frame.source_pixel_buffer.as_ref(),
                         width: frame.width as usize,
@@ -2611,7 +4772,16 @@ fn try_gpu_compose(
                         crop,
                         mirror: layout.camera_mirror,
                         mask: camera_mask(layout),
-                        blend: false,
+                        // The keyed camera is the one capture source that
+                        // blends: its alpha comes from the shader's keyer,
+                        // not the (untrustworthy) capture alpha channel.
+                        blend: camera_chroma_key(layout)
+                            .as_ref()
+                            .and_then(scene_chroma_key_into_metal)
+                            .is_some(),
+                        chroma_key: camera_chroma_key(layout)
+                            .as_ref()
+                            .and_then(scene_chroma_key_into_metal),
                     });
                 } else {
                     let placeholder =
@@ -2625,6 +4795,7 @@ fn try_gpu_compose(
                             SceneFit::Contain
                         ),
                         source_crop,
+                        source_cover_pan(&SceneSourceKind::Camera, layout),
                         inputs.width,
                         inputs.height,
                     )
@@ -2642,6 +4813,7 @@ fn try_gpu_compose(
                         mirror: layout.camera_mirror,
                         mask: camera_mask(layout),
                         blend: false,
+                        chroma_key: None,
                     });
                 }
             }
@@ -2673,6 +4845,7 @@ fn try_gpu_compose(
                         rect,
                         screen_contain,
                         source_crop,
+                        source_cover_pan(&source.kind, layout),
                         inputs.width,
                         inputs.height,
                     )
@@ -2680,7 +4853,11 @@ fn try_gpu_compose(
                     prepared_sources.push(PreparedGpuSource {
                         pixels: PreparedGpuSourcePixels::Borrowed(&frame.bytes),
                         kind: source_kind,
-                        content_key: None,
+                        content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                            namespace: SCREEN_CAPTURE_STORAGE_CONTENT_NAMESPACE,
+                            revision: frame.storage_identity(),
+                            variant: 0,
+                        }),
                         iosurface: frame.source_iosurface.as_ref(),
                         pixel_buffer: frame.source_pixel_buffer.as_ref(),
                         width: frame.width as usize,
@@ -2690,6 +4867,7 @@ fn try_gpu_compose(
                         mirror: false,
                         mask: SceneMask::None,
                         blend: false,
+                        chroma_key: None,
                     });
                 } else {
                     let placeholder =
@@ -2700,6 +4878,7 @@ fn try_gpu_compose(
                         rect,
                         screen_contain,
                         source_crop,
+                        source_cover_pan(&source.kind, layout),
                         inputs.width,
                         inputs.height,
                     )
@@ -2717,17 +4896,20 @@ fn try_gpu_compose(
                         mirror: false,
                         mask: SceneMask::None,
                         blend: false,
+                        chroma_key: None,
                     });
                 }
             }
             SceneSourceKind::TestPattern => {
-                let pattern = synthetic_test_pattern_bgra(inputs.sequence);
+                let pattern =
+                    synthetic_test_pattern_bgra(inputs.sequence, inputs.width, inputs.height);
                 let (dest, crop) = gpu_source_placement(
                     pattern.width as u32,
                     pattern.height as u32,
                     rect,
                     false,
                     SceneCrop::none(),
+                    (0.0, 0.0),
                     inputs.width,
                     inputs.height,
                 )
@@ -2745,6 +4927,7 @@ fn try_gpu_compose(
                     mirror: false,
                     mask: SceneMask::None,
                     blend: false,
+                    chroma_key: None,
                 });
             }
         }
@@ -2807,6 +4990,10 @@ fn source_import_stats_from_metal(
         iosurface_frames: stats.iosurface_frames,
         cvpixelbuffer_frames: stats.cvpixelbuffer_frames,
         byte_upload_frames: stats.byte_upload_frames,
+        capture_texture_reuses: stats.capture_texture_reuses,
+        camera_capture_texture_reuses: stats.camera_capture_texture_reuses,
+        screen_capture_texture_reuses: stats.screen_capture_texture_reuses,
+        texture_cache_flushes: stats.texture_cache_flushes,
         import_failures: stats.import_failures,
         camera_iosurface_frames: stats.camera_iosurface_frames,
         camera_cvpixelbuffer_frames: stats.camera_cvpixelbuffer_frames,
@@ -2818,6 +5005,23 @@ fn source_import_stats_from_metal(
         screen_import_failures: stats.screen_import_failures,
         import_time_ms: stats.import_time_ms,
     }
+}
+
+#[cfg(target_os = "macos")]
+fn take_failed_gpu_timings(gpu: Option<&mut GpuCompositor>) -> GpuCompositorTimings {
+    let source_import_stats = gpu
+        .map(GpuCompositor::take_pending_source_import_stats)
+        .map(source_import_stats_from_metal)
+        .unwrap_or_default();
+    GpuCompositorTimings {
+        source_import_stats,
+        ..GpuCompositorTimings::default()
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn take_failed_gpu_timings(_gpu: Option<&mut GpuCompositor>) -> GpuCompositorTimings {
+    GpuCompositorTimings::default()
 }
 
 #[cfg(target_os = "macos")]
@@ -2945,7 +5149,70 @@ fn missing_source_placeholder_bgra(
     }
 }
 
-fn synthetic_test_pattern_bgra(sequence: u64) -> SyntheticTestPatternBgra {
+/// Hard-content mode (VIDEORC_SYNTHETIC_HARD_CONTENT=1): the 64x64 pattern is
+/// trivially cheap to encode at any canvas size, so bridge-pressure defects
+/// (encoder falling behind realtime, ring starvation, latency-contract kills)
+/// are invisible to the smokes — the 0.9.44 regression shipped through green
+/// gates exactly this way. Hard mode paints deterministic per-frame noise at
+/// quarter-canvas resolution: every macroblock changes every frame and the
+/// encoder does real-content work.
+fn synthetic_hard_content_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT")
+            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    })
+}
+
+fn xorshift64(state: &mut u64) -> u64 {
+    let mut value = *state;
+    value ^= value << 13;
+    value ^= value >> 7;
+    value ^= value << 17;
+    *state = value;
+    value
+}
+
+fn synthetic_hard_content_bgra(
+    sequence: u64,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> SyntheticTestPatternBgra {
+    let width = (canvas_width as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_WIDTH, 960);
+    let height = (canvas_height as usize / 4).clamp(SYNTHETIC_TEST_PATTERN_HEIGHT, 960);
+    let mut bytes = vec![0; width * height * 4];
+    // Deterministic per (frame, run): reproducible artifacts, zero skip blocks.
+    let mut rng = sequence.wrapping_mul(0x9E37_79B9_7F4A_7C15).max(1);
+    for pixel in bytes.as_chunks_mut::<4>().0 {
+        let noise = xorshift64(&mut rng);
+        pixel[0] = noise as u8;
+        pixel[1] = (noise >> 8) as u8;
+        pixel[2] = (noise >> 16) as u8;
+        pixel[3] = 255;
+    }
+    crate::synthetic_diagnostic::overlay_frame_markers(
+        &mut bytes,
+        width,
+        height,
+        sequence,
+        crate::synthetic_diagnostic::SYNTHETIC_TIMECODE_FPS,
+    );
+    SyntheticTestPatternBgra {
+        bytes,
+        width,
+        height,
+    }
+}
+
+fn synthetic_test_pattern_bgra(
+    sequence: u64,
+    canvas_width: u32,
+    canvas_height: u32,
+) -> SyntheticTestPatternBgra {
+    if synthetic_hard_content_enabled() {
+        return synthetic_hard_content_bgra(sequence, canvas_width, canvas_height);
+    }
     let width = SYNTHETIC_TEST_PATTERN_WIDTH;
     let height = SYNTHETIC_TEST_PATTERN_HEIGHT;
     let mut bytes = vec![0; width * height * 4];
@@ -3034,16 +5301,21 @@ fn gpu_compositor_frame(
 }
 
 #[cfg(target_os = "macos")]
+// Placement is a flat description of one draw: geometry in, shader vec4s out.
+// Bundling the eight scalars into structs would add indirection at ~10 call
+// sites for no reuse.
+#[allow(clippy::too_many_arguments)]
 fn gpu_source_placement(
     source_width: u32,
     source_height: u32,
     rect: PixelRect,
     contain: bool,
     crop: SceneCrop,
+    pan: (f64, f64),
     output_width: u32,
     output_height: u32,
 ) -> Option<([f32; 4], [f32; 4])> {
-    let fit = source_fit(source_width, source_height, rect, contain, crop)?;
+    let fit = source_fit(source_width, source_height, rect, contain, crop, pan)?;
     let output_width = f64::from(output_width.max(1));
     let output_height = f64::from(output_height.max(1));
     let source_width = f64::from(source_width.max(1));
@@ -3064,6 +5336,202 @@ fn gpu_source_placement(
 }
 
 #[cfg(test)]
+mod scene_motion_tests {
+    use super::*;
+    use crate::protocol::{Scene, SceneSource, SceneSourceKind, SceneTransform};
+
+    fn transform(x: f64, y: f64, width: f64, height: f64) -> SceneTransform {
+        SceneTransform {
+            x,
+            y,
+            width,
+            height,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        }
+    }
+
+    fn source(kind: SceneSourceKind, t: SceneTransform) -> SceneSource {
+        SceneSource {
+            id: format!("{kind:?}"),
+            kind,
+            name: String::new(),
+            device_id: None,
+            visible: true,
+            locked: false,
+            transform: t.clone(),
+            default_transform: t,
+        }
+    }
+
+    fn scene_with(sources: Vec<SceneSource>) -> Scene {
+        Scene {
+            id: "scene".to_string(),
+            name: "scene".to_string(),
+            sources,
+            outputs: Vec::new(),
+            background: None,
+        }
+    }
+
+    #[test]
+    fn background_commit_mid_glide_carries_the_glide_forward() {
+        // Config reloads and camera installs re-commit the scene WITHOUT a
+        // transition while a glide is running. That commit must not snap —
+        // it continues from the current effective transforms across the
+        // remaining time (owner-reported 0.9.63 glitch: the glide aborted
+        // with a visible jump when the camera pipeline re-committed).
+        let now = Instant::now();
+        let from = scene_with(vec![source(
+            SceneSourceKind::Camera,
+            transform(0.4, 0.2, 0.4, 0.6),
+        )]);
+        let carried = next_scene_transition(
+            None,
+            Some(from.clone()),
+            true,
+            Some(Duration::from_millis(180)),
+            now,
+        )
+        .expect("an active glide must survive a background commit");
+        assert_eq!(carried.duration, Duration::from_millis(180));
+        assert_eq!(carried.started_at, now);
+        assert_eq!(carried.from, from);
+        // No active glide -> a background commit stays instant.
+        assert!(next_scene_transition(None, Some(from.clone()), true, None, now).is_none());
+        // An explicit 0 is a REQUEST for instant and cancels a running glide.
+        assert!(
+            next_scene_transition(
+                Some(0),
+                Some(from.clone()),
+                true,
+                Some(Duration::from_millis(180)),
+                now
+            )
+            .is_none()
+        );
+        // A motion request installs the requested duration (clamped).
+        let requested =
+            next_scene_transition(Some(5_000), Some(from), true, None, now).expect("installs");
+        assert_eq!(requested.duration, Duration::from_millis(1_000));
+    }
+
+    #[test]
+    fn easing_is_soft_bounded_and_monotonic() {
+        assert_eq!(ease_in_out_cubic(0.0), 0.0);
+        assert_eq!(ease_in_out_cubic(1.0), 1.0);
+        assert!((ease_in_out_cubic(0.5) - 0.5).abs() < 1e-9);
+        // No overshoot, ever — the nothing-bounces rule.
+        let mut previous = 0.0;
+        for step in 0..=100 {
+            let value = ease_in_out_cubic(f64::from(step) / 100.0);
+            assert!((0.0..=1.0).contains(&value));
+            assert!(value >= previous);
+            previous = value;
+        }
+        // Out-of-range inputs clamp instead of extrapolating.
+        assert_eq!(ease_in_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_in_out_cubic(2.0), 1.0);
+    }
+
+    #[test]
+    fn mid_transition_geometry_sits_between_the_two_layouts() {
+        // The owner's example: side-by-side camera gliding to the corner.
+        let from_camera = transform(0.7, 0.0, 0.3, 1.0);
+        let to_camera = transform(0.75, 0.05, 0.2, 0.2);
+        let transition = SceneTransition {
+            from: scene_with(vec![source(SceneSourceKind::Camera, from_camera.clone())]),
+            started_at: Instant::now() - Duration::from_millis(160),
+            duration: Duration::from_millis(320),
+        };
+        let animated = scene_with_transition(
+            scene_with(vec![source(SceneSourceKind::Camera, to_camera.clone())]),
+            &transition,
+            Instant::now(),
+        );
+        let camera = &animated.sources[0].transform;
+        // Strictly between the endpoints on every animated axis.
+        assert!(camera.x > from_camera.x && camera.x < to_camera.x);
+        assert!(camera.width < from_camera.width && camera.width > to_camera.width);
+        assert!(camera.height < from_camera.height && camera.height > to_camera.height);
+    }
+
+    #[test]
+    fn finished_transition_returns_the_target_scene_untouched() {
+        let to = scene_with(vec![source(
+            SceneSourceKind::Camera,
+            transform(0.1, 0.1, 0.2, 0.2),
+        )]);
+        let transition = SceneTransition {
+            from: scene_with(vec![source(
+                SceneSourceKind::Camera,
+                transform(0.0, 0.0, 1.0, 1.0),
+            )]),
+            started_at: Instant::now() - Duration::from_secs(5),
+            duration: Duration::from_millis(320),
+        };
+        let animated = scene_with_transition(to.clone(), &transition, Instant::now());
+        assert_eq!(
+            animated, to,
+            "an expired glide must cost and change nothing"
+        );
+    }
+
+    #[test]
+    fn base_family_glides_across_capture_kinds_and_entrants_grow_in() {
+        // Screen in the old scene, Window in the new: same slot, must glide.
+        let transition = SceneTransition {
+            from: scene_with(vec![source(
+                SceneSourceKind::Screen,
+                transform(0.0, 0.0, 0.7, 1.0),
+            )]),
+            started_at: Instant::now() - Duration::from_millis(160),
+            duration: Duration::from_millis(320),
+        };
+        let animated = scene_with_transition(
+            scene_with(vec![
+                source(SceneSourceKind::Window, transform(0.0, 0.0, 1.0, 1.0)),
+                source(SceneSourceKind::Camera, transform(0.75, 0.05, 0.2, 0.2)),
+            ]),
+            &transition,
+            Instant::now(),
+        );
+        let window = &animated.sources[0].transform;
+        assert!(
+            window.width > 0.7 && window.width < 1.0,
+            "base glides across kinds"
+        );
+        // The camera has no predecessor: grows in from 92% about its center.
+        let camera = &animated.sources[1].transform;
+        assert!(camera.width > 0.2 * 0.92 && camera.width < 0.2);
+        assert!(camera.x > 0.75 && camera.x < 0.75 + 0.2 * 0.04 + 1e-9);
+    }
+
+    #[test]
+    fn zero_or_absent_duration_never_installs_motion() {
+        let transition = SceneTransition {
+            from: scene_with(vec![source(
+                SceneSourceKind::Camera,
+                transform(0.0, 0.0, 1.0, 1.0),
+            )]),
+            started_at: Instant::now(),
+            duration: Duration::from_millis(0),
+        };
+        let to = scene_with(vec![source(
+            SceneSourceKind::Camera,
+            transform(0.1, 0.1, 0.2, 0.2),
+        )]);
+        assert_eq!(
+            scene_with_transition(to.clone(), &transition, Instant::now()),
+            to,
+            "zero duration is an instant switch"
+        );
+    }
+}
+
+#[cfg(test)]
 fn rgba_to_bgra_bytes(rgba: &[u8]) -> Vec<u8> {
     let mut bgra = Vec::with_capacity(rgba.len());
     for pixel in rgba.chunks_exact(4) {
@@ -3073,7 +5541,7 @@ fn rgba_to_bgra_bytes(rgba: &[u8]) -> Vec<u8> {
 }
 
 fn rgba_to_bgra_in_place(bytes: &mut [u8]) {
-    for pixel in bytes.chunks_exact_mut(4) {
+    for pixel in bytes.as_chunks_mut::<4>().0 {
         pixel.swap(0, 2);
     }
 }
@@ -3110,7 +5578,7 @@ async fn publish_compositor_frame(
     height: u32,
     live_sources: &mut CompositorLiveSources,
     render_cache: &mut CompositorRenderCache,
-    gpu: Option<&mut GpuCompositor>,
+    mut gpu: Option<&mut GpuCompositor>,
     frame_consumer: CompositorFrameConsumer,
     stream_output: Option<CompositorAuxiliaryOutput>,
     stream_gpu: Option<&mut GpuCompositor>,
@@ -3124,7 +5592,11 @@ async fn publish_compositor_frame(
     render_cache.refresh_nonblocking(state);
     let frame_store = render_cache.frame_store.clone();
     let stream_frame_store = render_cache.stream_frame_store.clone();
-    let snapshot = render_cache.snapshot.clone();
+    let snapshot = snapshot_with_transition(
+        render_cache.snapshot.clone(),
+        render_cache.transition.as_ref(),
+        Instant::now(),
+    );
     // The simulcast leg composes its own scene; without a simulcast-bound aux
     // it is inert and the tick behaves byte-identically to before.
     let simulcast_snapshot = stream_output
@@ -3222,20 +5694,25 @@ async fn publish_compositor_frame(
             },
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
-        match try_gpu_compose(gpu, &inputs, frame_consumer.publishes_cpu_yuv()) {
+        match try_gpu_compose(
+            gpu.as_deref_mut(),
+            &inputs,
+            frame_consumer.publishes_cpu_yuv(),
+        ) {
             Ok(frame) => {
                 bytes = frame.yuv;
                 pixel_format = frame.pixel_format;
                 export_handle = frame.export_handle;
                 timings.gpu_prepare_ms = frame.timings.prepare_ms;
                 timings.gpu_source_texture_ms = frame.timings.source_texture_ms;
-                timings.source_import_stats = frame.timings.source_import_stats;
                 timings.gpu_command_wait_ms = frame.timings.command_wait_ms;
                 timings.gpu_total_ms = frame.timings.total_ms;
                 timings.merge_gpu(frame.timings);
                 compositor_backend = CompositorBackend::Metal;
             }
             Err(reason) => {
+                let failed_gpu_timings = take_failed_gpu_timings(gpu);
+                timings.merge_gpu(failed_gpu_timings);
                 // On macOS a Metal miss is a real degradation worth surfacing;
                 // off macOS the CPU compositor IS the path, so the "why not
                 // Metal" reason is noise (backend already set to Cpu above).
@@ -3245,10 +5722,12 @@ async fn publish_compositor_frame(
                     let _ = reason;
                 }
                 if frame_consumer.requires_cpu_fallback() {
-                    let mut store = frame_store
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    bytes = store.checkout_buffer(raw_yuv420p_len(width, height));
+                    bytes = {
+                        let mut store = frame_store
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner());
+                        store.checkout_buffer(raw_yuv420p_len(width, height))
+                    };
                     render_compositor_yuv420p_frame(inputs, &mut bytes);
                 } else {
                     bytes = Vec::new();
@@ -3351,7 +5830,7 @@ fn set_latest_frame_evidence_if_current_run(
     if compositor.run_id.as_deref() != Some(run_id) {
         return false;
     }
-    compositor.latest_frame_evidence = Some(evidence);
+    push_frame_evidence(&mut compositor.frame_evidence, evidence);
     true
 }
 
@@ -3371,20 +5850,22 @@ fn publish_auxiliary_compositor_frame(
     captured_at: Instant,
     frame_store: CompositorFrameStore,
     inputs: CompositorRenderInputs<'_>,
-    gpu: Option<&mut GpuCompositor>,
+    mut gpu: Option<&mut GpuCompositor>,
     frame_consumer: CompositorFrameConsumer,
 ) -> Option<GpuCompositorTimings> {
     let width = inputs.width;
     let height = inputs.height;
     let mut pixel_format = CompositorPixelFormat::yuv420p_cpu_buffer();
     let mut export_handle = CompositorFrameExportHandle::default();
-    let mut gpu_timings = None;
-    let bytes = match try_gpu_compose(gpu, &inputs, frame_consumer.publishes_cpu_yuv()) {
+    let (bytes, gpu_timings) = match try_gpu_compose(
+        gpu.as_deref_mut(),
+        &inputs,
+        frame_consumer.publishes_cpu_yuv(),
+    ) {
         Ok(frame) => {
             pixel_format = frame.pixel_format;
             export_handle = frame.export_handle;
-            gpu_timings = Some(frame.timings);
-            frame.yuv
+            (frame.yuv, Some(frame.timings))
         }
         Err(_) if frame_consumer.requires_cpu_fallback() => {
             let mut bytes = {
@@ -3394,9 +5875,9 @@ fn publish_auxiliary_compositor_frame(
                 store.checkout_buffer(raw_yuv420p_len(width, height))
             };
             render_compositor_yuv420p_frame(inputs, &mut bytes);
-            bytes
+            (bytes, Some(take_failed_gpu_timings(gpu)))
         }
-        Err(_) => return None,
+        Err(_) => return Some(take_failed_gpu_timings(gpu)),
     };
     let mut store = frame_store
         .lock()
@@ -3507,6 +5988,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
             scene_content_rect_pixels(stage_margin, width, height),
             SourceRenderOptions {
                 crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
                 // Screen-image stand-ins are screen-like: contain, never crop.
                 contain: matches!(
                     compositor_scene_source_fit(&SceneSourceKind::Screen, &snapshot.layout),
@@ -3514,6 +5996,7 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                 ),
                 mirror_x: false,
                 mask: SceneMask::None,
+                chroma_key: None,
             },
         )
     {
@@ -3555,9 +6038,11 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                         rect,
                         SourceRenderOptions {
                             crop: scene_crop_from_transform(&transform),
+                            pan: (0.0, 0.0),
                             contain: screen_contain,
                             mirror_x: false,
                             mask: SceneMask::None,
+                            chroma_key: None,
                         },
                     )
                 } else if let Some(frame) = screen_frame {
@@ -3574,9 +6059,11 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                         rect,
                         SourceRenderOptions {
                             crop: scene_crop_from_transform(&transform),
+                            pan: (0.0, 0.0),
                             contain: screen_contain,
                             mirror_x: false,
                             mask: SceneMask::None,
+                            chroma_key: None,
                         },
                     )
                 } else {
@@ -3597,12 +6084,14 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                     rect,
                     SourceRenderOptions {
                         crop: scene_crop_from_transform(&transform),
+                        pan: source_cover_pan(&SceneSourceKind::Camera, &snapshot.layout),
                         contain: matches!(
                             scene_source_fit(&SceneSourceKind::Camera, &snapshot.layout),
                             SceneFit::Contain
                         ),
                         mirror_x: snapshot.layout.camera_mirror,
                         mask: camera_mask(&snapshot.layout),
+                        chroma_key: camera_chroma_key(&snapshot.layout),
                     },
                 )
             }),
@@ -3648,8 +6137,8 @@ fn try_update_compositor_frame_progress(
     compositor.status.state = CompositorState::Live;
     compositor.status.frames_rendered = frames_rendered;
     compositor.status.frame_scene_revision = compositor
-        .latest_frame_evidence
-        .as_ref()
+        .frame_evidence
+        .back()
         .filter(|evidence| evidence.sequence == frames_rendered)
         .and_then(|evidence| evidence.scene_revision);
     compositor.status.frame_age_ms = Some(frame_age_ms);
@@ -3686,8 +6175,8 @@ fn try_update_compositor_status(
     compositor.status.render_fps = Some(metrics.render_fps);
     compositor.status.frames_rendered = metrics.frames_rendered;
     compositor.status.frame_scene_revision = compositor
-        .latest_frame_evidence
-        .as_ref()
+        .frame_evidence
+        .back()
         .filter(|evidence| evidence.sequence == metrics.frames_rendered)
         .and_then(|evidence| evidence.scene_revision);
     compositor.status.repeated_frames = metrics.repeated_frames;
@@ -3809,9 +6298,14 @@ enum SourcePixelFormat {
 #[derive(Debug, Clone, Copy)]
 struct SourceRenderOptions {
     crop: SceneCrop,
+    /// Fill-mode cover pan (normalized -1..=1); see `source_cover_pan`.
+    pan: (f64, f64),
     contain: bool,
     mirror_x: bool,
     mask: SceneMask,
+    /// Camera chroma key from the shared spec; keyed pixels blend fractionally
+    /// into the frame instead of overwriting (mirrors the Metal shader keyer).
+    chroma_key: Option<ChromaKeySpec>,
 }
 
 struct RgbaSource<'a> {
@@ -3819,6 +6313,82 @@ struct RgbaSource<'a> {
     width: u32,
     height: u32,
     format: SourcePixelFormat,
+}
+
+/// Renders a camera source into a small, transparent BGRA overlay ready for
+/// upload to the Windows D3D11 video processor. The full-size screen remains a
+/// retained GPU texture; only the camera inset is sampled on the CPU.
+///
+/// Keeping this beside the CPU compositor's source-fit helpers makes the
+/// direct Windows path share the same crop, fit, mirror, and mask behavior.
+#[cfg(target_os = "windows")]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_camera_overlay_bgra(
+    source_bytes: &[u8],
+    source_width: u32,
+    source_height: u32,
+    overlay_width: u32,
+    overlay_height: u32,
+    crop: SceneCrop,
+    contain: bool,
+    mirror_x: bool,
+    mask: SceneMask,
+    output: &mut Vec<u8>,
+) -> bool {
+    let source = RgbaSource {
+        bytes: source_bytes,
+        width: source_width,
+        height: source_height,
+        format: SourcePixelFormat::Bgra,
+    };
+    if source.width == 0 || source.height == 0 || source.bytes.len() < source_pixel_len(&source) {
+        return false;
+    }
+    let rect = PixelRect {
+        x: 0,
+        y: 0,
+        width: overlay_width,
+        height: overlay_height,
+    };
+    let Some(fit) = source_fit(source_width, source_height, rect, contain, crop, (0.0, 0.0)) else {
+        return false;
+    };
+    let Some(byte_len) = usize::try_from(overlay_width)
+        .ok()
+        .and_then(|width| {
+            usize::try_from(overlay_height)
+                .ok()
+                .and_then(|height| width.checked_mul(height))
+        })
+        .and_then(|pixels| pixels.checked_mul(4))
+    else {
+        return false;
+    };
+    output.resize(byte_len, 0);
+    output.fill(0);
+    let row_len = overlay_width as usize * 4;
+    output
+        .par_chunks_mut(row_len)
+        .enumerate()
+        .for_each(|(dest_y, row)| {
+            for dest_x in 0..overlay_width as usize {
+                if !source_mask_allows(mask, dest_x, dest_y, &fit) {
+                    continue;
+                }
+                let Some((source_x, source_y)) =
+                    map_source_pixel(dest_x as u32, dest_y as u32, &source, &fit, mirror_x)
+                else {
+                    continue;
+                };
+                let (r, g, b, alpha) = read_source_rgba(&source, source_x, source_y);
+                let offset = dest_x * 4;
+                row[offset] = b;
+                row[offset + 1] = g;
+                row[offset + 2] = r;
+                row[offset + 3] = alpha;
+            }
+        });
+    true
 }
 
 fn cached_image_cpu_pixels(
@@ -3867,9 +6437,11 @@ fn render_scene_background(
         },
         SourceRenderOptions {
             crop: background_zoom_crop(Some(background)),
+            pan: (0.0, 0.0),
             contain: matches!(background.fit, BackgroundFit::Fit),
             mirror_x: false,
             mask: SceneMask::None,
+            chroma_key: None,
         },
     )
 }
@@ -3962,7 +6534,7 @@ fn render_synthetic_source_rect(
     rect: PixelRect,
     bytes: &mut [u8],
 ) {
-    let pattern = synthetic_test_pattern_bgra(sequence);
+    let pattern = synthetic_test_pattern_bgra(sequence, canvas_width, canvas_height);
     let source = RgbaSource {
         bytes: &pattern.bytes,
         width: pattern.width as u32,
@@ -3977,9 +6549,11 @@ fn render_synthetic_source_rect(
         rect,
         SourceRenderOptions {
             crop: SceneCrop::none(),
+            pan: (0.0, 0.0),
             contain: false,
             mirror_x: false,
             mask: SceneMask::None,
+            chroma_key: None,
         },
     );
 }
@@ -3992,7 +6566,7 @@ const OVERLAY_COLLISION_GAP: f64 = 0.02;
 /// creator also chooses captions on that edge, reserve the complete highlight
 /// bitmap plus a small title-safe gap. Both CPU and Metal paths consume this
 /// value, so the live stream cannot diverge from preview/recording output.
-fn caption_overlay_safe_inset(
+pub(crate) fn caption_overlay_safe_inset(
     caption: Option<&crate::captions::CaptionOverlay>,
     highlight: Option<&crate::captions::CaptionOverlay>,
     canvas_height: u32,
@@ -4034,7 +6608,7 @@ pub(crate) fn caption_overlay_layout(
     )
 }
 
-fn caption_overlay_layout_with_inset(
+pub(crate) fn caption_overlay_layout_with_inset(
     overlay_width: usize,
     overlay_height: usize,
     canvas_width: usize,
@@ -4057,6 +6631,12 @@ fn caption_overlay_layout_with_inset(
         }
     };
     (source_left, dest_left, dest_top, draw_width.max(1))
+}
+
+/// Straight-alpha source-over for one plane sample, shared by the caption
+/// overlay blit and the chroma-keyed camera blit.
+fn alpha_blend_channel(src: u8, dst: u8, alpha: u16) -> u8 {
+    ((u16::from(src) * alpha + u16::from(dst) * (255 - alpha)) / 255) as u8
 }
 
 fn composite_caption_overlay(
@@ -4102,9 +6682,7 @@ fn composite_caption_overlay(
             overlay.rgba[index + 3],
         )
     };
-    let blend = |src: u8, dst: u8, alpha: u16| -> u8 {
-        ((u16::from(src) * alpha + u16::from(dst) * (255 - alpha)) / 255) as u8
-    };
+    let blend = alpha_blend_channel;
 
     for row in 0..draw_height {
         let dest_y = dest_top + row;
@@ -4160,6 +6738,7 @@ fn blit_rgba_to_yuv420p(
         rect,
         options.contain,
         options.crop,
+        options.pan,
     ) else {
         return false;
     };
@@ -4168,59 +6747,197 @@ fn blit_rgba_to_yuv420p(
     let y_len = canvas_width * canvas_height;
     let uv_width = canvas_width.div_ceil(2);
     let uv_height = canvas_height.div_ceil(2);
-    let u_start = y_len;
-    let v_start = y_len + uv_width * uv_height;
     let draw_left = fit.x as usize;
     let draw_top = fit.y as usize;
     let draw_right = fit.x.saturating_add(fit.width).min(canvas_width as u32) as usize;
     let draw_bottom = fit.y.saturating_add(fit.height).min(canvas_height as u32) as usize;
-
-    for dest_y in draw_top..draw_bottom {
-        for dest_x in draw_left..draw_right {
-            if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
-                continue;
-            }
-            let Some((source_x, source_y)) =
-                map_source_pixel(dest_x as u32, dest_y as u32, source, &fit, options.mirror_x)
-            else {
-                continue;
-            };
-            let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
-            if a < 16 {
-                continue;
-            }
-            let (y_value, _u_value, _v_value) = rgb_to_yuv(r, g, b);
-            dest[dest_y * canvas_width + dest_x] = y_value;
-        }
+    if options.mask == SceneMask::None
+        && options.chroma_key.is_none()
+        && !options.mirror_x
+        && fit.source_x == 0.0
+        && fit.source_y == 0.0
+        && fit.source_width == f64::from(source.width)
+        && fit.source_height == f64::from(source.height)
+        && fit.width == source.width
+        && fit.height == source.height
+    {
+        blit_untransformed_rgba_to_yuv420p(
+            source,
+            dest,
+            canvas_width,
+            canvas_height,
+            draw_left,
+            draw_top,
+            draw_right,
+            draw_bottom,
+        );
+        return true;
     }
+
+    // Chroma key: resolve the source pixel to (rgb after despill, key alpha).
+    // None means the pixel keys fully out. Without a spec every pixel is the
+    // historical opaque overwrite (alpha 255) — byte-identical to before.
+    let keyed_pixel = |r: u8, g: u8, b: u8| -> Option<(u8, u8, u8, u8)> {
+        let Some(spec) = options.chroma_key.as_ref() else {
+            return Some((r, g, b, 255));
+        };
+        let key_alpha = chroma_key_alpha(spec, r, g, b);
+        if key_alpha == 0 {
+            return None;
+        }
+        let (r, g, b) = chroma_key_despill(spec, r, g, b);
+        Some((r, g, b, key_alpha))
+    };
 
     let uv_left = draw_left / 2;
     let uv_top = draw_top / 2;
     let uv_right = draw_right.div_ceil(2).min(uv_width);
     let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
-    for uv_y in uv_top..uv_bottom {
-        for uv_x in uv_left..uv_right {
-            let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
-            let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
-            if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
-                continue;
-            }
-            let Some((source_x, source_y)) =
-                map_source_pixel(dest_x as u32, dest_y as u32, source, &fit, options.mirror_x)
-            else {
-                continue;
-            };
-            let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
-            if a < 16 {
-                continue;
-            }
-            let (_y_value, u_value, v_value) = rgb_to_yuv(r, g, b);
-            let uv_index = uv_y * uv_width + uv_x;
-            dest[u_start + uv_index] = u_value;
-            dest[v_start + uv_index] = v_value;
-        }
-    }
+    let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
+    let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
+    rayon::join(
+        || {
+            y_plane[draw_top * canvas_width..draw_bottom * canvas_width]
+                .par_chunks_mut(canvas_width)
+                .enumerate()
+                .for_each(|(relative_y, row)| {
+                    let dest_y = draw_top + relative_y;
+                    for (dest_x, output) in
+                        row.iter_mut().enumerate().take(draw_right).skip(draw_left)
+                    {
+                        if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                            continue;
+                        }
+                        let Some((source_x, source_y)) = map_source_pixel(
+                            dest_x as u32,
+                            dest_y as u32,
+                            source,
+                            &fit,
+                            options.mirror_x,
+                        ) else {
+                            continue;
+                        };
+                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                        if a < 16 {
+                            continue;
+                        }
+                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                            continue;
+                        };
+                        let (y_value, _u_value, _v_value) = rgb_to_yuv(r, g, b);
+                        *output = if key_alpha == 255 {
+                            y_value
+                        } else {
+                            alpha_blend_channel(y_value, *output, u16::from(key_alpha))
+                        };
+                    }
+                });
+        },
+        || {
+            u_plane[uv_top * uv_width..uv_bottom * uv_width]
+                .par_chunks_mut(uv_width)
+                .zip(v_plane[uv_top * uv_width..uv_bottom * uv_width].par_chunks_mut(uv_width))
+                .enumerate()
+                .for_each(|(relative_y, (u_row, v_row))| {
+                    let uv_y = uv_top + relative_y;
+                    for uv_x in uv_left..uv_right {
+                        let dest_x = (uv_x * 2).min(draw_right.saturating_sub(1));
+                        let dest_y = (uv_y * 2).min(draw_bottom.saturating_sub(1));
+                        if !source_mask_allows(options.mask, dest_x, dest_y, &fit) {
+                            continue;
+                        }
+                        let Some((source_x, source_y)) = map_source_pixel(
+                            dest_x as u32,
+                            dest_y as u32,
+                            source,
+                            &fit,
+                            options.mirror_x,
+                        ) else {
+                            continue;
+                        };
+                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                        if a < 16 {
+                            continue;
+                        }
+                        let Some((r, g, b, key_alpha)) = keyed_pixel(r, g, b) else {
+                            continue;
+                        };
+                        let (_y_value, u_value, v_value) = rgb_to_yuv(r, g, b);
+                        if key_alpha == 255 {
+                            u_row[uv_x] = u_value;
+                            v_row[uv_x] = v_value;
+                        } else {
+                            u_row[uv_x] =
+                                alpha_blend_channel(u_value, u_row[uv_x], u16::from(key_alpha));
+                            v_row[uv_x] =
+                                alpha_blend_channel(v_value, v_row[uv_x], u16::from(key_alpha));
+                        }
+                    }
+                });
+        },
+    );
     true
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blit_untransformed_rgba_to_yuv420p(
+    source: &RgbaSource<'_>,
+    dest: &mut [u8],
+    canvas_width: usize,
+    canvas_height: usize,
+    draw_left: usize,
+    draw_top: usize,
+    draw_right: usize,
+    draw_bottom: usize,
+) {
+    let y_len = canvas_width * canvas_height;
+    let uv_width = canvas_width.div_ceil(2);
+    let uv_height = canvas_height.div_ceil(2);
+    let uv_left = draw_left / 2;
+    let uv_top = draw_top / 2;
+    let uv_right = draw_right.div_ceil(2).min(uv_width);
+    let uv_bottom = draw_bottom.div_ceil(2).min(uv_height);
+    let (y_plane, chroma_planes) = dest.split_at_mut(y_len);
+    let (u_plane, v_plane) = chroma_planes.split_at_mut(uv_width * uv_height);
+    rayon::join(
+        || {
+            y_plane[draw_top * canvas_width..draw_bottom * canvas_width]
+                .par_chunks_mut(canvas_width)
+                .enumerate()
+                .for_each(|(relative_y, row)| {
+                    let dest_y = draw_top + relative_y;
+                    let source_y = (dest_y - draw_top) as u32;
+                    for (dest_x, output) in
+                        row.iter_mut().enumerate().take(draw_right).skip(draw_left)
+                    {
+                        let source_x = (dest_x - draw_left) as u32;
+                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                        if a >= 16 {
+                            *output = rgb_to_yuv(r, g, b).0;
+                        }
+                    }
+                });
+        },
+        || {
+            u_plane[uv_top * uv_width..uv_bottom * uv_width]
+                .par_chunks_mut(uv_width)
+                .zip(v_plane[uv_top * uv_width..uv_bottom * uv_width].par_chunks_mut(uv_width))
+                .enumerate()
+                .for_each(|(relative_y, (u_row, v_row))| {
+                    let uv_y = uv_top + relative_y;
+                    let source_y = (uv_y * 2).saturating_sub(draw_top) as u32;
+                    for uv_x in uv_left..uv_right {
+                        let source_x = (uv_x * 2).saturating_sub(draw_left) as u32;
+                        let (r, g, b, a) = read_source_rgba(source, source_x, source_y);
+                        if a >= 16 {
+                            let (_, u_value, v_value) = rgb_to_yuv(r, g, b);
+                            u_row[uv_x] = u_value;
+                            v_row[uv_x] = v_value;
+                        }
+                    }
+                });
+        },
+    );
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4235,12 +6952,28 @@ struct SourceFit {
     source_height: f64,
 }
 
+/// Fill-mode pan for a scene source: which part of the cover-crop aspect
+/// slack stays visible (normalized -1..=1). Only the camera has pan controls;
+/// every other source keeps the centered default. The mapping mirrors the
+/// legacy FFmpeg `crop_offset_expr`, keeping the three render paths in
+/// parity.
+fn source_cover_pan(kind: &SceneSourceKind, layout: &LayoutSettings) -> (f64, f64) {
+    match kind {
+        SceneSourceKind::Camera => (
+            f64::from(layout.camera_offset_x.clamp(-100, 100)) / 100.0,
+            f64::from(layout.camera_offset_y.clamp(-100, 100)) / 100.0,
+        ),
+        _ => (0.0, 0.0),
+    }
+}
+
 fn source_fit(
     source_width: u32,
     source_height: u32,
     rect: PixelRect,
     contain: bool,
     crop: SceneCrop,
+    pan: (f64, f64),
 ) -> Option<SourceFit> {
     if rect.width == 0 || rect.height == 0 || source_width == 0 || source_height == 0 {
         return None;
@@ -4272,11 +7005,18 @@ fn source_fit(
             source_height: source_h,
         })
     } else {
+        // Fill/cover: pan chooses WHICH part of the aspect slack stays
+        // visible instead of hard-centering it. fraction = (1 + pan) / 2
+        // mirrors the legacy FFmpeg crop_offset_expr ((in-out)/2 +
+        // offset*(in-out)/200), so all render paths agree — pan was silently
+        // ignored here, which made Pan X/Y no-ops at zoom 100 (owner report,
+        // 2026-08-19).
+        let pan_fraction = |pan: f64| (1.0 + pan.clamp(-1.0, 1.0)) / 2.0;
         let (source_x, source_y, fitted_source_width, fitted_source_height) =
             if source_aspect > rect_aspect {
                 let fitted_source_width = source_h * rect_aspect;
                 (
-                    source_x + (source_w - fitted_source_width) / 2.0,
+                    source_x + (source_w - fitted_source_width) * pan_fraction(pan.0),
                     source_y,
                     fitted_source_width,
                     source_h,
@@ -4285,7 +7025,7 @@ fn source_fit(
                 let fitted_source_height = source_w / rect_aspect;
                 (
                     source_x,
-                    source_y + (source_h - fitted_source_height) / 2.0,
+                    source_y + (source_h - fitted_source_height) * pan_fraction(pan.1),
                     source_w,
                     fitted_source_height,
                 )
@@ -4634,6 +7374,10 @@ mod tests {
         SceneConfigParams, SourceSelection, StreamScreenStatus, VideoPreset, VideoSettings,
     };
     use crate::storage::Database;
+    use crate::windows_d3d11_device::{
+        WindowsD3d11SynchronizationToken, WindowsD3d11TextureLeaseId,
+        WindowsD3d11TextureLeaseMetadata, WindowsD3d11TextureLeaseReleaseSender,
+    };
     use tokio::sync::broadcast;
 
     fn fp(camera: Option<u64>, screen: Option<u64>) -> SourceFrameFingerprint {
@@ -4649,6 +7393,64 @@ mod tests {
             (actual - expected).abs() < 0.000_001,
             "expected {actual} to be close to {expected}"
         );
+    }
+
+    #[test]
+    fn windows_d3d11_export_handle_is_role_bound_and_releases_on_final_clone() {
+        let (release_sender, release_receiver) =
+            WindowsD3d11TextureLeaseReleaseSender::bounded(2).unwrap();
+        let ticket = WindowsD3d11TextureLeaseTicket::new(
+            WindowsD3d11TextureLeaseMetadata {
+                generation: 3,
+                lease_id: WindowsD3d11TextureLeaseId::from_u64(11),
+                adapter_luid: DxgiAdapterLuid::from_u64(0x89ab_cdef_0123_4567),
+                width: 1920,
+                height: 1080,
+                format: WindowsD3d11TextureFormat::Nv12,
+                sequence: 27,
+                synchronization: WindowsD3d11SynchronizationToken {
+                    generation: 3,
+                    fence_value: 31,
+                },
+                role: WindowsD3d11MediaRole::Stream,
+            },
+            release_sender,
+        )
+        .unwrap();
+        let export = CompositorFrameExportHandle::d3d11_texture(ticket);
+        let retained = export.clone();
+
+        assert!(export.has_d3d11_texture());
+        assert!(
+            export
+                .d3d11_texture_for_role(WindowsD3d11MediaRole::Preview)
+                .is_none()
+        );
+        let handoff = export.d3d11_texture_handoff().unwrap();
+        assert_eq!(handoff.generation, 3);
+        assert_eq!(handoff.lease_id, 11);
+        assert_eq!(handoff.format, WindowsD3d11TextureFormat::Nv12);
+        assert_eq!(handoff.sequence, 27);
+        assert_eq!(handoff.fence_value, 31);
+
+        drop(export);
+        assert!(release_receiver.try_recv().is_err());
+        drop(retained);
+        let release = release_receiver.try_recv().unwrap();
+        assert_eq!(release.generation, 3);
+        assert_eq!(release.lease_id.as_u64(), 11);
+        assert_eq!(release.role, WindowsD3d11MediaRole::Stream);
+    }
+
+    #[test]
+    fn windows_d3d11_pixel_formats_keep_preview_and_encoder_surfaces_distinct() {
+        let bgra = CompositorPixelFormat::d3d11_bgra8(1280, 720);
+        let nv12 = CompositorPixelFormat::d3d11_nv12(1920, 1080);
+        assert_eq!(bgra.d3d11_dimensions(), Some((1280, 720)));
+        assert_eq!(nv12.d3d11_dimensions(), Some((1920, 1080)));
+        assert!(bgra.has_d3d11_texture());
+        assert!(nv12.has_d3d11_texture());
+        assert!(!CompositorPixelFormat::yuv420p_cpu_buffer().has_d3d11_texture());
     }
 
     #[test]
@@ -4701,10 +7503,14 @@ mod tests {
             native_preview_main_scene_mismatch_age_ms: None,
             native_preview_main_last_skipped_scene_revision: None,
             native_preview_main_last_skipped_frame_scene_revision: None,
+            native_preview_iosurface_import_live_count: None,
+            native_preview_iosurface_import_peak_count: None,
+            native_preview_iosurface_import_ceiling: None,
             frame_polling_suppressed,
             source_pixels_present: false,
             pending_host_command_count: 0,
             bounds: None,
+            windows_d3d11_presenter: None,
             started_at: None,
             updated_at: "2026-06-06T00:00:00Z".to_string(),
             message: None,
@@ -4719,6 +7525,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = layout_preset;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: screen_id.map(ToString::to_string),
                 window_id: None,
@@ -4831,38 +7638,44 @@ mod tests {
             (),
         >(3, None));
 
-        let fresh_frame = std::sync::Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 1,
-            height: 1,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: vec![0, 0, 0, 255],
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let fresh_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 1,
+                height: 1,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: vec![0, 0, 0, 255],
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
         assert!(!should_blocking_refresh_live_source(1, Some(&fresh_frame)));
         assert!(!should_blocking_refresh_live_source(
             100,
             Some(&fresh_frame)
         ));
 
-        let contended_frame = std::sync::Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 1,
-            height: 1,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: vec![0, 0, 0, 255],
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now()
-                - COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER
-                - Duration::from_millis(1),
-        });
+        let contended_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 1,
+                height: 1,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: vec![0, 0, 0, 255],
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now()
+                    - COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER
+                    - Duration::from_millis(1),
+            });
         assert!(!should_blocking_refresh_live_source(
             COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES - 1,
             Some(&contended_frame)
@@ -4872,20 +7685,23 @@ mod tests {
             Some(&contended_frame)
         ));
 
-        let stale_frame = std::sync::Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 1,
-            height: 1,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: vec![0, 0, 0, 255],
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now()
-                - COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER
-                - Duration::from_millis(1),
-        });
+        let stale_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 1,
+                height: 1,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: vec![0, 0, 0, 255],
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now()
+                    - COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER
+                    - Duration::from_millis(1),
+            });
         assert!(should_blocking_refresh_live_source(1, Some(&stale_frame)));
     }
 
@@ -4953,6 +7769,87 @@ mod tests {
         assert!(!metal_compositor_enabled_from_env(Some("false")));
         assert!(!metal_compositor_enabled_from_env(Some("off")));
         assert!(!metal_compositor_enabled_from_env(Some("no")));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn metal_source_texture_cache_failed_fallback_reports_once_in_compositor_timings() {
+        use crate::metal_compositor::{
+            GpuSource, GpuSourceContentKey, GpuSourceKind, MetalSceneCompositor, SourceMask,
+            make_test_iosurface_bgra_pixel_buffer, source_zerocopy_enabled,
+        };
+
+        assert!(
+            source_zerocopy_enabled(),
+            "focused CVMetal cache tests require VIDEORC_ZEROCOPY_SOURCES enabled"
+        );
+        let mut gpu = MetalSceneCompositor::new()
+            .expect("focused CVMetal cache tests require a Metal compositor");
+        let (width, height) = (16usize, 16usize);
+        let pixel_buffer = make_test_iosurface_bgra_pixel_buffer(width, height)
+            .expect("focused CVMetal cache tests require local IOSurface allocation");
+        let source = GpuSource {
+            kind: GpuSourceKind::Camera,
+            bgra: &[],
+            content_key: Some(GpuSourceContentKey {
+                namespace: 4,
+                revision: 141,
+                variant: 0,
+            }),
+            iosurface: None,
+            pixel_buffer: Some(&pixel_buffer),
+            width,
+            height,
+            dest: [0.0, 0.0, 1.0, 1.0],
+            crop: [0.0; 4],
+            mirror: false,
+            mask: SourceMask::None,
+            blend: false,
+            chroma_key: None,
+        };
+
+        gpu.force_next_pixel_buffer_import_failure();
+        assert!(
+            gpu.compose_target_with_timings(
+                width,
+                height,
+                [0.0, 0.0, 0.0, 1.0],
+                std::slice::from_ref(&source),
+            )
+            .is_none(),
+            "empty byte fallback must force the outer compositor fallback seam"
+        );
+
+        let mut fallback_timings = CompositorPublishTimings::default();
+        fallback_timings.merge_gpu(take_failed_gpu_timings(Some(&mut gpu)));
+        assert_eq!(fallback_timings.source_import_stats.import_failures, 1);
+        assert_eq!(
+            fallback_timings.source_import_stats.camera_import_failures,
+            1
+        );
+        assert_eq!(
+            fallback_timings.source_import_stats.texture_cache_flushes,
+            1
+        );
+
+        let already_reported = take_failed_gpu_timings(Some(&mut gpu));
+        assert_eq!(already_reported.source_import_stats.import_failures, 0);
+        assert_eq!(
+            already_reported.source_import_stats.texture_cache_flushes,
+            0
+        );
+
+        let recovered = gpu
+            .compose_target_with_timings(
+                width,
+                height,
+                [0.0, 0.0, 0.0, 1.0],
+                std::slice::from_ref(&source),
+            )
+            .expect("post-fallback retry must recover through the live import seam");
+        assert_eq!(recovered.source_import_stats.cvpixelbuffer_frames, 1);
+        assert_eq!(recovered.source_import_stats.import_failures, 0);
+        assert_eq!(recovered.source_import_stats.texture_cache_flushes, 0);
     }
 
     #[test]
@@ -5026,14 +7923,260 @@ mod tests {
                     right: 0.0,
                     bottom: 0.0,
                 },
+                pan: (0.0, 0.0),
                 contain: false,
                 mirror_x: false,
                 mask: SceneMask::None,
+                chroma_key: None,
             },
         ));
 
         let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
         assert!(bytes[..8].iter().all(|&value| value == blue_y));
+    }
+
+    #[test]
+    fn untransformed_bgra_fast_path_preserves_bt709_plane_values() {
+        let source = [
+            0, 0, 255, 255, // red
+            0, 255, 0, 255, // green
+            255, 0, 0, 255, // blue
+            255, 255, 255, 255, // white
+        ];
+        let mut bytes = vec![0; raw_yuv420p_len(2, 2)];
+
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: &source,
+                width: 2,
+                height: 2,
+                format: SourcePixelFormat::Bgra,
+            },
+            &mut bytes,
+            2,
+            2,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            SourceRenderOptions {
+                crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: None,
+            },
+        ));
+
+        let red = rgb_to_yuv(255, 0, 0);
+        let green = rgb_to_yuv(0, 255, 0);
+        let blue = rgb_to_yuv(0, 0, 255);
+        let white = rgb_to_yuv(255, 255, 255);
+        assert_eq!(bytes, [red.0, green.0, blue.0, white.0, red.1, red.2]);
+    }
+
+    /// A 2×2 blue YUV canvas the chroma-key blit tests composite onto.
+    fn blue_yuv_canvas_2x2() -> Vec<u8> {
+        let (y, u, v) = rgb_to_yuv(0, 0, 255);
+        let mut bytes = vec![0; raw_yuv420p_len(2, 2)];
+        bytes[..4].fill(y);
+        bytes[4] = u;
+        bytes[5] = v;
+        bytes
+    }
+
+    fn chroma_key_test_spec() -> crate::scene_geometry::ChromaKeySpec {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_chroma_key_enabled = true;
+        camera_chroma_key(&layout).expect("keying enabled")
+    }
+
+    #[test]
+    fn yuv_blit_keys_out_green_and_keeps_foreground() {
+        // Top row: key green (keys out) + red (survives). Bottom row mirrors
+        // it so the 2×2 UV block's top-left sample is the KEYED pixel — the
+        // block must keep the background chroma, like the binary mask does.
+        let source: Vec<u8> = [
+            [0u8, 255, 0, 255],
+            [255, 0, 0, 255],
+            [0, 255, 0, 255],
+            [255, 0, 0, 255],
+        ]
+        .concat();
+        let mut bytes = blue_yuv_canvas_2x2();
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: &source,
+                width: 2,
+                height: 2,
+                format: SourcePixelFormat::Rgba,
+            },
+            &mut bytes,
+            2,
+            2,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            SourceRenderOptions {
+                crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: Some(chroma_key_test_spec()),
+            },
+        ));
+        let (blue_y, blue_u, blue_v) = rgb_to_yuv(0, 0, 255);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+        assert_eq!(bytes[0], blue_y, "keyed pixel keeps the background");
+        assert_eq!(bytes[1], red_y, "red foreground lands");
+        assert_eq!(bytes[2], blue_y);
+        assert_eq!(bytes[3], red_y);
+        assert_eq!(
+            (bytes[4], bytes[5]),
+            (blue_u, blue_v),
+            "UV block sampled on the keyed pixel keeps background chroma"
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn cpu_and_metal_chroma_keyers_agree_on_the_same_fixture_or_skips() {
+        use crate::metal_compositor::{GpuSource, GpuSourceKind, MetalSceneCompositor, SourceMask};
+        let Some(mut gpu) = MetalSceneCompositor::new() else {
+            eprintln!("skipping: no Metal device available in this environment");
+            return;
+        };
+        // A REALISTIC shadowed screen tone (out — the 0.9.39 model failed
+        // here), red (kept), a low-saturation screen tone inside the
+        // saturation-floor ramp (partial alpha), and grey (kept), over a
+        // blue background. RGBA order.
+        let pixels: [[u8; 4]; 4] = [
+            [30, 100, 40, 255],
+            [255, 0, 0, 255],
+            [100, 135, 100, 255],
+            [128, 128, 128, 255],
+        ];
+        let spec = chroma_key_test_spec();
+
+        let mut cpu = blue_yuv_canvas_2x2();
+        assert!(blit_rgba_to_yuv420p(
+            &RgbaSource {
+                bytes: &pixels.concat(),
+                width: 2,
+                height: 2,
+                format: SourcePixelFormat::Rgba,
+            },
+            &mut cpu,
+            2,
+            2,
+            PixelRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            SourceRenderOptions {
+                crop: SceneCrop::none(),
+                pan: (0.0, 0.0),
+                contain: false,
+                mirror_x: false,
+                mask: SceneMask::None,
+                chroma_key: Some(spec),
+            },
+        ));
+
+        let bgra: Vec<u8> = pixels
+            .iter()
+            .flat_map(|[r, g, b, a]| [*b, *g, *r, *a])
+            .collect();
+        let gpu_pixels = gpu
+            .compose_bgra(
+                2,
+                2,
+                [0.0, 0.0, 1.0, 1.0],
+                &[GpuSource {
+                    kind: GpuSourceKind::Camera,
+                    bgra: &bgra,
+                    content_key: None,
+                    iosurface: None,
+                    pixel_buffer: None,
+                    width: 2,
+                    height: 2,
+                    dest: [0.0, 0.0, 1.0, 1.0],
+                    crop: [0.0; 4],
+                    mirror: false,
+                    mask: SourceMask::None,
+                    blend: true,
+                    chroma_key: scene_chroma_key_into_metal(&spec),
+                }],
+            )
+            .expect("metal compose");
+
+        // Same Y for every pixel within rounding: the CPU keys in YUV space,
+        // the GPU keys in RGB then converts — linear ops that must agree.
+        for pixel in 0..4 {
+            let b = gpu_pixels[pixel * 4];
+            let g = gpu_pixels[pixel * 4 + 1];
+            let r = gpu_pixels[pixel * 4 + 2];
+            let (gpu_y, _, _) = rgb_to_yuv(r, g, b);
+            let cpu_y = cpu[pixel];
+            assert!(
+                (i16::from(gpu_y) - i16::from(cpu_y)).abs() <= 4,
+                "pixel {pixel}: cpu Y {cpu_y} vs gpu Y {gpu_y}"
+            );
+        }
+        // The keyed pixel is exactly the background on both paths.
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        assert_eq!(cpu[0], blue_y);
+        assert_eq!(gpu_pixels[0], 255, "gpu keyed pixel keeps blue");
+        assert!(gpu_pixels[1] <= 2 && gpu_pixels[2] <= 2);
+        // The partial pixel genuinely blended on both paths (neither the
+        // background nor the despilled source survives verbatim).
+        let partial_alpha = chroma_key_alpha(&spec, 100, 135, 100);
+        assert!(
+            partial_alpha > 0 && partial_alpha < 255,
+            "fixture pixel must ramp, got {partial_alpha}"
+        );
+    }
+
+    #[test]
+    fn cover_pan_chooses_the_visible_window_of_the_aspect_slack() {
+        // A 16:9 source into a square box in Fill mode has horizontal slack;
+        // pan must pick which part survives — it was hard-centered before
+        // (owner report, 2026-08-19: Pan X/Y did nothing at default zoom).
+        // Matches the legacy FFmpeg crop_offset_expr mapping.
+        let rect = PixelRect {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+        };
+        let fit_for = |pan_x: f64| {
+            source_fit(1920, 1080, rect, false, SceneCrop::none(), (pan_x, 0.0)).expect("cover fit")
+        };
+        let centered = fit_for(0.0);
+        assert!((centered.source_x - (1920.0 - 1080.0) / 2.0).abs() < 0.001);
+        let left = fit_for(-1.0);
+        assert!(left.source_x.abs() < 0.001, "full left pan starts at 0");
+        let right = fit_for(1.0);
+        assert!(
+            (right.source_x - (1920.0 - 1080.0)).abs() < 0.001,
+            "full right pan ends at the source edge"
+        );
+        // Out-of-range pan clamps instead of sampling outside the source.
+        let overshoot = fit_for(5.0);
+        assert!((overshoot.source_x - (1920.0 - 1080.0)).abs() < 0.001);
+        // Contain mode never pans — there is no crop to move.
+        let contained =
+            source_fit(1920, 1080, rect, true, SceneCrop::none(), (1.0, 1.0)).expect("contain fit");
+        assert!(contained.source_x.abs() < 0.001);
     }
 
     #[cfg(target_os = "macos")]
@@ -5055,6 +8198,7 @@ mod tests {
                 right: 0.0,
                 bottom: 0.0,
             },
+            (0.0, 0.0),
             4,
             2,
         )
@@ -5078,6 +8222,7 @@ mod tests {
             },
             true,
             SceneCrop::none(),
+            (0.0, 0.0),
             4,
             4,
         )
@@ -5096,10 +8241,58 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "windows")]
+    #[test]
+    fn direct_camera_overlay_preserves_bgra_mirror_and_circle_alpha() {
+        let source = [
+            10, 20, 30, 255, 40, 50, 60, 255, // row 0
+            70, 80, 90, 255, 100, 110, 120, 255, // row 1
+        ];
+        let mut mirrored = Vec::new();
+        assert!(render_camera_overlay_bgra(
+            &source,
+            2,
+            2,
+            2,
+            2,
+            SceneCrop::none(),
+            false,
+            true,
+            SceneMask::None,
+            &mut mirrored,
+        ));
+        assert_eq!(
+            mirrored,
+            vec![
+                40, 50, 60, 255, 10, 20, 30, 255, 100, 110, 120, 255, 70, 80, 90, 255,
+            ]
+        );
+
+        let mut circle = Vec::new();
+        assert!(render_camera_overlay_bgra(
+            &[255; 4 * 4 * 4],
+            4,
+            4,
+            4,
+            4,
+            SceneCrop::none(),
+            false,
+            false,
+            SceneMask::Circle,
+            &mut circle,
+        ));
+        assert_eq!(circle[3], 0, "top-left corner must be transparent");
+        assert_eq!(
+            circle[((1 * 4 + 1) * 4) + 3],
+            255,
+            "circle center must remain opaque"
+        );
+    }
+
     #[test]
     fn synthetic_test_pattern_bgra_has_spatial_and_temporal_motion() {
-        let first = synthetic_test_pattern_bgra(7);
-        let next = synthetic_test_pattern_bgra(8);
+        let first = synthetic_test_pattern_bgra(7, 1920, 1080);
+        let next = synthetic_test_pattern_bgra(8, 1920, 1080);
 
         assert_eq!(first.width, SYNTHETIC_TEST_PATTERN_WIDTH);
         assert_eq!(first.height, SYNTHETIC_TEST_PATTERN_HEIGHT);
@@ -5118,12 +8311,13 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_supports_test_pattern_source() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -5207,12 +8401,13 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_supports_test_pattern_overlay_without_camera_frame() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
         let layout = crate::protocol::default_layout_settings();
         let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -5316,7 +8511,7 @@ mod tests {
 
     #[test]
     fn metal_compose_supports_side_by_side_screen_camera_layout() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -5325,6 +8520,7 @@ mod tests {
         layout.side_by_side_split = crate::protocol::SideBySideSplit::SixtyForty;
         layout.side_by_side_camera_side = crate::protocol::SideBySideCameraSide::Left;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: Some("screen-1".to_string()),
                 window_id: None,
@@ -5349,30 +8545,36 @@ mod tests {
             layout,
             active_screen: None,
         };
-        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [255, 0, 0, 255].repeat(16),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(16),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let screen_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [255, 0, 0, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
 
         let output = try_gpu_compose(
             Some(&mut gpu),
@@ -5400,13 +8602,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_background_under_inset_screen_target_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenOnly;
         let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: Some("screen-1".to_string()),
                 window_id: None,
@@ -5455,18 +8658,21 @@ mod tests {
             state: "live".to_string(),
             message: None,
         };
-        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 100,
-            height: 100,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [255, 0, 0, 255].repeat(100 * 100),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let screen_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 100,
+                height: 100,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [255, 0, 0, 255].repeat(100 * 100),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
 
         let frame = try_gpu_compose(
             Some(&mut gpu),
@@ -5493,13 +8699,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn publish_compositor_frame_retains_metal_target_export_handle_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
         let state = test_state();
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -5581,13 +8788,14 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[tokio::test]
     async fn publish_compositor_frame_can_publish_metal_target_without_yuv_payload_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
         let state = test_state();
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -5720,12 +8928,13 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_missing_camera_frame_renders_placeholder_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
         let layout = crate::protocol::default_layout_settings();
         let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -5791,7 +9000,7 @@ mod tests {
     #[cfg(target_os = "macos")]
     #[test]
     fn metal_compose_missing_active_screen_image_renders_placeholder_or_skips() {
-        let Some(mut gpu) = new_gpu_compositor() else {
+        let Some(mut gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: Metal compositor unavailable");
             return;
         };
@@ -5847,6 +9056,645 @@ mod tests {
         )
     }
 
+    fn tiny_video() -> VideoSettings {
+        VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 8,
+            height: 4,
+            fps: 30,
+            bitrate_kbps: 2_000,
+        }
+    }
+
+    #[test]
+    fn exact_frameless_live_camera_enters_health_only_after_first_frame_grace() {
+        let epoch = CaptureHealthCameraEpoch {
+            source_key: SourceKey::camera("camera:frameless"),
+            generation: 7,
+        };
+        let sample = |camera_present| CaptureHealthSample {
+            target_fps: 30.0,
+            render_fps: 30.0,
+            camera_present,
+            camera_target_fps: Some(30.0),
+            camera_fresh_serves: 0,
+            camera_producer: Some(CaptureHealthCameraProducerSample {
+                epoch: epoch.clone(),
+                source_fps: None,
+                capture_callbacks: 0,
+                frame_store_publications: 0,
+                did_drop_callback_count: 0,
+                out_of_buffers: 0,
+                surface_backing_live_count: 0,
+                surface_backing_peak_count: 0,
+            }),
+            screen_present: false,
+            screen_target_fps: None,
+            screen_fresh_serves: 0,
+            screen_producer: None,
+            window_secs: COMPOSITOR_DIAGNOSTIC_WINDOW.as_secs_f64(),
+        };
+
+        assert!(
+            !camera_delivery_health_source_present(true, false, true, true, false),
+            "a stable Live generation is protected while its first frame may still warm up"
+        );
+        assert!(
+            !camera_delivery_health_source_present(true, false, true, false, true),
+            "stale/source-switch evidence cannot authorize a frameless recovery"
+        );
+        assert!(camera_delivery_health_source_present(
+            true, false, true, true, true
+        ));
+
+        let mut monitor = CaptureHealthMonitor::new();
+        for _ in 0..8 {
+            assert_eq!(monitor.observe(sample(false)), None);
+        }
+        assert_eq!(monitor.degraded_stage(), None);
+
+        // The first eligible sample establishes exact-generation counter
+        // baselines; the ordinary three-window threshold still owns admission.
+        assert_eq!(monitor.observe(sample(true)), None);
+        let mut transition = None;
+        for _ in 0..crate::capture_health::DEGRADED_WINDOW_THRESHOLD {
+            transition = monitor.observe(sample(true));
+        }
+        assert!(matches!(
+            transition,
+            Some(CaptureHealthTransition::Degraded {
+                stage: crate::capture_health::CaptureStage::CameraDelivery,
+                camera_epoch: Some(ref degraded_epoch),
+                ..
+            }) if degraded_epoch == &epoch
+        ));
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn independent_heartbeat_declares_blocked_render_before_loop_release() {
+        let state = test_state();
+        let run_id = "blocked-render-run".to_string();
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.clone());
+            compositor.status.run_id = Some(run_id.clone());
+        }
+        crate::capture_recovery::note_compositor_lifecycle_changed(&state, Some(run_id.clone()))
+            .await;
+        let heartbeat = Arc::new(AtomicU64::new(0));
+        let event_sequence = Arc::new(AtomicU64::new(0));
+        let (stop_tx, stop_rx) = watch::channel(false);
+        let (_loop_config_tx, loop_config_rx) = watch::channel(CompositorLoopConfig {
+            target_fps: 30,
+            frame_consumer: CompositorFrameConsumer::NativePreview,
+            caption_overlay_on_primary: false,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        });
+        let supervisor_state = state.clone();
+        let supervisor = state.spawn_process_task(run_compositor_health_supervisor(
+            supervisor_state,
+            run_id.clone(),
+            loop_config_rx,
+            Arc::clone(&heartbeat),
+            Arc::clone(&event_sequence),
+            stop_rx,
+            COMPOSITOR_DIAGNOSTIC_WINDOW,
+        ));
+        tokio::task::yield_now().await;
+
+        for _ in 0..3 {
+            tokio::time::advance(COMPOSITOR_DIAGNOSTIC_WINDOW).await;
+            tokio::task::yield_now().await;
+        }
+        for _ in 0..100 {
+            if state.capture_recovery.lock().await.status().phase
+                == crate::protocol::CaptureRecoveryPhase::Degraded
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        let degraded = state.capture_recovery.lock().await.status();
+        assert_eq!(
+            degraded.phase,
+            crate::protocol::CaptureRecoveryPhase::Degraded
+        );
+        assert_eq!(
+            degraded.stage,
+            Some(crate::protocol::CaptureRecoveryStage::CompositorRender)
+        );
+        assert_eq!(
+            heartbeat.load(Ordering::Acquire),
+            0,
+            "degradation must publish while the simulated render loop is still blocked"
+        );
+        assert_eq!(
+            current_capture_health_stage(&state),
+            Some(crate::capture_health::CaptureStage::CompositorRender)
+        );
+
+        let mut in_loop_monitor = CaptureHealthMonitor::new();
+        for render_fps in [0.0, 0.0, 0.0, 30.0, 30.0, 30.0] {
+            assert!(
+                in_loop_monitor
+                    .observe(source_authority_health_sample(CaptureHealthSample {
+                        target_fps: 30.0,
+                        render_fps,
+                        camera_present: false,
+                        camera_target_fps: None,
+                        camera_fresh_serves: 0,
+                        camera_producer: None,
+                        screen_present: false,
+                        screen_target_fps: None,
+                        screen_fresh_serves: 0,
+                        screen_producer: None,
+                        window_secs: 2.0,
+                    }))
+                    .is_none(),
+                "the in-loop camera authority must emit neither render degradation nor recovery"
+            );
+        }
+        assert_eq!(
+            state.capture_recovery.lock().await.status().phase,
+            crate::protocol::CaptureRecoveryPhase::Degraded,
+            "an overlapping in-loop healthy verdict cannot prematurely recover external render authority"
+        );
+
+        // Retirement is authoritative and the run-scoped supervisor cannot
+        // emit either a stale degradation or a false recovery afterward.
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = None;
+            compositor.status.run_id = None;
+        }
+        crate::capture_recovery::note_compositor_lifecycle_changed(&state, None).await;
+        stop_tx.send(true).unwrap();
+        supervisor.await.unwrap();
+        heartbeat.store(300, Ordering::Release);
+        tokio::time::advance(COMPOSITOR_DIAGNOSTIC_WINDOW * 3).await;
+        tokio::task::yield_now().await;
+        assert_eq!(
+            state.capture_recovery.lock().await.status().phase,
+            crate::protocol::CaptureRecoveryPhase::Idle
+        );
+    }
+
+    #[tokio::test]
+    async fn retired_run_edges_are_rejected_and_diagnostics_stay_camera_first() {
+        let state = test_state();
+        let run_id = "current-run";
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.to_string());
+            compositor.status.run_id = Some(run_id.to_string());
+        }
+        let render_degraded = CaptureHealthTransition::Degraded {
+            stage: crate::capture_health::CaptureStage::CompositorRender,
+            detail: "render stalled".to_string(),
+            camera_epoch: None,
+            screen_epoch: None,
+        };
+        assert!(
+            update_capture_health_stage_latch_if_current(&state, "retired-run", &render_degraded,)
+                .await
+                .is_none()
+        );
+        assert_eq!(current_capture_health_stage(&state), None);
+
+        let camera_epoch = CaptureHealthCameraEpoch {
+            source_key: SourceKey::camera("camera:a"),
+            generation: 7,
+        };
+        let camera_degraded = CaptureHealthTransition::Degraded {
+            stage: crate::capture_health::CaptureStage::CameraDelivery,
+            detail: "camera stalled".to_string(),
+            camera_epoch: Some(camera_epoch.clone()),
+            screen_epoch: None,
+        };
+        update_capture_health_stage_latch_if_current(&state, run_id, &camera_degraded)
+            .await
+            .expect("current camera edge");
+        update_capture_health_stage_latch_if_current(&state, run_id, &render_degraded)
+            .await
+            .expect("current render edge");
+        publish_capture_health_diagnostics_if_current(&state, run_id)
+            .await
+            .expect("current diagnostics commit");
+        assert_eq!(
+            state
+                .diagnostics
+                .lock()
+                .await
+                .capture_pipeline_degraded_stage
+                .as_deref(),
+            Some(crate::capture_health::CaptureStage::CameraDelivery.label())
+        );
+
+        let render_recovered = CaptureHealthTransition::Recovered {
+            stage: crate::capture_health::CaptureStage::CompositorRender,
+            detail: "render recovered".to_string(),
+            camera_epoch: None,
+            screen_epoch: None,
+        };
+        update_capture_health_stage_latch_if_current(&state, run_id, &render_recovered)
+            .await
+            .expect("current render recovery");
+        publish_capture_health_diagnostics_if_current(&state, run_id)
+            .await
+            .expect("current diagnostics commit");
+        assert_eq!(
+            state
+                .diagnostics
+                .lock()
+                .await
+                .capture_pipeline_degraded_stage
+                .as_deref(),
+            Some(crate::capture_health::CaptureStage::CameraDelivery.label()),
+            "render recovery must not transiently clear camera diagnostics"
+        );
+    }
+
+    #[tokio::test]
+    async fn explicit_camera_mutation_rearms_monitor_and_clears_only_camera_latch() {
+        let state = test_state();
+        let run_id = "epoch-rearm-run";
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.to_string());
+        }
+        set_capture_health_stage_latch_if_current(
+            &state,
+            run_id,
+            crate::capture_health::CaptureStage::CompositorRender,
+            true,
+        )
+        .await
+        .expect("render latch");
+        set_capture_health_stage_latch_if_current(
+            &state,
+            run_id,
+            crate::capture_health::CaptureStage::CameraDelivery,
+            true,
+        )
+        .await
+        .expect("camera latch");
+        assert_eq!(
+            current_capture_health_stage(&state),
+            Some(crate::capture_health::CaptureStage::CameraDelivery)
+        );
+
+        let mut monitor = CaptureHealthMonitor::new();
+        let mut observed_camera_mutation_epoch = state.capture_recovery_camera_mutation_epoch();
+        let sampled_camera_mutation_epoch = observed_camera_mutation_epoch;
+        let explicit_mutation = state.begin_capture_recovery_explicit_camera_mutation();
+        assert_eq!(
+            rearm_camera_health_for_explicit_mutation_if_needed(
+                &state,
+                run_id,
+                &mut monitor,
+                &mut observed_camera_mutation_epoch,
+            )
+            .await,
+            Some(true),
+            "a boundary crossed during evidence collection must discard that mixed sample"
+        );
+        assert_ne!(
+            sampled_camera_mutation_epoch, observed_camera_mutation_epoch,
+            "the exact inside-transaction token is retained for event dispatch"
+        );
+        assert_eq!(
+            current_capture_health_stage(&state),
+            Some(crate::capture_health::CaptureStage::CompositorRender),
+            "transaction begin clears only camera authority"
+        );
+
+        // Decay can be declared again while a long-running transaction is
+        // active. Ending the lease must create a second rearm boundary so the
+        // inside-transaction declaration cannot suppress future detection.
+        set_capture_health_stage_latch_if_current(
+            &state,
+            run_id,
+            crate::capture_health::CaptureStage::CameraDelivery,
+            true,
+        )
+        .await
+        .expect("inside-transaction camera latch");
+        let inside_transaction_epoch = observed_camera_mutation_epoch;
+        explicit_mutation.finish();
+        crate::capture_recovery::note_explicit_camera_configuration_changed(&state).await;
+        assert_eq!(
+            rearm_camera_health_for_explicit_mutation_if_needed(
+                &state,
+                run_id,
+                &mut monitor,
+                &mut observed_camera_mutation_epoch,
+            )
+            .await,
+            Some(true),
+            "transaction end must discard all evidence collected inside the lease"
+        );
+        assert_ne!(inside_transaction_epoch, observed_camera_mutation_epoch);
+        assert_eq!(
+            current_capture_health_stage(&state),
+            Some(crate::capture_health::CaptureStage::CompositorRender),
+            "transaction end also preserves independent render authority"
+        );
+        assert_eq!(
+            rearm_camera_health_for_explicit_mutation_if_needed(
+                &state,
+                run_id,
+                &mut monitor,
+                &mut observed_camera_mutation_epoch,
+            )
+            .await,
+            Some(false),
+            "a stable post-transaction boundary must not repeatedly discard evidence windows"
+        );
+    }
+
+    #[tokio::test]
+    async fn same_key_camera_generation_resets_held_frame_and_fetch_accounting() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let video = tiny_video();
+        let camera_id = "camera:avfoundation:generation-test";
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state, camera_id, &layout, &video,
+        )
+        .await;
+
+        let mut sources = CompositorLiveSources::refresh(&state).await;
+        let initial_generation = sources
+            .camera
+            .as_ref()
+            .expect("installed camera source")
+            .generation();
+        assert!(sources.latest_camera_frame().is_some());
+        sources.camera_fetch.try_lock_misses = 7;
+        sources.camera_fetch.blocking_refreshes = 3;
+        sources.camera_fetch.fresh_serves = 11;
+        sources.camera_fetch.held_serves = 13;
+        sources.camera_fetch.served_age_max_ms = 17;
+
+        let next_generation =
+            crate::preview_camera::test_advance_live_camera_generation(&state, 43).await;
+        assert_ne!(next_generation, initial_generation);
+        let replacement_epoch = CaptureHealthCameraEpoch {
+            source_key: SourceKey::camera(camera_id),
+            generation: next_generation,
+        };
+        assert!(
+            !camera_source_matches_health_epoch(sources.camera.as_ref(), &replacement_epoch),
+            "new-generation producer evidence must stay ambiguous until the compositor consumer adopts it"
+        );
+        let (sources, change, screen_change) = sources.refresh_sources_nonblocking(&state);
+
+        assert_eq!(
+            change,
+            Some(CompositorCameraSourceChange::Adopted {
+                source_key: SourceKey::camera(camera_id),
+                generation: next_generation,
+            })
+        );
+        assert_eq!(screen_change, None);
+        assert_eq!(
+            sources
+                .camera
+                .as_ref()
+                .map(PreviewCameraFrameSource::generation),
+            Some(next_generation)
+        );
+        assert!(camera_source_matches_health_epoch(
+            sources.camera.as_ref(),
+            &replacement_epoch
+        ));
+        assert!(sources.last_camera_frame.is_none());
+        let stats = sources.fetch_stats();
+        assert_eq!(stats.camera_try_lock_misses, 0);
+        assert_eq!(stats.camera_blocking_refreshes, 0);
+        assert_eq!(stats.camera_fresh_serves, 0);
+        assert_eq!(stats.camera_held_serves, 0);
+        assert_eq!(stats.camera_served_age_max_ms, 0);
+    }
+
+    #[tokio::test]
+    async fn initial_source_refresh_acknowledges_replacement_camera_generation() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let video = tiny_video();
+        let camera_id = "camera:avfoundation:initial-adoption";
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state, camera_id, &layout, &video,
+        )
+        .await;
+        let initial_generation = preview_camera_restart_snapshot(&state)
+            .await
+            .expect("initial camera snapshot")
+            .generation;
+        crate::capture_recovery::test_admit_camera_recovery_attempt(
+            &state,
+            SourceKey::camera(camera_id),
+            initial_generation,
+        )
+        .await;
+
+        // The replacement becomes live before the new compositor initializes
+        // its cache, so no later nonblocking refresh will observe a difference.
+        let replacement_generation =
+            crate::preview_camera::test_advance_live_camera_generation(&state, 43).await;
+        let run_id = "replacement-compositor-run";
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.to_string());
+        }
+        crate::capture_recovery::note_compositor_lifecycle_changed(
+            &state,
+            Some(run_id.to_string()),
+        )
+        .await;
+
+        let mut capture_health = CaptureHealthMonitor::new();
+        let sources = CompositorLiveSources::refresh(&state).await;
+        acknowledge_compositor_camera_source_change_if_current(
+            &state,
+            run_id,
+            &mut capture_health,
+            sources
+                .initial_camera_adoption()
+                .expect("replacement camera adoption"),
+        )
+        .await
+        .expect("current compositor adoption");
+
+        assert_eq!(
+            crate::capture_recovery::test_compositor_adopted_camera_scope(&state).await,
+            Some((SourceKey::camera(camera_id), replacement_generation)),
+            "the initial cache fill must publish the exact replacement generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn initial_source_refresh_acknowledges_replacement_screen_generation() {
+        let state = test_state();
+        let video = tiny_video();
+        let screen_id = "screen:screencapturekit:initial-adoption";
+        crate::preview_screen::test_install_live_screen_generation(
+            &state, screen_id, 7, 41, &video,
+        )
+        .await;
+        crate::capture_recovery::test_admit_screen_recovery_attempt(
+            &state,
+            SourceKey::screen(screen_id),
+            7,
+        )
+        .await;
+
+        let replacement_generation =
+            crate::preview_screen::test_advance_live_screen_generation(&state, 42).await;
+        let run_id = "replacement-screen-compositor-run";
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some(run_id.to_string());
+        }
+        crate::capture_recovery::note_compositor_lifecycle_changed(
+            &state,
+            Some(run_id.to_string()),
+        )
+        .await;
+
+        let mut capture_health = CaptureHealthMonitor::new();
+        let sources = CompositorLiveSources::refresh(&state).await;
+        acknowledge_compositor_screen_source_change_if_current(
+            &state,
+            run_id,
+            &mut capture_health,
+            sources
+                .initial_screen_adoption()
+                .expect("replacement screen adoption"),
+        )
+        .await
+        .expect("current compositor adoption");
+
+        assert_eq!(
+            crate::capture_recovery::test_compositor_adopted_screen_scope(&state).await,
+            Some((SourceKey::screen(screen_id), replacement_generation)),
+            "the initial cache fill must publish the exact replacement screen generation"
+        );
+    }
+
+    #[tokio::test]
+    async fn unchanged_camera_generation_preserves_held_frame_and_fetch_accounting() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let video = tiny_video();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation:stable-generation",
+            &layout,
+            &video,
+        )
+        .await;
+
+        let mut sources = CompositorLiveSources::refresh(&state).await;
+        assert!(sources.latest_camera_frame().is_some());
+        sources.camera_fetch.held_serves = 5;
+        let cached_identity = sources
+            .last_camera_frame
+            .as_ref()
+            .map(|(frame, _)| frame.as_ptr());
+
+        let (sources, change, screen_change) = sources.refresh_sources_nonblocking(&state);
+
+        assert_eq!(change, None);
+        assert_eq!(screen_change, None);
+        assert_eq!(sources.camera_fetch.held_serves, 5);
+        assert_eq!(
+            sources
+                .last_camera_frame
+                .as_ref()
+                .map(|(frame, _)| frame.as_ptr()),
+            cached_identity
+        );
+    }
+
+    #[tokio::test]
+    async fn camera_generation_removal_is_an_explicit_compositor_edge() {
+        let state = test_state();
+        let layout = crate::protocol::default_layout_settings();
+        let video = tiny_video();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation:removal",
+            &layout,
+            &video,
+        )
+        .await;
+        let mut sources = CompositorLiveSources::refresh(&state).await;
+        assert!(sources.latest_camera_frame().is_some());
+
+        crate::preview_camera::stop_preview_camera(&state).await;
+        let (sources, change, screen_change) = sources.refresh_sources_nonblocking(&state);
+
+        assert_eq!(change, Some(CompositorCameraSourceChange::Removed));
+        assert_eq!(screen_change, None);
+        assert!(sources.camera.is_none());
+        assert!(sources.last_camera_frame.is_none());
+    }
+
+    #[tokio::test]
+    async fn same_key_screen_generation_resets_held_frame_and_fetch_accounting() {
+        let state = test_state();
+        let video = tiny_video();
+        let screen_id = "screen:screencapturekit:generation-test";
+        crate::preview_screen::test_install_live_screen_generation(
+            &state, screen_id, 7, 41, &video,
+        )
+        .await;
+
+        let mut sources = CompositorLiveSources::refresh(&state).await;
+        let initial_generation = sources
+            .screen
+            .as_ref()
+            .expect("installed screen source")
+            .generation();
+        assert!(sources.latest_screen_frame().is_some());
+        sources.screen_fetch.try_lock_misses = 7;
+        sources.screen_fetch.blocking_refreshes = 3;
+        sources.screen_fetch.fresh_serves = 11;
+        sources.screen_fetch.held_serves = 13;
+        sources.screen_fetch.served_age_max_ms = 17;
+
+        let next_generation =
+            crate::preview_screen::test_advance_live_screen_generation(&state, 42).await;
+        assert_ne!(next_generation, initial_generation);
+        let (sources, camera_change, screen_change) = sources.refresh_sources_nonblocking(&state);
+
+        assert_eq!(camera_change, None);
+        assert_eq!(
+            screen_change,
+            Some(CompositorScreenSourceChange::Adopted {
+                source_key: SourceKey::screen(screen_id),
+                generation: next_generation,
+            })
+        );
+        assert_eq!(
+            sources
+                .screen
+                .as_ref()
+                .map(PreviewScreenFrameSource::generation),
+            Some(next_generation)
+        );
+        assert!(sources.last_screen_frame.is_none());
+        let stats = sources.fetch_stats();
+        assert_eq!(stats.screen_try_lock_misses, 0);
+        assert_eq!(stats.screen_blocking_refreshes, 0);
+        assert_eq!(stats.screen_fresh_serves, 0);
+        assert_eq!(stats.screen_held_serves, 0);
+        assert_eq!(stats.screen_served_age_max_ms, 0);
+    }
+
     #[tokio::test]
     async fn compositor_frame_progress_updates_frame_id_without_resetting_metrics() {
         let state = test_state();
@@ -5864,17 +9712,20 @@ mod tests {
             status.frame_age_ms = Some(9);
             status.frame_time_p95_ms = Some(12.5);
             compositor.status = status;
-            compositor.latest_frame_evidence = Some(CompositorFrameEvidence {
-                sequence: 42,
-                scene_revision: Some(12),
-                width: 640,
-                height: 360,
-                has_real_source: true,
-                camera_sequence: Some(1),
-                screen_sequence: None,
-                has_image_source: false,
-                published_at: Instant::now(),
-            });
+            compositor.frame_evidence.clear();
+            compositor
+                .frame_evidence
+                .push_back(CompositorFrameEvidence {
+                    sequence: 42,
+                    scene_revision: Some(12),
+                    width: 640,
+                    height: 360,
+                    has_real_source: true,
+                    camera_sequence: Some(1),
+                    screen_sequence: None,
+                    has_image_source: false,
+                    published_at: Instant::now(),
+                });
             compositor.run_id = Some("run".to_string());
         }
 
@@ -5921,17 +9772,20 @@ mod tests {
         {
             let mut compositor = state.compositor.lock().await;
             compositor.run_id = Some("current-run".to_string());
-            compositor.latest_frame_evidence = Some(CompositorFrameEvidence {
-                sequence: 7,
-                scene_revision: Some(2),
-                width: 640,
-                height: 360,
-                has_real_source: true,
-                camera_sequence: None,
-                screen_sequence: Some(3),
-                has_image_source: true,
-                published_at: Instant::now(),
-            });
+            compositor.frame_evidence.clear();
+            compositor
+                .frame_evidence
+                .push_back(CompositorFrameEvidence {
+                    sequence: 7,
+                    scene_revision: Some(2),
+                    width: 640,
+                    height: 360,
+                    has_real_source: true,
+                    camera_sequence: None,
+                    screen_sequence: Some(3),
+                    has_image_source: true,
+                    published_at: Instant::now(),
+                });
 
             let stale_updated = set_latest_frame_evidence_if_current_run(
                 &mut compositor,
@@ -5952,8 +9806,8 @@ mod tests {
             assert!(!stale_updated);
             assert_eq!(
                 compositor
-                    .latest_frame_evidence
-                    .as_ref()
+                    .frame_evidence
+                    .back()
                     .map(|evidence| evidence.width),
                 Some(640)
             );
@@ -5977,8 +9831,8 @@ mod tests {
             assert!(current_updated);
             assert_eq!(
                 compositor
-                    .latest_frame_evidence
-                    .as_ref()
+                    .frame_evidence
+                    .back()
                     .map(|evidence| evidence.sequence),
                 Some(8)
             );
@@ -6088,19 +9942,22 @@ mod tests {
         has_image_source: bool,
     ) {
         let mut compositor = state.compositor.lock().await;
-        compositor.latest_frame_evidence = Some(CompositorFrameEvidence {
-            sequence,
-            scene_revision,
-            width,
-            height,
-            has_real_source: camera_sequence.is_some()
-                || screen_sequence.is_some()
-                || has_image_source,
-            camera_sequence,
-            screen_sequence,
-            has_image_source,
-            published_at: Instant::now(),
-        });
+        compositor.frame_evidence.clear();
+        compositor
+            .frame_evidence
+            .push_back(CompositorFrameEvidence {
+                sequence,
+                scene_revision,
+                width,
+                height,
+                has_real_source: camera_sequence.is_some()
+                    || screen_sequence.is_some()
+                    || has_image_source,
+                camera_sequence,
+                screen_sequence,
+                has_image_source,
+                published_at: Instant::now(),
+            });
     }
 
     fn any_real_source_requirements() -> CompositorStartupSourceRequirements {
@@ -6186,6 +10043,7 @@ mod tests {
         .await;
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -6207,6 +10065,7 @@ mod tests {
         update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 1,
                 scene: Some(scene),
                 layout,
@@ -6291,6 +10150,7 @@ mod tests {
             }),
             background: None,
             protected_overlay_window_ids: Vec::new(),
+            transition_ms: None,
         });
         update_compositor_scene(
             &state,
@@ -6299,6 +10159,7 @@ mod tests {
                 scene: Some(horizontal_scene),
                 layout: horizontal_layout,
                 active_screen: None,
+                transition_ms: None,
             },
         )
         .await;
@@ -6316,6 +10177,7 @@ mod tests {
             }),
             background: None,
             protected_overlay_window_ids: Vec::new(),
+            transition_ms: None,
         });
         update_compositor_simulcast_scene(
             &state,
@@ -6324,6 +10186,7 @@ mod tests {
                 scene: Some(vertical_scene),
                 layout: vertical_layout,
                 active_screen: None,
+                transition_ms: None,
             },
         )
         .await;
@@ -6376,6 +10239,7 @@ mod tests {
             scene: None,
             layout: layout.clone(),
             active_screen: None,
+            transition_ms: None,
         };
         update_compositor_simulcast_scene(&state, update(5)).await;
         // A stale revision is ignored…
@@ -6411,17 +10275,18 @@ mod tests {
             eprintln!("skipping: Metal compositor disabled");
             return;
         }
-        let Some(mut recording_gpu) = new_gpu_compositor() else {
+        let Some(mut recording_gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: recording Metal compositor unavailable");
             return;
         };
-        let Some(mut stream_gpu) = new_gpu_compositor() else {
+        let Some(mut stream_gpu) = new_gpu_compositor(false) else {
             eprintln!("skipping: stream Metal compositor unavailable");
             return;
         };
         let state = test_state();
         let layout = crate::protocol::default_layout_settings();
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -6573,6 +10438,200 @@ mod tests {
         assert_eq!(result.frames_observed, 3);
     }
 
+    /// Instant-record P3: a compositor that has already produced fresh
+    /// target-resolution frames passes the barrier from its evidence ring
+    /// without waiting for three NEW frames.
+
+    #[test]
+    fn frame_history_proves_live_sources_ignores_resolution_but_needs_fresh_advancing_frames() {
+        let now = Instant::now();
+        let requirements = CompositorStartupSourceRequirements {
+            require_real_source: true,
+            require_camera_source: true,
+            require_screen_source: false,
+        };
+        let gap = Duration::from_millis(100);
+        let evidence =
+            |sequence: u64, width: u32, camera: Option<u64>, age_ms: u64| CompositorFrameEvidence {
+                sequence,
+                scene_revision: Some(7),
+                width,
+                height: width * 9 / 16,
+                has_real_source: true,
+                camera_sequence: camera,
+                screen_sequence: None,
+                has_image_source: false,
+                published_at: now - Duration::from_millis(age_ms),
+            };
+
+        // Preview-sized frames followed by one capture-sized frame: the
+        // canvas size is irrelevant, the source liveness is what counts.
+        let history = [
+            evidence(1, 640, Some(10), 90),
+            evidence(2, 640, Some(11), 60),
+            evidence(3, 640, Some(12), 30),
+            evidence(4, 1920, Some(13), 5),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&history, requirements, gap, 3, now),
+            Some(3)
+        );
+        assert_eq!(
+            frame_history_proves_live_sources(&history[..2], requirements, gap, 3, now),
+            None,
+            "two frames never prove a three-frame requirement"
+        );
+
+        // Stale entries are not evidence of the current state.
+        let stale = [
+            evidence(1, 640, Some(10), 900),
+            evidence(2, 640, Some(11), 700),
+            evidence(3, 640, Some(12), 500),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&stale, requirements, gap, 3, now),
+            None
+        );
+
+        // A camera that stopped advancing never proves liveness.
+        let frozen = [
+            evidence(1, 640, Some(10), 90),
+            evidence(2, 640, Some(10), 60),
+            evidence(3, 640, Some(10), 30),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&frozen, requirements, gap, 3, now),
+            None
+        );
+
+        // A required source that is missing blocks structurally.
+        let missing = [
+            evidence(1, 640, None, 90),
+            evidence(2, 640, None, 60),
+            evidence(3, 640, None, 30),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&missing, requirements, gap, 3, now),
+            None
+        );
+
+        // A gap over the cadence budget restarts the streak.
+        let choppy = [
+            evidence(1, 640, Some(10), 190),
+            evidence(2, 640, Some(11), 60),
+            evidence(3, 640, Some(12), 30),
+        ];
+        assert_eq!(
+            frame_history_proves_live_sources(&choppy, requirements, gap, 3, now),
+            None
+        );
+        assert_eq!(
+            frame_history_proves_live_sources(&choppy, requirements, gap, 2, now),
+            Some(2)
+        );
+    }
+    #[tokio::test]
+    async fn startup_barrier_passes_instantly_from_fresh_history() {
+        let state = test_state();
+        let now = Instant::now();
+        for (sequence, offset_ms) in [(1_u64, 66_u64), (2, 33), (3, 0)] {
+            set_latest_frame_evidence_for_tests(
+                &state,
+                CompositorFrameEvidence {
+                    sequence,
+                    scene_revision: Some(1),
+                    width: 1920,
+                    height: 1080,
+                    has_real_source: true,
+                    camera_sequence: None,
+                    screen_sequence: Some(sequence),
+                    has_image_source: false,
+                    published_at: now - Duration::from_millis(offset_ms),
+                },
+            )
+            .await;
+        }
+
+        let result = wait_for_compositor_startup_frames(
+            &state,
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(200)),
+                timeout: Duration::from_millis(2_500),
+                requirements: any_real_source_requirements(),
+            },
+        )
+        .await;
+
+        assert!(result.ready, "{result:?}");
+        assert_eq!(result.frames_observed, 3, "{result:?}");
+        assert!(
+            result.wait_ms < 50,
+            "seeded history must not wait: {result:?}"
+        );
+        assert_eq!(result.gap_history_ms.len(), 2, "{result:?}");
+    }
+
+    /// Stale or wrong-resolution history is not evidence of the current state:
+    /// the barrier still waits (and times out) exactly as before.
+    #[tokio::test]
+    async fn startup_barrier_ignores_stale_and_wrong_resolution_history() {
+        let state = test_state();
+        let now = Instant::now();
+        for (sequence, width, offset_ms) in [
+            (1_u64, 1920_u32, 5_000_u64),
+            (2, 1920, 4_900),
+            (3, 1920, 4_800),
+            (4, 1280, 10),
+        ] {
+            set_latest_frame_evidence_for_tests(
+                &state,
+                CompositorFrameEvidence {
+                    sequence,
+                    scene_revision: Some(1),
+                    width,
+                    height: if width == 1920 { 1080 } else { 720 },
+                    has_real_source: true,
+                    camera_sequence: None,
+                    screen_sequence: Some(sequence),
+                    has_image_source: false,
+                    published_at: now - Duration::from_millis(offset_ms),
+                },
+            )
+            .await;
+        }
+
+        let result = wait_for_compositor_startup_frames(
+            &state,
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(200)),
+                timeout: Duration::from_millis(120),
+                requirements: any_real_source_requirements(),
+            },
+        )
+        .await;
+
+        assert!(!result.ready, "{result:?}");
+        assert!(
+            !result.cadence_only,
+            "a wrong-resolution latest frame is structural: {result:?}"
+        );
+        assert!(
+            result
+                .timeout_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("1280x720")),
+            "{result:?}"
+        );
+    }
+
     #[tokio::test]
     async fn startup_barrier_blocks_unstable_frame_cadence_when_configured() {
         let state = test_state();
@@ -6607,6 +10666,233 @@ mod tests {
                 .is_some_and(|reason| reason.contains("startup cadence budget")),
             "{result:?}"
         );
+        // Usable frames arrived, only the cadence missed: the caller may
+        // retry or record with a warning instead of refusing.
+        assert!(result.cadence_only, "{result:?}");
+        assert_eq!(result.fresh_frames_seen, 2, "{result:?}");
+        assert_eq!(result.gap_history_ms.len(), 1, "{result:?}");
+        assert!(result.gap_history_ms[0] >= 100, "{result:?}");
+        assert!(
+            result
+                .timeout_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("2 fresh frame(s) in")),
+            "{result:?}"
+        );
+    }
+
+    /// Cadence matrix: the owner's 166/100/90ms hiccup pattern is unsteady
+    /// under a tight budget (cadence-only, with the last three gaps on record)
+    /// and clean under the 200ms production budget, at 30 and at 60fps.
+    #[tokio::test]
+    async fn startup_barrier_reports_gap_history_and_cadence_only_for_hiccups() {
+        for (label, budget_ms, expect_ready) in [
+            ("30fps/tight", 71_u64, false),
+            ("60fps/tight", 36, false),
+            ("30fps/production", 200, true),
+            ("60fps/production", 200, true),
+        ] {
+            let state = test_state();
+            let writer_state = state.clone();
+            let writer = tokio::spawn(async move {
+                sleep(Duration::from_millis(10)).await;
+                let mut sequence = 1_u64;
+                set_latest_frame_evidence(&writer_state, 1, 1920, 1080, Some(1), None, false).await;
+                for gap in [166_u64, 100, 90, 100, 90, 100] {
+                    sleep(Duration::from_millis(gap)).await;
+                    sequence += 1;
+                    set_latest_frame_evidence(
+                        &writer_state,
+                        sequence,
+                        1920,
+                        1080,
+                        Some(sequence),
+                        None,
+                        false,
+                    )
+                    .await;
+                }
+            });
+
+            let result = wait_for_compositor_startup_frames(
+                &state,
+                CompositorStartupBarrierParams {
+                    width: 1920,
+                    height: 1080,
+                    required_scene_revision: Some(1),
+                    min_consecutive_frames: 3,
+                    max_frame_gap: Some(Duration::from_millis(budget_ms)),
+                    timeout: Duration::from_millis(750),
+                    requirements: CompositorStartupSourceRequirements {
+                        require_real_source: true,
+                        require_camera_source: true,
+                        require_screen_source: false,
+                    },
+                },
+            )
+            .await;
+            writer.abort();
+
+            assert_eq!(result.ready, expect_ready, "{label}: {result:?}");
+            assert!(result.fresh_frames_seen >= 3, "{label}: {result:?}");
+            // Ready after exactly three frames = two gaps; a timeout has seen
+            // the whole pattern and keeps only the last three.
+            assert_eq!(
+                result.gap_history_ms.len(),
+                if expect_ready {
+                    2
+                } else {
+                    COMPOSITOR_STARTUP_GAP_HISTORY_LEN
+                },
+                "{label}: {result:?}"
+            );
+            assert!(
+                result
+                    .gap_history_ms
+                    .iter()
+                    .all(|gap| (80..=230).contains(gap)),
+                "{label}: {result:?}"
+            );
+            if expect_ready {
+                assert!(!result.cadence_only, "{label}: {result:?}");
+                assert_eq!(result.timeout_reason, None, "{label}: {result:?}");
+            } else {
+                assert!(result.cadence_only, "{label}: {result:?}");
+                let reason = result.timeout_reason.clone().unwrap_or_default();
+                assert!(
+                    reason.contains("startup cadence budget")
+                        && reason
+                            .contains(&format!("recent gaps {} ms", result.gap_history_label())),
+                    "{label}: {reason}"
+                );
+            }
+        }
+    }
+
+    /// A stall is never cadence-only: no frame at all, or frames that stop
+    /// advancing the required camera, report zero/one fresh frame and no
+    /// cadence violation so the caller refuses instead of recording.
+    #[tokio::test]
+    async fn startup_barrier_stalls_are_not_cadence_only() {
+        let silent = wait_for_compositor_startup_frames(
+            &test_state(),
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(200)),
+                timeout: Duration::from_millis(120),
+                requirements: any_real_source_requirements(),
+            },
+        )
+        .await;
+        assert!(!silent.ready && !silent.cadence_only, "{silent:?}");
+        assert_eq!(silent.fresh_frames_seen, 0);
+        assert_eq!(silent.gap_history_label(), "none");
+        assert!(
+            silent
+                .timeout_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("0 fresh frame(s)")),
+            "{silent:?}"
+        );
+
+        // One frame, then the camera freezes (sequence advances, camera does
+        // not): 700ms later the barrier has one fresh frame and no gaps.
+        let state = test_state();
+        set_latest_frame_evidence(&state, 1, 1920, 1080, Some(4), None, false).await;
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            let mut sequence = 2_u64;
+            loop {
+                sleep(Duration::from_millis(700)).await;
+                set_latest_frame_evidence(
+                    &writer_state,
+                    sequence,
+                    1920,
+                    1080,
+                    Some(4),
+                    None,
+                    false,
+                )
+                .await;
+                sequence += 1;
+            }
+        });
+        let frozen = wait_for_compositor_startup_frames(
+            &state,
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(200)),
+                timeout: Duration::from_millis(1500),
+                requirements: CompositorStartupSourceRequirements {
+                    require_real_source: true,
+                    require_camera_source: true,
+                    require_screen_source: false,
+                },
+            },
+        )
+        .await;
+        writer.abort();
+        assert!(!frozen.ready && !frozen.cadence_only, "{frozen:?}");
+        assert_eq!(frozen.fresh_frames_seen, 1, "{frozen:?}");
+        assert!(frozen.gap_history_ms.is_empty(), "{frozen:?}");
+    }
+
+    /// A resolution block AFTER usable frames wins over earlier cadence
+    /// misses: the latest observation decides, so this is never cadence-only.
+    #[tokio::test]
+    async fn startup_barrier_structural_block_after_hiccups_is_not_cadence_only() {
+        let state = test_state();
+        let writer_state = state.clone();
+        let writer = tokio::spawn(async move {
+            sleep(Duration::from_millis(10)).await;
+            set_latest_frame_evidence(&writer_state, 1, 1920, 1080, Some(1), None, false).await;
+            sleep(Duration::from_millis(120)).await;
+            set_latest_frame_evidence(&writer_state, 2, 1920, 1080, Some(2), None, false).await;
+            sleep(Duration::from_millis(30)).await;
+            set_latest_frame_evidence(&writer_state, 3, 640, 360, Some(3), None, false).await;
+        });
+
+        let result = wait_for_compositor_startup_frames(
+            &state,
+            CompositorStartupBarrierParams {
+                width: 1920,
+                height: 1080,
+                required_scene_revision: Some(1),
+                min_consecutive_frames: 3,
+                max_frame_gap: Some(Duration::from_millis(50)),
+                timeout: Duration::from_millis(300),
+                requirements: any_real_source_requirements(),
+            },
+        )
+        .await;
+        writer.abort();
+
+        assert!(!result.ready && !result.cadence_only, "{result:?}");
+        assert_eq!(result.fresh_frames_seen, 2, "{result:?}");
+        assert!(
+            result
+                .timeout_reason
+                .as_deref()
+                .is_some_and(|reason| reason.contains("640x360, expected 1920x1080")),
+            "{result:?}"
+        );
+    }
+
+    #[test]
+    fn startup_gap_history_keeps_the_last_three_gaps_oldest_first() {
+        let mut history = Vec::new();
+        for gap in [166_u64, 120, 98, 33, 34] {
+            push_startup_gap(&mut history, gap);
+        }
+        assert_eq!(history, vec![98, 33, 34]);
+        assert_eq!(startup_gap_history_label(&history), "98/33/34");
+        assert_eq!(startup_gap_history_label(&[]), "none");
     }
 
     #[tokio::test]
@@ -6896,6 +11182,222 @@ mod tests {
         assert_eq!(activity.stop_timeouts.load(Ordering::Acquire), 0);
     }
 
+    fn preview_params(width: u32, height: u32) -> CompositorStartParams {
+        CompositorStartParams {
+            target_fps: 60,
+            width,
+            height,
+            frame_consumer: CompositorFrameConsumer::NativePreview,
+            stream_output: None,
+            caption_overlay_on_primary: false,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        }
+    }
+
+    fn arm_params(width: u32, height: u32) -> CompositorArmParams {
+        CompositorArmParams {
+            target_fps: 30,
+            width,
+            height,
+            frame_consumer: CompositorFrameConsumer::VideoToolboxEncoder,
+            caption_overlay_on_primary: true,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        }
+    }
+
+    async fn wait_for_frame_dimensions(
+        state: &AppState,
+        width: u32,
+        height: u32,
+        after_sequence: u64,
+    ) -> CompositorFrameEvidence {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            let latest = compositor_latest_frame_evidence(state).await;
+            if let Some(evidence) = latest
+                && evidence.width == width
+                && evidence.height == height
+                && evidence.sequence > after_sequence
+            {
+                return evidence;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "compositor never published a {width}x{height} frame after {after_sequence} (latest {latest:?})"
+            );
+            sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn arm_compositor_for_capture_keeps_the_run_and_swaps_the_loop_config() {
+        let state = test_state();
+        let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        let preview_run_id = preview.run_id.clone().expect("preview run id");
+        let before = wait_for_frame_dimensions(&state, 64, 36, 0).await;
+
+        let armed = arm_compositor_for_capture(&state, "session-arm", arm_params(128, 72))
+            .await
+            .expect("preview run arms in place");
+        assert_eq!(armed.run_id.as_deref(), Some(preview_run_id.as_str()));
+        assert_eq!((armed.width, armed.height, armed.target_fps), (128, 72, 30));
+        assert_eq!(
+            armed.frame_pipeline.consumer.as_deref(),
+            Some("videotoolbox-encoder")
+        );
+        assert_eq!(
+            compositor_capture_lease_run_id(&state).await.as_deref(),
+            Some(preview_run_id.as_str())
+        );
+        // The same run keeps rendering, now at the capture canvas, and the
+        // status refresh keeps the encoder label the loop adopted.
+        let armed_frame = wait_for_frame_dimensions(&state, 128, 72, before.sequence).await;
+        let status = compositor_status(&state).await;
+        assert_eq!(status.run_id.as_deref(), Some(preview_run_id.as_str()));
+        assert_eq!(status.state, CompositorState::Live);
+        assert_eq!(
+            status.frame_pipeline.consumer.as_deref(),
+            Some("videotoolbox-encoder"),
+            "{status:?}"
+        );
+        // Preview bounds cannot resize a leased run.
+        assert!(
+            resize_preview_compositor_if_run_id(&state, &preview_run_id, 32, 18)
+                .await
+                .is_none()
+        );
+        assert_eq!(compositor_status(&state).await.width, 128);
+        // A second capture cannot take the lease.
+        assert_eq!(
+            arm_compositor_for_capture(&state, "session-other", arm_params(128, 72)).await,
+            Err(CompositorArmRefusal::AlreadyLeased)
+        );
+        // Frame history survives arming (wrong-dims entries are ignored by
+        // the barrier, target-dims entries accumulate).
+        let history = compositor_frame_evidence_history(&state).await;
+        assert!(history.iter().any(|evidence| evidence.width == 64));
+        assert!(
+            history
+                .iter()
+                .any(|evidence| evidence.sequence == armed_frame.sequence)
+        );
+
+        // No live preview surface: the release stops the run like a retired
+        // preview run would be stopped.
+        let released = release_compositor_capture_lease(&state, "session-arm").await;
+        assert_eq!(
+            released.map(|status| status.state),
+            Some(CompositorState::Stopped)
+        );
+        assert!(compositor_status(&state).await.run_id.is_none());
+        assert!(compositor_capture_lease_run_id(&state).await.is_none());
+        assert!(
+            release_compositor_capture_lease(&state, "session-arm")
+                .await
+                .is_none(),
+            "a second release is a no-op"
+        );
+    }
+
+    #[tokio::test]
+    async fn arm_compositor_for_capture_refuses_non_preview_runs() {
+        let state = test_state();
+        assert_eq!(
+            arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
+            Err(CompositorArmRefusal::NoLiveRun)
+        );
+
+        let recording = start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        assert_eq!(
+            arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
+            Err(CompositorArmRefusal::NotPreviewOwned)
+        );
+        assert_eq!(compositor_status(&state).await.run_id, recording.run_id);
+
+        let split = start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                stream_output: Some(CompositorAuxiliaryOutput {
+                    width: 32,
+                    height: 18,
+                    frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                    composes_simulcast_scene: false,
+                }),
+                ..preview_params(64, 36)
+            },
+        )
+        .await;
+        assert_eq!(
+            arm_compositor_for_capture(&state, "s", arm_params(128, 72)).await,
+            Err(CompositorArmRefusal::NotPreviewOwned)
+        );
+        assert_eq!(compositor_status(&state).await.run_id, split.run_id);
+        stop_compositor(&state).await;
+        assert!(compositor_capture_lease_run_id(&state).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn stopping_a_leased_run_clears_the_lease() {
+        let state = test_state();
+        let preview = start_synthetic_compositor(state.clone(), preview_params(64, 36)).await;
+        let run_id = preview.run_id.expect("preview run id");
+        arm_compositor_for_capture(&state, "session-arm", arm_params(128, 72))
+            .await
+            .expect("preview run arms in place");
+        assert!(stop_compositor_if_run_id(&state, &run_id).await.is_some());
+        assert!(compositor_capture_lease_run_id(&state).await.is_none());
+        assert!(
+            release_compositor_capture_lease(&state, "session-arm")
+                .await
+                .is_none()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn process_shutdown_joins_the_compositor_blocking_worker() {
+        let state = test_state();
+        start_synthetic_compositor(
+            state.clone(),
+            CompositorStartParams {
+                target_fps: 60,
+                width: 64,
+                height: 36,
+                frame_consumer: CompositorFrameConsumer::NativePreview,
+                stream_output: None,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+            },
+        )
+        .await;
+
+        let activity = state.compositor.lock().await.worker_activity.clone();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), shutdown_compositor(&state))
+                .await
+                .expect("process shutdown must not strand the compositor owner")
+        );
+
+        let compositor = state.compositor.lock().await;
+        assert!(compositor.run_id.is_none());
+        assert!(compositor.render_task.is_none());
+        assert_eq!(activity.active.load(Ordering::Acquire), 0);
+        assert_eq!(activity.max_active.load(Ordering::Acquire), 1);
+        assert_eq!(activity.stop_timeouts.load(Ordering::Acquire), 0);
+    }
+
     #[tokio::test]
     async fn concurrent_compositor_starts_serialize_the_full_worker_handoff() {
         let state = test_state();
@@ -7000,6 +11502,125 @@ mod tests {
         assert!(recording_ready.ready, "{recording_ready:?}");
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn compositor_shutdown_progresses_while_scene_image_prepare_is_blocked() {
+        let state = test_state();
+        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let blocked_gate = gate.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let update_state = state.clone();
+        let update = tokio::spawn(async move {
+            update_compositor_scene_with_prepare_hook(
+                &update_state,
+                CompositorSceneUpdateParams {
+                    transition_ms: None,
+                    revision: 1,
+                    scene: None,
+                    layout: crate::protocol::default_layout_settings(),
+                    active_screen: Some(test_stream_screen("slow-image")),
+                },
+                move || {
+                    let _ = entered_tx.send(());
+                    let (released, wake) = &*blocked_gate;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                },
+            )
+            .await
+        });
+
+        entered_rx
+            .await
+            .expect("scene update reached blocking image preparation");
+        let shutdown =
+            tokio::time::timeout(Duration::from_millis(500), stop_compositor(&state)).await;
+
+        let (released, wake) = &*gate;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        let _ = update.await.expect("scene update task joined");
+
+        let stopped = shutdown
+            .expect("compositor shutdown must not wait for synchronous scene image preparation");
+        assert_eq!(stopped.state, CompositorState::Stopped);
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn equal_revision_scene_prepares_are_latest_token_wins_but_sequential_reload_works() {
+        let state = test_state();
+        let gate = Arc::new((StdMutex::new(false), std::sync::Condvar::new()));
+        let blocked_gate = gate.clone();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let first_state = state.clone();
+        let first = tokio::spawn(async move {
+            update_compositor_scene_with_prepare_hook(
+                &first_state,
+                CompositorSceneUpdateParams {
+                    transition_ms: None,
+                    revision: 7,
+                    scene: None,
+                    layout: crate::protocol::default_layout_settings(),
+                    active_screen: Some(test_stream_screen("first-same-revision")),
+                },
+                move || {
+                    let _ = entered_tx.send(());
+                    let (released, wake) = &*blocked_gate;
+                    let mut released = released.lock().unwrap();
+                    while !*released {
+                        released = wake.wait(released).unwrap();
+                    }
+                },
+            )
+            .await
+        });
+        entered_rx
+            .await
+            .expect("first equal-revision prepare reached the test gate");
+
+        let latest = update_compositor_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                transition_ms: None,
+                revision: 7,
+                scene: None,
+                layout: crate::protocol::default_layout_settings(),
+                active_screen: Some(test_stream_screen("latest-same-revision")),
+            },
+        )
+        .await;
+        assert_eq!(
+            latest.active_screen_id.as_deref(),
+            Some("latest-same-revision")
+        );
+
+        let (released, wake) = &*gate;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        let superseded = first.await.expect("first scene update task joined");
+        assert_eq!(
+            superseded.active_screen_id.as_deref(),
+            Some("latest-same-revision")
+        );
+
+        let sequential = update_compositor_scene(
+            &state,
+            CompositorSceneUpdateParams {
+                transition_ms: None,
+                revision: 7,
+                scene: None,
+                layout: crate::protocol::default_layout_settings(),
+                active_screen: Some(test_stream_screen("sequential-same-revision")),
+            },
+        )
+        .await;
+        assert_eq!(
+            sequential.active_screen_id.as_deref(),
+            Some("sequential-same-revision")
+        );
+    }
+
     #[tokio::test]
     async fn compositor_scene_update_keeps_latest_revision() {
         let state = test_state();
@@ -7013,6 +11634,7 @@ mod tests {
         let status = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 10,
                 scene: Some(scene.clone()),
                 layout: layout.clone(),
@@ -7028,6 +11650,7 @@ mod tests {
         let stale = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 9,
                 scene: None,
                 layout: layout.clone(),
@@ -7043,6 +11666,7 @@ mod tests {
         let newest = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 11,
                 scene: None,
                 layout,
@@ -7074,6 +11698,7 @@ mod tests {
         let first = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 1,
                 scene: None,
                 layout: layout.clone(),
@@ -7098,6 +11723,7 @@ mod tests {
         let second = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 2,
                 scene: None,
                 layout: layout.clone(),
@@ -7114,6 +11740,7 @@ mod tests {
         let missing = update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 3,
                 scene: None,
                 layout,
@@ -7295,6 +11922,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenOnly;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -7492,16 +12120,19 @@ mod tests {
         // Comments upgrade S2: the highlight card (top) and the captions bar
         // (bottom) render in the SAME frame from their independent slots.
         let (canvas_w, canvas_h) = (32_u32, 16_u32);
+        // Solid red (not white): video-range white luma (235) can collide
+        // with bright idle-pattern pixels, making the "overlay changed the
+        // pixel" assertion vacuous.
         let caption = test_caption_overlay(
             8,
             4,
-            [255, 255, 255, 255],
+            [255, 0, 0, 255],
             crate::captions::CaptionOverlayPosition::Bottom,
         );
         let highlight = test_caption_overlay(
             8,
             4,
-            [255, 255, 255, 255],
+            [255, 0, 0, 255],
             crate::captions::CaptionOverlayPosition::Top,
         );
         let base_inputs = CompositorRenderInputs {
@@ -7527,14 +12158,14 @@ mod tests {
             },
             &mut with_both,
         );
-        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
         // Highlight owns the top band (margin = round(16*0.04) = 1 → rows 1..5).
         let top_index = 2 * canvas_w as usize + (canvas_w as usize / 2);
-        assert_eq!(with_both[top_index], white_y);
+        assert_eq!(with_both[top_index], red_y);
         assert_ne!(with_both[top_index], baseline[top_index]);
         // Captions own the bottom band (rows 11..15).
         let bottom_index = 13 * canvas_w as usize + (canvas_w as usize / 2);
-        assert_eq!(with_both[bottom_index], white_y);
+        assert_eq!(with_both[bottom_index], red_y);
         assert_ne!(with_both[bottom_index], baseline[bottom_index]);
     }
 
@@ -7691,6 +12322,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenOnly;
         let mut scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: Some("screen:screencapturekit:1".to_string()),
                 window_id: None,
@@ -7739,18 +12371,21 @@ mod tests {
             state: "live".to_string(),
             message: None,
         };
-        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 100,
-            height: 100,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [255, 0, 0, 255].repeat(100 * 100),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let screen_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 100,
+                height: 100,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [255, 0, 0, 255].repeat(100 * 100),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
         let mut bytes = vec![0; raw_yuv420p_len(100, 100)];
 
         render_compositor_yuv420p_frame(
@@ -7789,6 +12424,7 @@ mod tests {
         layout.layout_preset = LayoutPreset::VerticalCameraTop;
         layout.camera_fit = crate::protocol::CameraFit::Fit;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: Some("screen:screencapturekit:1".to_string()),
                 window_id: None,
@@ -7814,30 +12450,36 @@ mod tests {
             active_screen: None,
         };
         // Landscape sources into portrait bands: red camera, blue screen (BGRA).
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 160,
-            height: 90,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(160 * 90),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
-        let screen_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 160,
-            height: 90,
-            pixel_format: PreviewScreenPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [255, 0, 0, 255].repeat(160 * 90),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 160,
+                height: 90,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(160 * 90),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
+        let screen_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 160,
+                height: 90,
+                pixel_format: PreviewScreenPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [255, 0, 0, 255].repeat(160 * 90),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
         let mut bytes = vec![0; raw_yuv420p_len(90, 160)];
 
         render_compositor_yuv420p_frame(
@@ -8001,6 +12643,7 @@ mod tests {
         layout.layout_preset = LayoutPreset::CameraOnly;
         layout.camera_shape = CameraShape::Circle;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -8025,18 +12668,21 @@ mod tests {
             layout,
             active_screen: None,
         };
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 1,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(16),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: Instant::now(),
-        });
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
         let mut bytes = vec![0; raw_yuv420p_len(4, 4)];
 
         render_compositor_yuv420p_frame(
@@ -8176,6 +12822,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::CameraOnly;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -8206,18 +12853,21 @@ mod tests {
         let camera_captured_at = Instant::now()
             .checked_sub(Duration::from_millis(77))
             .unwrap_or_else(Instant::now);
-        let camera_frame = Arc::new(crate::frame_store::StoredFrame {
-            sequence: 7,
-            width: 4,
-            height: 4,
-            pixel_format: PreviewCameraPixelFormat::Bgra8,
-            metadata: (),
-            bytes: [0, 0, 255, 255].repeat(16),
-            source_iosurface: None,
-            source_pixel_buffer: None,
-            recycle_pool: None,
-            captured_at: camera_captured_at,
-        });
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 7,
+                width: 4,
+                height: 4,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(16),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: camera_captured_at,
+            });
         let mut live_sources = CompositorLiveSources {
             last_camera_frame: Some((camera_frame, layout)),
             ..CompositorLiveSources::default()
@@ -8259,6 +12909,7 @@ mod tests {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenOnly;
         let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
             sources: crate::protocol::SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -8276,6 +12927,7 @@ mod tests {
         update_compositor_scene(
             &state,
             CompositorSceneUpdateParams {
+                transition_ms: None,
                 revision: 20,
                 scene: Some(scene),
                 layout,

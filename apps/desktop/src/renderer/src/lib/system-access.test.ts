@@ -4,10 +4,12 @@ import type { AudioMeterResult, DeviceList } from '@/lib/backend'
 
 import {
   cameraAccessState,
+  isMediaAccessSnapshotReady,
   mediaAccessToState,
   microphoneAccessState,
   screenAccessState,
   shouldShowPermissionsOnboarding,
+  systemAccessAction,
   systemAccessRows
 } from './system-access'
 
@@ -72,6 +74,14 @@ describe('microphoneAccessState', () => {
   })
 })
 
+describe('isMediaAccessSnapshotReady', () => {
+  it('does not let automatic onboarding decide from an unknown OS snapshot', () => {
+    expect(isMediaAccessSnapshotReady({ camera: 'unknown', microphone: 'not-determined' })).toBe(
+      false
+    )
+  })
+})
+
 describe('shouldShowPermissionsOnboarding', () => {
   const allGranted = systemAccessRows({
     deviceList: devices([
@@ -131,9 +141,134 @@ describe('shouldShowPermissionsOnboarding', () => {
       shouldShowPermissionsOnboarding({ rows: missingSome, dismissed: false, backendReady: false })
     ).toBe(false)
   })
+  it('never evaluates before the exact media-access snapshot has loaded', () => {
+    expect(
+      shouldShowPermissionsOnboarding({
+        rows: missingSome,
+        dismissed: false,
+        backendReady: true,
+        mediaAccessReady: false
+      })
+    ).toBe(false)
+  })
 })
 
 describe('systemAccessRows', () => {
+  it('keeps a fresh macOS camera requestable when the backend collapses TCC states', () => {
+    const rows = systemAccessRows({
+      deviceList: devices([{ kind: 'camera', status: 'permission-required' }]),
+      audioMeter: null,
+      platform: 'darwin',
+      mediaAccess: { camera: 'not-determined', microphone: 'not-determined' }
+    })
+
+    expect(rows.find((row) => row.id === 'camera')?.state).toBe('first-use')
+    expect(rows.find((row) => row.id === 'microphone')?.state).toBe('first-use')
+  })
+
+  it.each(['denied', 'restricted'] as const)(
+    'uses the exact macOS %s state instead of the lossy backend placeholder',
+    (status) => {
+      const rows = systemAccessRows({
+        deviceList: devices([{ kind: 'camera', status: 'permission-required' }]),
+        audioMeter: { status: 'permission-required' },
+        platform: 'darwin',
+        mediaAccess: { camera: status, microphone: status }
+      })
+
+      expect(rows.find((row) => row.id === 'camera')?.state).toBe('not-granted')
+      expect(rows.find((row) => row.id === 'microphone')?.state).toBe('not-granted')
+      if (status === 'restricted') {
+        expect(rows.find((row) => row.id === 'camera')?.detail).toMatch(/restricted/i)
+        expect(rows.find((row) => row.id === 'microphone')?.detail).toMatch(/restricted/i)
+      }
+    }
+  )
+
+  it('requires backend device health before a macOS grant is shown as healthy', () => {
+    const healthy = systemAccessRows({
+      deviceList: devices([{ kind: 'camera', status: 'available' }]),
+      audioMeter: { status: 'ready' },
+      platform: 'darwin',
+      mediaAccess: { camera: 'granted', microphone: 'granted' }
+    })
+    const unhealthy = systemAccessRows({
+      deviceList: devices([{ kind: 'camera', status: 'unavailable' }]),
+      audioMeter: { status: 'no-frames' },
+      platform: 'darwin',
+      mediaAccess: { camera: 'granted', microphone: 'granted' }
+    })
+
+    expect(healthy.find((row) => row.id === 'camera')?.state).toBe('granted')
+    expect(healthy.find((row) => row.id === 'microphone')?.state).toBe('granted')
+    expect(unhealthy.find((row) => row.id === 'camera')?.state).toBe('device-issue')
+    expect(unhealthy.find((row) => row.id === 'microphone')?.state).toBe('device-issue')
+    expect(unhealthy.find((row) => row.id === 'camera')?.detail).toMatch(
+      /permission is granted.*no usable camera/i
+    )
+  })
+
+  it('accepts an enumerated microphone as healthy before an optional meter check', () => {
+    const rows = systemAccessRows({
+      deviceList: devices([
+        { kind: 'camera', status: 'available' },
+        { kind: 'microphone', status: 'available' }
+      ]),
+      audioMeter: null,
+      platform: 'darwin',
+      mediaAccess: { camera: 'granted', microphone: 'granted' }
+    })
+
+    expect(rows.find((row) => row.id === 'microphone')?.state).toBe('granted')
+  })
+
+  it('keeps a proven microphone backend failure visible after permission is granted', () => {
+    const rows = systemAccessRows({
+      deviceList: devices([{ kind: 'microphone', status: 'available' }]),
+      audioMeter: { status: 'unavailable' },
+      platform: 'darwin',
+      mediaAccess: { camera: 'granted', microphone: 'granted' }
+    })
+
+    expect(rows.find((row) => row.id === 'microphone')?.state).toBe('device-issue')
+  })
+
+  it('does not repeat stale permission-required meter copy after an exact microphone grant', () => {
+    const rows = systemAccessRows({
+      deviceList: devices([{ kind: 'microphone', status: 'available' }]),
+      audioMeter: {
+        status: 'permission-required',
+        message: 'Microphone permission is required.'
+      },
+      platform: 'darwin',
+      mediaAccess: { camera: 'granted', microphone: 'granted' }
+    })
+
+    const microphone = rows.find((row) => row.id === 'microphone')
+    expect(microphone?.state).toBe('device-issue')
+    expect(microphone?.detail).toMatch(/permission is granted/i)
+    expect(microphone?.detail).not.toMatch(/permission is required/i)
+  })
+
+  it('falls back to backend evidence when the exact macOS status is unknown or missing', () => {
+    const unknown = systemAccessRows({
+      deviceList: devices([{ kind: 'camera', status: 'permission-required' }]),
+      audioMeter: { status: 'ready' },
+      platform: 'darwin',
+      mediaAccess: { camera: 'unknown', microphone: 'unknown' }
+    })
+    const missing = systemAccessRows({
+      deviceList: devices([{ kind: 'camera', status: 'available' }]),
+      audioMeter: { status: 'permission-required' },
+      platform: 'darwin'
+    })
+
+    expect(unknown.find((row) => row.id === 'camera')?.state).toBe('not-granted')
+    expect(unknown.find((row) => row.id === 'microphone')?.state).toBe('granted')
+    expect(missing.find((row) => row.id === 'camera')?.state).toBe('granted')
+    expect(missing.find((row) => row.id === 'microphone')?.state).toBe('not-granted')
+  })
+
   it('renders three rows with purposes and honest details', () => {
     const rows = systemAccessRows({
       deviceList: devices([
@@ -203,6 +338,18 @@ describe('systemAccessRows', () => {
     expect(mic?.detail).toMatch(/isn.t listed by name/)
   })
 
+  it('falls back to backend evidence when the exact Windows status is unknown', () => {
+    const rows = systemAccessRows({
+      deviceList: devices([{ kind: 'camera', status: 'available' }]),
+      audioMeter: { status: 'permission-required' },
+      platform: 'win32',
+      mediaAccess: { camera: 'unknown', microphone: 'unknown' }
+    })
+
+    expect(rows.find((row) => row.id === 'camera')?.state).toBe('granted')
+    expect(rows.find((row) => row.id === 'microphone')?.state).toBe('not-granted')
+  })
+
   it('mediaAccessToState maps OS statuses to chip states', () => {
     expect(mediaAccessToState('granted')).toBe('granted')
     expect(mediaAccessToState('denied')).toBe('not-granted')
@@ -210,5 +357,70 @@ describe('systemAccessRows', () => {
     expect(mediaAccessToState('not-determined')).toBe('first-use')
     expect(mediaAccessToState('unknown')).toBe('first-use')
     expect(mediaAccessToState(undefined)).toBe('first-use')
+  })
+})
+
+describe('systemAccessAction', () => {
+  it('requests native macOS camera and microphone access only on first use', () => {
+    expect(
+      systemAccessAction({
+        pane: 'camera',
+        state: 'first-use',
+        platform: 'darwin',
+        mediaAccessStatus: 'not-determined'
+      })
+    ).toBe('request-media-access')
+    expect(
+      systemAccessAction({
+        pane: 'microphone',
+        state: 'first-use',
+        platform: 'darwin',
+        mediaAccessStatus: 'not-determined'
+      })
+    ).toBe('request-media-access')
+  })
+
+  it('opens settings for denied media, screen recording, privacy, and Windows', () => {
+    expect(systemAccessAction({ pane: 'camera', state: 'not-granted', platform: 'darwin' })).toBe(
+      'open-settings'
+    )
+    expect(
+      systemAccessAction({ pane: 'screen-recording', state: 'first-use', platform: 'darwin' })
+    ).toBe('open-settings')
+    expect(systemAccessAction({ pane: 'privacy', state: 'first-use', platform: 'darwin' })).toBe(
+      'open-settings'
+    )
+    expect(systemAccessAction({ pane: 'camera', state: 'first-use', platform: 'win32' })).toBe(
+      'open-settings'
+    )
+  })
+
+  it('does not offer another permission action after a grant or for a device issue', () => {
+    expect(systemAccessAction({ pane: 'camera', state: 'granted', platform: 'darwin' })).toBeNull()
+    expect(
+      systemAccessAction({ pane: 'microphone', state: 'device-issue', platform: 'darwin' })
+    ).toBeNull()
+    expect(
+      systemAccessAction({
+        pane: 'microphone',
+        state: 'first-use',
+        platform: 'darwin',
+        mediaAccessStatus: 'granted'
+      })
+    ).toBeNull()
+  })
+
+  it('never invents a native prompt when the exact macOS status is missing or unknown', () => {
+    expect(systemAccessAction({ pane: 'camera', state: 'first-use', platform: 'darwin' })).toBe(
+      'open-settings'
+    )
+    expect(
+      systemAccessAction({
+        pane: 'microphone',
+        state: 'first-use',
+        platform: 'darwin',
+        mediaAccessStatus: 'unknown'
+      })
+    ).toBe('open-settings')
   })
 })

@@ -1,11 +1,12 @@
 import {
-  ArrowDown,
-  ArrowLeft,
-  ArrowRight,
-  ArrowUp,
-  Layout,
-  SlidersHorizontal
-} from '@phosphor-icons/react'
+  AdjustIcon,
+  ArrowDownIcon,
+  ArrowLeftIcon,
+  ArrowRightIcon,
+  ArrowUpIcon,
+  LayoutIcon,
+  ResetIcon
+} from '@/components/icons'
 import { useEffect } from 'react'
 import type { ReactElement } from 'react'
 
@@ -36,6 +37,11 @@ import {
   layoutPresetOrientation
 } from '@/lib/capture'
 import { effectiveCameraMaskShape } from '../../../../shared/native-preview-proof-geometry'
+
+// The two real-world screen colors; the protocol takes any #RRGGBB so a
+// custom picker later needs no wire change.
+const CHROMA_KEY_GREEN = '#00FF00'
+const CHROMA_KEY_BLUE = '#0000FF'
 
 // Mode-scoped like the Scenes gallery: the tab edits the current
 // orientation's scenes; the gallery's header toggle switches modes.
@@ -111,7 +117,7 @@ export function LayoutTab(): ReactElement {
         <div className="flex min-w-0 flex-col gap-5">
           <PanelSection
             description="Pick how the screen and camera are composed."
-            icon={Layout}
+            icon={LayoutIcon}
             title="Layout preset"
           >
             <div className="flex flex-wrap gap-2">
@@ -196,7 +202,7 @@ export function LayoutTab(): ReactElement {
 
         <PanelSection
           className="min-w-0"
-          icon={SlidersHorizontal}
+          icon={AdjustIcon}
           title={selectedSource ? selectedSource.name : 'Inspector'}
         >
           {!selectedSource ? (
@@ -412,7 +418,7 @@ export function LayoutTab(): ReactElement {
                   <PowerSlider
                     label="Margin"
                     max={96}
-                    min={8}
+                    min={0}
                     numericInput
                     suffix="px"
                     value={layout.cameraMargin}
@@ -441,9 +447,11 @@ export function LayoutTab(): ReactElement {
                     type="single"
                     value={layout.cameraFit}
                     variant="outline"
-                    onValueChange={(value) =>
-                      value && patchLayout({ cameraFit: value as CameraFit })
-                    }
+                    onValueChange={(value) => {
+                      if (!value) return
+                      patchLayout({ cameraFit: value as CameraFit })
+                      applyLayoutPatch({ cameraFit: value as CameraFit })
+                    }}
                   >
                     <ToggleGroupItem value="fill">Fill crop</ToggleGroupItem>
                     <ToggleGroupItem value="fit">Fit frame</ToggleGroupItem>
@@ -458,7 +466,10 @@ export function LayoutTab(): ReactElement {
                 <Switch
                   checked={layout.cameraMirror}
                   id="camera-mirror"
-                  onCheckedChange={(checked) => patchLayout({ cameraMirror: checked })}
+                  onCheckedChange={(checked) => {
+                    patchLayout({ cameraMirror: checked })
+                    applyLayoutPatch({ cameraMirror: checked })
+                  }}
                 />
               </Field>
 
@@ -471,6 +482,7 @@ export function LayoutTab(): ReactElement {
                 suffix="%"
                 value={layout.cameraZoom}
                 onChange={(cameraZoom) => patchLayout({ cameraZoom })}
+                onCommit={(cameraZoom) => applyLayoutPatch({ cameraZoom })}
               />
               <PowerSlider
                 bipolar
@@ -481,6 +493,7 @@ export function LayoutTab(): ReactElement {
                 step={5}
                 value={layout.cameraOffsetX}
                 onChange={(cameraOffsetX) => patchLayout({ cameraOffsetX })}
+                onCommit={(cameraOffsetX) => applyLayoutPatch({ cameraOffsetX })}
               />
               <PowerSlider
                 bipolar
@@ -491,7 +504,136 @@ export function LayoutTab(): ReactElement {
                 step={5}
                 value={layout.cameraOffsetY}
                 onChange={(cameraOffsetY) => patchLayout({ cameraOffsetY })}
+                onCommit={(cameraOffsetY) => applyLayoutPatch({ cameraOffsetY })}
               />
+
+              <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">
+                Green screen
+              </span>
+              <Field orientation="horizontal">
+                <FieldContent>
+                  <FieldLabel htmlFor="camera-chroma-key">Key out background</FieldLabel>
+                  <p className="text-xs text-muted-foreground">
+                    Needs an evenly lit green or blue screen behind you.
+                  </p>
+                </FieldContent>
+                <Switch
+                  checked={layout.cameraChromaKeyEnabled}
+                  id="camera-chroma-key"
+                  onCheckedChange={(cameraChromaKeyEnabled) =>
+                    applyLayoutPatch({ cameraChromaKeyEnabled })
+                  }
+                />
+              </Field>
+              {layout.cameraChromaKeyEnabled ? (
+                <>
+                  <Field>
+                    <FieldLabel>Key color</FieldLabel>
+                    <ToggleGroup
+                      className="w-full"
+                      spacing={0}
+                      type="single"
+                      value={layout.cameraChromaKeyColor === CHROMA_KEY_BLUE ? 'blue' : 'green'}
+                      variant="outline"
+                      onValueChange={(value) =>
+                        value &&
+                        applyLayoutPatch({
+                          cameraChromaKeyColor:
+                            value === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
+                        })
+                      }
+                    >
+                      <ToggleGroupItem className="flex-1" value="green">
+                        Green
+                      </ToggleGroupItem>
+                      <ToggleGroupItem className="flex-1" value="blue">
+                        Blue
+                      </ToggleGroupItem>
+                    </ToggleGroup>
+                  </Field>
+                  <PowerSlider
+                    label="Similarity"
+                    max={100}
+                    min={0}
+                    numericInput
+                    step={1}
+                    suffix="%"
+                    value={layout.cameraChromaKeySimilarityPct}
+                    onChange={(cameraChromaKeySimilarityPct) =>
+                      patchLayout({ cameraChromaKeySimilarityPct })
+                    }
+                    onCommit={(cameraChromaKeySimilarityPct) =>
+                      applyLayoutPatch({ cameraChromaKeySimilarityPct })
+                    }
+                  />
+                  <PowerSlider
+                    label="Smoothness"
+                    max={100}
+                    min={0}
+                    numericInput
+                    step={1}
+                    suffix="%"
+                    value={layout.cameraChromaKeySmoothnessPct}
+                    onChange={(cameraChromaKeySmoothnessPct) =>
+                      patchLayout({ cameraChromaKeySmoothnessPct })
+                    }
+                    onCommit={(cameraChromaKeySmoothnessPct) =>
+                      applyLayoutPatch({ cameraChromaKeySmoothnessPct })
+                    }
+                  />
+                  <PowerSlider
+                    label="Spill removal"
+                    max={100}
+                    min={0}
+                    numericInput
+                    step={1}
+                    suffix="%"
+                    value={layout.cameraChromaKeySpillPct}
+                    onChange={(cameraChromaKeySpillPct) => patchLayout({ cameraChromaKeySpillPct })}
+                    onCommit={(cameraChromaKeySpillPct) =>
+                      applyLayoutPatch({ cameraChromaKeySpillPct })
+                    }
+                  />
+                </>
+              ) : null}
+
+              {/* One committed patch back to the shipped camera defaults —
+                  placement, frame, lens, and chroma key. Never touches the
+                  layout preset or the selected sources (owner request,
+                  2026-08-19). */}
+              <Button
+                className="mt-2 w-fit"
+                size="xs"
+                variant="ghost"
+                onClick={() => {
+                  const defaults = {
+                    cameraTransformMode: 'preset',
+                    cameraTransform: null,
+                    cameraCorner: 'bottom-right',
+                    cameraSize: 'medium',
+                    cameraShape: 'rectangle',
+                    cameraCornerRadiusPct: 12,
+                    cameraAspect: 'source',
+                    cameraMargin: 32,
+                    cameraFit: 'fill',
+                    cameraMirror: false,
+                    cameraZoom: 100,
+                    cameraOffsetX: 0,
+                    cameraOffsetY: 0,
+                    cameraChromaKeyEnabled: false,
+                    cameraChromaKeyColor: '#00FF00',
+                    cameraChromaKeySimilarityPct: 40,
+                    cameraChromaKeySmoothnessPct: 8,
+                    cameraChromaKeySpillPct: 10
+                  } as const
+                  patchLayout(defaults)
+                  applyLayoutPatch(defaults)
+                }}
+              >
+                <ResetIcon data-icon="inline-start" />
+                Reset camera settings
+              </Button>
+
               <SourceVisibilityField
                 disabled={isSessionActive}
                 source={selectedSource}
@@ -546,7 +688,7 @@ export function LayoutTab(): ReactElement {
                   variant="outline"
                   onClick={() => void nudgeSceneSource(selectedSource.id, 0, -1)}
                 >
-                  <ArrowUp />
+                  <ArrowUpIcon />
                 </Button>
                 <span />
                 <Button
@@ -556,7 +698,7 @@ export function LayoutTab(): ReactElement {
                   variant="outline"
                   onClick={() => void nudgeSceneSource(selectedSource.id, -1, 0)}
                 >
-                  <ArrowLeft />
+                  <ArrowLeftIcon />
                 </Button>
                 <Button
                   aria-label="Nudge source down"
@@ -565,7 +707,7 @@ export function LayoutTab(): ReactElement {
                   variant="outline"
                   onClick={() => void nudgeSceneSource(selectedSource.id, 0, 1)}
                 >
-                  <ArrowDown />
+                  <ArrowDownIcon />
                 </Button>
                 <Button
                   aria-label="Nudge source right"
@@ -574,7 +716,7 @@ export function LayoutTab(): ReactElement {
                   variant="outline"
                   onClick={() => void nudgeSceneSource(selectedSource.id, 1, 0)}
                 >
-                  <ArrowRight />
+                  <ArrowRightIcon />
                 </Button>
               </div>
               {/* Disabled arrows must say why — silent dead controls read as

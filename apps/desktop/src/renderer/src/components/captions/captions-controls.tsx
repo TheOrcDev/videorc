@@ -1,10 +1,10 @@
 import {
-  ArrowClockwise,
-  ArrowSquareOut,
-  ClosedCaptioning,
-  Microphone,
-  WarningCircle
-} from '@phosphor-icons/react'
+  AlertIcon,
+  CaptionsIcon,
+  ExternalLinkIcon,
+  MicrophoneIcon,
+  RefreshIcon
+} from '@/components/icons'
 import type { ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -47,6 +47,7 @@ import {
 } from '@/lib/captions-ui'
 import type { CaptionBurnTarget, CaptionsCaptureSettings } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
+import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 const LANGUAGES = [
@@ -192,6 +193,7 @@ export function CaptionsControls(): ReactElement {
     captureConfig,
     entitlements,
     isSessionActive,
+    runtimeInfo,
     setCaptureConfig,
     startCaptions,
     toggleCaptionsWindow
@@ -209,6 +211,8 @@ export function CaptionsControls(): ReactElement {
     captions.enabled &&
     isSessionActive &&
     (captionsStatus.state === 'blocked' || captionsStatus.state === 'error')
+  const modKey = displayKeyGlyph('⌘', runtimeInfo?.platform)
+  const shiftKey = displayKeyGlyph('⇧', runtimeInfo?.platform)
 
   const patchCaptions = (
     patch: Partial<CaptionsCaptureSettings>,
@@ -244,7 +248,7 @@ export function CaptionsControls(): ReactElement {
     <PanelSection
       action={<StatusBadge tone={status.tone} value={status.value} />}
       description="Transcribe your microphone during a recording or livestream."
-      icon={ClosedCaptioning}
+      icon={CaptionsIcon}
       title="Live captions"
     >
       <FieldGroup>
@@ -266,7 +270,7 @@ export function CaptionsControls(): ReactElement {
 
         {!gate.allowed ? (
           <Alert variant="warning">
-            <WarningCircle weight="fill" />
+            <AlertIcon weight="fill" />
             <AlertTitle>Premium captions</AlertTitle>
             <AlertDescription>
               {gate.reason}
@@ -287,7 +291,7 @@ export function CaptionsControls(): ReactElement {
         <div className="flex flex-col gap-3 rounded-row border border-border bg-muted/20 p-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <div className="flex min-w-0 items-center gap-2 text-sm">
-              <Microphone className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
+              <MicrophoneIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
               <span className="font-medium">Microphone</span>
               <span className="text-muted-foreground">
                 · {captionsStatus.transport === 'realtime' ? 'Realtime' : 'Live transcription'}
@@ -305,7 +309,7 @@ export function CaptionsControls(): ReactElement {
             <p className="text-xs text-muted-foreground">{status.detail}</p>
             {showRetry ? (
               <Button disabled={captionsCommandPending} size="xs" variant="outline" onClick={retry}>
-                <ArrowClockwise data-icon="inline-start" />
+                <RefreshIcon data-icon="inline-start" />
                 Retry
               </Button>
             ) : null}
@@ -376,7 +380,10 @@ export function CaptionsControls(): ReactElement {
               </ToggleGroupItem>
             </ToggleGroup>
           </Field>
-          <Field>
+          {/* Three labelled items need a full row: sharing a half-column let
+              the labels escape the buttons at narrow widths (owner report,
+              twice). min-w-fit keeps each item's intrinsic floor. */}
+          <Field className="sm:col-span-2">
             <FieldLabel>Text size</FieldLabel>
             <ToggleGroup
               aria-label="Caption text size"
@@ -390,13 +397,13 @@ export function CaptionsControls(): ReactElement {
                 }
               }}
             >
-              <ToggleGroupItem className="flex-1" value="s">
+              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="s">
                 Small
               </ToggleGroupItem>
-              <ToggleGroupItem className="flex-1" value="m">
+              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="m">
                 Medium
               </ToggleGroupItem>
-              <ToggleGroupItem className="flex-1" value="l">
+              <ToggleGroupItem className="min-w-fit flex-1 px-1.5" value="l">
                 Large
               </ToggleGroupItem>
             </ToggleGroup>
@@ -499,11 +506,11 @@ export function CaptionsControls(): ReactElement {
             variant="outline"
             onClick={() => void toggleCaptionsWindow()}
           >
-            <ArrowSquareOut data-icon="inline-start" />
+            <ExternalLinkIcon data-icon="inline-start" />
             {captionsWindow.open ? 'Close reader' : 'Open reader'}
             <KbdGroup className="ml-1">
-              <Kbd>⌘</Kbd>
-              <Kbd>⇧</Kbd>
+              <Kbd>{modKey}</Kbd>
+              <Kbd>{shiftKey}</Kbd>
               <Kbd>C</Kbd>
             </KbdGroup>
           </Button>

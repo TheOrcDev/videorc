@@ -35,15 +35,21 @@ import {
   normalizeLayoutSettings,
   normalizeAudioSettings,
   normalizeMicrophoneSyncOffsetMs,
+  normalizeStreamingSettings,
   normalizeVideoSettings,
   parseAudioSyncRecommendationJson,
   parseMicrophoneSyncOffsetInput,
+  preparedXCompletionTargets,
+  preparedYouTubeCompletionTargets,
   previewDeviceRefreshSignature,
   persistableCaptureConfig,
   reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
   resetAudioSyncCalibration,
+  resolveProviderStreamOutputPlan,
   smokePreviewCompositorCaptureConfig,
+  STREAM_OUTPUT_GOP_SECONDS,
+  streamVideoProfileValidationReason,
   streamOutputVideoForTarget,
   sourceSelectionChangeEvents,
   streamOutputVideoSettings,
@@ -612,6 +618,11 @@ describe('smokePreviewCompositorCaptureConfig', () => {
       cameraShape: 'rectangle',
       cameraCornerRadiusPct: 12,
       cameraAspect: 'source',
+      cameraChromaKeyEnabled: false,
+      cameraChromaKeyColor: '#00FF00',
+      cameraChromaKeySimilarityPct: 40,
+      cameraChromaKeySmoothnessPct: 8,
+      cameraChromaKeySpillPct: 10,
       cameraMargin: 32,
       cameraFit: 'fill',
       cameraMirror: false,
@@ -692,6 +703,11 @@ describe('smokePreviewCompositorCaptureConfig', () => {
         cameraShape: 'rectangle',
         cameraCornerRadiusPct: 12,
         cameraAspect: 'source',
+        cameraChromaKeyEnabled: false,
+        cameraChromaKeyColor: '#00FF00',
+        cameraChromaKeySimilarityPct: 40,
+        cameraChromaKeySmoothnessPct: 8,
+        cameraChromaKeySpillPct: 10,
         cameraMargin: 32,
         cameraFit: 'fill',
         cameraMirror: false,
@@ -1003,6 +1019,20 @@ describe('videoPresets', () => {
       fps: 60,
       bitrateKbps: 6000
     })
+    expect(videoPresets['stream-youtube-1080p30']).toEqual({
+      preset: 'stream-youtube-1080p30',
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrateKbps: 10000
+    })
+    expect(videoPresets['stream-youtube-1080p60']).toEqual({
+      preset: 'stream-youtube-1080p60',
+      width: 1920,
+      height: 1080,
+      fps: 60,
+      bitrateKbps: 12000
+    })
     expect(videoPresets['stream-youtube-4k30']).toMatchObject({
       width: 3840,
       height: 2160,
@@ -1019,6 +1049,37 @@ describe('videoPresets', () => {
     expect(normalizeVideoSettings({ preset: 'stream-youtube-4k30' })).toEqual(
       videoPresets['stream-youtube-4k30']
     )
+    expect(
+      normalizeVideoSettings({
+        preset: 'stream-youtube-1080p60',
+        width: 1280,
+        height: 720,
+        fps: 24,
+        bitrateKbps: 1000
+      })
+    ).toEqual(videoPresets['stream-youtube-1080p60'])
+    const normalizedStreaming = normalizeStreamingSettings({
+      defaultOutputPreset: 'stream-youtube-1080p30',
+      defaultBitrateKbps: 1234,
+      targets: [
+        {
+          id: 'youtube',
+          platform: 'youtube',
+          outputPreset: 'stream-youtube-1080p60',
+          outputBitrateKbps: 2345
+        }
+      ]
+    })
+    expect(normalizedStreaming).toMatchObject({
+      defaultOutputPreset: 'stream-youtube-1080p30',
+      defaultBitrateKbps: 10000
+    })
+    expect(normalizedStreaming.targets[0]).toMatchObject({
+      platform: 'youtube',
+      outputPreset: 'stream-youtube-1080p60',
+      outputBitrateKbps: 12000
+    })
+    expect(STREAM_OUTPUT_GOP_SECONDS).toBe(2)
   })
 })
 
@@ -1039,7 +1100,7 @@ describe('videoProfileCompatibility', () => {
     })
   })
 
-  it('resolves mixed destination outputs from a YouTube 4K default profile', () => {
+  it('uses one provider-safe profile for mixed destinations without a proven split role', () => {
     const config = captureConfigFixture()
     config.video = videoPresets['record-4k30']
     config.streaming = {
@@ -1049,16 +1110,115 @@ describe('videoProfileCompatibility', () => {
       defaultBitrateKbps: 30000,
       targets: config.streaming.targets.map((target) => ({
         ...target,
-        enabled: target.platform === 'youtube' || target.platform === 'twitch'
+        enabled: target.id === 'youtube' || target.platform === 'twitch'
       }))
     }
 
     const outputs = streamOutputVideosForTargets(config.video, config.streaming)
-    const youtube = outputs.find((output) => output.target?.platform === 'youtube')
+    const youtube = outputs.find((output) => output.target?.id === 'youtube')
     const twitch = outputs.find((output) => output.target?.platform === 'twitch')
 
-    expect(youtube?.video).toEqual(videoPresets['stream-youtube-4k30'])
+    expect(youtube?.video).toEqual(videoPresets['stream-safe-1080p30'])
     expect(twitch?.video).toEqual(videoPresets['stream-safe-1080p30'])
+  })
+
+  it('keeps exact higher-rate YouTube-only 1080p profiles', () => {
+    for (const preset of ['stream-youtube-1080p30', 'stream-youtube-1080p60'] as const) {
+      const config = captureConfigFixture()
+      config.streaming = {
+        ...config.streaming,
+        enabled: true,
+        defaultOutputPreset: preset,
+        defaultBitrateKbps: 1234,
+        targets: config.streaming.targets.map((target) => ({
+          ...target,
+          enabled: target.id === 'youtube'
+        }))
+      }
+
+      const plan = resolveProviderStreamOutputPlan(config.video, config.streaming)
+      expect(plan.streamVideo).toEqual(videoPresets[preset])
+      expect(plan.targets).toHaveLength(1)
+      expect(plan.targets[0].video).toEqual(videoPresets[preset])
+      expect(plan.separateEncodedOutputRole).toBe(false)
+    }
+  })
+
+  it('resolves a retained YouTube 10 Mbps default to a Basic-safe Twitch/X profile', () => {
+    for (const platform of ['twitch', 'x'] as const) {
+      const config = captureConfigFixture()
+      config.streaming = {
+        ...config.streaming,
+        enabled: true,
+        defaultOutputPreset: 'stream-youtube-1080p30',
+        defaultBitrateKbps: 10000,
+        enabledTargetIds: [platform],
+        targets: config.streaming.targets.map((target) => ({
+          ...target,
+          enabled: target.platform === platform
+        }))
+      }
+
+      const plan = resolveProviderStreamOutputPlan(config.video, config.streaming)
+      expect(plan.streamVideo).toEqual(videoPresets['stream-safe-1080p30'])
+      expect(plan.targets).toHaveLength(1)
+      expect(plan.targets[0]).toMatchObject({
+        target: { platform },
+        video: videoPresets['stream-safe-1080p30']
+      })
+    }
+  })
+
+  it('uses higher YouTube rate in a mixed session only with a proven separate role', () => {
+    const config = captureConfigFixture()
+    config.video = videoPresets['stream-safe-1080p30']
+    config.streaming = {
+      ...config.streaming,
+      enabled: true,
+      defaultOutputPreset: 'stream-youtube-1080p30',
+      defaultBitrateKbps: 10000,
+      targets: config.streaming.targets.map((target) => ({
+        ...target,
+        enabled: target.id === 'youtube' || target.platform === 'twitch'
+      }))
+    }
+
+    const shared = resolveProviderStreamOutputPlan(config.video, config.streaming, {
+      recordEnabled: true,
+      separateEncodedOutputRoleAvailable: false
+    })
+    expect(shared.separateEncodedOutputRole).toBe(false)
+    expect(shared.targets.every(({ video }) => video.bitrateKbps <= 6000)).toBe(true)
+
+    const split = resolveProviderStreamOutputPlan(config.video, config.streaming, {
+      recordEnabled: true,
+      separateEncodedOutputRoleAvailable: true
+    })
+    expect(split.separateEncodedOutputRole).toBe(true)
+    expect(split.targets.find(({ target }) => target?.id === 'youtube')?.video).toEqual(
+      videoPresets['stream-youtube-1080p30']
+    )
+    expect(split.targets.find(({ target }) => target?.platform === 'twitch')?.video).toEqual(
+      videoPresets['stream-safe-1080p30']
+    )
+  })
+
+  it('validates provider-only high rates and rejects unsupported 4K60', () => {
+    expect(
+      streamVideoProfileValidationReason(videoPresets['stream-youtube-1080p60'], 'youtube')
+    ).toBeNull()
+    expect(
+      streamVideoProfileValidationReason(videoPresets['stream-youtube-1080p60'], 'twitch')
+    ).toContain('only for YouTube')
+    expect(
+      streamVideoProfileValidationReason({
+        preset: 'custom',
+        width: 3840,
+        height: 2160,
+        fps: 60,
+        bitrateKbps: 30000
+      })
+    ).toContain('exact YouTube 4K30')
   })
 
   it('lets an explicit target output override the platform default', () => {
@@ -1096,7 +1256,7 @@ describe('videoProfileCompatibility', () => {
               outputPreset: 'stream-safe-1080p30',
               outputBitrateKbps: 6000
             }
-          : { ...target, enabled: target.platform === 'youtube' }
+          : { ...target, enabled: target.id === 'youtube' }
       )
     }
 
@@ -1118,7 +1278,7 @@ describe('videoProfileCompatibility', () => {
       defaultBitrateKbps: 30000,
       targets: config.streaming.targets.map((target) => ({
         ...target,
-        enabled: target.platform === 'youtube'
+        enabled: target.id === 'youtube'
       }))
     }
 
@@ -1184,6 +1344,89 @@ describe('persistable capture settings', () => {
       microphoneMuted: true
     })
   })
+})
+
+describe('prepared YouTube completion targets', () => {
+  const streamingWithPreparedYouTube = (
+    status: 'ready' | 'connecting' | 'live' | 'warning' | 'failed' | 'stopped' | undefined,
+    enabled = true
+  ) => ({
+    ...defaultCaptureConfig.streaming,
+    targets: defaultCaptureConfig.streaming.targets.map((target) =>
+      target.id === 'youtube'
+        ? {
+            ...target,
+            enabled,
+            authMode: 'oauth' as const,
+            platformBroadcastId: 'broadcast-1',
+            platformStreamId: 'stream-1',
+            ...(status ? { status: { state: status } } : { status: undefined })
+          }
+        : target
+    )
+  })
+
+  it.each(['ready', 'connecting', 'live', 'warning', 'failed', undefined] as const)(
+    'includes a prepared broadcast in %s state',
+    (status) => {
+      expect(preparedYouTubeCompletionTargets(streamingWithPreparedYouTube(status))).toHaveLength(1)
+    }
+  )
+
+  it('includes disabled prepared broadcasts but excludes already stopped broadcasts', () => {
+    expect(
+      preparedYouTubeCompletionTargets(streamingWithPreparedYouTube('connecting', false))
+    ).toHaveLength(1)
+    expect(
+      preparedYouTubeCompletionTargets(streamingWithPreparedYouTube('stopped', false))
+    ).toHaveLength(0)
+  })
+})
+
+describe('prepared X completion targets', () => {
+  const streamingWithPreparedX = (
+    state: 'ready' | 'connecting' | 'live' | 'warning',
+    options: { enabled?: boolean; redactedUrl?: string } = {}
+  ) => ({
+    ...defaultCaptureConfig.streaming,
+    targets: defaultCaptureConfig.streaming.targets.map((target) =>
+      target.platform === 'x'
+        ? {
+            ...target,
+            enabled: options.enabled ?? true,
+            authMode: 'oauth' as const,
+            platformBroadcastId: 'x-identifier-1',
+            platformStreamId: 'x-media-key-1',
+            status: {
+              state,
+              ...(options.redactedUrl ? { redactedUrl: options.redactedUrl } : {})
+            }
+          }
+        : target
+    )
+  })
+
+  it('includes live X broadcasts even after the destination is disabled', () => {
+    expect(
+      preparedXCompletionTargets(streamingWithPreparedX('live', { enabled: false }))
+    ).toHaveLength(1)
+  })
+
+  it('keeps legacy published-warning cleanup when a share URL proves publish returned', () => {
+    expect(
+      preparedXCompletionTargets(
+        streamingWithPreparedX('warning', { redactedUrl: 'https://x.com/i/broadcasts/actual' })
+      )
+    ).toHaveLength(1)
+    expect(preparedXCompletionTargets(streamingWithPreparedX('warning'))).toHaveLength(0)
+  })
+
+  it.each(['ready', 'connecting'] as const)(
+    'does not mistake a prepared %s region identifier for a broadcast ID',
+    (state) => {
+      expect(preparedXCompletionTargets(streamingWithPreparedX(state))).toHaveLength(0)
+    }
+  )
 })
 
 describe('legacy stream key migration', () => {

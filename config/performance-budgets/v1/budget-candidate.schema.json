@@ -29,22 +29,37 @@
       "type": "object",
       "required": [
         "scenario",
+        "profileClass",
+        "appVersion",
         "buildMode",
-        "machineModel",
         "operatingSystem",
         "displayScaleFactor",
         "appRole",
         "source",
         "outputs",
         "timing"
+      ],
+      "oneOf": [
+        {
+          "required": ["machineModel"],
+          "not": { "required": ["hardwareClass"] }
+        },
+        {
+          "required": ["hardwareClass"],
+          "not": { "required": ["machineModel"] }
+        }
       ]
     },
     "evidence": {
       "type": "object",
       "additionalProperties": false,
       "required": [
+        "calibrationId",
         "commit",
         "executableSha256",
+        "packagePayloadSha256",
+        "calibrationSha256",
+        "calibrationGeneratedAt",
         "powerAssertion",
         "powerAssertionVerified",
         "runCount",
@@ -52,8 +67,12 @@
         "reportPaths"
       ],
       "properties": {
+        "calibrationId": { "type": "string", "pattern": "^[0-9a-f]{24}$" },
         "commit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
         "executableSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "packagePayloadSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "calibrationSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "calibrationGeneratedAt": { "type": "string", "format": "date-time" },
         "powerAssertion": { "const": "caffeinate:-d,-i,-s" },
         "powerAssertionVerified": { "const": true },
         "runCount": { "const": 3 },

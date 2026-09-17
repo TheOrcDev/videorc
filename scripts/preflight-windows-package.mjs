@@ -43,6 +43,14 @@ const inputs = [
     path: join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64', 'bin', 'ffprobe.exe'),
     remedy: 'pnpm ffmpeg:fetch:windows'
   },
+  {
+    path: join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64', 'LICENSE.txt'),
+    remedy: 'pnpm ffmpeg:fetch:windows'
+  },
+  {
+    path: join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64', 'SOURCE.txt'),
+    remedy: 'pnpm ffmpeg:fetch:windows'
+  },
   ...bundledBackgrounds.map((fileName) => ({
     path: join(
       repoRoot,

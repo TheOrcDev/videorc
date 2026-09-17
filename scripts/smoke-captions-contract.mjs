@@ -24,7 +24,8 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180_000)
 const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-captions-contract-'))
 const appDataDir = join(stateRoot, 'app-data')
-const backendBinary = join(process.cwd(), 'target', 'debug', 'videorc-backend')
+const backendBinaryName = process.platform === 'win32' ? 'videorc-backend.exe' : 'videorc-backend'
+const backendBinary = join(process.cwd(), 'target', 'debug', backendBinaryName)
 const smokeSessionToken = 'captions-contract-session-token'
 const smokeRealtimeToken = 'captions-contract-realtime-token'
 
@@ -42,7 +43,7 @@ let backend
 
 try {
   if (!existsSync(backendBinary)) {
-    throw new Error('target/debug/videorc-backend is missing; build the debug backend first.')
+    throw new Error(`target/debug/${backendBinaryName} is missing; build the debug backend first.`)
   }
   backendProcess = spawn(backendBinary, [], {
     ...devAppSpawnOptions({

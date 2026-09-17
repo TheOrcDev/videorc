@@ -1,4 +1,10 @@
-import { ArrowRight, CheckCircle, DownloadSimple, Warning, XCircle } from '@phosphor-icons/react'
+import {
+  ArrowRightIcon,
+  DownloadIcon,
+  ErrorIcon,
+  SuccessIcon,
+  WarningIcon
+} from '@/components/icons'
 import { useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -33,11 +39,11 @@ import {
 
 const VERDICT_META: Record<
   ObsImportVerdict,
-  { title: string; icon: typeof CheckCircle; className: string }
+  { title: string; icon: typeof SuccessIcon; className: string }
 > = {
-  imported: { title: 'Will import', icon: CheckCircle, className: 'text-success' },
-  approximated: { title: 'Approximated', icon: Warning, className: 'text-warning' },
-  skipped: { title: "Won't import", icon: XCircle, className: 'text-muted-foreground' }
+  imported: { title: 'Will import', icon: SuccessIcon, className: 'text-success' },
+  approximated: { title: 'Approximated', icon: WarningIcon, className: 'text-warning' },
+  skipped: { title: "Won't import", icon: ErrorIcon, className: 'text-muted-foreground' }
 }
 
 export function ObsImportDialog({
@@ -293,9 +299,9 @@ export function ObsImportDialog({
             Cancel
           </Button>
           <Button disabled={!plan || reading || applying} onClick={() => void apply()}>
-            <DownloadSimple data-icon="inline-start" />
+            <DownloadIcon data-icon="inline-start" />
             {applying ? 'Importing…' : 'Import setup'}
-            <ArrowRight data-icon="inline-end" />
+            <ArrowRightIcon data-icon="inline-end" />
           </Button>
         </DialogFooter>
       </DialogContent>

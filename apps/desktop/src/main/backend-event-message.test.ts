@@ -4,6 +4,8 @@ import {
   parseMainBackendWireMessage,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
+  parseMainPreviewSurfaceStatus,
+  parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatusEvent
 } from './backend-event-message'
 
@@ -19,6 +21,8 @@ describe('main backend event trust boundary', () => {
     )
     expect(() => parseMainCompositorStatusEvent({})).toThrow('compositor.status')
     expect(() => parseMainCompositorFrameReadyEvent(null)).toThrow('preview.frameReady')
+    expect(() => parseMainPreviewSurfaceStatus({})).toThrow('preview.surface.status')
+    expect(() => parseMainPreviewSurfaceStatusEvent({})).toThrow('preview.surface.status')
 
     expect(
       parseMainCompositorFrameReadyEvent({

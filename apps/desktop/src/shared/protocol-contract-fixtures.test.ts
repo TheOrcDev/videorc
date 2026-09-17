@@ -5,6 +5,12 @@ import { describe, expect, it } from 'vitest'
 import { normalizeLayoutSettings } from '../renderer/src/lib/capture'
 import type {
   AccountCallbackEnvelope,
+  CohostFlagParams,
+  CohostQuestionParams,
+  CohostSettings,
+  CohostSettingsPatch,
+  CohostStartParams,
+  CohostState,
   CompositorStatus,
   LayoutSettings,
   PreviewSurfaceBounds,
@@ -16,6 +22,7 @@ import type {
 } from './backend'
 import { normalizeSessionCommentsListParams } from './backend'
 import {
+  validateBackendEventPayload,
   validateBackendRpcParams,
   validateBackendRpcResult,
   type BackendRpcParams
@@ -53,6 +60,18 @@ interface HighRiskContractFixtures {
     terminalPage: SessionCommentsPage
     deleteParams: BackendRpcParams<'sessions.delete'>
     deletionOperation: SessionDeletionOperation
+  }
+  cohost: {
+    startParams: CohostStartParams
+    questionParams: CohostQuestionParams
+    flagParams: CohostFlagParams
+    settingsPatch: CohostSettingsPatch
+    settings: CohostSettings
+    state: CohostState
+    offState: CohostState
+    errorState: CohostState
+    timeoutState: CohostState
+    legacyState: CohostState
   }
 }
 
@@ -129,6 +148,101 @@ describe('shared high-risk protocol fixture', () => {
     ).toStrictEqual(fixtures.account.completeSignInParams)
   })
 
+  it('keeps the Live Co-host RPC params, settings, and state identical across languages', () => {
+    expect(validateBackendRpcParams('cohost.start', fixtures.cohost.startParams)).toStrictEqual(
+      fixtures.cohost.startParams
+    )
+    for (const method of ['cohost.question.answered', 'cohost.question.dismiss'] as const) {
+      expect(validateBackendRpcParams(method, fixtures.cohost.questionParams)).toStrictEqual(
+        fixtures.cohost.questionParams
+      )
+    }
+    expect(
+      validateBackendRpcParams('cohost.flag.dismiss', fixtures.cohost.flagParams)
+    ).toStrictEqual(fixtures.cohost.flagParams)
+    expect(
+      validateBackendRpcParams('cohost.settings.set', fixtures.cohost.settingsPatch)
+    ).toStrictEqual(fixtures.cohost.settingsPatch)
+    expect(validateBackendRpcResult('cohost.settings.get', fixtures.cohost.settings)).toStrictEqual(
+      fixtures.cohost.settings
+    )
+    for (const method of [
+      'cohost.status',
+      'cohost.start',
+      'cohost.stop',
+      'cohost.question.answered',
+      'cohost.question.dismiss',
+      'cohost.flag.dismiss'
+    ] as const) {
+      expect(validateBackendRpcResult(method, fixtures.cohost.state)).toStrictEqual(
+        fixtures.cohost.state
+      )
+      expect(validateBackendRpcResult(method, fixtures.cohost.offState)).toStrictEqual(
+        fixtures.cohost.offState
+      )
+    }
+    expect(validateBackendEventPayload('cohost.state', fixtures.cohost.state)).toStrictEqual(
+      fixtures.cohost.state
+    )
+    expect(validateBackendEventPayload('cohost.state', fixtures.cohost.offState)).toStrictEqual(
+      fixtures.cohost.offState
+    )
+    expect(fixtures.cohost.offState).toMatchObject({
+      sessionId: null,
+      reason: null,
+      detail: null,
+      mood: null
+    })
+    // Presence fields (W1): the off shape is all defaults, the listening shape
+    // carries a pending delta with its announced next pass.
+    expect(fixtures.cohost.offState).toMatchObject({
+      tickInFlight: false,
+      pendingMessages: 0,
+      nextTickAt: null,
+      messagesSeen: 0,
+      questionsTotal: 0
+    })
+    expect(fixtures.cohost.state).toMatchObject({
+      tickInFlight: false,
+      pendingMessages: 4,
+      nextTickAt: '2026-08-22T10:00:28Z',
+      messagesSeen: 84,
+      questionsTotal: 5
+    })
+    // `detail` carries the failed tick's envelope verbatim, or a desktop code
+    // with no HTTP status; a pre-`detail` payload validates unchanged.
+    for (const shape of ['errorState', 'timeoutState', 'legacyState'] as const) {
+      expect(validateBackendEventPayload('cohost.state', fixtures.cohost[shape])).toStrictEqual(
+        fixtures.cohost[shape]
+      )
+      expect(validateBackendRpcResult('cohost.status', fixtures.cohost[shape])).toStrictEqual(
+        fixtures.cohost[shape]
+      )
+    }
+    expect(fixtures.cohost.errorState.detail).toStrictEqual({
+      code: 'ai-gateway-error',
+      message: 'The co-host tick failed on every configured model.',
+      status: 502
+    })
+    expect(fixtures.cohost.timeoutState.detail).toStrictEqual({
+      code: 'timeout',
+      message: 'The co-host service did not answer within 12 s.',
+      status: null
+    })
+    expect('detail' in fixtures.cohost.legacyState).toBe(false)
+    // The legacy payload predates the presence fields; validating it proves
+    // the schema (and serde on the Rust side) defaults them.
+    for (const key of [
+      'tickInFlight',
+      'pendingMessages',
+      'nextTickAt',
+      'messagesSeen',
+      'questionsTotal'
+    ]) {
+      expect(key in fixtures.cohost.legacyState).toBe(false)
+    }
+  })
+
   it('keeps comment pagination defaults and deletion DTOs identical', () => {
     expect(normalizeSessionCommentsListParams(fixtures.comments.listParamsWire)).toStrictEqual(
       fixtures.comments.listParamsNormalized
@@ -148,8 +262,10 @@ describe('shared high-risk protocol fixture', () => {
     expect(
       validateBackendRpcParams('sessions.delete', fixtures.comments.deleteParams)
     ).toStrictEqual(fixtures.comments.deleteParams)
-    expect(
-      validateBackendRpcResult('sessions.delete', [fixtures.comments.deletionOperation])
-    ).toStrictEqual([fixtures.comments.deletionOperation])
+    for (const method of ['sessions.delete', 'sessions.delete.pending']) {
+      expect(validateBackendRpcResult(method, [fixtures.comments.deletionOperation])).toStrictEqual(
+        [fixtures.comments.deletionOperation]
+      )
+    }
   })
 })

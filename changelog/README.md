@@ -21,6 +21,8 @@ and the update feed — never the bare `0.9.2`).
 version: 0.9.2-beta.1
 date: 2026-07-01
 channel: beta
+platforms:
+  - macos
 title: Camera and microphone fixed in the installed app
 summary: One sentence used by the changelog index, newsletter subject, and in-app banner.
 highlights:
@@ -32,11 +34,37 @@ User-facing markdown body. Plain product voice — what changed and why you
 care. Screenshots via public URLs only.
 ```
 
+`channel` is one of `alpha`, `beta`, or `stable` and must match the releaseId:
+`0.10.0-alpha.1` uses `alpha`, `0.10.0-beta.1` uses `beta`, and a final
+`0.10.0` release uses `stable`.
+
+`platforms` is a non-empty, duplicate-free block list containing `macos`,
+`windows`, or both. Every new entry must declare it explicitly. Entries written
+before platform metadata was added omit the field and are interpreted as
+`platforms: [macos]`, so the existing macOS history remains valid. A Windows
+Alpha entry starts like this:
+
+```markdown
+---
+version: 0.10.0-alpha.1
+date: 2026-07-18
+channel: alpha
+platforms:
+  - windows
+title: A signed Windows test build
+summary: One sentence that states only the capabilities this accepted build proves.
+highlights:
+  - A verified Windows-facing change.
+---
+
+User-facing Windows Alpha notes, including relevant limitations.
+```
+
 Frontmatter is a strict subset of YAML: scalar `key: value` lines plus the
-`highlights:` block list. Unknown keys, malformed dates/versions, empty
-highlights, or an empty body **fail validation** (`pnpm changelog:check`), and
-from the release gate onward a release cannot ship without a valid entry for
-its releaseId.
+`platforms:` and `highlights:` block lists. Unknown keys, malformed
+dates/versions, invalid platform identifiers, empty highlights, or an empty
+body **fail validation** (`pnpm changelog:check`), and from the release gate
+onward a release cannot ship without a valid entry for its releaseId.
 
 ## Voice rules
 

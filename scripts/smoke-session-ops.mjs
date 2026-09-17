@@ -16,10 +16,11 @@ import { join } from 'node:path'
 // Electron main resolves each handle over its private admin connection before
 // an explicit completion removes the rows after simulated Trash moves.
 
-const backendBinary = join(process.cwd(), 'target', 'debug', 'videorc-backend')
+const backendBinaryName = process.platform === 'win32' ? 'videorc-backend.exe' : 'videorc-backend'
+const backendBinary = join(process.cwd(), 'target', 'debug', backendBinaryName)
 assert.ok(
   existsSync(backendBinary),
-  'target/debug/videorc-backend missing — run `cargo build -p videorc-backend` first'
+  `target/debug/${backendBinaryName} missing — run \`cargo build -p videorc-backend\` first`
 )
 
 const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-session-ops-'))
@@ -60,7 +61,7 @@ try {
   assert.ok(existsSync(importedFile), 'import should copy the file into the output directory')
   assert.ok(existsSync(sourcePath), 'import must copy, never move, the source file')
 
-  let sessions = await rpc('sessions.list', { limit: 200 })
+  let sessions = (await rpc('sessions.list', { limit: 200 })).items
   let row = sessions.find((session) => session.id === importedId)
   assert.ok(row, 'imported session should appear in sessions.list')
   assert.equal(row.mode, 'imported')
@@ -75,7 +76,7 @@ try {
   })
   assert.equal(badRename.code, 'session-rename-invalid')
   await rpc('sessions.rename', { sessionId: importedId, title: 'Renamed by smoke' })
-  sessions = await rpc('sessions.list', { limit: 200 })
+  sessions = (await rpc('sessions.list', { limit: 200 })).items
   assert.equal(
     sessions.find((session) => session.id === importedId)?.title,
     'Renamed by smoke',
@@ -88,7 +89,7 @@ try {
   assert.ok(duplicateId && duplicateId !== importedId, 'duplicate should mint a new id')
   const copyFile = join(outputDir, 'Session Ops Smoke (copy).mp4')
   assert.ok(existsSync(copyFile), 'duplicate should write the " (copy)" file')
-  sessions = await rpc('sessions.list', { limit: 200 })
+  sessions = (await rpc('sessions.list', { limit: 200 })).items
   const copyRow = sessions.find((session) => session.id === duplicateId)
   assert.ok(copyRow, 'duplicated session should appear in sessions.list')
   assert.equal(copyRow.title, 'Renamed by smoke (copy)')
@@ -106,12 +107,25 @@ try {
       (operation) =>
         typeof operation.operationId === 'string' &&
         operation.pathCount === 1 &&
+        operation.blockedPathCount === 0 &&
         !Object.hasOwn(operation, 'paths') &&
         !Object.hasOwn(operation, 'blockedPaths')
     ),
     'delete prepare should return only renderer-safe operation handles'
   )
-  sessions = await rpc('sessions.list', { limit: 200 })
+  const pendingOperations = await rpc('sessions.delete.pending')
+  assert.deepEqual(
+    pendingOperations,
+    operations,
+    'pending delete should return the same non-empty operation handles as prepare'
+  )
+  assert.ok(
+    pendingOperations.every(
+      (operation) => !Object.hasOwn(operation, 'paths') && !Object.hasOwn(operation, 'blockedPaths')
+    ),
+    'pending delete should not expose private path authority to the renderer'
+  )
+  sessions = (await rpc('sessions.list', { limit: 200 })).items
   assert.equal(sessions.length, 0, 'prepared sessions should be hidden immediately')
   assert.ok(!existsSync(importedFile), 'prepare should quarantine the recording file')
   assert.ok(!existsSync(copyFile), 'prepare should quarantine the duplicated file')
@@ -203,8 +217,9 @@ function makeRpc(ws) {
     if (typeof message.id !== 'string' || !pending.has(message.id)) {
       return // server events
     }
-    const { resolve, reject, expectError } = pending.get(message.id)
+    const { resolve, reject, expectError, timer } = pending.get(message.id)
     pending.delete(message.id)
+    clearTimeout(timer)
     if (message.ok) {
       if (expectError) {
         reject(new Error(`expected an error but ${message.id} succeeded`))
@@ -220,14 +235,20 @@ function makeRpc(ws) {
   const send = (method, params, expectError) =>
     new Promise((resolve, reject) => {
       const id = `smoke-${nextId++}-${method}`
-      pending.set(id, { resolve, reject, expectError })
-      ws.send(JSON.stringify({ id, method, params: params ?? {} }))
-      setTimeout(() => {
+      const timer = setTimeout(() => {
         if (pending.has(id)) {
           pending.delete(id)
           reject(new Error(`${method} timed out`))
         }
       }, timeoutMs)
+      pending.set(id, { resolve, reject, expectError, timer })
+      try {
+        ws.send(JSON.stringify({ id, method, params: params ?? {} }))
+      } catch (error) {
+        clearTimeout(timer)
+        pending.delete(id)
+        reject(error)
+      }
     })
   const rpc = (method, params) => send(method, params, false)
   rpc.expectError = (method, params) => send(method, params, true)

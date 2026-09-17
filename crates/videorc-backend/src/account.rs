@@ -314,39 +314,150 @@ pub fn stored_entitlement_token() -> Option<String> {
 
 // Read the stored durable session token (for Bearer-authed Videorc API calls).
 pub fn stored_session_token() -> Option<String> {
-    secrets::try_get_secret(SESSION_TOKEN_SECRET)
-        .ok()
-        .flatten()
-        .filter(|token| !token.trim().is_empty())
+    stored_session_token_result().ok().flatten()
 }
 
-// Validate the stored token against videorc-web and refresh the cached identity.
-// A dead token (401 / no session) signs the user out; a transient network error
-// keeps the cached account. A rotated token is persisted to avoid a future 401.
-pub async fn refresh_account() -> VideorcAccountSnapshot {
-    let Some(token) = stored_session_token() else {
-        return signed_out_account();
+pub(crate) fn stored_session_token_result() -> Result<Option<String>> {
+    secrets::try_get_secret(SESSION_TOKEN_SECRET)
+        .map(|token| token.filter(|token| !token.trim().is_empty()))
+}
+
+enum PreparedAccountRefreshOutcome {
+    NoStoredSession,
+    Refreshed(SessionRefresh),
+    KeepCachedAccount,
+}
+
+/// Network phase of account refresh. It deliberately performs no secret-store
+/// or in-memory account mutation: sign-out/sign-in may proceed while this
+/// request awaits the account service.
+pub struct PreparedAccountRefresh {
+    expected_token: Option<String>,
+    expected_intent_generation: u64,
+    expected_refresh_generation: u64,
+    outcome: PreparedAccountRefreshOutcome,
+}
+
+pub struct AccountRefreshIdentity {
+    token: Option<String>,
+    intent_generation: u64,
+    refresh_generation: u64,
+}
+
+/// Capture while the caller holds `AppState.account_auth_transition`.
+pub fn capture_account_refresh_identity(refresh_generation: u64) -> Result<AccountRefreshIdentity> {
+    Ok(AccountRefreshIdentity {
+        token: stored_session_token_result()?,
+        intent_generation: current_sign_in_intent_generation()?,
+        refresh_generation,
+    })
+}
+
+pub async fn prepare_account_refresh(identity: AccountRefreshIdentity) -> PreparedAccountRefresh {
+    let outcome = match identity.token.as_deref() {
+        None => PreparedAccountRefreshOutcome::NoStoredSession,
+        Some(token) => match VideorcApiClient::new() {
+            Ok(client) => match client.get_session(token).await {
+                Ok(refresh) => PreparedAccountRefreshOutcome::Refreshed(refresh),
+                Err(error) => {
+                    // Transient failure — retain the cached account rather than
+                    // interpreting transport failure as sign-out.
+                    eprintln!("videorc session check failed: {error:#}");
+                    PreparedAccountRefreshOutcome::KeepCachedAccount
+                }
+            },
+            Err(error) => {
+                eprintln!("videorc session client initialization failed: {error:#}");
+                PreparedAccountRefreshOutcome::KeepCachedAccount
+            }
+        },
     };
-    let client = match VideorcApiClient::new() {
-        Ok(client) => client,
-        Err(_) => return restore_persisted_account().unwrap_or_else(signed_out_account),
-    };
-    match client.get_session(&token).await {
-        Ok(refresh) => apply_session_refresh(token, refresh),
-        Err(error) => {
-            // Transient failure — keep the cached account rather than signing out.
-            eprintln!("videorc session check failed: {error:#}");
-            restore_persisted_account().unwrap_or_else(signed_out_account)
-        }
+    PreparedAccountRefresh {
+        expected_token: identity.token,
+        expected_intent_generation: identity.intent_generation,
+        expected_refresh_generation: identity.refresh_generation,
+        outcome,
     }
 }
 
-fn apply_session_refresh(current_token: String, refresh: SessionRefresh) -> VideorcAccountSnapshot {
+fn account_refresh_commit_is_current(
+    expected_intent_generation: u64,
+    current_intent_generation: u64,
+    expected_refresh_generation: u64,
+    current_refresh_generation: u64,
+    expected_token: Option<&str>,
+    current_token: Option<&str>,
+) -> bool {
+    expected_intent_generation == current_intent_generation
+        && expected_refresh_generation == current_refresh_generation
+        && expected_token == current_token
+}
+
+fn commit_account_refresh_if_current<T>(
+    expected_intent_generation: u64,
+    current_intent_generation: u64,
+    expected_refresh_generation: u64,
+    current_refresh_generation: u64,
+    expected_token: Option<&str>,
+    current_token: Option<&str>,
+    commit: impl FnOnce() -> T,
+) -> Option<T> {
+    account_refresh_commit_is_current(
+        expected_intent_generation,
+        current_intent_generation,
+        expected_refresh_generation,
+        current_refresh_generation,
+        expected_token,
+        current_token,
+    )
+    .then(commit)
+}
+
+/// Commit phase of account refresh. The caller holds
+/// `AppState.account_auth_transition`, so the identity check and any secret
+/// mutation are atomic with respect to sign-in/sign-out. `None` means a newer
+/// account intent or refresh request won while the network request was in
+/// flight. For a current Unauthorized result, entitlement revocation and its
+/// update event run before the durable credentials are deleted.
+pub fn commit_account_refresh(
+    prepared: PreparedAccountRefresh,
+    current_refresh_generation: u64,
+    revoke_entitlements_and_emit_update: impl FnOnce(),
+) -> Option<VideorcAccountSnapshot> {
+    let current_intent_generation = current_sign_in_intent_generation().ok()?;
+    let current_token = stored_session_token_result().ok()?;
+    let expected_token_for_identity = prepared.expected_token.clone();
+    commit_account_refresh_if_current(
+        prepared.expected_intent_generation,
+        current_intent_generation,
+        prepared.expected_refresh_generation,
+        current_refresh_generation,
+        expected_token_for_identity.as_deref(),
+        current_token.as_deref(),
+        || match prepared.outcome {
+            PreparedAccountRefreshOutcome::NoStoredSession => signed_out_account(),
+            PreparedAccountRefreshOutcome::Refreshed(refresh) => apply_session_refresh(
+                prepared.expected_token.unwrap_or_default(),
+                refresh,
+                revoke_entitlements_and_emit_update,
+            ),
+            PreparedAccountRefreshOutcome::KeepCachedAccount => {
+                restore_persisted_account().unwrap_or_else(signed_out_account)
+            }
+        },
+    )
+}
+
+fn apply_session_refresh(
+    current_token: String,
+    refresh: SessionRefresh,
+    revoke_entitlements_and_emit_update: impl FnOnce(),
+) -> VideorcAccountSnapshot {
     match refresh.status {
-        SessionStatus::Unauthorized => {
-            clear_persisted_account();
-            signed_out_account()
-        }
+        SessionStatus::Unauthorized => apply_unauthorized_session_refresh(
+            revoke_entitlements_and_emit_update,
+            clear_persisted_account,
+        ),
         SessionStatus::Active { name, email, image } => {
             let snapshot = snapshot_from_identity(name, email, image);
             let token = refresh.rotated_token.unwrap_or(current_token);
@@ -354,6 +465,19 @@ fn apply_session_refresh(current_token: String, refresh: SessionRefresh) -> Vide
             snapshot
         }
     }
+}
+
+fn apply_unauthorized_session_refresh(
+    revoke_entitlements_and_emit_update: impl FnOnce(),
+    clear_persisted_credentials: impl FnOnce(),
+) -> VideorcAccountSnapshot {
+    // Premium must fail closed before durable auth disappears. Premium gates
+    // read the in-memory hydration directly and do not take the async account
+    // transition lock, so clearing credentials first would leave a real race
+    // in which a concurrent request could still pass a premium gate.
+    revoke_entitlements_and_emit_update();
+    clear_persisted_credentials();
+    signed_out_account()
 }
 
 fn signed_in_mock(username: &str) -> VideorcAccountSnapshot {
@@ -404,6 +528,119 @@ mod tests {
             &ensure_sign_in_intent_matches(6, 7).unwrap_err()
         ));
         ensure_sign_in_intent_matches(7, 7).unwrap();
+    }
+
+    #[test]
+    fn account_refresh_commit_rejects_a_sign_out_that_won_during_network_wait() {
+        assert!(!account_refresh_commit_is_current(
+            7,
+            8,
+            3,
+            3,
+            Some("old-session"),
+            None
+        ));
+    }
+
+    #[test]
+    fn account_refresh_commit_rejects_a_new_sign_in_that_won_during_network_wait() {
+        assert!(!account_refresh_commit_is_current(
+            7,
+            8,
+            3,
+            3,
+            Some("old-session"),
+            Some("new-session")
+        ));
+    }
+
+    #[test]
+    fn account_refresh_commit_accepts_only_the_unchanged_identity() {
+        assert!(account_refresh_commit_is_current(
+            7,
+            7,
+            3,
+            3,
+            Some("same-session"),
+            Some("same-session")
+        ));
+        assert!(!account_refresh_commit_is_current(
+            7,
+            7,
+            3,
+            3,
+            Some("old-session"),
+            Some("rotated-elsewhere")
+        ));
+    }
+
+    #[test]
+    fn older_unauthorized_refresh_cannot_overwrite_newer_active_refresh() {
+        let account_is_active = std::cell::Cell::new(false);
+        let entitlement_revocations = std::cell::Cell::new(0);
+
+        let newer_active = commit_account_refresh_if_current(
+            7,
+            7,
+            2,
+            2,
+            Some("same-session"),
+            Some("same-session"),
+            || account_is_active.set(true),
+        );
+        assert!(newer_active.is_some());
+
+        let older_unauthorized = commit_account_refresh_if_current(
+            7,
+            7,
+            1,
+            2,
+            Some("same-session"),
+            Some("same-session"),
+            || {
+                entitlement_revocations.set(entitlement_revocations.get() + 1);
+                account_is_active.set(false);
+            },
+        );
+
+        assert!(older_unauthorized.is_none());
+        assert!(account_is_active.get());
+        assert_eq!(entitlement_revocations.get(), 0);
+    }
+
+    #[test]
+    fn unauthorized_refresh_cannot_observably_return_signed_out_with_premium() {
+        // The credential-clear callback is the deterministic race probe: it
+        // runs at the exact boundary where the old implementation first made
+        // SignedOut durable while the in-memory entitlement was still Premium.
+        let premium = std::cell::Cell::new(true);
+        let entitlement_update_emitted = std::cell::Cell::new(false);
+        let credentials_present = std::cell::Cell::new(true);
+
+        let account = apply_unauthorized_session_refresh(
+            || {
+                premium.set(false);
+                entitlement_update_emitted.set(true);
+            },
+            || {
+                assert!(
+                    !premium.get(),
+                    "premium gates must be closed before credentials are deleted"
+                );
+                assert!(
+                    entitlement_update_emitted.get(),
+                    "the Basic entitlement update must be emitted synchronously"
+                );
+                credentials_present.set(false);
+            },
+        );
+
+        assert!(!credentials_present.get());
+        assert_eq!(account.status, AccountStatus::SignedOut);
+        assert!(
+            !(account.status == AccountStatus::SignedOut && premium.get()),
+            "SignedOut must never coexist observably with Premium"
+        );
     }
 
     #[tokio::test]

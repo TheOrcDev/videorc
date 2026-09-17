@@ -3,8 +3,7 @@ import { Dialog as DialogPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
-import { XIcon } from '@phosphor-icons/react'
-
+import { CloseIcon } from '@/components/icons'
 function Dialog({ ...props }: React.ComponentProps<typeof DialogPrimitive.Root>) {
   return <DialogPrimitive.Root data-slot="dialog" {...props} />
 }
@@ -66,7 +65,7 @@ function DialogContent({
         {showCloseButton && (
           <DialogPrimitive.Close data-slot="dialog-close" asChild>
             <Button variant="ghost" className="absolute top-4 right-4 bg-secondary" size="icon-sm">
-              <XIcon />
+              <CloseIcon />
               <span className="sr-only">Close</span>
             </Button>
           </DialogPrimitive.Close>

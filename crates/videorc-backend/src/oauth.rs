@@ -22,6 +22,13 @@ const OAUTH_PROVIDER_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration:
 const OAUTH_PROVIDER_CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 const BUNDLED_TWITCH_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_TWITCH_CLIENT_ID");
 const BUNDLED_YOUTUBE_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID");
+// Google's "Desktop app" client type REQUIRES client_secret in the token
+// exchange even with PKCE — omitting it fails the exchange with
+// `invalid_request: client_secret is missing.` AFTER the user has already
+// granted consent. For an installed app this value is not a true secret
+// (it ships in the binary); PKCE is what actually protects the exchange.
+const BUNDLED_YOUTUBE_CLIENT_SECRET: Option<&str> =
+    option_env!("VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET");
 // The Videorc X OAuth app (public Native App client, PKCE — no secret involved).
 // Client IDs are public identifiers; build-time/runtime env still override.
 const BUNDLED_X_CLIENT_ID: Option<&str> = match option_env!("VIDEORC_BUNDLED_X_CLIENT_ID") {
@@ -214,10 +221,18 @@ enum PendingOAuthWork {
 
 impl PendingOAuthWork {
     fn is_code_less_resumable(&self) -> bool {
-        matches!(
-            self,
-            Self::ProviderExchangeStarted(_) | Self::ProviderToken(_) | Self::AccountStorage { .. }
-        )
+        match self {
+            Self::ProviderExchangeStarted(_)
+            | Self::ProviderToken(_)
+            | Self::AccountStorage { .. } => true,
+            // A device grant (Twitch) NEVER has an authorization code: the
+            // poller trades the device code for tokens instead. Without this,
+            // completion is rejected as "no code" before it ever polls — which
+            // is exactly how the flow silently did nothing after the user
+            // approved in the browser.
+            Self::ProviderExchange(exchange) => exchange.is_device_grant(),
+            Self::Generic => false,
+        }
     }
 
     fn is_unadvanced(&self) -> bool {
@@ -251,6 +266,22 @@ pub struct PendingOAuthExchange {
     pub redirect_uri: String,
     pub scopes: Vec<String>,
     pub code_verifier_secret_ref: Option<String>,
+    /// Set only for the Twitch device code flow, which has no redirect and no
+    /// authorization code — the poller trades this for tokens instead. This
+    /// struct is in-memory only (persistence uses PersistedOAuthSession), so a
+    /// device authorization does not survive a restart; it expires in ~30
+    /// minutes anyway and the user simply reconnects.
+    pub device_code: Option<String>,
+    pub device_interval_seconds: Option<i64>,
+}
+
+impl PendingOAuthExchange {
+    /// A device-grant session carries a device code instead of a redirect.
+    pub fn is_device_grant(&self) -> bool {
+        self.device_code
+            .as_deref()
+            .is_some_and(|code| !code.trim().is_empty())
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -618,6 +649,10 @@ fn restore_oauth_work(
                 redirect_uri,
                 scopes: normalized_scopes(&config.scopes),
                 code_verifier_secret_ref,
+                // A restored session always came from disk, and device grants
+                // are never persisted (see PendingOAuthExchange::device_code).
+                device_code: None,
+                device_interval_seconds: None,
             })
         }
         PersistedOAuthWork::ProviderExchangeStarted { checkpoint } => {
@@ -687,16 +722,107 @@ fn restore_oauth_work(
     })
 }
 
-fn restore_persisted_sessions(
+/// Secret references named by a persisted work checkpoint, readable without
+/// restoring the work (restoration needs the platform's provider config, which
+/// a gated platform cannot supply).
+fn persisted_oauth_work_secret_refs(work: &PersistedOAuthWork) -> Vec<String> {
+    let checkpoint_refs = |checkpoint: &PendingOAuthTokenCheckpoint| {
+        let mut refs = vec![checkpoint.secret_ref.clone()];
+        if let Some(pkce) = checkpoint.pkce_verifier_secret_ref.clone() {
+            refs.push(pkce);
+        }
+        if !checkpoint.candidate_access_secret_ref.is_empty() {
+            refs.push(checkpoint.candidate_access_secret_ref.clone());
+        }
+        if !checkpoint.candidate_refresh_secret_ref.is_empty() {
+            refs.push(checkpoint.candidate_refresh_secret_ref.clone());
+        }
+        refs
+    };
+    match work {
+        PersistedOAuthWork::Generic => Vec::new(),
+        PersistedOAuthWork::ProviderExchange {
+            code_verifier_secret_ref,
+            ..
+        } => code_verifier_secret_ref.clone().into_iter().collect(),
+        PersistedOAuthWork::ProviderExchangeStarted { checkpoint }
+        | PersistedOAuthWork::ProviderToken { checkpoint } => checkpoint_refs(checkpoint),
+        PersistedOAuthWork::AccountStorage {
+            checkpoint_secret_ref,
+            pkce_verifier_secret_ref,
+            candidate_access_secret_ref,
+            candidate_refresh_secret_ref,
+            superseded_secret_refs,
+            ..
+        } => checkpoint_secret_ref
+            .clone()
+            .into_iter()
+            .chain(pkce_verifier_secret_ref.clone())
+            .chain(candidate_access_secret_ref.clone())
+            .chain(candidate_refresh_secret_ref.clone())
+            .chain(superseded_secret_refs.iter().cloned())
+            .collect(),
+    }
+}
+
+/// Outcome of loading the persisted sessions: the restorable ones, plus
+/// whether any were dropped (so the caller rewrites the store without them).
+struct RestoredPersistedSessions {
+    pending: HashMap<String, PendingOAuthSession>,
+    dropped_any: bool,
+}
+
+fn restore_persisted_sessions<D>(
     sessions: Vec<PersistedOAuthSession>,
-) -> Result<HashMap<String, PendingOAuthSession>> {
+    delete_secret: &mut D,
+) -> Result<RestoredPersistedSessions>
+where
+    D: FnMut(&str) -> Result<()>,
+{
     let mut pending = HashMap::with_capacity(sessions.len());
+    let mut dropped_any = false;
     for session in sessions {
         if session.state.is_empty() || session.state.len() > 2048 {
             anyhow::bail!("OAuth transaction recovery store contains an invalid state.");
         }
-        let work = restore_oauth_work(&session.state, session.platform, session.work)
-            .context("OAuth transaction recovery store contains an invalid work checkpoint")?;
+        let secret_refs = persisted_oauth_work_secret_refs(&session.work);
+        let platform = session.platform;
+        let work = match restore_oauth_work(&session.state, platform, session.work) {
+            Ok(work) => work,
+            // A checkpoint whose restoration fails ONLY because the platform's
+            // OAuth is currently gated off (a YouTube pre-exchange flow
+            // recorded while the integration was enabled, loaded after it was
+            // disabled again) is not corruption: the flow can never resume
+            // while the gate is closed, so the checkpoint is dropped and its
+            // secrets are cleaned up. Later stages (token / account storage)
+            // restore without provider config and MUST survive restarts, so
+            // the drop is keyed to the restoration error, not the platform.
+            // Failing the whole store here put every backend into a 5-second
+            // "storage is unavailable" ERROR loop for the life of the process
+            // (2026-08-27 field log).
+            Err(error)
+                if provider_oauth_unavailable_message(platform)
+                    .is_some_and(|message| format!("{error:#}").contains(message)) =>
+            {
+                tracing::warn!(
+                    "Dropped a pending {platform:?} OAuth recovery checkpoint: the platform's OAuth is currently disabled, so the interrupted flow can never resume."
+                );
+                for secret_ref in secret_refs {
+                    if let Err(error) = delete_secret(&secret_ref) {
+                        tracing::warn!(
+                            "Could not delete an orphaned OAuth secret ({secret_ref}): {error:#}"
+                        );
+                    }
+                }
+                dropped_any = true;
+                continue;
+            }
+            Err(error) => {
+                return Err(error.context(
+                    "OAuth transaction recovery store contains an invalid work checkpoint",
+                ));
+            }
+        };
         let previous = pending.insert(
             session.state,
             PendingOAuthSession {
@@ -709,7 +835,10 @@ fn restore_persisted_sessions(
             anyhow::bail!("OAuth transaction recovery store contains a duplicate state.");
         }
     }
-    Ok(pending)
+    Ok(RestoredPersistedSessions {
+        pending,
+        dropped_any,
+    })
 }
 
 fn migrate_legacy_oauth_store<P, D>(
@@ -793,10 +922,10 @@ where
                 work,
             });
         }
-        let pending = restore_persisted_sessions(sessions)?;
-        persist_pending_oauth_sessions(path, &pending)
+        let restored = restore_persisted_sessions(sessions, delete_secret)?;
+        persist_pending_oauth_sessions(path, &restored.pending)
             .context("Could not commit protected OAuth transaction migration")?;
-        Ok(pending)
+        Ok(restored.pending)
     })();
     if migration.is_err() {
         for secret_ref in newly_protected_refs.iter().rev() {
@@ -840,12 +969,12 @@ where
     {
         anyhow::bail!("OAuth transaction recovery store version is unsupported.");
     }
-    let pending = restore_persisted_sessions(store.sessions)?;
-    if store.version < OAUTH_PENDING_STORE_VERSION {
-        persist_pending_oauth_sessions(path, &pending)
-            .context("Could not commit OAuth candidate-reference migration")?;
+    let restored = restore_persisted_sessions(store.sessions, delete_secret)?;
+    if store.version < OAUTH_PENDING_STORE_VERSION || restored.dropped_any {
+        persist_pending_oauth_sessions(path, &restored.pending)
+            .context("Could not commit OAuth recovery store maintenance")?;
     }
-    Ok(pending)
+    Ok(restored.pending)
 }
 
 fn persist_pending_oauth_sessions(
@@ -949,6 +1078,60 @@ impl OAuthSessions {
             .await
     }
 
+    /// Start Twitch's device authorization and register a pending session the
+    /// poller can complete. Returns the verification URI as `auth_url` so the
+    /// caller's existing "open this URL" path needs no change.
+    async fn start_twitch_device_grant(
+        &self,
+        config: OAuthProviderConfig,
+        state: String,
+        expires_at: chrono::DateTime<Utc>,
+    ) -> Result<OAuthStartResult> {
+        let client = provider_http_client();
+        let authorization =
+            start_twitch_device_authorization(&config.client_id, &config.scopes, &client).await?;
+        // Never outlive Twitch's own device-code lifetime.
+        let expires_at = expires_at.min(
+            Utc::now()
+                + Duration::seconds(
+                    authorization
+                        .expires_in
+                        .clamp(1, OAUTH_STATE_TTL_MINUTES * 60),
+                ),
+        );
+
+        let mut session_state = self.state.lock().await;
+        session_state.pending.insert(
+            state.clone(),
+            PendingOAuthSession {
+                platform: StreamPlatform::Twitch,
+                expires_at,
+                work: PendingOAuthWork::ProviderExchange(PendingOAuthExchange {
+                    platform: StreamPlatform::Twitch,
+                    token_url: config.token_url,
+                    profile_url: config.profile_url,
+                    client_id: config.client_id,
+                    client_secret: config.client_secret,
+                    // A device grant has no redirect leg at all.
+                    redirect_uri: String::new(),
+                    scopes: normalized_scopes(&config.scopes),
+                    code_verifier_secret_ref: None,
+                    device_code: Some(authorization.device_code),
+                    device_interval_seconds: Some(authorization.interval.max(1)),
+                }),
+            },
+        );
+        drop(session_state);
+
+        Ok(OAuthStartResult {
+            platform: StreamPlatform::Twitch,
+            state,
+            auth_url: authorization.verification_uri,
+            redirect_uri: String::new(),
+            expires_at: expires_at.to_rfc3339(),
+        })
+    }
+
     pub async fn start_provider_with_secret_store<P, D>(
         &self,
         params: OAuthStartProviderParams,
@@ -975,6 +1158,20 @@ impl OAuthSessions {
             backend_port,
         )?;
         let expires_at = Utc::now() + Duration::minutes(OAUTH_STATE_TTL_MINUTES);
+
+        // Twitch registers Videorc as a PUBLIC client, which has no client
+        // secret at all, and Twitch's authorization-code grant rejects such a
+        // client with `Invalid client credentials` AFTER the user approves —
+        // with or without PKCE. The device code flow is Twitch's supported
+        // path for secretless clients. The user experience is unchanged
+        // because Twitch's verification_uri already embeds the user code, so
+        // the caller opens `auth_url` exactly as it does for every provider.
+        if matches!(params.platform, StreamPlatform::Twitch) {
+            return self
+                .start_twitch_device_grant(config, state, expires_at)
+                .await;
+        }
+
         let mut extra_params = config.extra_params.clone();
         let mut code_verifier = None;
         let code_verifier_secret_ref = if config.pkce {
@@ -1012,6 +1209,8 @@ impl OAuthSessions {
                     redirect_uri: redirect_uri.clone(),
                     scopes: normalized_scopes(&config.scopes),
                     code_verifier_secret_ref: code_verifier_secret_ref.clone(),
+                    device_code: None,
+                    device_interval_seconds: None,
                 }),
             },
         );
@@ -1948,6 +2147,83 @@ pub async fn exchange_authorization_code(
     })
 }
 
+/// Obtain provider tokens for a pending exchange, whichever grant it uses.
+///
+/// Redirect providers trade the authorization code immediately. Twitch's
+/// device grant instead WAITS here, polling until the user approves in the
+/// browser, so every caller downstream — checkpointing, profile fetch,
+/// account storage, events — stays identical for both grant types.
+/// Which provider exchange, if any, a completion outcome should run.
+///
+/// A redirect grant needs the provider's single-use authorization code. A
+/// device grant (Twitch) NEVER has one — the poller trades the stored device
+/// code instead — so requiring `Some(code)` at the driver was exactly the bug
+/// that made the whole device flow authorize into the void: the background
+/// completion task matched no arm, the session was retired at spawn time, and
+/// nobody was listening by the time the user approved in the browser
+/// (0.9.50–0.9.56). The placeholder code is ignored by
+/// `obtain_provider_token` for device grants.
+pub fn provider_exchange_to_run(
+    exchange: Option<PendingOAuthExchange>,
+    authorization_code: Option<String>,
+) -> Option<(PendingOAuthExchange, String)> {
+    let exchange = exchange?;
+    match authorization_code {
+        Some(code) => Some((exchange, code)),
+        None if exchange.is_device_grant() => Some((exchange, String::new())),
+        None => None,
+    }
+}
+
+pub async fn obtain_provider_token(
+    exchange: &PendingOAuthExchange,
+    authorization_code: &str,
+    code_verifier: Option<&str>,
+    client: &reqwest::Client,
+) -> Result<ExchangedOAuthToken> {
+    let device_code = match exchange.device_code.as_deref() {
+        Some(code) if exchange.is_device_grant() => code,
+        _ => {
+            return exchange_authorization_code(
+                exchange,
+                authorization_code,
+                code_verifier,
+                client,
+            )
+            .await;
+        }
+    };
+
+    let mut interval = exchange.device_interval_seconds.unwrap_or(5).clamp(1, 60);
+    let deadline = Utc::now() + Duration::minutes(OAUTH_STATE_TTL_MINUTES);
+    loop {
+        if Utc::now() >= deadline {
+            anyhow::bail!(
+                "Twitch authorization timed out before it was approved. Start the connection again."
+            );
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(interval.max(1) as u64)).await;
+        match poll_twitch_device_token(
+            exchange.platform,
+            &exchange.token_url,
+            &exchange.client_id,
+            device_code,
+            &exchange.scopes,
+            interval,
+            client,
+        )
+        .await?
+        {
+            DevicePollOutcome::Pending => continue,
+            DevicePollOutcome::SlowDown { next_interval } => {
+                interval = next_interval.clamp(1, 60);
+            }
+            DevicePollOutcome::Failed { reason } => anyhow::bail!("{reason}"),
+            DevicePollOutcome::Approved(token) => return Ok(*token),
+        }
+    }
+}
+
 pub async fn account_from_exchanged_token<F>(
     checkpoint: &PendingOAuthTokenCheckpoint,
     token: &ExchangedOAuthToken,
@@ -2310,6 +2586,164 @@ struct OAuthTokenResponse {
     scope: Option<OAuthScopeResponse>,
 }
 
+// ── Twitch device code flow ─────────────────────────────────────────────
+//
+// Twitch registers Videorc as a PUBLIC client (desktop apps cannot keep a
+// secret), and a public client has NO client secret at all. Twitch's
+// authorization-code grant rejects such a client outright — with or without
+// PKCE — returning `Invalid client credentials` AFTER the user has already
+// approved. The device code flow is Twitch's supported path for exactly this
+// case: it authenticates by client id alone and still issues a refresh token
+// (verified: the refresh grant accepts client_id with no secret).
+//
+// UX is unchanged for the user: Twitch's verification_uri already embeds the
+// user code, so the app opens that URL and the user just approves.
+
+pub const TWITCH_DEVICE_URL: &str = "https://id.twitch.tv/oauth2/device";
+pub const TWITCH_DEVICE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
+/// Twitch answers `slow_down` when polled too fast; back off by this much.
+const DEVICE_SLOW_DOWN_STEP: i64 = 5;
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TwitchDeviceAuthorization {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    pub expires_in: i64,
+    #[serde(default = "default_device_interval")]
+    pub interval: i64,
+}
+
+fn default_device_interval() -> i64 {
+    5
+}
+
+/// One poll of the device token endpoint, classified so the caller can decide
+/// whether to keep waiting, back off, or surface a terminal failure.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevicePollOutcome {
+    /// The user has not approved yet — keep polling at the current interval.
+    Pending,
+    /// Polled too fast — raise the interval before the next attempt.
+    SlowDown { next_interval: i64 },
+    /// The user declined, or the device code aged out. Terminal.
+    Failed { reason: String },
+    /// Approved. Contains the tokens.
+    Approved(Box<ExchangedOAuthToken>),
+}
+
+/// Classify a device-token poll from its HTTP status and body, without any
+/// network access, so the state machine is unit-testable.
+pub fn classify_device_poll(
+    platform: StreamPlatform,
+    status: u16,
+    body: &str,
+    requested_scopes: &[String],
+    interval: i64,
+) -> Result<DevicePollOutcome> {
+    if status == 200 {
+        let token: OAuthTokenResponse = serde_json::from_str(body)
+            .context("Could not parse the Twitch device token response")?;
+        if token.access_token.trim().is_empty() {
+            anyhow::bail!("Twitch device authorization returned an empty access token.");
+        }
+        let scopes = token
+            .scopes()
+            .filter(|scopes| !scopes.is_empty())
+            .unwrap_or_else(|| requested_scopes.to_vec());
+        let expires_at = token
+            .expires_in
+            .and_then(|seconds| Utc::now().checked_add_signed(Duration::seconds(seconds)))
+            .map(|expires_at| expires_at.to_rfc3339());
+        return Ok(DevicePollOutcome::Approved(Box::new(ExchangedOAuthToken {
+            platform,
+            access_token: token.access_token,
+            refresh_token: token.refresh_token,
+            scopes,
+            expires_at,
+        })));
+    }
+
+    // Twitch reports the pending/slow-down/denied states as 400s whose message
+    // carries the meaning. Match on the message, not the status.
+    let lowered = body.to_ascii_lowercase();
+    if lowered.contains("authorization_pending") || lowered.contains("authorization pending") {
+        return Ok(DevicePollOutcome::Pending);
+    }
+    if lowered.contains("slow_down") || lowered.contains("slow down") {
+        return Ok(DevicePollOutcome::SlowDown {
+            next_interval: interval.saturating_add(DEVICE_SLOW_DOWN_STEP),
+        });
+    }
+    if lowered.contains("expired_token") || lowered.contains("expired") {
+        return Ok(DevicePollOutcome::Failed {
+            reason: "The Twitch authorization code expired before it was approved.".to_string(),
+        });
+    }
+    if lowered.contains("access_denied") || lowered.contains("denied") {
+        return Ok(DevicePollOutcome::Failed {
+            reason: "Twitch authorization was declined.".to_string(),
+        });
+    }
+    Ok(DevicePollOutcome::Failed {
+        reason: format!("Twitch device authorization failed with HTTP {status}."),
+    })
+}
+
+/// Ask Twitch to start a device authorization for these scopes.
+pub async fn start_twitch_device_authorization(
+    client_id: &str,
+    scopes: &[String],
+    client: &reqwest::Client,
+) -> Result<TwitchDeviceAuthorization> {
+    let response = client
+        .post(TWITCH_DEVICE_URL)
+        .form(&[("client_id", client_id), ("scopes", &scopes.join(" "))])
+        .send()
+        .await
+        .context("Could not reach Twitch to start device authorization")?;
+    if !response.status().is_success() {
+        let status = response.status();
+        anyhow::bail!("Twitch device authorization request failed with HTTP {status}");
+    }
+    let authorization = response
+        .json::<TwitchDeviceAuthorization>()
+        .await
+        .context("Could not parse the Twitch device authorization response")?;
+    if authorization.device_code.trim().is_empty()
+        || authorization.verification_uri.trim().is_empty()
+    {
+        anyhow::bail!("Twitch device authorization response was incomplete.");
+    }
+    Ok(authorization)
+}
+
+/// Poll once for the device token. Callers own the wait between polls.
+pub async fn poll_twitch_device_token(
+    platform: StreamPlatform,
+    token_url: &str,
+    client_id: &str,
+    device_code: &str,
+    scopes: &[String],
+    interval: i64,
+    client: &reqwest::Client,
+) -> Result<DevicePollOutcome> {
+    let response = client
+        .post(token_url)
+        .form(&[
+            ("client_id", client_id),
+            ("device_code", device_code),
+            ("grant_type", TWITCH_DEVICE_GRANT_TYPE),
+            ("scopes", &scopes.join(" ")),
+        ])
+        .send()
+        .await
+        .context("Could not reach Twitch while waiting for device authorization")?;
+    let status = response.status().as_u16();
+    let body = response.text().await.unwrap_or_default();
+    classify_device_poll(platform, status, &body, scopes, interval)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(untagged)]
 enum OAuthScopeResponse {
@@ -2338,10 +2772,13 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
             if let Some(message) = provider_oauth_unavailable_message(platform) {
                 anyhow::bail!("{message}");
             }
-            Ok(youtube_provider_config(required_credential(
-                "VIDEORC_YOUTUBE_CLIENT_ID",
-                BUNDLED_YOUTUBE_CLIENT_ID,
-            )?))
+            Ok(youtube_provider_config(
+                required_credential("VIDEORC_YOUTUBE_CLIENT_ID", BUNDLED_YOUTUBE_CLIENT_ID)?,
+                required_credential(
+                    "VIDEORC_YOUTUBE_CLIENT_SECRET",
+                    BUNDLED_YOUTUBE_CLIENT_SECRET,
+                )?,
+            ))
         }
         StreamPlatform::Twitch => Ok(OAuthProviderConfig {
             authorization_url: "https://id.twitch.tv/oauth2/authorize".to_string(),
@@ -2379,14 +2816,14 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     }
 }
 
-fn youtube_provider_config(client_id: String) -> OAuthProviderConfig {
+fn youtube_provider_config(client_id: String, client_secret: String) -> OAuthProviderConfig {
     OAuthProviderConfig {
         authorization_url: "https://accounts.google.com/o/oauth2/v2/auth".to_string(),
         token_url: "https://oauth2.googleapis.com/token".to_string(),
         profile_url: "https://www.googleapis.com/youtube/v3/channels?part=snippet&mine=true"
             .to_string(),
         client_id,
-        client_secret: None,
+        client_secret: Some(client_secret),
         scopes: vec!["https://www.googleapis.com/auth/youtube.force-ssl".to_string()],
         extra_params: HashMap::from([
             ("access_type".to_string(), "offline".to_string()),
@@ -2467,10 +2904,14 @@ pub fn provider_credential_statuses() -> Vec<OAuthProviderCredentialStatus> {
     };
     vec![
         youtube,
-        // Twitch ships as a PUBLIC client type (dev console setting): no
-        // client secret exists, token exchange + refresh use the client id
-        // alone. VIDEORC_TWITCH_CLIENT_SECRET stays honoured for confidential
-        // setups (smoke accounts, forks running their own app).
+        // Twitch ships as a PUBLIC client type (dev console setting), so no
+        // client secret exists. That does NOT make the authorization-code
+        // grant work: Twitch rejects a secretless public client with
+        // `Invalid client credentials` after the user approves, with or
+        // without PKCE. Connect therefore uses the DEVICE CODE flow, which
+        // authenticates by client id alone; refresh genuinely does work with
+        // the client id alone. VIDEORC_TWITCH_CLIENT_SECRET stays honoured for
+        // confidential setups (smoke accounts, forks running their own app).
         provider_credential_status(
             StreamPlatform::Twitch,
             "VIDEORC_TWITCH_CLIENT_ID",
@@ -2764,6 +3205,72 @@ mod tests {
             );
             let _ = std::fs::remove_file(store_path);
         }
+    }
+
+    #[tokio::test]
+    async fn gate_closed_youtube_checkpoint_is_dropped_not_fatal() {
+        // 2026-08-27 field incident: a YouTube checkpoint persisted while the
+        // OAuth gate was open failed restoration once the gate closed, which
+        // failed the WHOLE store load and put every backend into a 5-second
+        // "storage is unavailable" ERROR loop for the life of the process.
+        // (This test assumes the ambient environment leaves the YouTube gate
+        // closed, like every other gate-dependent test in this file.)
+        let store_path = pending_store_path();
+        let store = format!(
+            concat!(
+                "{{\"version\":{version},\"sessions\":[",
+                "{{\"state\":\"stale-youtube-state\",\"platform\":\"youtube\",",
+                "\"expiresAt\":\"2026-08-25T14:00:00Z\",",
+                "\"work\":{{\"kind\":\"provider-exchange\",",
+                "\"redirectUri\":\"http://127.0.0.1:17995/callback\",",
+                "\"codeVerifierSecretRef\":\"videorc-oauth-pkce-stale-youtube-state-youtube\"}}}},",
+                "{{\"state\":\"live-twitch-state\",\"platform\":\"twitch\",",
+                "\"expiresAt\":\"2099-01-01T00:00:00Z\",",
+                "\"work\":{{\"kind\":\"generic\"}}}}",
+                "]}}"
+            ),
+            version = OAUTH_PENDING_STORE_VERSION
+        );
+        std::fs::write(&store_path, store.as_bytes()).unwrap();
+
+        let deleted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let deleted_sink = deleted.clone();
+        let sessions =
+            OAuthSessions::new_with_secret_cleanup(Some(store_path.clone()), move |secret_ref| {
+                deleted_sink.lock().unwrap().push(secret_ref.to_string());
+                Ok(())
+            });
+
+        // The store loaded: operations work instead of failing with
+        // "storage is unavailable".
+        sessions
+            .start(
+                OAuthStartParams {
+                    platform: StreamPlatform::Twitch,
+                    ..start_params()
+                },
+                61234,
+            )
+            .await
+            .unwrap();
+
+        // The dead checkpoint's secret was cleaned up…
+        assert!(
+            deleted
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|secret_ref| secret_ref.contains("stale-youtube-state")),
+            "expected the stale PKCE secret to be deleted, saw {:?}",
+            deleted.lock().unwrap()
+        );
+        // …and the rewritten store no longer names the YouTube session, so
+        // the next launch does not re-drop (and re-warn about) it. The
+        // unrelated Twitch session survives.
+        let rewritten = std::fs::read_to_string(&store_path).unwrap();
+        assert!(!rewritten.contains("stale-youtube-state"));
+        assert!(rewritten.contains("live-twitch-state"));
+        let _ = std::fs::remove_file(store_path);
     }
 
     #[tokio::test]
@@ -4543,6 +5050,8 @@ mod tests {
             redirect_uri: "http://127.0.0.1:61234/oauth/callback".to_string(),
             scopes: vec!["fallback".to_string()],
             code_verifier_secret_ref: Some("fixture-pkce-ref".to_string()),
+            device_code: None,
+            device_interval_seconds: None,
         };
         let mut batches = Vec::new();
         let account = exchange_and_store_token(
@@ -4693,12 +5202,192 @@ mod tests {
         );
     }
 
+    fn device_exchange_fixture(device_code: Option<&str>) -> PendingOAuthExchange {
+        PendingOAuthExchange {
+            platform: StreamPlatform::Twitch,
+            token_url: "https://id.twitch.tv/oauth2/token".to_string(),
+            profile_url: "https://api.twitch.tv/helix/users".to_string(),
+            client_id: "client".to_string(),
+            client_secret: None,
+            redirect_uri: String::new(),
+            scopes: vec!["user:write:chat".to_string()],
+            code_verifier_secret_ref: None,
+            device_code: device_code.map(str::to_string),
+            device_interval_seconds: Some(5),
+        }
+    }
+
+    #[test]
+    fn a_device_grant_completes_without_an_authorization_code() {
+        // The bug this pins: completion computed
+        //   failed = !code_less_resume && (error || !code_present)
+        // and a device grant has NO code by design, so the flow was rejected
+        // before it ever polled — the user approved in the browser and the app
+        // did nothing. A device grant must be code-less resumable.
+        let device = PendingOAuthWork::ProviderExchange(device_exchange_fixture(Some("dc")));
+        assert!(
+            device.is_code_less_resumable(),
+            "a device grant has no authorization code and must still complete"
+        );
+
+        // Redirect providers must keep requiring their code.
+        let redirect = PendingOAuthWork::ProviderExchange(device_exchange_fixture(None));
+        assert!(!redirect.is_code_less_resumable());
+        assert!(!PendingOAuthWork::Generic.is_code_less_resumable());
+    }
+
+    #[test]
+    fn completion_driver_runs_a_device_exchange_without_a_code() {
+        // The 0.9.50–0.9.56 outage: the driver destructured
+        // `(Some(exchange), Some(code))`, which a device grant can never
+        // satisfy — the background completion matched no arm, the session was
+        // retired at spawn time, and the user's browser approval landed on
+        // nothing. All three shapes are pinned here so "who supplies the
+        // code" can never quietly kill the device flow again (#187 fixed the
+        // same disease one layer lower).
+        let device = provider_exchange_to_run(Some(device_exchange_fixture(Some("dc"))), None);
+        let (exchange, code) = device.expect("a device grant must run without a code");
+        assert!(exchange.is_device_grant());
+        assert!(
+            code.is_empty(),
+            "the placeholder code must be inert — obtain_provider_token ignores it"
+        );
+
+        // A redirect exchange with its code runs with that exact code.
+        let redirect = provider_exchange_to_run(
+            Some(device_exchange_fixture(None)),
+            Some("auth-code".to_string()),
+        );
+        let (_, code) = redirect.expect("a redirect grant with a code must run");
+        assert_eq!(code, "auth-code");
+
+        // A redirect exchange with NO code must never run — that code is the
+        // single-use provider credential, there is nothing to trade without it.
+        assert!(provider_exchange_to_run(Some(device_exchange_fixture(None)), None).is_none());
+        // No exchange, nothing to run.
+        assert!(provider_exchange_to_run(None, Some("auth-code".to_string())).is_none());
+    }
+
+    #[test]
+    fn device_grant_is_detected_only_when_a_code_is_present() {
+        assert!(device_exchange_fixture(Some("dc")).is_device_grant());
+        assert!(!device_exchange_fixture(None).is_device_grant());
+        // Whitespace is not a grant.
+        assert!(!device_exchange_fixture(Some("   ")).is_device_grant());
+    }
+
+    #[test]
+    fn redirect_exchanges_keep_no_device_state() {
+        // Every non-Twitch provider must be untouched by the device work.
+        let exchange = device_exchange_fixture(None);
+        assert!(exchange.device_code.is_none());
+        assert!(!exchange.is_device_grant());
+    }
+
+    fn twitch_device_scopes() -> Vec<String> {
+        vec![
+            "channel:manage:broadcast".to_string(),
+            "user:write:chat".to_string(),
+        ]
+    }
+
+    #[test]
+    fn device_poll_treats_pending_as_keep_waiting_not_failure() {
+        let outcome = classify_device_poll(
+            StreamPlatform::Twitch,
+            400,
+            r#"{"status":400,"message":"authorization_pending"}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, DevicePollOutcome::Pending);
+    }
+
+    #[test]
+    fn device_poll_backs_off_when_twitch_says_slow_down() {
+        let outcome = classify_device_poll(
+            StreamPlatform::Twitch,
+            400,
+            r#"{"status":400,"message":"slow_down"}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap();
+
+        assert_eq!(outcome, DevicePollOutcome::SlowDown { next_interval: 10 });
+    }
+
+    #[test]
+    fn device_poll_reports_decline_and_expiry_as_terminal() {
+        let denied = classify_device_poll(
+            StreamPlatform::Twitch,
+            400,
+            r#"{"status":400,"message":"access_denied"}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap();
+        assert!(matches!(denied, DevicePollOutcome::Failed { .. }));
+
+        let expired = classify_device_poll(
+            StreamPlatform::Twitch,
+            400,
+            r#"{"status":400,"message":"expired_token"}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap();
+        assert!(matches!(expired, DevicePollOutcome::Failed { .. }));
+    }
+
+    #[test]
+    fn device_poll_returns_tokens_and_falls_back_to_requested_scopes() {
+        let DevicePollOutcome::Approved(token) = classify_device_poll(
+            StreamPlatform::Twitch,
+            200,
+            r#"{"access_token":"at","refresh_token":"rt","expires_in":14400}"#,
+            &twitch_device_scopes(),
+            5,
+        )
+        .unwrap() else {
+            panic!("an approved device poll must return tokens");
+        };
+
+        assert_eq!(token.access_token, "at");
+        // Twitch omits `scope` on the device grant; the requested set stands in
+        // so a connection is never stored claiming zero permissions.
+        assert_eq!(token.scopes, twitch_device_scopes());
+        assert_eq!(token.refresh_token.as_deref(), Some("rt"));
+        assert!(token.expires_at.is_some());
+    }
+
+    #[test]
+    fn device_poll_rejects_an_empty_access_token() {
+        assert!(
+            classify_device_poll(
+                StreamPlatform::Twitch,
+                200,
+                r#"{"access_token":"   "}"#,
+                &twitch_device_scopes(),
+                5,
+            )
+            .is_err()
+        );
+    }
+
     #[test]
     fn youtube_verification_config_uses_pkce_and_the_minimum_scope() {
-        let config = youtube_provider_config("public-client-id".to_string());
+        let config =
+            youtube_provider_config("public-client-id".to_string(), "client-secret".to_string());
 
         assert!(config.pkce);
-        assert_eq!(config.client_secret, None);
+        // Google's Desktop client type rejects a PKCE-only token exchange with
+        // `client_secret is missing` AFTER consent, so the secret rides along
+        // WITH PKCE. Asserting None here previously enshrined a flow that
+        // could never complete against Google.
+        assert_eq!(config.client_secret.as_deref(), Some("client-secret"));
         assert_eq!(
             config.scopes,
             vec!["https://www.googleapis.com/auth/youtube.force-ssl"]

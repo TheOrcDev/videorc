@@ -1,0 +1,212 @@
+// Remote-control end-to-end smoke (remote-control plan RC5, issue #143).
+//
+// Drives the REAL dev app: enables the remote surface over the renderer
+// socket, pairs a fake Stream Deck client via the discovery file, and proves
+// the security contract + the intent round trip:
+//
+//   1. discovery file exists, is owner-only (0600), and matches port+token
+//   2. the remote role is a hard allowlist (health.ping → forbidden-method)
+//   3. remote sockets cannot widen their event filter (events.setIncluded)
+//   4. micToggle + sceneApply intents ack ok AND the state projection
+//      reflects them (backend-confirmed state, not optimistic)
+//   5. token regenerate closes the paired client
+//
+// No recording is started: the intents exercised here are disk-free.
+
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { launchDevApp } from './lib/app-launcher.mjs'
+import {
+  connectRemote as connectRemoteClient,
+  remoteRequest as remoteRequestClient,
+  waitForRemoteEvent as waitForRemoteEventClient
+} from './lib/remote-control-client.mjs'
+import { syntheticCompositorReady } from './lib/remote-control-smoke-gates.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import { connectBackend, request } from './smoke-recording-session.mjs'
+
+const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 90000)
+const userDataDir = mkdtempSync(join(tmpdir(), 'videorc-remote-control-user-data-'))
+
+function fail(message) {
+  throw new Error(`remote-control smoke FAIL: ${message}`)
+}
+
+const connectRemote = (host, port, token) => connectRemoteClient(host, port, token, { timeoutMs })
+const remoteRequest = (ws, method, params) => remoteRequestClient(ws, method, params, { timeoutMs })
+const waitForRemoteEvent = (ws, event, predicate) =>
+  waitForRemoteEventClient(ws, event, predicate, { timeoutMs })
+
+async function waitForBackendState(connection, method, predicate, label) {
+  const deadline = Date.now() + timeoutMs
+  let last = null
+  while (Date.now() < deadline) {
+    last = await request(connection, timeoutMs, method)
+    if (predicate(last)) return last
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 100))
+  }
+  fail(`timed out waiting for ${label}; last ${method}: ${JSON.stringify(last)}`)
+}
+
+let stopApp = async () => {}
+try {
+  const launch = await launchDevApp({
+    env: {
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      VIDEORC_SMOKE_PREVIEW_MOTION: '1',
+      VIDEORC_USER_DATA_DIR: userDataDir
+    },
+    timeoutMs,
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
+    onLine: (line) => {
+      if (process.env.VIDEORC_REMOTE_SMOKE_DEBUG === '1') {
+        console.log('[app]', line)
+      }
+    }
+  })
+  stopApp = launch.stop
+  const renderer = await connectBackend(launch.connections['backend-ready'], timeoutMs)
+  const smoke = launch.connections['preview-motion-ready']
+
+  // 1. Enable + discovery file contract.
+  const status = await request(renderer, timeoutMs, 'remote.control.enable')
+  if (!status.enabled || !status.token) fail('enable did not return an enabled status + token')
+  if (!status.discoveryPath || !existsSync(status.discoveryPath)) {
+    fail('discovery file missing after enable')
+  }
+  const mode = statSync(status.discoveryPath).mode & 0o777
+  if (process.platform !== 'win32' && mode !== 0o600) {
+    fail(`discovery file mode ${mode.toString(8)} != 600`)
+  }
+  const discovery = JSON.parse(readFileSync(status.discoveryPath, 'utf8'))
+  if (discovery.port !== status.port || discovery.token !== status.token) {
+    fail('discovery file does not match remote.control.status')
+  }
+  console.log('remote-control smoke: discovery contract OK')
+
+  // 2 + 3. Security: hard allowlist + locked event filter.
+  const remote = await connectRemote(discovery.host, discovery.port, discovery.token)
+  const forbidden = await remoteRequest(remote, 'health.ping')
+  if (forbidden.error?.code !== 'forbidden-method') {
+    fail(`remote health.ping expected forbidden-method, got ${JSON.stringify(forbidden)}`)
+  }
+  const widen = await remoteRequest(remote, 'events.setIncluded', { events: ['recording.status'] })
+  if (widen.error?.code !== 'forbidden-method') {
+    fail(`remote events.setIncluded expected forbidden-method, got ${JSON.stringify(widen)}`)
+  }
+  console.log('remote-control smoke: allowlist + filter lock OK')
+
+  // 4. Intent round trip with backend-confirmed state. The studio renderer
+  // connects and publishes AFTER backend-ready — wait for its first publish
+  // (non-null describe) before sending intents, exactly like a deck key that
+  // stays disabled until state arrives.
+  let describe = null
+  const describeDeadline = Date.now() + timeoutMs
+  for (;;) {
+    describe = await remoteRequest(remote, 'remote.describe')
+    if (describe.payload?.protocol !== 1) fail('remote.describe did not answer protocol 1')
+    if (describe.payload?.describe && describe.payload?.state) break
+    if (Date.now() > describeDeadline) {
+      fail('renderer never published its remote surface (describe/state stayed empty)')
+    }
+    await new Promise((resolveSleep) => setTimeout(resolveSleep, 500))
+  }
+  const micBefore = describe.payload?.state?.micMuted ?? false
+
+  if (process.env.VIDEORC_REMOTE_SMOKE_DEBUG === '1') {
+    renderer.addEventListener('message', (raw) => {
+      const message = JSON.parse(String(raw.data ?? raw))
+      if (message.event?.startsWith('remote.')) {
+        console.log(
+          '[DEBUG-rc] renderer saw event:',
+          message.event,
+          JSON.stringify(message.payload).slice(0, 120)
+        )
+      }
+    })
+    remote.on('message', (raw) => {
+      console.log('[DEBUG-rc] remote saw:', String(raw).slice(0, 160))
+    })
+  }
+  const micAckPromise = waitForRemoteEvent(remote, 'remote.ack')
+  const micStatePromise = waitForRemoteEvent(
+    remote,
+    'remote.state',
+    (state) => state?.micMuted === !micBefore
+  )
+  const micTicket = await remoteRequest(remote, 'remote.intent', { kind: 'micToggle' })
+  if (!micTicket.payload?.accepted) fail('micToggle intent was not accepted')
+  const micAck = await micAckPromise
+  if (micAck?.intentId !== micTicket.payload.intentId || micAck?.ok !== true) {
+    fail(`micToggle was not acknowledged successfully: ${JSON.stringify(micAck)}`)
+  }
+  await micStatePromise
+  console.log('remote-control smoke: micToggle ack + confirmed state OK')
+
+  // The isolated profile intentionally has no persisted capture source. Arm the
+  // same deterministic renderer-owned test pattern used by the other live app
+  // smokes, then prove the backend compositor is actually rendering it before
+  // asking the remote surface to commit a screen-backed layout.
+  const compositorBeforeSynthetic = await request(renderer, timeoutMs, 'compositor.status')
+  await requestSmokeCommand(smoke, 'enable-synthetic-source', { settleMs: 500 }, { timeoutMs })
+  await waitForBackendState(
+    renderer,
+    'compositor.status',
+    (compositor) => syntheticCompositorReady(compositor, compositorBeforeSynthetic),
+    'synthetic compositor readiness'
+  )
+
+  const sceneAckPromise = waitForRemoteEvent(remote, 'remote.ack')
+  const sceneStatePromise = waitForRemoteEvent(
+    remote,
+    'remote.state',
+    (state) => state?.layoutPreset === 'screen-only'
+  )
+  const sceneTicket = await remoteRequest(remote, 'remote.intent', {
+    kind: 'sceneApply',
+    layoutPreset: 'screen-only'
+  })
+  if (!sceneTicket.payload?.accepted) fail('sceneApply intent was not accepted')
+
+  // Debounce: a same-kind intent within the window is rejected without relay
+  // (sent BEFORE awaiting the first one's ack — a bouncing deck key).
+  const bounced = await remoteRequest(remote, 'remote.intent', {
+    kind: 'sceneApply',
+    layoutPreset: 'screen-camera'
+  })
+  if (bounced.payload?.accepted !== false) fail('immediate same-kind intent was not debounced')
+  console.log('remote-control smoke: debounce OK')
+
+  const sceneAck = await sceneAckPromise
+  if (sceneAck?.intentId !== sceneTicket.payload.intentId || sceneAck?.ok !== true) {
+    fail(`sceneApply was not acknowledged successfully: ${JSON.stringify(sceneAck)}`)
+  }
+  await sceneStatePromise
+  console.log('remote-control smoke: sceneApply ack + confirmed state OK')
+
+  // 5. Regenerate cuts the paired client.
+  const closed = new Promise((resolveClose) => remote.once('close', resolveClose))
+  await request(renderer, timeoutMs, 'remote.control.regenerate')
+  await Promise.race([
+    closed,
+    new Promise((_, rejectClose) =>
+      setTimeout(() => rejectClose(new Error('remote socket not closed after regenerate')), 10000)
+    )
+  ])
+  console.log('remote-control smoke: regenerate cut the client OK')
+
+  // Disable removes the discovery file.
+  await request(renderer, timeoutMs, 'remote.control.disable')
+  if (existsSync(status.discoveryPath)) fail('discovery file still present after disable')
+  console.log('remote-control smoke: PASS')
+} catch (error) {
+  console.error(error instanceof Error ? (error.stack ?? error.message) : String(error))
+  process.exitCode = 1
+} finally {
+  try {
+    await stopApp()
+  } finally {
+    rmSync(userDataDir, { recursive: true, force: true })
+  }
+}

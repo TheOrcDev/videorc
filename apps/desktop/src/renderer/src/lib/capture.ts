@@ -30,6 +30,41 @@ export type SettingsState = {
   /** Human-readable picker label only; never a filesystem path. */
   outputDirectory: string
   outputDirectoryHandle?: string
+  /**
+   * Keep the capture MKV (lossless PCM audio) next to the exported MP4
+   * instead of removing it after finalization.
+   */
+  keepOriginalRecording: boolean
+  /**
+   * Keep the selected CoreAudio microphone open while Studio is visible so
+   * Record starts instantly (instant-record P5). macOS shows its microphone
+   * indicator while Studio is on screen; hiding the window releases it.
+   */
+  keepMicrophoneWarm?: boolean
+  /**
+   * OS-global shortcuts (work with the app unfocused — a Stream Deck's
+   * native Hotkey action drives these). Electron accelerator syntax.
+   */
+  globalShortcuts?: {
+    recordToggle?: string
+    streamToggle?: string
+    micToggle?: string
+  }
+  /**
+   * Scene motion: layout changes glide (320ms ease) in the live output —
+   * preview, stream, AND recording — instead of cutting. Default OFF while
+   * the glide's interplay with idle camera restarts settles in the field.
+   */
+  animateSceneChanges?: boolean
+  /**
+   * Audio mixer (live feedback batch 3, B2). `monitorWhenIdle` keeps the
+   * visual-only analyser open while NO session runs; default OFF so an idle
+   * Studio never holds the microphone (no OS mic indicator) and the bars sit
+   * at floor. A running session always arms the meter regardless.
+   */
+  audioMixer?: {
+    monitorWhenIdle?: boolean
+  }
 }
 
 export type CaptionBurnTarget = 'off' | 'stream' | 'recording' | 'both'
@@ -350,7 +385,11 @@ export const MICROPHONE_SYNC_OFFSET_MAX_MS = 1000
 
 export const defaultSettings: SettingsState = {
   outputDirectory: '',
-  outputDirectoryHandle: undefined
+  outputDirectoryHandle: undefined,
+  keepOriginalRecording: false,
+  keepMicrophoneWarm: true,
+  animateSceneChanges: false,
+  audioMixer: { monitorWhenIdle: false }
 }
 
 export const rtmpDefaults: Record<RtmpPreset, string> = {
@@ -516,6 +555,20 @@ export const videoPresets: Record<VideoPreset, VideoSettings> = {
     fps: 60,
     bitrateKbps: 6000
   },
+  'stream-youtube-1080p30': {
+    preset: 'stream-youtube-1080p30',
+    width: 1920,
+    height: 1080,
+    fps: 30,
+    bitrateKbps: 10000
+  },
+  'stream-youtube-1080p60': {
+    preset: 'stream-youtube-1080p60',
+    width: 1920,
+    height: 1080,
+    fps: 60,
+    bitrateKbps: 12000
+  },
   'stream-youtube-4k30': {
     preset: 'stream-youtube-4k30',
     width: 3840,
@@ -565,6 +618,8 @@ export const recordingVideoPresetOptions: VideoPresetOption[] = [
 export const streamingVideoPresetOptions: VideoPresetOption[] = [
   { value: 'stream-safe-1080p30', label: 'Stream-safe 1080p30' },
   { value: 'stream-safe-1080p60', label: 'Stream-safe 1080p60' },
+  { value: 'stream-youtube-1080p30', label: 'YouTube 1080p30 · 10 Mbps' },
+  { value: 'stream-youtube-1080p60', label: 'YouTube 1080p60 · 12 Mbps' },
   { value: 'stream-youtube-4k30', label: 'YouTube 4K30' }
 ]
 
@@ -594,7 +649,7 @@ export const streamPlatformOutputCapabilities: Record<
   youtube: {
     maxWidth: 3840,
     maxHeight: 2160,
-    maxFps: 30,
+    maxFps: 60,
     maxBitrateKbps: 30000,
     true4k: true
   },
@@ -670,6 +725,38 @@ export interface StreamTargetOutput {
   video: VideoSettings
 }
 
+export const STREAM_OUTPUT_GOP_SECONDS = 2
+
+export interface ProviderStreamOutputPlan {
+  targets: StreamTargetOutput[]
+  streamVideo: VideoSettings
+  separateEncodedOutputRole: boolean
+}
+
+export interface ProviderStreamOutputPlanOptions {
+  recordEnabled?: boolean
+  separateEncodedOutputRoleAvailable?: boolean
+  /**
+   * Dual-orientation simulcast is armed (see `simulcastArmed`): vertical-bound
+   * destinations ride the vertical leg's own portrait encode, so they leave
+   * the horizontal plan — and the one auxiliary encoded role is theirs, so the
+   * horizontal plan can never claim a separate role. Mirrors the backend.
+   */
+  simulcastArmed?: boolean
+}
+
+/** The provider-plan options a full capture config implies. */
+export function providerStreamOutputPlanOptions(
+  config: Pick<CaptureConfig, 'recordEnabled' | 'streamEnabled' | 'streaming' | 'layout'>,
+  separateEncodedOutputRoleAvailable = false
+): ProviderStreamOutputPlanOptions {
+  return {
+    recordEnabled: config.recordEnabled,
+    separateEncodedOutputRoleAvailable,
+    simulcastArmed: simulcastArmed(config)
+  }
+}
+
 export function streamOutputVideoSettings(
   fallback: VideoSettings,
   streaming: StreamingSettings | undefined
@@ -679,10 +766,10 @@ export function streamOutputVideoSettings(
   }
 
   const preset = videoPresets[streaming.defaultOutputPreset] ?? fallback
-  return {
+  return exactProviderVideo({
     ...preset,
     bitrateKbps: streaming.defaultBitrateKbps
-  }
+  })
 }
 
 export function streamOutputVideoForTarget(
@@ -696,9 +783,9 @@ export function streamOutputVideoForTarget(
 
   const outputPreset =
     target.outputPreset ??
-    (streaming.defaultOutputPreset === 'stream-youtube-4k30' && target.platform !== 'youtube'
-      ? 'stream-safe-1080p30'
-      : streaming.defaultOutputPreset)
+    (target.platform === 'youtube'
+      ? streaming.defaultOutputPreset
+      : providerSafePreset(streaming.defaultOutputPreset))
   const preset = videoPresets[outputPreset] ?? streamOutputVideoSettings(fallback, streaming)
   const bitrateKbps =
     target.outputBitrateKbps ??
@@ -706,21 +793,18 @@ export function streamOutputVideoForTarget(
       ? streaming.defaultBitrateKbps
       : preset.bitrateKbps)
 
-  return {
+  return exactProviderVideo({
     ...preset,
     bitrateKbps
-  }
+  })
 }
 
 export function streamOutputVideosForTargets(
   fallback: VideoSettings,
-  streaming: StreamingSettings | undefined
+  streaming: StreamingSettings | undefined,
+  options: ProviderStreamOutputPlanOptions = {}
 ): StreamTargetOutput[] {
-  const targets = streaming?.targets.filter((target) => target.enabled) ?? []
-  return targets.map((target) => ({
-    target,
-    video: streamOutputVideoForTarget(fallback, streaming, target)
-  }))
+  return resolveProviderStreamOutputPlan(fallback, streaming, options).targets
 }
 
 function sameVideoOutputProfile(left: VideoSettings, right: VideoSettings): boolean {
@@ -733,6 +817,252 @@ function sameVideoOutputProfile(left: VideoSettings, right: VideoSettings): bool
 }
 
 /**
+ * Mirrors the backend's provider output plan without inferring encoder
+ * capabilities. YouTube-only sessions may keep their validated provider
+ * bitrate. Mixed destinations stay on one strict <=6000 kbps profile unless
+ * the caller explicitly supplies proof that a separate encoded role exists.
+ */
+export function resolveProviderStreamOutputPlan(
+  recording: VideoSettings,
+  streaming: StreamingSettings | undefined,
+  {
+    recordEnabled = false,
+    separateEncodedOutputRoleAvailable: separateRoleRequested = false,
+    simulcastArmed: simulcast = false
+  }: ProviderStreamOutputPlanOptions = {}
+): ProviderStreamOutputPlan {
+  const separateEncodedOutputRoleAvailable = separateRoleRequested && !simulcast
+  const requestedTargets =
+    streaming?.enabled === true
+      ? streaming.targets
+          .filter(
+            (target) => target.enabled && !(simulcast && target.outputOrientation === 'vertical')
+          )
+          .map((target) => ({
+            target,
+            video: streamOutputVideoForTarget(recording, streaming, target)
+          }))
+      : []
+
+  if (!requestedTargets.length) {
+    return {
+      targets: [],
+      streamVideo: streamOutputVideoSettings(recording, streaming),
+      separateEncodedOutputRole: false
+    }
+  }
+
+  const firstTargetVideo = requestedTargets[0].video
+  const targetsShareOneProfile = requestedTargets.every(({ video }) =>
+    sameVideoOutputProfile(video, firstTargetVideo)
+  )
+  const recordingSharesTargetProfile =
+    !recordEnabled || sameVideoOutputProfile(recording, firstTargetVideo)
+  if (targetsShareOneProfile && recordingSharesTargetProfile) {
+    return {
+      targets: requestedTargets,
+      streamVideo: firstTargetVideo,
+      separateEncodedOutputRole: false
+    }
+  }
+
+  if (
+    recordEnabled &&
+    separateEncodedOutputRoleAvailable &&
+    separateProviderRolesFitBridgeEnvelope(recording, requestedTargets) &&
+    streamTargetsFitRecordingPlusOneCompanion(recording, requestedTargets)
+  ) {
+    return {
+      targets: requestedTargets,
+      streamVideo: [...requestedTargets].sort((left, right) =>
+        compareStreamProfileStrictness(right.video, left.video)
+      )[0].video,
+      separateEncodedOutputRole: true
+    }
+  }
+
+  const youtubeOnly = requestedTargets.every(({ target }) => target?.platform === 'youtube')
+  const sharedCandidates = requestedTargets.map(({ video }) =>
+    youtubeOnly ? video : providerSafeSharedProfile(video)
+  )
+  if (recordEnabled) {
+    sharedCandidates.push(providerSafeSharedProfile(recording))
+  }
+  const sharedVideo = strictestSharedStreamProfile(sharedCandidates)
+
+  return {
+    targets: requestedTargets.map(({ target }) => ({ target, video: sharedVideo })),
+    streamVideo: sharedVideo,
+    separateEncodedOutputRole: false
+  }
+}
+
+export function streamVideoProfileValidationReason(
+  video: VideoSettings,
+  platform?: StreamPlatform
+): string | null {
+  const named = videoPresets[video.preset]
+  if (
+    video.preset !== 'custom' &&
+    (!named ||
+      named.width !== video.width ||
+      named.height !== video.height ||
+      named.fps !== video.fps ||
+      named.bitrateKbps !== video.bitrateKbps)
+  ) {
+    return `${video.preset} must use its exact ${named?.width ?? video.width}×${named?.height ?? video.height} @ ${named?.fps ?? video.fps} FPS and ${named?.bitrateKbps ?? video.bitrateKbps} kbps profile.`
+  }
+
+  if (platform && platform !== 'youtube' && isYouTubeProviderPreset(video.preset)) {
+    return `${video.preset} is available only for YouTube destinations.`
+  }
+
+  const true4k = video.width >= 3840 || video.height >= 2160
+  if (true4k) {
+    return video.preset === 'stream-youtube-4k30' &&
+      video.width === 3840 &&
+      video.height === 2160 &&
+      video.fps === 30 &&
+      video.bitrateKbps === 30000
+      ? null
+      : 'True 4K streaming requires the exact YouTube 4K30 profile.'
+  }
+  if (video.width > 1920 || video.height > 1080) {
+    return 'Livestream output above 1080p requires the exact YouTube 4K30 profile.'
+  }
+  if (
+    video.bitrateKbps > 6000 &&
+    video.preset !== 'stream-youtube-1080p30' &&
+    video.preset !== 'stream-youtube-1080p60'
+  ) {
+    return 'Livestream output above 6000 kbps requires an exact YouTube 1080p30 or 1080p60 profile.'
+  }
+  return null
+}
+
+function exactProviderVideo(video: VideoSettings): VideoSettings {
+  return isYouTubeProviderPreset(video.preset) ? { ...videoPresets[video.preset] } : video
+}
+
+function isYouTubeProviderPreset(
+  preset: VideoPreset
+): preset is 'stream-youtube-1080p30' | 'stream-youtube-1080p60' | 'stream-youtube-4k30' {
+  return (
+    preset === 'stream-youtube-1080p30' ||
+    preset === 'stream-youtube-1080p60' ||
+    preset === 'stream-youtube-4k30'
+  )
+}
+
+function providerSafePreset(preset: VideoPreset): VideoPreset {
+  switch (preset) {
+    case 'stream-youtube-1080p30':
+    case 'stream-youtube-4k30':
+      return 'stream-safe-1080p30'
+    case 'stream-youtube-1080p60':
+      return 'stream-safe-1080p60'
+    default:
+      return preset
+  }
+}
+
+function providerSafeSharedProfile(video: VideoSettings): VideoSettings {
+  switch (video.preset) {
+    case 'stream-youtube-1080p30':
+    case 'stream-youtube-4k30':
+      return { ...videoPresets['stream-safe-1080p30'] }
+    case 'stream-youtube-1080p60':
+    case 'stream-1080p60':
+      return { ...videoPresets['stream-safe-1080p60'] }
+    default:
+      return video.bitrateKbps > 6000
+        ? { ...video, preset: 'custom', bitrateKbps: 6000 }
+        : { ...video }
+  }
+}
+
+function separateProviderRolesFitBridgeEnvelope(
+  recording: VideoSettings,
+  targets: StreamTargetOutput[]
+): boolean {
+  const profiles = [recording, ...targets.map(({ video }) => video)]
+  if (Math.max(...profiles.map((profile) => profile.fps)) <= 30) {
+    return true
+  }
+  return profiles.every(
+    (profile) =>
+      profile.fps <= 60 &&
+      Math.max(profile.width, profile.height) <= 1920 &&
+      Math.min(profile.width, profile.height) <= 1080
+  )
+}
+
+function streamTargetsFitRecordingPlusOneCompanion(
+  recording: VideoSettings,
+  targets: StreamTargetOutput[]
+): boolean {
+  let companion: VideoSettings | null = null
+  for (const { video } of targets) {
+    if (sameVideoOutputProfile(video, recording)) {
+      continue
+    }
+    if (companion && !sameVideoOutputProfile(companion, video)) {
+      return false
+    }
+    companion = video
+  }
+  return companion !== null
+}
+
+function strictestSharedStreamProfile(candidates: VideoSettings[]): VideoSettings {
+  const first = candidates[0]
+  if (candidates.every((candidate) => sameVideoOutputProfile(candidate, first))) {
+    return { ...first }
+  }
+  const smallestCanvas = [...candidates].sort(
+    (left, right) => left.width * left.height - right.width * right.height
+  )[0]
+  const shared: VideoSettings = {
+    preset: 'custom',
+    width: smallestCanvas.width,
+    height: smallestCanvas.height,
+    fps: Math.min(...candidates.map((candidate) => candidate.fps)),
+    bitrateKbps: Math.min(...candidates.map((candidate) => candidate.bitrateKbps))
+  }
+  return {
+    ...shared,
+    preset: canonicalStreamPresetForProfile(shared)
+  }
+}
+
+function canonicalStreamPresetForProfile(video: VideoSettings): VideoPreset {
+  if (sameVideoOutputProfile(video, videoPresets['stream-safe-1080p30'])) {
+    return 'stream-safe-1080p30'
+  }
+  if (sameVideoOutputProfile(video, videoPresets['stream-safe-1080p60'])) {
+    return 'stream-safe-1080p60'
+  }
+  if (sameVideoOutputProfile(video, videoPresets['stream-youtube-1080p30'])) {
+    return 'stream-youtube-1080p30'
+  }
+  if (sameVideoOutputProfile(video, videoPresets['stream-youtube-1080p60'])) {
+    return 'stream-youtube-1080p60'
+  }
+  if (sameVideoOutputProfile(video, videoPresets['stream-youtube-4k30'])) {
+    return 'stream-youtube-4k30'
+  }
+  return 'custom'
+}
+
+function compareStreamProfileStrictness(left: VideoSettings, right: VideoSettings): number {
+  return (
+    left.width * left.height - right.width * right.height ||
+    left.fps - right.fps ||
+    left.bitrateKbps - right.bitrateKbps
+  )
+}
+
+/**
  * Mirrors the backend's record+stream auxiliary compositor profile choice.
  * The auxiliary uses the distinct enabled-target output; when every enabled
  * target shares the recording profile, caption routing forces a same-profile
@@ -740,9 +1070,10 @@ function sameVideoOutputProfile(left: VideoSettings, right: VideoSettings): bool
  */
 export function auxiliaryStreamOutputVideoSettings(
   recording: VideoSettings,
-  streaming: StreamingSettings | undefined
+  streaming: StreamingSettings | undefined,
+  options: ProviderStreamOutputPlanOptions = {}
 ): VideoSettings {
-  const companion = streamOutputVideosForTargets(recording, streaming).find(
+  const companion = streamOutputVideosForTargets(recording, streaming, options).find(
     ({ video }) => !sameVideoOutputProfile(video, recording)
   )
   return companion?.video ?? recording
@@ -762,6 +1093,11 @@ export const defaultCaptureConfig: CaptureConfig = {
     cameraShape: 'rectangle',
     cameraCornerRadiusPct: 12,
     cameraAspect: 'source',
+    cameraChromaKeyEnabled: false,
+    cameraChromaKeyColor: '#00FF00',
+    cameraChromaKeySimilarityPct: 40,
+    cameraChromaKeySmoothnessPct: 8,
+    cameraChromaKeySpillPct: 10,
     cameraMargin: 32,
     cameraFit: 'fill',
     cameraMirror: false,
@@ -1182,7 +1518,7 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
     cameraMargin: clampNumber(
       candidate.cameraMargin,
       defaultCaptureConfig.layout.cameraMargin,
-      8,
+      0,
       96
     ),
     cameraZoom: clampNumber(candidate.cameraZoom, defaultCaptureConfig.layout.cameraZoom, 100, 200),
@@ -1224,6 +1560,33 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
       candidate.cameraAspect === 'portrait'
         ? candidate.cameraAspect
         : defaultCaptureConfig.layout.cameraAspect,
+    cameraChromaKeyEnabled:
+      typeof candidate.cameraChromaKeyEnabled === 'boolean'
+        ? candidate.cameraChromaKeyEnabled
+        : defaultCaptureConfig.layout.cameraChromaKeyEnabled,
+    cameraChromaKeyColor:
+      typeof candidate.cameraChromaKeyColor === 'string' &&
+      /^#[0-9a-fA-F]{6}$/.test(candidate.cameraChromaKeyColor)
+        ? candidate.cameraChromaKeyColor
+        : defaultCaptureConfig.layout.cameraChromaKeyColor,
+    cameraChromaKeySimilarityPct: clampNumber(
+      candidate.cameraChromaKeySimilarityPct,
+      defaultCaptureConfig.layout.cameraChromaKeySimilarityPct,
+      0,
+      100
+    ),
+    cameraChromaKeySmoothnessPct: clampNumber(
+      candidate.cameraChromaKeySmoothnessPct,
+      defaultCaptureConfig.layout.cameraChromaKeySmoothnessPct,
+      0,
+      100
+    ),
+    cameraChromaKeySpillPct: clampNumber(
+      candidate.cameraChromaKeySpillPct,
+      defaultCaptureConfig.layout.cameraChromaKeySpillPct,
+      0,
+      100
+    ),
     sideBySideSplit: isSideBySideSplit(candidate.sideBySideSplit)
       ? candidate.sideBySideSplit
       : defaultCaptureConfig.layout.sideBySideSplit,
@@ -1241,6 +1604,10 @@ export function normalizeVideoSettings(video: unknown): VideoSettings {
       ? (candidate.preset as VideoPreset)
       : defaultCaptureConfig.video.preset
   const fallback = videoPresets[preset]
+
+  if (isYouTubeProviderPreset(preset)) {
+    return { ...fallback }
+  }
 
   return {
     preset,
@@ -1264,6 +1631,16 @@ function normalizeStreamTarget(
   const authMode =
     savedAuthMode === 'oauth' && isPlatformOAuthAvailable(base.platform) ? 'oauth' : 'manual-rtmp'
   const oauthUnavailable = savedAuthMode === 'oauth' && authMode !== 'oauth'
+  const outputPreset =
+    typeof saved.outputPreset === 'string' && saved.outputPreset in videoPresets
+      ? saved.outputPreset
+      : undefined
+  const outputBitrateKbps =
+    outputPreset && isYouTubeProviderPreset(outputPreset)
+      ? videoPresets[outputPreset].bitrateKbps
+      : typeof saved.outputBitrateKbps === 'number'
+        ? clampNumber(saved.outputBitrateKbps, 6000, 1000, 50000)
+        : undefined
   return {
     // id, platform, status keep the built-in identity from base.
     ...base,
@@ -1289,14 +1666,8 @@ function normalizeStreamTarget(
       authMode === 'oauth' && typeof saved.platformStreamId === 'string'
         ? saved.platformStreamId
         : undefined,
-    outputPreset:
-      typeof saved.outputPreset === 'string' && saved.outputPreset in videoPresets
-        ? saved.outputPreset
-        : undefined,
-    outputBitrateKbps:
-      typeof saved.outputBitrateKbps === 'number'
-        ? clampNumber(saved.outputBitrateKbps, 6000, 1000, 50000)
-        : undefined,
+    outputPreset,
+    outputBitrateKbps,
     // Leg binding survives reloads; anything unexpected (and every legacy
     // config) falls back to the platform default's orientation.
     outputOrientation:
@@ -1332,6 +1703,9 @@ export function normalizeStreamingSettings(value: unknown): StreamingSettings {
     candidate.defaultOutputPreset in videoPresets
       ? (candidate.defaultOutputPreset as VideoPreset)
       : 'tutorial-1080p30'
+  const defaultBitrateKbps = isYouTubeProviderPreset(defaultOutputPreset)
+    ? videoPresets[defaultOutputPreset].bitrateKbps
+    : clampNumber(candidate.defaultBitrateKbps, 6000, 1000, 50000)
 
   return {
     enabled:
@@ -1341,7 +1715,7 @@ export function normalizeStreamingSettings(value: unknown): StreamingSettings {
     selectedTargetId:
       typeof candidate.selectedTargetId === 'string' ? candidate.selectedTargetId : undefined,
     defaultOutputPreset,
-    defaultBitrateKbps: clampNumber(candidate.defaultBitrateKbps, 6000, 1000, 50000),
+    defaultBitrateKbps,
     enabledTargetIds
   }
 }
@@ -1630,11 +2004,10 @@ export function preparedYouTubeCompletionTargets(
 ): StreamTargetSettings[] {
   return streaming.targets.filter(
     (target) =>
-      target.enabled &&
       target.authMode === 'oauth' &&
       target.platform === 'youtube' &&
       isPlatformOAuthAvailable(target.platform) &&
-      target.status?.state === 'live' &&
+      target.status?.state !== 'stopped' &&
       Boolean(target.platformBroadcastId)
   )
 }
@@ -1654,10 +2027,10 @@ export function preparedXActivationTargets(streaming: StreamingSettings): Stream
 export function preparedXCompletionTargets(streaming: StreamingSettings): StreamTargetSettings[] {
   return streaming.targets.filter(
     (target) =>
-      target.enabled &&
       target.authMode === 'oauth' &&
       target.platform === 'x' &&
-      target.status?.state === 'live' &&
+      (target.status?.state === 'live' ||
+        (target.status?.state === 'warning' && Boolean(target.status.redactedUrl))) &&
       Boolean(target.platformBroadcastId)
   )
 }

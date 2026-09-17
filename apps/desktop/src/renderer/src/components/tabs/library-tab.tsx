@@ -1,24 +1,24 @@
 import {
-  ArrowCounterClockwise,
-  ArrowsDownUp,
-  Copy,
-  PencilSimple,
-  Trash,
-  UploadSimple,
-  ChatCircle,
-  CheckCircle,
-  CircleNotch,
-  DotsThree,
-  FileVideo,
-  FolderOpen,
-  LockSimple,
-  MagnifyingGlass,
-  Play,
-  Sparkle,
-  VideoCamera,
-  WaveformSlash,
-  Wrench
-} from '@phosphor-icons/react'
+  CameraIcon,
+  ChatIcon,
+  CopyIcon,
+  DeleteIcon,
+  EditIcon,
+  FolderIcon,
+  LockIcon,
+  MoreIcon,
+  PlayIcon,
+  RepairIcon,
+  ResetIcon,
+  SearchIcon,
+  SortIcon,
+  SparkleIcon,
+  SpinnerIcon,
+  SuccessIcon,
+  UploadIcon,
+  VideoFileIcon,
+  WaveformMutedIcon
+} from '@/components/icons'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -57,6 +57,11 @@ import {
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore, useStudioRecording, useStudioRecordingState } from '@/hooks/use-studio'
 import type { FileAssessment, GateStatus, SessionSummary } from '@/lib/backend'
+import {
+  finalizationFailed,
+  finalizingBadgeLabel,
+  isFinalizingSession
+} from '@/lib/session-finalization'
 import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
 import {
   LIBRARY_FILTERS,
@@ -95,6 +100,9 @@ export function LibraryTab({
 }): ReactElement {
   const {
     sessions,
+    sessionsNextCursor,
+    sessionsLoadingMore,
+    loadMoreSessions,
     sessionStorageTotals,
     settings,
     importRecording,
@@ -243,7 +251,7 @@ export function LibraryTab({
         title="Library"
         action={
           <Button size="sm" onClick={() => setActive('studio')}>
-            <VideoCamera data-icon="inline-start" weight="fill" />
+            <CameraIcon data-icon="inline-start" weight="fill" />
             New Recording
           </Button>
         }
@@ -275,11 +283,11 @@ export function LibraryTab({
           variant="outline"
           onClick={() => setSort((current) => (current === 'newest' ? 'oldest' : 'newest'))}
         >
-          <ArrowsDownUp data-icon="inline-start" />
+          <SortIcon data-icon="inline-start" />
           {sort === 'newest' ? 'Newest' : 'Oldest'}
         </Button>
         <div className="relative min-w-48 flex-1">
-          <MagnifyingGlass className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
+          <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             aria-label="Search recordings"
             className="h-8 pl-8"
@@ -289,7 +297,7 @@ export function LibraryTab({
           />
         </div>
         <Button disabled={importing} size="sm" variant="outline" onClick={() => void runImport()}>
-          <UploadSimple data-icon="inline-start" />
+          <UploadIcon data-icon="inline-start" />
           {importing ? 'Importing…' : 'Import'}
         </Button>
       </div>
@@ -304,7 +312,7 @@ export function LibraryTab({
             variant="destructive"
             onClick={() => setDeleting(sessions.filter((session) => selected.includes(session.id)))}
           >
-            <Trash data-icon="inline-start" />
+            <DeleteIcon data-icon="inline-start" />
             Delete
           </Button>
           <Button size="sm" variant="ghost" onClick={() => setSelected([])}>
@@ -321,7 +329,7 @@ export function LibraryTab({
       {sessions.length === 0 ? (
         <Empty className="rounded-panel border py-16">
           <EmptyMedia variant="icon">
-            <FileVideo weight="duotone" />
+            <VideoFileIcon weight="duotone" />
           </EmptyMedia>
           <EmptyTitle>No sessions yet</EmptyTitle>
           <EmptyDescription>
@@ -383,13 +391,27 @@ export function LibraryTab({
             )}
           </div>
           {/* Honest storage footer: real totals + real free space, no quota bar. */}
-          {sessionStorageTotals ? (
-            <div className="border-t px-4 py-2 text-xs text-muted-foreground">
-              {libraryStorageLabel({
-                count: sessionStorageTotals.count,
-                totalBytes: sessionStorageTotals.totalBytes,
-                freeBytes
-              })}
+          {sessionStorageTotals || sessionsNextCursor ? (
+            <div className="flex items-center justify-between gap-3 border-t px-4 py-2 text-xs text-muted-foreground">
+              <span>
+                {sessionStorageTotals
+                  ? libraryStorageLabel({
+                      count: sessionStorageTotals.count,
+                      totalBytes: sessionStorageTotals.totalBytes,
+                      freeBytes
+                    })
+                  : `${sessions.length} sessions loaded`}
+              </span>
+              {sessionsNextCursor ? (
+                <Button
+                  disabled={sessionsLoadingMore}
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => void loadMoreSessions()}
+                >
+                  {sessionsLoadingMore ? 'Loading…' : 'Load more'}
+                </Button>
+              ) : null}
             </div>
           ) : null}
         </div>
@@ -443,7 +465,7 @@ export function LibraryTab({
               {deleting.length === 1
                 ? 'The recording and its file move to the system Trash.'
                 : `${deleting.length} recordings and their files move to the system Trash.`}{' '}
-              You can restore them from the Trash.
+              You can restore them from the DeleteIcon.
             </DialogDescription>
           </DialogHeader>
           <DialogFooter>
@@ -499,6 +521,10 @@ function LibraryRow({
   // A live row shows the capture's ticking elapsed time; the session row only
   // gets duration_ms at finalize.
   const live = isLiveSession(session, recording)
+  // Background MP4 export (instant-record P2): Idle arrives while the export
+  // still runs; the row says so instead of claiming an MKV.
+  const finalizing = isFinalizingSession(session)
+  const exportFailed = finalizationFailed(session)
   return (
     <div
       ref={registerRow}
@@ -553,6 +579,15 @@ function LibraryRow({
       <div>
         {live ? (
           <StatusDot pulse label={liveSessionLabel(recording.state)} tone="error" />
+        ) : finalizing ? (
+          <Badge variant="outline">
+            <SpinnerIcon className="animate-spin" data-icon="inline-start" />
+            {finalizingBadgeLabel(session)}
+          </Badge>
+        ) : exportFailed ? (
+          <Badge title={session.finalizationError} variant="destructive">
+            MP4 failed
+          </Badge>
         ) : format ? (
           <Badge variant={session.mp4Path ? 'success' : 'outline'}>{format}</Badge>
         ) : null}
@@ -585,13 +620,15 @@ function LiveSessionDuration(): ReactElement {
 export function SessionPoster({
   session
 }: {
-  session: Pick<SessionSummary, 'id' | 'durationMs' | 'status'>
+  session: Pick<SessionSummary, 'id' | 'durationMs' | 'status' | 'finalizationState'>
 }): ReactElement {
   const { connection, ensureSessionPoster } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const [attempt, setAttempt] = useState(0)
   const [failed, setFailed] = useState(false)
-  const running = session.status === 'running'
+  // Posters are extracted after finalization; while the MP4 is still exporting
+  // the request would 404, so treat a finalizing row like a running one.
+  const running = session.status === 'running' || isFinalizingSession(session)
   const url = running ? null : sessionPosterUrl(connection, session)
   const source = url && attempt > 0 ? `${url}&attempt=${attempt}` : url
   return (
@@ -618,7 +655,7 @@ export function SessionPoster({
           }}
         />
       ) : (
-        <FileVideo className="size-4 text-muted-foreground/50" weight="duotone" />
+        <VideoFileIcon className="size-4 text-muted-foreground/50" weight="duotone" />
       )}
     </span>
   )
@@ -683,9 +720,13 @@ function RowActions({
   const live = isLiveSession(session, recording)
   const canRepair = assessment?.repairable ?? false
   const persistedRepaired = session.qualityStatus?.status === 'repaired'
-  const canExportMp4 = Boolean(
-    session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
-  )
+  // Background finalization (instant-record P2): the file is still being
+  // produced, so play/duplicate/export wait; a failed export gets a retry.
+  const finalizing = isFinalizingSession(session)
+  const canExportMp4 =
+    Boolean(
+      session.status === 'completed' && session.outputPath?.endsWith('.mkv') && !session.mp4Path
+    ) && !finalizing
   const canOpenComments = session.commentCount > 0
   const cleanupJob = latestNoiseCleanupJobForSession(noiseCleanupJobs, session.id)
   const cleanupView = withNoiseCleanupConnectionState(
@@ -697,7 +738,7 @@ function RowActions({
     }),
     wsStatus === 'connected'
   )
-  const fileActionsBusy = busy || cleanupView.conflictsWithFileActions
+  const fileActionsBusy = busy || cleanupView.conflictsWithFileActions || finalizing
   const cleanupMenuAction = cleanupView.menuAction
 
   const playFile = async (): Promise<void> => {
@@ -827,7 +868,7 @@ function RowActions({
         variant="ghost"
         onClick={() => void playFile()}
       >
-        <Play weight="fill" />
+        <PlayIcon weight="fill" />
       </Button>
       <NoiseCleanupDirectAction
         sessionId={session.id}
@@ -842,7 +883,7 @@ function RowActions({
         variant="ghost"
         onClick={onOpenInAi}
       >
-        <Sparkle weight="fill" />
+        <SparkleIcon weight="fill" />
       </Button>
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -853,27 +894,27 @@ function RowActions({
             variant="ghost"
           >
             {busy || cleanupView.busy ? (
-              <CircleNotch className="animate-spin" />
+              <SpinnerIcon className="animate-spin" />
             ) : (
-              <DotsThree weight="bold" />
+              <MoreIcon weight="bold" />
             )}
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end">
           <DropdownMenuGroup>
             <DropdownMenuItem disabled={!filePath || live} onClick={() => void playFile()}>
-              <Play />
+              <PlayIcon />
               Play
             </DropdownMenuItem>
             <DropdownMenuItem onClick={onOpenInAi}>
-              <Sparkle />
+              <SparkleIcon />
               Open in Publish
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={!filePath}
               onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}
             >
-              <FolderOpen />
+              <FolderIcon />
               Show in Finder
             </DropdownMenuItem>
             {cleanupView.menuLabel ? (
@@ -881,7 +922,7 @@ function RowActions({
                 disabled={!cleanupMenuAction}
                 onClick={() => cleanupMenuAction && void runNoiseCleanupAction(cleanupMenuAction)}
               >
-                {cleanupView.premiumLocked ? <LockSimple /> : <WaveformSlash />}
+                {cleanupView.premiumLocked ? <LockIcon /> : <WaveformMutedIcon />}
                 {cleanupView.menuLabel}
               </DropdownMenuItem>
             ) : null}
@@ -889,8 +930,8 @@ function RowActions({
               disabled={!canExportMp4 || fileActionsBusy}
               onClick={() => void remuxSession(session.id)}
             >
-              <FileVideo />
-              Export MP4
+              <VideoFileIcon />
+              {finalizationFailed(session) ? 'Retry MP4 export' : 'Export MP4'}
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={!canOpenComments || busy || disconnected}
@@ -898,21 +939,21 @@ function RowActions({
                 void openSessionCommentsWindow(session.id, session.title, session.startedAt)
               }
             >
-              <ChatCircle />
+              <ChatIcon />
               Open Comments
             </DropdownMenuItem>
           </DropdownMenuGroup>
           <DropdownMenuSeparator />
           <DropdownMenuGroup>
             <DropdownMenuItem disabled={busy} onClick={onRename}>
-              <PencilSimple />
+              <EditIcon />
               Rename
             </DropdownMenuItem>
             <DropdownMenuItem
               disabled={!filePath || fileActionsBusy || duplicating || live}
               onClick={() => void runDuplicate()}
             >
-              <Copy />
+              <CopyIcon />
               {duplicating ? 'Duplicating…' : 'Duplicate'}
             </DropdownMenuItem>
           </DropdownMenuGroup>
@@ -922,7 +963,7 @@ function RowActions({
               disabled={!filePath || fileActionsBusy || captureProtected}
               onClick={() => void runCheck()}
             >
-              <CheckCircle />
+              <SuccessIcon />
               {phase === 'checking' ? 'Checking…' : 'Check quality'}
             </DropdownMenuItem>
             {canRepair ? (
@@ -930,7 +971,7 @@ function RowActions({
                 disabled={fileActionsBusy || captureProtected}
                 onClick={() => void runRepair()}
               >
-                <Wrench />
+                <RepairIcon />
                 {phase === 'repairing' ? 'Repairing…' : 'Repair & fix'}
               </DropdownMenuItem>
             ) : null}
@@ -939,7 +980,7 @@ function RowActions({
                 disabled={fileActionsBusy || captureProtected}
                 onClick={() => void runRestore()}
               >
-                <ArrowCounterClockwise />
+                <ResetIcon />
                 Restore original
               </DropdownMenuItem>
             ) : null}
@@ -951,7 +992,7 @@ function RowActions({
               variant="destructive"
               onClick={onDelete}
             >
-              <Trash />
+              <DeleteIcon />
               Delete
             </DropdownMenuItem>
           </DropdownMenuGroup>
@@ -994,11 +1035,11 @@ export function NoiseCleanupDirectAction({
       onClick={() => view.directAction && onAction(view.directAction)}
     >
       {view.premiumLocked ? (
-        <LockSimple data-icon="inline-start" />
+        <LockIcon data-icon="inline-start" />
       ) : view.busy ? (
-        <CircleNotch className="animate-spin" data-icon="inline-start" />
+        <SpinnerIcon className="animate-spin" data-icon="inline-start" />
       ) : (
-        <WaveformSlash data-icon="inline-start" />
+        <WaveformMutedIcon data-icon="inline-start" />
       )}
       <span className="hidden min-[1280px]:inline">{view.directLabel}</span>
     </Button>

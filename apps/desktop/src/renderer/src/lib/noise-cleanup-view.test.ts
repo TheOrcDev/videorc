@@ -30,11 +30,9 @@ function session(overrides: Partial<SessionSummary> = {}): SessionSummary {
     status: 'completed',
     mode: 'record',
     outputPath: '/recordings/session-1.mkv',
-    layout: {} as SessionSummary['layout'],
-    sources: {},
-    healthEvents: [],
-    sessionLogs: [],
-    aiArtifacts: [],
+    healthEventCount: 0,
+    sessionLogCount: 0,
+    aiArtifactCount: 0,
     commentCount: 0,
     ...overrides
   }

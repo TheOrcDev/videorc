@@ -1,4 +1,4 @@
-import { PushPin } from '@phosphor-icons/react'
+import { PinIcon } from '@/components/icons'
 import { useEffect, useRef, type CSSProperties, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -73,7 +73,7 @@ export function CaptionsReader({
             variant="ghost"
             onClick={onToggleAlwaysOnTop}
           >
-            <PushPin className="size-4" weight={alwaysOnTop ? 'fill' : 'regular'} />
+            <PinIcon className="size-4" weight={alwaysOnTop ? 'fill' : 'regular'} />
           </Button>
         ) : null}
       </header>

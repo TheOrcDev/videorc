@@ -1,5 +1,11 @@
 # Plan 016: Add the open-core entitlement boundary for premium features
 
+> **Addendum 2026-09-15**: multistreaming moved to the free tier for every
+> plan (cap 5 destinations, one shared `STREAMING_MAX_DESTINATIONS` constant on
+> each side). The `multistreaming` feature id stays on the wire as `enabled`
+> for every tier. Premium = cloud AI, live captions, co-host, streaming
+> quality. The multistream rows and premium-only claims below are historical.
+
 > **Addendum 2026-07-05**: the `VIDEORC_PREMIUM_FEATURES=1` unlock described
 > below was removed — a release binary honored it at runtime, which defeated
 > the boundary. The variable is now downgrade-only (`=0` forces Basic for gate

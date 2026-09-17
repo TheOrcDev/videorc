@@ -1,0 +1,184 @@
+name: Promote Windows Alpha Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Exact candidate release id (<package version>-alpha.1)
+        required: true
+        type: string
+      source_commit:
+        description: Exact lowercase 40-character candidate source commit
+        required: true
+        type: string
+      installer_sha256:
+        description: Exact lowercase 64-character candidate installer SHA-256
+        required: true
+        type: string
+      stage:
+        description: Pilot keeps pending acceptance; public requires the PASS record
+        required: true
+        default: pilot
+        type: choice
+        options:
+          - pilot
+          - public
+      acceptance_record_url:
+        description: Public only; commit-pinned GitHub blob/raw sanitized JSON record
+        required: false
+        type: string
+
+concurrency:
+  # All workflows that can replace a public release pointer share this lock.
+  group: release-publication
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  promote:
+    name: Promote exact private candidate to ${{ inputs.stage }}
+    runs-on: windows-latest
+    timeout-minutes: 45
+    environment: windows-alpha-release
+    steps:
+      - name: Validate dispatch inputs
+        shell: pwsh
+        env:
+          RELEASE_ID: ${{ inputs.release_id }}
+          SOURCE_COMMIT: ${{ inputs.source_commit }}
+          INSTALLER_SHA256: ${{ inputs.installer_sha256 }}
+          RELEASE_STAGE: ${{ inputs.stage }}
+          ACCEPTANCE_RECORD_URL: ${{ inputs.acceptance_record_url }}
+        run: |
+          if ($env:GITHUB_REF -ne 'refs/heads/main') {
+            throw 'Windows promotion must be dispatched from the protected main branch.'
+          }
+          if ($env:RELEASE_ID -notmatch '^\d+\.\d+\.\d+-alpha\.1$') {
+            throw 'release_id must be <numeric package version>-alpha.1.'
+          }
+          if ($env:SOURCE_COMMIT -notmatch '^[a-f0-9]{40}$') {
+            throw 'source_commit must be a lowercase full Git commit SHA.'
+          }
+          if ($env:INSTALLER_SHA256 -notmatch '^[a-f0-9]{64}$') {
+            throw 'installer_sha256 must be a lowercase SHA-256 digest.'
+          }
+          if ($env:RELEASE_STAGE -eq 'public' -and -not $env:ACCEPTANCE_RECORD_URL) {
+            throw 'Public promotion requires acceptance_record_url.'
+          }
+          if ($env:RELEASE_STAGE -eq 'pilot' -and $env:ACCEPTANCE_RECORD_URL) {
+            throw 'Pilot promotion must preserve pending acceptance and omit acceptance_record_url.'
+          }
+
+      - name: Check out trusted promotion tooling
+        # actions/checkout v4.2.2, pinned from the verified upstream tag.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify trusted main and candidate ancestry
+        shell: pwsh
+        env:
+          CANDIDATE_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          TRUSTED_WORKFLOW_COMMIT: ${{ github.sha }}
+        run: |
+          $checkedOut = (git rev-parse HEAD).Trim()
+          if ($checkedOut -ne $env:TRUSTED_WORKFLOW_COMMIT) {
+            throw "Checked out $checkedOut, expected trusted workflow commit $env:TRUSTED_WORKFLOW_COMMIT."
+          }
+
+          git fetch --no-tags origin main
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Unable to fetch the protected main branch.'
+          }
+          $currentMain = (git rev-parse origin/main).Trim()
+          if ($checkedOut -ne $currentMain) {
+            throw "Main advanced to $currentMain. Re-dispatch promotion from the current protected main branch."
+          }
+
+          git cat-file -e "$($env:CANDIDATE_SOURCE_COMMIT)^{commit}"
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Candidate source is not a reachable commit in this repository.'
+          }
+          git merge-base --is-ancestor $env:CANDIDATE_SOURCE_COMMIT HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Candidate source must be an ancestor of the trusted promotion commit.'
+          }
+
+      - name: Set up pnpm
+        # pnpm/action-setup v4.1.0, pinned from the verified upstream tag.
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        # actions/setup-node v4.4.0, pinned from the verified upstream tag.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Download exact private candidate
+        env:
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          VIDEORC_RELEASE_EXPECTED_SHA256: ${{ inputs.installer_sha256 }}
+          VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_WINDOWS_CANDIDATE_READ_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_WINDOWS_CANDIDATE_READ_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_S3_FORCE_PATH_STYLE: 'true'
+        run: pnpm release:candidate:download:windows
+
+      - name: Verify exact hash, feed, and Authenticode signature
+        env:
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          VIDEORC_RELEASE_EXPECTED_SHA256: ${{ inputs.installer_sha256 }}
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+        run: pnpm release:candidate:verify:windows
+
+      - name: Verify public PASS record and accept manifest
+        if: ${{ inputs.stage == 'public' }}
+        env:
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          VIDEORC_RELEASE_EXPECTED_SHA256: ${{ inputs.installer_sha256 }}
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+          VIDEORC_WINDOWS_ACCEPTANCE_RECORD_URL: ${{ inputs.acceptance_record_url }}
+        run: pnpm release:acceptance:windows
+
+      - name: Publish exact candidate to protected release storage
+        env:
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ inputs.source_commit }}
+          VIDEORC_RELEASE_EXPECTED_SHA256: ${{ inputs.installer_sha256 }}
+          VIDEORC_WINDOWS_PUBLISHER_NAME: ${{ vars.VIDEORC_WINDOWS_PUBLISHER_NAME }}
+          VIDEORC_WINDOWS_RELEASE_STAGE: ${{ inputs.stage }}
+          VIDEORC_WINDOWS_FFMPEG_LICENSE_PATH: ${{ github.workspace }}\apps\desktop\release\FFMPEG-LICENSE.txt
+          VIDEORC_WINDOWS_FFMPEG_SOURCE_PATH: ${{ github.workspace }}\apps\desktop\release\FFMPEG-SOURCE.txt
+          VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_WINDOWS_RELEASE_WRITE_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_WINDOWS_RELEASE_WRITE_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_S3_FORCE_PATH_STYLE: 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          pnpm release:upload:preflight:windows
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows release upload preflight failed.'
+          }
+          pnpm release:upload:windows
+          if ($LASTEXITCODE -ne 0) {
+            throw 'Windows release upload failed.'
+          }

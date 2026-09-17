@@ -633,13 +633,14 @@ async fn create_subscriptions(
 
 async fn run_eventsub_session(
     state: &AppState,
-    session_id: &str,
+    session_owner: (&str, u64),
     config: &TwitchChatConfig,
     client: &reqwest::Client,
     ws_url: &str,
     seen: &mut HashSet<String>,
     avatars: &mut TwitchAvatarCache,
 ) -> SessionOutcome {
+    let (session_id, session_generation) = session_owner;
     let Ok((ws_stream, _response)) = connect_async(ws_url).await else {
         return SessionOutcome::Reconnect(None);
     };
@@ -665,6 +666,8 @@ async fn run_eventsub_session(
                     }
                     set_provider_and_emit(
                         state,
+                        session_id,
+                        session_generation,
                         StreamPlatform::Twitch,
                         config.target_id.as_deref(),
                         LiveChatProviderConnectionState::Connected,
@@ -701,7 +704,9 @@ async fn run_eventsub_session(
                         let mut persistence_backoff_ms = MIN_BACKOFF_MS;
                         let mut waited_for_storage = false;
                         loop {
-                            match try_deliver_message(state, message.clone()).await {
+                            match try_deliver_message(state, session_generation, message.clone())
+                                .await
+                            {
                                 Ok(()) => break,
                                 Err(error) if error.is_terminal() => {
                                     return SessionOutcome::Fatal(format!(
@@ -716,6 +721,8 @@ async fn run_eventsub_session(
                                     waited_for_storage = true;
                                     set_provider_and_emit(
                                         state,
+                                        session_id,
+                                        session_generation,
                                         StreamPlatform::Twitch,
                                         config.target_id.as_deref(),
                                         LiveChatProviderConnectionState::Waiting,
@@ -733,6 +740,8 @@ async fn run_eventsub_session(
                         if waited_for_storage {
                             set_provider_and_emit(
                                 state,
+                                session_id,
+                                session_generation,
                                 StreamPlatform::Twitch,
                                 config.target_id.as_deref(),
                                 LiveChatProviderConnectionState::Connected,
@@ -770,6 +779,7 @@ async fn run_eventsub_session(
 pub async fn run_twitch_chat_connector(
     state: AppState,
     session_id: String,
+    session_generation: u64,
     config: TwitchChatConfig,
 ) {
     let client = reqwest::Client::new();
@@ -786,6 +796,8 @@ pub async fn run_twitch_chat_connector(
 
     set_provider_and_emit(
         &state,
+        &session_id,
+        session_generation,
         StreamPlatform::Twitch,
         config.target_id.as_deref(),
         LiveChatProviderConnectionState::Connecting,
@@ -797,7 +809,7 @@ pub async fn run_twitch_chat_connector(
     loop {
         match run_eventsub_session(
             &state,
-            &session_id,
+            (&session_id, session_generation),
             &config,
             &client,
             &ws_url,
@@ -810,6 +822,8 @@ pub async fn run_twitch_chat_connector(
                 ws_url = next_url.unwrap_or_else(|| default_ws_url.clone());
                 set_provider_and_emit(
                     &state,
+                    &session_id,
+                    session_generation,
                     StreamPlatform::Twitch,
                     config.target_id.as_deref(),
                     LiveChatProviderConnectionState::Reconnecting,
@@ -822,6 +836,8 @@ pub async fn run_twitch_chat_connector(
             SessionOutcome::Fatal(message) => {
                 set_provider_and_emit(
                     &state,
+                    &session_id,
+                    session_generation,
                     StreamPlatform::Twitch,
                     config.target_id.as_deref(),
                     LiveChatProviderConnectionState::Failed,
@@ -1252,14 +1268,16 @@ mod tests {
             .database
             .ensure_fake_live_chat_session("session-1")
             .unwrap();
-        {
+        let session_generation = {
             let mut coordinator = state.live_chat.lock().await;
             coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
-        }
+            coordinator.session_generation()
+        };
 
         let connector = tokio::spawn(run_twitch_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             TwitchChatConfig {
                 access_token: "token-1".to_string(),
                 client_id: "client-1".to_string(),
@@ -1317,15 +1335,16 @@ mod tests {
             shutdown,
         ) = spawn_mock_twitch_server_sending_notification_once().await;
         let state = test_state();
-        state
-            .live_chat
-            .lock()
-            .await
-            .start_session("session-1".to_string(), vec![twitch_provider_row()]);
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
+            coordinator.session_generation()
+        };
 
         let connector = tokio::spawn(run_twitch_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             TwitchChatConfig {
                 access_token: "token-1".to_string(),
                 client_id: "client-1".to_string(),
@@ -1383,15 +1402,16 @@ mod tests {
             )))
         });
         state.live_chat_persistence = LiveChatPersistence::with_writer(writer);
-        state
-            .live_chat
-            .lock()
-            .await
-            .start_session("session-1".to_string(), vec![twitch_provider_row()]);
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
+            coordinator.session_generation()
+        };
 
         let connector = tokio::spawn(run_twitch_chat_connector(
             state.clone(),
             "session-1".to_string(),
+            session_generation,
             TwitchChatConfig {
                 access_token: "token-1".to_string(),
                 client_id: "client-1".to_string(),

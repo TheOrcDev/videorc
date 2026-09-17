@@ -1,0 +1,100 @@
+{
+  "$schema": "https://schemas.elgato.com/streamdeck/plugins/manifest.json",
+  "Name": "Videorc",
+  "UUID": "com.videorc.streamdeck",
+  "Version": "0.1.0.0",
+  "Author": "Videorc",
+  "Description": "Control Videorc: start/stop recording and streams, switch scenes, mute your mic, show takeovers, and bring windows forward.",
+  "URL": "https://www.videorc.com",
+  "Icon": "imgs/plugin",
+  "SDKVersion": 2,
+  "Software": {
+    "MinimumVersion": "6.5"
+  },
+  "OS": [
+    {
+      "Platform": "mac",
+      "MinimumVersion": "12"
+    },
+    {
+      "Platform": "windows",
+      "MinimumVersion": "10"
+    }
+  ],
+  "Nodejs": {
+    "Version": "20",
+    "Debug": "disabled"
+  },
+  "CodePath": "bin/plugin.js",
+  "Actions": [
+    {
+      "UUID": "com.videorc.streamdeck.record-toggle",
+      "Name": "Record",
+      "Icon": "imgs/record",
+      "Tooltip": "Start or stop the recording.",
+      "States": [
+        {
+          "Image": "imgs/record"
+        }
+      ]
+    },
+    {
+      "UUID": "com.videorc.streamdeck.stream-toggle",
+      "Name": "Go Live",
+      "Icon": "imgs/stream",
+      "Tooltip": "Start or end the stream.",
+      "States": [
+        {
+          "Image": "imgs/stream"
+        }
+      ]
+    },
+    {
+      "UUID": "com.videorc.streamdeck.mic-toggle",
+      "Name": "Mic",
+      "Icon": "imgs/mic",
+      "Tooltip": "Mute or unmute the microphone.",
+      "States": [
+        {
+          "Image": "imgs/mic"
+        }
+      ]
+    },
+    {
+      "UUID": "com.videorc.streamdeck.scene-apply",
+      "Name": "Scene",
+      "Icon": "imgs/scene",
+      "Tooltip": "Switch to a layout preset.",
+      "States": [
+        {
+          "Image": "imgs/scene"
+        }
+      ],
+      "PropertyInspectorPath": "ui/property-inspector.html"
+    },
+    {
+      "UUID": "com.videorc.streamdeck.takeover-toggle",
+      "Name": "Takeover",
+      "Icon": "imgs/takeover",
+      "Tooltip": "Show or hide a takeover image (BRB, starting soon).",
+      "States": [
+        {
+          "Image": "imgs/takeover"
+        }
+      ],
+      "PropertyInspectorPath": "ui/property-inspector.html"
+    },
+    {
+      "UUID": "com.videorc.streamdeck.window-front",
+      "Name": "Window",
+      "Icon": "imgs/window",
+      "Tooltip": "Bring the Notes, Comments, or Preview window to the front.",
+      "States": [
+        {
+          "Image": "imgs/window"
+        }
+      ],
+      "PropertyInspectorPath": "ui/property-inspector.html"
+    }
+  ]
+}

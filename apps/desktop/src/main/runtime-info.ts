@@ -1,6 +1,11 @@
 import { release } from 'node:os'
 
-import type { RuntimeGpuDevice, RuntimeInfo, SystemPermissionPane } from '../shared/backend'
+import type {
+  BackendCrashRecord,
+  RuntimeGpuDevice,
+  RuntimeInfo,
+  SystemPermissionPane
+} from '../shared/backend'
 
 export const MACOS_PERMISSION_URLS: Record<SystemPermissionPane, string> = {
   privacy: 'x-apple.systempreferences:com.apple.preference.security',
@@ -28,6 +33,9 @@ export interface RuntimeInfoInput {
   osRelease?: string
   gpuInfo?: unknown
   hardwareAccelerationDisabled?: boolean
+  gpuFallback?: RuntimeInfo['gpuFallback']
+  /** Persisted crash evidence, most recent first (see backend-crash-log.ts). */
+  backendCrashes?: readonly BackendCrashRecord[]
   env: Partial<
     Pick<
       NodeJS.ProcessEnv,
@@ -40,6 +48,7 @@ export interface RuntimeInfoInput {
       | 'VIDEORC_NOTES_RECORDING_OVERLAY'
       | 'VIDEORC_COMMENTS_WINDOW'
       | 'VIDEORC_COMMENTS_RECORDING_OVERLAY'
+      | 'VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE'
     >
   >
 }
@@ -87,6 +96,15 @@ export function buildRuntimeInfo({
   osRelease = release(),
   gpuInfo,
   hardwareAccelerationDisabled = false,
+  gpuFallback = {
+    source: 'none',
+    reason: null,
+    crashCount: 0,
+    updatedAt: null,
+    retryScheduled: false,
+    retryAttempts: 0
+  },
+  backendCrashes = [],
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
@@ -100,6 +118,8 @@ export function buildRuntimeInfo({
     osRelease,
     gpuDevices: normalizeRuntimeGpuDevices(gpuInfo),
     hardwareAccelerationDisabled,
+    gpuFallback,
+    backendCrashes: [...backendCrashes],
     isPackaged,
     permissionTargetName: isPackaged ? 'Videorc' : 'Electron',
     permissionTargetPath: targetPath,
@@ -113,6 +133,7 @@ export function buildRuntimeInfo({
     commentsWindowRecordingOverlayAllowed:
       env.VIDEORC_COMMENTS_WINDOW !== '0' && env.VIDEORC_COMMENTS_RECORDING_OVERLAY !== '0',
     previewSmokeMode: env.VIDEORC_SMOKE_PREVIEW_MOTION === '1',
+    windowsLiveAudioSmokeMode: env.VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE === '1',
     disableAutoPreview: env.VIDEORC_DISABLE_AUTO_PREVIEW === '1',
     disableAutoSourcePreview: env.VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW === '1',
     nativePreviewSurfaceStageSuspended: env.VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED === '1'

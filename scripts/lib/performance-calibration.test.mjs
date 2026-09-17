@@ -17,6 +17,7 @@ import {
 
 const COMMIT = 'a'.repeat(40)
 const EXECUTABLE_SHA256 = 'b'.repeat(64)
+const PACKAGE_PAYLOAD_SHA256 = 'c'.repeat(64)
 const MIB = 1024 * 1024
 
 describe('packaged performance calibration', () => {
@@ -30,9 +31,12 @@ describe('packaged performance calibration', () => {
     assert.equal(summary.schemaVersion, 1)
     assert.equal(summary.runCount, 3)
     assert.equal(summary.provenance.executableSha256, EXECUTABLE_SHA256)
+    assert.equal(summary.provenance.packagePayloadSha256, PACKAGE_PAYLOAD_SHA256)
     assert.equal(summary.provenance.powerAssertion, 'caffeinate:-d,-i,-s')
     assert.equal(summary.provenance.powerAssertionVerified, true)
     assert.equal(summary.provenance.displayScaleFactor, 2)
+    assert.equal(summary.provenance.profileClass, 'endurance')
+    assert.equal(summary.provenance.appVersion, '0.9.45')
     assert.equal(summary.provenance.detachedPreviewGeometry.stableAcrossMeasurement, true)
     assert.equal(summary.comparabilityPolicy.maxCadenceRelativeRange, 0.1)
     assert.equal(summary.observed.cadence.presentFps.median, 60)
@@ -43,9 +47,16 @@ describe('packaged performance calibration', () => {
     assert.equal(summary.observed.memoryMiB.perRole.backend.slopePerMinute.median, 2)
     assert.equal(summary.observed.resources.physicalFootprintMiB.growth.median, 8)
     assert.equal(summary.observed.resources.physicalFootprintMiB.perRole.backend.growth.median, 2)
+    assert.equal(summary.observed.cpuPercentByRole.backend.average.median, 10)
+    assert.equal(summary.observed.cpuPercentByRole.backend.p95.median, 20)
     assert.equal(budgetCandidate.schemaVersion, 1)
+    assert.equal(budgetCandidate.evidence.calibrationId, summary.calibrationId)
     assert.equal(budgetCandidate.evidence.powerAssertion, 'caffeinate:-d,-i,-s')
     assert.equal(budgetCandidate.evidence.powerAssertionVerified, true)
+    assert.equal(budgetCandidate.evidence.packagePayloadSha256, PACKAGE_PAYLOAD_SHA256)
+    assert.match(budgetCandidate.evidence.calibrationSha256, /^[0-9a-f]{64}$/)
+    assert.equal(budgetCandidate.scope.profileClass, 'endurance')
+    assert.equal(budgetCandidate.scope.appVersion, '0.9.45')
     assert.equal(budgetCandidate.status, 'candidate')
     assert.equal(budgetCandidate.enforcement, 'disabled')
     assert.equal(budgetCandidate.thresholds, null)
@@ -67,6 +78,52 @@ describe('packaged performance calibration', () => {
 
     assert.equal(summary.provenance.displayScaleFactor, 1)
     assert.equal(budgetCandidate.scope.displayScaleFactor, 1)
+  })
+
+  it('calibrates a distinct three-run packaged short-sentinel window', () => {
+    const reports = calibrationReports().map(shortSentinelReport)
+
+    const { summary, budgetCandidate } = aggregatePackagedPerformanceCalibration({ reports })
+
+    assert.equal(summary.provenance.profileClass, 'short-sentinel')
+    assert.deepEqual(summary.timing, {
+      warmupMs: 60_000,
+      measurementMs: 120_000,
+      intervalMs: 1_000
+    })
+    assert.equal(budgetCandidate.scope.profileClass, 'short-sentinel')
+  })
+
+  it('calibrates three full lifecycle-churn runs without fabricating preview cadence', () => {
+    const reports = calibrationReports().map((report) => {
+      report.scenario = 'lifecycle-churn'
+      report.metadata.appRole = 'lifecycle-churn'
+      delete report.metadata.detachedPreviewGeometry
+      delete report.metrics.detachedPreviewGeometry
+      delete report.metrics.pipeline
+      return report
+    })
+
+    const { summary, budgetCandidate } = aggregatePackagedPerformanceCalibration({ reports })
+
+    assert.equal(summary.scenario, 'lifecycle-churn')
+    assert.deepEqual(summary.observed.cadence, {})
+    assert.equal(summary.observed.memoryMiB.maximumOwnedRss.median, 402)
+    assert.equal(summary.observed.cpuPercentByRole.backend.p95.median, 20)
+    assert.equal(summary.observed.resources.physicalFootprintMiB.growth.median, 8)
+    assert.equal(budgetCandidate.scope.scenario, 'lifecycle-churn')
+  })
+
+  it('binds a workflow-owned hardware class without also binding a transient machine model', () => {
+    const reports = calibrationReports().map(shortSentinelReport)
+    for (const report of reports) {
+      report.metadata.hardwareClass = 'github-hosted-macos-15-arm64-standard'
+    }
+
+    const { budgetCandidate } = aggregatePackagedPerformanceCalibration({ reports })
+
+    assert.equal(budgetCandidate.scope.hardwareClass, 'github-hosted-macos-15-arm64-standard')
+    assert.equal('machineModel' in budgetCandidate.scope, false)
   })
 
   for (const [name, mutate, expected] of [
@@ -279,6 +336,21 @@ describe('packaged performance calibration', () => {
       /executable SHA-256 did not match run 1/
     ],
     [
+      'mismatched packaged payload hash',
+      (reports) => (reports[1].metadata.packagePayload.sha256 = 'e'.repeat(64)),
+      /packaged app payload SHA-256 did not match run 1/
+    ],
+    [
+      'mismatched profile class',
+      (reports) => (reports[1].metadata.profileClass = 'short-sentinel'),
+      /short-sentinel measurement overlapped|profile class did not match run 1/
+    ],
+    [
+      'mismatched app version',
+      (reports) => (reports[1].metadata.appVersion = '0.9.46'),
+      /app version did not match run 1/
+    ],
+    [
       'mismatched machine',
       (reports) => (reports[1].metadata.machineModel = 'Mac99,9'),
       /machine model did not match run 1/
@@ -307,7 +379,12 @@ describe('packaged performance calibration', () => {
         })
         reports[1].metrics.sampling.measurementElapsedMs = 601_000
       },
-      /timing did not match run 1/
+      /performance window identity did not match report timing|timing did not match run 1/
+    ],
+    [
+      'mismatched metadata performance window',
+      (reports) => (reports[1].metadata.performanceWindow.measurementMs = 120_000),
+      /performance window identity did not match report timing/
     ],
     [
       'unclean teardown',
@@ -318,6 +395,11 @@ describe('packaged performance calibration', () => {
       'missing detailed metrics',
       (reports) => delete reports[1].metrics.memory.roles.backend.slopeRssKbPerMinute,
       /slopeRssKbPerMinute was missing/
+    ],
+    [
+      'missing CPU p95',
+      (reports) => delete reports[1].metrics.cpuP95PercentByRole.backend,
+      /backend CPU p95 metric was missing/
     ],
     [
       'missing sampling evidence',
@@ -487,6 +569,9 @@ function detailedReport(index) {
         arch: 'arm64'
       },
       displayScaleFactor: 2,
+      profileClass: 'endurance',
+      appVersion: '0.9.45',
+      performanceWindow: { warmupMs: 60_000, measurementMs: 600_000, intervalMs: 1_000 },
       buildMode: 'packaged',
       expectedBuildMode: 'packaged',
       runNonce: `run-${index}-1234567890`,
@@ -495,6 +580,10 @@ function detailedReport(index) {
       executable: {
         path: '/Applications/Videorc.app/Contents/MacOS/Videorc',
         sha256: EXECUTABLE_SHA256
+      },
+      packagePayload: {
+        algorithm: 'sha256-packaged-code-manifest-v1',
+        sha256: PACKAGE_PAYLOAD_SHA256
       },
       appRole: 'detached-native-preview',
       source: { width: 1280, height: 720, fps: 60 },
@@ -550,9 +639,15 @@ function detailedReport(index) {
       },
       cpuAveragePercentByRole: {
         backend: 8 + index,
-        'electron-main': 3 + index,
-        'electron-renderer': 5 + index,
-        'electron-gpu': 1 + index
+        'electron-main': 10 + index,
+        'electron-renderer': 12 + index,
+        'electron-gpu': 7 + index
+      },
+      cpuP95PercentByRole: {
+        backend: 18 + index,
+        'electron-main': 20 + index,
+        'electron-renderer': 24 + index,
+        'electron-gpu': 14 + index
       },
       resourceCheckpoints: {
         first: { rows: firstRows },
@@ -635,6 +730,32 @@ function memorySeries(index, baseMiB) {
     slopePerMinute: index * 1024,
     secondHalfSlopePerMinute: index * 512
   }
+}
+
+function shortSentinelReport(report) {
+  report.metadata.profileClass = 'short-sentinel'
+  report.metadata.performanceWindow.measurementMs = 120_000
+  report.timing.measurementMs = 120_000
+  report.metrics.memory.samples = 120
+  for (const series of [report.metrics.memory.totalRss, report.metrics.memory.ownedRss]) {
+    series.samples = 120
+    series.endAtMs = 120_000
+    series.durationMs = 119_000
+  }
+  for (const role of Object.values(report.metrics.memory.roles)) role.rssSamples = 120
+  report.metrics.sampling = {
+    ...report.metrics.sampling,
+    expectedSamples: 120,
+    collectedSamples: 120,
+    observations: Array.from({ length: 120 }, (_, sampleIndex) => ({
+      sampleIndex,
+      scheduledAtMs: sampleIndex * 1_000,
+      observedAtMs: sampleIndex * 1_000 + 50
+    })),
+    maxSampleGapMs: 1_050,
+    measurementElapsedMs: 120_000
+  }
+  return report
 }
 
 function memoryRole(index) {

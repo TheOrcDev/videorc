@@ -1,0 +1,46 @@
+{
+  "schemaVersion": 2,
+  "kind": "videorc-windows-alpha-acceptance",
+  "status": "REPLACE_WITH_PASS_AFTER_ALL_REQUIRED_TESTING",
+  "releaseId": "REPLACE_RELEASE_ID",
+  "sourceCommit": "REPLACE_WITH_40_CHARACTER_CANDIDATE_SOURCE_COMMIT",
+  "candidateIdentity": "windows:REPLACE_RELEASE_ID:REPLACE_SOURCE_COMMIT:sha256:REPLACE_INSTALLER_SHA256",
+  "candidateStoragePrefix": "candidates/windows/REPLACE_RELEASE_ID/REPLACE_SOURCE_COMMIT",
+  "installer": {
+    "filename": "REPLACE_INSTALLER_FILENAME",
+    "sha256": "REPLACE_WITH_64_CHARACTER_LOWERCASE_SHA256",
+    "publisherName": "REPLACE_WITH_EXACT_CERTIFICATE_COMMON_NAME"
+  },
+  "testedAt": "REPLACE_WITH_CANONICAL_UTC_TIMESTAMP",
+  "testPlatform": {
+    "operatingSystem": "Windows 11",
+    "architecture": "x64",
+    "physicalHardware": true
+  },
+  "releaseSequence": {
+    "kind": "REPLACE_WITH_first-public-alpha_OR_successor",
+    "previousReleaseId": "REMOVE_FOR_FIRST_ALPHA_OR_REPLACE_WITH_PRIOR_ACCEPTED_RELEASE_ID"
+  },
+  "requiredGates": {
+    "cleanInstall": { "status": "REPLACE_WITH_PASS" },
+    "protocolSignIn": { "status": "REPLACE_WITH_PASS" },
+    "signOutRelaunch": { "status": "REPLACE_WITH_PASS" },
+    "uninstall": { "status": "REPLACE_WITH_PASS" },
+    "screenOnlyRecording": { "status": "REPLACE_WITH_PASS" },
+    "cameraOnlyRecording": { "status": "REPLACE_WITH_PASS" },
+    "screenCameraMicrophoneRecording": { "status": "REPLACE_WITH_PASS" },
+    "normalGpuPath": { "status": "REPLACE_WITH_PASS" },
+    "fallbackGpuPath": { "status": "REPLACE_WITH_PASS" },
+    "lowerCapacityHardware": { "status": "REPLACE_WITH_PASS" },
+    "ownedProcessCleanup": { "status": "REPLACE_WITH_PASS" },
+    "supportBundleRedaction": { "status": "REPLACE_WITH_PASS" },
+    "defenderMalwareScan": { "status": "REPLACE_WITH_PASS" },
+    "authenticodeSignature": { "status": "REPLACE_WITH_PASS" },
+    "alphaToAlphaUpdate": {
+      "status": "REPLACE_WITH_PASS_OR_NOT_APPLICABLE_FOR_FIRST_PUBLIC_ALPHA_ONLY",
+      "reason": "REMOVE_FOR_SUCCESSOR_OR_SET_TO_first-public-alpha"
+    },
+    "productionDownloadRoute": { "status": "REPLACE_WITH_PASS" },
+    "advertisedRtmpWorkflow": { "status": "REPLACE_WITH_PASS" }
+  }
+}

@@ -1,26 +1,64 @@
 import { spawn } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-import { stimulusWindowOptionsForSource } from './screen-motion-stimulus.mjs'
+import {
+  resolveScreenMotionStimulusBrowser,
+  resolveWindowsStimulusBrowser,
+  stopStimulusBrowserTree,
+  stimulusWindowOptionsForSource
+} from './screen-motion-stimulus.mjs'
 
 const DEFAULT_CHROME_PATH = '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 
+export function resolveAvSyncStimulusBrowser({
+  platform = process.platform,
+  env = process.env,
+  exists = existsSync,
+  requestedPath
+} = {}) {
+  if (platform === 'win32') {
+    return resolveWindowsStimulusBrowser({
+      env,
+      exists,
+      requestedPath,
+      legacyEnvironmentVariable: 'VIDEORC_AV_SYNC_BROWSER_PATH'
+    })
+  }
+  return resolveScreenMotionStimulusBrowser({
+    platform,
+    env: {
+      ...env,
+      VIDEORC_SCREEN_MOTION_BROWSER_PATH: env.VIDEORC_AV_SYNC_BROWSER_PATH ?? DEFAULT_CHROME_PATH
+    },
+    exists,
+    requestedPath
+  })
+}
+
 export async function launchAvSyncStimulus(options = {}) {
   const displayOptions = stimulusWindowOptionsForSource(options.screenSource) ?? {}
-  const browserPath = options.browserPath ?? process.env.VIDEORC_AV_SYNC_BROWSER_PATH ?? DEFAULT_CHROME_PATH
+  const browserResolution = resolveAvSyncStimulusBrowser({
+    requestedPath: options.browserPath
+  })
+  const browserPath = browserResolution.executablePath
   const x = Number(options.x ?? process.env.VIDEORC_AV_SYNC_X ?? displayOptions.x ?? 16)
   const y = Number(options.y ?? process.env.VIDEORC_AV_SYNC_Y ?? displayOptions.y ?? 16)
-  const width = Number(options.width ?? process.env.VIDEORC_AV_SYNC_WIDTH ?? displayOptions.width ?? 1800)
-  const height = Number(options.height ?? process.env.VIDEORC_AV_SYNC_HEIGHT ?? displayOptions.height ?? 980)
+  const width = Number(
+    options.width ?? process.env.VIDEORC_AV_SYNC_WIDTH ?? displayOptions.width ?? 1800
+  )
+  const height = Number(
+    options.height ?? process.env.VIDEORC_AV_SYNC_HEIGHT ?? displayOptions.height ?? 980
+  )
   const settleMs = Number(options.settleMs ?? process.env.VIDEORC_AV_SYNC_SETTLE_MS ?? 1800)
 
-  if (!existsSync(browserPath)) {
+  if (!browserPath) {
     throw new Error(
       `A/V sync stimulus requires a Chromium-compatible browser. ` +
-        `Set VIDEORC_AV_SYNC_BROWSER_PATH, or install Google Chrome at ${browserPath}.`
+        `Set VIDEORC_STIMULUS_BROWSER, or install Edge/Chrome. ` +
+        `Checked: ${browserResolution.searchedPaths.join(', ') || 'no Windows browser roots were available'}.`
     )
   }
 
@@ -41,45 +79,39 @@ export async function launchAvSyncStimulus(options = {}) {
       '--force-device-scale-factor=1',
       `--window-position=${x},${y}`,
       `--window-size=${width},${height}`,
-      `--app=${pathToFileURL(htmlPath).href}`,
+      `--app=${pathToFileURL(htmlPath).href}`
     ],
     {
       detached: true,
-      stdio: 'ignore',
+      stdio: 'ignore'
     }
   )
   child.unref()
-  await sleep(settleMs)
-  if (child.exitCode !== null) {
-    rmSync(dir, { recursive: true, force: true })
-    throw new Error(`A/V sync stimulus browser exited early with code ${child.exitCode}.`)
+  const stimulus = {
+    child,
+    dir,
+    htmlPath,
+    browserPath,
+    browserSource: browserResolution.source,
+    x,
+    y,
+    width,
+    height
   }
-  return { child, dir, htmlPath, browserPath, x, y, width, height }
-}
-
-export async function stopAvSyncStimulus(stimulus) {
-  if (!stimulus) return
-  const pid = stimulus.child?.pid
-  if (pid) {
-    signal(pid, 'SIGTERM')
-    await sleep(800)
-    signal(pid, 'SIGKILL')
-  }
-  if (stimulus.dir) {
-    rmSync(stimulus.dir, { recursive: true, force: true })
-  }
-}
-
-function signal(pid, sig) {
   try {
-    process.kill(-pid, sig)
-  } catch {
-    try {
-      process.kill(pid, sig)
-    } catch {
-      // Already gone.
+    await sleep(settleMs)
+    if (child.exitCode !== null) {
+      throw new Error(`A/V sync stimulus browser exited early with code ${child.exitCode}.`)
     }
+    return stimulus
+  } catch (error) {
+    await stopAvSyncStimulus(stimulus, options.teardownOptions)
+    throw error
   }
+}
+
+export async function stopAvSyncStimulus(stimulus, options = {}) {
+  return await stopStimulusBrowserTree(stimulus, options)
 }
 
 function sleep(ms) {

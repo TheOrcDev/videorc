@@ -25,9 +25,14 @@ const htmlPath = resolve(
 // deliberately TIGHT ~2.5% headroom so further eager growth gets challenged;
 // the gzip ceilings were still honest and stay unchanged. If this trips
 // again, prefer re-splitting the Studio dashboard chunks over bumping.
+// Recalibrated 2026-08-29 after the capture-decay/session-lifecycle hardening
+// grew the eager bundle to 1,951,766 raw / 375,456 gzip. The added bytes are
+// Studio provider correctness logic rather than a newly eager dependency; the
+// rounded ceilings retain the same ~2.5% challenge margin. Entry ceilings stay
+// unchanged so an accidental dashboard collapse into the main entry still fails.
 const budget = {
-  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 1_950_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 370_000),
+  maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 385_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

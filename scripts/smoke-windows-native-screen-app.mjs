@@ -1,5 +1,6 @@
 import { spawnSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, statSync } from 'node:fs'
+import { randomBytes } from 'node:crypto'
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -7,17 +8,43 @@ import { performanceAppSpawnSpec, launchDevApp } from './lib/app-launcher.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
 import {
+  collectPerformanceMetadata,
+  createPerformanceReport,
+  failingChecks,
+  passingCheck,
+  performanceMode,
+  writePerformanceReport
+} from './lib/performance-contract.mjs'
+import { collectWindowsProcessTreeTelemetry } from './lib/process-endurance.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
+import {
+  evaluateWindowsPerformanceBudget,
+  loadWindowsPerformanceBudget
+} from './lib/windows-performance-budget.mjs'
+import {
   assertBmpHeaders,
   assertNonblankBmp,
+  assertWindowsGraphicsCaptureTexture,
+  evaluateWindowsNativeScreenD3d11Diagnostics,
   nativeWindowsCompositorUsesScreen,
+  nativeWindowsD3d11MediaEncodingActive,
   nativeWindowsScreenCandidates,
-  nativeWindowsScreenRecordingActive
+  nativeWindowsScreenRecordingActive,
+  parseWindowsNativeScreenArgs,
+  requiredBmpPreviewAdvances,
+  windowsNativeScreenPerformanceBudgetContext,
+  windowsNativeScreenRecordingArtifactGates,
+  windowsNativeScreenRequiresFinalDiagnostics
 } from './lib/windows-native-screen-gates.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
+const options = parseWindowsNativeScreenArgs(process.argv.slice(2))
+
 if (process.platform !== 'win32') {
-  throw new Error('The native Windows screen/BMP smoke must run on Windows.')
+  throw new Error('The native Windows screen smoke must run on Windows.')
 }
+
+const performanceModeValue = performanceMode()
 
 const repoRoot = resolve(import.meta.dirname, '..')
 const spawnSpec = performanceAppSpawnSpec()
@@ -33,6 +60,26 @@ const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180_000)
 const recordingMs = Number(process.env.VIDEORC_WINDOWS_NATIVE_SCREEN_RECORDING_MS ?? 6_000)
+const performanceWarmupMs = Number(process.env.VIDEORC_PERF_WARMUP_MS ?? 0)
+const performanceMeasurementMs = Number(
+  process.env.VIDEORC_PERF_MEASUREMENT_MS ?? Math.max(1, recordingMs - performanceWarmupMs)
+)
+const performanceIntervalMs = Number(process.env.VIDEORC_PERF_SAMPLE_INTERVAL_MS ?? 1_000)
+const performanceReportRequested = Boolean(process.env.VIDEORC_PERF_REPORT_PATH)
+const measureOccludedAuxWindows = process.env.VIDEORC_PERF_OCCLUDED_AUX_WINDOWS === '1'
+const requireEncodedBridge =
+  process.env.VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE === '1' || options.requireD3d11
+const requireFinalDiagnostics = windowsNativeScreenRequiresFinalDiagnostics({
+  requireEncodedBridge,
+  d3d11: options.d3d11,
+  expectFallback: options.expectFallback
+})
+const requireGraphicsCapture = process.env.VIDEORC_WINDOWS_REQUIRE_GRAPHICS_CAPTURE === '1'
+const requireDirectD3D11Recording =
+  process.env.VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING === '1'
+const includeCamera = process.env.VIDEORC_WINDOWS_INCLUDE_CAMERA === '1'
+const printAppOutput = process.env.VIDEORC_SMOKE_PRINT_APP_OUTPUT === '1'
+const performanceEvaluationRequested = performanceReportRequested || performanceModeValue === 'gate'
 const video = {
   preset: 'custom',
   width: Number(process.env.VIDEORC_SMOKE_VIDEO_WIDTH ?? 1280),
@@ -43,18 +90,60 @@ const video = {
 
 mkdirSync(outputDirectory, { recursive: true })
 
+const packagedSmokeCommandCapability = measureOccludedAuxWindows
+  ? randomBytes(32).toString('base64url')
+  : undefined
 const launched = await launchDevApp({
   spawnSpec,
   timeoutMs,
-  requiredMarkers: ['backend-ready'],
+  ...(printAppOutput ? { onLine: (line) => console.log(`[app] ${line}`) } : {}),
+  requiredMarkers: measureOccludedAuxWindows
+    ? ['backend-ready', 'preview-motion-ready']
+    : ['backend-ready'],
+  packagedSmokeCommandCapability,
   env: {
     VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
     VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',
-    VIDEORC_DISABLE_AUTO_PREVIEW: '1'
+    VIDEORC_DISABLE_AUTO_PREVIEW: '1',
+    ...(requireGraphicsCapture ? { VIDEORC_WINDOWS_GRAPHICS_CAPTURE: '1' } : {}),
+    ...(options.d3d11
+      ? {
+          VIDEORC_WINDOWS_D3D11_MEDIA: '1',
+          VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
+        }
+      : {}),
+    ...(options.requireD3d11
+      ? {
+          VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1',
+          VIDEORC_WINDOWS_REQUIRE_ENCODED_BRIDGE: '1'
+        }
+      : {}),
+    ...(options.expectFallback === 'natural'
+      ? { VIDEORC_WINDOWS_EXPECT_D3D11_FALLBACK: 'natural' }
+      : {}),
+    ...(measureOccludedAuxWindows
+      ? {
+          VIDEORC_SMOKE_COMMAND_SERVER: '1',
+          VIDEORC_PACKAGED_SMOKE_TEST: '1',
+          VIDEORC_SMOKE_COMMAND_CAPABILITY: packagedSmokeCommandCapability
+        }
+      : {})
   }
 })
 
 let ws
+let performanceTelemetry = null
+let bmpEvidence = null
+let recordingEvidence = null
+let selectedScreen = null
+let selectedCamera = null
+let cameraEvidence = null
+let cameraFramesAtRecordingStart = null
+let teardownEvidence = null
+let occludedAuxWindowsEvidence = null
+let collectorFailure = null
+let collectorFailed = false
+const collectorHardFailures = []
 try {
   const connection = launched.connections['backend-ready']
   ws = await connectBackend(connection, timeoutMs)
@@ -71,25 +160,147 @@ try {
     )
   }
   const screen = await startAvailableWindowsScreenPreview(ws, candidates)
-  const sources = { screenId: screen.id, testPattern: false }
+  selectedScreen = screen
+  const minimumBmpPreviewAdvances = requiredBmpPreviewAdvances(screen)
+  const camera = includeCamera
+    ? (deviceList?.devices ?? []).find(
+        (device) => device.kind === 'camera' && device.status === 'available'
+      )
+    : null
+  if (includeCamera && !camera) {
+    throw new Error(
+      `Screen+camera smoke requested but no available camera was found: ${JSON.stringify(deviceList?.devices ?? [])}`
+    )
+  }
+  selectedCamera = camera
+  const sources = {
+    screenId: screen.id,
+    windowId: null,
+    cameraId: camera?.id ?? null,
+    microphoneId: null,
+    testPattern: false
+  }
   console.log(`Windows native screen smoke selected ${screen.id}: ${screen.detail ?? screen.name}`)
-  await waitForNativeScreenFrame(ws, screen.id)
+  let previewStatus = await waitForNativeScreenFrame(ws, screen.id)
+  if (requireGraphicsCapture) {
+    assertWindowsGraphicsCaptureTexture(previewStatus)
+  }
+  if (camera) {
+    await request(ws, timeoutMs, 'preview.camera.start', {
+      sources,
+      layout: sessionLayout(),
+      video,
+      ffmpegPath
+    })
+    cameraEvidence = await waitForNativeCameraFrame(ws, camera.id)
+    cameraFramesAtRecordingStart = cameraEvidence.framesCaptured ?? 0
+    console.log(
+      `Windows screen+camera smoke selected ${camera.id}: ${camera.name}; ` +
+        `sourceFps=${cameraEvidence.sourceFps ?? 'pending'}`
+    )
+  }
 
-  const firstBmp = await waitForNonblankBmpFrame(connection)
+  const firstBmp = options.d3d11 ? null : await waitForNonblankBmpFrame(connection)
 
-  const started = await request(ws, timeoutMs, 'session.start', screenOnlySessionParams(sources))
+  const started = await request(ws, timeoutMs, 'session.start', sessionParams(sources))
   if (started?.state !== 'recording') {
-    throw new Error(`Expected ScreenOnly recording, got ${started?.state ?? 'no state'}.`)
+    throw new Error(
+      `Expected ${includeCamera ? 'ScreenCamera' : 'ScreenOnly'} recording, got ${started?.state ?? 'no state'}.`
+    )
   }
   const recordingStartedAt = Date.now()
   const activeRecording = await waitForActiveNativeScreenRecording(ws, screen.id)
-  if (!nativeWindowsCompositorUsesScreen(activeRecording.compositor, screen.id)) {
+  if (requireEncodedBridge) {
+    assertEncodedBridgeDiagnostics(activeRecording.diagnostics, {
+      requireOutput: false,
+      requireDirectD3D11Recording,
+      requireNoCpuCompositor: includeCamera
+    })
+  }
+  if (options.d3d11 || options.expectFallback) {
+    assertD3d11Diagnostics(activeRecording.diagnostics, { requireOutput: false })
+  }
+  if (
+    !requireDirectD3D11Recording &&
+    !options.d3d11 &&
+    !nativeWindowsCompositorUsesScreen(activeRecording.compositor, screen.id)
+  ) {
     throw new Error(
       `Recording compositor did not retain selected native screen ${screen.id}: ${JSON.stringify(activeRecording)}`
     )
   }
+  if (measureOccludedAuxWindows) {
+    occludedAuxWindowsEvidence = await prepareOccludedAuxWindows(
+      launched.connections['preview-motion-ready']
+    )
+  }
 
-  const bmpEvidence = await pollBmpDuringRecording(connection, firstBmp.cursor, recordingMs)
+  const telemetryPromise = performanceEvaluationRequested
+    ? collectWindowsProcessTreeTelemetry({
+        rootPid: launched.process.pid,
+        warmupMs: performanceWarmupMs,
+        measurementMs: performanceMeasurementMs,
+        intervalMs: performanceIntervalMs
+      })
+    : Promise.resolve(null)
+  const [telemetryResult, bmpResult] = await Promise.allSettled([
+    telemetryPromise,
+    options.d3d11
+      ? monitorD3d11DuringRecording(ws, recordingMs)
+      : pollBmpDuringRecording(connection, firstBmp.cursor, recordingMs, minimumBmpPreviewAdvances)
+  ])
+  if (telemetryResult.status === 'fulfilled') {
+    performanceTelemetry = telemetryResult.value
+  } else {
+    if (!collectorFailed) collectorFailure = telemetryResult.reason
+    collectorFailed = true
+    collectorHardFailures.push(
+      `Windows process telemetry collection failed: ${failureMessage(telemetryResult.reason)}`
+    )
+  }
+  if (bmpResult.status === 'fulfilled') {
+    bmpEvidence = bmpResult.value
+  } else {
+    if (!collectorFailed) collectorFailure = bmpResult.reason
+    collectorFailed = true
+    collectorHardFailures.push(
+      `${options.d3d11 ? 'D3D11 diagnostics monitoring' : 'BMP proof polling'} failed: ${failureMessage(bmpResult.reason)}`
+    )
+  }
+  if (collectorFailed && !performanceEvaluationRequested) throw collectorFailure
+  let finalDiagnostics = null
+  if (requireFinalDiagnostics) {
+    finalDiagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+    if (requireEncodedBridge) {
+      assertEncodedBridgeDiagnostics(finalDiagnostics, {
+        requireOutput: true,
+        requireDirectD3D11Recording,
+        requireNoCpuCompositor: includeCamera
+      })
+    }
+  }
+  if (camera) {
+    cameraEvidence = await waitForNativeCameraFrame(ws, camera.id)
+    const cameraFramesDuringRecording =
+      (cameraEvidence?.framesCaptured ?? 0) - (cameraFramesAtRecordingStart ?? 0)
+    const minimumCameraFrames = Math.max(1, Math.floor((recordingMs / 1000) * 5))
+    if (
+      cameraFramesDuringRecording < minimumCameraFrames ||
+      !(cameraEvidence?.sourceFps > 0) ||
+      !(cameraEvidence?.frameAgeMs < 1_000)
+    ) {
+      throw new Error(
+        `Windows camera stopped advancing during recording: frames=${cameraFramesDuringRecording}, minimum=${minimumCameraFrames}, sourceFps=${cameraEvidence?.sourceFps ?? 'missing'}, frameAgeMs=${cameraEvidence?.frameAgeMs ?? 'missing'}, status=${JSON.stringify(cameraEvidence)}`
+      )
+    }
+  }
+  if (requireGraphicsCapture) {
+    previewStatus = await request(ws, timeoutMs, 'preview.screen.status')
+    assertWindowsGraphicsCaptureTexture(previewStatus)
+  }
+  if (options.d3d11 || options.expectFallback) {
+    assertD3d11Diagnostics(finalDiagnostics, { requireOutput: options.d3d11 })
+  }
   const stopRequestedAt = Date.now()
   const stopped = await request(ws, timeoutMs, 'session.stop')
   const outputPath = stopped?.outputPath ?? started?.outputPath
@@ -104,8 +315,14 @@ try {
     ffprobePath,
     intendedFps: video.fps,
     expectAudio: false,
-    gates: { requireMotion: false }
+    gates: windowsNativeScreenRecordingArtifactGates(screen)
   })
+  recordingEvidence = {
+    outputPath,
+    sizeBytes: statSync(outputPath).size,
+    metrics: report.metrics,
+    verdict: report.verdict
+  }
   const reportPaths = writeReports(report)
   if (!report.verdict.pass) {
     throw new Error(
@@ -121,13 +338,53 @@ try {
   }
   assertNonblankRecordingFrame(outputPath)
 
-  console.log(
-    `Windows native screen/BMP PASS: ${screen.id}, ${bmpEvidence.advancedFrames} BMP frame advances, ` +
-      `${report.metrics.observedFrames ?? 'n/a'} recorded frames, ${report.metrics.durationSeconds.toFixed(2)}s, ` +
-      `${outputPath} (report: ${reportPaths.mdPath})`
-  )
+  if (!collectorFailed) {
+    console.log(
+      `Windows native screen ${options.d3d11 ? 'D3D11' : 'BMP'} PASS: ${screen.id}, ${bmpEvidence.advancedFrames} ${options.d3d11 ? 'GPU sample' : 'BMP frame'} advances, ` +
+        `${report.metrics.observedFrames ?? 'n/a'} recorded frames, ${report.metrics.durationSeconds.toFixed(2)}s, ` +
+        `${camera ? `camera source ${cameraEvidence?.sourceFps?.toFixed?.(2) ?? 'n/a'} fps, ` : ''}` +
+        `${previewStatus?.d3d11TextureAvailable === true ? 'retained D3D11 texture, ' : ''}` +
+        `${outputPath} (report: ${reportPaths.mdPath})`
+    )
+  }
 } finally {
+  let evidenceDiagnostics = null
+  try {
+    if (ws) {
+      evidenceDiagnostics = await request(ws, 10_000, 'diagnostics.stats')
+    }
+  } catch {
+    // Best effort only; the original failure must keep propagating.
+  }
+  try {
+    writeFileSync(
+      join(outputDirectory, 'native-screen-diagnostics-evidence.json'),
+      JSON.stringify(
+        {
+          includeCamera,
+          video,
+          requireDirectD3D11Recording,
+          d3d11Monitor: bmpEvidence,
+          finalDiagnostics: evidenceDiagnostics,
+          cameraEvidence,
+          recordingEvidence,
+          collectorHardFailures
+        },
+        null,
+        2
+      )
+    )
+  } catch (error) {
+    console.log(`Windows native screen smoke could not retain diagnostics evidence: ${error}`)
+  }
   if (ws) {
+    if (includeCamera) {
+      try {
+        await request(ws, 10_000, 'preview.camera.stop')
+      } catch {
+        // Process teardown below is authoritative.
+      }
+    }
     try {
       await request(ws, 10_000, 'preview.screen.stop')
     } catch {
@@ -135,7 +392,150 @@ try {
     }
     ws.close()
   }
-  await launched.stop()
+  teardownEvidence = await launched.stop()
+}
+
+if (performanceEvaluationRequested) {
+  const requiredRoles = [
+    'backend',
+    'electron-main',
+    'electron-renderer',
+    'electron-gpu',
+    'ffmpeg',
+    ...(measureOccludedAuxWindows
+      ? ['electron-renderer-notes', 'electron-renderer-comments', 'electron-renderer-captions']
+      : [])
+  ]
+  const telemetryFailures = requiredRoles.filter(
+    (role) =>
+      (performanceTelemetry?.memory?.summary?.roles?.[role]?.minMeasuredCount ?? 0) < 1 ||
+      (performanceTelemetry?.cpu?.summary?.byRole?.[role]?.samples ?? 0) < 1
+  )
+  const hardFailures = [
+    ...collectorHardFailures,
+    ...(telemetryFailures.length > 0
+      ? [`Windows process telemetry did not continuously identify: ${telemetryFailures.join(', ')}`]
+      : []),
+    ...(bmpEvidence?.advancedFrames > 0 || options.expectFallback === 'natural'
+      ? []
+      : [
+          `${options.d3d11 ? 'D3D11 GPU diagnostics' : 'BMP proof polling'} did not observe frame progress`
+        ]),
+    ...(recordingEvidence?.verdict?.pass === true
+      ? []
+      : ['final recording media validity was missing'])
+  ]
+  const metadata = await collectPerformanceMetadata({ cwd: repoRoot })
+  let activeBudget = null
+  let budgetFailures = []
+  if (performanceModeValue === 'gate') {
+    try {
+      activeBudget = await loadWindowsPerformanceBudget({
+        path: process.env.VIDEORC_WINDOWS_PERF_BUDGET_PATH,
+        profileId: process.env.VIDEORC_WINDOWS_PERF_BUDGET_PROFILE,
+        context: windowsNativeScreenPerformanceBudgetContext({
+          metadata,
+          scenario: process.env.VIDEORC_PERF_SCENARIO ?? 'windows-proof-recording',
+          timing: {
+            warmupMs: performanceWarmupMs,
+            measurementMs: performanceMeasurementMs,
+            intervalMs: performanceIntervalMs
+          }
+        })
+      })
+      budgetFailures = evaluateWindowsPerformanceBudget(activeBudget.profile, {
+        processTree: performanceTelemetry,
+        bmp: bmpEvidence,
+        recording: recordingEvidence,
+        teardownClean: teardownEvidence?.state === 'terminated'
+      })
+    } catch (error) {
+      budgetFailures = [error?.message ?? String(error)]
+    }
+  }
+  const report = createPerformanceReport({
+    scenario: process.env.VIDEORC_PERF_SCENARIO ?? 'windows-proof-recording',
+    mode: performanceModeValue,
+    metadata,
+    timing: {
+      warmupMs: performanceWarmupMs,
+      measurementMs: performanceMeasurementMs,
+      intervalMs: performanceIntervalMs
+    },
+    metrics: {
+      screen: selectedScreen,
+      camera: selectedCamera ? { ...selectedCamera, evidence: cameraEvidence } : null,
+      processTree: performanceTelemetry,
+      bmp: bmpEvidence,
+      recording: recordingEvidence,
+      occludedAuxWindows: occludedAuxWindowsEvidence,
+      teardown: teardownEvidence,
+      activeBudget: activeBudget
+        ? { path: activeBudget.path, profileId: activeBudget.profile.id }
+        : null,
+      budgetFailures
+    },
+    checks: [
+      ...(hardFailures.length === 0
+        ? [
+            passingCheck(
+              `packaged Windows source, media, ${options.d3d11 ? 'D3D11 zero-copy' : 'BMP'}, and per-role process evidence passed`
+            )
+          ]
+        : []),
+      ...failingChecks(hardFailures),
+      ...failingChecks(budgetFailures)
+    ]
+  })
+  if (performanceReportRequested) {
+    const reportPath = await writePerformanceReport(report)
+    console.log(`Windows packaged performance report: ${reportPath}`)
+  }
+  if (collectorFailed) throw collectorFailure
+  if (hardFailures.length > 0 || budgetFailures.length > 0) {
+    throw new Error([...hardFailures, ...budgetFailures].join('\n'))
+  }
+}
+
+async function prepareOccludedAuxWindows(smoke) {
+  const placements = [
+    ['notes-window-open', 'notes-window-set-bounds', { x: 140, y: 140, width: 640, height: 420 }],
+    [
+      'comments-window-open',
+      'comments-window-set-bounds',
+      { x: 180, y: 120, width: 420, height: 640 }
+    ],
+    [
+      'captions-window-open',
+      'captions-window-set-bounds',
+      { x: 120, y: 360, width: 640, height: 320 }
+    ]
+  ]
+  const windows = {}
+  for (const [openCommand, boundsCommand, bounds] of placements) {
+    await requestSmokeCommand(smoke, openCommand, {}, { timeoutMs })
+    windows[openCommand.replace('-open', '')] = await requestSmokeCommand(
+      smoke,
+      boundsCommand,
+      bounds,
+      { timeoutMs }
+    )
+  }
+  const main = await requestSmokeCommand(
+    smoke,
+    'main-window-set-bounds',
+    { x: 80, y: 80, width: 1180, height: 780 },
+    { timeoutMs }
+  )
+  const focus = await requestSmokeCommand(smoke, 'main-window-focus', {}, { timeoutMs })
+  if (focus?.focused !== true) {
+    throw new Error('Main window did not occlude the auxiliary performance surfaces.')
+  }
+  return { windows, main, mainFocused: true }
+}
+
+function failureMessage(error) {
+  return error instanceof Error ? error.message : String(error)
 }
 
 async function startAvailableWindowsScreenPreview(ws, candidates) {
@@ -171,6 +571,23 @@ async function waitForNativeScreenFrame(ws, sourceId) {
     await sleep(100)
   }
   throw new Error(`Timed out waiting for ${sourceId} frame: ${JSON.stringify(last)}`)
+}
+
+async function waitForNativeCameraFrame(ws, cameraId) {
+  const deadline = Date.now() + timeoutMs
+  let last
+  while (Date.now() < deadline) {
+    last = await request(ws, timeoutMs, 'preview.camera.status')
+    if (
+      last?.state === 'live' &&
+      last?.cameraId === cameraId &&
+      ((last.framesCaptured ?? 0) > 0 || last.sequence != null)
+    ) {
+      return last
+    }
+    await sleep(100)
+  }
+  throw new Error(`Timed out waiting for ${cameraId} frame: ${JSON.stringify(last)}`)
 }
 
 async function waitForNonblankBmpFrame(connection) {
@@ -213,11 +630,12 @@ async function waitForActiveNativeScreenRecording(ws, sourceId) {
   )
 }
 
-async function pollBmpDuringRecording(connection, initialCursor, durationMs) {
+async function pollBmpDuringRecording(connection, initialCursor, durationMs, minimumAdvances) {
   const deadline = Date.now() + durationMs
   let cursor = initialCursor
   let advancedFrames = 0
   let nonblankFrames = 0
+  const observations = []
   while (Date.now() < deadline) {
     const frame = await fetchBmpFrame(connection, cursor)
     if (frame.status === 200) {
@@ -225,15 +643,33 @@ async function pollBmpDuringRecording(connection, initialCursor, durationMs) {
       cursor = frame.cursor
       advancedFrames += 1
       nonblankFrames += 1
+      observations.push({
+        atMs: Date.now(),
+        bytes: frame.bytes.length,
+        sequence: frame.cursor.sequence
+      })
     }
     await sleep(100)
   }
-  if (advancedFrames < 5 || nonblankFrames !== advancedFrames) {
+  if (advancedFrames < minimumAdvances || nonblankFrames !== advancedFrames) {
     throw new Error(
-      `Native BMP preview did not stay live during recording: advanced=${advancedFrames}, nonblank=${nonblankFrames}.`
+      `Native BMP preview did not stay live during recording: advanced=${advancedFrames}, ` +
+        `required=${minimumAdvances}, nonblank=${nonblankFrames}.`
     )
   }
-  return { advancedFrames, cursor }
+  const intervalsMs = observations
+    .slice(1)
+    .map((sample, index) => sample.atMs - observations[index].atMs)
+    .filter((intervalMs) => Number.isFinite(intervalMs) && intervalMs >= 0)
+  const bytes = observations.map((sample) => sample.bytes)
+  return {
+    advancedFrames,
+    cursor,
+    observations,
+    totalBytes: bytes.reduce((total, value) => total + value, 0),
+    maxBytes: bytes.length > 0 ? Math.max(...bytes) : 0,
+    intervalP95Ms: percentileNearestRank(intervalsMs, 0.95)
+  }
 }
 
 async function fetchBmpFrame(connection, cursor) {
@@ -264,25 +700,31 @@ async function fetchBmpFrame(connection, cursor) {
   }
 }
 
-function screenOnlySessionParams(sources) {
+function sessionLayout() {
+  const layout = {
+    layoutPreset: 'screen-only',
+    cameraTransformMode: 'preset',
+    cameraTransform: null,
+    cameraCorner: 'bottom-right',
+    cameraSize: 'medium',
+    cameraShape: 'rectangle',
+    cameraMargin: 32,
+    cameraFit: 'fill',
+    cameraMirror: false,
+    cameraZoom: 100,
+    cameraOffsetX: 0,
+    cameraOffsetY: 0,
+    sideBySideSplit: '70-30',
+    sideBySideCameraSide: 'right'
+  }
+  if (includeCamera) layout.layoutPreset = 'screen-camera'
+  return layout
+}
+
+function sessionParams(sources) {
   return {
     sources,
-    layout: {
-      layoutPreset: 'screen-only',
-      cameraTransformMode: 'preset',
-      cameraTransform: null,
-      cameraCorner: 'bottom-right',
-      cameraSize: 'medium',
-      cameraShape: 'rectangle',
-      cameraMargin: 32,
-      cameraFit: 'fill',
-      cameraMirror: false,
-      cameraZoom: 100,
-      cameraOffsetX: 0,
-      cameraOffsetY: 0,
-      sideBySideSplit: '70-30',
-      sideBySideCameraSide: 'right'
-    },
+    layout: sessionLayout(),
     output: {
       recordEnabled: true,
       streamEnabled: false,
@@ -294,6 +736,106 @@ function screenOnlySessionParams(sources) {
       microphoneMuted: true,
       microphoneSyncOffsetMs: 0
     }
+  }
+}
+
+async function monitorD3d11DuringRecording(ws, durationMs) {
+  const samples = []
+  const startedAt = Date.now()
+  while (Date.now() - startedAt < durationMs) {
+    const diagnostics = await request(ws, timeoutMs, 'diagnostics.stats')
+    assertD3d11Diagnostics(diagnostics, { requireOutput: false })
+    samples.push({
+      elapsedMs: Date.now() - startedAt,
+      media: diagnostics.windowsD3d11Media
+    })
+    await sleep(Math.min(250, Math.max(1, durationMs - (Date.now() - startedAt))))
+  }
+  const first = samples[0] ?? {}
+  const last = samples.at(-1) ?? {}
+  const mediaAt = (sample) => sample?.media ?? {}
+  const counterDelta = (name) =>
+    Math.max(0, Number(mediaAt(last)[name] ?? 0) - Number(mediaAt(first)[name] ?? 0))
+  const textureAdvances = counterDelta('textureImportFrames')
+  const encoderAdvances = counterDelta('encoderGpuSamples')
+  return {
+    mode: 'disabled-d3d11',
+    requests: 0,
+    bytes: 0,
+    advancedFrames: Math.max(textureAdvances, encoderAdvances),
+    nonblankFrames: 0,
+    sampleCount: samples.length,
+    textureAdvances,
+    encoderAdvances,
+    texturePoolPressureEvents: counterDelta('texturePoolPressureEvents'),
+    previewPresents: counterDelta('previewPresents'),
+    synchronizationTimeouts: counterDelta('synchronizationTimeouts'),
+    samples
+  }
+}
+
+function assertD3d11Diagnostics(diagnostics, { requireOutput }) {
+  const failures = evaluateWindowsNativeScreenD3d11Diagnostics(diagnostics, {
+    requireOutput,
+    expectFallback: options.expectFallback,
+    requireZeroPoolPressure: options.requireD3d11
+  })
+  if (failures.length > 0) {
+    throw new Error(`Windows D3D11 media diagnostics failed: ${failures.join('; ')}`)
+  }
+}
+
+function assertEncodedBridgeDiagnostics(
+  diagnostics,
+  { requireOutput, requireDirectD3D11Recording, requireNoCpuCompositor = false }
+) {
+  const failures = []
+  if (diagnostics?.encodeBackend !== 'hardware-media-foundation') {
+    failures.push(`encodeBackend=${diagnostics?.encodeBackend ?? 'missing'}`)
+  }
+  if (diagnostics?.encoderBridgeEncodedOutputBackend !== 'media-foundation') {
+    failures.push(
+      `encodedOutputBackend=${diagnostics?.encoderBridgeEncodedOutputBackend ?? 'missing'}`
+    )
+  }
+  if (diagnostics?.encoderBridgeEffectiveVideoOutput !== 'windows-media-foundation-h264-mpegts') {
+    failures.push(`effectiveOutput=${diagnostics?.encoderBridgeEffectiveVideoOutput ?? 'missing'}`)
+  }
+  if ((diagnostics?.encoderBridgeRawVideoCopiedFrames ?? 0) !== 0) {
+    failures.push(`rawFifoCopiedFrames=${diagnostics.encoderBridgeRawVideoCopiedFrames}`)
+  }
+  if ((diagnostics?.encoderBridgeEncodedOutputErrors ?? 0) !== 0) {
+    failures.push(`encodedOutputErrors=${diagnostics.encoderBridgeEncodedOutputErrors}`)
+  }
+  if (
+    requireDirectD3D11Recording &&
+    !nativeWindowsD3d11MediaEncodingActive(diagnostics)
+  ) {
+    failures.push(
+      `directD3D11Media=${diagnostics?.encoderBridgeEncodedOutputInputSubtype ?? 'missing'}`
+    )
+  }
+  if (requireOutput && !(diagnostics?.encoderBridgeEncodedOutputFrames > 0)) {
+    failures.push(`encodedOutputFrames=${diagnostics?.encoderBridgeEncodedOutputFrames ?? 0}`)
+  }
+  if (requireOutput && !(diagnostics?.encoderBridgeEncodedOutputBytes > 0)) {
+    failures.push(`encodedOutputBytes=${diagnostics?.encoderBridgeEncodedOutputBytes ?? 0}`)
+  }
+  // Windows counts its expected CPU compositor frames under compositorCpuFrames (not a
+  // fault); the direct-D3D11 path must render NO CPU frames of either kind.
+  if (requireNoCpuCompositor && (diagnostics?.compositorCpuFallbackFrames ?? 0) !== 0) {
+    failures.push(`compositorCpuFallbackFrames=${diagnostics.compositorCpuFallbackFrames}`)
+  }
+  if (requireNoCpuCompositor && (diagnostics?.compositorCpuFrames ?? 0) !== 0) {
+    failures.push(`compositorCpuFrames=${diagnostics.compositorCpuFrames}`)
+  }
+  if (failures.length > 0) {
+    const terminalError = diagnostics?.encoderBridgeError
+      ? `; encoderBridgeError=${diagnostics.encoderBridgeError}`
+      : ''
+    throw new Error(
+      `Windows encoded bridge diagnostics failed: ${failures.join('; ')}${terminalError}`
+    )
   }
 }
 
@@ -340,4 +882,10 @@ function assertNonblankRecordingFrame(outputPath) {
 
 function sleep(ms) {
   return new Promise((resolveSleep) => setTimeout(resolveSleep, ms))
+}
+
+function percentileNearestRank(values, percentile) {
+  if (values.length === 0) return null
+  const sorted = [...values].sort((left, right) => left - right)
+  return sorted[Math.max(0, Math.ceil(percentile * sorted.length) - 1)]
 }

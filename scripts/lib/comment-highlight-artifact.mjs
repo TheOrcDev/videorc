@@ -38,7 +38,10 @@ export function measureCommentHighlightArtifactRgb(
   const bottomStart = Math.min(height - 1, topEnd)
   const topPixels = width * topEnd
   const bottomPixels = width * (height - bottomStart)
-  const cardStart = Math.max(0, Math.min(height - 1, Math.round(height * 0.12)))
+  // The compositor places top overlays at a 4% safe margin. The raster adds
+  // transparent shadow padding before the glass plate, so scan from 8% to
+  // include a correctly sized 1080p card without treating the top edge as UI.
+  const cardStart = Math.max(0, Math.min(height - 1, Math.round(height * 0.08)))
   const cardEnd = Math.max(cardStart + 1, Math.min(height, Math.round(height * 0.62)))
   const cardPixels = width * (cardEnd - cardStart)
   const frames = []

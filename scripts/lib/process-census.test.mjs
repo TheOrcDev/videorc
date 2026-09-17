@@ -12,9 +12,11 @@ import {
   ownedProcessLedgerPaths,
   parseProcessTable,
   parseWindowsProcessTable,
+  processTreeRows,
   pruneDeadOwnedProcessRecords,
   readOwnedProcessLedgers,
-  summarizeRows
+  summarizeRows,
+  verifyCleanProcessStateBeforeRecovery
 } from './process-census.mjs'
 
 test('ownedProcessLedgerPaths mirrors the desktop owned-process ledger locations', () => {
@@ -112,6 +114,25 @@ test('classifyProcess does not count launcher wrappers as backend or preview hel
   )
 })
 
+test('classifyProcess identifies auxiliary Electron renderers independently', () => {
+  for (const role of ['notes', 'comments', 'captions']) {
+    assert.equal(
+      classifyProcess({
+        command: 'C:\\Program Files\\Videorc\\Videorc.exe',
+        args: `--type=renderer --videorc-renderer-role=${role}`
+      }),
+      `electron-renderer-${role}`
+    )
+  }
+  assert.equal(
+    classifyProcess({
+      command: 'C:\\Program Files\\Videorc\\Videorc.exe',
+      args: '--type=renderer --videorc-renderer-role=main'
+    }),
+    'electron-renderer'
+  )
+})
+
 test('classifyProcess uses the exact argv executable when macOS truncates comm', () => {
   assert.equal(
     classifyProcess({
@@ -129,26 +150,83 @@ test('classifyProcess uses the exact argv executable when macOS truncates comm',
   )
 })
 
+test('classifyProcess counts electron-vite under the Videorc workspace as tooling', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/opt/homebrew/bin/node',
+      args: '/Users/orcdev/projects/videorc/node_modules/electron-vite/bin/electron-vite.js dev'
+    }),
+    'tooling'
+  )
+})
+
+test('classifyProcess counts an esbuild service under the Videorc workspace as tooling', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/Users/orcdev/projects/videorc/node_modules/@esbuild/darwin-arm64/bin/esbuild',
+      args: '/Users/orcdev/projects/videorc/node_modules/@esbuild/darwin-arm64/bin/esbuild --service=0.25.6 --ping'
+    }),
+    'tooling'
+  )
+})
+
+test('classifyProcess still counts the Electron app executable as electron-main', () => {
+  assert.equal(
+    classifyProcess({
+      command:
+        '/Users/orcdev/projects/videorc/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron',
+      args: '/Users/orcdev/projects/videorc/node_modules/electron/dist/Electron.app/Contents/MacOS/Electron .'
+    }),
+    'electron-main'
+  )
+  assert.equal(
+    classifyProcess({
+      command: 'C:\\repo\\node_modules\\electron\\dist\\electron.exe',
+      args: '"C:\\repo\\node_modules\\electron\\dist\\electron.exe" .'
+    }),
+    'electron-main'
+  )
+})
+
+test('classifyProcess does not count arbitrary Videorc workspace descendants as electron-main', () => {
+  assert.equal(
+    classifyProcess({
+      command: '/opt/homebrew/bin/node',
+      args: '/Users/orcdev/projects/videorc/scripts/preview-lifecycle-probe.mjs'
+    }),
+    'other'
+  )
+})
+
 test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videorc roles', () => {
   const rows = parseWindowsProcessTable(`[
     {
       "ProcessId": 301,
       "ParentProcessId": 300,
+      "CreationDate": "2026-07-18T12:00:00.000000-04:00",
       "WorkingSetSize": 4194304,
+      "KernelModeTime": 10000000,
+      "UserModeTime": 20000000,
       "ExecutablePath": "C:\\\\repo\\\\target\\\\debug\\\\videorc-backend.exe",
       "CommandLine": "\\"C:\\\\repo\\\\target\\\\debug\\\\videorc-backend.exe\\" --port 1234"
     },
     {
       "ProcessId": 302,
       "ParentProcessId": 301,
+      "CreationDate": "2026-07-18T12:00:01.000000-04:00",
       "WorkingSetSize": 2097152,
+      "KernelModeTime": 3000000,
+      "UserModeTime": 4000000,
       "ExecutablePath": null,
       "CommandLine": "\\"C:\\\\repo\\\\vendor\\\\ffmpeg\\\\bin\\\\ffmpeg.exe\\" -version"
     },
     {
       "ProcessId": 303,
       "ParentProcessId": 301,
+      "CreationDate": "2026-07-18T12:00:02.000000-04:00",
       "WorkingSetSize": 1048576,
+      "KernelModeTime": 5000000,
+      "UserModeTime": 6000000,
       "ExecutablePath": "C:\\\\repo\\\\target\\\\debug\\\\native_preview_host_helper.exe",
       "CommandLine": null
     }
@@ -160,6 +238,8 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
       ppid: row.ppid,
       pgid: row.pgid,
       rssKb: row.rssKb,
+      cpuTimeMs: row.cpuTimeMs,
+      creationDate: row.creationDate,
       command: row.command,
       role: classifyProcess(row)
     })),
@@ -169,6 +249,8 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
         ppid: 300,
         pgid: null,
         rssKb: 4096,
+        cpuTimeMs: 3000,
+        creationDate: '2026-07-18T12:00:00.000000-04:00',
         command: 'C:\\repo\\target\\debug\\videorc-backend.exe',
         role: 'backend'
       },
@@ -177,6 +259,8 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
         ppid: 301,
         pgid: null,
         rssKb: 2048,
+        cpuTimeMs: 700,
+        creationDate: '2026-07-18T12:00:01.000000-04:00',
         command: 'C:\\repo\\vendor\\ffmpeg\\bin\\ffmpeg.exe',
         role: 'ffmpeg'
       },
@@ -185,6 +269,8 @@ test('parseWindowsProcessTable normalizes CIM process JSON and classifies Videor
         ppid: 301,
         pgid: null,
         rssKb: 1024,
+        cpuTimeMs: 1100,
+        creationDate: '2026-07-18T12:00:02.000000-04:00',
         command: 'C:\\repo\\target\\debug\\native_preview_host_helper.exe',
         role: 'native-preview-helper'
       }
@@ -238,6 +324,36 @@ test('collectProcessCensus reports alive and dead ledger records without killing
   )
   assert.equal(census.processGroupRows.length, 2)
   assert.deepEqual(summarizeRows(census.processRows).cargo, { count: 1, rssKb: 2048 })
+})
+
+test('processTreeRows and rootPid census include the complete Windows app tree', async () => {
+  const table = parseWindowsProcessTable(`[
+    {"ProcessId": 100, "ParentProcessId": 1, "WorkingSetSize": 1024, "ExecutablePath": "C:\\\\Videorc.exe"},
+    {"ProcessId": 101, "ParentProcessId": 100, "WorkingSetSize": 2048, "ExecutablePath": "C:\\\\Videorc.exe", "CommandLine": "C:\\\\Videorc.exe --type=renderer"},
+    {"ProcessId": 102, "ParentProcessId": 100, "WorkingSetSize": 4096, "ExecutablePath": "C:\\\\videorc-backend.exe"},
+    {"ProcessId": 103, "ParentProcessId": 102, "WorkingSetSize": 8192, "ExecutablePath": "C:\\\\ffmpeg.exe"},
+    {"ProcessId": 200, "ParentProcessId": 1, "WorkingSetSize": 16384, "ExecutablePath": "C:\\\\unrelated.exe"}
+  ]`)
+
+  assert.deepEqual(
+    processTreeRows(table, 100).map((row) => row.pid),
+    [100, 101, 102, 103]
+  )
+  const census = await collectProcessCensus({
+    ledgerPaths: [],
+    rootPid: 100,
+    readProcessTable: async () => table
+  })
+  assert.deepEqual(
+    census.processGroupRows.map((row) => row.pid),
+    [100, 101, 102, 103]
+  )
+  assert.deepEqual(Object.keys(census.summary).sort(), [
+    'backend',
+    'electron-main',
+    'electron-renderer',
+    'ffmpeg'
+  ])
 })
 
 test('collectProcessResourceDetails records macOS physical footprint and open files at checkpoints', async () => {
@@ -576,6 +692,53 @@ test('pruneDeadOwnedProcessRecords removes only records whose pids are gone', as
   assert.deepEqual(JSON.parse(files.get('/tmp/global.json')), [
     { pid: 111, label: 'videorc-backend', startedAt: '2026-06-20T10:00:00.000Z' }
   ])
+})
+
+test('verifyCleanProcessStateBeforeRecovery preserves the original failure before pruning', async () => {
+  const expected = new Error('ledger was not empty')
+  const calls = []
+
+  await assert.rejects(
+    verifyCleanProcessStateBeforeRecovery({
+      verify: async () => {
+        calls.push('verify')
+        throw expected
+      },
+      recover: async () => {
+        calls.push('recover')
+      }
+    }),
+    (error) => error === expected
+  )
+  assert.deepEqual(calls, ['verify', 'recover'])
+})
+
+test('verifyCleanProcessStateBeforeRecovery reports recovery failure without replacing verification failure', async () => {
+  const verificationFailure = new Error('ledger was not empty')
+  const verificationStack = verificationFailure.stack
+  const recoveryFailure = new Error('could not rewrite ledger')
+  const calls = []
+
+  await assert.rejects(
+    verifyCleanProcessStateBeforeRecovery({
+      verify: async () => {
+        calls.push('verify')
+        throw verificationFailure
+      },
+      recover: async () => {
+        calls.push('recover')
+        throw recoveryFailure
+      }
+    }),
+    (error) => {
+      assert.equal(error, verificationFailure)
+      assert.equal(error.message, 'ledger was not empty')
+      assert.equal(error.stack, verificationStack)
+      assert.equal(error.recoveryError, recoveryFailure)
+      return true
+    }
+  )
+  assert.deepEqual(calls, ['verify', 'recover'])
 })
 
 function completeResourceCheckpoint(rows) {

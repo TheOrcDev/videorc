@@ -16,10 +16,12 @@ import { createHash } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
 import { mkdir, readFile, readdir, rm, copyFile, writeFile, stat } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
-import { Readable } from 'node:stream'
+import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
+
+import { assessFfmpegWindowsPin, autobuildDurability } from './lib/ffmpeg-windows-pin.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const pinPath = join(repoRoot, 'vendor', 'ffmpeg', 'windows-pin.json')
@@ -49,11 +51,9 @@ async function sha256Of(path) {
 }
 
 const pin = JSON.parse(await readFile(pinPath, 'utf8'))
-if (!pin.url || !pin.sha256) {
-  fail(`${pinPath} must contain { url, sha256 }`)
-}
-if (!/lgpl/.test(pin.url)) {
-  fail(`pinned URL is not an LGPL build: ${pin.url} (LGPL-only is the repo's ffmpeg policy)`)
+const assessment = assessFfmpegWindowsPin(pin)
+if (!assessment.ok) {
+  fail(`${pinPath} is unusable:\n  - ${assessment.problems.join('\n  - ')}`)
 }
 
 const ffmpegExe = join(outputDir, 'bin', 'ffmpeg.exe')
@@ -84,9 +84,72 @@ if (!haveZip) {
   await mkdir(dirname(downloadPath), { recursive: true })
   const response = await fetch(pin.url, { redirect: 'follow' })
   if (!response.ok || !response.body) {
-    fail(`download failed: HTTP ${response.status} for ${pin.url}`)
+    // A 404 on a BtbN autobuild almost always means upstream pruned the
+    // release. Say so, rather than leaving the next reader to rediscover it.
+    const pruned =
+      response.status === 404 && autobuildDurability(pin.url)
+        ? '\nThis release looks pruned upstream. Re-pin the last autobuild of a recent month and update the sha256.'
+        : ''
+    fail(`download failed: HTTP ${response.status} for ${pin.url}${pruned}`)
   }
-  await pipeline(Readable.fromWeb(response.body), createWriteStream(downloadPath))
+
+  const totalBytes = Number(response.headers.get('content-length') || 0)
+  let downloadedBytes = 0
+  let lastUpdate = 0
+  const startTime = Date.now()
+  // Carriage-return progress is for humans at a terminal. In CI (non-TTY)
+  // the \r updates pile onto one endless log line, so render sparse plain
+  // lines instead (this fetcher runs in the Windows CI and release lanes).
+  const interactive = process.stdout.isTTY === true
+  const updateIntervalMs = interactive ? 100 : 10_000
+
+  function renderProgress() {
+    const now = Date.now()
+    lastUpdate = now
+    const elapsedSec = (now - startTime) / 1000 || 0.001
+    const speedMB = (downloadedBytes / (1024 * 1024) / elapsedSec).toFixed(1)
+    const currentMB = (downloadedBytes / (1024 * 1024)).toFixed(1)
+    if (totalBytes > 0) {
+      const totalMB = (totalBytes / (1024 * 1024)).toFixed(1)
+      const pct = Math.min(100, Math.floor((downloadedBytes / totalBytes) * 100))
+      if (!interactive) {
+        console.log(`  ${pct}% (${currentMB} / ${totalMB} MB) @ ${speedMB} MB/s`)
+        return
+      }
+      const barWidth = 25
+      const filled = Math.min(barWidth, Math.floor((barWidth * downloadedBytes) / totalBytes))
+      const bar =
+        '='.repeat(filled) +
+        (filled < barWidth ? '>' : '') +
+        ' '.repeat(Math.max(0, barWidth - filled - 1))
+      process.stdout.write(
+        `\r  [${bar}] ${pct}% (${currentMB} / ${totalMB} MB) @ ${speedMB} MB/s `
+      )
+    } else if (!interactive) {
+      console.log(`  ${currentMB} MB downloaded @ ${speedMB} MB/s`)
+    } else {
+      process.stdout.write(`\r  ${currentMB} MB downloaded @ ${speedMB} MB/s `)
+    }
+  }
+
+  const progressStream = new Transform({
+    transform(chunk, _encoding, callback) {
+      downloadedBytes += chunk.length
+      if (Date.now() - lastUpdate > updateIntervalMs) {
+        renderProgress()
+      }
+      callback(null, chunk)
+    },
+    flush(callback) {
+      renderProgress()
+      callback()
+    }
+  })
+
+  await pipeline(Readable.fromWeb(response.body), progressStream, createWriteStream(downloadPath))
+  if (interactive) {
+    process.stdout.write('\n')
+  }
 }
 
 const actualSha = await sha256Of(downloadPath)

@@ -1,0 +1,136 @@
+diff --git a/out/codeSign/windowsSignAzureManager.js b/out/codeSign/windowsSignAzureManager.js
+--- a/out/codeSign/windowsSignAzureManager.js
++++ b/out/codeSign/windowsSignAzureManager.js
+@@ -4,6 +4,25 @@
+ const builder_util_1 = require("builder-util");
+ const builder_util_runtime_1 = require("builder-util-runtime");
+ const lazy_val_1 = require("lazy-val");
++const azureCliOnlyExclusions = [
++    "ExcludeEnvironmentCredential",
++    "ExcludeWorkloadIdentityCredential",
++    "ExcludeManagedIdentityCredential",
++    "ExcludeSharedTokenCacheCredential",
++    "ExcludeVisualStudioCredential",
++    "ExcludeVisualStudioCodeCredential",
++    "ExcludeAzurePowerShellCredential",
++    "ExcludeAzureDeveloperCliCredential",
++    "ExcludeInteractiveBrowserCredential",
++];
++const forbiddenCredentialEnvVars = [
++    "AZURE_CLIENT_SECRET",
++    "AZURE_CLIENT_CERTIFICATE_PATH",
++    "AZURE_CLIENT_CERTIFICATE_PASSWORD",
++    "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN",
++    "AZURE_USERNAME",
++    "AZURE_PASSWORD",
++];
+ class WindowsSignAzureManager {
+     constructor(packager) {
+         this.packager = packager;
+@@ -26,62 +45,43 @@
+     async initialize() {
+         const vm = await this.packager.vm.value;
+         const ps = await vm.powershellCommand.value;
+-        builder_util_1.log.info(null, "installing required module (TrustedSigning) with scope CurrentUser");
+-        try {
+-            await vm.exec(ps, ["-NoProfile", "-NonInteractive", "-Command", "Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser"]);
++        builder_util_1.log.info(null, "verifying preinstalled TrustedSigning module version 0.5.0");
++        await vm.exec(ps, [
++            "-NoProfile",
++            "-NonInteractive",
++            "-Command",
++            "$module = Get-Module -ListAvailable -Name TrustedSigning | Where-Object { $_.Version -eq [version]'0.5.0' } | Select-Object -First 1; if (-not $module) { throw 'TrustedSigning 0.5.0 must be installed and hash-verified before electron-builder starts.' }; Import-Module $module.Path -RequiredVersion '0.5.0' -Force -ErrorAction Stop",
++        ]);
++        this.verifyAzureCliOnlyConfiguration();
++        this.rejectLongLivedCredentialEnv();
++        builder_util_1.log.info(null, "verifying Azure CLI workload-identity session");
++        await vm.exec(ps, [
++            "-NoProfile",
++            "-NonInteractive",
++            "-Command",
++            "$ErrorActionPreference = 'Stop'; $accountJson = az account show --output json 2>$null; if ($LASTEXITCODE -ne 0 -or -not $accountJson) { throw 'Azure CLI must be logged in by the pinned azure/login OIDC action before signing.' }; $account = $accountJson | ConvertFrom-Json; if ($account.state -ne 'Enabled') { throw 'Azure CLI account is not enabled.' }",
++        ]);
++    }
++    verifyAzureCliOnlyConfiguration() {
++        const options = this.platformSpecificBuildOptions.azureSignOptions;
++        const missing = azureCliOnlyExclusions.filter(field => String(options[field]).toLowerCase() !== "true");
++        if (missing.length > 0) {
++            throw new builder_util_1.InvalidConfigurationError(`Azure Trusted Signing must exclude every credential except AzureCliCredential. Missing: ${missing.join(", ")}`);
+         }
+-        catch (error) {
+-            // Might not be needed, seems GH runners already have NuGet set up.
+-            // Logging to debug just in case users run into this. If NuGet isn't present, Install-Module -Name TrustedSigning will fail, so we'll get the logs at that point
+-            builder_util_1.log.debug({ message: error.message || error.stack }, "unable to install PackageProvider Nuget. Might be a false alarm though as some systems already have it installed");
++        const azureCliExclusion = options.ExcludeAzureCliCredential;
++        if (azureCliExclusion != null && String(azureCliExclusion).toLowerCase() !== "false") {
++            throw new builder_util_1.InvalidConfigurationError("AzureCliCredential must remain enabled for OIDC signing.");
+         }
+-        await vm.exec(ps, ["-NoProfile", "-NonInteractive", "-Command", "Install-Module -Name TrustedSigning -MinimumVersion 0.5.0 -Force -Repository PSGallery -Scope CurrentUser"]);
+-        // Preemptively check env vars once during initialization
+-        // Options: https://learn.microsoft.com/en-us/dotnet/api/azure.identity.environmentcredential?view=azure-dotnet#definition
+-        builder_util_1.log.info(null, "verifying env vars for authenticating to Microsoft Entra ID");
+-        this.verifyRequiredEnvVars();
+-        if (!(this.verifyPrincipleSecretEnv() || this.verifyPrincipleCertificateEnv() || this.verifyUsernamePasswordEnv())) {
+-            throw new builder_util_1.InvalidConfigurationError(`Unable to find valid azure env configuration for signing. Missing field(s) can be debugged via "DEBUG=electron-builder". Please refer to: https://learn.microsoft.com/en-us/dotnet/api/azure.identity.environmentcredential?view=azure-dotnet#definition`);
+-        }
+     }
+-    verifyRequiredEnvVars() {
+-        ;
+-        ["AZURE_TENANT_ID", "AZURE_CLIENT_ID"].forEach(field => {
+-            if (!process.env[field]) {
+-                throw new builder_util_1.InvalidConfigurationError(`Unable to find valid azure env field ${field} for signing. Please refer to: https://learn.microsoft.com/en-us/dotnet/api/azure.identity.environmentcredential?view=azure-dotnet#definition`);
+-            }
++    rejectLongLivedCredentialEnv() {
++        const configured = forbiddenCredentialEnvVars.filter(field => {
++            var _a;
++            return ((_a = process.env[field]) === null || _a === void 0 ? void 0 : _a.trim()) !== "" && process.env[field] != null;
+         });
+-    }
+-    verifyPrincipleSecretEnv() {
+-        if (!process.env.AZURE_CLIENT_SECRET) {
+-            builder_util_1.log.debug({ envVar: "AZURE_CLIENT_SECRET" }, "no secret found for authenticating to Microsoft Entra ID");
+-            return false;
++        if (configured.length > 0) {
++            throw new builder_util_1.InvalidConfigurationError(`Long-lived Azure credential environment variables are forbidden: ${configured.join(", ")}`);
+         }
+-        return true;
+     }
+-    verifyPrincipleCertificateEnv() {
+-        if (!process.env.AZURE_CLIENT_CERTIFICATE_PATH) {
+-            builder_util_1.log.debug({ envVar: "AZURE_CLIENT_CERTIFICATE_PATH" }, "no path found for signing certificate for authenticating to Microsoft Entra ID");
+-            return false;
+-        }
+-        if (!process.env.AZURE_CLIENT_CERTIFICATE_PASSWORD) {
+-            builder_util_1.log.debug({ envVar: "AZURE_CLIENT_CERTIFICATE_PASSWORD" }, "(optional) certificate password not found, assuming no password");
+-        }
+-        if (!process.env.AZURE_CLIENT_SEND_CERTIFICATE_CHAIN) {
+-            builder_util_1.log.debug({ envVar: "AZURE_CLIENT_SEND_CERTIFICATE_CHAIN" }, "(optional) certificate chain not found");
+-        }
+-        return true;
+-    }
+-    verifyUsernamePasswordEnv() {
+-        if (!process.env.AZURE_USERNAME) {
+-            builder_util_1.log.debug({ envVar: "AZURE_USERNAME" }, "no username found for authenticating to Microsoft Entra ID");
+-            if (!process.env.AZURE_PASSWORD) {
+-                builder_util_1.log.debug({ envVar: "AZURE_PASSWORD" }, "no password found for authenticating to Microsoft Entra ID");
+-            }
+-            return false;
+-        }
+-        return true;
+-    }
+     computePublisherName() {
+         return Promise.resolve(this.packager.platformSpecificBuildOptions.azureSignOptions.publisherName);
+     }
+@@ -104,6 +104,12 @@
+         const paramsString = Object.entries(params)
+             .filter(([_, value]) => value != null)
+             .reduce((res, [field, value]) => {
++            if (azureCliOnlyExclusions.includes(field)) {
++                if (String(value).toLowerCase() !== "true") {
++                    throw new builder_util_1.InvalidConfigurationError(`Trusted Signing switch ${field} must be true.`);
++                }
++                return [...res, `-${field}`];
++            }
+             const escapedValue = String(value).replace(/'/g, "''");
+             return [...res, `-${field}`, `'${escapedValue}'`];
+         }, [])

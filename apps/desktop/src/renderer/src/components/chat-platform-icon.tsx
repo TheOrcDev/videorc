@@ -1,12 +1,12 @@
 import {
-  Broadcast,
-  InstagramLogo,
-  TiktokLogo,
-  TwitchLogo,
-  XLogo,
-  YoutubeLogo,
-  type Icon
-} from '@phosphor-icons/react'
+  type AppIcon,
+  InstagramIcon,
+  LivestreamIcon,
+  TiktokIcon,
+  TwitchIcon,
+  XPlatformIcon,
+  YoutubeIcon
+} from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import type { StreamPlatform } from '@/lib/backend'
@@ -26,13 +26,13 @@ export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   custom: 'Custom'
 }
 
-const CHAT_PLATFORM_ICON: Record<StreamPlatform, Icon> = {
-  youtube: YoutubeLogo,
-  twitch: TwitchLogo,
-  x: XLogo,
-  tiktok: TiktokLogo,
-  instagram: InstagramLogo,
-  custom: Broadcast
+const CHAT_PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
+  youtube: YoutubeIcon,
+  twitch: TwitchIcon,
+  x: XPlatformIcon,
+  tiktok: TiktokIcon,
+  instagram: InstagramIcon,
+  custom: LivestreamIcon
 }
 
 const CHAT_PLATFORM_TINT: Record<StreamPlatform, string> = {

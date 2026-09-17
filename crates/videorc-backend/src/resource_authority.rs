@@ -22,6 +22,7 @@ use crate::storage::{
 const DEFAULT_TTL: Duration = Duration::from_secs(5 * 60);
 const MAX_TTL: Duration = Duration::from_secs(15 * 60);
 const MAX_USES: u32 = 16;
+const MAX_ACTIVE_RESOURCE_CAPABILITIES: usize = 1024;
 
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -108,10 +109,17 @@ impl ResourceAuthority {
             expires_at: now + ttl,
             remaining_uses: use_count,
         };
-        self.entries
+        let mut entries = self
+            .entries
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(capability_id.clone(), entry);
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sweep_expired_capabilities(&mut entries, now);
+        if entries.len() >= MAX_ACTIVE_RESOURCE_CAPABILITIES {
+            bail!(
+                "Resource capability capacity ({MAX_ACTIVE_RESOURCE_CAPABILITIES}) was reached. Consume or revoke an existing selection and try again."
+            );
+        }
+        entries.insert(capability_id.clone(), entry);
 
         Ok(IssuedResourceCapability {
             capability_id,
@@ -142,13 +150,16 @@ impl ResourceAuthority {
             .entries
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let requested_capability_expired = entries
+            .get(capability_id)
+            .is_some_and(|entry| now >= entry.expires_at);
+        sweep_expired_capabilities(&mut entries, now);
+        if requested_capability_expired {
+            bail!("Resource capability has expired.");
+        }
         let Some(entry) = entries.get(capability_id) else {
             bail!("Resource capability is unknown or has already been consumed.");
         };
-        if now >= entry.expires_at {
-            entries.remove(capability_id);
-            bail!("Resource capability has expired.");
-        }
         if entry.kind != expected_kind {
             // Wrong-kind attempts must not burn the legitimate operation.
             bail!(
@@ -203,6 +214,16 @@ impl ResourceAuthority {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .remove(capability_id)
             .is_some()
+    }
+
+    #[cfg(test)]
+    fn active_entry_count_at(&self, now: Instant) -> usize {
+        let mut entries = self
+            .entries
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sweep_expired_capabilities(&mut entries, now);
+        entries.len()
     }
 
     pub fn register_managed_background(&self, asset_id: &str, raw_path: &str) -> Result<()> {
@@ -429,6 +450,10 @@ pub fn canonical_path_is_within(path: &Path, roots: &[PathBuf]) -> bool {
     })
 }
 
+fn sweep_expired_capabilities(entries: &mut HashMap<String, ResourceCapability>, now: Instant) {
+    entries.retain(|_, entry| now < entry.expires_at);
+}
+
 pub fn configured_managed_background_roots() -> Vec<PathBuf> {
     std::env::var_os("VIDEORC_MANAGED_BACKGROUND_ROOTS")
         .map(|value| std::env::split_paths(&value).collect())
@@ -556,6 +581,85 @@ mod tests {
             authority
                 .consume(&issued.capability_id, ResourceCapabilityKind::InputFile)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn issuing_a_capability_sweeps_other_abandoned_expired_entries() {
+        let authority = ResourceAuthority::default();
+        let file = temp_file();
+        let now = Instant::now();
+        let abandoned = authority
+            .issue_at(
+                IssueResourceCapabilityParams {
+                    ttl_ms: Some(1),
+                    ..issue_params(&file, ResourceCapabilityKind::InputFile)
+                },
+                now,
+            )
+            .unwrap();
+
+        let replacement = authority
+            .issue_at(
+                issue_params(&file, ResourceCapabilityKind::InputFile),
+                now + Duration::from_millis(2),
+            )
+            .unwrap();
+
+        assert_eq!(
+            authority.active_entry_count_at(now + Duration::from_millis(2)),
+            1
+        );
+        assert!(
+            authority
+                .consume_at(
+                    &abandoned.capability_id,
+                    ResourceCapabilityKind::InputFile,
+                    now + Duration::from_millis(2),
+                )
+                .is_err()
+        );
+        assert!(
+            authority
+                .consume_at(
+                    &replacement.capability_id,
+                    ResourceCapabilityKind::InputFile,
+                    now + Duration::from_millis(2),
+                )
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn active_capability_capacity_is_bounded_and_recovers_after_revoke() {
+        let authority = ResourceAuthority::default();
+        let file = temp_file();
+        let now = Instant::now();
+        let mut issued_ids = Vec::with_capacity(MAX_ACTIVE_RESOURCE_CAPABILITIES);
+
+        for _ in 0..MAX_ACTIVE_RESOURCE_CAPABILITIES {
+            issued_ids.push(
+                authority
+                    .issue_at(issue_params(&file, ResourceCapabilityKind::InputFile), now)
+                    .unwrap()
+                    .capability_id,
+            );
+        }
+
+        let error = authority
+            .issue_at(issue_params(&file, ResourceCapabilityKind::InputFile), now)
+            .unwrap_err();
+        assert!(error.to_string().contains("capacity"));
+
+        assert!(authority.revoke(&issued_ids[0]));
+        assert!(
+            authority
+                .issue_at(issue_params(&file, ResourceCapabilityKind::InputFile), now,)
+                .is_ok()
+        );
+        assert_eq!(
+            authority.active_entry_count_at(now),
+            MAX_ACTIVE_RESOURCE_CAPABILITIES
         );
     }
 

@@ -97,6 +97,7 @@ pub enum FeatureId {
     Multistreaming,
     CloudAi,
     NoiseCleanup,
+    LiveCohost,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -143,16 +144,8 @@ pub struct StreamingEntitlementLimits {
     pub max_height: u32,
     pub max_fps: u32,
     pub max_bitrate_kbps: u32,
-    /// TOTAL enabled destinations across both orientations.
+    /// TOTAL enabled destinations across both orientation legs (one shared cap).
     pub max_destinations: u32,
-    /// Enabled destinations per orientation leg (dual-orientation simulcast:
-    /// Premium = 3 horizontal + 3 vertical; Basic = 1 total).
-    #[serde(default = "default_max_destinations_per_orientation")]
-    pub max_destinations_per_orientation: u32,
-}
-
-fn default_max_destinations_per_orientation() -> u32 {
-    1
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -399,6 +392,28 @@ pub struct LayoutSettings {
     /// camera like a vertical framing. Circle keeps its square box always.
     #[serde(default = "default_camera_aspect")]
     pub camera_aspect: CameraAspect,
+    /// Green-screen chroma key for the camera layer. Off by default; when on,
+    /// all three render paths (CPU, Metal, FFmpeg) key with the ONE spec from
+    /// `scene_geometry::camera_chroma_key` — never re-derive thresholds per path.
+    #[serde(default)]
+    pub camera_chroma_key_enabled: bool,
+    /// Key color as `#RRGGBB`. The UI currently offers green/blue presets; the
+    /// protocol takes any hex so a custom picker needs no wire change. An
+    /// unparseable value keys against green (with a warning), never fails.
+    #[serde(default = "default_camera_chroma_key_color")]
+    pub camera_chroma_key_color: String,
+    /// CbCr distance below which a pixel is fully transparent, as a percent of
+    /// the calibrated range (0-100 → 0-180 distance units).
+    #[serde(default = "default_camera_chroma_key_similarity_pct")]
+    pub camera_chroma_key_similarity_pct: u32,
+    /// Ramp band above the similarity threshold over which alpha rises 0→255
+    /// (percent, same scale as similarity; 0 = hard edge).
+    #[serde(default = "default_camera_chroma_key_smoothness_pct")]
+    pub camera_chroma_key_smoothness_pct: u32,
+    /// Spill suppression strength (percent): clamps the key channel toward the
+    /// other channels' maximum on kept pixels, killing the green/blue fringe.
+    #[serde(default = "default_camera_chroma_key_spill_pct")]
+    pub camera_chroma_key_spill_pct: u32,
     pub camera_margin: u32,
     #[serde(default = "default_camera_fit")]
     pub camera_fit: CameraFit,
@@ -451,6 +466,22 @@ pub enum CameraAspect {
 
 fn default_camera_corner_radius_pct() -> u32 {
     12
+}
+
+fn default_camera_chroma_key_color() -> String {
+    "#00FF00".to_string()
+}
+
+fn default_camera_chroma_key_similarity_pct() -> u32 {
+    40
+}
+
+fn default_camera_chroma_key_smoothness_pct() -> u32 {
+    8
+}
+
+fn default_camera_chroma_key_spill_pct() -> u32 {
+    10
 }
 
 fn default_camera_aspect() -> CameraAspect {
@@ -666,6 +697,10 @@ pub struct SceneConfigParams {
     pub background: Option<EffectiveSceneBackground>,
     #[serde(default)]
     pub protected_overlay_window_ids: Vec<u32>,
+    /// Scene-motion duration in ms for THIS commit (renderer sends it when
+    /// "Animate scene changes" is on). Absent/0 = instant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u32>,
 }
 
 /// Backend-owned scene layout transaction. Renderer-generated intent ids are
@@ -756,6 +791,11 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         camera_shape: CameraShape::Rectangle,
         camera_corner_radius_pct: default_camera_corner_radius_pct(),
         camera_aspect: default_camera_aspect(),
+        camera_chroma_key_enabled: false,
+        camera_chroma_key_color: default_camera_chroma_key_color(),
+        camera_chroma_key_similarity_pct: default_camera_chroma_key_similarity_pct(),
+        camera_chroma_key_smoothness_pct: default_camera_chroma_key_smoothness_pct(),
+        camera_chroma_key_spill_pct: default_camera_chroma_key_spill_pct(),
         camera_margin: 32,
         camera_fit: default_camera_fit(),
         camera_mirror: false,
@@ -774,6 +814,10 @@ pub struct OutputSettings {
     pub stream_enabled: bool,
     pub output_directory: Option<String>,
     pub ffmpeg_path: Option<String>,
+    /// Keep the capture MKV (lossless PCM audio) next to the exported MP4
+    /// instead of removing it after a committed export. Off by default.
+    #[serde(default)]
+    pub keep_original_mkv: bool,
     pub video: VideoSettings,
     pub rtmp: RtmpSettings,
 }
@@ -803,6 +847,10 @@ pub enum VideoPreset {
     StreamSafe1080p30,
     #[serde(rename = "stream-safe-1080p60")]
     StreamSafe1080p60,
+    #[serde(rename = "stream-youtube-1080p30")]
+    StreamYoutube1080p30,
+    #[serde(rename = "stream-youtube-1080p60")]
+    StreamYoutube1080p60,
     #[serde(rename = "stream-youtube-4k30")]
     StreamYoutube4k30,
     #[serde(rename = "stream-1080p60")]
@@ -850,6 +898,10 @@ pub struct StartSessionParams {
     /// targets consume this leg, horizontal targets the primary.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub simulcast: Option<SimulcastParams>,
+    /// Renderer click timestamp (epoch ms) for latency attribution. Telemetry
+    /// only: never load-bearing for the start itself.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_ms: Option<u64>,
 }
 
 /// The vertical leg of a dual-orientation session. The layout must be a
@@ -862,6 +914,15 @@ pub struct SimulcastParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scene: Option<Scene>,
     pub video: VideoSettings,
+}
+
+/// Optional `session.stop` params. Older renderers send none.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionStopParams {
+    /// Renderer Stop click timestamp (epoch ms) for latency attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_ms: Option<u64>,
 }
 
 /// Live-caption output intent for this session. Stream selection shapes the
@@ -969,6 +1030,10 @@ pub struct AudioProcessingUpdateResult {
     pub microphone_muted: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reason_code: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_gain_db: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub confirmed_microphone_muted: Option<bool>,
 }
 
 fn default_microphone_sync_offset_ms() -> i32 {
@@ -1084,6 +1149,7 @@ pub enum PreviewLiveSource {
 #[serde(rename_all = "kebab-case")]
 pub enum PreviewTransport {
     NativeSurface,
+    D3d11SharedTexture,
     ElectronProofSurface,
     LatestJpegPolling,
     MjpegStream,
@@ -1094,7 +1160,9 @@ impl PreviewTransport {
     pub fn is_surface(self) -> bool {
         matches!(
             self,
-            PreviewTransport::NativeSurface | PreviewTransport::ElectronProofSurface
+            PreviewTransport::NativeSurface
+                | PreviewTransport::D3d11SharedTexture
+                | PreviewTransport::ElectronProofSurface
         )
     }
 }
@@ -1107,6 +1175,8 @@ impl PreviewTransport {
 pub enum PreviewSurfaceBacking {
     #[serde(rename = "cametal-layer")]
     CaMetalLayer,
+    #[serde(rename = "directcomposition-swapchain")]
+    DirectcompositionSwapChain,
     ElectronBrowserWindow,
     #[default]
     None,
@@ -1131,6 +1201,37 @@ pub struct AudioMeterProbeParams {
     pub microphone_gain_db: f32,
     #[serde(default)]
     pub microphone_muted: bool,
+}
+
+/// `audio.mic.arm` (instant-record P5): keep the selected CoreAudio
+/// microphone open while Studio is visible so `session.start` takes it
+/// warm instead of opening the device and waiting for its first callback.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmMicrophoneArmParams {
+    pub microphone_id: Option<String>,
+    #[serde(default)]
+    pub microphone_gain_db: f32,
+    #[serde(default)]
+    pub microphone_muted: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmMicrophoneStatus {
+    pub armed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub device_name: Option<String>,
+    /// Why the microphone is not armed (`not-coreaudio`, `session-active`,
+    /// `disabled-for-smoke`, `open-failed`, `disarmed`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default)]
+    pub captured_frames: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub armed_for_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1172,6 +1273,12 @@ pub struct StreamHealth {
     pub fps: Option<f64>,
     pub dropped_frames: Option<u64>,
     pub speed: Option<f64>,
+    #[serde(default)]
+    pub bitrate_kbps: Option<f64>,
+    #[serde(default)]
+    pub total_bytes: Option<u64>,
+    #[serde(default)]
+    pub duplicated_frames: Option<u64>,
     pub created_at: String,
 }
 
@@ -1181,30 +1288,243 @@ pub struct StreamHealth {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum EncodeBackend {
-    /// libx264 (software), used on non-macOS/non-Windows fallback builds.
+    /// libx264 (software). LEGACY: no code path selects this; Linux L1.5 uses
+    /// OpenH264 for its LGPL software fallback. Kept only so historical
+    /// diagnostics payloads still deserialize.
     SoftwareX264,
     /// h264_videotoolbox (hardware, sw fallback allowed).
     HardwareVideotoolbox,
+    /// h264_vaapi on a capability-probed Linux DRM render node.
+    HardwareVaapi,
     /// h264_mf (MediaFoundation hardware/software hybrid), used by Windows builds.
     HardwareMediaFoundation,
     /// h264_mf's software MFT fallback after the exact hardware profile probe failed.
     SoftwareMediaFoundation,
+    /// libopenh264 (software): the Linux LGPL fallback and the Windows fallback
+    /// after the hardware probe failed (issue #149).
+    SoftwareOpenH264,
+}
+
+/// One production encoder role represented by an off-air stream topology probe.
+///
+/// `shared` means one encoded video output feeds every enabled output. A separate
+/// recording/stream pair is explicit so preflight probes the same two encoders
+/// that session start will create, even when both use the same video profile.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamOutputTopologyRole {
+    Shared,
+    Recording,
+    Stream,
+}
+
+/// Secret-free input for `stream.output.topology.probe`.
+///
+/// The renderer sends already-normalized effective video profiles, never RTMP
+/// URLs, stream keys, OAuth credentials, or a full `StartSessionParams`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct StreamOutputTopologyProbeParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ffmpeg_path: Option<String>,
+    pub stream_profile: VideoSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_profile: Option<VideoSettings>,
+    pub output_roles: Vec<StreamOutputTopologyRole>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum StreamOutputBridge {
+    #[serde(rename = "raw-yuv420p")]
+    RawYuv420p,
+    #[serde(rename = "videotoolbox-h264-annex-b")]
+    VideoToolboxH264AnnexB,
+    #[serde(rename = "videotoolbox-h264-mpegts")]
+    VideoToolboxH264MpegTs,
+    #[serde(rename = "windows-media-foundation-h264-mpegts")]
+    WindowsMediaFoundationH264MpegTs,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum StreamOutputTopologyProbeState {
+    NotRequired,
+    Passed,
+    Rejected,
+    Unsupported,
+}
+
+/// Completed output-topology verdict. The capability key is a SHA-256 over the
+/// trusted FFmpeg identity, normalized profiles, roles, and requested bridge;
+/// it deliberately does not expose a local executable path.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StreamOutputTopologyProbeResult {
+    pub capability_key: String,
+    pub stream_profile: VideoSettings,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_profile: Option<VideoSettings>,
+    pub output_roles: Vec<StreamOutputTopologyRole>,
+    pub requested_bridge_output: StreamOutputBridge,
+    pub effective_bridge_output: StreamOutputBridge,
+    pub effective_encode_backend: EncodeBackend,
+    pub probe_state: StreamOutputTopologyProbeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 /// Which compositor rendered the active shared-compositor frame.
 ///
 /// - `Metal`: the GPU path (macOS OBS-parity target).
-/// - `Cpu`: the CPU compositor as the EXPECTED path — platforms without a
-///   Metal backend (Windows/Linux) have no GPU compositor to fall back from,
-///   so this is normal, not a degradation, and carries no fallback reason.
+/// - `D3d11`: the Windows GPU path when the complete capture/compositor/encoder
+///   capability probe agrees on one adapter and generation.
+/// - `Cpu`: the CPU compositor as the expected path on platforms without a
+///   supported GPU backend, and as the named Windows legacy path before a
+///   D3D11 session starts.
 /// - `CpuFallback`: macOS asked for Metal and could not get it — a real
-///   degradation, kept honest with a reason and count.
+///   degradation, or Windows rejected D3D11 before session start. Both stay
+///   honest with a reason and count.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CompositorBackend {
     Metal,
+    D3d11,
     Cpu,
     CpuFallback,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11MediaState {
+    #[default]
+    Unavailable,
+    Probing,
+    Live,
+    Draining,
+    Fallback,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11CaptureBackend {
+    DesktopDuplication,
+    WindowsGraphicsCaptureMonitor,
+    LegacyFfmpeg,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum WindowsD3d11CursorMode {
+    Embedded,
+    Separate,
+    ExcludedWgc,
+    DisabledFallback,
+}
+
+/// One truthful, wire-safe snapshot of the Windows GPU media authority. It
+/// contains scalar diagnostics only: no COM pointer, shared texture handle, or
+/// HWND may cross this boundary.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11MediaDiagnostics {
+    pub state: WindowsD3d11MediaState,
+    #[serde(default)]
+    pub requested: bool,
+    #[serde(default)]
+    pub required: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub primary_encoder_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auxiliary_encoder_adapter_luid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_backend: Option<WindowsD3d11CaptureBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_mode: Option<WindowsD3d11CursorMode>,
+    #[serde(default)]
+    pub cursor_requested: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor_pixels_source: Option<String>,
+    #[serde(default)]
+    pub cursor_exclusion_guaranteed: bool,
+    #[serde(default)]
+    pub capture_readback_frames: u64,
+    /// Frames where Windows masked protected pixels while the remaining
+    /// desktop pixels continued through the D3D11 media path.
+    #[serde(default)]
+    pub protected_content_masked_frames: u64,
+    #[serde(default)]
+    pub texture_import_frames: u64,
+    #[serde(default)]
+    pub camera_upload_frames: u64,
+    #[serde(default)]
+    pub cursor_shape_uploads: u64,
+    #[serde(default)]
+    pub cursor_composited_frames: u64,
+    #[serde(default)]
+    pub compositor_cpu_fallback_frames: u64,
+    #[serde(default)]
+    pub preview_presents: u64,
+    #[serde(default)]
+    pub preview_drops: u64,
+    #[serde(default)]
+    pub preview_bmp_requests: u64,
+    #[serde(default)]
+    pub preview_bmp_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_pump_lag_p95_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_pump_lag_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_command_lag_p95_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub media_command_lag_max_ms: Option<f64>,
+    #[serde(default)]
+    pub maximum_consecutive_message_batch: u64,
+    #[serde(default)]
+    pub maximum_consecutive_media_batch: u64,
+    #[serde(default)]
+    pub encoder_gpu_samples: u64,
+    #[serde(default)]
+    pub encoder_system_memory_samples: u64,
+    #[serde(default)]
+    pub raw_video_copied_frames: u64,
+    #[serde(default)]
+    pub texture_pool_capacity: u64,
+    #[serde(default)]
+    pub texture_pool_in_use: u64,
+    #[serde(default)]
+    pub texture_pool_pressure_events: u64,
+    #[serde(default)]
+    pub adapter_mismatches: u64,
+    #[serde(default)]
+    pub device_resets: u64,
+    /// Aggregate count of abnormal bounded D3D synchronization waits that
+    /// expired. Normal zero-time capture polls with no new desktop frame are
+    /// deliberately excluded.
+    #[serde(default)]
+    pub synchronization_timeouts: u64,
+    #[serde(default)]
+    pub stale_generation_callbacks: u64,
+    /// Render-loop ticks whose work exceeded the frame interval before pacing.
+    #[serde(default)]
+    pub render_tick_overruns: u64,
+    /// Worst overshoot of any render tick beyond its frame interval.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_tick_lag_max_ms: Option<f64>,
+    /// Worst observed D3D11 compose_scene stage duration on the render thread.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub render_compose_stage_max_ms: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 /// Cumulative request counts (since backend start) for the HTTP image-polling preview
@@ -1241,11 +1561,168 @@ pub struct WebSocketQueueDiagnosticStats {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "camelCase")]
+pub struct WebSocketCommandLaneDiagnosticStats {
+    pub queue: WebSocketQueueDiagnosticStats,
+    pub expired_before_dispatch_count: u64,
+    pub rejected_before_dispatch_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
 pub struct WebSocketTransportDiagnosticStats {
     pub reliable_response_queue: WebSocketQueueDiagnosticStats,
     pub incoming_command_queue: WebSocketQueueDiagnosticStats,
     pub coalesced_telemetry_queue: WebSocketQueueDiagnosticStats,
+    #[serde(default)]
+    pub command_lanes: std::collections::BTreeMap<String, WebSocketCommandLaneDiagnosticStats>,
     pub slow_pressure_disconnect_count: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewCameraDropReasonStats {
+    pub frame_was_late: u64,
+    pub out_of_buffers: u64,
+    pub discontinuity: u64,
+    pub unknown: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewScreenFrameStatusStats {
+    pub complete: u64,
+    pub idle: u64,
+    pub blank: u64,
+    pub suspended: u64,
+    pub started: u64,
+    pub stopped: u64,
+    pub unknown: u64,
+}
+
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PreviewSourceSurfaceBackingStats {
+    pub live_count: u64,
+    pub peak_count: u64,
+    pub estimated_bytes: u64,
+    pub peak_estimated_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub oldest_age_ms: Option<u64>,
+}
+
+/// Authoritative lifecycle for one capture-recovery incident. `Failed` is a
+/// latched terminal state: the backend never loops automatic restarts, and a
+/// new attempt requires the explicit `capture.recovery.retry` command.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryPhase {
+    #[default]
+    Idle,
+    Degraded,
+    Restarting,
+    Verifying,
+    Recovered,
+    Failed,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryStage {
+    CameraDelivery,
+    ScreenDelivery,
+    CompositorRender,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoverySource {
+    Camera,
+    Screen,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CaptureRecoveryTrigger {
+    Automatic,
+    Manual,
+}
+
+/// Renderer-safe capture-recovery truth. Optional values are omitted, never
+/// serialized as `null`, so a healthy/idle backend remains compatible with
+/// strict optional schemas.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaptureRecoveryStatus {
+    /// Monotonic process-local publication revision. Consumers must ignore a
+    /// status whose revision is older than the newest revision they have
+    /// already accepted.
+    pub revision: u64,
+    pub phase: CaptureRecoveryPhase,
+    pub retryable: bool,
+    pub attempts: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<CaptureRecoveryStage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<CaptureRecoverySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<CaptureRecoveryTrigger>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_generation: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detected_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub updated_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "optional_duration_ms_is_unavailable")]
+    pub last_duration_ms: Option<f64>,
+}
+
+fn optional_duration_ms_is_unavailable(value: &Option<f64>) -> bool {
+    value.is_none_or(|value| !value.is_finite() || value < 0.0)
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct EncoderBridgeRoleOutputPressureStats {
+    pub output_queue_high_water_frames: u64,
+    pub output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    pub output_last_progress_age_ms: Option<u64>,
+    pub output_pressure_recovery_events: u64,
+    pub output_pre_encode_skipped_frames: u64,
+    pub video_toolbox_pending_encode_frames: u64,
+    pub video_toolbox_pending_fifo_frames: u64,
+    pub encoded_access_unit_dropped_frames: u64,
+}
+
+/// Last cumulative/high-water backend sample for one split-output encoder.
+/// Kept out of the public diagnostic contract; it exists only so generic
+/// counters and timing high-waters can be merged without depending on which
+/// role reported last.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct EncoderBridgeRoleDiagnosticStats {
+    pub metal_target_frames: u64,
+    pub metal_target_copied_frames: u64,
+    pub metal_target_handle_frames: u64,
+    pub zero_copy_frames: u64,
+    pub video_toolbox_probe_frames: u64,
+    pub video_toolbox_probe_bytes: u64,
+    pub video_toolbox_probe_errors: u64,
+    pub video_toolbox_output_encode_ms: Option<u64>,
+    pub compositor_wait_p95_ms: Option<f64>,
+    pub video_toolbox_submit_p95_ms: Option<f64>,
+    pub raw_video_fifo_write_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_write_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_enqueue_p95_ms: Option<f64>,
+    pub video_toolbox_fifo_enqueue_max_ms: Option<f64>,
+    pub writer_loop_p95_ms: Option<f64>,
+    pub writer_sleep_p95_ms: Option<f64>,
+    pub writer_active_p95_ms: Option<f64>,
+    pub deadline_lag_p95_ms: Option<f64>,
+    pub deadline_lag_max_ms: Option<f64>,
+    pub late_deadline_ticks: u64,
+    pub schedule_skipped_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1261,17 +1738,68 @@ pub struct DiagnosticStats {
     pub dropped_frames: u64,
     pub encoder_speed: Option<f64>,
     pub encoder_bridge_queue_depth: u64,
-    /// Oldest frame currently waiting for VideoToolbox completion or FIFO output.
+    /// Peak combined pending encoder + FIFO depth observed by an output bridge.
     #[serde(default)]
+    pub encoder_bridge_output_queue_high_water_frames: u64,
+    /// Oldest frame currently waiting for VideoToolbox completion or FIFO output.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encoder_bridge_output_queue_oldest_frame_age_ms: Option<u64>,
+    /// Peak oldest-frame age retained after a pressured queue recovers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_output_queue_oldest_frame_age_high_water_ms: Option<u64>,
+    /// Milliseconds since the most recent encoder completion or complete FIFO AU write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_output_last_progress_age_ms: Option<u64>,
     /// Cumulative enqueue attempts that encountered a full bounded output queue.
     #[serde(default)]
     pub encoder_bridge_output_queue_capacity_pressure_events: u64,
+    /// Cumulative pressured intervals that returned to the healthy budget.
+    #[serde(default)]
+    pub encoder_bridge_output_pressure_recovery_events: u64,
     /// Cumulative frames intentionally discarded by output backpressure policy.
     #[serde(default)]
     pub encoder_bridge_output_queue_dropped_frames: u64,
+    /// Recording compositor ticks skipped before encode while queued AUs drain.
+    #[serde(default)]
+    pub encoder_bridge_output_pre_encode_skipped_frames: u64,
+    /// Current VideoToolbox callback/in-flight and FIFO-writer stage depths.
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_pending_encode_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_video_toolbox_pending_fifo_frames: u64,
+    /// Encoded H.264 access units rejected after encode; zero is required.
+    #[serde(default)]
+    pub encoder_bridge_encoded_access_unit_dropped_frames: u64,
+    /// Last role-local pressure samples used to build the aggregate fields above.
+    /// These are process-internal because the public diagnostic contract already
+    /// exposes the useful aggregate plus the established per-role queue fields.
+    /// Keeping the samples here prevents a quiet split-output role from erasing
+    /// pressure evidence emitted by the other role.
+    #[serde(skip)]
+    pub(crate) encoder_bridge_recording_output_pressure: EncoderBridgeRoleOutputPressureStats,
+    #[serde(skip)]
+    pub(crate) encoder_bridge_stream_output_pressure: EncoderBridgeRoleOutputPressureStats,
+    /// Role-local samples used to build generic split-output sums/high-waters.
+    /// Starting diagnostics reset both fields, preventing prior-session state
+    /// from entering a new recording.
+    #[serde(skip)]
+    pub(crate) encoder_bridge_recording_role_diagnostics: EncoderBridgeRoleDiagnosticStats,
+    #[serde(skip)]
+    pub(crate) encoder_bridge_stream_role_diagnostics: EncoderBridgeRoleDiagnosticStats,
     pub encoder_bridge_input_fps: Option<f64>,
     pub encoder_bridge_dropped_frames: u64,
+    /// FFmpeg progress-reported drops attributable to the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_dropped_frames: u64,
+    /// FFmpeg progress-reported drops attributable to the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_dropped_frames: u64,
+    /// FFmpeg progress-reported encoder speed for the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_encoder_speed: Option<f64>,
+    /// FFmpeg progress-reported encoder speed for the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_encoder_speed: Option<f64>,
     /// Compositor frames re-fed to the encoder on under-run (duplicate frames in the
     /// final file). Honest signal for the recording repeated-frame gate.
     #[serde(default)]
@@ -1306,6 +1834,12 @@ pub struct DiagnosticStats {
     /// not zero-copy VideoToolbox submissions.
     #[serde(default)]
     pub encoder_bridge_raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes attributable to the recording bridge.
+    #[serde(default)]
+    pub encoder_bridge_recording_raw_video_copied_frames: u64,
+    /// Raw-video FFmpeg writes attributable to the stream bridge.
+    #[serde(default)]
+    pub encoder_bridge_stream_raw_video_copied_frames: u64,
     /// Raw-video FFmpeg writes where the source frame also had an IOSurface-backed Metal
     /// target. This proves the current Metal-target path is still copied.
     #[serde(default)]
@@ -1337,6 +1871,40 @@ pub struct DiagnosticStats {
     /// Max inline VideoToolbox encode latency observed by the bridge writer.
     #[serde(default)]
     pub encoder_bridge_video_toolbox_output_encode_ms: Option<u64>,
+    /// Generic encoded-output backend selected for this session.
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_backend: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_requested_video_output: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_effective_video_output: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_encoder_identity: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_input_subtype: Option<String>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_fallback_reason: Option<String>,
+    /// Cross-platform aliases populated by both VideoToolbox and Media Foundation.
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_bytes: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_output_errors: u64,
+    #[serde(default)]
+    pub encoder_bridge_encoded_submit_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub encoder_bridge_encoded_fifo_write_p95_ms: Option<f64>,
+    #[serde(default)]
+    pub encoder_bridge_active_encoded_output_encoders: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_recording_encoded_output_bytes: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_encoded_output_frames: u64,
+    #[serde(default)]
+    pub encoder_bridge_stream_encoded_output_bytes: u64,
     /// Local recording output profile used by split-output sessions.
     #[serde(default)]
     pub recording_output_width: Option<u32>,
@@ -1355,6 +1923,21 @@ pub struct DiagnosticStats {
     pub stream_output_fps: Option<u32>,
     #[serde(default)]
     pub stream_output_bitrate_kbps: Option<u32>,
+    /// Latest measured FFmpeg output bitrate for the active stream.
+    #[serde(default)]
+    pub stream_measured_bitrate_kbps: Option<f64>,
+    /// Lowest non-zero measured output bitrate observed in this stream session.
+    #[serde(default)]
+    pub stream_measured_bitrate_min_kbps: Option<f64>,
+    /// Highest non-zero measured output bitrate observed in this stream session.
+    #[serde(default)]
+    pub stream_measured_bitrate_max_kbps: Option<f64>,
+    /// Cumulative bytes emitted by FFmpeg for this stream process generation.
+    #[serde(default)]
+    pub stream_output_total_bytes: u64,
+    /// Cumulative frames FFmpeg reports duplicating for this stream process generation.
+    #[serde(default)]
+    pub stream_duplicated_frames: u64,
     /// Number of distinct production VideoToolbox output encoders active for the session.
     #[serde(default)]
     pub encoder_bridge_active_video_toolbox_output_encoders: u64,
@@ -1371,6 +1954,9 @@ pub struct DiagnosticStats {
     /// True only when diagnostics prove separate record and stream output encoders.
     #[serde(default)]
     pub encoder_bridge_separate_output_encoders_active: bool,
+    /// In split-output sessions the generic timing fields below are the worst
+    /// role-local session high-water. This keeps them truthful and independent
+    /// of report order; established role-specific writer fields remain below.
     /// P95 time the bridge writer spent waiting for a fresh compositor frame.
     #[serde(default)]
     pub encoder_bridge_compositor_wait_p95_ms: Option<f64>,
@@ -1471,14 +2057,49 @@ pub struct DiagnosticStats {
     #[serde(default)]
     pub encode_backend: Option<EncodeBackend>,
     /// Which compositor backend produced the most recent diagnostic window.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compositor_backend: Option<CompositorBackend>,
     /// Reason the shared compositor had to use CPU fallback.
     #[serde(default)]
     pub compositor_fallback_reason: Option<String>,
-    /// Cumulative frames rendered by CPU fallback during the active compositor run.
+    /// Cumulative frames rendered by the CPU compositor as the platform's
+    /// expected path (no GPU compositor exists off macOS). Never a fault.
+    #[serde(default)]
+    pub compositor_cpu_frames: u64,
+    /// Cumulative frames rendered by CPU FALLBACK during the active compositor
+    /// run: a GPU compositor was expected and not reached. Nonzero is a fault.
     #[serde(default)]
     pub compositor_cpu_fallback_frames: u64,
+    /// Cumulative render ticks of the active record/stream compositor run
+    /// (not the preview-only compositor). Frame accounting at stop.
+    #[serde(default)]
+    pub compositor_ticks: u64,
+    /// Cumulative frame intervals the record/stream compositor loop missed
+    /// entirely (ticks it was too late to render). Frame accounting at stop.
+    #[serde(default)]
+    pub compositor_tick_skipped: u64,
+    /// Recording-leg bridge writer ticks that fed a fresh compositor frame.
+    #[serde(default)]
+    pub encoder_bridge_fresh_frames: u64,
+    /// Frames the recording-leg bridge submitted to the Media Foundation
+    /// encoder (Windows only; zero elsewhere).
+    #[serde(default)]
+    pub encoder_bridge_mf_submitted_frames: u64,
+    /// Writer-thread Media Foundation input-credit waits that hit the
+    /// two-frame cap and skipped the frame instead of stalling the schedule.
+    #[serde(default)]
+    pub encoder_bridge_mf_input_credit_timeouts: u64,
+    /// P95 wall time the writer thread spent waiting for a Media Foundation
+    /// input credit (Windows only). MUST skip when None: the renderer contract
+    /// validates this key with a finite-number schema, and serde would emit
+    /// `null` — which blocked every macOS session start in 0.9.68–0.9.70.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_mf_input_credit_wait_p95_ms: Option<f64>,
+    /// Scalar-only state for the Windows D3D11 capture/compositor/presenter/MF
+    /// authority. This remains present (with `unavailable`) on other platforms
+    /// so support-bundle and renderer contracts stay deterministic.
+    #[serde(default)]
+    pub windows_d3d11_media: WindowsD3d11MediaDiagnostics,
     #[serde(default)]
     pub websocket_transport: WebSocketTransportDiagnosticStats,
     /// Cumulative HTTP image-poll request counts. The transport-honesty gate fails when
@@ -1547,6 +2168,47 @@ pub struct DiagnosticStats {
     /// Cumulative live-source frames uploaded to Metal from CPU BGRA bytes.
     #[serde(default)]
     pub compositor_source_byte_upload_frames: u64,
+    /// Cumulative held capture frames that reused an already imported Metal texture.
+    #[serde(default)]
+    pub compositor_source_capture_texture_reuses: u64,
+    /// Camera subset of held capture texture reuses.
+    #[serde(default)]
+    pub compositor_camera_source_capture_texture_reuses: u64,
+    /// Screen/window subset of held capture texture reuses.
+    #[serde(default)]
+    pub compositor_screen_source_capture_texture_reuses: u64,
+    /// Completed-command boundaries that flushed the CoreVideo Metal texture cache.
+    #[serde(default)]
+    pub compositor_source_texture_cache_flushes: u64,
+    /// Cached capture-source CVMetalTexture/IOSurface imports currently retained.
+    /// Absent off macOS, where the Metal ownership path does not exist.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_cached_capture_source_imports_ceiling: Option<u64>,
+    /// IOSurface-backed Metal compositor target-ring slots retained process-wide.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_metal_target_ring_slots_ceiling: Option<u64>,
+    /// Encoder completion guards still retaining an IOSurface target frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_bridge_metal_target_refs_in_flight_ceiling: Option<u64>,
+    /// Native presenter cache lifetime accounting reported by Electron main.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
     /// Cumulative live-source zero-copy import attempts that fell back to byte upload.
     #[serde(default)]
     pub compositor_source_import_failures: u64,
@@ -1632,6 +2294,49 @@ pub struct DiagnosticStats {
     /// source-store contention or a visibly stale cached screen/window frame.
     #[serde(default)]
     pub compositor_screen_source_blocking_refreshes: u64,
+    /// Cumulative compositor ticks that served a camera frame the capture
+    /// pipeline had replaced since the previous tick (fresh content).
+    #[serde(default)]
+    pub compositor_camera_source_fresh_serves: u64,
+    /// Cumulative compositor ticks that re-served the identical camera frame
+    /// handle as the previous tick (held content; the producer delivered
+    /// nothing new). Held ≫ fresh during a session is the frozen-recording
+    /// signature of the 0.9.71 second-session lag.
+    #[serde(default)]
+    pub compositor_camera_source_held_serves: u64,
+    /// Oldest capture age (ms) of any camera frame the compositor served.
+    #[serde(default)]
+    pub compositor_camera_source_served_age_max_ms: u64,
+    /// Cumulative compositor ticks that served a fresh screen/window frame.
+    #[serde(default)]
+    pub compositor_screen_source_fresh_serves: u64,
+    /// Cumulative compositor ticks that re-served the identical screen/window
+    /// frame handle as the previous tick.
+    #[serde(default)]
+    pub compositor_screen_source_held_serves: u64,
+    /// Oldest capture age (ms) of any screen/window frame the compositor served.
+    #[serde(default)]
+    pub compositor_screen_source_served_age_max_ms: u64,
+    /// The pipeline stage the capture-health monitor currently declares
+    /// degraded (`camera-delivery` / `compositor-render`), or absent while
+    /// healthy. skip_serializing_if is load-bearing: the renderer contract
+    /// accepts undefined, and a serialized `null` here is the app-killing
+    /// defect class of 0.9.68 and 0.9.79 ([[videorc-serde-null-contract-trap]]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_pipeline_degraded_stage: Option<String>,
+    /// Recovery fields are absent while idle. This is intentionally separate
+    /// from `capturePipelineDegradedStage`: health detects the fault, while
+    /// recovery owns restart/verification authority and its failure latch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_phase: Option<CaptureRecoveryPhase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_source: Option<CaptureRecoverySource>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_attempts: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_recovery_last_error: Option<String>,
+    #[serde(default, skip_serializing_if = "optional_duration_ms_is_unavailable")]
+    pub capture_recovery_last_duration_ms: Option<f64>,
     pub preview_repeated_frames: u64,
     pub preview_surface_resize_count: u64,
     pub preview_latency_ms: Option<u64>,
@@ -1639,6 +2344,28 @@ pub struct DiagnosticStats {
     pub preview_camera_frame_age_ms: Option<u64>,
     pub preview_camera_source_fps: Option<f64>,
     pub preview_camera_dropped_frames: u64,
+    /// AVFoundation didOutput callbacks observed before any FrameStore validation/publication.
+    #[serde(default)]
+    pub preview_camera_capture_callback_count: u64,
+    /// AVFoundation didDrop callbacks, independent of locally rejected didOutput samples.
+    #[serde(default)]
+    pub preview_camera_did_drop_callback_count: u64,
+    /// Camera frames successfully published to the shared FrameStore.
+    #[serde(default)]
+    pub preview_camera_frame_store_publications: u64,
+    /// Age of the latest AVFoundation didOutput callback, even if it did not publish a frame.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_capture_callback_age_ms: Option<u64>,
+    /// Latest camera FrameStore sequence visible to consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_latest_sequence: Option<u64>,
+    /// FourCC delivered by the latest valid AVFoundation sample.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_camera_capture_pixel_format: Option<String>,
+    #[serde(default)]
+    pub preview_camera_drop_reasons: PreviewCameraDropReasonStats,
+    #[serde(default)]
+    pub preview_camera_surface_backing: PreviewSourceSurfaceBackingStats,
     /// Latest native camera state reported by the AVFoundation preview source.
     #[serde(default)]
     pub preview_camera_state: Option<PreviewCameraState>,
@@ -1714,6 +2441,22 @@ pub struct DiagnosticStats {
     pub preview_screen_frame_age_ms: Option<u64>,
     pub preview_screen_source_fps: Option<f64>,
     pub preview_screen_dropped_frames: u64,
+    /// ScreenCaptureKit callbacks observed before status/image validation.
+    #[serde(default)]
+    pub preview_screen_capture_callback_count: u64,
+    /// Screen frames successfully published to the shared FrameStore.
+    #[serde(default)]
+    pub preview_screen_frame_store_publications: u64,
+    /// Age of the latest ScreenCaptureKit callback, including non-complete statuses.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_screen_capture_callback_age_ms: Option<u64>,
+    /// Latest screen FrameStore sequence visible to consumers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_screen_latest_sequence: Option<u64>,
+    #[serde(default)]
+    pub preview_screen_frame_statuses: PreviewScreenFrameStatusStats,
+    #[serde(default)]
+    pub preview_screen_surface_backing: PreviewSourceSurfaceBackingStats,
     /// Latest native ScreenCaptureKit status message, including permission/startup errors.
     #[serde(default)]
     pub preview_screen_message: Option<String>,
@@ -1738,6 +2481,9 @@ pub struct DiagnosticStats {
     /// Whether the latest ScreenCaptureKit frame retained a zero-copy source handle.
     #[serde(default)]
     pub preview_screen_iosurface_available: Option<bool>,
+    /// Whether the latest Windows Graphics Capture frame retained its D3D11 source texture.
+    #[serde(default)]
+    pub preview_screen_d3d11_texture_available: Option<bool>,
     /// P95 interval between ScreenCaptureKit screen sample callbacks.
     #[serde(default)]
     pub preview_screen_capture_gap_p95_ms: Option<f64>,
@@ -1759,7 +2505,9 @@ pub struct DiagnosticStats {
     /// ScreenCaptureKit stream queue depth requested for the live screen source.
     #[serde(default)]
     pub preview_screen_capture_queue_depth: u32,
+    /// CPU buffers currently owned by the camera/screen stores and spare pools.
     pub preview_source_frame_buffer_count: u64,
+    /// CPU bytes currently owned by the camera/screen stores and spare pools.
     pub preview_source_frame_bytes: u64,
     pub preview_source_frame_dropped_frames: u64,
     pub mic_captured_frames: Option<u64>,
@@ -1817,7 +2565,45 @@ pub struct DiagnosticStats {
     pub first_full_resolution_compositor_frame_ms: Option<u64>,
     #[serde(default)]
     pub first_encoded_frame_ms: Option<u64>,
+    /// Phase timeline of the most recent `session.start` (instant-record plan).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_start_timeline: Option<RecordingTimelineSnapshot>,
+    /// Phase timeline of the most recent stop, including background finalization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recording_stop_timeline: Option<RecordingTimelineSnapshot>,
     pub updated_at: String,
+}
+
+/// One phase boundary of a start/stop timeline, milliseconds since the
+/// timeline origin (backend admission of the request).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingTimelineMark {
+    pub phase: String,
+    pub at_ms: u64,
+}
+
+/// Typed start/stop latency timeline published in `diagnostics.stats`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingTimelineSnapshot {
+    /// `start` | `stop`.
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
+    /// True for the first start in this backend process (start timelines only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cold: Option<bool>,
+    /// Renderer click time (epoch ms) when the renderer supplied one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_at_epoch_ms: Option<u64>,
+    /// Renderer click → backend admission, when plausible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub click_to_origin_ms: Option<u64>,
+    pub total_ms: u64,
+    pub outcome: String,
+    #[serde(default)]
+    pub marks: Vec<RecordingTimelineMark>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1901,6 +2687,86 @@ pub struct PreviewSurfaceBounds {
     pub order_above_window_id: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevated: Option<bool>,
+    // Corner radius in POINTS for the native surface (CALayer works in points;
+    // contentsScale handles pixels). Docked previews pass the panel radius so
+    // the surface clips to the rounded slot instead of poking square corners
+    // past it; absent/0 = square (floating window, legacy callers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f64>,
+}
+
+/// Validated opaque HWND identity used only by Electron main and the backend
+/// presenter. The fixed-width string form prevents JavaScript precision loss
+/// and is never embedded in renderer-visible status or events.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct OpaqueNativeWindowHandle(String);
+
+impl OpaqueNativeWindowHandle {
+    pub fn parse(value: impl Into<String>) -> Result<Self, String> {
+        let value = value.into();
+        let bytes = value.as_bytes();
+        if bytes.len() != 18
+            || !value.starts_with("0x")
+            || !bytes[2..]
+                .iter()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(byte))
+            || value == "0x0000000000000000"
+        {
+            return Err(
+                "native window handle must be a nonzero lowercase 0x-prefixed 64-bit value"
+                    .to_string(),
+            );
+        }
+        Ok(Self(value))
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub fn as_u64(&self) -> u64 {
+        u64::from_str_radix(&self.0[2..], 16)
+            .expect("validated native window handles always contain hexadecimal digits")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Serialize for OpaqueNativeWindowHandle {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for OpaqueNativeWindowHandle {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        Self::parse(value).map_err(serde::de::Error::custom)
+    }
+}
+
+/// Privileged request-only bounds. Flattening preserves the established
+/// geometry wire shape while keeping the HWND out of `PreviewSurfaceBounds`
+/// and therefore out of renderer-visible `PreviewSurfaceStatus`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MainOwnedPreviewSurfaceBounds {
+    #[serde(flatten)]
+    pub bounds: PreviewSurfaceBounds,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_above_window_handle: Option<OpaqueNativeWindowHandle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct MainOwnedPreviewSurfaceBoundsParams {
+    pub bounds: MainOwnedPreviewSurfaceBounds,
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1945,12 +2811,63 @@ pub struct PreviewSurfacePresentParams {
     pub native_preview_main_last_skipped_scene_revision: Option<u64>,
     #[serde(default)]
     pub native_preview_main_last_skipped_frame_scene_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
     #[serde(default)]
     pub message: Option<String>,
     #[serde(default)]
     pub frame_polling_suppressed: bool,
     #[serde(default)]
     pub source_pixels_present: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11PresenterBounds {
+    pub x: i32,
+    pub y: i32,
+    pub width: u32,
+    pub height: u32,
+}
+
+/// Renderer-safe readback from the backend-owned Windows presenter. Raw HWNDs
+/// and process IDs intentionally never enter this status object.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsD3d11PresenterDiagnostics {
+    /// Generation of the backend-owned D3D11 media authority. This remains
+    /// scalar and renderer-safe while allowing Electron to reject a delayed
+    /// status callback from a retired authority deterministically.
+    #[serde(default)]
+    pub media_generation: u64,
+    pub layered: bool,
+    pub transparent: bool,
+    pub no_activate: bool,
+    pub excluded_from_capture: bool,
+    pub window_active: bool,
+    pub window_focused: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_generation: Option<u64>,
+    pub generation_matches: bool,
+    pub owner_process_matches: bool,
+    pub same_adapter: bool,
+    pub source_live: bool,
+    pub first_present_succeeded: bool,
+    pub successful_presents: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_presented_sequence: Option<u64>,
+    pub latest_wins_drops: u64,
+    pub hidden_drops: u64,
+    pub busy_drops: u64,
+    pub stale_frame_drops: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub actual_bounds: Option<WindowsD3d11PresenterBounds>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -1993,6 +2910,12 @@ pub struct PreviewSurfaceStatus {
     pub native_preview_main_last_skipped_scene_revision: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub native_preview_main_last_skipped_frame_scene_revision: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_live_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_peak_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub native_preview_iosurface_import_ceiling: Option<u64>,
     #[serde(default)]
     pub frame_polling_suppressed: bool,
     #[serde(default)]
@@ -2004,6 +2927,8 @@ pub struct PreviewSurfaceStatus {
     pub pending_host_command_count: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bounds: Option<PreviewSurfaceBounds>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub windows_d3d11_presenter: Option<WindowsD3d11PresenterDiagnostics>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub started_at: Option<String>,
     pub updated_at: String,
@@ -2194,6 +3119,10 @@ pub struct CompositorSceneUpdateParams {
     pub layout: LayoutSettings,
     #[serde(default)]
     pub active_screen: Option<StreamScreen>,
+    /// Scene-motion duration in ms (clamped to 1000): the previous scene's
+    /// transforms glide to this one. Absent/0 = instant switch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transition_ms: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -2360,6 +3289,8 @@ pub struct PreviewScreenStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub iosurface_available: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub d3d11_texture_available: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub source_fps: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub frame_age_ms: Option<u64>,
@@ -2454,6 +3385,145 @@ pub struct SessionSummary {
     pub source_title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub processing_kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_state: Option<RecordingFinalizationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
+}
+
+/// Bounded, renderer-facing Library row. Histories intentionally live behind
+/// their cursor-paginated detail methods so refreshing the Library never
+/// serializes every event, log line, or AI payload for every session.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListItem {
+    pub id: String,
+    pub title: String,
+    pub started_at: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
+    pub status: String,
+    pub mode: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mp4_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_preset: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub container: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_size_bytes: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scene_label: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quality_status: Option<GateStatus>,
+    pub health_event_count: u64,
+    pub session_log_count: u64,
+    pub ai_artifact_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ready_ai_artifact_kinds: Vec<AiArtifactKind>,
+    pub comment_count: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_from_session_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub processing_kind: Option<String>,
+    /// Background MP4 finalization (instant-record P2). Absent for rows that
+    /// finished inline (legacy) or never recorded a file.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_state: Option<RecordingFinalizationState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_progress_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
+}
+
+/// Progress of a background recording finalization job.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecordingFinalizationEvent {
+    pub session_id: String,
+    pub state: RecordingFinalizationState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress_percent: Option<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mp4_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_size_bytes: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionListPage {
+    pub items: Vec<SessionListItem>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionListParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_session_list_page_limit")]
+    pub limit: usize,
+}
+
+pub const DEFAULT_SESSION_LIST_PAGE_LIMIT: usize = 50;
+
+fn default_session_list_page_limit() -> usize {
+    DEFAULT_SESSION_LIST_PAGE_LIMIT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SessionDetailListParams {
+    pub session_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    #[serde(default = "default_session_detail_page_limit")]
+    pub limit: usize,
+}
+
+pub const DEFAULT_SESSION_DETAIL_PAGE_LIMIT: usize = 120;
+
+fn default_session_detail_page_limit() -> usize {
+    DEFAULT_SESSION_DETAIL_PAGE_LIMIT
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionHealthEventsPage {
+    pub events: Vec<HealthEvent>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionLogsPage {
+    pub entries: Vec<SessionLogEntry>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SessionAiArtifactsPage {
+    pub artifacts: Vec<AiArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -2666,6 +3736,51 @@ pub enum HealthLevel {
     Info,
     Warn,
     Error,
+}
+
+// --- Live Co-host RPC params (wire contract v1; mirrored in shared/backend.ts) ---
+
+/// `cohost.start`. Consent is renderer-owned state (the cloud-AI consent
+/// toggle), so the renderer passes it explicitly on every start; the backend
+/// never assumes it. `streamTitle` is optional context for the model.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostStartParams {
+    pub session_id: String,
+    #[serde(default)]
+    pub consent_to_process_chat: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_title: Option<String>,
+}
+
+/// `cohost.question.answered` / `cohost.question.dismiss`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostQuestionParams {
+    pub session_id: String,
+    pub question_id: String,
+}
+
+/// `cohost.flag.dismiss`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostFlagParams {
+    pub session_id: String,
+    pub message_id: String,
+}
+
+/// `cohost.settings.set`: every field optional; absent fields are unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSettingsPatch {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tone: Option<crate::cohost::CohostTone>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub notes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_highlight: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -3189,6 +4304,92 @@ impl ServerEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn capture_recovery_status_omits_unavailable_and_non_finite_fields() {
+        let status = super::CaptureRecoveryStatus {
+            revision: 7,
+            phase: super::CaptureRecoveryPhase::Idle,
+            retryable: false,
+            attempts: 0,
+            stage: None,
+            source: None,
+            trigger: None,
+            source_generation: None,
+            detected_at: None,
+            updated_at: None,
+            message: None,
+            last_error: None,
+            last_duration_ms: Some(f64::NAN),
+        };
+        let wire = serde_json::to_value(status).expect("recovery status serializes");
+        assert_eq!(wire["revision"], 7);
+        assert_eq!(wire["phase"], "idle");
+        assert_eq!(wire["retryable"], false);
+        assert_eq!(wire["attempts"], 0);
+        for field in [
+            "stage",
+            "source",
+            "trigger",
+            "sourceGeneration",
+            "detectedAt",
+            "updatedAt",
+            "message",
+            "lastError",
+            "lastDurationMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unavailable recovery field {field} must be omitted"
+            );
+        }
+
+        let missing_revision = serde_json::json!({
+            "phase": "idle",
+            "retryable": false,
+            "attempts": 0
+        });
+        assert!(
+            serde_json::from_value::<super::CaptureRecoveryStatus>(missing_revision).is_err(),
+            "strict recovery consumers need an explicit ordering revision"
+        );
+    }
+
+    #[test]
+    fn screen_capture_recovery_scope_has_stable_wire_labels() {
+        let status = super::CaptureRecoveryStatus {
+            revision: 8,
+            phase: super::CaptureRecoveryPhase::Verifying,
+            retryable: false,
+            attempts: 1,
+            stage: Some(super::CaptureRecoveryStage::ScreenDelivery),
+            source: Some(super::CaptureRecoverySource::Screen),
+            trigger: Some(super::CaptureRecoveryTrigger::Automatic),
+            source_generation: Some(12),
+            detected_at: None,
+            updated_at: None,
+            message: Some("Verifying replacement screen generation.".to_string()),
+            last_error: None,
+            last_duration_ms: None,
+        };
+        let wire = serde_json::to_value(status).expect("screen recovery status serializes");
+        assert_eq!(wire["stage"], "screen-delivery");
+        assert_eq!(wire["source"], "screen");
+        assert_eq!(wire["sourceGeneration"], 12);
+    }
+
+    #[test]
+    fn mf_input_credit_wait_p95_is_absent_when_none() {
+        // 0.9.68 regression: serde emitted `"encoderBridgeMfInputCreditWaitP95Ms": null`
+        // and the renderer contract (optional finite number) rejected every
+        // diagnostics.stats payload on macOS, blocking session start.
+        let stats = crate::diagnostics::idle_diagnostics();
+        let json = serde_json::to_value(&stats).expect("stats serialize");
+        assert!(
+            json.get("encoderBridgeMfInputCreditWaitP95Ms").is_none(),
+            "None must serialize as an absent key, not null"
+        );
+    }
+
     use super::*;
 
     #[test]
@@ -3246,6 +4447,7 @@ mod tests {
     #[test]
     fn scene_config_round_trips_background_and_defaults_absent_background() {
         let plain = SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -3264,6 +4466,7 @@ mod tests {
         assert_eq!(legacy.background, None);
 
         let params = SceneConfigParams {
+            transition_ms: None,
             sources: SourceSelection {
                 screen_id: None,
                 window_id: None,
@@ -3367,7 +4570,11 @@ mod tests {
     }
 
     #[test]
-    fn media_foundation_backends_match_the_desktop_wire_contract() {
+    fn h264_backends_match_the_desktop_wire_contract() {
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::HardwareVaapi).unwrap(),
+            serde_json::json!("hardware-vaapi")
+        );
         assert_eq!(
             serde_json::to_value(EncodeBackend::HardwareMediaFoundation).unwrap(),
             serde_json::json!("hardware-media-foundation")
@@ -3375,6 +4582,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(EncodeBackend::SoftwareMediaFoundation).unwrap(),
             serde_json::json!("software-media-foundation")
+        );
+        assert_eq!(
+            serde_json::to_value(EncodeBackend::SoftwareOpenH264).unwrap(),
+            serde_json::json!("software-open-h264")
         );
     }
 
@@ -3420,6 +4631,11 @@ mod tests {
             camera_offset_y: 0,
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
+            camera_chroma_key_enabled: false,
+            camera_chroma_key_color: "#00FF00".to_string(),
+            camera_chroma_key_similarity_pct: 40,
+            camera_chroma_key_smoothness_pct: 8,
+            camera_chroma_key_spill_pct: 10,
         };
         let json = serde_json::to_string(&layout).unwrap();
         assert!(json.contains("\"layoutPreset\":\"side-by-side\""));
@@ -3457,6 +4673,14 @@ mod tests {
         assert_eq!(
             serde_json::to_value(VideoPreset::StreamSafe1080p60).unwrap(),
             serde_json::json!("stream-safe-1080p60")
+        );
+        assert_eq!(
+            serde_json::to_value(VideoPreset::StreamYoutube1080p30).unwrap(),
+            serde_json::json!("stream-youtube-1080p30")
+        );
+        assert_eq!(
+            serde_json::to_value(VideoPreset::StreamYoutube1080p60).unwrap(),
+            serde_json::json!("stream-youtube-1080p60")
         );
         assert_eq!(
             serde_json::to_value(VideoPreset::StreamYoutube4k30).unwrap(),
@@ -3580,6 +4804,69 @@ mod tests {
     }
 
     #[test]
+    fn windows_d3d11_main_owned_preview_bounds_preserve_opaque_hwnd_and_generation() {
+        let wire = serde_json::json!({
+            "bounds": {
+                "screenX": 12.0,
+                "screenY": 34.0,
+                "width": 1280.0,
+                "height": 720.0,
+                "scaleFactor": 1.25,
+                "visible": true,
+                "orderAboveWindowId": 42,
+                "orderAboveWindowHandle": "0x000000001234abcd",
+                "elevated": false
+            },
+            "generation": 9
+        });
+        let request: MainOwnedPreviewSurfaceBoundsParams =
+            serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(request.generation, 9);
+        assert_eq!(
+            request
+                .bounds
+                .order_above_window_handle
+                .as_ref()
+                .map(OpaqueNativeWindowHandle::as_u64),
+            Some(0x1234_abcd)
+        );
+        assert_eq!(request.bounds.bounds.order_above_window_id, Some(42));
+        assert_eq!(request.bounds.bounds.elevated, Some(false));
+        assert_eq!(serde_json::to_value(request).unwrap(), wire);
+    }
+
+    #[test]
+    fn windows_d3d11_opaque_hwnd_rejects_unsafe_wire_values() {
+        for value in [
+            serde_json::json!("0x0000000000000000"),
+            serde_json::json!("0x1234"),
+            serde_json::json!("0X0000000000000001"),
+            serde_json::json!("0x00000000000000AF"),
+            serde_json::json!(1234),
+        ] {
+            assert!(
+                serde_json::from_value::<OpaqueNativeWindowHandle>(value).is_err(),
+                "unsafe HWND wire value was accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn windows_d3d11_renderer_preview_bounds_never_serialize_an_hwnd() {
+        let ordinary: PreviewSurfaceBounds = serde_json::from_value(serde_json::json!({
+            "screenX": 0.0,
+            "screenY": 0.0,
+            "width": 640.0,
+            "height": 360.0,
+            "scaleFactor": 1.0,
+            "orderAboveWindowHandle": "0x000000001234abcd"
+        }))
+        .unwrap();
+        let serialized = serde_json::to_value(ordinary).unwrap();
+        assert!(serialized.get("orderAboveWindowHandle").is_none());
+    }
+
+    #[test]
     fn shared_high_risk_contract_fixture_matches_layout_and_scene_defaults() {
         let legacy_layout = shared_high_risk_contract_fixture_value("/layout/legacyWire");
         let expected_layout = shared_high_risk_contract_fixture_value("/layout/normalized");
@@ -3665,5 +4952,367 @@ mod tests {
         let operation: SessionDeletionHandle =
             serde_json::from_value(operation_wire.clone()).unwrap();
         assert_eq!(serde_json::to_value(operation).unwrap(), operation_wire);
+    }
+
+    #[test]
+    fn shared_high_risk_contract_fixture_matches_cohost_dtos() {
+        let start_wire = shared_high_risk_contract_fixture_value("/cohost/startParams");
+        let start: CohostStartParams = serde_json::from_value(start_wire.clone()).unwrap();
+        assert!(start.consent_to_process_chat);
+        assert_eq!(serde_json::to_value(start).unwrap(), start_wire);
+
+        let minimal_start: CohostStartParams =
+            serde_json::from_value(serde_json::json!({ "sessionId": "session-fixture" })).unwrap();
+        assert!(!minimal_start.consent_to_process_chat);
+        assert_eq!(minimal_start.stream_title, None);
+
+        let question_wire = shared_high_risk_contract_fixture_value("/cohost/questionParams");
+        let question: CohostQuestionParams = serde_json::from_value(question_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(question).unwrap(), question_wire);
+
+        let flag_wire = shared_high_risk_contract_fixture_value("/cohost/flagParams");
+        let flag: CohostFlagParams = serde_json::from_value(flag_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(flag).unwrap(), flag_wire);
+
+        let patch_wire = shared_high_risk_contract_fixture_value("/cohost/settingsPatch");
+        let patch: CohostSettingsPatch = serde_json::from_value(patch_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(patch).unwrap(), patch_wire);
+        let empty_patch: CohostSettingsPatch =
+            serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty_patch, CohostSettingsPatch::default());
+
+        let settings_wire = shared_high_risk_contract_fixture_value("/cohost/settings");
+        let settings: crate::cohost::CohostSettings =
+            serde_json::from_value(settings_wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(settings).unwrap(), settings_wire);
+
+        let state_wire = shared_high_risk_contract_fixture_value("/cohost/state");
+        let state: crate::cohost::CohostState = serde_json::from_value(state_wire.clone()).unwrap();
+        // Presence fields (W1): pending delta, scheduled next pass, in-flight
+        // flag, and the session lifetime counters ride every state payload.
+        assert!(!state.tick_in_flight);
+        assert_eq!(state.pending_messages, 4);
+        assert_eq!(state.next_tick_at.as_deref(), Some("2026-08-22T10:00:28Z"));
+        assert_eq!(state.messages_seen, 84);
+        assert_eq!(state.questions_total, 5);
+        assert_eq!(serde_json::to_value(state).unwrap(), state_wire);
+
+        let off_wire = shared_high_risk_contract_fixture_value("/cohost/offState");
+        let off: crate::cohost::CohostState = serde_json::from_value(off_wire.clone()).unwrap();
+        assert_eq!(off, crate::cohost::CohostState::off());
+        assert_eq!(serde_json::to_value(off).unwrap(), off_wire);
+
+        // `detail` rides a failed tick: server envelope code + message + HTTP
+        // status, or a desktop-assigned code with no status.
+        let error_wire = shared_high_risk_contract_fixture_value("/cohost/errorState");
+        let errored: crate::cohost::CohostState =
+            serde_json::from_value(error_wire.clone()).unwrap();
+        assert_eq!(
+            errored.detail,
+            Some(crate::cohost::CohostErrorDetail {
+                code: "ai-gateway-error".to_string(),
+                message: "The co-host tick failed on every configured model.".to_string(),
+                status: Some(502),
+            })
+        );
+        assert_eq!(serde_json::to_value(errored).unwrap(), error_wire);
+        let timeout_wire = shared_high_risk_contract_fixture_value("/cohost/timeoutState");
+        let timed_out: crate::cohost::CohostState =
+            serde_json::from_value(timeout_wire.clone()).unwrap();
+        assert_eq!(
+            timed_out.detail.as_ref().map(|detail| detail.code.as_str()),
+            Some("timeout")
+        );
+        assert_eq!(
+            timed_out.detail.as_ref().and_then(|detail| detail.status),
+            None
+        );
+        assert_eq!(serde_json::to_value(timed_out).unwrap(), timeout_wire);
+
+        // A payload from before `detail` and the presence fields existed still
+        // parses (serde defaults).
+        let legacy_wire = shared_high_risk_contract_fixture_value("/cohost/legacyState");
+        assert!(legacy_wire.get("detail").is_none());
+        assert!(legacy_wire.get("tickInFlight").is_none());
+        assert!(legacy_wire.get("pendingMessages").is_none());
+        assert!(legacy_wire.get("nextTickAt").is_none());
+        assert!(legacy_wire.get("messagesSeen").is_none());
+        assert!(legacy_wire.get("questionsTotal").is_none());
+        let legacy: crate::cohost::CohostState = serde_json::from_value(legacy_wire).unwrap();
+        assert_eq!(legacy, crate::cohost::CohostState::off());
+    }
+
+    #[test]
+    fn stream_output_topology_probe_contract_is_secret_free_and_stable() {
+        let params: StreamOutputTopologyProbeParams = serde_json::from_value(serde_json::json!({
+            "streamProfile": {
+                "preset": "stream-safe-1080p60",
+                "width": 1920,
+                "height": 1080,
+                "fps": 60,
+                "bitrateKbps": 6000
+            },
+            "recordingProfile": {
+                "preset": "tutorial-1080p30",
+                "width": 1920,
+                "height": 1080,
+                "fps": 30,
+                "bitrateKbps": 6000
+            },
+            "outputRoles": ["recording", "stream"]
+        }))
+        .unwrap();
+        assert_eq!(
+            params.output_roles,
+            vec![
+                StreamOutputTopologyRole::Recording,
+                StreamOutputTopologyRole::Stream
+            ]
+        );
+
+        let result = StreamOutputTopologyProbeResult {
+            capability_key: format!("stream-output-topology-v1:{}", "a".repeat(64)),
+            stream_profile: params.stream_profile,
+            recording_profile: params.recording_profile,
+            output_roles: params.output_roles,
+            requested_bridge_output: StreamOutputBridge::WindowsMediaFoundationH264MpegTs,
+            effective_bridge_output: StreamOutputBridge::RawYuv420p,
+            effective_encode_backend: EncodeBackend::SoftwareOpenH264,
+            probe_state: StreamOutputTopologyProbeState::Rejected,
+            fallback_reason: Some("hardware profile rejected".to_string()),
+        };
+        let wire = serde_json::to_value(result).unwrap();
+        assert_eq!(
+            wire["requestedBridgeOutput"],
+            "windows-media-foundation-h264-mpegts"
+        );
+        assert_eq!(wire["effectiveBridgeOutput"], "raw-yuv420p");
+        assert_eq!(wire["effectiveEncodeBackend"], "software-open-h264");
+        assert_eq!(wire["probeState"], "rejected");
+        let serialized = wire.to_string().to_ascii_lowercase();
+        for forbidden in [
+            "serverurl",
+            "streamkey",
+            "accesstoken",
+            "refreshtoken",
+            "oauth",
+        ] {
+            assert!(
+                !serialized.contains(forbidden),
+                "topology result exposed forbidden field {forbidden}"
+            );
+        }
+
+        let rejected =
+            serde_json::from_value::<StreamOutputTopologyProbeParams>(serde_json::json!({
+                "streamProfile": {
+                    "preset": "custom",
+                    "width": 1920,
+                    "height": 1080,
+                    "fps": 30,
+                    "bitrateKbps": 6000
+                },
+                "outputRoles": ["shared"],
+                "streamKey": "must-not-enter-the-contract"
+            }));
+        assert!(
+            rejected.is_err(),
+            "unknown secret-bearing fields must be rejected"
+        );
+    }
+
+    #[test]
+    fn windows_d3d11_synchronization_timeout_counter_is_stable_on_the_wire() {
+        let diagnostics = WindowsD3d11MediaDiagnostics {
+            synchronization_timeouts: 3,
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&diagnostics).unwrap();
+        assert_eq!(wire["synchronizationTimeouts"], 3);
+        for field in [
+            "messagePumpLagP95Ms",
+            "messagePumpLagMaxMs",
+            "mediaCommandLagP95Ms",
+            "mediaCommandLagMaxMs",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unset optional timing field {field} must be omitted rather than serialized as null"
+            );
+        }
+
+        let legacy: WindowsD3d11MediaDiagnostics = serde_json::from_value(serde_json::json!({
+            "state": "unavailable"
+        }))
+        .unwrap();
+        assert_eq!(legacy.synchronization_timeouts, 0);
+    }
+
+    #[test]
+    fn diagnostic_stats_omit_an_unavailable_compositor_backend_on_the_wire() {
+        let diagnostics = crate::diagnostics::idle_diagnostics();
+        let wire = serde_json::to_value(diagnostics).unwrap();
+
+        assert!(
+            wire.get("compositorBackend").is_none(),
+            "optional compositor backend must be omitted rather than serialized as null"
+        );
+    }
+
+    #[test]
+    fn diagnostic_capture_pressure_idle_fixture_omits_unavailable_fields_without_nulls() {
+        let wire = serde_json::to_value(crate::diagnostics::idle_diagnostics())
+            .expect("idle diagnostics serialize");
+
+        for field in [
+            "previewCameraCaptureCallbackAgeMs",
+            "previewCameraLatestSequence",
+            "previewCameraCapturePixelFormat",
+            "previewScreenCaptureCallbackAgeMs",
+            "previewScreenLatestSequence",
+            "compositorMetalCachedCaptureSourceImportsLiveCount",
+            "compositorMetalCachedCaptureSourceImportsPeakCount",
+            "compositorMetalCachedCaptureSourceImportsCeiling",
+            "compositorMetalTargetRingSlotsLiveCount",
+            "compositorMetalTargetRingSlotsPeakCount",
+            "compositorMetalTargetRingSlotsCeiling",
+            "encoderBridgeMetalTargetRefsInFlightLiveCount",
+            "encoderBridgeMetalTargetRefsInFlightPeakCount",
+            "encoderBridgeMetalTargetRefsInFlightCeiling",
+            "nativePreviewIosurfaceImportLiveCount",
+            "nativePreviewIosurfaceImportPeakCount",
+            "nativePreviewIosurfaceImportCeiling",
+        ] {
+            assert!(
+                wire.get(field).is_none(),
+                "unset optional capture field {field} must be omitted rather than null"
+            );
+        }
+        for field in ["previewCameraSurfaceBacking", "previewScreenSurfaceBacking"] {
+            let surface = wire
+                .get(field)
+                .and_then(serde_json::Value::as_object)
+                .unwrap_or_else(|| panic!("required surface diagnostics object {field}"));
+            assert!(
+                !surface.contains_key("oldestAgeMs"),
+                "unset optional {field}.oldestAgeMs must be omitted rather than null"
+            );
+            assert!(
+                surface.values().all(|value| !value.is_null()),
+                "required {field} counters must never serialize as null"
+            );
+        }
+    }
+
+    #[test]
+    fn capture_pipeline_degraded_stage_is_omitted_when_healthy_and_a_string_when_set() {
+        // The serde-null → contract trap (0.9.68, 0.9.79): an Option without
+        // skip_serializing_if serializes null, and the renderer contract's
+        // optionalSchema rejects null. Healthy pipelines must OMIT the field.
+        let wire = serde_json::to_value(crate::diagnostics::idle_diagnostics())
+            .expect("idle diagnostics serialize");
+        assert!(
+            wire.get("capturePipelineDegradedStage").is_none(),
+            "healthy capturePipelineDegradedStage must be omitted rather than null"
+        );
+
+        let mut degraded = crate::diagnostics::idle_diagnostics();
+        degraded.capture_pipeline_degraded_stage = Some("camera-delivery".to_string());
+        let wire = serde_json::to_value(degraded).expect("degraded diagnostics serialize");
+        assert_eq!(
+            wire.get("capturePipelineDegradedStage")
+                .and_then(serde_json::Value::as_str),
+            Some("camera-delivery")
+        );
+    }
+
+    #[test]
+    fn diagnostic_capture_pressure_maximal_fixture_round_trips_without_nulls() {
+        let mut diagnostics = crate::diagnostics::idle_diagnostics();
+        diagnostics.compositor_source_capture_texture_reuses = 120;
+        diagnostics.compositor_camera_source_capture_texture_reuses = 70;
+        diagnostics.compositor_screen_source_capture_texture_reuses = 50;
+        diagnostics.compositor_source_texture_cache_flushes = 6;
+        diagnostics.preview_camera_capture_callback_count = 1_001;
+        diagnostics.preview_camera_did_drop_callback_count = 17;
+        diagnostics.preview_camera_frame_store_publications = 984;
+        diagnostics.preview_camera_capture_callback_age_ms = Some(12);
+        diagnostics.preview_camera_latest_sequence = Some(984);
+        diagnostics.preview_camera_capture_pixel_format = Some("BGRA".to_string());
+        diagnostics.preview_camera_drop_reasons = PreviewCameraDropReasonStats {
+            frame_was_late: 3,
+            out_of_buffers: 5,
+            discontinuity: 7,
+            unknown: 2,
+        };
+        diagnostics.preview_camera_surface_backing = PreviewSourceSurfaceBackingStats {
+            live_count: 2,
+            peak_count: 4,
+            estimated_bytes: 66_355_200,
+            peak_estimated_bytes: 132_710_400,
+            oldest_age_ms: Some(42),
+        };
+        diagnostics.preview_screen_capture_callback_count = 1_010;
+        diagnostics.preview_screen_frame_store_publications = 990;
+        diagnostics.preview_screen_capture_callback_age_ms = Some(9);
+        diagnostics.preview_screen_latest_sequence = Some(990);
+        diagnostics.preview_screen_frame_statuses = PreviewScreenFrameStatusStats {
+            complete: 990,
+            idle: 4,
+            blank: 3,
+            suspended: 2,
+            started: 1,
+            stopped: 1,
+            unknown: 9,
+        };
+        diagnostics.preview_screen_surface_backing = PreviewSourceSurfaceBackingStats {
+            live_count: 3,
+            peak_count: 6,
+            estimated_bytes: 99_532_800,
+            peak_estimated_bytes: 199_065_600,
+            oldest_age_ms: Some(31),
+        };
+
+        let wire = serde_json::to_value(&diagnostics).expect("maximal diagnostics serialize");
+        for field in [
+            "previewCameraCaptureCallbackAgeMs",
+            "previewCameraLatestSequence",
+            "previewCameraCapturePixelFormat",
+            "previewScreenCaptureCallbackAgeMs",
+            "previewScreenLatestSequence",
+        ] {
+            assert_ne!(wire.get(field), Some(&serde_json::Value::Null), "{field}");
+        }
+        assert_eq!(wire["previewCameraDropReasons"]["outOfBuffers"], 5);
+        assert_eq!(wire["previewCameraSurfaceBacking"]["oldestAgeMs"], 42);
+        assert_eq!(wire["previewScreenFrameStatuses"]["suspended"], 2);
+        assert_eq!(wire["previewScreenSurfaceBacking"]["peakCount"], 6);
+        assert_eq!(wire["compositorSourceCaptureTextureReuses"], 120);
+        assert_eq!(wire["compositorCameraSourceCaptureTextureReuses"], 70);
+        assert_eq!(wire["compositorScreenSourceCaptureTextureReuses"], 50);
+        assert_eq!(wire["compositorSourceTextureCacheFlushes"], 6);
+
+        let restored: DiagnosticStats =
+            serde_json::from_value(wire).expect("maximal diagnostics deserialize");
+        assert_eq!(restored, diagnostics);
+    }
+
+    #[test]
+    fn windows_d3d11_presenter_media_generation_is_stable_on_the_wire() {
+        let diagnostics = WindowsD3d11PresenterDiagnostics {
+            media_generation: 41,
+            ..Default::default()
+        };
+        let wire = serde_json::to_value(&diagnostics).unwrap();
+        assert_eq!(wire["mediaGeneration"], 41);
+
+        let mut legacy_wire =
+            serde_json::to_value(WindowsD3d11PresenterDiagnostics::default()).unwrap();
+        legacy_wire
+            .as_object_mut()
+            .expect("presenter diagnostics serialize as an object")
+            .remove("mediaGeneration");
+        let legacy: WindowsD3d11PresenterDiagnostics = serde_json::from_value(legacy_wire).unwrap();
+        assert_eq!(legacy.media_generation, 0);
     }
 }

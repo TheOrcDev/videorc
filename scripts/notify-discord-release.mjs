@@ -24,6 +24,8 @@ import { loadChangelogEntries } from './lib/changelog.mjs'
 
 const WEBHOOK_ENV = 'VIDEORC_DISCORD_RELEASE_WEBHOOK'
 const MAX_HIGHLIGHTS = 4
+const WINDOWS_ALPHA_DOWNLOAD_URL = 'https://www.videorc.com/download/windows'
+const DOWNLOAD_CHOOSER_URL = 'https://www.videorc.com/download'
 const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)))
 
 /** Strip inline markdown emphasis/links so a highlight reads clean in Discord. */
@@ -36,16 +38,41 @@ function stripInline(text) {
 
 /** Build the short Discord message from a changelog entry. */
 export function buildDiscordReleaseMessage(entry) {
-  const version = entry.version.replace(/-beta\.\d+$/, '')
+  const platforms = entry.platforms ?? ['macos']
+  const isWindowsAlpha = entry.channel === 'alpha' && platforms.includes('windows')
+  const isWindowsOnly = platforms.length === 1 && platforms[0] === 'windows'
+  const version = isWindowsAlpha
+    ? formatReleaseVersion(entry.version)
+    : entry.version.replace(/-beta\.\d+$/, '')
+  const audience = isWindowsAlpha ? ` for ${formatPlatforms(platforms)}` : ''
   const highlights = entry.highlights
     .slice(0, MAX_HIGHLIGHTS)
     .map((item) => `• ${stripInline(item)}`)
-  const lines = [`🚀 **Videorc ${version} — ${entry.title}**`, '', ...highlights]
+  const lines = [`🚀 **Videorc ${version}${audience} — ${entry.title}**`, '', ...highlights]
   if (entry.highlights.length > MAX_HIGHLIGHTS) {
     lines.push('', '…and more.')
   }
-  lines.push('', 'Update from Settings → About, or it applies on next launch.')
+  lines.push(
+    '',
+    isWindowsAlpha
+      ? isWindowsOnly
+        ? `Download the Windows Alpha: ${WINDOWS_ALPHA_DOWNLOAD_URL}`
+        : `Choose your Alpha download: ${DOWNLOAD_CHOOSER_URL}`
+      : 'Update from Settings → About, or it applies on next launch.'
+  )
   return lines.join('\n')
+}
+
+function formatPlatforms(platforms) {
+  return platforms.map((platform) => (platform === 'macos' ? 'macOS' : 'Windows')).join(' and ')
+}
+
+function formatReleaseVersion(version) {
+  const [core, preRelease] = version.split('-')
+  if (!preRelease) return core
+  const [tag, number] = preRelease.split('.')
+  const capitalized = tag.charAt(0).toUpperCase() + tag.slice(1)
+  return number ? `${core} ${capitalized} ${number}` : `${core} ${capitalized}`
 }
 
 async function main() {

@@ -5,6 +5,8 @@ import { createRoot, type Root } from 'react-dom/client'
 import { describe, expect, it } from 'vitest'
 
 import {
+  capSessionDetailBuffer,
+  SESSION_DETAIL_BUFFER_LIMIT,
   StudioContextProviders,
   useStudioCore,
   useStudioPreview,
@@ -88,6 +90,11 @@ function installNullRenderDom(): { container: Element; restore: () => void } {
 }
 
 describe('studio context invalidation boundaries', () => {
+  it('caps selected-session live detail buffers to the rendered history window', () => {
+    const entries = Array.from({ length: SESSION_DETAIL_BUFFER_LIMIT + 5 }, (_, index) => index)
+
+    expect(capSessionDetailBuffer(entries)).toEqual(entries.slice(-SESSION_DETAIL_BUFFER_LIMIT))
+  })
   it('keeps high-frequency media state out of the core context memo', () => {
     const source = readFileSync(new URL('./use-studio.tsx', import.meta.url), 'utf8')
     const coreStart = source.indexOf('const value = useMemo<StudioCoreContextValue>')
@@ -107,6 +114,52 @@ describe('studio context invalidation boundaries', () => {
     expect(coreMemo).not.toMatch(/\bpreviewLiveStatus\b/)
     expect(coreMemo).not.toMatch(/\bpreviewCameraStatus\b/)
     expect(coreMemo).not.toMatch(/\bpreviewScreenStatus\b/)
+  })
+
+  it('keeps the microphone analyser runtime behind a demand-loaded boundary', () => {
+    const provider = readFileSync(new URL('./use-studio-mic-visual.tsx', import.meta.url), 'utf8')
+    const eagerConsumers = [
+      '../components/studio/audio-mixer.tsx',
+      '../components/studio/session-mic-sliver.tsx',
+      '../components/ui/live-waveform.tsx'
+    ].map((path) => readFileSync(new URL(path, import.meta.url), 'utf8'))
+
+    expect(provider).toContain("import('@/lib/browser-mic-visual-pipeline')")
+    expect(provider).not.toMatch(/import\s*\{[^}]*createMicVisualPipeline[^}]*\}\s*from/)
+    for (const consumer of eagerConsumers) {
+      expect(consumer).not.toContain("from '@/lib/mic-visual-pipeline'")
+    }
+  })
+
+  it('keeps remote-control runtimes out of the eager Studio chunk', () => {
+    const source = readFileSync(new URL('./use-studio.tsx', import.meta.url), 'utf8')
+
+    expect(source).toContain("import('@/lib/remote-surface')")
+    expect(source).toContain("import('@/lib/global-shortcuts')")
+    expect(source).not.toMatch(/import\s*\{[^}]*RemoteSurfacePublisher[^}]*\}\s*from/)
+    expect(source).not.toMatch(/import\s*\{[^}]*GlobalShortcutsRegistrar[^}]*\}\s*from/)
+    expect(source).not.toContain("from 'immer'")
+  })
+
+  it('keeps below-the-fold Studio editors out of the launch chunk', () => {
+    const source = readFileSync(
+      new URL('../components/tabs/studio-tab.tsx', import.meta.url),
+      'utf8'
+    )
+
+    expect(source).toContain("await import('@/components/studio/studio-dashboard-bottom-row')")
+    expect(source).not.toContain("from '@/components/studio/audio-mixer'")
+    expect(source).not.toContain("from '@/components/studio/scenes-gallery'")
+    expect(source).toMatch(/<Suspense fallback=\{<StudioDashboardBottomRowFallback \/>\}>/)
+  })
+
+  it('keeps the Studio workspace behind the shell lazy-import boundary', () => {
+    const source = readFileSync(new URL('../components/app-shell.tsx', import.meta.url), 'utf8')
+
+    expect(source).toContain("await import('@/components/tabs/studio-tab')")
+    expect(source).not.toMatch(
+      /import\s*\{[^}]*StudioTab[^}]*\}\s*from\s*['"]@\/components\/tabs\/studio-tab['"]/
+    )
   })
 
   it('preserves core provider identity across elapsed-time and preview telemetry updates', async () => {
@@ -241,27 +294,26 @@ describe('studio context invalidation boundaries', () => {
     expect(optionalPlatformLoad).toBeGreaterThan(criticalPreviewCommit)
   })
 
-  it('keeps diagnostics and chat consumers below the Studio tab root', () => {
+  it('keeps diagnostics consumers below the Studio tab root', () => {
+    // The in-studio chat rail was removed 2026-08-19 (comments live only in
+    // the separate window), so the partition to protect is root vs preview:
+    // the Studio root must not subscribe to diagnostics or chat contexts.
     const source = readFileSync(
       new URL('../components/tabs/studio-tab.tsx', import.meta.url),
       'utf8'
     )
     const rootStart = source.indexOf('export function StudioTab')
     const previewStart = source.indexOf('function StudioPreviewPanel', rootStart)
-    const chatStart = source.indexOf('function StudioLiveChatRail', previewStart)
     const rootComponent = source.slice(rootStart, previewStart)
-    const previewComponent = source.slice(previewStart, chatStart)
-    const chatComponent = source.slice(chatStart)
+    const previewComponent = source.slice(previewStart)
 
     expect(rootStart).toBeGreaterThan(-1)
     expect(previewStart).toBeGreaterThan(rootStart)
-    expect(chatStart).toBeGreaterThan(previewStart)
+    expect(source).not.toMatch(/useStudioChat\s*\(/)
     expect(rootComponent).not.toMatch(/useStudioDiagnostics\s*\(/)
-    expect(rootComponent).not.toMatch(/useStudioChat\s*\(/)
     expect(rootComponent).not.toMatch(/\bdiagnosticStats\b/)
     expect(rootComponent).not.toMatch(/\bliveChatSnapshot\b/)
     expect(previewComponent).toMatch(/useStudioDiagnostics\s*\(/)
-    expect(chatComponent).toMatch(/useStudioChat\s*\(/)
   })
 
   it('coalesces websocket chat messages before updating React state', () => {

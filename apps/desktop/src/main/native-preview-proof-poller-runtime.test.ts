@@ -36,6 +36,23 @@ type ProofPollerRuntime = {
     now: number,
     freshnessBudgetMs: number
   ) => boolean
+  proofPollersHaveCompleteFrameHistory: (pollers: Map<string, RuntimePoller>) => boolean
+  markProofPollerRequestStarted: (poller: RuntimePoller) => void
+  markProofPollerNotModified: (poller: RuntimePoller) => void
+  markProofPollerFrameDecoded: (
+    poller: RuntimePoller,
+    byteLength: number,
+    width: number,
+    height: number,
+    now: number
+  ) => void
+  proofPollerTransportTotals: (pollers: Map<string, RuntimePoller>) => {
+    requestCount: number
+    notModifiedCount: number
+    bytesReceived: number
+    decodedFrames: number
+    sourceDimensions: Record<string, { width: number; height: number }>
+  }
 }
 
 function loadRuntime(
@@ -55,7 +72,12 @@ function loadRuntime(
       proofPollerFrameAgeMs,
       proofPollerTransportAgeMs,
       proofPollerFrameIsFresh,
-      proofPollerTransportIsFresh
+      proofPollerTransportIsFresh,
+      proofPollersHaveCompleteFrameHistory,
+      markProofPollerRequestStarted,
+      markProofPollerNotModified,
+      markProofPollerFrameDecoded,
+      proofPollerTransportTotals
     };`
   )
   const pixels = new Uint8ClampedArray(8 * 8 * 4)
@@ -145,6 +167,32 @@ describe('Windows proof poller runtime', () => {
     expect(runtime.proofPollerFrameIsFresh(current, 2_000, 1_000)).toBe(false)
   })
 
+  it('tracks first-frame history only for the active poller generation', () => {
+    const established = poller()
+    const replacement = { ...poller(), lastFrameAdvanceAt: established.lastFrameAdvanceAt }
+    const newGeneration = { ...poller(), lastFrameAdvanceAt: null }
+    const runtime = loadRuntime(new Map(), vi.fn())
+
+    expect(runtime.proofPollersHaveCompleteFrameHistory(new Map([['screen', established]]))).toBe(
+      true
+    )
+    expect(
+      runtime.proofPollersHaveCompleteFrameHistory(
+        new Map([
+          ['screen', established],
+          ['camera', newGeneration]
+        ])
+      )
+    ).toBe(false)
+    expect(runtime.proofPollersHaveCompleteFrameHistory(new Map([['screen', replacement]]))).toBe(
+      true
+    )
+    expect(runtime.proofPollersHaveCompleteFrameHistory(new Map([['screen', newGeneration]]))).toBe(
+      false
+    )
+    expect(runtime.proofPollersHaveCompleteFrameHistory(new Map())).toBe(false)
+  })
+
   it('counts only decoded images with no visible pixels as blank', () => {
     const visible = loadRuntime(new Map(), vi.fn(), [0, 0, 255])
     const transparent = loadRuntime(new Map(), vi.fn(), [0])
@@ -152,5 +200,63 @@ describe('Windows proof poller runtime', () => {
     expect(visible.proofImageIsBlank({ naturalWidth: 640, naturalHeight: 360 })).toBe(false)
     expect(transparent.proofImageIsBlank({ naturalWidth: 640, naturalHeight: 360 })).toBe(true)
     expect(visible.proofImageIsBlank({ naturalWidth: 0, naturalHeight: 0 })).toBe(true)
+  })
+})
+
+describe('proof poller transport accounting', () => {
+  function poller(): RuntimePoller {
+    return {
+      image: { src: '', dataset: { live: '0' }, removeAttribute: vi.fn() },
+      cancelled: false,
+      abortController: { abort: vi.fn() },
+      objectUrl: null,
+      startedAt: 0,
+      lastFrameAdvanceAt: null,
+      lastTransportSuccessAt: null
+    }
+  }
+
+  it('aggregates request, not-modified, byte, and decode totals per surface', () => {
+    const pollers = new Map<string, RuntimePoller>()
+    const runtime = loadRuntime(pollers, () => {})
+    const screen = poller()
+    const camera = poller()
+    pollers.set('screen', screen)
+    pollers.set('camera', camera)
+
+    runtime.markProofPollerRequestStarted(screen)
+    runtime.markProofPollerRequestStarted(screen)
+    runtime.markProofPollerRequestStarted(camera)
+    runtime.markProofPollerNotModified(screen)
+    runtime.markProofPollerFrameDecoded(screen, 8_294_454, 1920, 1080, 1000)
+    runtime.markProofPollerFrameDecoded(camera, 3_686_454, 1280, 720, 1001)
+
+    expect(runtime.proofPollerTransportTotals(pollers)).toEqual({
+      requestCount: 3,
+      notModifiedCount: 1,
+      bytesReceived: 8_294_454 + 3_686_454,
+      decodedFrames: 2,
+      sourceDimensions: {
+        screen: { width: 1920, height: 1080 },
+        camera: { width: 1280, height: 720 }
+      }
+    })
+  })
+
+  it('ignores invalid byte lengths and dimensions without losing the decode count', () => {
+    const pollers = new Map<string, RuntimePoller>()
+    const runtime = loadRuntime(pollers, () => {})
+    const layer = poller()
+    pollers.set('layer', layer)
+
+    runtime.markProofPollerFrameDecoded(layer, Number.NaN, 0, -1, 5)
+
+    expect(runtime.proofPollerTransportTotals(pollers)).toEqual({
+      requestCount: 0,
+      notModifiedCount: 0,
+      bytesReceived: 0,
+      decodedFrames: 1,
+      sourceDimensions: {}
+    })
   })
 })

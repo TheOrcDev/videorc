@@ -31,6 +31,11 @@ export function buildRecordingStudioGateSteps({
       args: ['test:scripts']
     },
     {
+      label: 'FFmpeg live microphone control probe',
+      command: 'pnpm',
+      args: ['probe:live-audio-controls']
+    },
+    {
       label: 'backend live layout tests',
       command: 'cargo',
       args: ['test', '-p', 'videorc-backend', 'live_layout::tests::']
@@ -80,6 +85,22 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:dev']
       },
       {
+        // Exercise the real Electron before-quit -> authenticated backend
+        // shutdown path while terminal MP4 publication remains blocked beyond
+        // the historical 30s process-kill boundary.
+        label: 'app quit during recording finalization smoke',
+        command: 'pnpm',
+        args: ['smoke:app-quit-recording']
+      },
+      {
+        // Instant-record contract: renderer-path Record/Stop cycles must stay
+        // inside the calibrated OBS-parity budgets (record-latency-gate.mjs),
+        // and every artifact must pass the analyzer + startup-resolution gates.
+        label: 'record start/stop latency gate',
+        command: 'pnpm',
+        args: ['smoke:record-latency:gate']
+      },
+      {
         label: 'imported screen image recording smoke',
         command: 'pnpm',
         args: ['smoke:screens']
@@ -107,6 +128,11 @@ export function buildRecordingStudioGateSteps({
         label: 'comment highlight stream artifact smoke',
         command: 'pnpm',
         args: ['smoke:comment-highlight-stream']
+      },
+      {
+        label: 'detached Comments command relay probe',
+        command: 'pnpm',
+        args: ['probe:comments-window']
       },
       {
         label: 'backend-owned preview scene commit smoke',

@@ -1,4 +1,4 @@
-import type { Icon } from '@phosphor-icons/react'
+import { AppIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -21,7 +21,7 @@ export function PanelSection({
   // the surrounding layout already names the section.
   title?: string
   description?: ReactNode
-  icon?: Icon
+  icon?: AppIcon
   action?: ReactNode
   children: ReactNode
   className?: string

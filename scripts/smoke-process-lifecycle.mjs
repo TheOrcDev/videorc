@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { mkdtempSync } from 'node:fs'
-import { rm } from 'node:fs/promises'
+import { mkdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 
 import { launchDevApp, repoRoot } from './lib/app-launcher.mjs'
 import {
@@ -10,9 +10,11 @@ import {
   formatCensus,
   ownedProcessLedgerPaths,
   pruneDeadOwnedProcessRecords,
+  verifyCleanProcessStateBeforeRecovery,
   waitForCleanProcessState,
   waitForNoLiveProcessState
 } from './lib/process-census.mjs'
+import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 120000)
 const stateRoot = mkdtempSync(join(tmpdir(), 'videorc-process-lifecycle-'))
@@ -23,6 +25,7 @@ const ledgerPaths = ownedProcessLedgerPaths({
   userDataDir,
   workspaceRoot: repoRoot
 })
+const injectStaleLedger = process.env.VIDEORC_SMOKE_INJECT_STALE_LEDGER === '1'
 
 let launched
 
@@ -32,10 +35,11 @@ try {
       VIDEORC_APP_DATA_DIR: appDataDir,
       VIDEORC_USER_DATA_DIR: userDataDir,
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
-      VIDEORC_DISABLE_BACKEND_REAP: '0'
+      VIDEORC_DISABLE_BACKEND_REAP: '0',
+      VIDEORC_SMOKE_COMMAND_SERVER: '1'
     },
     timeoutMs,
-    requiredMarkers: ['backend-ready'],
+    requiredMarkers: ['backend-ready', 'preview-motion-ready'],
     onLine: (line) => {
       if (/Reaping|Backend exited|Native preview host helper|error|panic/i.test(line)) {
         console.log(line)
@@ -57,7 +61,26 @@ try {
   )
 } finally {
   if (launched) {
-    await launched.stop()
+    let gracefulQuitCompleted = false
+    try {
+      await requestSmokeCommand(
+        launched.connections['preview-motion-ready'],
+        'app-quit',
+        {},
+        { timeoutMs: 2000 }
+      )
+      await waitForCleanProcessState({
+        ledgerPaths,
+        pgid: launched.process.pid,
+        timeoutMs: 10000
+      })
+      gracefulQuitCompleted = true
+    } catch (error) {
+      console.warn(
+        `Graceful app quit failed; using forced launcher teardown: ${error?.message ?? error}`
+      )
+    }
+    if (!gracefulQuitCompleted) await launched.stop()
   }
 
   console.log('\n=== teardown process census ===')
@@ -68,22 +91,48 @@ try {
   })
   console.log(formatCensus(stopped))
 
-  const pruned = await pruneDeadOwnedProcessRecords({ ledgerPaths })
-  for (const entry of pruned) {
-    console.log(
-      `pruned ${entry.removed.length} dead owned process record(s) from ${entry.ledgerPath}`
+  if (injectStaleLedger) {
+    const ledgerPath = ledgerPaths[0]
+    await mkdir(dirname(ledgerPath), { recursive: true })
+    await writeFile(
+      ledgerPath,
+      `${JSON.stringify(
+        [
+          {
+            pid: 2_147_483_647,
+            label: 'injected-dead-process-record',
+            startedAt: '2000-01-01T00:00:00.000Z'
+          }
+        ],
+        null,
+        2
+      )}\n`
     )
+    console.log(`Injected an isolated stale ledger record at ${ledgerPath}`)
   }
 
-  const clean = await waitForCleanProcessState({
-    ledgerPaths,
-    pgid: launched?.process?.pid,
-    timeoutMs: 1000
-  })
-  console.log('\n=== clean process census ===')
-  console.log(formatCensus(clean))
-
-  await rm(stateRoot, { recursive: true, force: true })
+  try {
+    const clean = await verifyCleanProcessStateBeforeRecovery({
+      verify: () =>
+        waitForCleanProcessState({
+          ledgerPaths,
+          pgid: launched?.process?.pid,
+          timeoutMs: 1000
+        }),
+      recover: async () => {
+        const pruned = await pruneDeadOwnedProcessRecords({ ledgerPaths })
+        for (const entry of pruned) {
+          console.log(
+            `recovery pruned ${entry.removed.length} dead owned process record(s) from ${entry.ledgerPath}`
+          )
+        }
+      }
+    })
+    console.log('\n=== clean process census ===')
+    console.log(formatCensus(clean))
+  } finally {
+    await rm(stateRoot, { recursive: true, force: true })
+  }
 }
 
 console.log('Process lifecycle smoke OK - owned process records and process group cleaned up.')

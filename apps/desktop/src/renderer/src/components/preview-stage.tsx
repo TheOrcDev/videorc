@@ -1,4 +1,4 @@
-import { ArrowSquareOut, PushPinSimple, VideoCamera, Warning } from '@phosphor-icons/react'
+import { CameraIcon, ExternalLinkIcon, PinIcon, WarningIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -10,8 +10,15 @@ import type {
   PreviewLiveStatus,
   PreviewSupervisorState,
   PreviewSurfaceStatus,
-  PreviewWindowState
+  PreviewWindowState,
+  SystemPermissionPane
 } from '@/lib/backend'
+import {
+  systemAccessAction,
+  systemAccessRows,
+  type SystemAccessAction,
+  type SystemAccessRow
+} from '@/lib/system-access'
 import { cn } from '@/lib/utils'
 
 type PreviewStageProps = {
@@ -23,8 +30,13 @@ type PreviewStageProps = {
    * that normally carries it. */
   dockedFooterStart?: ReactNode
   onRetry?: () => void
-  onOpenPermissions?: () => void
+  onOpenPermissions?: (pane: SystemPermissionPane) => void
   className?: string
+}
+
+type PreviewPermissionAccess = {
+  action: SystemAccessAction
+  row: SystemAccessRow | undefined
 }
 
 export function PreviewStage({
@@ -42,8 +54,33 @@ export function PreviewStage({
     closePreviewWindow,
     setPreviewWindowAlwaysOnTop,
     setPreviewWindowMode,
-    captureConfig
+    captureConfig,
+    deviceList,
+    mediaAccess,
+    runtimeInfo
   } = useStudioCore()
+  const accessRows = systemAccessRows({
+    deviceList,
+    audioMeter: null,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  })
+  const permissionPane = previewPermissionPane(previewWindow.supervisor)
+  const permissionRow = accessRows.find((candidate) => candidate.id === permissionPane)
+  const permissionAccess: PreviewPermissionAccess | null = permissionPane
+    ? {
+        row: permissionRow,
+        action: systemAccessAction({
+          pane: permissionPane,
+          state: permissionRow?.state,
+          platform: runtimeInfo?.platform,
+          mediaAccessStatus:
+            permissionPane === 'camera' || permissionPane === 'microphone'
+              ? mediaAccess?.[permissionPane]
+              : undefined
+        })
+      }
+    : null
 
   const docked =
     nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
@@ -62,6 +99,7 @@ export function PreviewStage({
         footerStart={dockedFooterStart}
         previewSurfaceStatus={previewSurfaceStatus}
         previewWindow={previewWindow}
+        permissionAccess={permissionAccess}
         slotRef={slotRef}
         onClose={() => void closePreviewWindow()}
         onOpenPermissions={onOpenPermissions}
@@ -80,6 +118,7 @@ export function PreviewStage({
       previewSupervisor={previewWindow.supervisor}
       previewSurfaceStatus={previewSurfaceStatus}
       previewWindowOpen={previewWindow.open}
+      permissionAccess={permissionAccess}
       onAlwaysOnTopChange={(alwaysOnTop) => void setPreviewWindowAlwaysOnTop(alwaysOnTop)}
       onClose={() => void closePreviewWindow()}
       onOpen={() => void openPreviewWindow()}
@@ -126,6 +165,7 @@ function DockedPreviewFrame({
   footerStart,
   onPopOut,
   onClose,
+  permissionAccess,
   onOpenPermissions,
   className
 }: {
@@ -136,16 +176,16 @@ function DockedPreviewFrame({
   footerStart?: ReactNode
   onPopOut: () => void
   onClose: () => void
-  onOpenPermissions?: () => void
+  permissionAccess: PreviewPermissionAccess | null
+  onOpenPermissions?: (pane: SystemPermissionPane) => void
   className?: string
 }): ReactElement {
   const supervisor = previewWindow.supervisor
   const hidden = dockHiddenDisplay(previewWindow.dockHiddenReason)
-  const status = hidden ?? {
-    title: previewSupervisorDisplay(true, supervisor, previewSurfaceStatus).title,
-    detail: previewSupervisorDisplay(true, supervisor, previewSurfaceStatus).detail
-  }
-  const showPermissionAction = supervisor.lifecycleState === 'permission-required'
+  const status =
+    hidden ??
+    previewSupervisorDisplay(true, supervisor, previewSurfaceStatus, undefined, permissionAccess)
+  const permissionPane = previewPermissionPane(supervisor)
   const footprintRatio = previewFootprintRatio(aspect)
   const slotRatio = previewSlotRatio(aspect)
 
@@ -171,12 +211,15 @@ function DockedPreviewFrame({
       >
         <div
           ref={slotRef}
-          className="relative h-full"
+          /* rounded-panel (18pt) matches the cornerRadius main sends with the
+             docked surface bounds — the native CAMetalLayer now clips itself
+             to the same radius, so the CSS ground and the video agree. */
+          className="relative h-full overflow-hidden rounded-panel"
           data-videorc-dock-slot
           style={{ aspectRatio: slotRatio }}
         >
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
-            <VideoCamera className="size-8 text-muted-foreground" weight="duotone" />
+            <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
             <span className="text-sm font-medium text-[#F4F4F5]">{status.title}</span>
             <span className="text-xs text-[#A1A1AA]">{status.detail}</span>
           </div>
@@ -187,9 +230,9 @@ function DockedPreviewFrame({
           with the video edges. */}
       <div className="flex items-center justify-end gap-1.5 pt-2">
         {footerStart ? <div className="mr-auto flex items-center">{footerStart}</div> : null}
-        {showPermissionAction && onOpenPermissions ? (
-          <Button size="sm" variant="outline" onClick={onOpenPermissions}>
-            Open permissions
+        {permissionPane && permissionAccess?.action && onOpenPermissions ? (
+          <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
+            Resolve permission
           </Button>
         ) : null}
         <Button
@@ -199,7 +242,7 @@ function DockedPreviewFrame({
           variant="secondary"
           onClick={onPopOut}
         >
-          <ArrowSquareOut className="size-4" />
+          <ExternalLinkIcon className="size-4" />
           Pop out
         </Button>
         <Button size="sm" variant="secondary" onClick={onClose}>
@@ -253,6 +296,7 @@ function DetachedPreviewCard({
   onClose,
   onStick,
   onRetry,
+  permissionAccess,
   onOpenPermissions,
   className
 }: {
@@ -268,28 +312,32 @@ function DetachedPreviewCard({
   onClose: () => void
   onStick: () => void
   onRetry?: () => void
-  onOpenPermissions?: () => void
+  permissionAccess: PreviewPermissionAccess | null
+  onOpenPermissions?: (pane: SystemPermissionPane) => void
   className?: string
 }): ReactElement {
   const supervisorStatus = previewSupervisorDisplay(
     previewWindowOpen,
     previewSupervisor,
     previewSurfaceStatus,
-    previewLiveStatus
+    previewLiveStatus,
+    permissionAccess
   )
   const transportLabel = previewWindowOpen
     ? (supervisorStatus.transportLabel ??
       previewTransportLabel(
         previewSurfaceStatus?.transport ?? 'unavailable',
-        previewSurfaceStatus?.backing
+        previewSurfaceStatus?.backing,
+        previewSurfaceStatus?.nativePreviewHostKind
       ))
     : null
   const disabledMessage =
     previewLiveStatus?.message ??
     previewSurfaceStatus?.message ??
     'Native preview surface is disabled.'
+  const permissionPane = previewPermissionPane(previewSupervisor)
   const showPermissionAction =
-    previewWindowOpen && previewSupervisor.lifecycleState === 'permission-required'
+    previewWindowOpen && permissionPane !== null && Boolean(permissionAccess?.action)
 
   return (
     <div
@@ -303,9 +351,9 @@ function DetachedPreviewCard({
       style={{ aspectRatio: previewFootprintRatio(aspect) }}
     >
       {nativePreviewSurfaceEnabled && supervisorStatus.tone !== 'warn' ? (
-        <VideoCamera className="size-8 text-muted-foreground" weight="duotone" />
+        <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
       ) : (
-        <Warning className="size-8 text-warning" weight="duotone" />
+        <WarningIcon className="size-8 text-warning" weight="duotone" />
       )}
       {nativePreviewSurfaceEnabled ? (
         previewWindowOpen ? (
@@ -322,15 +370,19 @@ function DetachedPreviewCard({
                 Focus window
               </Button>
               <Button data-videorc-preview-stick size="sm" variant="outline" onClick={onStick}>
-                <PushPinSimple className="size-4" />
+                <PinIcon className="size-4" />
                 Stick to app
               </Button>
               <Button size="sm" variant="outline" onClick={onClose}>
                 Close preview
               </Button>
-              {showPermissionAction && onOpenPermissions ? (
-                <Button size="sm" variant="outline" onClick={onOpenPermissions}>
-                  Open permissions
+              {showPermissionAction && permissionPane && onOpenPermissions ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onOpenPermissions(permissionPane)}
+                >
+                  Resolve permission
                 </Button>
               ) : null}
             </div>
@@ -367,9 +419,9 @@ function DetachedPreviewCard({
                 Retry preview
               </Button>
             ) : null}
-            {onOpenPermissions ? (
-              <Button size="sm" variant="outline" onClick={onOpenPermissions}>
-                Open permissions
+            {permissionPane && permissionAccess?.action && onOpenPermissions ? (
+              <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
+                Resolve permission
               </Button>
             ) : null}
           </div>
@@ -386,11 +438,12 @@ type PreviewSupervisorDisplay = {
   tone: 'normal' | 'warn'
 }
 
-function previewSupervisorDisplay(
+export function previewSupervisorDisplay(
   previewWindowOpen: boolean,
   supervisor: PreviewSupervisorState,
   previewSurfaceStatus?: PreviewSurfaceStatus,
-  previewLiveStatus?: PreviewLiveStatus
+  previewLiveStatus?: PreviewLiveStatus,
+  permissionAccess?: PreviewPermissionAccess | null
 ): PreviewSupervisorDisplay {
   if (!previewWindowOpen) {
     return {
@@ -405,17 +458,40 @@ function previewSupervisorDisplay(
       return {
         title: 'Preview is live in its own window',
         detail: 'Drag, resize, or close it anytime',
-        transportLabel: previewTransportLabel(supervisor.transport, supervisor.backing),
+        transportLabel: previewTransportLabel(
+          supervisor.transport,
+          supervisor.backing,
+          supervisor.nativePreviewHostKind
+        ),
         tone: 'normal'
       }
     case 'surface-fallback':
       return {
         title: 'Preview is using fallback rendering',
         detail: supervisor.fallbackReason ?? 'Native surface is not available yet.',
-        transportLabel: previewTransportLabel(supervisor.transport, supervisor.backing),
+        transportLabel: previewTransportLabel(
+          supervisor.transport,
+          supervisor.backing,
+          supervisor.nativePreviewHostKind
+        ),
         tone: 'warn'
       }
     case 'permission-required':
+      if (
+        permissionAccess?.action === null &&
+        (permissionAccess.row?.state === 'device-issue' ||
+          permissionAccess.row?.state === 'granted')
+      ) {
+        const row = permissionAccess.row
+        return {
+          title: 'Preview is recovering',
+          detail:
+            row.state === 'device-issue'
+              ? row.detail
+              : `${row.label} permission is granted. Reconnecting capture.`,
+          tone: 'warn'
+        }
+      }
       return {
         title: 'Preview needs permission',
         detail:
@@ -477,13 +553,38 @@ function previewPermissionMessage(
   }
 }
 
+export function previewPermissionPane(
+  supervisor: PreviewSupervisorState
+): SystemPermissionPane | null {
+  if (supervisor.lifecycleState !== 'permission-required') {
+    return null
+  }
+  switch (supervisor.permissionStatus) {
+    case 'camera-required':
+      return 'camera'
+    case 'screen-recording-required':
+      return 'screen-recording'
+    case 'unknown':
+      return 'privacy'
+    case 'ok':
+      return null
+  }
+}
+
 function previewTransportLabel(
   transport: PreviewLiveStatus['transport'] | PreviewSupervisorState['transport'],
-  backing?: PreviewSurfaceStatus['backing'] | PreviewSupervisorState['backing']
+  backing?: PreviewSurfaceStatus['backing'] | PreviewSupervisorState['backing'],
+  hostKind?:
+    | PreviewSurfaceStatus['nativePreviewHostKind']
+    | PreviewSupervisorState['nativePreviewHostKind']
 ): string | null {
   switch (transport) {
     case 'native-surface':
       return backing === 'cametal-layer' ? 'Native preview' : 'Surface proof'
+    case 'd3d11-shared-texture':
+      return backing === 'directcomposition-swapchain' && hostKind === 'backend-d3d11-presenter'
+        ? 'Native preview'
+        : 'Surface proof'
     case 'electron-proof-surface':
       return 'Electron proof'
     case 'latest-jpeg-polling':

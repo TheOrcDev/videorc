@@ -90,7 +90,7 @@ pub async fn run_ai_workflow(
                 "ai-consent-required",
                 "Transcript is ready from live captions. Cloud generation did not run because consent was not granted.",
             )?;
-            emit_ai_artifacts_changed(&state, &params.session_id)?;
+            emit_ai_artifacts_changed(&state, &params.session_id);
             return Ok(AiWorkflowResult {
                 session_id: params.session_id,
                 audio_path: String::new(),
@@ -153,7 +153,7 @@ pub async fn run_ai_workflow(
             "ai-consent-required",
             "Audio was extracted locally. Cloud AI did not run because consent was not granted.",
         )?;
-        emit_ai_artifacts_changed(&state, &params.session_id)?;
+        emit_ai_artifacts_changed(&state, &params.session_id);
         return Ok(AiWorkflowResult {
             session_id: params.session_id,
             audio_path: audio_path.display().to_string(),
@@ -233,7 +233,7 @@ fn finish_workflow(
         }
     }
 
-    emit_ai_artifacts_changed(state, &session_id)?;
+    emit_ai_artifacts_changed(state, &session_id);
     Ok(AiWorkflowResult {
         session_id,
         audio_path,
@@ -946,12 +946,11 @@ fn publish_pack_files(artifacts: &[AiArtifact]) -> Vec<(&'static str, String)> {
     files
 }
 
-fn emit_ai_artifacts_changed(state: &AppState, session_id: &str) -> Result<()> {
+fn emit_ai_artifacts_changed(state: &AppState, session_id: &str) {
     state.emit_event(
         "ai.artifacts.changed",
-        state.database.list_ai_artifacts(session_id)?,
+        serde_json::json!({ "sessionId": session_id }),
     );
-    Ok(())
 }
 
 async fn extract_audio(ffmpeg_path: &str, input_path: &Path, output_path: &Path) -> Result<()> {

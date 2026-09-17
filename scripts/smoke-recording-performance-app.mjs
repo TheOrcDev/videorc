@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync } from 'node:fs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -167,7 +168,7 @@ async function runScenario(ws, connection, smoke, samples, scenario) {
 
   const stopRequestedAt = Date.now()
   const stopped = await request(ws, timeoutMs, 'session.stop')
-  const outputPath = stopped.outputPath ?? started.outputPath
+  const outputPath = await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 })
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error(
       `[${scenario.label}] Recording output was not created: ${outputPath ?? 'missing path'}`

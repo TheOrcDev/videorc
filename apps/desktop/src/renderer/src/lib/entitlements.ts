@@ -1,4 +1,33 @@
-import type { EntitlementCapability, EntitlementsSnapshot, FeatureId } from './backend'
+import type {
+  EntitlementCapability,
+  EntitlementsSnapshot,
+  FeatureId,
+  StreamingEntitlementLimits
+} from './backend'
+
+/**
+ * Multistreaming is free for every plan (mirror of the backend's
+ * STREAMING_MAX_DESTINATIONS): one shared destination cap for Basic, Premium
+ * and Developer. Only streaming QUALITY is tiered.
+ */
+export const STREAMING_MAX_DESTINATIONS = 5
+
+export const BASIC_STREAMING_LIMITS: StreamingEntitlementLimits = {
+  maxWidth: 1920,
+  maxHeight: 1080,
+  maxFps: 30,
+  maxBitrateKbps: 6000,
+  maxDestinations: STREAMING_MAX_DESTINATIONS
+}
+
+/** Mirrors the backend's Premium and Developer streaming entitlement ceiling. */
+export const PREMIUM_STREAMING_LIMITS: StreamingEntitlementLimits = {
+  maxWidth: 3840,
+  maxHeight: 2160,
+  maxFps: 60,
+  maxBitrateKbps: 30000,
+  maxDestinations: STREAMING_MAX_DESTINATIONS
+}
 
 export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
   schemaVersion: 1,
@@ -14,9 +43,10 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
       state: 'enabled'
     },
     {
+      // Free for every plan; the capability stays on the wire (strict enum on
+      // both sides) and a missing snapshot must never lock it.
       featureId: 'multistreaming',
-      state: 'disabled',
-      reason: 'Multistreaming requires Videorc Premium. Basic can stream to one destination at HD.'
+      state: 'enabled'
     },
     {
       featureId: 'cloud-ai',
@@ -27,6 +57,11 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
       featureId: 'noise-cleanup',
       state: 'disabled',
       reason: 'Noise Cleanup requires Videorc Premium.'
+    },
+    {
+      featureId: 'live-cohost',
+      state: 'disabled',
+      reason: 'Live Co-host requires Videorc Premium.'
     }
   ],
   limits: {
@@ -37,14 +72,7 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
       maxHeight: 2160,
       maxFps: 60
     },
-    streaming: {
-      maxWidth: 1920,
-      maxHeight: 1080,
-      maxFps: 30,
-      maxBitrateKbps: 6000,
-      maxDestinations: 1,
-      maxDestinationsPerOrientation: 1
-    }
+    streaming: BASIC_STREAMING_LIMITS
   }
 }
 

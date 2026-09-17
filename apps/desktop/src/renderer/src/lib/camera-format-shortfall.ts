@@ -100,5 +100,9 @@ export function cameraFormatShortfallMessage(shortfall: CameraFormatShortfall): 
   if (shortfall.fpsUnmet) {
     return `This camera's closest format is ${selected} — below the requested ${shortfall.requestedFps} fps. Recording will run at ${Math.round(shortfall.selectedMaxFps)} fps.`
   }
-  return `This camera's closest format is ${selected}, below the requested ${shortfall.requestedWidth}×${shortfall.requestedHeight}.`
+  // Name the consequence, not just the mismatch: a resolution shortfall means
+  // every frame is enlarged to fill the canvas, which is what the user
+  // actually sees. Saying only "below the requested 3840×2160" left people
+  // believing they were recording 4K because the OUTPUT is 4K.
+  return `This camera's closest format is ${selected}, so the image is upscaled to fill the ${shortfall.requestedWidth}×${shortfall.requestedHeight} canvas.`
 }

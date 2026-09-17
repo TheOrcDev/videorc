@@ -1,4 +1,4 @@
-import { DeviceMobile } from '@phosphor-icons/react'
+import { MobileIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -29,7 +29,7 @@ export function VerticalLegMonitor(): ReactElement | null {
       </div>
       <div className="flex min-w-0 flex-col gap-1">
         <span className="flex items-center gap-1.5 text-sm font-medium">
-          <DeviceMobile className="size-4 text-muted-foreground" />
+          <MobileIcon className="size-4 text-muted-foreground" />
           Vertical stream
           {isSessionActive ? (
             <Badge variant="success">Live</Badge>

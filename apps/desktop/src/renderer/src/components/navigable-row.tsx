@@ -1,5 +1,4 @@
-import { CaretRight } from '@phosphor-icons/react'
-import type { Icon } from '@phosphor-icons/react'
+import { AppIcon, ChevronRightIcon } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
@@ -17,7 +16,7 @@ export function NavigableRow({
   className,
   onNavigate
 }: {
-  icon?: Icon
+  icon?: AppIcon
   label: string
   value: ReactNode
   className?: string
@@ -32,7 +31,9 @@ export function NavigableRow({
       <span className="flex-1 truncate text-left text-muted-foreground">{label}</span>
       <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
         {typeof value === 'string' ? <span className="truncate">{value}</span> : value}
-        {onNavigate ? <CaretRight className="size-3.5 shrink-0 text-muted-foreground" /> : null}
+        {onNavigate ? (
+          <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : null}
       </span>
     </>
   )

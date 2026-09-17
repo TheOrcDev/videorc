@@ -20,6 +20,19 @@ pub(crate) const CAPTION_CHUNK_UPLOAD_TIMEOUT: std::time::Duration =
 pub(crate) const AI_CAPABILITIES_REQUEST_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(8);
 const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// Co-host ticks are synchronous and small, but the server fans one tick out
+/// across a model ladder: a slow-but-alive gateway needs headroom beyond the
+/// 8 s cadence floor, while a hung tick must still become a retryable failure,
+/// never a stalled engine. The scheduler never overlaps ticks, so a 12 s tick
+/// simply delays the next one.
+pub(crate) const COHOST_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
+const COHOST_TICK_PATH: &str = "/api/ai/cohost/tick";
+
+use crate::cohost::{
+    CohostErrorDetail, CohostFlagKind, CohostFlagSeverity, CohostMood, CohostPriority,
+    CohostReason, CohostTone,
+};
+use crate::streaming::StreamPlatform;
 
 use crate::protocol::{
     AiCapabilities, AiJobCreateResponse, AiJobEnvelope, AiJobSnapshot, AiObjectUploadResponse,
@@ -108,6 +121,245 @@ pub struct AiObjectUploadRequest<'a> {
     pub session_client_id: &'a str,
     pub size_bytes: u64,
     pub workflow_kind: &'a str,
+}
+
+// --- Live Co-host tick wire types (contract v1; field names are load-bearing) ---
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickRequest {
+    pub client_version: String,
+    pub session_client_id: String,
+    pub tick_seq: u64,
+    pub prompt_version: u32,
+    pub consent_to_process_chat: bool,
+    pub tone: CohostTone,
+    pub notes: String,
+    pub stream_title: Option<String>,
+    pub open_questions: Vec<CohostTickOpenQuestion>,
+    pub messages: Vec<CohostTickMessage>,
+    pub dropped_messages: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickOpenQuestion {
+    pub id: String,
+    pub text: String,
+    pub count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickMessage {
+    pub id: String,
+    pub platform: StreamPlatform,
+    pub author: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    pub text: String,
+    pub at: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickResponse {
+    #[serde(default)]
+    pub prompt_version: u32,
+    #[serde(default)]
+    pub questions: Vec<CohostTickQuestion>,
+    #[serde(default)]
+    pub resolved: Vec<String>,
+    #[serde(default)]
+    pub flags: Vec<CohostTickFlag>,
+    #[serde(default)]
+    pub mood: Option<CohostMood>,
+    #[serde(default)]
+    pub usage: Option<CohostTickUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickQuestion {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub message_ids: Vec<String>,
+    #[serde(default)]
+    pub askers: Vec<String>,
+    #[serde(default)]
+    pub platforms: Vec<StreamPlatform>,
+    #[serde(default)]
+    pub priority: CohostPriority,
+    #[serde(default)]
+    pub suggested_reply: String,
+    #[serde(default)]
+    pub from_notes: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickFlag {
+    pub message_id: String,
+    pub kind: CohostFlagKind,
+    pub severity: CohostFlagSeverity,
+    #[serde(default)]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickUsage {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub model: String,
+}
+
+/// Every failed tick outcome: the classification the engine acts on
+/// (`kind` → status/backoff, `reason()` → renderer reason) plus the server's
+/// own diagnosis (`detail`) that rides `cohost.state` so "AI returned an
+/// error" is never the whole story.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CohostApiError {
+    pub kind: CohostApiErrorKind,
+    pub detail: CohostErrorDetail,
+}
+
+/// Classified from the error envelope code first and the HTTP status second.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CohostApiErrorKind {
+    /// 401: the stored bearer no longer works (session expired/rotated).
+    Unauthorized,
+    /// 403 `premium-required` (and any other 403: ops blocklist).
+    PremiumRequired,
+    /// 400 `consent-required`.
+    ConsentRequired,
+    /// 400 `prompt-version-unsupported`: this build is behind the server.
+    PromptVersionUnsupported,
+    /// 400 `invalid-request`: a desktop-side request bug (zod rejection).
+    InvalidRequest,
+    /// 429 `quota-exhausted` (+ Retry-After seconds when the server sent one).
+    QuotaExhausted {
+        retry_after: Option<std::time::Duration>,
+    },
+    /// 503 `ai-gateway-not-configured` | `cohost-disabled`.
+    ServerUnconfigured,
+    /// 502 `ai-gateway-error` and any other server failure.
+    GatewayError,
+    /// Transport failure (`network`) or the tick timeout (`timeout`).
+    Network,
+    /// 200 with a body that does not match the contract.
+    MalformedResponse,
+}
+
+/// Detail codes the desktop assigns itself when no server envelope exists.
+pub const COHOST_DETAIL_CODE_NETWORK: &str = "network";
+pub const COHOST_DETAIL_CODE_TIMEOUT: &str = "timeout";
+pub const COHOST_DETAIL_CODE_MALFORMED_RESPONSE: &str = "malformed-response";
+
+impl CohostApiError {
+    pub fn reason(&self) -> CohostReason {
+        match self.kind {
+            CohostApiErrorKind::Unauthorized => CohostReason::SessionExpired,
+            CohostApiErrorKind::PremiumRequired => CohostReason::PremiumRequired,
+            CohostApiErrorKind::ConsentRequired => CohostReason::ConsentRequired,
+            CohostApiErrorKind::PromptVersionUnsupported
+            | CohostApiErrorKind::ServerUnconfigured => CohostReason::ServerUnconfigured,
+            CohostApiErrorKind::QuotaExhausted { .. } => CohostReason::QuotaExhausted,
+            CohostApiErrorKind::InvalidRequest
+            | CohostApiErrorKind::GatewayError
+            | CohostApiErrorKind::MalformedResponse => CohostReason::GatewayError,
+            CohostApiErrorKind::Network => CohostReason::Network,
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.detail.message
+    }
+
+    /// A transport failure before any HTTP status existed.
+    pub fn network(message: impl Into<String>) -> Self {
+        Self {
+            kind: CohostApiErrorKind::Network,
+            detail: CohostErrorDetail::new(COHOST_DETAIL_CODE_NETWORK, message, None),
+        }
+    }
+
+    /// The request outlived `COHOST_TICK_TIMEOUT`.
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self {
+            kind: CohostApiErrorKind::Network,
+            detail: CohostErrorDetail::new(COHOST_DETAIL_CODE_TIMEOUT, message, None),
+        }
+    }
+
+    /// A success status whose body does not match the tick contract.
+    pub fn malformed_response(status: u16, message: impl Into<String>) -> Self {
+        Self {
+            kind: CohostApiErrorKind::MalformedResponse,
+            detail: CohostErrorDetail::new(
+                COHOST_DETAIL_CODE_MALFORMED_RESPONSE,
+                message,
+                Some(status),
+            ),
+        }
+    }
+
+    pub(crate) fn from_transport(error: reqwest::Error) -> Self {
+        if error.is_timeout() {
+            Self::timeout(format!(
+                "The co-host service did not answer within {} s.",
+                COHOST_TICK_TIMEOUT.as_secs()
+            ))
+        } else {
+            Self::network(format!("Could not reach the co-host service: {error}"))
+        }
+    }
+}
+
+/// `Retry-After` as delay-seconds. HTTP-date forms are not parsed; the engine
+/// falls back to its default quota pause.
+pub(crate) fn parse_retry_after_seconds(value: Option<&str>) -> Option<std::time::Duration> {
+    value
+        .map(str::trim)
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+}
+
+pub(crate) fn classify_cohost_failure(
+    status: u16,
+    code: &str,
+    message: String,
+    retry_after: Option<&str>,
+) -> CohostApiError {
+    let kind = match code {
+        "unauthorized" => CohostApiErrorKind::Unauthorized,
+        "premium-required" => CohostApiErrorKind::PremiumRequired,
+        "consent-required" => CohostApiErrorKind::ConsentRequired,
+        "prompt-version-unsupported" => CohostApiErrorKind::PromptVersionUnsupported,
+        "invalid-request" => CohostApiErrorKind::InvalidRequest,
+        "quota-exhausted" => CohostApiErrorKind::QuotaExhausted {
+            retry_after: parse_retry_after_seconds(retry_after),
+        },
+        "ai-gateway-not-configured" | "cohost-disabled" => CohostApiErrorKind::ServerUnconfigured,
+        _ => match status {
+            401 => CohostApiErrorKind::Unauthorized,
+            403 => CohostApiErrorKind::PremiumRequired,
+            400 => CohostApiErrorKind::InvalidRequest,
+            429 => CohostApiErrorKind::QuotaExhausted {
+                retry_after: parse_retry_after_seconds(retry_after),
+            },
+            503 => CohostApiErrorKind::ServerUnconfigured,
+            _ => CohostApiErrorKind::GatewayError,
+        },
+    };
+    CohostApiError {
+        kind,
+        detail: CohostErrorDetail::new(code, message, Some(status)),
+    }
 }
 
 /// A thin client over the Videorc web API.
@@ -305,6 +557,46 @@ impl VideorcApiClient {
             .json()
             .await
             .with_context(|| format!("Could not read Videorc API response for {path}."))
+    }
+
+    /// One synchronous Live Co-host tick. Every failure class is mapped to a
+    /// `CohostApiError` so the engine can pause/back off with an honest reason.
+    pub async fn post_cohost_tick(
+        &self,
+        bearer_token: &str,
+        request: &CohostTickRequest,
+    ) -> std::result::Result<CohostTickResponse, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(COHOST_TICK_PATH))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(COHOST_TICK_TIMEOUT)
+            .send()
+            .await
+            .map_err(CohostApiError::from_transport)?;
+
+        let status = response.status();
+        if status.is_success() {
+            return response.json().await.map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read the co-host response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
     }
 
     /// Fetch safe client-facing AI quota metadata for the signed-in user.
@@ -608,6 +900,14 @@ fn classify_caption_failure(status: u16, code: String, message: String) -> Capti
 }
 
 async fn read_error_code_and_message(response: reqwest::Response) -> (String, String) {
+    let text = response.text().await.unwrap_or_default();
+    parse_error_envelope(&text)
+}
+
+/// `{ error: { code, message } }` → `(code, message)` with honest fallbacks:
+/// `unknown` / `request failed` when the body is not the envelope (HTML from
+/// a proxy, an empty body, a different JSON shape) or a part is blank.
+pub(crate) fn parse_error_envelope(text: &str) -> (String, String) {
     #[derive(Deserialize)]
     struct ErrorEnvelope {
         error: Option<ErrorBody>,
@@ -619,17 +919,19 @@ async fn read_error_code_and_message(response: reqwest::Response) -> (String, St
         message: Option<String>,
     }
 
-    let parsed = match response.text().await {
-        Ok(text) => serde_json::from_str::<ErrorEnvelope>(&text).ok(),
-        Err(_) => None,
-    };
-    let body = parsed.and_then(|envelope| envelope.error);
+    let body = serde_json::from_str::<ErrorEnvelope>(text)
+        .ok()
+        .and_then(|envelope| envelope.error);
     (
         body.as_ref()
-            .and_then(|error| error.code.clone())
+            .and_then(|error| error.code.as_deref())
+            .map(str::trim)
+            .filter(|code| !code.is_empty())
+            .map(str::to_string)
             .unwrap_or_else(|| "unknown".to_string()),
         body.and_then(|error| error.message)
-            .filter(|message| !message.trim().is_empty())
+            .map(|message| message.trim().to_string())
+            .filter(|message| !message.is_empty())
             .unwrap_or_else(|| "request failed".to_string()),
     )
 }
@@ -706,6 +1008,10 @@ mod tests {
     #[test]
     fn entitlement_capability_request_finishes_before_the_rpc_deadline() {
         assert!(!AI_CAPABILITIES_REQUEST_TIMEOUT.is_zero());
+        // Headroom over the 8 s cadence floor (a model ladder can take longer),
+        // but well under the updater/RPC deadlines; see cohost.rs for the
+        // min-gap interaction test.
+        assert_eq!(COHOST_TICK_TIMEOUT.as_secs(), 12);
         assert!(AI_CAPABILITIES_REQUEST_TIMEOUT < std::time::Duration::from_secs(10));
     }
 
@@ -913,5 +1219,221 @@ mod tests {
             CaptionChunkFailure::Transient { code: Some(code), .. }
                 if code == "captions-realtime-disabled"
         ));
+    }
+
+    #[test]
+    fn cohost_failures_classify_by_envelope_code_then_status() {
+        use CohostApiErrorKind as Kind;
+        let cases: Vec<(u16, &str, Option<&str>, Kind, CohostReason)> = vec![
+            (
+                401,
+                "unauthorized",
+                None,
+                Kind::Unauthorized,
+                CohostReason::SessionExpired,
+            ),
+            (
+                403,
+                "premium-required",
+                None,
+                Kind::PremiumRequired,
+                CohostReason::PremiumRequired,
+            ),
+            (
+                400,
+                "consent-required",
+                None,
+                Kind::ConsentRequired,
+                CohostReason::ConsentRequired,
+            ),
+            (
+                400,
+                "prompt-version-unsupported",
+                None,
+                Kind::PromptVersionUnsupported,
+                CohostReason::ServerUnconfigured,
+            ),
+            (
+                400,
+                "invalid-request",
+                None,
+                Kind::InvalidRequest,
+                CohostReason::GatewayError,
+            ),
+            (
+                429,
+                "quota-exhausted",
+                Some("120"),
+                Kind::QuotaExhausted {
+                    retry_after: Some(std::time::Duration::from_secs(120)),
+                },
+                CohostReason::QuotaExhausted,
+            ),
+            (
+                429,
+                "unknown",
+                Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+                Kind::QuotaExhausted { retry_after: None },
+                CohostReason::QuotaExhausted,
+            ),
+            (
+                503,
+                "ai-gateway-not-configured",
+                None,
+                Kind::ServerUnconfigured,
+                CohostReason::ServerUnconfigured,
+            ),
+            (
+                503,
+                "cohost-disabled",
+                None,
+                Kind::ServerUnconfigured,
+                CohostReason::ServerUnconfigured,
+            ),
+            (
+                502,
+                "ai-gateway-error",
+                None,
+                Kind::GatewayError,
+                CohostReason::GatewayError,
+            ),
+            (
+                500,
+                "unknown",
+                None,
+                Kind::GatewayError,
+                CohostReason::GatewayError,
+            ),
+            // Ops blocklist: any unknown 403 code is the premium-required class.
+            (
+                403,
+                "ai-user-disabled",
+                None,
+                Kind::PremiumRequired,
+                CohostReason::PremiumRequired,
+            ),
+            // Status-only fallbacks when the envelope carries no known code.
+            (
+                401,
+                "unknown",
+                None,
+                Kind::Unauthorized,
+                CohostReason::SessionExpired,
+            ),
+            (
+                403,
+                "unknown",
+                None,
+                Kind::PremiumRequired,
+                CohostReason::PremiumRequired,
+            ),
+        ];
+        for (status, code, retry_after, kind, reason) in cases {
+            let actual = classify_cohost_failure(status, code, "m".to_string(), retry_after);
+            assert_eq!(actual.kind, kind, "{status} {code}");
+            assert_eq!(actual.reason(), reason, "{status} {code}");
+            // The server's own words survive classification verbatim: the
+            // raw envelope code (even when the class came from the status),
+            // the message, and the HTTP status.
+            assert_eq!(
+                actual.detail,
+                CohostErrorDetail {
+                    code: code.to_string(),
+                    message: "m".to_string(),
+                    status: Some(status),
+                },
+                "{status} {code}"
+            );
+            assert_eq!(actual.message(), "m");
+        }
+        assert_eq!(
+            parse_retry_after_seconds(Some(" 42 ")),
+            Some(std::time::Duration::from_secs(42))
+        );
+        assert_eq!(parse_retry_after_seconds(Some("soon")), None);
+        assert_eq!(parse_retry_after_seconds(None), None);
+    }
+
+    #[test]
+    fn cohost_error_envelope_parse_keeps_code_and_message_with_honest_fallbacks() {
+        // The 2026-08-23 incident shape: web mis-parsed the gateway reply and
+        // answered 502 with this envelope; the desktop must carry both parts.
+        assert_eq!(
+            parse_error_envelope(
+                r#"{"error":{"code":"ai-gateway-error","message":"The co-host tick failed on every configured model."}}"#
+            ),
+            (
+                "ai-gateway-error".to_string(),
+                "The co-host tick failed on every configured model.".to_string()
+            )
+        );
+        assert_eq!(
+            parse_error_envelope(
+                r#"{"error":{"code":"quota-exhausted","message":"  Try later. "}}"#
+            ),
+            ("quota-exhausted".to_string(), "Try later.".to_string())
+        );
+        // Missing or blank parts fall back one at a time.
+        assert_eq!(
+            parse_error_envelope(r#"{"error":{"code":"ai-gateway-error"}}"#),
+            ("ai-gateway-error".to_string(), "request failed".to_string())
+        );
+        assert_eq!(
+            parse_error_envelope(r#"{"error":{"code":"  ","message":"Upstream exploded."}}"#),
+            ("unknown".to_string(), "Upstream exploded.".to_string())
+        );
+        assert_eq!(
+            parse_error_envelope(r#"{"error":{"message":""}}"#),
+            ("unknown".to_string(), "request failed".to_string())
+        );
+        // Not the envelope at all: a proxy HTML page, an empty body, other JSON.
+        for body in ["<html>502 Bad Gateway</html>", "", r#"{"ok":false}"#, "[]"] {
+            assert_eq!(
+                parse_error_envelope(body),
+                ("unknown".to_string(), "request failed".to_string()),
+                "{body:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cohost_desktop_side_failures_carry_their_own_detail_codes() {
+        let network = CohostApiError::network("Could not reach the co-host service: dns");
+        assert_eq!(network.kind, CohostApiErrorKind::Network);
+        assert_eq!(network.reason(), CohostReason::Network);
+        assert_eq!(network.detail.code, COHOST_DETAIL_CODE_NETWORK);
+        assert_eq!(network.detail.status, None);
+
+        let timeout = CohostApiError::timeout("The co-host service did not answer within 12 s.");
+        assert_eq!(timeout.kind, CohostApiErrorKind::Network);
+        assert_eq!(timeout.reason(), CohostReason::Network);
+        assert_eq!(timeout.detail.code, COHOST_DETAIL_CODE_TIMEOUT);
+        assert_eq!(timeout.detail.status, None);
+        assert_eq!(
+            timeout.message(),
+            "The co-host service did not answer within 12 s."
+        );
+
+        let malformed =
+            CohostApiError::malformed_response(200, "Could not read the co-host response: EOF");
+        assert_eq!(malformed.kind, CohostApiErrorKind::MalformedResponse);
+        assert_eq!(malformed.reason(), CohostReason::GatewayError);
+        assert_eq!(malformed.detail.code, COHOST_DETAIL_CODE_MALFORMED_RESPONSE);
+        assert_eq!(malformed.detail.status, Some(200));
+    }
+
+    #[test]
+    fn cohost_tick_response_tolerates_missing_optional_fields() {
+        let response: CohostTickResponse = serde_json::from_str(
+            r#"{"promptVersion":1,"questions":[{"id":"q_1","text":"What keyboard?"}],"mood":"calm"}"#,
+        )
+        .unwrap();
+        assert_eq!(response.questions.len(), 1);
+        assert_eq!(response.questions[0].priority, CohostPriority::Normal);
+        assert!(response.questions[0].message_ids.is_empty());
+        assert_eq!(response.mood, Some(CohostMood::Calm));
+        assert!(response.resolved.is_empty());
+        assert!(response.flags.is_empty());
+        assert!(response.usage.is_none());
     }
 }

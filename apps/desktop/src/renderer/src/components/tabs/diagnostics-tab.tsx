@@ -1,14 +1,14 @@
 import {
-  ArrowSquareOut,
-  CaretDown,
-  Gauge,
-  Heartbeat,
-  Pulse,
-  TerminalWindow,
-  WarningCircle,
-  X
-} from '@phosphor-icons/react'
-import { useMemo, useState, type ReactElement, type ReactNode } from 'react'
+  AlertIcon,
+  ChevronDownIcon,
+  CloseIcon,
+  ExternalLinkIcon,
+  GaugeIcon,
+  HealthIcon,
+  HeartbeatIcon,
+  TerminalIcon
+} from '@/components/icons'
+import { useEffect, useMemo, useState, type ReactElement, type ReactNode } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
@@ -17,12 +17,14 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import {
+  useStudioAudio,
   useStudioCore,
   useStudioDiagnostics,
   useStudioPreview,
   useStudioRecording
 } from '@/hooks/use-studio'
 import type {
+  BackendCrashRecord,
   DiagnosticBottleneck,
   DiagnosticStats,
   HealthEvent,
@@ -36,29 +38,77 @@ import type {
   SystemPermissionPane,
   WebSocketQueueDiagnosticStats
 } from '@/lib/backend'
+import { backendCrashView, latestBackendCrash } from '@/lib/backend-crash-view'
 import { compactTime, formatDroppedFrames, formatMetric } from '@/lib/format'
+import { formatLatencyMs, formatTimelineSummary, slowestTimelinePhase } from '@/lib/record-latency'
+import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
+import { isNativePreviewCapability } from '../../../../shared/native-preview-capability'
 
 export function DiagnosticsTab(): ReactElement {
   const {
-    openSystemPermission,
+    handleSystemPermission,
     sessions,
+    sessionDetails,
+    sessionDetailsLoading,
+    sessionDetailError,
+    loadSessionDetails,
     streamTargets,
     nativePreviewSurfaceEnabled,
     captureConfig,
+    deviceList,
+    mediaAccess,
+    runtimeInfo,
     exportSupportBundle,
     supportBundleExportPending
   } = useStudioCore()
+  const { audioMeter } = useStudioAudio()
   const { recording } = useStudioRecording()
   const { previewLiveStatus, previewCameraStatus, previewScreenStatus } = useStudioPreview()
-  const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, streamHealth } =
+  const { diagnosticStats, healthEvents, logs, previewSurfaceStatus, recordLatency, streamHealth } =
     useStudioDiagnostics()
   const [dismissed, setDismissed] = useState<Set<string>>(() => new Set())
-  const activeSession =
+  const activeSessionSummary =
     sessions.find((session) => session.id === recording.sessionId) ?? sessions[0] ?? null
+  const activeSessionId = activeSessionSummary?.id
+  const activeSessionDetails = activeSessionSummary
+    ? sessionDetails[activeSessionSummary.id]
+    : undefined
+
+  useEffect(() => {
+    if (activeSessionId) {
+      void loadSessionDetails(activeSessionId)
+    }
+  }, [activeSessionId, loadSessionDetails])
+  const accessRows = systemAccessRows({
+    deviceList,
+    audioMeter,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  })
+  const permissionAction = (pane: SystemPermissionPane) => {
+    const row = accessRows.find((candidate) => candidate.id === pane)
+    return systemAccessAction({
+      pane,
+      state: row?.state,
+      platform: runtimeInfo?.platform,
+      mediaAccessStatus:
+        pane === 'camera' || pane === 'microphone' ? mediaAccess?.[pane] : undefined
+    })
+  }
   const actionableEvents = healthEvents.filter(
-    (event) => event.permissionPane && !dismissed.has(event.id)
+    (event) =>
+      event.permissionPane &&
+      !dismissed.has(event.id) &&
+      permissionAction(event.permissionPane) !== null
   )
-  const sessionLogs = activeSession?.sessionLogs ?? []
+  const sessionLogs = activeSessionDetails?.sessionLogs ?? []
+  const sessionLogsError =
+    activeSessionId && sessionDetailError?.sessionId === activeSessionId
+      ? sessionDetailError.message
+      : null
+  const sessionLogsLoading = Boolean(
+    activeSessionSummary && sessionDetailsLoading.has(activeSessionSummary.id)
+  )
 
   const bottleneck = useMemo(
     () => bottleneckCopy(diagnosticStats.bottleneck),
@@ -71,6 +121,7 @@ export function DiagnosticsTab(): ReactElement {
         expectsCamera: Boolean(captureConfig.sources.cameraId),
         expectsScreen: Boolean(captureConfig.sources.screenId || captureConfig.sources.windowId),
         nativePreviewSurfaceEnabled,
+        platform: runtimeInfo?.platform ?? 'darwin',
         previewCameraStatus,
         previewLiveStatus,
         previewScreenStatus,
@@ -82,6 +133,7 @@ export function DiagnosticsTab(): ReactElement {
       captureConfig.sources.screenId,
       captureConfig.sources.windowId,
       nativePreviewSurfaceEnabled,
+      runtimeInfo?.platform,
       previewCameraStatus,
       previewLiveStatus,
       previewScreenStatus,
@@ -113,7 +165,11 @@ export function DiagnosticsTab(): ReactElement {
       <div className="flex flex-col gap-4">
         {/* Verdicts first (ux-ia plan, slice 8): the page answers "is anything
             wrong?" before offering the numbers. */}
-        <PanelSection description="Is anything wrong right now?" icon={Heartbeat} title="Verdicts">
+        <PanelSection
+          description="Is anything wrong right now?"
+          icon={HeartbeatIcon}
+          title="Verdicts"
+        >
           <div className="flex flex-wrap items-center gap-2">
             <StatusBadge
               label="Likely bottleneck"
@@ -145,13 +201,17 @@ export function DiagnosticsTab(): ReactElement {
               tone={
                 previewPathBadge(
                   diagnosticStats.previewTransport,
-                  diagnosticStats.previewSurfaceBacking
+                  diagnosticStats.previewSurfaceBacking,
+                  previewSurfaceStatus.nativePreviewHostKind,
+                  runtimeInfo?.platform ?? 'darwin'
                 ).tone
               }
               value={
                 previewPathBadge(
                   diagnosticStats.previewTransport,
-                  diagnosticStats.previewSurfaceBacking
+                  diagnosticStats.previewSurfaceBacking,
+                  previewSurfaceStatus.nativePreviewHostKind,
+                  runtimeInfo?.platform ?? 'darwin'
                 ).label
               }
             />
@@ -196,7 +256,7 @@ export function DiagnosticsTab(): ReactElement {
 
         <PanelSection
           description="Current capture and preview health."
-          icon={Gauge}
+          icon={GaugeIcon}
           title="Live stats"
         >
           <MetricGroup title="Pipeline">
@@ -259,6 +319,38 @@ export function DiagnosticsTab(): ReactElement {
               value={diagnosticStats.encoderBridgeError ?? 'None'}
             />
           </MetricGroup>
+          <MetricGroup title="Record latency">
+            <DiagnosticMetric
+              label="Click → recording"
+              value={formatLatencyMs(
+                recordLatency.start?.kind === 'start'
+                  ? recordLatency.start.clickToRecordingMs
+                  : undefined
+              )}
+            />
+            <DiagnosticMetric
+              label="Click → idle"
+              value={formatLatencyMs(
+                recordLatency.stop?.kind === 'stop' ? recordLatency.stop.clickToIdleMs : undefined
+              )}
+            />
+            <DiagnosticMetric
+              label="Backend start"
+              value={formatTimelineSummary(diagnosticStats.recordingStartTimeline)}
+            />
+            <DiagnosticMetric
+              label="Slowest start phase"
+              value={formatSlowestPhase(diagnosticStats.recordingStartTimeline)}
+            />
+            <DiagnosticMetric
+              label="Backend stop"
+              value={formatTimelineSummary(diagnosticStats.recordingStopTimeline)}
+            />
+            <DiagnosticMetric
+              label="Slowest stop phase"
+              value={formatSlowestPhase(diagnosticStats.recordingStopTimeline)}
+            />
+          </MetricGroup>
           <MetricGroup title="WebSocket transport">
             <DiagnosticMetric
               label="Reliable responses"
@@ -278,6 +370,15 @@ export function DiagnosticsTab(): ReactElement {
               label="Slow-peer disconnects"
               value={diagnosticStats.websocketTransport.slowPressureDisconnectCount.toString()}
             />
+            {Object.entries(diagnosticStats.websocketTransport.commandLanes).map(
+              ([lane, stats]) => (
+                <DiagnosticMetric
+                  key={lane}
+                  label={`${lane} lane`}
+                  value={`${formatWebSocketQueue(stats.queue)} · ${stats.expiredBeforeDispatchCount} expired · ${stats.rejectedBeforeDispatchCount} rejected`}
+                />
+              )
+            )}
           </MetricGroup>
           <MetricGroup title="Preview">
             <DiagnosticMetric
@@ -401,6 +502,50 @@ export function DiagnosticsTab(): ReactElement {
               value={formatEncodeBackend(diagnosticStats.encodeBackend)}
             />
             <DiagnosticMetric
+              label="Requested output"
+              value={diagnosticStats.encoderBridgeRequestedVideoOutput ?? '--'}
+            />
+            <DiagnosticMetric
+              label="Effective output"
+              value={diagnosticStats.encoderBridgeEffectiveVideoOutput ?? '--'}
+            />
+            <DiagnosticMetric
+              label="Output fallback"
+              value={diagnosticStats.encoderBridgeEncodedOutputFallbackReason ?? 'None'}
+            />
+            <DiagnosticMetric
+              label="Stream bitrate"
+              value={formatKbps(diagnosticStats.streamMeasuredBitrateKbps)}
+            />
+            <DiagnosticMetric
+              label="Stream bitrate range"
+              value={`${formatKbps(
+                diagnosticStats.streamMeasuredBitrateMinKbps
+              )} / ${formatKbps(diagnosticStats.streamMeasuredBitrateMaxKbps)}`}
+            />
+            <DiagnosticMetric
+              label="Stream bytes"
+              value={formatBytes(diagnosticStats.streamOutputTotalBytes)}
+            />
+            <DiagnosticMetric
+              label="Stream duplicated"
+              value={formatOptionalCounter(diagnosticStats.streamDuplicatedFrames)}
+            />
+            <DiagnosticMetric
+              label="Stream dropped"
+              value={formatOptionalCounter(
+                streamHealth?.droppedFrames ?? diagnosticStats.droppedFrames
+              )}
+            />
+            <DiagnosticMetric
+              label="Stream coalesced"
+              value={formatOptionalCounter(
+                diagnosticStats.encoderBridgeSeparateOutputEncodersActive
+                  ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
+                  : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
+              )}
+            />
+            <DiagnosticMetric
               label="Recording repeats"
               value={diagnosticStats.encoderBridgeRepeatedFrames.toString()}
             />
@@ -521,7 +666,7 @@ export function DiagnosticsTab(): ReactElement {
           </MetricGroup>
         </PanelSection>
 
-        <PanelSection icon={Pulse} title="Pipeline">
+        <PanelSection icon={HealthIcon} title="Pipeline">
           {recording.pipeline ? (
             <div className="grid gap-2">
               {recording.pipeline.stages.map((stage) => (
@@ -548,7 +693,7 @@ export function DiagnosticsTab(): ReactElement {
       </div>
 
       <div className="flex flex-col gap-4">
-        <PanelSection icon={TerminalWindow} title="Support bundle">
+        <PanelSection icon={TerminalIcon} title="Support bundle">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
               <p className="text-sm font-medium">Redacted diagnostics JSON</p>
@@ -559,13 +704,13 @@ export function DiagnosticsTab(): ReactElement {
               disabled={supportBundleExportPending}
               onClick={() => void exportSupportBundle()}
             >
-              <ArrowSquareOut className="mr-2 size-4" />
+              <ExternalLinkIcon className="mr-2 size-4" />
               {supportBundleExportPending ? 'Exporting' : 'Export'}
             </Button>
           </div>
         </PanelSection>
 
-        <PanelSection icon={WarningCircle} title="Actionable warnings">
+        <PanelSection icon={AlertIcon} title="Actionable warnings">
           {actionableEvents.length ? (
             <div className="flex flex-col gap-2">
               {actionableEvents.map((event) => (
@@ -579,7 +724,7 @@ export function DiagnosticsTab(): ReactElement {
                       return next
                     })
                   }
-                  onOpenPermission={openSystemPermission}
+                  onHandlePermission={handleSystemPermission}
                 />
               ))}
             </div>
@@ -588,13 +733,22 @@ export function DiagnosticsTab(): ReactElement {
           )}
         </PanelSection>
 
-        <PanelSection icon={TerminalWindow} title="Session logs">
+        <PanelSection icon={TerminalIcon} title="Session logs">
           <ScrollArea className="h-64 pr-3">
-            <LogList entries={sessionLogs} />
+            {sessionLogsLoading && sessionLogs.length === 0 ? (
+              <p className="text-sm text-muted-foreground">Loading session logs…</p>
+            ) : sessionLogsError && sessionLogs.length === 0 ? (
+              <p className="text-sm text-destructive">
+                Session logs unavailable: {sessionLogsError}
+              </p>
+            ) : (
+              <LogList entries={sessionLogs} />
+            )}
           </ScrollArea>
         </PanelSection>
 
-        <PanelSection icon={TerminalWindow} title="Backend logs">
+        <PanelSection icon={TerminalIcon} title="Backend logs">
+          <LastBackendCrash record={latestBackendCrash(runtimeInfo?.backendCrashes)} />
           <ScrollArea className="h-64 pr-3">
             <div className="flex flex-col gap-1.5">
               {logs.length ? (
@@ -624,7 +778,7 @@ function DiagnosticMetric({ label, value }: { label: string; value: string }): R
   return (
     <div className="rounded-row border bg-muted/40 px-3 py-2">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="text-base font-semibold tabular-nums">{value}</div>
+      <div className="break-words text-base font-semibold tabular-nums">{value}</div>
     </div>
   )
 }
@@ -636,7 +790,7 @@ function MetricGroup({ title, children }: { title: string; children: ReactNode }
   return (
     <Collapsible>
       <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-row px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-        <CaretDown className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
+        <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
         <span>{title}</span>
       </CollapsibleTrigger>
       <CollapsibleContent>
@@ -649,11 +803,11 @@ function MetricGroup({ title, children }: { title: string; children: ReactNode }
 function ActionableWarning({
   event,
   onDismiss,
-  onOpenPermission
+  onHandlePermission
 }: {
   event: HealthEvent
   onDismiss: () => void
-  onOpenPermission: (pane: SystemPermissionPane) => Promise<void>
+  onHandlePermission: (pane: SystemPermissionPane) => Promise<void>
 }): ReactElement {
   return (
     <div className="flex items-start justify-between gap-3 rounded-row border bg-warning/10 px-3 py-2">
@@ -667,13 +821,13 @@ function ActionableWarning({
       <div className="flex shrink-0 items-center gap-1">
         {event.permissionPane ? (
           <Button
-            aria-label="Open permission settings"
+            aria-label="Resolve permission"
             size="icon"
-            title="Open permission settings"
+            title="Resolve permission"
             variant="ghost"
-            onClick={() => void onOpenPermission(event.permissionPane!)}
+            onClick={() => void onHandlePermission(event.permissionPane!)}
           >
-            <ArrowSquareOut />
+            <ExternalLinkIcon />
           </Button>
         ) : null}
         <Button
@@ -683,7 +837,7 @@ function ActionableWarning({
           variant="ghost"
           onClick={onDismiss}
         >
-          <X />
+          <CloseIcon />
         </Button>
       </div>
     </div>
@@ -706,9 +860,38 @@ function LogList({ entries }: { entries: SessionLogEntry[] }): ReactElement {
           createdAt={entry.createdAt}
           level={entry.level}
           message={entry.message}
-          sourceId={entry.sourceId}
+          sourceId={entry.sourceId ?? undefined}
         />
       ))}
+    </div>
+  )
+}
+
+// Persisted crash evidence (runtimeInfo.backendCrashes, written by main at
+// the moment of the exit). The live log list below starts at the CURRENT
+// generation, so without this row a crash that already restarted is invisible.
+function LastBackendCrash({ record }: { record: BackendCrashRecord | null }): ReactElement | null {
+  if (!record) {
+    return null
+  }
+  const view = backendCrashView(record)
+  return (
+    <div className="mb-2 rounded-row border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs">
+      <div className="mb-1 flex flex-wrap items-center gap-2">
+        <Badge variant="destructive">{view.intentional ? 'exit' : 'crash'}</Badge>
+        <span className="font-medium">
+          Backend generation {record.generation} · {view.exit} · after {view.uptime}
+          {view.attempt !== null ? ` · restart attempt ${view.attempt}` : ''}
+        </span>
+        <span className="ml-auto text-muted-foreground">{compactTime(record.at)}</span>
+      </div>
+      <p className="break-words font-mono text-muted-foreground">
+        {view.headline ?? 'No stderr output was captured before the exit.'}
+      </p>
+      <p className="mt-1 text-muted-foreground">
+        Kept with the last {record.stderrTail.length} stderr line(s); Export support bundle includes
+        it.
+      </p>
     </div>
   )
 }
@@ -936,6 +1119,7 @@ function previewDiagnosisCopy({
   expectsCamera,
   expectsScreen,
   nativePreviewSurfaceEnabled,
+  platform,
   previewCameraStatus,
   previewLiveStatus,
   previewScreenStatus,
@@ -945,6 +1129,7 @@ function previewDiagnosisCopy({
   expectsCamera: boolean
   expectsScreen: boolean
   nativePreviewSurfaceEnabled: boolean
+  platform: string
   previewCameraStatus: PreviewCameraStatus
   previewLiveStatus: PreviewLiveStatus
   previewScreenStatus: PreviewScreenStatus
@@ -984,14 +1169,20 @@ function previewDiagnosisCopy({
   if (diagnosticStats.previewTransport === 'electron-proof-surface') {
     return { label: 'Proof surface', tone: 'warn' }
   }
-  if (diagnosticStats.previewTransport !== 'native-surface') {
+  if (
+    !isNativePreviewCapability(
+      {
+        transport: diagnosticStats.previewTransport,
+        backing: diagnosticStats.previewSurfaceBacking,
+        nativePreviewHostKind: previewSurfaceStatus.nativePreviewHostKind
+      },
+      platform
+    )
+  ) {
     return {
       label: 'Fallback',
       tone: diagnosticStats.previewTransport === 'unavailable' ? 'neutral' : 'warn'
     }
-  }
-  if (diagnosticStats.previewSurfaceBacking !== 'cametal-layer') {
-    return { label: 'Surface backing', tone: 'warn' }
   }
 
   const targetFps = diagnosticStats.previewTargetFps ?? previewSurfaceStatus.targetFps
@@ -1097,6 +1288,18 @@ function formatMs(value?: number): string {
   return typeof value === 'number' ? `${value.toFixed(0)} ms` : '-- ms'
 }
 
+function formatKbps(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${Math.round(value).toLocaleString()} kbps`
+    : '-- kbps'
+}
+
+function formatOptionalCounter(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.round(value)).toLocaleString()
+    : '--'
+}
+
 function formatFrameLag(value?: number): string {
   return typeof value === 'number' ? `${value.toFixed(0)} frames` : '-- frames'
 }
@@ -1117,6 +1320,11 @@ function formatDuplicateCapture(sources: string[]): string {
 
 function formatSourceTryLocks(cameraMisses: number, screenMisses: number): string {
   return `cam ${cameraMisses}, screen ${screenMisses}`
+}
+
+export function formatSlowestPhase(snapshot: Parameters<typeof slowestTimelinePhase>[0]): string {
+  const slowest = slowestTimelinePhase(snapshot)
+  return slowest ? `${slowest.phase} · ${formatLatencyMs(slowest.deltaMs)}` : '--'
 }
 
 export function formatWebSocketQueue(queue: WebSocketQueueDiagnosticStats): string {
@@ -1141,6 +1349,8 @@ function formatPreviewTransport(transport?: string): string {
   switch (transport) {
     case 'native-surface':
       return 'Native'
+    case 'd3d11-shared-texture':
+      return 'D3D11'
     case 'electron-proof-surface':
       return 'Proof'
     case 'latest-jpeg-polling':
@@ -1156,6 +1366,8 @@ function formatPreviewSurfaceBacking(backing?: string): string {
   switch (backing) {
     case 'cametal-layer':
       return 'CAMetalLayer'
+    case 'directcomposition-swapchain':
+      return 'DirectComposition swap chain'
     case 'electron-browser-window':
       return 'Electron BrowserWindow'
     case 'none':
@@ -1175,10 +1387,14 @@ function formatEncodeBackend(backend?: string): string {
       return 'Software (x264)'
     case 'hardware-videotoolbox':
       return 'Hardware (VideoToolbox)'
+    case 'hardware-vaapi':
+      return 'Hardware (VAAPI)'
     case 'hardware-media-foundation':
       return 'Hardware (MediaFoundation)'
     case 'software-media-foundation':
       return 'Software (MediaFoundation)'
+    case 'software-open-h264':
+      return 'Software (OpenH264)'
     default:
       return '--'
   }
@@ -1188,6 +1404,10 @@ function formatCompositorBackend(stats: DiagnosticStats): string {
   switch (stats.compositorBackend) {
     case 'metal':
       return 'Metal'
+    case 'd3d11':
+      return 'D3D11'
+    case 'cpu':
+      return 'CPU'
     case 'cpu-fallback': {
       const frames = stats.compositorCpuFallbackFrames ?? 0
       const reason = stats.compositorFallbackReason ? `: ${stats.compositorFallbackReason}` : ''
@@ -1202,23 +1422,46 @@ function formatImagePolls(counts?: DiagnosticStats['previewImagePollCounts']): s
   if (!counts) {
     return '--'
   }
-  const total = counts.cameraPng + counts.screenPng + counts.liveJpeg + counts.liveMjpeg
+  const total =
+    counts.cameraPng +
+    counts.screenPng +
+    counts.productionPng +
+    counts.cameraBmp +
+    counts.screenBmp +
+    counts.liveJpeg +
+    counts.liveMjpeg
   return total === 0
     ? 'None'
-    : `${total} (cam ${counts.cameraPng}, scr ${counts.screenPng}, jpg ${counts.liveJpeg}, mjpeg ${counts.liveMjpeg})`
+    : `${total} (PNG cam ${counts.cameraPng}, scr ${counts.screenPng}, prod ${counts.productionPng}; BMP cam ${counts.cameraBmp}, scr ${counts.screenBmp}; jpg ${counts.liveJpeg}, mjpeg ${counts.liveMjpeg})`
 }
 
-// The plan's "OBS-native preview" vs "Fallback preview" badge. Only the real Metal
-// layer may report native-surface; the Electron proof window stays explicitly non-native.
+// The plan's "OBS-native preview" vs "Fallback preview" badge. Only the
+// platform-canonical Metal or D3D11 presenter may report native; the Electron
+// proof window stays explicitly non-native.
 function previewPathBadge(
   transport?: string,
-  backing?: string
+  backing?: string,
+  hostKind?: PreviewSurfaceStatus['nativePreviewHostKind'],
+  platform = 'darwin'
 ): { label: string; tone: StatusTone } {
+  if (
+    transport &&
+    backing &&
+    isNativePreviewCapability(
+      {
+        transport: transport as DiagnosticStats['previewTransport'],
+        backing: backing as DiagnosticStats['previewSurfaceBacking'],
+        nativePreviewHostKind: hostKind
+      },
+      platform
+    )
+  ) {
+    return { label: 'OBS-native', tone: 'good' }
+  }
   switch (transport) {
     case 'native-surface':
-      return backing === 'cametal-layer'
-        ? { label: 'OBS-native', tone: 'good' }
-        : { label: 'Surface proof', tone: 'warn' }
+    case 'd3d11-shared-texture':
+      return { label: 'Surface proof', tone: 'warn' }
     case 'electron-proof-surface':
       return { label: 'Proof surface', tone: 'warn' }
     case 'latest-jpeg-polling':

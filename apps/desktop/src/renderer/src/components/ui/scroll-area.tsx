@@ -37,14 +37,17 @@ function ScrollBar({
       data-orientation={orientation}
       orientation={orientation}
       className={cn(
-        'flex touch-none p-px transition-colors select-none data-horizontal:h-2.5 data-horizontal:flex-col data-horizontal:border-t data-horizontal:border-t-transparent data-vertical:h-full data-vertical:w-2.5 data-vertical:border-l data-vertical:border-l-transparent',
+        // No track and no edge hairline: the gutter is invisible and only the
+        // thumb reads. Matches the native scrollbar rules in styles.css so the
+        // two populations cannot drift apart.
+        'flex touch-none select-none bg-transparent p-[3px] transition-colors data-horizontal:h-2.5 data-horizontal:flex-col data-vertical:h-full data-vertical:w-2.5',
         className
       )}
       {...props}
     >
       <ScrollAreaPrimitive.ScrollAreaThumb
         data-slot="scroll-area-thumb"
-        className="relative flex-1 rounded-full bg-border"
+        className="relative flex-1 rounded-full bg-[var(--scrollbar-thumb)] shadow-[inset_0_0_0_1px_var(--scrollbar-thumb-ring)] transition-colors hover:bg-[var(--scrollbar-thumb-hover)]"
       />
     </ScrollAreaPrimitive.ScrollAreaScrollbar>
   )

@@ -1,30 +1,31 @@
 import {
-  ArrowCounterClockwise,
-  ArrowsClockwise,
-  Broadcast,
-  CaretDown,
-  CheckCircle,
-  FloppyDisk,
-  Gauge,
-  LinkSimple,
-  LockSimple,
-  MagnifyingGlass,
-  SignOut,
-  TextAa,
-  InstagramLogo,
-  TiktokLogo,
-  TwitchLogo,
-  Warning,
-  WarningCircle,
-  XLogo,
-  YoutubeLogo,
-  type Icon
-} from '@phosphor-icons/react'
+  AlertIcon,
+  type AppIcon,
+  ChevronDownIcon,
+  GaugeIcon,
+  HeartbeatIcon,
+  InstagramIcon,
+  LinkIcon,
+  LivestreamIcon,
+  ResetIcon,
+  SaveIcon,
+  SearchIcon,
+  SignOutIcon,
+  SuccessIcon,
+  SyncIcon,
+  TextIcon,
+  TiktokIcon,
+  TwitchIcon,
+  WarningIcon,
+  XPlatformIcon,
+  YoutubeIcon
+} from '@/components/icons'
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
 
 import { ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
+import { AvatarCircle } from '@/lib/chat-avatar'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -47,19 +48,24 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useStudioCore } from '@/hooks/use-studio'
+import {
+  useStudioCore,
+  useStudioDiagnostics,
+  type StreamOutputTopologyPreflight
+} from '@/hooks/use-studio'
 import type {
+  DiagnosticStats,
   PlatformAccount,
   PlatformAccountValidation,
   OAuthProviderCredentialStatus,
   StreamAuthMode,
+  StreamHealth,
   StreamMetadataDraft,
   StreamMetadataValidation,
   StreamPlatform,
   StreamPrivacy,
   StreamTargetRuntime,
   StreamTargetSettings,
-  StreamingSettings,
   StreamUrlMode,
   VideoSettings,
   TwitchCategory,
@@ -69,25 +75,32 @@ import type {
 import {
   isStreamTargetReady,
   oauthUnavailableReason,
-  streamOutputVideoForTarget,
-  streamOutputVideoSettings,
+  providerStreamOutputPlanOptions,
+  resolveProviderStreamOutputPlan,
+  STREAM_OUTPUT_GOP_SECONDS,
+  streamVideoProfileValidationReason,
+  type ProviderStreamOutputPlan,
   videoProfileCompatibility
 } from '@/lib/capture'
 import { streamingDestinationEnableGate, type EntitlementUiGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { streamKeyPlatformMismatch, streamKeyTailHint } from '@/lib/stream-key-format'
+import {
+  classifyStreamHealthAttribution,
+  type StreamHealthAttribution
+} from '@/lib/stream-health-attribution'
 import { cn } from '@/lib/utils'
 import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
 type BadgeTone = 'success' | 'warning' | 'destructive' | 'outline'
 
-const PLATFORM_ICON: Record<StreamPlatform, Icon> = {
-  youtube: YoutubeLogo,
-  twitch: TwitchLogo,
-  x: XLogo,
-  tiktok: TiktokLogo,
-  instagram: InstagramLogo,
-  custom: Broadcast
+const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
+  youtube: YoutubeIcon,
+  twitch: TwitchIcon,
+  x: XPlatformIcon,
+  tiktok: TiktokIcon,
+  instagram: InstagramIcon,
+  custom: LivestreamIcon
 }
 
 export function StreamingTab(): ReactElement {
@@ -115,6 +128,8 @@ export function StreamingTab(): ReactElement {
     streamMetadataSavePending,
     streamMetadataValidation,
     streamTargets,
+    streamOutputTopologyPreflight,
+    refreshStreamOutputTopology,
     twitchCategories,
     twitchCategorySearchPending,
     searchTwitchCategories,
@@ -124,17 +139,25 @@ export function StreamingTab(): ReactElement {
     authorizeXLive,
     stopSession
   } = useStudioCore()
+  const { diagnosticStats, streamHealth } = useStudioDiagnostics()
   const streaming = captureConfig.streaming
   const { video } = captureConfig
-  const streamVideo = streamOutputVideoSettings(
+  const preflightProvesSeparateOutput =
+    streamOutputTopologyPreflight.state === 'ready' &&
+    streamOutputTopologyPreflight.result.outputRoles.length === 2 &&
+    streamOutputTopologyPreflight.result.outputRoles[0] === 'recording' &&
+    streamOutputTopologyPreflight.result.outputRoles[1] === 'stream' &&
+    streamOutputTopologyPreflight.result.effectiveBridgeOutput !== 'raw-yuv420p' &&
+    (streamOutputTopologyPreflight.result.probeState === 'passed' ||
+      streamOutputTopologyPreflight.result.probeState === 'not-required')
+  const separateEncodedOutputRoleAvailable = isSessionActive
+    ? diagnosticStats.encoderBridgeSeparateOutputEncodersActive
+    : preflightProvesSeparateOutput
+  const providerPlan = resolveProviderStreamOutputPlan(
     video,
-    captureConfig.streamEnabled ? streaming : undefined
+    captureConfig.streamEnabled ? streaming : undefined,
+    providerStreamOutputPlanOptions(captureConfig, separateEncodedOutputRoleAvailable)
   )
-  const splitOutputActive =
-    captureConfig.recordEnabled &&
-    captureConfig.streamEnabled &&
-    streaming.enabled &&
-    !sameVideoOutput(video, streamVideo)
   const compatibility = videoProfileCompatibility(captureConfig)
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   const livestreamingEntitlementReason = entitlementDisabledReason(entitlements, 'livestreaming')
@@ -190,7 +213,7 @@ export function StreamingTab(): ReactElement {
       <div className="flex flex-col gap-5">
         {livestreamingEntitlementReason && !isSessionActive ? (
           <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-            <WarningCircle className="mt-0.5 size-4 shrink-0" weight="fill" />
+            <AlertIcon className="mt-0.5 size-4 shrink-0" weight="fill" />
             <span>{livestreamingEntitlementReason}</span>
           </div>
         ) : null}
@@ -256,18 +279,26 @@ export function StreamingTab(): ReactElement {
       <div className="flex flex-col gap-5">
         {compatibilityMessage ? (
           <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-            <WarningCircle className="mt-0.5 size-4 shrink-0" weight="fill" />
+            <AlertIcon className="mt-0.5 size-4 shrink-0" weight="fill" />
             <span>{compatibilityMessage}</span>
           </div>
         ) : null}
+        <LiveOutputHealth
+          diagnosticStats={diagnosticStats}
+          isSessionActive={isSessionActive}
+          preflight={streamOutputTopologyPreflight}
+          providerPlan={providerPlan}
+          streamEnabled={captureConfig.streamEnabled && streaming.enabled}
+          streamHealth={streamHealth}
+          streamTargets={streamTargets}
+          onRetry={refreshStreamOutputTopology}
+        />
         <StreamingReadiness
           ffmpegReady={Boolean(health?.ffmpeg.available)}
           profileCompatible={!compatibility.blockingReason}
           recordEnabled={captureConfig.recordEnabled}
           recordingVideo={video}
-          splitOutputActive={splitOutputActive}
-          streaming={streaming}
-          streamVideo={streamVideo}
+          providerPlan={providerPlan}
           targets={streaming.targets}
         />
       </div>
@@ -290,7 +321,7 @@ function StreamFailureBanner({
   return (
     <div className="flex flex-col gap-3 rounded-row border border-warning/40 bg-warning/10 p-3">
       <div className="flex items-start gap-2.5">
-        <WarningCircle className="size-5 shrink-0 text-warning" weight="fill" />
+        <AlertIcon className="size-5 shrink-0 text-warning" weight="fill" />
         <div className="flex flex-col gap-1 text-sm">
           <span className="font-medium">Some destinations aren’t live</span>
           {failed.length ? (
@@ -405,8 +436,10 @@ function DestinationCard({
     ? runtimeBadge(runtime)
     : (savedStatusBadge ?? configuredBadge(target.enabled, ready))
   const statusMessage = runtime?.message ?? target.status?.message
+  // Multistreaming is free for every plan: the only enable gate left is the
+  // shared destination cap (or a disabled livestreaming feature), so the
+  // switch is always rendered and the strip below explains why it is off.
   const enableLockGate = !disabled && !target.enabled && !enableGate.allowed ? enableGate : null
-  const enableLockUpgradeUrl = enableLockGate?.upgradeUrl
   const enableSwitchDisabled = disabled || Boolean(enableLockGate)
   const enableLockId = `${target.id}-enable-lock`
   const [manualStreamKeyDraft, setManualStreamKeyDraft] = useState(target.streamKey)
@@ -511,34 +544,15 @@ function DestinationCard({
         onClick={() => setExpanded((value) => !value)}
       >
         <span onClick={(event) => event.stopPropagation()}>
-          {enableLockGate ? (
-            // A dead disabled switch reads as broken; the lock chip says what
-            // this actually is — a Premium feature — and IS the upgrade
-            // affordance (multistream gate UI flow).
-            <button
-              aria-describedby={enableLockId}
-              aria-label={`${target.label} requires Videorc Premium`}
-              className="cursor-pointer"
-              type="button"
-              onClick={() =>
-                enableLockUpgradeUrl ? openExternalUrl(enableLockUpgradeUrl) : undefined
-              }
-            >
-              <Badge variant="outline">
-                <LockSimple className="size-3" weight="fill" />
-                Premium
-              </Badge>
-            </button>
-          ) : (
-            <Switch
-              aria-label={`Enable ${target.label}`}
-              checked={target.enabled}
-              disabled={enableSwitchDisabled}
-              onCheckedChange={patchEnabled}
-            />
-          )}
+          <Switch
+            aria-describedby={enableLockGate ? enableLockId : undefined}
+            aria-label={`Enable ${target.label}`}
+            checked={target.enabled}
+            disabled={enableSwitchDisabled}
+            onCheckedChange={patchEnabled}
+          />
         </span>
-        <CaretDown
+        <ChevronDownIcon
           className={cn(
             'size-3.5 shrink-0 text-muted-foreground transition-transform',
             expanded && 'rotate-180'
@@ -562,22 +576,14 @@ function DestinationCard({
         </div>
       ) : null}
       {enableLockGate ? (
+        // Neutral limit strip: a pipeline cap, not a plan boundary, so no
+        // warning tint and no upgrade affordance.
         <div
-          className="-mt-2 flex flex-wrap items-center gap-2 border-l-2 border-warning/50 pl-3 text-xs text-warning-foreground dark:text-warning"
+          className="-mt-2 flex flex-wrap items-center gap-2 border-l-2 border-border pl-3 text-xs text-muted-foreground"
           id={enableLockId}
         >
-          <WarningCircle className="size-3.5 shrink-0" weight="fill" />
+          <AlertIcon className="size-3.5 shrink-0" weight="fill" />
           <span className="min-w-0 flex-1">{enableLockGate.reason}</span>
-          {enableLockUpgradeUrl ? (
-            <Button
-              className="h-auto px-0 text-xs"
-              size="xs"
-              variant="link"
-              onClick={() => openExternalUrl(enableLockUpgradeUrl)}
-            >
-              View Premium
-            </Button>
-          ) : null}
         </div>
       ) : null}
 
@@ -754,7 +760,7 @@ function DestinationCard({
                   variant="ghost"
                   onClick={() => void onRestorePreviousStreamKey(target.id)}
                 >
-                  <ArrowCounterClockwise />
+                  <ResetIcon />
                   Restore previous {credentialLabel}
                   {target.previousStreamKeyHint ? ` (ends ${target.previousStreamKeyHint})` : ''}
                 </Button>
@@ -789,7 +795,7 @@ function DestinationCard({
               </DialogHeader>
               {pendingKeySave?.warning ? (
                 <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-                  <Warning className="mt-0.5 shrink-0" />
+                  <WarningIcon className="mt-0.5 shrink-0" />
                   <span>{pendingKeySave.warning}</span>
                 </div>
               ) : null}
@@ -888,7 +894,7 @@ function manualKeyGuidance(
 }
 
 function PlatformGlyph({ platform }: { platform: StreamPlatform }): ReactElement {
-  const Icon = PLATFORM_ICON[platform]
+  const AppIcon = PLATFORM_ICON[platform]
   return (
     <span
       className={cn(
@@ -896,7 +902,7 @@ function PlatformGlyph({ platform }: { platform: StreamPlatform }): ReactElement
         PLATFORM_GLYPH_TINT[platform]
       )}
     >
-      <Icon className="size-4" weight="fill" />
+      <AppIcon className="size-4" weight="fill" />
     </span>
   )
 }
@@ -981,7 +987,7 @@ function OAuthAccountPanel({
                 }
               }}
             >
-              <LinkSimple data-icon="inline-start" weight="bold" />
+              <LinkIcon data-icon="inline-start" weight="bold" />
               Connect
             </Button>
           </div>
@@ -1085,11 +1091,16 @@ function OAuthAccountPanel({
   return (
     <div className="flex flex-col gap-2 rounded-row border bg-muted/30 p-3">
       <div className="flex items-start justify-between gap-3">
-        <div className="flex min-w-0 flex-col gap-1">
-          <span className="truncate text-sm font-medium">{account.accountLabel}</span>
-          <span className="truncate text-xs text-muted-foreground">
-            {account.accountHandle ?? account.accountId}
-          </span>
+        <div className="flex min-w-0 items-center gap-2.5">
+          {/* The platform account's own avatar (stored at connect time and
+              resolved through main's allowlisted cache); initials fallback. */}
+          <AvatarCircle avatarUrl={account.avatarUrl} name={account.accountLabel} />
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="truncate text-sm font-medium">{account.accountLabel}</span>
+            <span className="truncate text-xs text-muted-foreground">
+              {account.accountHandle ?? account.accountId}
+            </span>
+          </div>
         </div>
         <Badge variant={account.status === 'connected' ? 'success' : 'warning'}>
           {account.status === 'connected' ? 'Connected' : 'Reconnect'}
@@ -1145,7 +1156,7 @@ function OAuthAccountPanel({
               variant="outline"
               onClick={() => void onRefreshYouTubeChannels(account.accountId)}
             >
-              <ArrowsClockwise data-icon="inline-start" weight="bold" />
+              <SyncIcon data-icon="inline-start" weight="bold" />
               {youtubeChannelsLoading ? 'Loading' : 'Refresh'}
             </Button>
           </div>
@@ -1179,7 +1190,7 @@ function OAuthAccountPanel({
               variant="outline"
               onClick={() => void onRefreshXNativeCapability(account.accountId)}
             >
-              <ArrowsClockwise data-icon="inline-start" weight="bold" />
+              <SyncIcon data-icon="inline-start" weight="bold" />
               {xNativeCapabilityLoading ? 'Checking' : 'Refresh'}
             </Button>
           </div>
@@ -1258,7 +1269,7 @@ function OAuthAccountPanel({
         variant="outline"
         onClick={() => onDisconnect(platform)}
       >
-        <SignOut data-icon="inline-start" weight="bold" />
+        <SignOutIcon data-icon="inline-start" weight="bold" />
         Disconnect
       </Button>
     </div>
@@ -1332,11 +1343,11 @@ function MetadataEditor({
           variant="secondary"
           onClick={onSave}
         >
-          <FloppyDisk data-icon="inline-start" weight="bold" />
+          <SaveIcon data-icon="inline-start" weight="bold" />
           {pending ? 'Saving' : 'Save'}
         </Button>
       }
-      icon={TextAa}
+      icon={TextIcon}
       title="Broadcast info"
     >
       {!draft ? (
@@ -1589,7 +1600,7 @@ function MetadataOverride({
                 variant="outline"
                 onClick={() => void onSearchTwitchCategories(twitchCategoryQuery)}
               >
-                <MagnifyingGlass data-icon="inline-start" weight="bold" />
+                <SearchIcon data-icon="inline-start" weight="bold" />
                 {twitchCategorySearchPending ? 'Searching' : 'Search'}
               </Button>
             </div>
@@ -1672,32 +1683,317 @@ function platformLabel(platform: StreamPlatform): string {
   }
 }
 
+function LiveOutputHealth({
+  diagnosticStats,
+  isSessionActive,
+  preflight,
+  providerPlan,
+  streamEnabled,
+  streamHealth,
+  streamTargets,
+  onRetry
+}: {
+  diagnosticStats: DiagnosticStats
+  isSessionActive: boolean
+  preflight: StreamOutputTopologyPreflight
+  providerPlan: ProviderStreamOutputPlan
+  streamEnabled: boolean
+  streamHealth: StreamHealth | null
+  streamTargets: StreamTargetRuntime[]
+  onRetry: () => Promise<void>
+}): ReactElement {
+  const liveOutputActive = isSessionActive && streamEnabled
+  const currentStreamHealth =
+    streamHealth &&
+    (!diagnosticStats.sessionId || diagnosticStats.sessionId === streamHealth.sessionId)
+      ? streamHealth
+      : null
+  const attribution = liveOutputActive
+    ? classifyStreamHealthAttribution(diagnosticStats, currentStreamHealth, streamTargets)
+    : preflightAttribution(preflight)
+  const badge = streamHealthBadge(attribution, liveOutputActive)
+  const probeResult = !liveOutputActive && preflight.state === 'ready' ? preflight.result : null
+  const requestedPath = liveOutputActive
+    ? diagnosticStats.encoderBridgeRequestedVideoOutput
+    : probeResult?.requestedBridgeOutput
+  const effectivePath = liveOutputActive
+    ? diagnosticStats.encoderBridgeEffectiveVideoOutput
+    : probeResult?.effectiveBridgeOutput
+  const effectiveEncoder = liveOutputActive
+    ? diagnosticStats.encodeBackend
+    : probeResult?.effectiveEncodeBackend
+  const fallbackReason = liveOutputActive
+    ? diagnosticStats.encoderBridgeEncodedOutputFallbackReason
+    : probeResult?.fallbackReason
+  const coalescedFrames = diagnosticStats.encoderBridgeSeparateOutputEncodersActive
+    ? diagnosticStats.encoderBridgeStreamQueueDroppedFrames
+    : diagnosticStats.encoderBridgeOutputQueueDroppedFrames
+  const effectiveProviders = [
+    ...new Set(
+      providerPlan.targets
+        .map(({ target }) => target?.platform)
+        .filter((platform): platform is StreamPlatform => Boolean(platform))
+        .map(platformLabel)
+    )
+  ].join(', ')
+  const effectiveProfiles = providerPlan.targets.length
+    ? providerPlan.targets
+        .map(({ target, video }) =>
+          target
+            ? `${platformLabel(target.platform)} ${formatEffectiveStreamProfile(video)}`
+            : formatEffectiveStreamProfile(video)
+        )
+        .join(' / ')
+    : formatEffectiveStreamProfile(providerPlan.streamVideo)
+
+  return (
+    <PanelSection
+      action={
+        !liveOutputActive && preflight.state === 'failed' ? (
+          <Button
+            size="xs"
+            variant="ghost"
+            onClick={() => {
+              void onRetry().catch(() => {})
+            }}
+          >
+            <SyncIcon data-icon="inline-start" weight="bold" />
+            Retry
+          </Button>
+        ) : null
+      }
+      contentClassName="gap-3"
+      description={streamHealthDescription(attribution, liveOutputActive, preflight)}
+      icon={HeartbeatIcon}
+      title="Live output health"
+    >
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+          Classified stage
+        </span>
+        <Badge variant={badge.tone}>{badge.label}</Badge>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+        <OutputMetric
+          label="Delivered FPS"
+          value={liveOutputActive ? formatLiveFps(currentStreamHealth?.fps) : '—'}
+        />
+        <OutputMetric
+          label="Bitrate"
+          value={
+            liveOutputActive
+              ? formatLiveBitrate(
+                  currentStreamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
+                )
+              : '—'
+          }
+        />
+        <OutputMetric
+          label="Encoder speed"
+          value={
+            liveOutputActive
+              ? formatEncoderSpeed(currentStreamHealth?.speed ?? diagnosticStats.encoderSpeed)
+              : '—'
+          }
+        />
+        <OutputMetric
+          label="Duplicated"
+          value={
+            liveOutputActive
+              ? formatFrameCount(
+                  currentStreamHealth?.duplicatedFrames ?? diagnosticStats.streamDuplicatedFrames
+                )
+              : '—'
+          }
+        />
+        <OutputMetric
+          label="Dropped"
+          value={
+            liveOutputActive
+              ? formatFrameCount(
+                  currentStreamHealth?.droppedFrames ?? diagnosticStats.droppedFrames
+                )
+              : '—'
+          }
+        />
+        <OutputMetric
+          label="Coalesced"
+          value={liveOutputActive ? formatFrameCount(coalescedFrames) : '—'}
+        />
+      </div>
+
+      <div className="flex flex-col gap-2 rounded-row border border-border bg-muted/30 p-3">
+        <ExactOutputPath
+          label="Effective provider"
+          value={effectiveProviders || 'No enabled destination'}
+        />
+        <ExactOutputPath label="Effective profile" value={effectiveProfiles} />
+        <ExactOutputPath label="GOP" value={`${STREAM_OUTPUT_GOP_SECONDS} seconds`} />
+        <ExactOutputPath
+          label="Encode sharing"
+          value={
+            providerPlan.separateEncodedOutputRole
+              ? 'Separate recording + stream roles'
+              : 'Shared encode · strictest provider'
+          }
+        />
+        <ExactOutputPath label="Requested path" value={requestedPath} />
+        <ExactOutputPath label="Effective path" value={effectivePath} />
+        <ExactOutputPath label="Effective encoder" value={effectiveEncoder} />
+        {fallbackReason ? (
+          <p className="border-t border-border pt-2 text-xs text-warning">
+            Fallback reason: {fallbackReason}
+          </p>
+        ) : null}
+      </div>
+    </PanelSection>
+  )
+}
+
+function preflightAttribution(preflight: StreamOutputTopologyPreflight): StreamHealthAttribution {
+  if (preflight.state !== 'ready') {
+    return 'unknown'
+  }
+  const result = preflight.result
+  return result.fallbackReason ||
+    result.requestedBridgeOutput !== result.effectiveBridgeOutput ||
+    result.probeState === 'rejected' ||
+    result.probeState === 'unsupported'
+    ? 'fallback'
+    : 'healthy'
+}
+
+function streamHealthBadge(
+  attribution: StreamHealthAttribution,
+  liveOutputActive: boolean
+): { label: string; tone: BadgeTone } {
+  if (!liveOutputActive && attribution === 'healthy') {
+    return { label: 'Ready', tone: 'success' }
+  }
+  if (attribution === 'healthy') {
+    return { label: 'Healthy', tone: 'success' }
+  }
+  if (attribution === 'unknown') {
+    return { label: 'Unknown', tone: 'outline' }
+  }
+  if (attribution === 'fallback' || attribution === 'network' || attribution === 'preview') {
+    return {
+      label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
+      tone: 'warning'
+    }
+  }
+  return {
+    label: attribution.charAt(0).toUpperCase() + attribution.slice(1),
+    tone: 'destructive'
+  }
+}
+
+function streamHealthDescription(
+  attribution: StreamHealthAttribution,
+  liveOutputActive: boolean,
+  preflight: StreamOutputTopologyPreflight
+): string {
+  if (!liveOutputActive) {
+    switch (preflight.state) {
+      case 'not-requested':
+        return 'The exact output path has not been checked. Go Live stays blocked.'
+      case 'pending':
+        return 'Checking the exact output path. Go Live stays blocked until it finishes.'
+      case 'failed':
+        return `Output path check failed: ${preflight.message}`
+      case 'ready':
+        return attribution === 'fallback'
+          ? 'The backend verified this fallback path for the selected output profile.'
+          : 'The backend verified the exact output path for the selected profile.'
+    }
+  }
+
+  switch (attribution) {
+    case 'device':
+      return 'A disconnected capture device is interrupting the livestream path.'
+    case 'audio':
+      return 'Audio capture is dropping data before the livestream encode.'
+    case 'capture':
+      return 'Capture is running below the target frame rate.'
+    case 'render':
+      return 'The compositor is running below the target frame rate.'
+    case 'encoder':
+      return 'The encoder or its bounded output queue is losing frames.'
+    case 'fallback':
+      return 'The livestream is using a backend-confirmed fallback output path.'
+    case 'network':
+      return 'Media stages are healthy, but delivery or a destination is degraded.'
+    case 'preview':
+      return 'Livestream media is healthy; only the local preview is degraded.'
+    case 'healthy':
+      return 'Backend evidence shows the livestream media and delivery path are healthy.'
+    default:
+      return 'Waiting for enough backend evidence to classify the active livestream.'
+  }
+}
+
+function OutputMetric({ label, value }: { label: string; value: string }): ReactElement {
+  return (
+    <div className="rounded-row border border-border bg-muted/30 px-2.5 py-2">
+      <div className="text-[11px] text-muted-foreground">{label}</div>
+      <div className="text-sm font-medium tabular-nums">{value}</div>
+    </div>
+  )
+}
+
+function ExactOutputPath({ label, value }: { label: string; value?: string }): ReactElement {
+  return (
+    <div className="flex items-start justify-between gap-3 text-xs">
+      <span className="shrink-0 text-muted-foreground">{label}</span>
+      <code className="min-w-0 break-all text-right text-foreground">{value ?? 'unknown'}</code>
+    </div>
+  )
+}
+
+function formatLiveFps(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} fps` : '—'
+}
+
+function formatLiveBitrate(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? `${Math.round(value).toLocaleString()} kbps`
+    : '—'
+}
+
+function formatEncoderSpeed(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : '—'
+}
+
+function formatFrameCount(value?: number): string {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.round(value)).toLocaleString()
+    : '—'
+}
+
 function StreamingReadiness({
   targets,
   ffmpegReady,
   profileCompatible,
+  providerPlan,
   recordEnabled,
-  recordingVideo,
-  splitOutputActive,
-  streaming,
-  streamVideo
+  recordingVideo
 }: {
   targets: StreamTargetSettings[]
   ffmpegReady: boolean
   profileCompatible: boolean
+  providerPlan: ProviderStreamOutputPlan
   recordEnabled: boolean
   recordingVideo: VideoSettings
-  splitOutputActive: boolean
-  streaming: StreamingSettings
-  streamVideo: VideoSettings
 }): ReactElement {
   const enabled = targets.filter((target) => target.enabled)
   const readyCount = enabled.filter(isStreamTargetReady).length
   const allReady = enabled.length > 0 && readyCount === enabled.length
-  const targetOutputs = enabled.map((target) => ({
-    target,
-    video: streamOutputVideoForTarget(recordingVideo, streaming, target)
-  }))
+  const targetOutputs = providerPlan.targets.flatMap(({ target, video }) =>
+    target ? [{ target, video }] : []
+  )
+  const streamVideo = providerPlan.streamVideo
+  const splitOutputActive = providerPlan.separateEncodedOutputRole
   const outputVideos = targetOutputs.length
     ? targetOutputs.map((output) => output.video)
     : [streamVideo]
@@ -1709,12 +2005,7 @@ function StreamingReadiness({
     profileCompatible &&
     outputVideos.every((video, index) => {
       const target = targetOutputs[index]?.target
-      return (
-        video.bitrateKbps <= 6000 ||
-        (video.preset === 'stream-youtube-4k30' &&
-          target?.platform === 'youtube' &&
-          video.bitrateKbps === 30000)
-      )
+      return streamVideoProfileValidationReason(video, target?.platform) === null
     })
   const showRecordingOutput = recordEnabled && (splitOutputActive || true4kStreamActive)
   const compatibilityHint = true4kStreamActive
@@ -1743,7 +2034,7 @@ function StreamingReadiness({
   const diskMbPerMin = Math.round((recordingVideo.bitrateKbps / 8 / 1000) * 60)
 
   return (
-    <PanelSection icon={Gauge} title="Multistream readiness">
+    <PanelSection icon={GaugeIcon} title="Multistream readiness">
       <ChecklistRow
         detail={
           enabled.length ? `${readyCount}/${enabled.length} ready` : 'No destinations enabled'
@@ -1790,17 +2081,12 @@ function StreamingReadiness({
   )
 }
 
-function sameVideoOutput(left: VideoSettings, right: VideoSettings): boolean {
-  return (
-    left.width === right.width &&
-    left.height === right.height &&
-    left.fps === right.fps &&
-    left.bitrateKbps === right.bitrateKbps
-  )
-}
-
 function formatVideoOutput(video: VideoSettings): string {
   return `${video.width}×${video.height} @ ${video.fps}`
+}
+
+function formatEffectiveStreamProfile(video: VideoSettings): string {
+  return `${formatVideoOutput(video)} fps · ${video.bitrateKbps.toLocaleString()} kbps CBR`
 }
 
 function formatTargetOutputSummary(
@@ -1827,9 +2113,9 @@ function ChecklistRow({
     <div className="flex items-start justify-between gap-3 text-sm">
       <div className="flex items-center gap-2">
         {ok ? (
-          <CheckCircle className="size-4 shrink-0 text-primary" weight="fill" />
+          <SuccessIcon className="size-4 shrink-0 text-primary" weight="fill" />
         ) : (
-          <WarningCircle className="size-4 shrink-0 text-muted-foreground" weight="fill" />
+          <AlertIcon className="size-4 shrink-0 text-muted-foreground" weight="fill" />
         )}
         <span>{label}</span>
       </div>

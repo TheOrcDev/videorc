@@ -94,7 +94,7 @@ export function buildMacosBetaReleaseManifest({
     minimumMacOS: nonEmpty(env.VIDEORC_RELEASE_MINIMUM_MACOS) ?? DEFAULT_MINIMUM_MACOS,
     releasedAt,
     releaseNotesUrl:
-      nonEmpty(env.VIDEORC_RELEASE_NOTES_URL) ?? `https://videorc.app/releases/${releaseId}`
+      nonEmpty(env.VIDEORC_RELEASE_NOTES_URL) ?? `https://www.videorc.com/releases/${releaseId}`
   }
 }
 

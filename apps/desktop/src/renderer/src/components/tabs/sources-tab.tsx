@@ -1,15 +1,15 @@
 import {
-  ArrowCounterClockwise,
-  ArrowsClockwise,
-  Check,
-  Monitor,
-  SpeakerHigh,
-  SpeakerSlash,
-  UploadSimple,
-  VideoCamera,
-  Warning,
-  Waveform
-} from '@phosphor-icons/react'
+  CameraIcon,
+  CheckIcon,
+  DisplayIcon,
+  ResetIcon,
+  SpeakerOffIcon,
+  SpeakerOnIcon,
+  SyncIcon,
+  UploadIcon,
+  WarningIcon,
+  WaveformIcon
+} from '@/components/icons'
 import { useRef, useState, type ReactElement } from 'react'
 
 import { ConfigGrid } from '@/components/page'
@@ -40,6 +40,7 @@ import {
   type AudioSyncRecommendationReport
 } from '@/lib/capture'
 import type { SourceSelection } from '@/lib/backend'
+import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 
 // Live chip for a capture source (UI rewrite V3): what the preview pipeline says
 // about the source RIGHT NOW. A live source whose newest frame is old is reported
@@ -109,10 +110,10 @@ export function SourcesTab(): ReactElement {
     layoutSwitchPending,
     sourceDeviceSwitchPending,
     switchSourceDeviceLive,
-    openSystemPermission,
-    openPreviewPermissions,
+    handleSystemPermission,
     revealPermissionTarget,
     runtimeInfo,
+    mediaAccess,
     wsStatus
   } = useStudioCore()
   const { previewCameraStatus, previewScreenStatus } = useStudioPreview()
@@ -129,11 +130,20 @@ export function SourcesTab(): ReactElement {
   const hasCapturePermissionRequired = captureDevices.some(
     (device) => device.status === 'permission-required'
   )
-  const selectedCamera = cameras.find((device) => device.id === captureConfig.sources.cameraId)
+  const cameraAccess = systemAccessRows({
+    deviceList,
+    audioMeter: null,
+    platform: runtimeInfo?.platform,
+    mediaAccess
+  }).find((row) => row.id === 'camera')
   const hasCameraPermissionRequired =
-    previewCameraStatus?.state === 'permission-needed' ||
-    selectedCamera?.status === 'permission-required' ||
-    cameras.some((device) => device.status === 'permission-required')
+    cameraAccess?.state === 'first-use' || cameraAccess?.state === 'not-granted'
+  const cameraPermissionAction = systemAccessAction({
+    pane: 'camera',
+    state: cameraAccess?.state,
+    platform: runtimeInfo?.platform,
+    mediaAccessStatus: mediaAccess?.camera
+  })
   const capturePermissionTargetName =
     runtimeInfo?.capturePermissionTargetName ?? runtimeInfo?.permissionTargetName ?? 'Videorc'
   const [syncRecommendation, setSyncRecommendation] =
@@ -214,34 +224,38 @@ export function SourcesTab(): ReactElement {
       <PanelSection
         action={
           <Button size="sm" variant="outline" onClick={() => void refreshBackend()}>
-            <ArrowsClockwise data-icon="inline-start" />
+            <SyncIcon data-icon="inline-start" />
             Refresh
           </Button>
         }
         className="lg:col-span-2"
         description="Pick what gets captured. Unavailable devices need permission or reconnection."
-        icon={Monitor}
+        icon={DisplayIcon}
         title="Capture sources"
       >
         {deviceList.warnings.map((warning) => (
           <Alert key={warning} variant="warning">
-            <Warning weight="fill" />
+            <WarningIcon weight="fill" />
             <AlertTitle>{warning}</AlertTitle>
           </Alert>
         ))}
         {hasCapturePermissionRequired ? (
           <Alert variant="warning">
-            <Warning weight="fill" />
+            <WarningIcon weight="fill" />
             <AlertTitle>
               Screen Recording permission is required for {capturePermissionTargetName}.
             </AlertTitle>
             <AlertDescription className="flex flex-wrap gap-2 pt-2">
-              <Button size="sm" variant="outline" onClick={() => void openPreviewPermissions()}>
-                <Monitor data-icon="inline-start" />
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void handleSystemPermission('screen-recording')}
+              >
+                <DisplayIcon data-icon="inline-start" />
                 Open Screen Recording
               </Button>
               <Button size="sm" variant="ghost" onClick={() => void revealPermissionTarget()}>
-                <UploadSimple data-icon="inline-start" />
+                <UploadIcon data-icon="inline-start" />
                 Show Capture Helper
               </Button>
             </AlertDescription>
@@ -249,21 +263,25 @@ export function SourcesTab(): ReactElement {
         ) : null}
         {hasCameraPermissionRequired ? (
           <Alert variant="warning">
-            <Warning weight="fill" />
+            <WarningIcon weight="fill" />
             <AlertTitle>
               Camera permission is required for {capturePermissionTargetName}.
             </AlertTitle>
             <AlertDescription className="flex flex-wrap gap-2 pt-2">
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => void openSystemPermission('camera')}
-              >
-                <VideoCamera data-icon="inline-start" />
-                Open Camera
-              </Button>
+              {cameraPermissionAction ? (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => void handleSystemPermission('camera')}
+                >
+                  <CameraIcon data-icon="inline-start" />
+                  {cameraPermissionAction === 'request-media-access'
+                    ? 'Enable Camera'
+                    : 'Open Camera Settings'}
+                </Button>
+              ) : null}
               <Button size="sm" variant="ghost" onClick={() => void revealPermissionTarget()}>
-                <UploadSimple data-icon="inline-start" />
+                <UploadIcon data-icon="inline-start" />
                 Show Capture Helper
               </Button>
             </AlertDescription>
@@ -323,7 +341,7 @@ export function SourcesTab(): ReactElement {
                 mystery. */}
             {cameraShortfall ? (
               <p className="flex items-start gap-1.5 text-xs text-warning">
-                <Warning className="mt-0.5 size-3.5 shrink-0" weight="fill" />
+                <WarningIcon className="mt-0.5 size-3.5 shrink-0" weight="fill" />
                 <span>{cameraFormatShortfallMessage(cameraShortfall)}</span>
               </p>
             ) : null}
@@ -372,7 +390,7 @@ export function SourcesTab(): ReactElement {
       <PanelSection
         className="lg:col-span-2"
         description="Live input meter with manual source gain. No automatic processing is applied."
-        icon={Waveform}
+        icon={WaveformIcon}
         title="Microphone mixer"
       >
         <SourceSelect
@@ -394,9 +412,9 @@ export function SourcesTab(): ReactElement {
         <MicPickerPreview deviceName={selectedMicrophone?.name} />
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           {captureConfig.audio.microphoneMuted ? (
-            <SpeakerSlash className="size-4" weight="duotone" />
+            <SpeakerOffIcon className="size-4" weight="duotone" />
           ) : (
-            <SpeakerHigh className="size-4" weight="duotone" />
+            <SpeakerOnIcon className="size-4" weight="duotone" />
           )}
           {selectedMicrophone ? selectedMicrophone.name : 'No microphone selected'}
         </div>
@@ -470,7 +488,7 @@ export function SourcesTab(): ReactElement {
                     variant="outline"
                     onClick={() => setShowSyncStimulusInstructions((open) => !open)}
                   >
-                    <Waveform data-icon="inline-start" />
+                    <WaveformIcon data-icon="inline-start" />
                     Stimulus
                   </Button>
                   <Button
@@ -479,7 +497,7 @@ export function SourcesTab(): ReactElement {
                     variant="outline"
                     onClick={() => syncMeasurementInputRef.current?.click()}
                   >
-                    <UploadSimple data-icon="inline-start" />
+                    <UploadIcon data-icon="inline-start" />
                     Import JSON
                   </Button>
                   <Button
@@ -489,11 +507,11 @@ export function SourcesTab(): ReactElement {
                     variant="secondary"
                     onClick={applySyncRecommendation}
                   >
-                    <Check data-icon="inline-start" />
+                    <CheckIcon data-icon="inline-start" />
                     Apply
                   </Button>
                   <Button size="xs" type="button" variant="ghost" onClick={resetSyncCalibration}>
-                    <ArrowCounterClockwise data-icon="inline-start" />
+                    <ResetIcon data-icon="inline-start" />
                     Reset
                   </Button>
                 </div>

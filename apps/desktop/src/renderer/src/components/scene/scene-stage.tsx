@@ -1,4 +1,4 @@
-import { ArrowSquareOut, Monitor, VideoCamera } from '@phosphor-icons/react'
+import { CameraIcon, DisplayIcon, ExternalLinkIcon } from '@/components/icons'
 import { useRef, useState, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -219,9 +219,9 @@ export function SceneStage({
             onClick={() => onSelectSource(source.id)}
           >
             {source.kind === 'camera' ? (
-              <VideoCamera className="size-3" weight="duotone" />
+              <CameraIcon className="size-3" weight="duotone" />
             ) : (
-              <Monitor className="size-3" weight="duotone" />
+              <DisplayIcon className="size-3" weight="duotone" />
             )}
             <span className="max-w-44 truncate">{source.name}</span>
           </button>
@@ -231,7 +231,7 @@ export function SceneStage({
       {/* Ground truth lives in the detached preview window. */}
       <div className="absolute inset-x-0 bottom-2 flex justify-center">
         <Button size="sm" variant="secondary" onClick={onTogglePreview}>
-          <ArrowSquareOut data-icon="inline-start" />
+          <ExternalLinkIcon data-icon="inline-start" />
           {previewOpen ? 'Close preview' : 'Open preview'}
         </Button>
       </div>

@@ -18,7 +18,10 @@ describe('native preview in-process loader', () => {
           iosurfaceCacheHits: 0,
           iosurfaceImports: 0,
           iosurfaceInvalidations: 0,
-          iosurfaceImportFailures: 0
+          iosurfaceImportFailures: 0,
+          iosurfaceImportLiveCount: 0,
+          iosurfaceImportPeakCount: 0,
+          iosurfaceImportCeiling: 3
         }))
       }),
       getNativeWindowHandle: () => nativeHandle

@@ -1,12 +1,12 @@
 import {
-  ChatCircle,
-  ClosedCaptioning,
-  Desktop,
-  Moon,
-  Stop,
-  Sun,
-  VideoCamera
-} from '@phosphor-icons/react'
+  CameraIcon,
+  CaptionsIcon,
+  ChatIcon,
+  DarkModeIcon,
+  DesktopIcon,
+  LightModeIcon,
+  StopIcon
+} from '@/components/icons'
 import { useTheme } from 'next-themes'
 import type { ReactElement } from 'react'
 
@@ -127,7 +127,7 @@ export function CommandPalette({
               disabled={busy}
               onSelect={() => run(() => void stopSession())}
             >
-              <Stop className="size-4" />
+              <StopIcon className="size-4" />
               Stop session
             </CommandItem>
           ) : (
@@ -136,7 +136,7 @@ export function CommandPalette({
               disabled={busy}
               onSelect={() => run(() => void startSession())}
             >
-              <VideoCamera className="size-4" />
+              <CameraIcon className="size-4" />
               Start session
             </CommandItem>
           )}
@@ -145,7 +145,7 @@ export function CommandPalette({
               value="Toggle comments window"
               onSelect={() => run(() => toggleCommentsWindow())}
             >
-              <ChatCircle className="size-4" />
+              <ChatIcon className="size-4" />
               {commentsWindow.open ? 'Close comments window' : 'Open comments window'}
               <CommandShortcut className="tracking-normal">
                 <Kbd>
@@ -160,7 +160,7 @@ export function CommandPalette({
               value="Toggle captions reader"
               onSelect={() => run(() => toggleCaptionsWindow())}
             >
-              <ClosedCaptioning className="size-4" />
+              <CaptionsIcon className="size-4" />
               {captionsWindow.open ? 'Close captions reader' : 'Open captions reader'}
               <CommandShortcut className="tracking-normal">
                 <Kbd>
@@ -176,15 +176,15 @@ export function CommandPalette({
 
         <CommandGroup heading="Theme">
           <CommandItem value="Theme light" onSelect={() => run(() => setTheme('light'))}>
-            <Sun className="size-4" />
+            <LightModeIcon className="size-4" />
             Light
           </CommandItem>
           <CommandItem value="Theme dark" onSelect={() => run(() => setTheme('dark'))}>
-            <Moon className="size-4" />
+            <DarkModeIcon className="size-4" />
             Dark
           </CommandItem>
           <CommandItem value="Theme system" onSelect={() => run(() => setTheme('system'))}>
-            <Desktop className="size-4" />
+            <DesktopIcon className="size-4" />
             System
           </CommandItem>
         </CommandGroup>

@@ -9,6 +9,19 @@ export interface BackendConnection {
   parentPid?: number
 }
 
+/** Non-secret identity for a backend whose capture state predates a permission grant. */
+export interface BackendRestartBoundary {
+  port: number
+  pid?: number
+}
+
+export interface MediaAccessResult {
+  granted: boolean
+  restarted: boolean
+  /** Backend whose capture state predates this grant. */
+  staleBackend?: BackendRestartBoundary
+}
+
 export interface BackendHealth {
   status: string
   version: string
@@ -52,6 +65,7 @@ export type FeatureId =
   | 'multistreaming'
   | 'cloud-ai'
   | 'noise-cleanup'
+  | 'live-cohost'
 export type EntitlementState = 'enabled' | 'disabled' | 'developer-override'
 export type EntitlementTier = 'basic' | 'premium' | 'developer'
 export type EntitlementSource =
@@ -80,10 +94,8 @@ export interface StreamingEntitlementLimits {
   maxHeight: number
   maxFps: number
   maxBitrateKbps: number
-  /** Total enabled destinations across both orientations. */
+  /** Total enabled destinations across both orientation legs (one shared cap). */
   maxDestinations: number
-  /** Enabled destinations per orientation leg (Premium 3+3, Basic 1). */
-  maxDestinationsPerOrientation: number
 }
 
 export interface EntitlementLimits {
@@ -192,6 +204,7 @@ export interface AutomaticSourceFallbackEvent {
 
 export interface RendererDiagnosticsSnapshot {
   automaticSourceFallbacks: AutomaticSourceFallbackEvent[]
+  nativePreviewSurfaceStatus?: PreviewSurfaceStatus
   runtimeInfo?: RuntimeInfo
 }
 
@@ -263,7 +276,7 @@ export interface ResourceSelection {
 }
 
 export interface BackendLifecycleEvent {
-  state: 'running' | 'restarting' | 'failed'
+  state: 'running' | 'restarting' | 'failed' | 'lost'
   code?: number | null
   signal?: string | null
   attempt?: number
@@ -379,6 +392,16 @@ export interface LayoutSettings {
   cameraCornerRadiusPct: number
   /** Camera box aspect: source (per-shape default), square, or portrait 3:4. */
   cameraAspect: CameraAspect
+  /** Green-screen chroma key for the camera layer (off by default). */
+  cameraChromaKeyEnabled: boolean
+  /** Key color as #RRGGBB; the UI offers green/blue presets. */
+  cameraChromaKeyColor: string
+  /** CbCr distance (as % of the calibrated range) that keys fully out. */
+  cameraChromaKeySimilarityPct: number
+  /** Ramp band above similarity over which alpha rises (%; 0 = hard edge). */
+  cameraChromaKeySmoothnessPct: number
+  /** Spill suppression strength (%): kills the green/blue fringe. */
+  cameraChromaKeySpillPct: number
   cameraMargin: number
   cameraFit: CameraFit
   cameraMirror: boolean
@@ -489,6 +512,8 @@ export interface SceneConfigParams {
   video?: VideoSettings
   background?: EffectiveSceneBackground
   protectedOverlayWindowIds?: number[]
+  /** Scene-motion duration (ms) for this commit; absent/0 = instant switch. */
+  transitionMs?: number
 }
 
 export interface SceneTransformUpdateParams {
@@ -596,6 +621,8 @@ export type VideoPreset =
   | 'record-4k60-experimental'
   | 'stream-safe-1080p30'
   | 'stream-safe-1080p60'
+  | 'stream-youtube-1080p30'
+  | 'stream-youtube-1080p60'
   | 'stream-youtube-4k30'
   | 'stream-1080p60'
   | 'vertical-1080x1920'
@@ -1130,6 +1157,8 @@ export interface OutputSettings {
   outputDirectory?: string
   outputDirectoryCapability?: string
   ffmpegPath?: string
+  /** Keep the capture MKV (lossless audio) next to the exported MP4. */
+  keepOriginalMkv?: boolean
   video: VideoSettings
   rtmp: RtmpSettings
 }
@@ -1148,6 +1177,8 @@ export interface StartSessionParams {
    * destination is armed; vertical targets consume this leg.
    */
   simulcast?: SimulcastParams
+  /** Renderer click timestamp (epoch ms) for start-latency attribution. Telemetry only. */
+  requestedAtMs?: number
 }
 
 /** The vertical leg of a dual-orientation session: a vertical scene preset on
@@ -1156,6 +1187,33 @@ export interface SimulcastParams {
   layout: LayoutSettings
   scene?: Scene
   video: VideoSettings
+}
+
+/** Optional `session.stop` params; older renderers send none. */
+export interface SessionStopParams {
+  /** Renderer Stop click timestamp (epoch ms) for stop-latency attribution. */
+  requestedAtMs?: number
+}
+
+/** One phase boundary of a start/stop latency timeline (ms since backend admission). */
+export interface RecordingTimelineMark {
+  phase: string
+  atMs: number
+}
+
+/** Typed start/stop latency timeline published in `diagnostics.stats`. */
+export interface RecordingTimelineSnapshot {
+  /** `start` | `stop`. */
+  kind: string
+  sessionId?: string
+  /** True for the first start in this backend process (start timelines only). */
+  cold?: boolean
+  requestedAtEpochMs?: number
+  /** Renderer click → backend admission when the renderer supplied a plausible timestamp. */
+  clickToOriginMs?: number
+  totalMs: number
+  outcome: string
+  marks: RecordingTimelineMark[]
 }
 
 /** Burn-in intent for the session (shapes output legs; see burn-in plan A0/R1)
@@ -1187,7 +1245,17 @@ export interface AudioProcessingUpdateParams {
 
 export interface AudioProcessingUpdateResult extends AudioProcessingUpdateParams {
   applied: boolean
-  reasonCode?: 'no-active-session' | 'stale-session' | 'native-audio-unavailable'
+  reasonCode?:
+    | 'no-active-session'
+    | 'stale-session'
+    | 'native-audio-unavailable'
+    | 'live-audio-control-unavailable'
+    | 'live-audio-control-state-unknown'
+    | 'session-ended'
+  /** Present when the backend can conclusively report settings remaining after rejection. */
+  confirmedMicrophoneGainDb?: number
+  /** Present when the backend can conclusively report settings remaining after rejection. */
+  confirmedMicrophoneMuted?: boolean
 }
 
 export interface RemuxSessionParams {
@@ -1211,6 +1279,7 @@ export type PreviewLiveState = 'connecting' | 'live' | 'reconnecting' | 'unavail
 export type PreviewLiveSource = 'idle-preview' | 'recording-session' | 'unavailable'
 export type PreviewTransport =
   | 'native-surface'
+  | 'd3d11-shared-texture'
   | 'electron-proof-surface'
   | 'latest-jpeg-polling'
   | 'mjpeg-stream'
@@ -1222,15 +1291,122 @@ export type PreviewTransport =
 export type EncodeBackend =
   | 'software-x264'
   | 'hardware-videotoolbox'
+  | 'hardware-vaapi'
   | 'hardware-media-foundation'
   | 'software-media-foundation'
-export type CompositorBackend = 'metal' | 'cpu' | 'cpu-fallback'
+  // libopenh264 software fallback on Windows and Linux. On Linux it is the
+  // required LGPL fallback when no DRM render node passes the VAAPI probe.
+  | 'software-open-h264'
+
+export type StreamOutputTopologyRole = 'shared' | 'recording' | 'stream'
+
+export type StreamOutputBridge =
+  | 'raw-yuv420p'
+  | 'videotoolbox-h264-annex-b'
+  | 'videotoolbox-h264-mpegts'
+  | 'windows-media-foundation-h264-mpegts'
+
+export type StreamOutputTopologyProbeState = 'not-required' | 'passed' | 'rejected' | 'unsupported'
+
+/**
+ * Secret-free off-air probe input. Never add RTMP URLs, stream keys, OAuth
+ * credentials, or a full StartSessionParams to this contract.
+ */
+export interface StreamOutputTopologyProbeParams {
+  ffmpegPath?: string
+  streamProfile: VideoSettings
+  recordingProfile?: VideoSettings
+  outputRoles: StreamOutputTopologyRole[]
+}
+
+/** Exact output topology selected by the same production probe used at start. */
+export interface StreamOutputTopologyProbeResult {
+  capabilityKey: string
+  streamProfile: VideoSettings
+  recordingProfile?: VideoSettings
+  outputRoles: StreamOutputTopologyRole[]
+  requestedBridgeOutput: StreamOutputBridge
+  effectiveBridgeOutput: StreamOutputBridge
+  effectiveEncodeBackend: EncodeBackend
+  probeState: StreamOutputTopologyProbeState
+  fallbackReason?: string
+}
+
+export type CompositorBackend = 'metal' | 'd3d11' | 'cpu' | 'cpu-fallback'
+
+export type WindowsD3d11MediaState =
+  | 'unavailable'
+  | 'probing'
+  | 'live'
+  | 'draining'
+  | 'fallback'
+  | 'failed'
+
+export type WindowsD3d11CaptureBackend =
+  | 'desktop-duplication'
+  | 'windows-graphics-capture-monitor'
+  | 'legacy-ffmpeg'
+
+export type WindowsD3d11CursorMode = 'embedded' | 'separate' | 'excluded-wgc' | 'disabled-fallback'
+
+/** Scalar-only diagnostics. No COM pointer, texture/shared handle, or HWND is wire-safe. */
+export interface WindowsD3d11MediaDiagnostics {
+  state: WindowsD3d11MediaState
+  requested: boolean
+  required: boolean
+  adapterLuid?: string
+  captureAdapterLuid?: string
+  compositorAdapterLuid?: string
+  primaryEncoderAdapterLuid?: string
+  auxiliaryEncoderAdapterLuid?: string
+  generation?: number
+  captureBackend?: WindowsD3d11CaptureBackend
+  cursorMode?: WindowsD3d11CursorMode
+  cursorRequested: boolean
+  cursorPixelsSource?: string
+  cursorExclusionGuaranteed: boolean
+  captureReadbackFrames: number
+  /** Frames where Windows masked protected pixels while capture continued. */
+  protectedContentMaskedFrames: number
+  textureImportFrames: number
+  cameraUploadFrames: number
+  cursorShapeUploads: number
+  cursorCompositedFrames: number
+  compositorCpuFallbackFrames: number
+  previewPresents: number
+  previewDrops: number
+  previewBmpRequests: number
+  previewBmpBytes: number
+  messagePumpLagP95Ms?: number
+  messagePumpLagMaxMs?: number
+  mediaCommandLagP95Ms?: number
+  mediaCommandLagMaxMs?: number
+  maximumConsecutiveMessageBatch: number
+  maximumConsecutiveMediaBatch: number
+  encoderGpuSamples: number
+  encoderSystemMemorySamples: number
+  rawVideoCopiedFrames: number
+  texturePoolCapacity: number
+  texturePoolInUse: number
+  texturePoolPressureEvents: number
+  adapterMismatches: number
+  deviceResets: number
+  synchronizationTimeouts: number
+  staleGenerationCallbacks: number
+  renderTickOverruns: number
+  renderTickLagMaxMs?: number
+  renderComposeStageMaxMs?: number
+  fallbackReason?: string
+}
 
 /** Cumulative request counts for the HTTP image-polling preview transports. A native
  * preview never fetches these, so a session in which they climb is not actually native. */
 export interface PreviewImagePollCounts {
   cameraPng: number
   screenPng: number
+  productionPng: number
+  cameraBmp: number
+  screenBmp: number
   liveJpeg: number
   liveMjpeg: number
 }
@@ -1268,6 +1444,25 @@ export interface PreviewSurfaceBounds {
   // whether the pair floats above other apps (always-on-top).
   orderAboveWindowId?: number
   elevated?: boolean
+  /** Corner radius in points; docked previews pass the panel radius so the
+   * native surface clips to the rounded slot. Absent/0 = square. */
+  cornerRadius?: number
+}
+
+/** Canonical lowercase, fixed-width pointer value. It is never renderer-facing. */
+export type OpaqueNativeWindowHandle = `0x${string}`
+
+/**
+ * Main-owned request shape for backend/native-host commands. Renderer bounds
+ * never include the Windows HWND; main injects it immediately before dispatch.
+ */
+export interface MainOwnedPreviewSurfaceBounds extends PreviewSurfaceBounds {
+  orderAboveWindowHandle?: OpaqueNativeWindowHandle
+}
+
+export interface MainOwnedPreviewSurfaceBoundsParams {
+  bounds: MainOwnedPreviewSurfaceBounds
+  generation: number
 }
 
 export type NativePreviewHostCommandKind = 'create' | 'update-bounds' | 'destroy'
@@ -1279,7 +1474,17 @@ export interface NativePreviewHostCommand {
 
 export type PreviewSurfaceState = 'unavailable' | 'starting' | 'live' | 'stopped' | 'failed'
 export type PreviewSurfaceSource = 'synthetic' | 'camera' | 'screen' | 'window'
-export type PreviewSurfaceBacking = 'cametal-layer' | 'electron-browser-window' | 'none'
+export type PreviewSurfaceBacking =
+  | 'cametal-layer'
+  | 'directcomposition-swapchain'
+  | 'electron-browser-window'
+  | 'none'
+export type NativePreviewHostKind =
+  | 'in-process'
+  | 'helper-process'
+  | 'external-module'
+  | 'proof-surface'
+  | 'backend-d3d11-presenter'
 export type CompositorState = 'stopped' | 'starting' | 'live' | 'failed'
 export type CompositorSourceKind = 'camera' | 'screen' | 'window'
 export type CompositorSceneSourceKind = SceneSourceKind | 'screen-image' | 'background-image'
@@ -1457,6 +1662,13 @@ export interface PreviewSurfaceStatus {
   framesRendered: number
   presentedFrameId?: number
   compositorFrameLag?: number
+  /** Windows proof-surface transport metrics (issue #157): observed frame
+   * request rate, payload bandwidth, decode cadence, and decoded per-layer
+   * source dimensions. Absent on native CAMetalLayer transports. */
+  proofTransportRequestsPerSecond?: number
+  proofTransportBytesPerSecond?: number
+  proofTransportDecodedFramesPerSecond?: number
+  proofSourceDimensions?: Record<string, { width: number; height: number }>
   droppedFrames: number
   inputToPresentLatencyMs?: number
   inputToPresentLatencyP50Ms?: number
@@ -1490,7 +1702,7 @@ export interface PreviewSurfaceStatus {
   nativePreviewMainSceneMismatchAgeMs?: number
   nativePreviewMainLastSkippedSceneRevision?: number
   nativePreviewMainLastSkippedFrameSceneRevision?: number
-  nativePreviewHostKind?: 'in-process' | 'helper-process' | 'external-module' | 'proof-surface'
+  nativePreviewHostKind?: NativePreviewHostKind
   nativePreviewHostAttached?: boolean
   nativePreviewPlacementEventsReceived?: number
   nativePreviewPlacementsCoalesced?: number
@@ -1501,6 +1713,12 @@ export interface PreviewSurfaceStatus {
   nativePreviewIosurfaceImports?: number
   nativePreviewIosurfaceInvalidations?: number
   nativePreviewIosurfaceImportFailures?: number
+  /** Cached IOSurface imports currently retained by the native presenter. */
+  nativePreviewIosurfaceImportLiveCount?: number
+  /** Highest cached-IOSurface retention observed for this presenter lifetime. */
+  nativePreviewIosurfaceImportPeakCount?: number
+  /** Hard cache-entry ceiling enforced by the active presenter implementation. */
+  nativePreviewIosurfaceImportCeiling?: number
   nativePreviewDrawableWidth?: number
   nativePreviewDrawableHeight?: number
   nativePreviewContentsScale?: number
@@ -1510,6 +1728,9 @@ export interface PreviewSurfaceStatus {
   sourcePixelsPresent: boolean
   pendingHostCommandCount: number
   bounds?: PreviewSurfaceBounds
+  /** Sanitized readback from the backend-owned Windows DirectComposition
+   * presenter. This intentionally contains no HWND or process ID. */
+  windowsD3d11Presenter?: WindowsD3d11PresenterDiagnostics
   startedAt?: string
   updatedAt: string
   message?: string
@@ -1519,6 +1740,37 @@ export interface PreviewSurfaceStatus {
   // unexplained indefinite wait.
   firstFrameContract?: 'pending' | 'healing' | 'met' | 'fallback'
   firstFrameReason?: string
+}
+
+export interface WindowsD3d11PresenterBounds {
+  x: number
+  y: number
+  width: number
+  height: number
+}
+
+export interface WindowsD3d11PresenterDiagnostics {
+  layered: boolean
+  transparent: boolean
+  noActivate: boolean
+  excludedFromCapture: boolean
+  windowActive: boolean
+  windowFocused: boolean
+  previewGeneration?: number
+  mediaGeneration: number
+  generationMatches: boolean
+  ownerProcessMatches: boolean
+  sameAdapter: boolean
+  sourceLive: boolean
+  firstPresentSucceeded: boolean
+  successfulPresents: number
+  lastPresentedSequence?: number
+  latestWinsDrops: number
+  hiddenDrops: number
+  busyDrops: number
+  staleFrameDrops: number
+  actualBounds?: WindowsD3d11PresenterBounds
+  fallbackReason?: string
 }
 
 export interface PreviewSurfacePresentParams {
@@ -1553,6 +1805,9 @@ export interface PreviewSurfacePresentParams {
   nativePreviewMainSceneMismatchAgeMs?: number
   nativePreviewMainLastSkippedSceneRevision?: number
   nativePreviewMainLastSkippedFrameSceneRevision?: number
+  nativePreviewIosurfaceImportLiveCount?: number
+  nativePreviewIosurfaceImportPeakCount?: number
+  nativePreviewIosurfaceImportCeiling?: number
   message?: string
   framePollingSuppressed?: boolean
   sourcePixelsPresent?: boolean
@@ -1642,6 +1897,7 @@ export interface PreviewScreenStatus {
   actualWidth?: number
   actualHeight?: number
   iosurfaceAvailable?: boolean
+  d3d11TextureAvailable?: boolean
   sourceFps?: number
   frameAgeMs?: number
   framesCaptured: number
@@ -1665,6 +1921,23 @@ export interface AudioMeterParams {
   ffmpegPath?: string
   microphoneGainDb?: number
   microphoneMuted?: boolean
+}
+
+/** `audio.mic.arm` params (instant record: keep the mic open while Studio is visible). */
+export type WarmMicrophoneArmParams = {
+  microphoneId?: string
+  microphoneGainDb?: number
+  microphoneMuted?: boolean
+}
+
+export type WarmMicrophoneStatus = {
+  armed: boolean
+  deviceId?: number
+  deviceName?: string
+  /** `not-coreaudio` | `session-active` | `disabled-for-smoke` | `open-failed` | `disarmed`. */
+  reason?: string
+  capturedFrames: number
+  armedForMs?: number
 }
 
 export type AudioMeterStatus =
@@ -1709,6 +1982,9 @@ export interface StreamHealth {
   fps?: number
   droppedFrames?: number
   speed?: number
+  bitrateKbps?: number
+  totalBytes?: number
+  duplicatedFrames?: number
   createdAt: string
 }
 
@@ -1757,11 +2033,73 @@ export interface WebSocketQueueDiagnosticStats {
   evictedOrDroppedCount: number
 }
 
+export interface WebSocketCommandLaneDiagnosticStats {
+  queue: WebSocketQueueDiagnosticStats
+  expiredBeforeDispatchCount: number
+  rejectedBeforeDispatchCount: number
+}
+
 export interface WebSocketTransportDiagnosticStats {
   reliableResponseQueue: WebSocketQueueDiagnosticStats
   incomingCommandQueue: WebSocketQueueDiagnosticStats
   coalescedTelemetryQueue: WebSocketQueueDiagnosticStats
+  commandLanes: Record<string, WebSocketCommandLaneDiagnosticStats>
   slowPressureDisconnectCount: number
+}
+
+export interface PreviewCameraDropReasonStats {
+  frameWasLate: number
+  outOfBuffers: number
+  discontinuity: number
+  unknown: number
+}
+
+export interface PreviewScreenFrameStatusStats {
+  complete: number
+  idle: number
+  blank: number
+  suspended: number
+  started: number
+  stopped: number
+  unknown: number
+}
+
+export interface PreviewSourceSurfaceBackingStats {
+  liveCount: number
+  peakCount: number
+  estimatedBytes: number
+  peakEstimatedBytes: number
+  oldestAgeMs?: number
+}
+
+export type CaptureRecoveryPhase =
+  | 'idle'
+  | 'degraded'
+  | 'restarting'
+  | 'verifying'
+  | 'recovered'
+  | 'failed'
+
+export type CaptureRecoveryStage = 'camera-delivery' | 'screen-delivery' | 'compositor-render'
+export type CaptureRecoverySource = 'camera' | 'screen'
+export type CaptureRecoveryTrigger = 'automatic' | 'manual'
+
+/** Authoritative backend-owned state for one capture-recovery incident. */
+export interface CaptureRecoveryStatus {
+  /** Process-local monotonic ordering key. Resets when the backend process reconnects. */
+  revision: number
+  phase: CaptureRecoveryPhase
+  retryable: boolean
+  attempts: number
+  stage?: CaptureRecoveryStage
+  source?: CaptureRecoverySource
+  trigger?: CaptureRecoveryTrigger
+  sourceGeneration?: number
+  detectedAt?: string
+  updatedAt?: string
+  message?: string
+  lastError?: string
+  lastDurationMs?: number
 }
 
 export interface DiagnosticStats {
@@ -1775,14 +2113,37 @@ export interface DiagnosticStats {
   droppedFrames: number
   encoderSpeed?: number
   encoderBridgeQueueDepth: number
+  /** Peak combined pending encoder + FIFO depth retained after recovery. */
+  encoderBridgeOutputQueueHighWaterFrames?: number
   /** Oldest frame waiting for VideoToolbox completion or FIFO output. */
-  encoderBridgeOutputQueueOldestFrameAgeMs?: number
+  encoderBridgeOutputQueueOldestFrameAgeMs?: number | null
+  /** Peak oldest-frame age retained after recovery. */
+  encoderBridgeOutputQueueOldestFrameAgeHighWaterMs?: number | null
+  /** Milliseconds since the latest encoder completion or complete FIFO AU write. */
+  encoderBridgeOutputLastProgressAgeMs?: number | null
   /** Enqueue attempts that encountered a full bounded output queue. */
   encoderBridgeOutputQueueCapacityPressureEvents: number
+  /** Pressured intervals that returned to the healthy output budget. */
+  encoderBridgeOutputPressureRecoveryEvents?: number
   /** Frames intentionally discarded by output backpressure policy. */
   encoderBridgeOutputQueueDroppedFrames: number
+  /** Recording compositor ticks skipped before encode while queued AUs drain. */
+  encoderBridgeOutputPreEncodeSkippedFrames?: number
+  /** Current per-stage VideoToolbox output depths. */
+  encoderBridgeVideoToolboxPendingEncodeFrames?: number
+  encoderBridgeVideoToolboxPendingFifoFrames?: number
+  /** Encoded H.264 AUs rejected after encode; healthy/recovered sessions require zero. */
+  encoderBridgeEncodedAccessUnitDroppedFrames?: number
   encoderBridgeInputFps?: number
   encoderBridgeDroppedFrames: number
+  /** FFmpeg progress-reported drops attributable to the recording bridge. */
+  encoderBridgeRecordingDroppedFrames: number
+  /** FFmpeg progress-reported drops attributable to the stream bridge. */
+  encoderBridgeStreamDroppedFrames: number
+  /** FFmpeg progress-reported encoder speed for the recording bridge. */
+  encoderBridgeRecordingEncoderSpeed?: number
+  /** FFmpeg progress-reported encoder speed for the stream bridge. */
+  encoderBridgeStreamEncoderSpeed?: number
   /** Compositor frames re-fed to the encoder on under-run (duplicate frames in the final file). */
   encoderBridgeRepeatedFrames: number
   /** Distinct bridge under-run bursts; helps separate phase misses from clustered stalls. */
@@ -1803,6 +2164,10 @@ export interface DiagnosticStats {
   encoderBridgeMetalTargetFrames: number
   /** FIFO frames still written through raw-video FFmpeg stdin. */
   encoderBridgeRawVideoCopiedFrames: number
+  /** Raw-video FFmpeg writes attributable to the recording bridge. */
+  encoderBridgeRecordingRawVideoCopiedFrames: number
+  /** Raw-video FFmpeg writes attributable to the stream bridge. */
+  encoderBridgeStreamRawVideoCopiedFrames: number
   /** Raw-video writes where the source frame had an IOSurface-backed Metal target. */
   encoderBridgeMetalTargetCopiedFrames: number
   /** Raw-video writes where the bridge received the retained CoreVideo handle. */
@@ -1818,6 +2183,23 @@ export interface DiagnosticStats {
   encoderBridgeVideoToolboxOutputBytes: number
   /** Max inline VideoToolbox encode latency observed by the bridge writer. */
   encoderBridgeVideoToolboxOutputEncodeMs?: number
+  /** Generic encoded-output diagnostics populated by VideoToolbox and Media Foundation. */
+  encoderBridgeEncodedOutputBackend?: string
+  encoderBridgeRequestedVideoOutput?: string
+  encoderBridgeEffectiveVideoOutput?: string
+  encoderBridgeEncodedOutputEncoderIdentity?: string
+  encoderBridgeEncodedOutputInputSubtype?: string
+  encoderBridgeEncodedOutputFallbackReason?: string
+  encoderBridgeEncodedOutputFrames?: number
+  encoderBridgeEncodedOutputBytes?: number
+  encoderBridgeEncodedOutputErrors?: number
+  encoderBridgeEncodedSubmitP95Ms?: number
+  encoderBridgeEncodedFifoWriteP95Ms?: number
+  encoderBridgeActiveEncodedOutputEncoders?: number
+  encoderBridgeRecordingEncodedOutputFrames?: number
+  encoderBridgeRecordingEncodedOutputBytes?: number
+  encoderBridgeStreamEncodedOutputFrames?: number
+  encoderBridgeStreamEncodedOutputBytes?: number
   /** Local recording output profile used by split-output sessions. */
   recordingOutputWidth?: number
   recordingOutputHeight?: number
@@ -1828,6 +2210,16 @@ export interface DiagnosticStats {
   streamOutputHeight?: number
   streamOutputFps?: number
   streamOutputBitrateKbps?: number
+  /** Latest measured FFmpeg output bitrate for the active stream. */
+  streamMeasuredBitrateKbps?: number
+  /** Lowest non-zero measured output bitrate observed in this stream session. */
+  streamMeasuredBitrateMinKbps?: number
+  /** Highest non-zero measured output bitrate observed in this stream session. */
+  streamMeasuredBitrateMaxKbps?: number
+  /** Cumulative bytes emitted by FFmpeg for this stream process generation. */
+  streamOutputTotalBytes?: number
+  /** Cumulative frames FFmpeg reports duplicating for this stream process generation. */
+  streamDuplicatedFrames?: number
   /** Number of distinct production VideoToolbox output encoders active for the session. */
   encoderBridgeActiveVideoToolboxOutputEncoders: number
   /** Frames/bytes produced by the local-recording VideoToolbox output encoder. */
@@ -1900,8 +2292,30 @@ export interface DiagnosticStats {
   compositorBackend?: CompositorBackend
   /** Why the compositor had to render on CPU fallback. */
   compositorFallbackReason?: string
-  /** Cumulative frames rendered by CPU fallback during the active compositor run. */
+  /**
+   * Cumulative frames rendered by the CPU compositor as the platform's expected path (no GPU
+   * compositor exists off macOS). Never a fault.
+   */
+  compositorCpuFrames: number
+  /**
+   * Cumulative frames rendered by CPU FALLBACK during the active compositor run: a GPU compositor
+   * was expected and not reached. Nonzero is a fault.
+   */
   compositorCpuFallbackFrames: number
+  /** Cumulative render ticks of the active record/stream compositor run (frame accounting). */
+  compositorTicks: number
+  /** Cumulative frame intervals the record/stream compositor loop missed entirely. */
+  compositorTickSkipped: number
+  /** Recording-leg bridge writer ticks that fed a fresh compositor frame. */
+  encoderBridgeFreshFrames: number
+  /** Frames the recording-leg bridge submitted to the Media Foundation encoder (Windows only). */
+  encoderBridgeMfSubmittedFrames: number
+  /** Writer-thread Media Foundation input-credit waits that hit the two-frame cap and skipped a frame. */
+  encoderBridgeMfInputCreditTimeouts: number
+  /** P95 wall time the writer thread spent waiting for a Media Foundation input credit (Windows only). */
+  encoderBridgeMfInputCreditWaitP95Ms?: number | null
+  /** Scalar-only state for the Windows D3D11 media authority. */
+  windowsD3d11Media?: WindowsD3d11MediaDiagnostics
   websocketTransport: WebSocketTransportDiagnosticStats
   /** Cumulative HTTP image-poll request counts; the transport-honesty gate fails when these climb during a "native" preview session. */
   previewImagePollCounts: PreviewImagePollCounts
@@ -1918,6 +2332,10 @@ export interface DiagnosticStats {
   firstSourceFrameMs?: number
   firstFullResolutionCompositorFrameMs?: number
   firstEncodedFrameMs?: number
+  /** Phase timeline of the most recent session start (instant-record plan). */
+  recordingStartTimeline?: RecordingTimelineSnapshot
+  /** Phase timeline of the most recent stop, including finalization. */
+  recordingStopTimeline?: RecordingTimelineSnapshot
   previewTargetFps?: number
   previewFrameAgeMs?: number
   previewTransport: PreviewTransport
@@ -1952,6 +2370,38 @@ export interface DiagnosticStats {
   compositorSourceCvpixelbufferImportFrames: number
   /** Cumulative live-source frames uploaded to Metal from CPU BGRA bytes. */
   compositorSourceByteUploadFrames: number
+  /** Cumulative held capture frames that reused an already imported Metal texture. */
+  compositorSourceCaptureTextureReuses: number
+  /** Camera subset of held capture texture reuses. */
+  compositorCameraSourceCaptureTextureReuses: number
+  /** Screen/window subset of held capture texture reuses. */
+  compositorScreenSourceCaptureTextureReuses: number
+  /** Completed-command boundaries that flushed the CoreVideo Metal texture cache. */
+  compositorSourceTextureCacheFlushes: number
+  /** Cached capture-source CVMetalTexture/IOSurface imports retained process-wide. */
+  compositorMetalCachedCaptureSourceImportsLiveCount?: number | null
+  /** Peak cached capture-source imports retained process-wide. */
+  compositorMetalCachedCaptureSourceImportsPeakCount?: number | null
+  /** Peak bounded capture-source cache capacity observed process-wide. */
+  compositorMetalCachedCaptureSourceImportsCeiling?: number | null
+  /** IOSurface-backed Metal target-ring slots currently retained process-wide. */
+  compositorMetalTargetRingSlotsLiveCount?: number | null
+  /** Peak IOSurface-backed Metal target-ring slots retained process-wide. */
+  compositorMetalTargetRingSlotsPeakCount?: number | null
+  /** Peak target-ring capacity; each compositor contributes the actual hard maximum of five. */
+  compositorMetalTargetRingSlotsCeiling?: number | null
+  /** Encoder guards currently retaining compositor target frames. */
+  encoderBridgeMetalTargetRefsInFlightLiveCount?: number | null
+  /** Peak encoder guards retaining compositor target frames. */
+  encoderBridgeMetalTargetRefsInFlightPeakCount?: number | null
+  /** Peak bounded in-flight capacity derived from the target-ring authorities. */
+  encoderBridgeMetalTargetRefsInFlightCeiling?: number | null
+  /** Native-presenter cached IOSurface imports currently retained. */
+  nativePreviewIosurfaceImportLiveCount?: number | null
+  /** Peak native-presenter cached IOSurface imports retained. */
+  nativePreviewIosurfaceImportPeakCount?: number | null
+  /** Hard cached-IOSurface import bound reported by the active presenter. */
+  nativePreviewIosurfaceImportCeiling?: number | null
   /** Cumulative live-source zero-copy import attempts that fell back to byte upload. */
   compositorSourceImportFailures: number
   /** Cumulative camera frames imported from IOSurface storage into Metal. */
@@ -2000,6 +2450,31 @@ export interface DiagnosticStats {
   compositorCameraSourceBlockingRefreshes: number
   /** Bounded blocking screen/window refreshes after source-store contention or visibly stale cached screen/window frames. */
   compositorScreenSourceBlockingRefreshes: number
+  /** Compositor ticks that served a camera frame the capture pipeline replaced since the previous tick. */
+  compositorCameraSourceFreshServes: number
+  /** Compositor ticks that re-served the identical camera frame handle (producer delivered nothing new). */
+  compositorCameraSourceHeldServes: number
+  /** Oldest capture age (ms) of any camera frame the compositor served. */
+  compositorCameraSourceServedAgeMaxMs: number
+  /** Compositor ticks that served a fresh screen/window frame. */
+  compositorScreenSourceFreshServes: number
+  /** Compositor ticks that re-served the identical screen/window frame handle. */
+  compositorScreenSourceHeldServes: number
+  /** Oldest capture age (ms) of any screen/window frame the compositor served. */
+  compositorScreenSourceServedAgeMaxMs: number
+  /**
+   * The pipeline stage the backend's capture-health monitor currently
+   * declares degraded ('camera-delivery' / 'screen-delivery' /
+   * 'compositor-render'); absent while
+   * healthy. Nullable for defense in depth against the serde-null trap.
+   */
+  capturePipelineDegradedStage?: string | null
+  /** Recovery fields are omitted while idle; null remains tolerated at the renderer boundary. */
+  captureRecoveryPhase?: CaptureRecoveryPhase | null
+  captureRecoverySource?: CaptureRecoverySource | null
+  captureRecoveryAttempts?: number | null
+  captureRecoveryLastError?: string | null
+  captureRecoveryLastDurationMs?: number | null
   previewRepeatedFrames: number
   previewSurfaceResizeCount: number
   previewLatencyMs?: number
@@ -2007,6 +2482,20 @@ export interface DiagnosticStats {
   previewCameraFrameAgeMs?: number
   previewCameraSourceFps?: number
   previewCameraDroppedFrames: number
+  /** AVFoundation didOutput callbacks observed before local validation/publication. */
+  previewCameraCaptureCallbackCount: number
+  /** AVFoundation didDrop callbacks, excluding locally rejected didOutput samples. */
+  previewCameraDidDropCallbackCount: number
+  /** Camera frames successfully published to the source FrameStore. */
+  previewCameraFrameStorePublications: number
+  /** Age of the latest AVFoundation didOutput callback, whether or not it published. */
+  previewCameraCaptureCallbackAgeMs?: number
+  /** Latest camera FrameStore sequence visible to consumers. */
+  previewCameraLatestSequence?: number
+  /** FourCC delivered by the latest valid AVFoundation sample. */
+  previewCameraCapturePixelFormat?: string
+  previewCameraDropReasons: PreviewCameraDropReasonStats
+  previewCameraSurfaceBacking: PreviewSourceSurfaceBackingStats
   /** Latest native camera state reported by the AVFoundation preview source. */
   previewCameraState?: PreviewCameraState
   /** Native AVFoundation unique ID for the selected camera. */
@@ -2058,6 +2547,16 @@ export interface DiagnosticStats {
   previewScreenFrameAgeMs?: number
   previewScreenSourceFps?: number
   previewScreenDroppedFrames: number
+  /** ScreenCaptureKit callbacks observed before status/image validation. */
+  previewScreenCaptureCallbackCount: number
+  /** Screen frames successfully published to the source FrameStore. */
+  previewScreenFrameStorePublications: number
+  /** Age of the latest ScreenCaptureKit callback, including non-complete statuses. */
+  previewScreenCaptureCallbackAgeMs?: number
+  /** Latest screen FrameStore sequence visible to consumers. */
+  previewScreenLatestSequence?: number
+  previewScreenFrameStatuses: PreviewScreenFrameStatusStats
+  previewScreenSurfaceBacking: PreviewSourceSurfaceBackingStats
   /** Latest native ScreenCaptureKit status message, including permission/startup errors. */
   previewScreenMessage?: string
   /** Native ScreenCaptureKit source width selected for the live screen/window source. */
@@ -2074,6 +2573,8 @@ export interface DiagnosticStats {
   previewScreenActualHeight?: number
   /** Whether the latest ScreenCaptureKit frame retained a zero-copy source handle. */
   previewScreenIosurfaceAvailable?: boolean
+  /** Whether the latest Windows Graphics Capture frame retained its D3D11 source texture. */
+  previewScreenD3d11TextureAvailable?: boolean
   /** P95 interval between ScreenCaptureKit screen sample callbacks. */
   previewScreenCaptureGapP95Ms?: number
   /** Max interval between ScreenCaptureKit screen sample callbacks. */
@@ -2088,7 +2589,9 @@ export interface DiagnosticStats {
   previewScreenFrameBytes: number
   /** ScreenCaptureKit queue depth requested for the live screen source. */
   previewScreenCaptureQueueDepth: number
+  /** CPU buffers currently owned by the camera/screen stores and spare pools. */
   previewSourceFrameBufferCount: number
+  /** CPU bytes currently owned by the camera/screen stores and spare pools. */
   previewSourceFrameBytes: number
   previewSourceFrameDroppedFrames: number
   micCapturedFrames?: number
@@ -2128,11 +2631,11 @@ export interface MediaAccessSnapshot {
 
 export interface HealthEvent {
   id: string
-  sessionId?: string
+  sessionId?: string | null
   level: HealthLevel
   code: string
   message: string
-  permissionPane?: SystemPermissionPane
+  permissionPane?: SystemPermissionPane | null
   createdAt: string
 }
 
@@ -2142,8 +2645,8 @@ export interface SessionLogEntry {
   level: HealthLevel
   code: string
   message: string
-  sourceId?: string
-  permissionPane?: SystemPermissionPane
+  sourceId?: string | null
+  permissionPane?: SystemPermissionPane | null
   createdAt: string
 }
 
@@ -2392,7 +2895,7 @@ export interface AiArtifact {
   createdAt: string
 }
 
-export interface SessionSummary {
+export interface SessionListItem {
   id: string
   title: string
   startedAt: string
@@ -2409,18 +2912,77 @@ export interface SessionSummary {
   /** "Screen + Camera" etc. (derived layout preset; stream preset when stream-only). */
   sceneLabel?: string
   qualityStatus?: GateStatus | null
-  finalDiagnostics?: DiagnosticStats | null
-  layout: LayoutSettings
-  sources: SourceSelection
-  healthEvents: HealthEvent[]
-  sessionLogs: SessionLogEntry[]
-  aiArtifacts: AiArtifact[]
+  healthEventCount: number
+  sessionLogCount: number
+  aiArtifactCount: number
+  readyAiArtifactKinds?: AiArtifactKind[]
   commentCount: number
   /** Present only for managed derivatives created from another Library session. */
   derivedFromSessionId?: string
   sourceTitle?: string
   processingKind?: 'noise-cleanup'
+  /** Background MP4 finalization (instant-record P2); absent for legacy rows. */
+  finalizationState?: RecordingFinalizationState
+  /** Live export progress from the backend registry (only while finalizing). */
+  finalizationProgressPercent?: number
+  finalizationError?: string
 }
+
+/** Progress of a background recording finalization job (`recording.finalization`). */
+export interface RecordingFinalizationEvent {
+  sessionId: string
+  state: RecordingFinalizationState
+  progressPercent?: number
+  mp4Path?: string
+  outputPath?: string
+  durationMs?: number
+  fileSizeBytes?: number
+  error?: string
+  updatedAt: string
+}
+
+/** Backwards-compatible name for renderer consumers while the Library model
+ * remains a summary. It intentionally has no history arrays. */
+export type SessionSummary = SessionListItem
+
+export interface SessionListParams {
+  cursor?: string
+  limit?: number
+}
+
+export interface SessionListPage {
+  items: SessionListItem[]
+  nextCursor?: string
+}
+
+export interface SessionDetailListParams {
+  sessionId: string
+  cursor?: string
+  limit?: number
+}
+
+export interface SessionHealthEventsPage {
+  events: HealthEvent[]
+  nextCursor?: string
+}
+
+export interface SessionLogsPage {
+  entries: SessionLogEntry[]
+  nextCursor?: string
+}
+
+export interface SessionAiArtifactsPage {
+  artifacts: AiArtifact[]
+  nextCursor?: string
+}
+
+export interface SessionDetails {
+  healthEvents: HealthEvent[]
+  sessionLogs: SessionLogEntry[]
+  aiArtifacts: AiArtifact[]
+}
+
+export type SessionWithDetails = SessionListItem & SessionDetails
 
 export interface SessionStorageTotals {
   count: number
@@ -2507,6 +3069,15 @@ export interface RuntimeInfo {
    * VIDEORC_DISABLE_GPU=1 or the persisted GPU-crash fallback. Surfaced so
    * support bundles name the active graphics mode. */
   hardwareAccelerationDisabled: boolean
+  /** Launch-time graphics policy plus persisted recovery evidence. */
+  gpuFallback: {
+    source: 'env' | 'persisted' | 'retry' | 'none'
+    reason: string | null
+    crashCount: number
+    updatedAt: string | null
+    retryScheduled: boolean
+    retryAttempts: number
+  }
   isPackaged: boolean
   permissionTargetName: string
   permissionTargetPath: string
@@ -2518,9 +3089,34 @@ export interface RuntimeInfo {
   commentsWindowEnabled?: boolean
   commentsWindowRecordingOverlayAllowed?: boolean
   previewSmokeMode?: boolean
+  /** Enables the fixed, packaged Windows live-microphone acceptance bridge. */
+  windowsLiveAudioSmokeMode?: boolean
   disableAutoPreview?: boolean
   disableAutoSourcePreview?: boolean
   nativePreviewSurfaceStageSuspended?: boolean
+  /** Persisted backend crash evidence (most recent first, last 5). Survives
+   * supervisor restarts and app relaunches so a support bundle exported after
+   * "Backend crashed, restarting" still names the exit and its last stderr. */
+  backendCrashes?: BackendCrashRecord[]
+}
+
+/** One backend process exit worth keeping: every non-intentional exit plus
+ * intentional shutdowns that still reported a non-zero code. Written by the
+ * main-process supervisor to `userData/backend-crashes.json`. */
+export interface BackendCrashRecord {
+  /** ISO timestamp of the exit observation. */
+  at: string
+  /** Supervisor generation (1-based per app launch) of the process that died. */
+  generation: number
+  code: number | null
+  signal: string | null
+  /** Restart attempt number the supervisor assigned, or null when no restart
+   * was scheduled (app quitting, intentional stop with a non-zero code). */
+  attempt: number | null
+  uptimeMs: number
+  intentional: boolean
+  /** Last stderr lines of that process (each line truncated). */
+  stderrTail: string[]
 }
 
 export interface RuntimeGpuDevice {
@@ -2598,6 +3194,8 @@ export interface CommentsSendCommand {
   operationId: string
   sessionId: string
   text: string
+  /** Co-host reply: the open question this send answers (cleared on sent/partial). */
+  inReplyToQuestionId?: string
 }
 
 export interface CommentsClearCommand {
@@ -2694,6 +3292,7 @@ export interface PreviewSupervisorState {
   surfaceActive: boolean
   transport: PreviewLifecycleTransport
   backing: PreviewLifecycleBacking
+  nativePreviewHostKind?: NativePreviewHostKind
   permissionStatus: PreviewPermissionStatus
   fallbackReason?: string
   lastError?: string
@@ -2709,6 +3308,7 @@ export interface NotesWindowState {
   windowId?: number
   alwaysOnTop: boolean
   protected: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }
@@ -2726,6 +3326,7 @@ export interface CommentsWindowState {
   windowId?: number
   alwaysOnTop: boolean
   protected: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }
@@ -2780,10 +3381,33 @@ export type OAuthCallbackEnvelope = {
   receivedAtMs: number
 }
 
+export interface RemoteControlStatus {
+  enabled: boolean
+  token: string | null
+  port: number
+  connectedClients: number
+  discoveryPath: string | null
+}
+
+export interface GlobalShortcutsConfig {
+  recordToggle?: string
+  streamToggle?: string
+  micToggle?: string
+}
+
+export interface GlobalShortcutsResult {
+  registered: Record<string, boolean>
+}
+
 export interface VideorcApi {
+  setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
+  onGlobalShortcut?: (
+    callback: (action: 'record-toggle' | 'stream-toggle' | 'mic-toggle') => void
+  ) => () => void
   getBackendConnection: () => Promise<BackendConnection | null>
   getBackendLogs: () => Promise<BackendLogEvent[]>
   getRuntimeInfo: () => Promise<RuntimeInfo>
+  retryHardwareAcceleration: () => Promise<RuntimeInfo>
   pickScreenImage: () => Promise<ResourceSelection | null>
   pickFile: () => Promise<ResourceSelection | null>
   pickDirectory: () => Promise<ResourceSelection | null>
@@ -2815,8 +3439,28 @@ export interface VideorcApi {
   pushCommentsClearResult: (
     resolution: CommentsCommandResolution<LiveChatSnapshot>
   ) => Promise<boolean>
+  /** Co-host relay: the main renderer pushes state, the window seeds + follows
+   * it, and window actions come back through the same correlated broker. */
+  pushCohostWindowState: (state: CohostWindowState) => Promise<void>
+  /** Never null: main seeds the relay cache with `offCohostWindowState()`. */
+  getCohostWindowState: () => Promise<CohostWindowState>
+  onCohostWindowState: (callback: (state: CohostWindowState) => void) => () => void
+  sendCohostAction: (command: CohostActionCommand) => Promise<CohostState>
+  onCohostActionRequest: (callback: (command: CohostActionCommand) => void) => () => void
+  pushCohostActionResult: (resolution: CommentsCommandResolution<CohostState>) => Promise<boolean>
+  /** Turning co-host on (and granting cloud-AI consent) from the Comments
+   * window: the MAIN renderer owns both settings, so the window asks. The
+   * result is the relayed window state, so the switch never lies. */
+  sendCohostEnable: (command: CohostEnableCommand) => Promise<CohostWindowState>
+  onCohostEnableRequest: (callback: (command: CohostEnableCommand) => void) => () => void
+  pushCohostEnableResult: (
+    resolution: CommentsCommandResolution<CohostWindowState>
+  ) => Promise<boolean>
   getBundledBackgroundAssets: () => Promise<BackgroundImportResult[]>
   beginAccountSignIn: (authorizeUrl: string) => Promise<void>
+  /** Best-effort product-account identity refresh owned by Electron Main's
+   * independent admin socket. Never shares the renderer's live-control lane. */
+  refreshAccount: () => Promise<VideorcAccountSnapshot>
   signOutAccount: () => Promise<VideorcAccountSnapshot>
   getPendingAccountCallbacks: () => Promise<AccountCallbackEnvelope[]>
   acknowledgeAccountCallback: (callbackId: string) => Promise<boolean>
@@ -2901,6 +3545,7 @@ export interface VideorcApi {
   onNativePreviewMainPumpActive: (callback: (active: boolean) => void) => () => void
   setNativePreviewSurfaceFramePollingSuppressed: (
     suppressed: boolean,
+    generation: number,
     recordingActive?: boolean
   ) => Promise<PreviewSurfaceStatus>
   destroyNativePreviewSurface: (generation?: number) => Promise<PreviewSurfaceStatus>
@@ -2914,9 +3559,7 @@ export interface VideorcApi {
   /** Fire the native macOS grant prompt in place (no System Settings jump).
    * `restarted` is true only when a fresh grant restarted the capture backend
    * — callers probing a device right after must wait for reconnect first. */
-  requestMediaAccess: (
-    pane: 'camera' | 'microphone'
-  ) => Promise<{ granted: boolean; restarted: boolean }>
+  requestMediaAccess: (pane: 'camera' | 'microphone') => Promise<MediaAccessResult>
   revealPermissionTarget: () => Promise<void>
   revealSelectedResource: (capabilityId: string) => Promise<void>
   revealSession: (sessionId: string) => Promise<void>
@@ -2938,6 +3581,10 @@ export interface VideorcApi {
    * the raw key here ("1".."9" or ",").
    */
   onShortcutNavigate: (callback: (key: string) => void) => () => void
+  /** Whether the command modifier is physically down; see main's before-input-event. */
+  onShortcutModifier: (callback: (held: boolean) => void) => () => void
+  /** Whether the main window is on screen (minimise/hide aware, unlike the Page Visibility API here). */
+  onWindowVisible: (callback: (visible: boolean) => void) => () => void
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLifecycle: (callback: (event: BackendLifecycleEvent) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void
@@ -3132,6 +3779,236 @@ export function createEmptyLiveChatSnapshot(updatedAt: string): LiveChatSnapshot
   }
 }
 
+/** `liveChat.send` params (wire mirror of live_chat.rs `CommentsSendParams`). */
+export interface CommentsSendParams {
+  operationId: string
+  sessionId: string
+  text: string
+  /** Co-host reply: on a terminal `sent`/`partial` phase the engine marks this question answered. */
+  inReplyToQuestionId?: string
+}
+
+// --- Live Chat Co-host (Premium cloud AI) ---
+// Wire mirror of crates/videorc-backend/src/cohost.rs. Plan:
+// "2026-08-22 - Videorc Live Chat Co-host Plan". The backend owns the tick
+// scheduler, the open-question set, flags, mood, and readiness; the renderer
+// only renders `cohost.state` and calls `cohost.*` RPCs. Reply sends reuse
+// `liveChat.send` with `inReplyToQuestionId`.
+
+export type CohostTone = 'friendly' | 'short' | 'professional'
+export type CohostStatus = 'off' | 'listening' | 'paused' | 'error'
+export type CohostReason =
+  | 'premium-required'
+  | 'consent-required'
+  | 'session-expired'
+  | 'signed-out'
+  | 'quota-exhausted'
+  | 'server-unconfigured'
+  | 'network'
+  | 'gateway-error'
+export type CohostPriority = 'high' | 'normal' | 'low'
+export type CohostMood = 'hype' | 'calm' | 'tense' | 'mixed'
+export type CohostFlagKind = 'toxicity' | 'spam' | 'self-promo' | 'personal-info'
+export type CohostFlagSeverity = 'high' | 'medium' | 'low'
+
+/** Persisted per-profile co-host settings (`cohost.settings.get/set`). */
+export interface CohostSettings {
+  enabled: boolean
+  tone: CohostTone
+  /** Streamer notes the model answers from; at most 4000 characters. */
+  notes: string
+  /** "Show questions on stream automatically" (default off). */
+  autoHighlight: boolean
+}
+
+/** `cohost.settings.set`: absent fields are unchanged. */
+export interface CohostSettingsPatch {
+  enabled?: boolean
+  tone?: CohostTone
+  notes?: string
+  autoHighlight?: boolean
+}
+
+/** One open viewer question grouped across platforms and askers. */
+export interface CohostQuestion {
+  id: string
+  text: string
+  messageIds: string[]
+  askers: string[]
+  platforms: StreamPlatform[]
+  priority: CohostPriority
+  /** Draft reply in the chat's language (≤ 200 chars); editable before send. */
+  suggestedReply: string
+  fromNotes: boolean
+  firstSeenAt: string
+  updatedAt: string
+}
+
+export interface CohostFlag {
+  messageId: string
+  kind: CohostFlagKind
+  severity: CohostFlagSeverity
+  reason: string
+  at: string
+}
+
+/**
+ * What the last failed tick actually said. `code` is the server's error
+ * envelope code verbatim (`ai-gateway-error`, `quota-exhausted`, ...) or a
+ * desktop-assigned `network` / `timeout` / `malformed-response`; `status` is
+ * the HTTP status when a response arrived. Cleared as soon as the engine is
+ * listening again.
+ */
+export interface CohostErrorDetail {
+  code: string
+  message: string
+  status: number | null
+}
+
+/** The `cohost.state` event payload and every `cohost.*` RPC result. */
+export interface CohostState {
+  sessionId: string | null
+  status: CohostStatus
+  reason: CohostReason | null
+  /**
+   * Present only while `reason` describes a failed tick. Optional on the wire
+   * so a backend from before the field still validates; absent means null.
+   */
+  detail?: CohostErrorDetail | null
+  questions: CohostQuestion[]
+  flags: CohostFlag[]
+  mood: CohostMood | null
+  lastTickAt: string | null
+  tickSeq: number
+  /** True when the last tick dropped messages under the 60-message delta cap. */
+  partial: boolean
+  /**
+   * Presence fields (co-host presence W1). All optional on the wire so a
+   * backend from before them still validates; absent means the default
+   * (false / 0 / null).
+   */
+  /** A tick HTTP request is outstanding right now ("thinking"). */
+  tickInFlight?: boolean
+  /** Delta messages collected but not yet sent in a tick ("reading N new"). */
+  pendingMessages?: number
+  /**
+   * ISO-8601 instant of the scheduler's earliest next pass; present only while
+   * `pendingMessages > 0` (burst rule bounded by the 8 s min gap, trickle rule
+   * at anchor + 20 s, pushed back by a backoff/quota window).
+   */
+  nextTickAt?: string | null
+  /** Session total of chat messages the engine noted for ticks. */
+  messagesSeen?: number
+  /** Distinct question ids surfaced this session — lifetime, not open count. */
+  questionsTotal?: number
+}
+
+/**
+ * Off-shaped `cohost.state`: what the backend reports when no engine session
+ * exists. Presence is unconditional — surfaces render this instead of hiding
+ * (null never reaches the Comments window relay any more).
+ */
+export function offCohostState(): CohostState {
+  return {
+    sessionId: null,
+    status: 'off',
+    reason: null,
+    detail: null,
+    questions: [],
+    flags: [],
+    mood: null,
+    lastTickAt: null,
+    tickSeq: 0,
+    partial: false,
+    tickInFlight: false,
+    pendingMessages: 0,
+    nextTickAt: null,
+    messagesSeen: 0,
+    questionsTotal: 0
+  }
+}
+
+/**
+ * `cohost.start`. Cloud-AI consent is renderer-owned, so the renderer passes
+ * it on every start; without it the engine pauses with `consent-required` and
+ * never sends chat to the server.
+ */
+export interface CohostStartParams {
+  sessionId: string
+  consentToProcessChat?: boolean
+  streamTitle?: string | null
+}
+
+/** `cohost.question.answered` / `cohost.question.dismiss`. */
+export interface CohostQuestionParams {
+  sessionId: string
+  questionId: string
+}
+
+/** `cohost.flag.dismiss`. */
+export interface CohostFlagParams {
+  sessionId: string
+  messageId: string
+}
+
+/**
+ * What the detached Comments window needs to render the Co-host segment. The
+ * MAIN renderer owns the backend socket, the entitlement snapshot and the
+ * renderer-local cloud-AI consent, so it resolves all three and relays one
+ * value; the window never re-derives gating.
+ */
+export interface CohostWindowState {
+  /** Always concrete: `offCohostState()` until the engine reports, never null. */
+  state: CohostState
+  /** Premium gate result. Fail-closed: false until the main renderer says otherwise. */
+  entitled: boolean
+  entitlementReason: string | null
+  upgradeUrl: string | null
+  /** Renderer-local cloud-AI consent (`videorc.aiConsent`). */
+  consented: boolean
+  /** Persisted `cohost.settings.enabled`. */
+  enabled: boolean
+}
+
+/**
+ * Fail-closed seed for the Comments window relay: co-host presence must be
+ * knowable from the first frame, so the window mounts on this instead of null.
+ */
+export function offCohostWindowState(): CohostWindowState {
+  return {
+    state: offCohostState(),
+    entitled: false,
+    entitlementReason: null,
+    upgradeUrl: null,
+    consented: false,
+    enabled: false
+  }
+}
+
+export type CohostActionKind = 'answered' | 'dismiss-question' | 'dismiss-flag'
+
+/** Correlated co-host action from the Comments window, brokered through main
+ * to the main renderer (which makes the actual `cohost.*` RPC). */
+export interface CohostActionCommand {
+  requestId: string
+  sessionId: string
+  kind: CohostActionKind
+  /** Question id for question actions; the flagged message id for flags. */
+  targetId: string
+}
+
+/**
+ * Correlated "turn the co-host on/off" from the Comments window (presence W2).
+ * Session-independent by design: the header popover is reachable while idle,
+ * which is exactly when a streamer discovers the feature.
+ */
+export interface CohostEnableCommand {
+  requestId: string
+  enabled: boolean
+  /** Grant renderer-local cloud-AI consent in the same click. */
+  grantConsent?: boolean
+}
+
 // Live captions (captions.* RPCs + events; premium cloud-AI feature).
 // `live` remains accepted during the rolling upgrade from the Alpha backend;
 // new coordinators publish the more truthful ready/listening state machine.
@@ -3182,6 +4059,7 @@ export interface CaptionsWindowState {
   bounds: { x: number; y: number; width: number; height: number } | null
   windowId?: number
   alwaysOnTop: boolean
+  captureProtectionMarkerInstalled?: boolean
   enabled: boolean
   message?: string
 }

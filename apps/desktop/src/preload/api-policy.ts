@@ -12,6 +12,7 @@ export const AUXILIARY_API_KEYS = {
     'onNotesWindowState'
   ],
   comments: [
+    'cacheChatAvatar',
     'sendCommentHighlight',
     'getCommentHighlightState',
     'onCommentHighlightState',
@@ -25,7 +26,14 @@ export const AUXILIARY_API_KEYS = {
     'onCommentsSnapshot',
     'onCommentsDelta',
     'getViewerSample',
-    'onViewerSample'
+    'onViewerSample',
+    // Co-host presence: the window renders the relayed state and can act on it
+    // (dismiss/answer, and — presence W2 — turn the engine on). Without these
+    // the Comments window silently had no co-host at all.
+    'getCohostWindowState',
+    'onCohostWindowState',
+    'sendCohostAction',
+    'sendCohostEnable'
   ],
   captions: [
     'getCaptionsWindowState',

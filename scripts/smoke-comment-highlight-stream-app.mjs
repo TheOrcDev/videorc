@@ -1,5 +1,6 @@
 import { spawn } from 'node:child_process'
 import { existsSync, mkdirSync, statSync, writeFileSync } from 'node:fs'
+import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -23,20 +24,25 @@ const listenerBindMs = Number(process.env.VIDEORC_COMMENT_HIGHLIGHT_LISTENER_BIN
 const basePort = Number(process.env.VIDEORC_COMMENT_HIGHLIGHT_RTMP_PORT ?? 19721)
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const ffprobePath = process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe'
+const streamSafe1080p30 = Object.freeze({
+  preset: 'stream-safe-1080p30',
+  width: 1920,
+  bitrateKbps: 6000
+})
 
 const modernScenarios = [
   {
     label: 'stream-only',
     recordEnabled: false,
     fps: 30,
-    streamPreset: 'stream-safe-1080p30',
+    streamProfile: streamSafe1080p30,
     allowHighlightUnavailable: false
   },
   {
     label: 'split-record-stream',
     recordEnabled: true,
     fps: 30,
-    streamPreset: 'stream-safe-1080p30',
+    streamProfile: streamSafe1080p30,
     allowHighlightUnavailable: false
   }
 ]
@@ -45,7 +51,7 @@ const legacyScenario = {
   recordEnabled: false,
   fps: 60,
   expectedStreamFps: 30,
-  streamPreset: 'stream-safe-1080p30',
+  streamProfile: streamSafe1080p30,
   allowHighlightUnavailable: true
 }
 
@@ -188,7 +194,10 @@ async function runScenario(ws, smoke, scenario, index) {
     // renderer owns overlay reconciliation and may still be settling while the Comments IPC
     // request rasterizes the card; this order proves the two final viewer-facing slots coexist.
     await sleep(1500)
-    const captionStimulusWidth = scenario.recordEnabled ? 1920 : 640
+    // Caption bars are output-sized raster overlays and the compositor never scales
+    // them. Use the resolved viewer-facing stream width even for stream-only sessions,
+    // whose 640x360 recording placeholder is normalized to this provider profile.
+    const captionStimulusWidth = scenario.streamProfile.width
     const captionStimulus = startCaptionOverlayStimulus(ws, {
       width: captionStimulusWidth,
       height: Math.round(captionStimulusWidth * (140 / 1920)),
@@ -259,7 +268,11 @@ async function runScenario(ws, smoke, scenario, index) {
     }
 
     if (scenario.recordEnabled) {
-      const recordingPath = stopped.outputPath ?? started.outputPath
+      const recordingPath = await resolveFinalRecordingPath({
+        started,
+        stopped,
+        timeoutMs: 120_000
+      })
       assertArtifactFile(scenario.label, recordingPath, 'local recording')
       const recordingQuality = await analyzeRecording(recordingPath, {
         ffmpegPath,
@@ -463,15 +476,15 @@ function sessionParams({ scenario, outputDirectoryCapability, target }) {
           streamKey: target.streamKey,
           streamKeyPresent: true,
           authMode: 'manual-rtmp',
-          outputPreset: scenario.streamPreset,
-          outputBitrateKbps: 2000,
+          outputPreset: scenario.streamProfile.preset,
+          outputBitrateKbps: scenario.streamProfile.bitrateKbps,
           createdAt: timestamp,
           updatedAt: timestamp
         }
       ],
       selectedTargetId: target.id,
-      defaultOutputPreset: scenario.streamPreset,
-      defaultBitrateKbps: 2000,
+      defaultOutputPreset: scenario.streamProfile.preset,
+      defaultBitrateKbps: scenario.streamProfile.bitrateKbps,
       enabledTargetIds: [target.id]
     },
     captions: {

@@ -1,4 +1,4 @@
-import { Eye } from '@phosphor-icons/react'
+import { PreviewIcon } from '@/components/icons'
 import { useEffect, useMemo, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -61,7 +61,7 @@ export function CaptionPreview(): ReactElement {
       }
       className="lg:sticky lg:top-4"
       description="The selected style at your current video aspect ratio."
-      icon={Eye}
+      icon={PreviewIcon}
       title="Caption preview"
     >
       <div

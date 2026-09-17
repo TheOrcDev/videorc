@@ -20,6 +20,8 @@ export const REQUIRED_CAPTURE_ENTITLEMENTS = [
   'com.apple.security.device.audio-input'
 ]
 
+export const EXPECTED_MACOS_BUNDLE_IDENTIFIER = 'dev.theorcdev.videorc'
+
 // One shared entitlements plist signs the app and every bundled tool, so all of
 // them must carry the device entitlements (paths mirror
 // scripts/sign-macos-local-app.mjs and electron-builder extraResources).
@@ -95,6 +97,22 @@ export function evaluateBinaryContainsEnvSecretCheck(
       }
 }
 
+export function stdoutExpectationFailures(check, stdout) {
+  const value = String(stdout ?? '')
+  const failures = []
+
+  if (check.expectStdoutEquals !== undefined && value !== check.expectStdoutEquals) {
+    failures.push(
+      `expected stdout exactly ${JSON.stringify(check.expectStdoutEquals)}, got ${JSON.stringify(value)}`
+    )
+  }
+  if (check.expectStdoutNonEmpty === true && value.trim().length === 0) {
+    failures.push('expected non-empty stdout')
+  }
+
+  return failures
+}
+
 export function buildMacosReleaseArtifactChecks(path) {
   const kind = artifactKindFromPath(path)
   if (!kind) {
@@ -102,6 +120,7 @@ export function buildMacosReleaseArtifactChecks(path) {
   }
 
   if (kind === 'app') {
+    const infoPlist = `${path}/Contents/Info.plist`
     return [
       {
         id: 'codesign-verify',
@@ -126,6 +145,57 @@ export function buildMacosReleaseArtifactChecks(path) {
         label: 'stapler validate',
         command: 'xcrun',
         args: ['stapler', 'validate', path]
+      },
+      {
+        id: 'info-plist-bundle-identifier',
+        label: 'Info.plist bundle identifier',
+        command: 'plutil',
+        args: [
+          '-extract',
+          'CFBundleIdentifier',
+          'raw',
+          '-expect',
+          'string',
+          '-n',
+          '-o',
+          '-',
+          infoPlist
+        ],
+        expectStdoutEquals: EXPECTED_MACOS_BUNDLE_IDENTIFIER
+      },
+      {
+        id: 'info-plist-camera-usage-description',
+        label: 'Info.plist camera usage description',
+        command: 'plutil',
+        args: [
+          '-extract',
+          'NSCameraUsageDescription',
+          'raw',
+          '-expect',
+          'string',
+          '-n',
+          '-o',
+          '-',
+          infoPlist
+        ],
+        expectStdoutNonEmpty: true
+      },
+      {
+        id: 'info-plist-microphone-usage-description',
+        label: 'Info.plist microphone usage description',
+        command: 'plutil',
+        args: [
+          '-extract',
+          'NSMicrophoneUsageDescription',
+          'raw',
+          '-expect',
+          'string',
+          '-n',
+          '-o',
+          '-',
+          infoPlist
+        ],
+        expectStdoutNonEmpty: true
       },
       ...captureEntitlementCheckTargets(path).map((target) => ({
         id: `capture-entitlements-${target.id}`,

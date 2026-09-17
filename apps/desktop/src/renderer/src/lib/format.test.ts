@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 
-import { durationMsLabel, formatBytes } from './format'
+import type { StreamHealth } from '@/lib/backend'
+
+import { durationMsLabel, formatBytes, mergeStreamHealth } from './format'
 
 describe('format', () => {
   it('spells out recording durations once they pass an hour', () => {
@@ -29,6 +31,92 @@ describe('formatBytes', () => {
     expect(formatBytes(null)).toBe('—')
     expect(formatBytes(-5)).toBe('—')
     expect(formatBytes(Number.NaN)).toBe('—')
+  })
+})
+
+describe('mergeStreamHealth', () => {
+  const health = (
+    overrides: Partial<StreamHealth> & Pick<StreamHealth, 'sessionId'>
+  ): StreamHealth => {
+    const { sessionId, ...rest } = overrides
+    return {
+      sessionId,
+      createdAt: '2026-07-29T10:00:00.000Z',
+      ...rest
+    }
+  }
+
+  it('preserves sparse progress values within one stream session', () => {
+    const current = health({
+      sessionId: 'session-a',
+      fps: 59.8,
+      droppedFrames: 2,
+      speed: 0.99,
+      bitrateKbps: 11_900,
+      totalBytes: 2_000_000,
+      duplicatedFrames: 3
+    })
+
+    expect(
+      mergeStreamHealth(
+        current,
+        health({
+          sessionId: 'session-a',
+          fps: 60,
+          createdAt: '2026-07-29T10:00:01.000Z'
+        })
+      )
+    ).toEqual({
+      ...current,
+      fps: 60,
+      createdAt: '2026-07-29T10:00:01.000Z'
+    })
+  })
+
+  it('accepts explicit zero values instead of treating them as sparse', () => {
+    const merged = mergeStreamHealth(
+      health({
+        sessionId: 'session-a',
+        bitrateKbps: 12_000,
+        totalBytes: 2_000_000,
+        duplicatedFrames: 3
+      }),
+      health({
+        sessionId: 'session-a',
+        bitrateKbps: 0,
+        totalBytes: 0,
+        duplicatedFrames: 0
+      })
+    )
+
+    expect(merged).toMatchObject({
+      bitrateKbps: 0,
+      totalBytes: 0,
+      duplicatedFrames: 0
+    })
+  })
+
+  it('resets sparse values instead of leaking them into a new session', () => {
+    const update = health({
+      sessionId: 'session-b',
+      fps: 30,
+      createdAt: '2026-07-29T10:05:00.000Z'
+    })
+
+    expect(
+      mergeStreamHealth(
+        health({
+          sessionId: 'session-a',
+          bitrateKbps: 12_000,
+          totalBytes: 2_000_000,
+          duplicatedFrames: 3
+        }),
+        update
+      )
+    ).toBe(update)
+    expect(update).not.toHaveProperty('bitrateKbps')
+    expect(update).not.toHaveProperty('totalBytes')
+    expect(update).not.toHaveProperty('duplicatedFrames')
   })
 })
 

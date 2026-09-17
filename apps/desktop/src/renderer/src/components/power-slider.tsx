@@ -1,4 +1,4 @@
-import { ArrowCounterClockwise, type Icon } from '@phosphor-icons/react'
+import { type AppIcon, ResetIcon } from '@/components/icons'
 import { useId, useState, type ComponentProps, type KeyboardEvent, type ReactElement } from 'react'
 
 import { Badge } from '@/components/ui/badge'
@@ -41,7 +41,7 @@ export type PowerSliderProps = {
   onChange: (value: number) => void
   step?: number
   onCommit?: (value: number) => void
-  icon?: Icon
+  icon?: AppIcon
   suffix?: string
   decimals?: number
   bipolar?: boolean
@@ -188,7 +188,7 @@ export function PowerSlider({
               variant="ghost"
               onClick={reset}
             >
-              <ArrowCounterClockwise className="size-3.5" />
+              <ResetIcon className="size-3.5" />
             </Button>
           ) : null}
         </div>

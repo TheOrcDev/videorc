@@ -4,6 +4,12 @@ import { join } from 'node:path'
 
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { evaluateRecordingWallDuration } from './lib/recording-duration-gate.mjs'
+import {
+  assertFinalizedRecordingStop,
+  assertNoZeroByteMkvsCreatedAfter,
+  assertNoZeroByteScenarioMkvs,
+  snapshotScenarioMkvPaths
+} from './lib/recording-smoke-guards.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 
@@ -193,7 +199,7 @@ async function recordBundledBackgroundScenario({
   return result
 }
 
-async function recordScenario({
+export async function recordScenario({
   ws,
   timeoutMs,
   recordingMs,
@@ -215,17 +221,29 @@ async function recordScenario({
         )
       ).capabilityId
     : undefined
-  const started = await request(
-    ws,
-    timeoutMs,
-    'session.start',
-    sessionParams({
-      outputDirectoryCapability,
-      preset: scenario.preset,
-      background: scenario.background,
-      video: scenario.video
+  const mkvsBeforeStart = snapshotScenarioMkvPaths({ outputDirectory })
+  let started
+  try {
+    started = await request(
+      ws,
+      timeoutMs,
+      'session.start',
+      sessionParams({
+        outputDirectoryCapability,
+        preset: scenario.preset,
+        background: scenario.background,
+        video: scenario.video
+      })
+    )
+  } catch (error) {
+    assertNoZeroByteMkvsCreatedAfter({
+      scenarioLabel: scenario.label,
+      outputDirectory,
+      beforePaths: mkvsBeforeStart,
+      startupError: error
     })
-  )
+    throw error
+  }
   if (!['recording', 'streaming'].includes(started.state)) {
     throw new Error(
       `[${scenario.label}] Expected recording state after start, got ${started.state}.`
@@ -235,7 +253,29 @@ async function recordScenario({
   await sleep(recordingMs)
 
   const stopped = await request(ws, timeoutMs, 'session.stop')
-  const outputPath = stopped.outputPath ?? started.outputPath
+  const finalizedPath = await assertFinalizedRecordingStop({
+    scenarioLabel: scenario.label,
+    started,
+    stopped,
+    loadHealthEvents: async (sessionId) => {
+      const health = await request(ws, Math.min(timeoutMs, 5000), 'sessions.healthEvents.list', {
+        sessionId,
+        limit: 120
+      })
+      return health?.events ?? []
+    },
+    loadSessionItem: (sessionId) => loadSessionListItem(ws, timeoutMs, sessionId),
+    finalizationTimeoutMs: timeoutMs
+  })
+
+  assertNoZeroByteScenarioMkvs({
+    scenarioLabel: scenario.label,
+    outputDirectory,
+    sessionId: started.sessionId,
+    outputPaths: [started.outputPath, stopped.outputPath]
+  })
+
+  const outputPath = finalizedPath ?? stopped.outputPath ?? started.outputPath
   if (!outputPath || !existsSync(outputPath)) {
     throw new Error(
       `[${scenario.label}] Recording output was not created: ${outputPath ?? 'missing path'}`
@@ -360,7 +400,7 @@ async function recordAssetBackgroundScenario({
  * the token-authenticated HTTP server. */
 async function assertSessionPoster({ ws, connection, timeoutMs, ffmpegPath, label }) {
   const sessions = await request(ws, timeoutMs, 'sessions.list', { limit: 1 })
-  const latest = sessions?.[0]
+  const latest = sessions?.items?.[0]
   if (!latest) {
     throw new Error('Poster assert: no session found after the recording scenarios.')
   }
@@ -383,6 +423,12 @@ async function assertSessionPoster({ ws, connection, timeoutMs, ffmpegPath, labe
     throw new Error(`Poster assert: response is not a JPEG (${bytes.length} bytes).`)
   }
   console.log(`${label} smoke poster PASS: ${bytes.length}-byte JPEG served for ${latest.id}`)
+}
+
+/** One Library row by id (the background finalization state lives there). */
+export async function loadSessionListItem(ws, timeoutMs, sessionId) {
+  const page = await request(ws, Math.min(timeoutMs, 10_000), 'sessions.list', { limit: 50 })
+  return page?.items?.find((item) => item.id === sessionId) ?? null
 }
 
 export function connectBackend(connection, timeoutMs) {

@@ -1,19 +1,23 @@
 import type {
+  NativePreviewHostKind,
   PreviewLifecycleBacking,
   PreviewLifecycleState,
   PreviewLifecycleTransport,
   PreviewPermissionStatus,
   PreviewSupervisorState
 } from '../shared/backend'
+import { isNativePreviewCapability } from '../shared/native-preview-capability'
 
 export interface PreviewSupervisorOptions {
   now?: () => string
+  platform?: NodeJS.Platform
 }
 
 export interface PreviewSurfaceLiveEvent {
   generation: number
-  transport?: PreviewLifecycleTransport
-  backing?: PreviewLifecycleBacking
+  transport: PreviewLifecycleTransport
+  backing: PreviewLifecycleBacking
+  nativePreviewHostKind?: NativePreviewHostKind
 }
 
 export interface PreviewPermissionEvent {
@@ -30,9 +34,11 @@ export interface PreviewFailureEvent {
 export class PreviewSupervisorModel {
   private state: PreviewSupervisorState
   private readonly now: () => string
+  private readonly platform: NodeJS.Platform
 
   constructor(options: PreviewSupervisorOptions = {}) {
     this.now = options.now ?? (() => new Date().toISOString())
+    this.platform = options.platform ?? process.platform
     this.state = this.closedState(0)
   }
 
@@ -61,6 +67,7 @@ export class PreviewSupervisorModel {
       surfaceActive: false,
       transport: 'none',
       backing: 'none',
+      nativePreviewHostKind: undefined,
       permissionStatus: 'ok',
       fallbackReason: undefined,
       lastError: undefined
@@ -102,6 +109,7 @@ export class PreviewSupervisorModel {
       surfaceActive: false,
       transport: 'none',
       backing: 'none',
+      nativePreviewHostKind: undefined,
       permissionStatus: 'ok',
       fallbackReason: undefined,
       lastError: undefined
@@ -113,12 +121,39 @@ export class PreviewSupervisorModel {
       return this.snapshot()
     }
 
+    if (
+      event.transport === 'none' ||
+      event.transport === 'unknown' ||
+      event.backing === 'unknown' ||
+      !isNativePreviewCapability(
+        {
+          transport: event.transport,
+          backing: event.backing,
+          nativePreviewHostKind: event.nativePreviewHostKind
+        },
+        this.platform
+      )
+    ) {
+      return this.transition({
+        lifecycleState: 'surface-fallback',
+        surfaceRequested: true,
+        surfaceActive: false,
+        transport: 'electron-proof-surface',
+        backing: 'electron-browser-window',
+        nativePreviewHostKind: 'proof-surface',
+        permissionStatus: 'ok',
+        fallbackReason: `Preview transport ${event.transport}/${event.backing} is not native on ${this.platform}.`,
+        lastError: undefined
+      })
+    }
+
     return this.transition({
       lifecycleState: 'surface-live',
       surfaceRequested: true,
       surfaceActive: true,
-      transport: event.transport ?? 'native-surface',
-      backing: event.backing ?? 'cametal-layer',
+      transport: event.transport,
+      backing: event.backing,
+      nativePreviewHostKind: event.nativePreviewHostKind,
       permissionStatus: 'ok',
       fallbackReason: undefined,
       lastError: undefined
@@ -136,6 +171,7 @@ export class PreviewSupervisorModel {
       surfaceActive: false,
       transport: 'electron-proof-surface',
       backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface',
       permissionStatus: 'ok',
       fallbackReason: reason,
       lastError: undefined
@@ -153,6 +189,7 @@ export class PreviewSupervisorModel {
       surfaceActive: false,
       transport: 'none',
       backing: 'none',
+      nativePreviewHostKind: undefined,
       permissionStatus: event.permissionStatus,
       fallbackReason: undefined,
       lastError: event.message
@@ -170,6 +207,7 @@ export class PreviewSupervisorModel {
       surfaceActive: false,
       transport: 'none',
       backing: 'none',
+      nativePreviewHostKind: undefined,
       lastError: event.message
     })
   }
@@ -189,7 +227,8 @@ export class PreviewSupervisorModel {
       surfaceRequested: false,
       surfaceActive: false,
       transport: 'none',
-      backing: 'none'
+      backing: 'none',
+      nativePreviewHostKind: undefined
     })
   }
 
@@ -243,6 +282,7 @@ export class PreviewSupervisorModel {
       surfaceActive: false,
       transport: 'none',
       backing: 'none',
+      nativePreviewHostKind: undefined,
       permissionStatus: 'ok',
       updatedAt: this.now()
     }

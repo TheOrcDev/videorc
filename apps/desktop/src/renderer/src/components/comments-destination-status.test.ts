@@ -94,3 +94,49 @@ describe('comments destination status', () => {
     expect(composerMarkup).toContain('Twitch: Token expired')
   })
 })
+
+describe('co-host status chip', () => {
+  const cohost = {
+    sessionId: 'session-1',
+    status: 'listening' as const,
+    reason: null,
+    questions: [],
+    flags: [],
+    mood: null,
+    lastTickAt: null,
+    tickSeq: 3,
+    partial: false
+  }
+
+  it('sits in the destination strip and only goes live-green while listening', () => {
+    const listening = renderToStaticMarkup(
+      createElement(CommentsDestinationStatus, { cohostState: cohost, providers })
+    )
+    expect(listening).toContain('data-slot="cohost-status-chip"')
+    expect(listening).toContain('Co-host: listening')
+    expect(listening).toContain('data-variant="success"')
+
+    const paused = renderToStaticMarkup(
+      createElement(CommentsDestinationStatus, {
+        cohostState: { ...cohost, status: 'paused' as const, reason: 'quota-exhausted' as const },
+        providers: []
+      })
+    )
+    expect(paused).toContain('Co-host: paused · quota')
+    expect(paused).not.toContain('data-variant="success"')
+  })
+
+  it('stays out of the strip entirely when there is no co-host state', () => {
+    const markup = renderToStaticMarkup(
+      createElement(CommentsDestinationStatus, { providers, cohostState: null })
+    )
+    expect(markup).not.toContain('data-slot="cohost-status-chip"')
+  })
+
+  it('still renders the chip for a session with no chat providers at all', () => {
+    const markup = renderToStaticMarkup(
+      createElement(CommentsDestinationStatus, { cohostState: cohost, providers: [] })
+    )
+    expect(markup).toContain('data-slot="cohost-status-chip"')
+  })
+})

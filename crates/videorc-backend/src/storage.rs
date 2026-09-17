@@ -5,11 +5,11 @@ use std::io::{Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use chrono::Utc;
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params, params_from_iter, types::Value};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
@@ -19,10 +19,11 @@ use crate::live_chat::{
     CommentsSendOperation, CommentsSendOperationPhase, LiveChatEventType, LiveChatMessage,
     LiveChatMessageFragment,
 };
-use crate::process_job::output_owned_std;
+use crate::process_job::output_owned_std_with_timeout;
 use crate::protocol::{
     AiArtifact, AiArtifactKind, AiArtifactStatus, DiagnosticStats, HealthEvent, HealthLevel,
-    LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionLogEntry,
+    LayoutSettings, NoiseCleanupJob, NoiseCleanupJobStatus, OutputSettings, SessionAiArtifactsPage,
+    SessionHealthEventsPage, SessionListItem, SessionListPage, SessionLogEntry, SessionLogsPage,
     SessionStorageTotals, SessionSummary, SourceSelection, StreamScreen, StreamScreenStatus,
 };
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
@@ -33,11 +34,25 @@ use crate::streaming::{
 };
 
 const MAX_NOISE_CLEANUP_JOB_LIST: usize = 1_000;
+// Stays below both the renderer's 30s backend request contract and the
+// backend's 30s post-finalization hard-exit grace. The child is killed/reaped
+// by `output_owned_std_with_timeout` before this operation returns.
+const SCREEN_IMAGE_OPTIMIZER_TIMEOUT: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
     path: PathBuf,
+}
+
+/// Persisted active-Screen selection before output reconciliation. An
+/// unavailable selection deliberately carries only its id: a missing or
+/// tampered path must never cross back into the compositor/recording output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ActiveStreamScreenSelection {
+    Inactive,
+    Ready(StreamScreen),
+    Unavailable { screen_id: String },
 }
 
 #[derive(Debug, Clone)]
@@ -147,6 +162,17 @@ pub enum PlatformAccountCasOutcome {
     Stale(PlatformAccountWriteExpectation),
 }
 
+/// A row left in `finalizing` by an interrupted background export.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PendingRecordingFinalization {
+    pub session_id: String,
+    pub output_path: Option<String>,
+    pub ended_at: Option<String>,
+    pub duration_ms: Option<i64>,
+    pub diagnostics_json: String,
+    pub keep_original_mkv: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFinalization {
@@ -204,6 +230,12 @@ pub struct SessionFinalization {
     /// deleting by the original user-visible path.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_cleanup_path: Option<String>,
+    /// Background finalization state (`finalizing` | `finalized` | `failed`).
+    /// `None` leaves the column untouched (legacy inline finalization).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finalization_error: Option<String>,
 }
 
 impl SessionFinalization {
@@ -234,7 +266,20 @@ impl SessionFinalization {
             mp4_staging_directory_cleanup_path: None,
             remove_output_after_commit: false,
             output_cleanup_path: None,
+            finalization_state: None,
+            finalization_error: None,
         })
+    }
+
+    /// Marks the row's background finalization state alongside the commit.
+    pub fn with_finalization_state(
+        mut self,
+        state: impl Into<String>,
+        error: Option<String>,
+    ) -> Self {
+        self.finalization_state = Some(state.into());
+        self.finalization_error = error;
+        self
     }
 
     pub fn with_media_ownership(
@@ -374,6 +419,21 @@ struct SessionDeletionPathRecord {
     object_identity: Option<SessionFileObjectIdentity>,
 }
 
+#[derive(Debug)]
+enum SessionDeletionPreparation {
+    Existing {
+        operation_id: String,
+    },
+    New {
+        operation_id: String,
+        session_id: String,
+        status: String,
+        mp4_path: Option<String>,
+        output_path: Option<String>,
+        path_records: Vec<SessionDeletionPathRecord>,
+    },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFileIdentity {
@@ -391,14 +451,17 @@ impl SessionFileIdentity {
     }
 }
 
-/// Identity of one filesystem object, independent of its length, timestamps,
-/// or contents. It is recorded while the creating handle is still open and is
-/// stable across writes and same-filesystem renames.
+/// Identity of one filesystem object. It is recorded while the creating handle
+/// is still open and remains stable across writes and same-filesystem renames.
+/// On platforms where creation time is stable across renames, it distinguishes
+/// a newly-created replacement that reuses a filesystem object ID.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct SessionFileObjectIdentity {
     volume_id: u64,
     file_id: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    created_unix_nanos: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,6 +497,16 @@ pub struct SessionDeletionReconciliationSummary {
     pub completed: usize,
     pub pending: usize,
     pub errors: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CaptionPrivateArtifactRecord {
+    pub id: String,
+    pub kind: String,
+    pub path: String,
+    pub owner_token: String,
+    pub published_path: Option<String>,
+    pub object_identity: Option<SessionFileObjectIdentity>,
 }
 
 fn parse_session_deletion_path_records(value: &str) -> Result<Vec<SessionDeletionPathRecord>> {
@@ -544,13 +617,13 @@ pub(crate) fn capture_session_file_object_identity_from_file(
             path.display()
         );
     }
-
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
         Ok(SessionFileObjectIdentity {
             volume_id: metadata.dev(),
             file_id: metadata.ino(),
+            created_unix_nanos: metadata_created_unix_nanos(&metadata),
         })
     }
 
@@ -595,7 +668,22 @@ fn windows_session_object_identity_from_handle(
     Ok(SessionFileObjectIdentity {
         volume_id: u64::from(information.dwVolumeSerialNumber),
         file_id,
+        created_unix_nanos: None,
     })
+}
+
+#[cfg(target_os = "macos")]
+fn metadata_created_unix_nanos(_metadata: &std::fs::Metadata) -> Option<i64> {
+    None
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn metadata_created_unix_nanos(metadata: &std::fs::Metadata) -> Option<i64> {
+    metadata
+        .created()
+        .ok()
+        .and_then(|created| created.duration_since(UNIX_EPOCH).ok())
+        .map(|duration| i64::try_from(duration.as_nanos()).unwrap_or(i64::MAX))
 }
 
 pub(crate) fn capture_session_file_object_identity(
@@ -716,6 +804,7 @@ pub(crate) fn capture_session_directory_object_identity(
         Ok(Some(SessionFileObjectIdentity {
             volume_id: metadata.dev(),
             file_id: metadata.ino(),
+            created_unix_nanos: metadata_created_unix_nanos(&metadata),
         }))
     }
 
@@ -1336,6 +1425,7 @@ impl Database {
                 stream_enabled: true,
                 output_directory: None,
                 ffmpeg_path: None,
+                keep_original_mkv: false,
                 video: crate::protocol::VideoSettings {
                     preset: crate::protocol::VideoPreset::StreamSafe1080p30,
                     width: 1920,
@@ -1404,7 +1494,9 @@ impl Database {
                      ELSE COALESCE(?4, mp4_path)
                  END,
                  duration_ms = COALESCE(?5, duration_ms),
-                 diagnostics_json = ?6
+                 diagnostics_json = ?6,
+                 finalization_state = COALESCE(?8, finalization_state),
+                 finalization_error = CASE WHEN ?8 IS NULL THEN finalization_error ELSE ?9 END
              WHERE id = ?1",
             params![
                 finalization.session_id,
@@ -1414,6 +1506,8 @@ impl Database {
                 finalization.duration_ms,
                 finalization.diagnostics_json,
                 clear_mp4_path_if_matches,
+                finalization.finalization_state,
+                finalization.finalization_error,
             ],
         )?;
         if updated != 1 {
@@ -2035,6 +2129,51 @@ impl Database {
     /// advances only the session's MP4 path. Keeping the existing diagnostics
     /// in the recovery record prevents a later crash replay from substituting
     /// the current studio's diagnostics for an older recording.
+    /// Marks a session's background finalization state without touching the
+    /// media columns (used for `failed` and cancellation).
+    pub fn set_session_finalization_state(
+        &self,
+        session_id: &str,
+        state: &str,
+        error: Option<&str>,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE sessions SET finalization_state = ?2, finalization_error = ?3 WHERE id = ?1",
+            params![session_id, state, error],
+        )?;
+        Ok(())
+    }
+
+    /// Sessions whose MP4 export was interrupted (backend exit mid-job).
+    pub fn sessions_pending_finalization(&self) -> Result<Vec<PendingRecordingFinalization>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, output_path, ended_at, duration_ms, COALESCE(diagnostics_json, '{}'),
+                    output_json
+             FROM sessions
+             WHERE finalization_state = 'finalizing'
+             ORDER BY started_at ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let output_json: String = row.get(5)?;
+            let keep_original_mkv = serde_json::from_str::<serde_json::Value>(&output_json)
+                .ok()
+                .and_then(|value| value.get("keepOriginalMkv")?.as_bool())
+                .unwrap_or(false);
+            Ok(PendingRecordingFinalization {
+                session_id: row.get(0)?,
+                output_path: row.get(1)?,
+                ended_at: row.get(2)?,
+                duration_ms: row.get(3)?,
+                diagnostics_json: row.get(4)?,
+                keep_original_mkv,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(anyhow::Error::from)
+    }
+
     pub fn session_finalization_snapshot(&self, session_id: &str) -> Result<SessionFinalization> {
         let conn = self.lock()?;
         conn.query_row(
@@ -2062,6 +2201,8 @@ impl Database {
                     mp4_staging_directory_cleanup_path: None,
                     remove_output_after_commit: false,
                     output_cleanup_path: None,
+                    finalization_state: None,
+                    finalization_error: None,
                 })
             },
         )
@@ -2555,7 +2696,9 @@ impl Database {
              SELECT ?3, ?4, ?6, ?6, 'completed', mode,
                     CASE WHEN ?9 = 0 THEN ?7 ELSE NULL END,
                     CASE WHEN ?9 = 1 THEN ?7 ELSE NULL END,
-                    stream_preset, ?8, COALESCE(?10, duration_ms), sources_json, layout_json,
+                    stream_preset,
+                    CASE WHEN ?9 = 1 THEN NULL ELSE ?8 END,
+                    COALESCE(?10, duration_ms), sources_json, layout_json,
                     output_json, NULL, ?11, ?2, ?5, 'noise-cleanup'
              FROM sessions WHERE id = ?2",
             params![
@@ -2801,6 +2944,24 @@ impl Database {
         .map_err(Into::into)
     }
 
+    pub fn latest_chat_send_operation(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<CommentsSendOperation>> {
+        let conn = self.lock()?;
+        conn.query_row(
+            "SELECT id, session_id, message_text, phase_json, destinations_json, created_at, updated_at
+             FROM live_chat_send_operations
+             WHERE session_id = ?1
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1",
+            params![session_id],
+            chat_send_operation_from_row,
+        )
+        .optional()
+        .map_err(Into::into)
+    }
+
     pub fn list_chat_send_operations(
         &self,
         session_id: &str,
@@ -2877,9 +3038,103 @@ impl Database {
         self.ai_artifacts_for_session_locked(&conn, session_id)
     }
 
+    pub fn list_ai_artifacts_page(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionAiArtifactsPage> {
+        let limit = requested_limit.clamp(1, 120);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(121);
+        let (cursor_created_at, cursor_id) = cursor
+            .map(parse_session_detail_cursor)
+            .transpose()?
+            .map(|(created_at, id)| (Some(created_at), Some(id)))
+            .unwrap_or((None, None));
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, session_id, kind, status, content_json, file_path, created_at
+             FROM ai_artifacts
+             WHERE session_id = ?1
+               AND (
+                    ?2 IS NULL
+                    OR created_at < ?2
+                    OR (created_at = ?2 AND id < ?3)
+               )
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, cursor_created_at, cursor_id, query_limit],
+            ai_artifact_from_row,
+        )?;
+        let mut artifacts = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_older = artifacts.len() > limit;
+        artifacts.truncate(limit);
+        let next_cursor = has_older
+            .then(|| {
+                artifacts
+                    .last()
+                    .map(|artifact| session_detail_cursor(&artifact.created_at, &artifact.id))
+            })
+            .flatten();
+        artifacts.reverse();
+        Ok(SessionAiArtifactsPage {
+            artifacts,
+            next_cursor,
+        })
+    }
+
     pub fn list_health_events(&self, session_id: &str) -> Result<Vec<HealthEvent>> {
         let conn = self.lock()?;
         self.health_events_for_session_locked(&conn, session_id)
+    }
+
+    pub fn list_health_events_page(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionHealthEventsPage> {
+        let limit = requested_limit.clamp(1, 120);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(121);
+        let (cursor_created_at, cursor_id) = cursor
+            .map(parse_session_detail_cursor)
+            .transpose()?
+            .map(|(created_at, id)| (Some(created_at), Some(id)))
+            .unwrap_or((None, None));
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, session_id, level, code, message, permission_pane, created_at
+             FROM health_events
+             WHERE session_id = ?1
+               AND (
+                    ?2 IS NULL
+                    OR created_at < ?2
+                    OR (created_at = ?2 AND id < ?3)
+               )
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, cursor_created_at, cursor_id, query_limit],
+            health_event_from_row,
+        )?;
+        let mut events = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_older = events.len() > limit;
+        events.truncate(limit);
+        let next_cursor = has_older
+            .then(|| {
+                events
+                    .last()
+                    .map(|event| session_detail_cursor(&event.created_at, &event.id))
+            })
+            .flatten();
+        events.reverse();
+        Ok(SessionHealthEventsPage {
+            events,
+            next_cursor,
+        })
     }
 
     pub fn add_health_event(
@@ -2962,13 +3217,60 @@ impl Database {
         Ok(entry)
     }
 
+    pub fn list_session_logs_page(
+        &self,
+        session_id: &str,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionLogsPage> {
+        let limit = requested_limit.clamp(1, 120);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(121);
+        let (cursor_created_at, cursor_id) = cursor
+            .map(parse_session_detail_cursor)
+            .transpose()?
+            .map(|(created_at, id)| (Some(created_at), Some(id)))
+            .unwrap_or((None, None));
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, session_id, level, code, message, source_id, permission_pane, created_at
+             FROM session_logs
+             WHERE session_id = ?1
+               AND (
+                    ?2 IS NULL
+                    OR created_at < ?2
+                    OR (created_at = ?2 AND id < ?3)
+               )
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?4",
+        )?;
+        let rows = statement.query_map(
+            params![session_id, cursor_created_at, cursor_id, query_limit],
+            session_log_entry_from_row,
+        )?;
+        let mut entries = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        let has_older = entries.len() > limit;
+        entries.truncate(limit);
+        let next_cursor = has_older
+            .then(|| {
+                entries
+                    .last()
+                    .map(|entry| session_detail_cursor(&entry.created_at, &entry.id))
+            })
+            .flatten();
+        entries.reverse();
+        Ok(SessionLogsPage {
+            entries,
+            next_cursor,
+        })
+    }
+
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
             "SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
                     stream_preset, container, duration_ms, sources_json, layout_json,
                     diagnostics_json, file_size_bytes, derived_from_session_id, source_title,
-                    processing_kind
+                    processing_kind, finalization_state, finalization_error
              FROM sessions
              WHERE library_hidden = 0
              ORDER BY started_at DESC
@@ -2998,6 +3300,8 @@ impl Database {
                 row.get::<_, Option<String>>(15)?,
                 row.get::<_, Option<String>>(16)?,
                 row.get::<_, Option<String>>(17)?,
+                row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<String>>(19)?,
             ))
         })?;
 
@@ -3022,6 +3326,8 @@ impl Database {
                 derived_from_session_id,
                 source_title,
                 processing_kind,
+                finalization_state,
+                finalization_error,
             ) = row?;
 
             // Size truth (Library rewrite L1): stat the VISIBLE file live while
@@ -3053,6 +3359,10 @@ impl Database {
                 derived_from_session_id,
                 source_title,
                 processing_kind,
+                finalization_state: crate::recording_finalization::finalization_state_from_column(
+                    finalization_state.as_deref(),
+                ),
+                finalization_error,
                 quality_status: self.latest_quality_status_for_session_locked(
                     &conn,
                     output_path.as_deref(),
@@ -3067,7 +3377,7 @@ impl Database {
                 output_path,
                 mp4_path,
                 stream_preset,
-                container,
+                container: normalized_session_container(container),
                 duration_ms,
                 final_diagnostics: diagnostics_json
                     .as_deref()
@@ -3078,6 +3388,314 @@ impl Database {
         }
 
         Ok(sessions)
+    }
+
+    /// Return one bounded Library page with a fixed SQL statement count.
+    /// Histories are represented only by counts/ready-kind summaries and are
+    /// loaded through their dedicated detail endpoints when a row is opened.
+    pub fn list_session_items_page(
+        &self,
+        cursor: Option<&str>,
+        requested_limit: usize,
+    ) -> Result<SessionListPage> {
+        let limit = requested_limit.clamp(1, 200);
+        let query_limit = i64::try_from(limit.saturating_add(1)).unwrap_or(201);
+        let (cursor_started_at, cursor_id) = cursor
+            .map(parse_session_list_cursor)
+            .transpose()?
+            .map(|(started_at, id)| (Some(started_at), Some(id)))
+            .unwrap_or((None, None));
+
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "WITH
+                page_sessions AS (
+                    SELECT id, title, started_at, ended_at, status, mode, output_path, mp4_path,
+                           stream_preset, container, duration_ms, layout_json, file_size_bytes,
+                           derived_from_session_id, source_title, processing_kind,
+                           finalization_state, finalization_error
+                    FROM sessions
+                    WHERE library_hidden = 0
+                      AND (
+                           ?1 IS NULL
+                           OR started_at < ?1
+                           OR (started_at = ?1 AND id < ?2)
+                      )
+                    ORDER BY started_at DESC, id DESC
+                    LIMIT ?3
+                ),
+                health_counts AS (
+                    SELECT health_events.session_id, COUNT(*) AS count
+                    FROM health_events
+                    JOIN page_sessions ON page_sessions.id = health_events.session_id
+                    GROUP BY health_events.session_id
+                ),
+                log_counts AS (
+                    SELECT session_logs.session_id, COUNT(*) AS count
+                    FROM session_logs
+                    JOIN page_sessions ON page_sessions.id = session_logs.session_id
+                    GROUP BY session_logs.session_id
+                ),
+                artifact_summaries AS (
+                    SELECT ai_artifacts.session_id, COUNT(*) AS count,
+                           GROUP_CONCAT(
+                               DISTINCT CASE
+                                   WHEN ai_artifacts.status = '\"ready\"'
+                                   THEN ai_artifacts.kind
+                               END
+                           )
+                               AS ready_kinds
+                    FROM ai_artifacts
+                    JOIN page_sessions ON page_sessions.id = ai_artifacts.session_id
+                    GROUP BY ai_artifacts.session_id
+                ),
+                comment_counts AS (
+                    SELECT live_chat_messages.session_id, COUNT(*) AS count
+                    FROM live_chat_messages
+                    JOIN page_sessions ON page_sessions.id = live_chat_messages.session_id
+                    GROUP BY live_chat_messages.session_id
+                ),
+                quality_candidate_values AS (
+                    SELECT page_sessions.id AS session_id, repair_jobs.outcome_json,
+                           repair_jobs.status AS job_status, repair_jobs.reason,
+                           repair_jobs.updated_at, repair_jobs.created_at, repair_jobs.id,
+                           CASE
+                               WHEN repair_jobs.file_path = page_sessions.mp4_path THEN 0
+                               ELSE 1
+                           END AS path_priority,
+                           CASE
+                               WHEN json_valid(repair_jobs.outcome_json)
+                               THEN json_extract(repair_jobs.outcome_json, '$.status')
+                               ELSE NULL
+                           END AS gate_status,
+                           CASE
+                               WHEN json_valid(repair_jobs.outcome_json)
+                               THEN CASE
+                                   WHEN json_type(repair_jobs.outcome_json) = 'object'
+                                    AND (
+                                        (
+                                            json_extract(repair_jobs.outcome_json, '$.status') = 'ready'
+                                            AND json_type(repair_jobs.outcome_json, '$.path') = 'text'
+                                        )
+                                        OR (
+                                            json_extract(repair_jobs.outcome_json, '$.status') = 'repaired'
+                                            AND json_type(repair_jobs.outcome_json, '$.path') = 'text'
+                                            AND json_type(repair_jobs.outcome_json, '$.interpolated')
+                                                IN ('true', 'false')
+                                        )
+                                        OR (
+                                            json_extract(repair_jobs.outcome_json, '$.status') = 'not-hundred-percent'
+                                            AND json_type(repair_jobs.outcome_json, '$.path') = 'text'
+                                            AND json_type(repair_jobs.outcome_json, '$.reasons') = 'array'
+                                            AND NOT EXISTS (
+                                                SELECT 1
+                                                FROM json_each(
+                                                    repair_jobs.outcome_json,
+                                                    '$.reasons'
+                                                ) AS reason
+                                                WHERE reason.type <> 'text'
+                                            )
+                                            AND (
+                                                json_type(
+                                                    repair_jobs.outcome_json,
+                                                    '$.needs_attention'
+                                                ) IS NULL
+                                                OR json_type(
+                                                    repair_jobs.outcome_json,
+                                                    '$.needs_attention'
+                                                ) IN ('true', 'false')
+                                            )
+                                        )
+                                        OR (
+                                            json_extract(repair_jobs.outcome_json, '$.status') = 'failed'
+                                            AND json_type(repair_jobs.outcome_json, '$.path') = 'text'
+                                            AND json_type(repair_jobs.outcome_json, '$.reason') = 'text'
+                                        )
+                                    )
+                                   THEN 1
+                                   ELSE 0
+                               END
+                               ELSE 0
+                           END AS gate_status_valid
+                    FROM page_sessions
+                    JOIN repair_jobs
+                      ON repair_jobs.file_path = page_sessions.output_path
+                      OR repair_jobs.file_path = page_sessions.mp4_path
+                    WHERE repair_jobs.status IN ('completed', 'running')
+                      AND repair_jobs.outcome_json IS NOT NULL
+                ),
+                quality_candidates AS (
+                    SELECT session_id, outcome_json,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY session_id
+                               ORDER BY updated_at DESC, path_priority ASC,
+                                        created_at DESC, id DESC
+                           ) AS rank
+                    FROM quality_candidate_values
+                    WHERE gate_status_valid = 1
+                      AND NOT (
+                          gate_status IN ('ready', 'repaired')
+                          AND (job_status = 'running' OR COALESCE(reason, '') <> '')
+                      )
+                )
+             SELECT page_sessions.id, page_sessions.title, page_sessions.started_at,
+                    page_sessions.ended_at, page_sessions.status, page_sessions.mode,
+                    page_sessions.output_path, page_sessions.mp4_path,
+                    page_sessions.stream_preset, page_sessions.container,
+                    page_sessions.duration_ms, page_sessions.layout_json,
+                    page_sessions.file_size_bytes, page_sessions.derived_from_session_id,
+                    page_sessions.source_title, page_sessions.processing_kind,
+                    quality_candidates.outcome_json,
+                    COALESCE(health_counts.count, 0), COALESCE(log_counts.count, 0),
+                    COALESCE(artifact_summaries.count, 0), artifact_summaries.ready_kinds,
+                    COALESCE(comment_counts.count, 0),
+                    page_sessions.finalization_state, page_sessions.finalization_error
+             FROM page_sessions
+             LEFT JOIN health_counts ON health_counts.session_id = page_sessions.id
+             LEFT JOIN log_counts ON log_counts.session_id = page_sessions.id
+             LEFT JOIN artifact_summaries ON artifact_summaries.session_id = page_sessions.id
+             LEFT JOIN comment_counts ON comment_counts.session_id = page_sessions.id
+             LEFT JOIN quality_candidates
+                    ON quality_candidates.session_id = page_sessions.id
+                   AND quality_candidates.rank = 1
+             ORDER BY page_sessions.started_at DESC, page_sessions.id DESC",
+        )?;
+
+        let rows =
+            statement.query_map(params![cursor_started_at, cursor_id, query_limit], |row| {
+                let layout_json: String = row.get(11)?;
+                let stream_preset: Option<String> = row.get(8)?;
+                let mode: String = row.get(5)?;
+                let layout: LayoutSettings =
+                    serde_json::from_str(&layout_json).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            11,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })?;
+                let ready_kinds: Option<String> = row.get(20)?;
+                let ready_ai_artifact_kinds = ready_kinds
+                    .as_deref()
+                    .into_iter()
+                    .flat_map(|value| value.split(','))
+                    .filter_map(|value| serde_json::from_str(value).ok())
+                    .collect();
+                let quality_json: Option<String> = row.get(16)?;
+                Ok(SessionListItem {
+                    id: row.get(0)?,
+                    title: row.get(1)?,
+                    started_at: row.get(2)?,
+                    ended_at: row.get(3)?,
+                    status: row.get(4)?,
+                    mode: mode.clone(),
+                    output_path: row.get(6)?,
+                    mp4_path: row.get(7)?,
+                    stream_preset: stream_preset.clone(),
+                    container: normalized_session_container(row.get(9)?),
+                    duration_ms: row.get(10)?,
+                    file_size_bytes: row.get(12)?,
+                    scene_label: session_scene_label(&layout, stream_preset.as_deref(), &mode),
+                    quality_status: quality_json
+                        .as_deref()
+                        .and_then(|value| serde_json::from_str(value).ok()),
+                    health_event_count: row.get::<_, i64>(17)?.max(0) as u64,
+                    session_log_count: row.get::<_, i64>(18)?.max(0) as u64,
+                    ai_artifact_count: row.get::<_, i64>(19)?.max(0) as u64,
+                    ready_ai_artifact_kinds,
+                    comment_count: row.get::<_, i64>(21)?.max(0) as u64,
+                    derived_from_session_id: row.get(13)?,
+                    source_title: row.get(14)?,
+                    processing_kind: row.get(15)?,
+                    finalization_state:
+                        crate::recording_finalization::finalization_state_from_column(
+                            row.get::<_, Option<String>>(22)?.as_deref(),
+                        ),
+                    finalization_progress_percent: None,
+                    finalization_error: row.get(23)?,
+                })
+            })?;
+        let mut items = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(conn);
+
+        let has_more = items.len() > limit;
+        items.truncate(limit);
+
+        // Filesystem metadata can block on removable/network volumes. It must
+        // never run while the shared SQLite mutex is held.
+        let mut live_size_writebacks = Vec::new();
+        for item in &mut items {
+            let Some(visible_path) = item.mp4_path.as_deref().or(item.output_path.as_deref())
+            else {
+                continue;
+            };
+            if let Some(live_size) = std::fs::metadata(visible_path)
+                .ok()
+                .map(|metadata| metadata.len() as i64)
+            {
+                let stored_size = item.file_size_bytes;
+                item.file_size_bytes = Some(live_size);
+                if Some(live_size) != stored_size {
+                    live_size_writebacks.push((
+                        item.id.clone(),
+                        visible_path.to_string(),
+                        live_size,
+                        stored_size,
+                    ));
+                }
+            }
+        }
+        self.persist_live_session_file_sizes(&live_size_writebacks)?;
+
+        let next_cursor = has_more
+            .then(|| items.last().map(session_list_cursor))
+            .flatten();
+        Ok(items_page(items, next_cursor))
+    }
+
+    /// Persist all live sizes observed by one bounded Library page in one SQL
+    /// statement. The path and previous-size guards prevent a stat result from
+    /// overwriting a concurrent session update while the SQLite mutex was
+    /// intentionally released for filesystem I/O.
+    fn persist_live_session_file_sizes(
+        &self,
+        writebacks: &[(String, String, i64, Option<i64>)],
+    ) -> Result<()> {
+        if writebacks.is_empty() {
+            return Ok(());
+        }
+        let values = (0..writebacks.len())
+            .map(|_| "(?, ?, ?, ?)")
+            .collect::<Vec<_>>()
+            .join(", ");
+        let sql = format!(
+            "WITH live_session_sizes(id, visible_path, observed_size, stored_size) AS (
+                 VALUES {values}
+             )
+             UPDATE sessions
+             SET file_size_bytes = (
+                 SELECT live_session_sizes.observed_size
+                 FROM live_session_sizes
+                 WHERE live_session_sizes.id = sessions.id
+             )
+             WHERE EXISTS (
+                 SELECT 1
+                 FROM live_session_sizes
+                 WHERE live_session_sizes.id = sessions.id
+                   AND live_session_sizes.visible_path = COALESCE(sessions.mp4_path, sessions.output_path)
+                   AND sessions.file_size_bytes IS live_session_sizes.stored_size
+             )"
+        );
+        let mut parameters = Vec::with_capacity(writebacks.len() * 4);
+        for (id, visible_path, observed_size, stored_size) in writebacks {
+            parameters.push(Value::Text(id.clone()));
+            parameters.push(Value::Text(visible_path.clone()));
+            parameters.push(Value::Integer(*observed_size));
+            parameters.push(stored_size.map(Value::Integer).unwrap_or(Value::Null));
+        }
+        self.lock()?.execute(&sql, params_from_iter(parameters))?;
+        Ok(())
     }
 
     /// Rename a session (Library L3). Title is validated at the RPC edge.
@@ -3487,50 +4105,85 @@ impl Database {
         &self,
         session_ids: &[String],
     ) -> Result<Vec<PendingSessionDeletion>> {
-        let mut conn = self.lock()?;
-        let transaction = conn.transaction()?;
-        let now = Utc::now().to_rfc3339();
-        let mut operation_ids = Vec::new();
+        self.prepare_session_deletions_with_identity(session_ids, |path| {
+            capture_session_file_bound_identity(path)
+        })
+    }
 
-        for session_id in session_ids {
-            let existing: Option<String> = transaction
-                .query_row(
-                    "SELECT id FROM session_delete_operations WHERE session_id = ?1",
-                    params![session_id],
-                    |row| row.get(0),
-                )
-                .optional()?;
-            if let Some(existing) = existing {
-                operation_ids.push(existing);
-                continue;
+    fn prepare_session_deletions_with_identity<F>(
+        &self,
+        session_ids: &[String],
+        mut capture_identity: F,
+    ) -> Result<Vec<PendingSessionDeletion>>
+    where
+        F: FnMut(&Path) -> Result<Option<SessionFileBoundIdentity>>,
+    {
+        // Phase one snapshots only SQLite state. File hashing and identity
+        // capture happen after this sole connection guard has been released,
+        // so a slow disk can never stall recording finalization commits.
+        let mut preparations = {
+            let conn = self.lock()?;
+            let mut preparations = Vec::new();
+            for session_id in session_ids {
+                let existing: Option<String> = conn
+                    .query_row(
+                        "SELECT id FROM session_delete_operations WHERE session_id = ?1",
+                        params![session_id],
+                        |row| row.get(0),
+                    )
+                    .optional()?;
+                if let Some(operation_id) = existing {
+                    preparations.push(SessionDeletionPreparation::Existing { operation_id });
+                    continue;
+                }
+
+                let media: Option<(String, Option<String>, Option<String>)> = conn
+                    .query_row(
+                        "SELECT status, mp4_path, output_path
+                         FROM sessions
+                         WHERE id = ?1 AND library_hidden = 0",
+                        params![session_id],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                let Some((status, mp4_path, output_path)) = media else {
+                    continue;
+                };
+                if status == "running" {
+                    bail!("Session {session_id} is still active and cannot be deleted.");
+                }
+                preparations.push(SessionDeletionPreparation::New {
+                    operation_id: Uuid::new_v4().to_string(),
+                    session_id: session_id.clone(),
+                    status,
+                    mp4_path,
+                    output_path,
+                    path_records: Vec::new(),
+                });
             }
+            preparations
+        };
 
-            let media: Option<(String, Option<String>, Option<String>)> = transaction
-                .query_row(
-                    "SELECT status, mp4_path, output_path
-                     FROM sessions
-                     WHERE id = ?1 AND library_hidden = 0",
-                    params![session_id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            let Some((status, mp4_path, output_path)) = media else {
+        for preparation in &mut preparations {
+            let SessionDeletionPreparation::New {
+                operation_id,
+                mp4_path,
+                output_path,
+                path_records,
+                ..
+            } = preparation
+            else {
                 continue;
             };
-            if status == "running" {
-                bail!("Session {session_id} is still active and cannot be deleted.");
-            }
-            let paths = distinct_nonempty_paths([mp4_path, output_path]);
-            let operation_id = Uuid::new_v4().to_string();
-            let path_records = paths
-                .iter()
+            *path_records = distinct_nonempty_paths([mp4_path.clone(), output_path.clone()])
+                .into_iter()
                 .enumerate()
                 .map(|(index, path)| {
-                    let ownership = capture_session_file_bound_identity(Path::new(path))?;
+                    let ownership = capture_identity(Path::new(&path))?;
                     Ok(SessionDeletionPathRecord {
                         original_path: path.clone(),
                         quarantine_path: Some(
-                            session_deletion_quarantine_path(Path::new(path), &operation_id, index)
+                            session_deletion_quarantine_path(Path::new(&path), operation_id, index)
                                 .display()
                                 .to_string(),
                         ),
@@ -3541,27 +4194,119 @@ impl Database {
                     })
                 })
                 .collect::<Result<Vec<_>>>()?;
-            transaction.execute(
-                "INSERT INTO session_delete_operations
-                    (id, session_id, paths_json, last_error, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, NULL, ?4, ?4)",
-                params![
-                    operation_id,
-                    session_id,
-                    serde_json::to_string(&path_records)?,
-                    now,
-                ],
-            )?;
-            let hidden = transaction.execute(
-                "UPDATE sessions SET library_hidden = 1 WHERE id = ?1 AND library_hidden = 0",
-                params![session_id],
-            )?;
-            if hidden != 1 {
-                bail!("Session {session_id} could not be hidden for deletion.");
+
+            // Re-read identity after the full external preparation pass and
+            // immediately before acquiring SQLite. The later quarantine step
+            // still verifies again at the use boundary, closing the remaining
+            // check/use race without ever hashing under the DB guard.
+            for record in path_records.iter() {
+                let current = capture_identity(Path::new(&record.original_path))?;
+                let unchanged = match (
+                    record.identity.as_ref(),
+                    record.object_identity.as_ref(),
+                    current.as_ref(),
+                ) {
+                    (None, None, None) => true,
+                    (Some(content), Some(object), Some(current)) => {
+                        &current.content_identity == content && &current.object_identity == object
+                    }
+                    _ => false,
+                };
+                if !unchanged {
+                    bail!(
+                        "Session media {} changed while deletion ownership was being prepared; retry the deletion.",
+                        record.original_path
+                    );
+                }
             }
-            operation_ids.push(operation_id);
         }
 
+        // Phase two is a short transaction. Re-read every identity-bearing
+        // row before adopting the out-of-lock filesystem evidence.
+        let now = Utc::now().to_rfc3339();
+        let mut operation_ids = Vec::new();
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        for preparation in preparations {
+            match preparation {
+                SessionDeletionPreparation::Existing { operation_id } => {
+                    let still_exists: bool = transaction.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM session_delete_operations WHERE id = ?1)",
+                        params![operation_id],
+                        |row| row.get(0),
+                    )?;
+                    if still_exists {
+                        operation_ids.push(operation_id);
+                    }
+                }
+                SessionDeletionPreparation::New {
+                    operation_id,
+                    session_id,
+                    status,
+                    mp4_path,
+                    output_path,
+                    path_records,
+                } => {
+                    if let Some(existing) = transaction
+                        .query_row(
+                            "SELECT id FROM session_delete_operations WHERE session_id = ?1",
+                            params![session_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .optional()?
+                    {
+                        operation_ids.push(existing);
+                        continue;
+                    }
+                    let current: Option<(String, Option<String>, Option<String>, bool)> =
+                        transaction
+                            .query_row(
+                                "SELECT status, mp4_path, output_path, library_hidden
+                                 FROM sessions WHERE id = ?1",
+                                params![session_id],
+                                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                            )
+                            .optional()?;
+                    let Some((current_status, current_mp4, current_output, hidden)) = current
+                    else {
+                        continue;
+                    };
+                    if hidden
+                        || current_status != status
+                        || current_mp4 != mp4_path
+                        || current_output != output_path
+                    {
+                        bail!(
+                            "Session {session_id} changed while deletion ownership was being prepared; retry the deletion."
+                        );
+                    }
+                    if current_status == "running" {
+                        bail!("Session {session_id} is still active and cannot be deleted.");
+                    }
+                    transaction.execute(
+                        "INSERT INTO session_delete_operations
+                            (id, session_id, paths_json, last_error, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, NULL, ?4, ?4)",
+                        params![
+                            operation_id,
+                            session_id,
+                            serde_json::to_string(&path_records)?,
+                            now,
+                        ],
+                    )?;
+                    let hidden = transaction.execute(
+                        "UPDATE sessions SET library_hidden = 1
+                         WHERE id = ?1 AND library_hidden = 0 AND status = ?2
+                           AND mp4_path IS ?3 AND output_path IS ?4",
+                        params![session_id, current_status, current_mp4, current_output],
+                    )?;
+                    if hidden != 1 {
+                        bail!("Session {session_id} could not be hidden for deletion.");
+                    }
+                    operation_ids.push(operation_id);
+                }
+            }
+        }
         transaction.commit()?;
         drop(conn);
         let requested = operation_ids.into_iter().collect::<HashSet<_>>();
@@ -3587,6 +4332,8 @@ impl Database {
             ))
         })?;
         let rows = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        drop(statement);
+        drop(conn);
         rows.into_iter()
             .map(|(operation_id, session_id, paths_json)| {
                 pending_session_deletion_from_records(
@@ -3598,6 +4345,16 @@ impl Database {
             .collect()
     }
 
+    pub fn has_pending_session_deletions(&self) -> Result<bool> {
+        let conn = self.lock()?;
+        let exists = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_delete_operations LIMIT 1)",
+            [],
+            |row| row.get::<_, bool>(0),
+        )?;
+        Ok(exists)
+    }
+
     /// Resolve one Trash attempt. Successful paths are forgotten. If no paths
     /// remain, deleting the session and its tombstone is one SQLite transaction;
     /// otherwise the hidden row remains durable for the next retry.
@@ -3606,17 +4363,31 @@ impl Database {
         operation_id: &str,
         failed_paths: &[String],
     ) -> Result<SessionDeletionCompletion> {
-        let mut conn = self.lock()?;
-        let transaction = conn.transaction()?;
-        let (session_id, paths_json): (String, String) = transaction
-            .query_row(
+        self.complete_session_deletion_with_inspector(operation_id, failed_paths, |record| {
+            deletion_path_state(record)
+        })
+    }
+
+    fn complete_session_deletion_with_inspector<F>(
+        &self,
+        operation_id: &str,
+        failed_paths: &[String],
+        mut inspect_path: F,
+    ) -> Result<SessionDeletionCompletion>
+    where
+        F: FnMut(&SessionDeletionPathRecord) -> Result<DeletionPathState>,
+    {
+        let (session_id, paths_json): (String, String) = {
+            let conn = self.lock()?;
+            conn.query_row(
                 "SELECT session_id, paths_json
                  FROM session_delete_operations
                  WHERE id = ?1",
                 params![operation_id],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
-            .with_context(|| format!("Delete operation {operation_id} was not found."))?;
+            .with_context(|| format!("Delete operation {operation_id} was not found."))?
+        };
         let expected_records = parse_session_deletion_path_records(&paths_json)?;
         let expected = expected_records
             .iter()
@@ -3642,7 +4413,7 @@ impl Database {
             // The filesystem is authoritative after Electron's attempt. Even
             // when Trash reported an error, a now-missing path is complete;
             // any present or uninspectable path remains retryable.
-            match deletion_path_state(&record)? {
+            match inspect_path(&record)? {
                 DeletionPathState::Missing => {}
                 DeletionPathState::Ready(path) | DeletionPathState::Blocked(path) => {
                     pending_paths.push(path);
@@ -3652,6 +4423,26 @@ impl Database {
         }
         pending_paths.sort();
 
+        // The path inspection above can hash, sync, and rename media. It must
+        // not own the process-wide SQLite connection while doing so. Adopt its
+        // result only if the durable tombstone is still byte-for-byte the one
+        // we inspected.
+        let mut conn = self.lock()?;
+        let transaction = conn.transaction()?;
+        let current: Option<(String, String)> = transaction
+            .query_row(
+                "SELECT session_id, paths_json
+                 FROM session_delete_operations
+                 WHERE id = ?1",
+                params![operation_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        if current.as_ref() != Some(&(session_id.clone(), paths_json.clone())) {
+            bail!(
+                "Delete operation {operation_id} changed while its filesystem state was inspected; retry completion."
+            );
+        }
         let deleted = if pending_paths.is_empty() {
             let deleted = transaction.execute(
                 "DELETE FROM sessions WHERE id = ?1 AND library_hidden = 1",
@@ -3712,6 +4503,99 @@ impl Database {
             }
         }
         Ok(summary)
+    }
+
+    pub(crate) fn register_caption_private_artifact(
+        &self,
+        record: &CaptionPrivateArtifactRecord,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            "INSERT INTO caption_private_artifacts (
+                id, kind, path, owner_token, published_path, object_identity_json,
+                created_at, updated_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)",
+            params![
+                record.id,
+                record.kind,
+                record.path,
+                record.owner_token,
+                record.published_path,
+                record
+                    .object_identity
+                    .as_ref()
+                    .map(serde_json::to_string)
+                    .transpose()?,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub(crate) fn update_caption_private_artifact_publication(
+        &self,
+        id: &str,
+        published_path: &Path,
+        identity: &SessionFileObjectIdentity,
+    ) -> Result<()> {
+        let conn = self.lock()?;
+        let updated = conn.execute(
+            "UPDATE caption_private_artifacts
+             SET published_path = ?2, object_identity_json = ?3, updated_at = ?4
+             WHERE id = ?1",
+            params![
+                id,
+                published_path.display().to_string(),
+                serde_json::to_string(identity)?,
+                Utc::now().to_rfc3339()
+            ],
+        )?;
+        if updated != 1 {
+            bail!("Caption private-artifact ownership {id} was not found.");
+        }
+        Ok(())
+    }
+
+    pub(crate) fn caption_private_artifacts(&self) -> Result<Vec<CaptionPrivateArtifactRecord>> {
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT id, kind, path, owner_token, published_path, object_identity_json
+             FROM caption_private_artifacts
+             ORDER BY created_at ASC, id ASC",
+        )?;
+        let rows = statement.query_map([], |row| {
+            let object_identity_json = row.get::<_, Option<String>>(5)?;
+            let object_identity = object_identity_json
+                .map(|value| {
+                    serde_json::from_str(&value).map_err(|error| {
+                        rusqlite::Error::FromSqlConversionFailure(
+                            5,
+                            rusqlite::types::Type::Text,
+                            Box::new(error),
+                        )
+                    })
+                })
+                .transpose()?;
+            Ok(CaptionPrivateArtifactRecord {
+                id: row.get(0)?,
+                kind: row.get(1)?,
+                path: row.get(2)?,
+                owner_token: row.get(3)?,
+                published_path: row.get(4)?,
+                object_identity,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(Into::into)
+    }
+
+    pub(crate) fn remove_caption_private_artifact(&self, id: &str) -> Result<bool> {
+        let conn = self.lock()?;
+        Ok(conn.execute(
+            "DELETE FROM caption_private_artifacts WHERE id = ?1",
+            params![id],
+        )? == 1)
     }
 
     /// Clone a session row for Duplicate (Library L3): same config lineage,
@@ -4125,50 +5009,123 @@ impl Database {
     {
         let source_path = Path::new(image_path);
         validate_screen_image_source(source_path)?;
-        let conn = self.lock()?;
         let now = Utc::now().to_rfc3339();
-        let next_order: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM stream_screens",
-            [],
-            |row| row.get(0),
-        )?;
         let id = Uuid::new_v4().to_string();
         let screen_dir = self.screen_assets_dir();
         std::fs::create_dir_all(&screen_dir)
             .with_context(|| format!("Could not create {}", screen_dir.display()))?;
         validate_managed_screen_root(&screen_dir)?;
         let optimized_path = screen_dir.join(format!("{id}.png"));
-        optimize(source_path, &optimized_path)?;
+        if let Err(error) = optimize(source_path, &optimized_path) {
+            let _ = std::fs::remove_file(&optimized_path);
+            return Err(error);
+        }
         let optimized_path =
-            resolve_managed_screen_image_path(&screen_dir, &id, &optimized_path)
-                .context("Optimized Screen image did not remain a managed regular file")?;
-        let screen = StreamScreen {
-            id,
-            name: screen_name_from_path(image_path),
-            image_path: optimized_path.display().to_string(),
-            thumbnail_path: None,
-            sort_order: next_order,
-            status: StreamScreenStatus::Ready,
-            created_at: now.clone(),
-            updated_at: now,
+            match resolve_managed_screen_image_path(&screen_dir, &id, &optimized_path)
+                .context("Optimized Screen image did not remain a managed regular file")
+            {
+                Ok(path) => path,
+                Err(error) => {
+                    let _ = std::fs::remove_file(&optimized_path);
+                    return Err(error);
+                }
+            };
+        let optimized_identity = match capture_session_file_bound_identity(&optimized_path)
+            .and_then(|identity| {
+                identity.context("Optimized Screen image disappeared before database publication")
+            }) {
+            Ok(identity) => identity,
+            Err(error) => {
+                let _ = std::fs::remove_file(&optimized_path);
+                return Err(error);
+            }
         };
 
-        conn.execute(
-            "INSERT INTO stream_screens (
-                id, name, image_path, thumbnail_path, sort_order, status, created_at, updated_at
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-            params![
-                screen.id,
-                screen.name,
-                screen.image_path,
-                screen.thumbnail_path,
-                screen.sort_order,
-                serde_json::to_string(&screen.status)?,
-                screen.created_at,
-                screen.updated_at,
-            ],
-        )?;
-        Ok(screen)
+        let insertion = (|| -> Result<StreamScreen> {
+            // Revalidate the exact managed asset immediately before the short
+            // SQLite transaction. FFmpeg and directory creation have already
+            // finished, so recording finalization is never queued behind them.
+            let current_identity = capture_session_file_bound_identity(&optimized_path)?
+                .context("Optimized Screen image disappeared before database publication")?;
+            if current_identity != optimized_identity {
+                bail!("Optimized Screen image changed before database publication.");
+            }
+
+            let mut conn = self.lock()?;
+            let transaction = conn.transaction()?;
+            let id_available: bool = transaction.query_row(
+                "SELECT NOT EXISTS(SELECT 1 FROM stream_screens WHERE id = ?1)",
+                params![id],
+                |row| row.get(0),
+            )?;
+            if !id_available {
+                bail!("Screen import identity already exists; retry the import.");
+            }
+            let next_order: i64 = transaction.query_row(
+                "SELECT COALESCE(MAX(sort_order), -1) + 1 FROM stream_screens",
+                [],
+                |row| row.get(0),
+            )?;
+            let screen = StreamScreen {
+                id: id.clone(),
+                name: screen_name_from_path(image_path),
+                image_path: optimized_path.display().to_string(),
+                thumbnail_path: None,
+                sort_order: next_order,
+                status: StreamScreenStatus::Ready,
+                created_at: now.clone(),
+                updated_at: now.clone(),
+            };
+            transaction.execute(
+                "INSERT INTO stream_screens (
+                    id, name, image_path, thumbnail_path, sort_order, status, created_at, updated_at
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    screen.id,
+                    screen.name,
+                    screen.image_path,
+                    screen.thumbnail_path,
+                    screen.sort_order,
+                    serde_json::to_string(&screen.status)?,
+                    screen.created_at,
+                    screen.updated_at,
+                ],
+            )?;
+            transaction.commit()?;
+            Ok(screen)
+        })();
+
+        if insertion.is_err() {
+            // A failed COMMIT has an outcome-unknown edge on some storage
+            // failures. Never delete an exact optimized asset until a fresh
+            // short read proves SQLite did not adopt it.
+            let asset_was_adopted = self
+                .lock()
+                .and_then(|conn| {
+                    conn.query_row(
+                        "SELECT EXISTS(
+                            SELECT 1 FROM stream_screens
+                            WHERE id = ?1 AND image_path = ?2
+                         )",
+                        params![id, optimized_path.display().to_string()],
+                        |row| row.get::<_, bool>(0),
+                    )
+                    .map_err(Into::into)
+                })
+                // If SQLite itself cannot answer, retaining an orphan is
+                // safer than deleting a potentially referenced Screen.
+                .unwrap_or(true);
+            if !asset_was_adopted
+                && capture_session_file_bound_identity(&optimized_path)
+                    .ok()
+                    .flatten()
+                    .as_ref()
+                    == Some(&optimized_identity)
+            {
+                let _ = std::fs::remove_file(&optimized_path);
+            }
+        }
+        insertion
     }
 
     pub fn list_stream_screens(&self) -> Result<Vec<StreamScreen>> {
@@ -4206,7 +5163,7 @@ impl Database {
     }
 
     pub fn delete_stream_screen(&self, screen_id: &str) -> Result<()> {
-        let conn = self.lock()?;
+        let mut conn = self.lock()?;
         let screen = self
             .stream_screen_by_id_raw_locked(&conn, screen_id)
             .optional()?;
@@ -4217,20 +5174,39 @@ impl Database {
         // Invalid persisted paths are retired from SQLite without ever being
         // followed or deleted. In particular, a forged row cannot turn
         // screens.delete into an arbitrary file deletion primitive.
-        if let Ok(path) = resolve_managed_screen_image_path(
+        let managed_image_path = resolve_managed_screen_image_path(
             &self.screen_assets_dir(),
             &screen.id,
             Path::new(&screen.image_path),
-        ) {
-            std::fs::remove_file(&path)
-                .with_context(|| format!("Could not delete {}", path.display()))?;
-        }
-        conn.execute(
+        )
+        .ok();
+
+        // Removing the row and clearing activeScreenId are one authoritative
+        // transition. The managed asset is deliberately left untouched until
+        // that transaction commits, so an SQLite failure can roll back to a
+        // fully usable Screen rather than a row pointing at a deleted file.
+        let transaction = conn.transaction()?;
+        transaction.execute(
             "DELETE FROM stream_screens WHERE id = ?1",
             params![screen_id],
         )?;
-        if self.active_screen_id_locked(&conn)?.as_deref() == Some(screen_id) {
-            self.save_setting_locked(&conn, "activeScreenId", &Option::<String>::None)?;
+        if self.active_screen_id_locked(&transaction)?.as_deref() == Some(screen_id) {
+            self.save_setting_locked(&transaction, "activeScreenId", &Option::<String>::None)?;
+        }
+        transaction.commit()?;
+        drop(conn);
+
+        // Once SQLite is authoritative, asset cleanup is best effort. A
+        // cleanup failure may leave an inert orphan, but must not report a
+        // false transactional failure that makes the caller roll output back
+        // to a Screen whose row is already gone.
+        if let Some(path) = managed_image_path
+            && let Err(error) = std::fs::remove_file(&path)
+        {
+            tracing::warn!(
+                path = %path.display(),
+                "Could not remove deleted Screen asset after database commit: {error}"
+            );
         }
         Ok(())
     }
@@ -4263,17 +5239,32 @@ impl Database {
         self.list_stream_screens()
     }
 
-    pub fn active_stream_screen(&self) -> Result<Option<StreamScreen>> {
+    pub(crate) fn active_stream_screen_selection(&self) -> Result<ActiveStreamScreenSelection> {
         let conn = self.lock()?;
         let Some(screen_id) = self.active_screen_id_locked(&conn)? else {
-            return Ok(None);
+            return Ok(ActiveStreamScreenSelection::Inactive);
         };
-        let screen = self.stream_screen_by_id_locked(&conn, &screen_id)?;
-        if screen.status == StreamScreenStatus::Ready {
-            return Ok(Some(screen));
-        }
-        self.save_setting_locked(&conn, "activeScreenId", &Option::<String>::None)?;
-        Ok(None)
+        let screen = self
+            .stream_screen_by_id_raw_locked(&conn, &screen_id)
+            .optional()?
+            .map(|screen| self.validate_stream_screen(screen));
+        Ok(match screen {
+            Some(screen) if screen.status == StreamScreenStatus::Ready => {
+                ActiveStreamScreenSelection::Ready(screen)
+            }
+            _ => ActiveStreamScreenSelection::Unavailable { screen_id },
+        })
+    }
+
+    /// Pure snapshot read. Retirement of a missing/tampered active asset owns
+    /// output state too, so only Main's active-screen transition may clear the
+    /// persisted pointer.
+    pub fn active_stream_screen(&self) -> Result<Option<StreamScreen>> {
+        Ok(match self.active_stream_screen_selection()? {
+            ActiveStreamScreenSelection::Ready(screen) => Some(screen),
+            ActiveStreamScreenSelection::Inactive
+            | ActiveStreamScreenSelection::Unavailable { .. } => None,
+        })
     }
 
     pub fn stream_screen_by_id(&self, screen_id: &str) -> Result<StreamScreen> {
@@ -4741,9 +5732,33 @@ impl Database {
                 updated_at TEXT NOT NULL,
                 FOREIGN KEY(session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
+
+            CREATE TABLE IF NOT EXISTS caption_private_artifacts (
+                id TEXT PRIMARY KEY,
+                kind TEXT NOT NULL,
+                path TEXT NOT NULL,
+                owner_token TEXT NOT NULL,
+                published_path TEXT,
+                object_identity_json TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
             ",
         )?;
         ensure_column(&conn, "sessions", "container", "container TEXT")?;
+        // Noise-cleanup derivatives used to store their literal mp4-family
+        // extension as the container, which the session protocol enum rejects —
+        // one such row broke sessions.list (and with it recording) for every
+        // client (2026-08-17). mp4-family files follow the import convention:
+        // the file lives in mp4_path, container stays empty.
+        conn.execute(
+            "UPDATE sessions
+             SET mp4_path = COALESCE(mp4_path, output_path),
+                 output_path = NULL,
+                 container = NULL
+             WHERE container IN ('mp4', 'mov', 'm4v')",
+            [],
+        )?;
         ensure_column(&conn, "sessions", "duration_ms", "duration_ms INTEGER")?;
         ensure_column(
             &conn,
@@ -4789,6 +5804,20 @@ impl Database {
         )?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
+        // Background MP4 finalization (instant-record P2). Never write into
+        // `container` (the 0.9.55 "mp4" row bricked sessions.list).
+        ensure_column(
+            &conn,
+            "sessions",
+            "finalization_state",
+            "finalization_state TEXT",
+        )?;
+        ensure_column(
+            &conn,
+            "sessions",
+            "finalization_error",
+            "finalization_error TEXT",
+        )?;
         ensure_column(
             &conn,
             "noise_cleanup_jobs",
@@ -4820,7 +5849,15 @@ impl Database {
              CREATE INDEX idx_noise_cleanup_completed_identity_preset
                 ON noise_cleanup_jobs(source_session_id, source_identity_json,
                                       source_object_identity_json, source_full_sha256, preset)
-                WHERE status = 'completed';",
+                WHERE status = 'completed';
+             CREATE INDEX IF NOT EXISTS idx_sessions_library_started
+                ON sessions(library_hidden, started_at DESC, id DESC);
+             CREATE INDEX IF NOT EXISTS idx_health_events_session_created
+                ON health_events(session_id, created_at DESC, id DESC);
+             CREATE INDEX IF NOT EXISTS idx_session_logs_session_created
+                ON session_logs(session_id, created_at DESC, id DESC);
+             CREATE INDEX IF NOT EXISTS idx_ai_artifacts_session_created
+                ON ai_artifacts(session_id, created_at DESC, id DESC);",
         )?;
         ensure_column(
             &conn,
@@ -4875,21 +5912,7 @@ impl Database {
              WHERE session_id = ?1
              ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            let kind_json: String = row.get(2)?;
-            let status_json: String = row.get(3)?;
-            let content_json: String = row.get(4)?;
-            Ok(AiArtifact {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                kind: serde_json::from_str(&kind_json).unwrap_or(AiArtifactKind::Transcript),
-                status: serde_json::from_str(&status_json).unwrap_or(AiArtifactStatus::Failed),
-                content: serde_json::from_str(&content_json)
-                    .unwrap_or_else(|_| serde_json::json!({})),
-                file_path: row.get(5)?,
-                created_at: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![session_id], ai_artifact_from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -4967,21 +5990,7 @@ impl Database {
              WHERE session_id = ?1
              ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            let level_json: String = row.get(2)?;
-            let permission_json: Option<String> = row.get(5)?;
-            Ok(HealthEvent {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                level: serde_json::from_str(&level_json).unwrap_or(HealthLevel::Warn),
-                code: row.get(3)?,
-                message: row.get(4)?,
-                permission_pane: permission_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str(value).ok()),
-                created_at: row.get(6)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![session_id], health_event_from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -4997,22 +6006,7 @@ impl Database {
              WHERE session_id = ?1
              ORDER BY created_at ASC",
         )?;
-        let rows = stmt.query_map(params![session_id], |row| {
-            let level_json: String = row.get(2)?;
-            let permission_json: Option<String> = row.get(6)?;
-            Ok(SessionLogEntry {
-                id: row.get(0)?,
-                session_id: row.get(1)?,
-                level: serde_json::from_str(&level_json).unwrap_or(HealthLevel::Warn),
-                code: row.get(3)?,
-                message: row.get(4)?,
-                source_id: row.get(5)?,
-                permission_pane: permission_json
-                    .as_deref()
-                    .and_then(|value| serde_json::from_str(value).ok()),
-                created_at: row.get(7)?,
-            })
-        })?;
+        let rows = stmt.query_map(params![session_id], session_log_entry_from_row)?;
 
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
@@ -5035,6 +6029,54 @@ fn stream_screen_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StreamScr
         status: serde_json::from_str(&status_json).unwrap_or(StreamScreenStatus::Missing),
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+    })
+}
+
+fn health_event_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<HealthEvent> {
+    let level_json: String = row.get(2)?;
+    let permission_json: Option<String> = row.get(5)?;
+    Ok(HealthEvent {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        level: serde_json::from_str(&level_json).unwrap_or(HealthLevel::Warn),
+        code: row.get(3)?,
+        message: row.get(4)?,
+        permission_pane: permission_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
+        created_at: row.get(6)?,
+    })
+}
+
+fn session_log_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionLogEntry> {
+    let level_json: String = row.get(2)?;
+    let permission_json: Option<String> = row.get(6)?;
+    Ok(SessionLogEntry {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        level: serde_json::from_str(&level_json).unwrap_or(HealthLevel::Warn),
+        code: row.get(3)?,
+        message: row.get(4)?,
+        source_id: row.get(5)?,
+        permission_pane: permission_json
+            .as_deref()
+            .and_then(|value| serde_json::from_str(value).ok()),
+        created_at: row.get(7)?,
+    })
+}
+
+fn ai_artifact_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<AiArtifact> {
+    let kind_json: String = row.get(2)?;
+    let status_json: String = row.get(3)?;
+    let content_json: String = row.get(4)?;
+    Ok(AiArtifact {
+        id: row.get(0)?,
+        session_id: row.get(1)?,
+        kind: serde_json::from_str(&kind_json).unwrap_or(AiArtifactKind::Transcript),
+        status: serde_json::from_str(&status_json).unwrap_or(AiArtifactStatus::Failed),
+        content: serde_json::from_str(&content_json).unwrap_or_else(|_| serde_json::json!({})),
+        file_path: row.get(5)?,
+        created_at: row.get(6)?,
     })
 }
 
@@ -5109,6 +6151,38 @@ fn metadata_is_symlink_or_reparse(metadata: &std::fs::Metadata) -> bool {
 
 fn live_chat_cursor(message: &LiveChatMessage) -> String {
     format!("{}\n{}", message.received_at, message.id)
+}
+
+fn items_page(items: Vec<SessionListItem>, next_cursor: Option<String>) -> SessionListPage {
+    SessionListPage { items, next_cursor }
+}
+
+fn session_list_cursor(item: &SessionListItem) -> String {
+    format!("{}\n{}", item.started_at, item.id)
+}
+
+fn parse_session_list_cursor(cursor: &str) -> Result<(&str, &str)> {
+    let (started_at, id) = cursor
+        .split_once('\n')
+        .ok_or_else(|| anyhow::anyhow!("Session list cursor is invalid."))?;
+    if started_at.is_empty() || id.is_empty() || id.contains('\n') {
+        bail!("Session list cursor is invalid.");
+    }
+    Ok((started_at, id))
+}
+
+fn session_detail_cursor(created_at: &str, id: &str) -> String {
+    format!("{created_at}\n{id}")
+}
+
+fn parse_session_detail_cursor(cursor: &str) -> Result<(&str, &str)> {
+    let (created_at, id) = cursor
+        .split_once('\n')
+        .ok_or_else(|| anyhow::anyhow!("Session detail cursor is invalid."))?;
+    if created_at.is_empty() || id.is_empty() || id.contains('\n') {
+        bail!("Session detail cursor is invalid.");
+    }
+    Ok((created_at, id))
 }
 
 fn parse_live_chat_cursor(cursor: &str) -> Result<(&str, &str)> {
@@ -5356,6 +6430,28 @@ pub fn session_scene_label(
     )
 }
 
+/// A stored container the session protocol does not recognise must degrade to
+/// "no container" for that one row — never fail the whole list. One malformed
+/// row once took recording down for every client (2026-08-17): the renderer's
+/// protocol validation rejects the full sessions.list response on any single
+/// bad value. Validated against the real protocol enum so the accepted set can
+/// never drift from what clients enforce.
+fn normalized_session_container(value: Option<String>) -> Option<String> {
+    value.filter(|container| {
+        let recognised = serde_json::from_value::<crate::protocol::RecordingContainer>(
+            serde_json::Value::String(container.clone()),
+        )
+        .is_ok();
+        if !recognised {
+            tracing::warn!(
+                container,
+                "session row carries a container the protocol does not know; listing it without one"
+            );
+        }
+        recognised
+    })
+}
+
 fn ensure_column(conn: &Connection, table: &str, column: &str, definition: &str) -> Result<()> {
     let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
     let columns = stmt.query_map([], |row| row.get::<_, String>(1))?;
@@ -5474,6 +6570,7 @@ fn optimize_screen_image(
     let mut command = Command::new(ffmpeg_path);
     command
         .arg("-hide_banner")
+        .arg("-nostdin")
         .arg("-loglevel")
         .arg("error")
         .arg("-y")
@@ -5486,8 +6583,13 @@ fn optimize_screen_image(
         .arg("-frames:v")
         .arg("1")
         .arg(destination_path);
-    let output = output_owned_std(&mut command)
-        .with_context(|| format!("Could not start {ffmpeg_path} for Screen image import"))?;
+    let output = output_owned_std_with_timeout(&mut command, SCREEN_IMAGE_OPTIMIZER_TIMEOUT)
+        .with_context(|| {
+            format!(
+                "Could not finish {ffmpeg_path} Screen image import within {} seconds",
+                SCREEN_IMAGE_OPTIMIZER_TIMEOUT.as_secs()
+            )
+        })?;
 
     if output.status.success() {
         return Ok(());
@@ -5534,6 +6636,70 @@ mod tests {
     use super::session_scene_label;
 
     #[test]
+    fn unknown_container_degrades_to_one_row_not_a_dead_list() {
+        // The class of the 2026-08-17 outage: any single stored container the
+        // protocol enum rejects used to fail sessions.list validation in every
+        // client, which blocked recording entirely. A bad row must list as
+        // container-less; the rest of the library must be untouched.
+        use super::*;
+        let database = Database {
+            conn: Arc::new(Mutex::new(Connection::open_in_memory().unwrap())),
+            path: PathBuf::from(":memory:"),
+        };
+        database.migrate().unwrap();
+        {
+            let conn = database.lock().unwrap();
+            for (id, container) in [
+                ("healthy", Some("mkv")),
+                ("poisoned", Some("mp42-from-the-future")),
+                ("importish", None),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions
+                        (id, title, started_at, status, mode, container,
+                         sources_json, layout_json, output_json)
+                     VALUES (?1, ?1, '2026-08-17T00:00:00Z', 'completed', 'record', ?2,
+                             '{}', ?3, '{}')",
+                    params![
+                        id,
+                        container,
+                        serde_json::to_string(&crate::protocol::default_layout_settings()).unwrap(),
+                    ],
+                )
+                .unwrap();
+            }
+        }
+
+        let sessions = database.list_sessions(10).unwrap();
+        assert_eq!(sessions.len(), 3, "no row may be dropped");
+        let by_id = |id: &str| {
+            sessions
+                .iter()
+                .find(|session| session.id == id)
+                .unwrap_or_else(|| panic!("{id} must list"))
+        };
+        assert_eq!(by_id("healthy").container.as_deref(), Some("mkv"));
+        assert_eq!(
+            by_id("poisoned").container,
+            None,
+            "an unrecognised container must degrade to none, not poison the list"
+        );
+        assert_eq!(by_id("importish").container, None);
+        // Every listed container must round-trip through the protocol enum —
+        // the exact invariant the renderer's validator enforces on clients.
+        for session in &sessions {
+            if let Some(container) = &session.container {
+                serde_json::from_value::<crate::protocol::RecordingContainer>(
+                    serde_json::Value::String(container.clone()),
+                )
+                .unwrap_or_else(|_| {
+                    panic!("listed container {container:?} must satisfy the protocol enum")
+                });
+            }
+        }
+    }
+
+    #[test]
     fn scene_labels_map_presets_and_stream_presets() {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = crate::protocol::LayoutPreset::ScreenCamera;
@@ -5559,6 +6725,8 @@ mod tests {
     }
 
     use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
     use crate::live_chat::{
         CommentsSendOperation, CommentsSendOperationPhase, DestinationDelivery,
         DestinationDeliveryPhase, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
@@ -5573,6 +6741,26 @@ mod tests {
         PlatformAccountStatus, StreamPlatform, StreamPrivacy, UpsertPlatformAccount,
         default_stream_metadata_draft,
     };
+    use rusqlite::trace::{TraceEvent, TraceEventCodes};
+
+    static SESSION_LIST_TRACED_STATEMENTS: AtomicUsize = AtomicUsize::new(0);
+    static SESSION_SIZE_WRITEBACK_STATEMENTS: AtomicUsize = AtomicUsize::new(0);
+
+    fn count_session_list_statement(event: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(statement, _) = event
+            && statement.sql().contains("page_sessions AS")
+        {
+            SESSION_LIST_TRACED_STATEMENTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    fn count_session_size_writeback_statement(event: TraceEvent<'_>) {
+        if let TraceEvent::Stmt(statement, _) = event
+            && statement.sql().contains("live_session_sizes")
+        {
+            SESSION_SIZE_WRITEBACK_STATEMENTS.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 
     fn test_database() -> Database {
         let database = Database {
@@ -5599,6 +6787,7 @@ mod tests {
         let expected_object = SessionFileObjectIdentity {
             volume_id: 7,
             file_id: 11,
+            created_unix_nanos: Some(300),
         };
         let timestamp_drift = SessionFileBoundIdentity {
             content_identity: SessionFileIdentity {
@@ -5623,6 +6812,7 @@ mod tests {
             object_identity: SessionFileObjectIdentity {
                 volume_id: 7,
                 file_id: 12,
+                created_unix_nanos: Some(300),
             },
             ..timestamp_drift.clone()
         };
@@ -5839,8 +7029,14 @@ mod tests {
                 camera_offset_y: 0,
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
+                camera_chroma_key_enabled: false,
+                camera_chroma_key_color: "#00FF00".to_string(),
+                camera_chroma_key_similarity_pct: 40,
+                camera_chroma_key_smoothness_pct: 8,
+                camera_chroma_key_spill_pct: 10,
             },
             output: OutputSettings {
+                keep_original_mkv: false,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: None,
@@ -5924,12 +7120,17 @@ mod tests {
     }
 
     #[test]
-    fn default_database_path_uses_application_support_on_macos() {
+    fn default_database_path_uses_the_platform_application_data_location() {
         let path = default_database_path();
         let rendered = path.display().to_string();
 
-        assert!(rendered.contains("Videorc"));
         assert!(rendered.ends_with("videorc.sqlite3"));
+        #[cfg(target_os = "macos")]
+        assert!(rendered.contains("Library/Application Support/Videorc"));
+        #[cfg(target_os = "windows")]
+        assert!(rendered.contains("Videorc"));
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        assert!(rendered.contains(".videorc"));
     }
 
     #[test]
@@ -5951,6 +7152,11 @@ mod tests {
             camera_offset_y: -5,
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
+            camera_chroma_key_enabled: false,
+            camera_chroma_key_color: "#00FF00".to_string(),
+            camera_chroma_key_similarity_pct: 40,
+            camera_chroma_key_smoothness_pct: 8,
+            camera_chroma_key_spill_pct: 10,
         };
         let sources = SourceSelection {
             screen_id: Some("screen:avfoundation:1".to_string()),
@@ -5960,6 +7166,7 @@ mod tests {
             test_pattern: false,
         };
         let output = OutputSettings {
+            keep_original_mkv: false,
             record_enabled: true,
             stream_enabled: true,
             output_directory: None,
@@ -6026,6 +7233,307 @@ mod tests {
         assert_eq!(
             session.session_logs[0].source_id.as_deref(),
             Some("screen:avfoundation:1")
+        );
+    }
+
+    #[test]
+    fn session_list_page_is_slim_and_uses_one_query_for_any_page_size() {
+        let database = test_database();
+        for index in 0..200 {
+            let session_id = format!("session-{index:03}");
+            let mut session = sample_session(&session_id);
+            session.started_at = format!("2026-06-01T00:{:02}:{:02}Z", index / 60, index % 60);
+            database.create_session(&session).unwrap();
+            database
+                .add_health_event(
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "fixture-health",
+                    "Fixture health event.",
+                )
+                .unwrap();
+            database
+                .add_session_log(
+                    &session_id,
+                    HealthLevel::Info,
+                    "fixture-log",
+                    "Fixture session log.",
+                    None,
+                )
+                .unwrap();
+            database
+                .save_ai_artifact(
+                    &session_id,
+                    AiArtifactKind::Transcript,
+                    AiArtifactStatus::Ready,
+                    serde_json::json!({ "text": "fixture" }),
+                    None,
+                )
+                .unwrap();
+        }
+
+        database.conn.lock().unwrap().trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_session_list_statement),
+        );
+        for limit in [1, 20, 200] {
+            SESSION_LIST_TRACED_STATEMENTS.store(0, Ordering::Relaxed);
+            let started = std::time::Instant::now();
+            let page = database.list_session_items_page(None, limit).unwrap();
+            let query_count = SESSION_LIST_TRACED_STATEMENTS.load(Ordering::Relaxed);
+            let encoded = serde_json::to_vec(&page).unwrap();
+            eprintln!(
+                "session-list rows={} queries={} bytes={} elapsed_us={}",
+                limit,
+                query_count,
+                encoded.len(),
+                started.elapsed().as_micros()
+            );
+
+            assert_eq!(page.items.len(), limit);
+            assert_eq!(query_count, 1, "list query count must not grow with rows");
+            assert!(encoded.len() < limit * 4_096 + 256);
+            let first = serde_json::to_value(&page.items[0]).unwrap();
+            assert!(first.get("healthEvents").is_none());
+            assert!(first.get("sessionLogs").is_none());
+            assert!(first.get("aiArtifacts").is_none());
+            assert_eq!(first["healthEventCount"], 1);
+            assert_eq!(first["sessionLogCount"], 1);
+            assert_eq!(first["aiArtifactCount"], 1);
+            assert_eq!(
+                first["readyAiArtifactKinds"],
+                serde_json::json!(["transcript"])
+            );
+        }
+
+        let newest = database.list_session_items_page(None, 20).unwrap();
+        let older = database
+            .list_session_items_page(newest.next_cursor.as_deref(), 20)
+            .unwrap();
+        assert_eq!(newest.items.len(), 20);
+        assert_eq!(older.items.len(), 20);
+        assert!(
+            newest
+                .items
+                .iter()
+                .all(|item| !older.items.iter().any(|older| older.id == item.id))
+        );
+        assert!(
+            database
+                .list_session_items_page(Some("invalid"), 20)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor")
+        );
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+    }
+
+    #[test]
+    fn session_list_page_persists_live_sizes_in_one_batch_for_missing_file_fallback() {
+        let database = test_database();
+        let directory = std::env::temp_dir().join(format!(
+            "videorc-session-list-size-writeback-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let fixtures = [
+            (
+                "session-size-a",
+                "first.mkv",
+                b"fresh first media".as_slice(),
+            ),
+            (
+                "session-size-b",
+                "second.mkv",
+                b"fresh second media with more bytes".as_slice(),
+            ),
+        ];
+
+        for (index, (session_id, file_name, live_bytes)) in fixtures.iter().enumerate() {
+            let path = directory.join(file_name);
+            std::fs::write(&path, live_bytes).unwrap();
+            let mut session = sample_session(session_id);
+            session.started_at = format!("2026-06-01T00:00:0{index}Z");
+            session.output_path = Some(path.display().to_string());
+            database
+                .create_completed_session(
+                    &session,
+                    "2026-06-01T00:01:00Z",
+                    None,
+                    Some(60_000),
+                    Some(1),
+                )
+                .unwrap();
+        }
+
+        SESSION_SIZE_WRITEBACK_STATEMENTS.store(0, Ordering::Relaxed);
+        database.conn.lock().unwrap().trace_v2(
+            TraceEventCodes::SQLITE_TRACE_STMT,
+            Some(count_session_size_writeback_statement),
+        );
+        let page = database
+            .list_session_items_page(None, fixtures.len())
+            .unwrap();
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .trace_v2(TraceEventCodes::SQLITE_TRACE_STMT, None);
+
+        let expected_total = fixtures
+            .iter()
+            .map(|(_, _, bytes)| bytes.len() as i64)
+            .sum::<i64>();
+        assert_eq!(SESSION_SIZE_WRITEBACK_STATEMENTS.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            page.items
+                .iter()
+                .map(|item| item.file_size_bytes.unwrap_or_default())
+                .sum::<i64>(),
+            expected_total
+        );
+        assert_eq!(
+            database.session_storage_totals().unwrap().total_bytes,
+            expected_total
+        );
+
+        for (_, file_name, _) in &fixtures {
+            std::fs::remove_file(directory.join(file_name)).unwrap();
+        }
+        let missing_files_page = database
+            .list_session_items_page(None, fixtures.len())
+            .unwrap();
+        assert_eq!(
+            missing_files_page
+                .items
+                .iter()
+                .map(|item| item.file_size_bytes.unwrap_or_default())
+                .sum::<i64>(),
+            expected_total
+        );
+        assert_eq!(
+            database.session_storage_totals().unwrap().total_bytes,
+            expected_total
+        );
+
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn health_event_pages_are_bounded_stable_and_non_overlapping() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-health-page"))
+            .unwrap();
+        for sequence in 0..5 {
+            database
+                .add_health_event(
+                    Some("session-health-page"),
+                    HealthLevel::Info,
+                    &format!("health-{sequence}"),
+                    "Health fixture.",
+                )
+                .unwrap();
+        }
+
+        let newest = database
+            .list_health_events_page("session-health-page", None, 2)
+            .unwrap();
+        let older = database
+            .list_health_events_page("session-health-page", newest.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(newest.events.len(), 2);
+        assert_eq!(older.events.len(), 2);
+        assert!(newest.next_cursor.is_some());
+        assert!(
+            newest
+                .events
+                .iter()
+                .all(|event| !older.events.iter().any(|older| older.id == event.id))
+        );
+
+        let capped = database
+            .list_health_events_page("session-health-page", None, usize::MAX)
+            .unwrap();
+        assert_eq!(capped.events.len(), 5);
+        assert!(
+            database
+                .list_health_events_page("session-health-page", Some("invalid"), 2)
+                .unwrap_err()
+                .to_string()
+                .contains("cursor")
+        );
+    }
+
+    #[test]
+    fn session_log_pages_are_bounded_stable_and_non_overlapping() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-log-page"))
+            .unwrap();
+        for sequence in 0..5 {
+            database
+                .add_session_log(
+                    "session-log-page",
+                    HealthLevel::Info,
+                    &format!("log-{sequence}"),
+                    "Log fixture.",
+                    None,
+                )
+                .unwrap();
+        }
+
+        let newest = database
+            .list_session_logs_page("session-log-page", None, 2)
+            .unwrap();
+        let older = database
+            .list_session_logs_page("session-log-page", newest.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(newest.entries.len(), 2);
+        assert_eq!(older.entries.len(), 2);
+        assert!(
+            newest
+                .entries
+                .iter()
+                .all(|entry| !older.entries.iter().any(|older| older.id == entry.id))
+        );
+    }
+
+    #[test]
+    fn ai_artifact_pages_are_bounded_stable_and_non_overlapping() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-artifact-page"))
+            .unwrap();
+        for sequence in 0..5 {
+            database
+                .save_ai_artifact(
+                    "session-artifact-page",
+                    AiArtifactKind::Summary,
+                    AiArtifactStatus::Ready,
+                    serde_json::json!({ "sequence": sequence }),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let newest = database
+            .list_ai_artifacts_page("session-artifact-page", None, 2)
+            .unwrap();
+        let older = database
+            .list_ai_artifacts_page("session-artifact-page", newest.next_cursor.as_deref(), 2)
+            .unwrap();
+        assert_eq!(newest.artifacts.len(), 2);
+        assert_eq!(older.artifacts.len(), 2);
+        assert!(
+            newest
+                .artifacts
+                .iter()
+                .all(|artifact| !older.artifacts.iter().any(|older| older.id == artifact.id))
         );
     }
 
@@ -6158,6 +7666,40 @@ mod tests {
         assert_eq!(
             database.list_chat_send_operations("session-1").unwrap(),
             vec![recovered]
+        );
+    }
+
+    #[test]
+    fn latest_chat_send_operation_stays_single_row_with_high_cardinality_history() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-many-operations"))
+            .unwrap();
+
+        for index in 0..1_024 {
+            let operation = CommentsSendOperation {
+                id: format!("operation-{index:04}"),
+                session_id: "session-many-operations".to_string(),
+                text: format!("message {index}"),
+                phase: CommentsSendOperationPhase::Sent,
+                destinations: Vec::new(),
+                created_at: "2026-07-18T00:00:00Z".to_string(),
+                updated_at: "2026-07-18T00:00:00Z".to_string(),
+            };
+            database.save_chat_send_operation(&operation).unwrap();
+        }
+
+        let latest = database
+            .latest_chat_send_operation("session-many-operations")
+            .unwrap()
+            .unwrap();
+        assert_eq!(latest.id, "operation-1023");
+        assert_eq!(latest.text, "message 1023");
+        assert!(
+            database
+                .latest_chat_send_operation("missing-session")
+                .unwrap()
+                .is_none()
         );
     }
 
@@ -8359,6 +9901,7 @@ mod tests {
         let expectations = QualityExpectations {
             intended_fps: Some(30.0),
             expect_audio: true,
+            pipeline_reported_freezes: false,
         };
         let mut older_output_job = RepairJob::pending(
             "job-output-ready".to_string(),
@@ -8398,6 +9941,8 @@ mod tests {
                 needs_attention: false,
             })
         );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
 
         let mut running_fast_gate = RepairJob::pending(
             "job-running-fast-not-100".to_string(),
@@ -8423,6 +9968,8 @@ mod tests {
                 needs_attention: false,
             })
         );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
 
         let mut stale_repair_outcome = RepairJob::pending(
             "job-stale-repaired".to_string(),
@@ -8450,6 +9997,169 @@ mod tests {
                 needs_attention: false,
             })
         );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
+
+        let malformed_outcomes = [
+            (
+                "ready-missing-path",
+                serde_json::json!({ "status": "ready" }),
+            ),
+            (
+                "ready-path-type",
+                serde_json::json!({ "status": "ready", "path": 7 }),
+            ),
+            (
+                "repaired-missing-path",
+                serde_json::json!({ "status": "repaired", "interpolated": true }),
+            ),
+            (
+                "repaired-path-type",
+                serde_json::json!({ "status": "repaired", "path": false, "interpolated": true }),
+            ),
+            (
+                "repaired-missing-interpolated",
+                serde_json::json!({ "status": "repaired", "path": "/tmp/videorc-test.mp4" }),
+            ),
+            (
+                "repaired-interpolated-type",
+                serde_json::json!({
+                    "status": "repaired",
+                    "path": "/tmp/videorc-test.mp4",
+                    "interpolated": 1
+                }),
+            ),
+            (
+                "not-hundred-percent-missing-path",
+                serde_json::json!({ "status": "not-hundred-percent", "reasons": [] }),
+            ),
+            (
+                "not-hundred-percent-path-type",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": 7,
+                    "reasons": []
+                }),
+            ),
+            (
+                "not-hundred-percent-missing-reasons",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": "/tmp/videorc-test.mp4"
+                }),
+            ),
+            (
+                "not-hundred-percent-reasons-type",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": "/tmp/videorc-test.mp4",
+                    "reasons": "not-an-array"
+                }),
+            ),
+            (
+                "not-hundred-percent-reason-element-type",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": "/tmp/videorc-test.mp4",
+                    "reasons": ["valid", 7]
+                }),
+            ),
+            (
+                "not-hundred-percent-attention-type",
+                serde_json::json!({
+                    "status": "not-hundred-percent",
+                    "path": "/tmp/videorc-test.mp4",
+                    "reasons": [],
+                    "needs_attention": null
+                }),
+            ),
+            (
+                "failed-missing-path",
+                serde_json::json!({ "status": "failed", "reason": "probe failed" }),
+            ),
+            (
+                "failed-path-type",
+                serde_json::json!({ "status": "failed", "path": 7, "reason": "probe failed" }),
+            ),
+            (
+                "failed-missing-reason",
+                serde_json::json!({ "status": "failed", "path": "/tmp/videorc-test.mp4" }),
+            ),
+            (
+                "failed-reason-type",
+                serde_json::json!({
+                    "status": "failed",
+                    "path": "/tmp/videorc-test.mp4",
+                    "reason": false
+                }),
+            ),
+        ];
+        for (index, (label, outcome)) in malformed_outcomes.into_iter().enumerate() {
+            let mut malformed_job = RepairJob::pending(
+                format!("job-malformed-{label}"),
+                "/tmp/videorc-test.mp4".to_string(),
+                &expectations,
+                "t0".to_string(),
+            );
+            malformed_job.status = RepairJobStatus::Completed;
+            malformed_job.outcome = Some(outcome);
+            malformed_job.updated_at = format!("t3-malformed-{index:02}");
+            database.upsert_repair_job(&malformed_job).unwrap();
+
+            // A recognized tag is not enough: legacy summary selection fully
+            // deserializes GateStatus and skips malformed rows before
+            // considering the next older candidate.
+            let sessions = database.list_sessions(1).unwrap();
+            assert_eq!(
+                sessions[0].quality_status,
+                Some(GateStatus::NotHundredPercent {
+                    path: "/tmp/videorc-test.mp4".to_string(),
+                    reasons: vec!["Only 8fps observed while live.".to_string()],
+                    needs_attention: false,
+                }),
+                "legacy fallback for {label}"
+            );
+            let page = database.list_session_items_page(None, 1).unwrap();
+            assert_eq!(
+                page.items[0].quality_status, sessions[0].quality_status,
+                "slim fallback for {label}"
+            );
+        }
+
+        let mut raw_invalid_json_job = RepairJob::pending(
+            "job-raw-invalid-json".to_string(),
+            "/tmp/videorc-test.mp4".to_string(),
+            &expectations,
+            "t0".to_string(),
+        );
+        raw_invalid_json_job.status = RepairJobStatus::Completed;
+        raw_invalid_json_job.outcome = Some(serde_json::json!({
+            "status": "ready",
+            "path": "/tmp/videorc-test.mp4"
+        }));
+        raw_invalid_json_job.updated_at = "t3-raw-invalid".to_string();
+        database.upsert_repair_job(&raw_invalid_json_job).unwrap();
+        database
+            .conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE repair_jobs SET outcome_json = '{not-json' WHERE id = ?1",
+                params![raw_invalid_json_job.id],
+            )
+            .unwrap();
+
+        let sessions = database.list_sessions(1).unwrap();
+        assert_eq!(
+            sessions[0].quality_status,
+            Some(GateStatus::NotHundredPercent {
+                path: "/tmp/videorc-test.mp4".to_string(),
+                reasons: vec!["Only 8fps observed while live.".to_string()],
+                needs_attention: false,
+            })
+        );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
 
         let mut newer_repair_outcome = RepairJob::pending(
             "job-newer-repaired".to_string(),
@@ -8474,6 +10184,8 @@ mod tests {
                 interpolated: true,
             })
         );
+        let page = database.list_session_items_page(None, 1).unwrap();
+        assert_eq!(page.items[0].quality_status, sessions[0].quality_status);
     }
 
     #[test]
@@ -8494,6 +10206,185 @@ mod tests {
         assert_eq!(screens.len(), 2);
         assert_eq!(screens[0].id, first.id);
         assert_eq!(screens[1].id, second.id);
+    }
+
+    #[test]
+    fn blocked_screen_optimizer_does_not_block_session_finalization_commit() {
+        let (database, database_path) = file_database();
+        database
+            .create_session(&sample_session("finalize-during-screen-import"))
+            .unwrap();
+        let source_path = database_path.parent().unwrap().join("break.png");
+        std::fs::write(&source_path, b"source image placeholder").unwrap();
+
+        let (optimizer_started_tx, optimizer_started_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_optimizer_tx, release_optimizer_rx) = std::sync::mpsc::sync_channel(0);
+        let import_database = database.clone();
+        let import_source = source_path.clone();
+        let import = std::thread::spawn(move || {
+            import_database.import_screen_image_with_optimizer(
+                import_source.to_str().unwrap(),
+                |_, destination| {
+                    optimizer_started_tx.send(()).unwrap();
+                    release_optimizer_rx.recv().unwrap();
+                    std::fs::write(destination, b"optimized image")?;
+                    Ok(())
+                },
+            )
+        });
+        optimizer_started_rx.recv().unwrap();
+
+        let (finalized_tx, finalized_rx) = std::sync::mpsc::sync_channel(0);
+        let finalize_database = database.clone();
+        let finalization = std::thread::spawn(move || {
+            let result = finalize_database.finish_session(
+                "finalize-during-screen-import",
+                "completed",
+                Some("2026-08-28T00:00:00Z".to_string()),
+                None,
+                Some(1_000),
+            );
+            finalized_tx.send(result).unwrap();
+        });
+        finalized_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("finalization must not wait for Screen optimization")
+            .unwrap();
+
+        release_optimizer_tx.send(()).unwrap();
+        import.join().unwrap().unwrap();
+        finalization.join().unwrap();
+        drop(database);
+        std::fs::remove_dir_all(database_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn blocked_session_delete_identity_probe_does_not_block_finalization_commit() {
+        let (database, database_path) = file_database();
+        let media_path = database_path.parent().unwrap().join("delete-probe.mkv");
+        std::fs::write(&media_path, b"recording").unwrap();
+        let mut deleting = sample_session("delete-probe");
+        deleting.output_path = Some(media_path.display().to_string());
+        database.create_session(&deleting).unwrap();
+        database
+            .finish_session("delete-probe", "completed", None, None, None)
+            .unwrap();
+        database
+            .create_session(&sample_session("finalize-during-delete-probe"))
+            .unwrap();
+
+        let (probe_started_tx, probe_started_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_probe_tx, release_probe_rx) = std::sync::mpsc::sync_channel(0);
+        let delete_database = database.clone();
+        let deletion = std::thread::spawn(move || {
+            let mut release_probe_rx = Some(release_probe_rx);
+            delete_database.prepare_session_deletions_with_identity(
+                &["delete-probe".to_string()],
+                |path| {
+                    if let Some(release) = release_probe_rx.take() {
+                        probe_started_tx.send(()).unwrap();
+                        release.recv().unwrap();
+                    }
+                    capture_session_file_bound_identity(path)
+                },
+            )
+        });
+        probe_started_rx.recv().unwrap();
+
+        let (finalized_tx, finalized_rx) = std::sync::mpsc::sync_channel(0);
+        let finalize_database = database.clone();
+        let finalization = std::thread::spawn(move || {
+            let result = finalize_database.finish_session(
+                "finalize-during-delete-probe",
+                "completed",
+                Some("2026-08-28T00:00:00Z".to_string()),
+                None,
+                Some(1_000),
+            );
+            finalized_tx.send(result).unwrap();
+        });
+        finalized_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("finalization must not wait for deletion identity hashing")
+            .unwrap();
+
+        release_probe_tx.send(()).unwrap();
+        let operation = deletion.join().unwrap().unwrap().remove(0);
+        finalization.join().unwrap();
+        std::fs::remove_file(&operation.paths[0]).unwrap();
+        database
+            .complete_session_deletion(&operation.operation_id, &[])
+            .unwrap();
+        drop(database);
+        std::fs::remove_dir_all(database_path.parent().unwrap()).unwrap();
+    }
+
+    #[test]
+    fn blocked_session_delete_completion_probe_does_not_block_finalization_commit() {
+        let (database, database_path) = file_database();
+        let media_path = database_path.parent().unwrap().join("delete-complete.mkv");
+        std::fs::write(&media_path, b"recording").unwrap();
+        let mut deleting = sample_session("delete-complete");
+        deleting.output_path = Some(media_path.display().to_string());
+        database.create_session(&deleting).unwrap();
+        database
+            .finish_session("delete-complete", "completed", None, None, None)
+            .unwrap();
+        let operation = database
+            .prepare_session_deletions(&["delete-complete".to_string()])
+            .unwrap()
+            .remove(0);
+        database
+            .create_session(&sample_session("finalize-during-delete-complete"))
+            .unwrap();
+
+        let (probe_started_tx, probe_started_rx) = std::sync::mpsc::sync_channel(0);
+        let (release_probe_tx, release_probe_rx) = std::sync::mpsc::sync_channel(0);
+        let complete_database = database.clone();
+        let operation_id = operation.operation_id.clone();
+        let completion = std::thread::spawn(move || {
+            let mut release_probe_rx = Some(release_probe_rx);
+            complete_database.complete_session_deletion_with_inspector(
+                &operation_id,
+                &[],
+                |record| {
+                    if let Some(release) = release_probe_rx.take() {
+                        probe_started_tx.send(()).unwrap();
+                        release.recv().unwrap();
+                    }
+                    deletion_path_state(record)
+                },
+            )
+        });
+        probe_started_rx.recv().unwrap();
+
+        let (finalized_tx, finalized_rx) = std::sync::mpsc::sync_channel(0);
+        let finalize_database = database.clone();
+        let finalization = std::thread::spawn(move || {
+            let result = finalize_database.finish_session(
+                "finalize-during-delete-complete",
+                "completed",
+                Some("2026-08-28T00:00:00Z".to_string()),
+                None,
+                Some(1_000),
+            );
+            finalized_tx.send(result).unwrap();
+        });
+        finalized_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("finalization must not wait for deletion path reconciliation")
+            .unwrap();
+
+        release_probe_tx.send(()).unwrap();
+        let pending = completion.join().unwrap().unwrap();
+        assert!(!pending.deleted);
+        finalization.join().unwrap();
+        std::fs::remove_file(&operation.paths[0]).unwrap();
+        database
+            .complete_session_deletion(&operation.operation_id, &[])
+            .unwrap();
+        drop(database);
+        std::fs::remove_dir_all(database_path.parent().unwrap()).unwrap();
     }
 
     #[test]
@@ -8537,6 +10428,35 @@ mod tests {
         let screens = database.list_stream_screens().unwrap();
         assert_eq!(screens.len(), 1);
         assert_eq!(screens[0].id, second.id);
+    }
+
+    #[test]
+    fn stream_screen_delete_keeps_active_row_and_asset_when_database_commit_fails() {
+        let database = test_database();
+        let screen = import_stub_screen(&database, "break.png");
+        let image_path = PathBuf::from(&screen.image_path);
+        database.activate_stream_screen(&screen.id).unwrap();
+        database
+            .lock()
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER reject_stream_screen_delete
+                 BEFORE DELETE ON stream_screens
+                 BEGIN
+                   SELECT RAISE(ABORT, 'injected delete failure');
+                 END;",
+            )
+            .unwrap();
+
+        let error = database.delete_stream_screen(&screen.id).unwrap_err();
+
+        assert!(error.to_string().contains("injected delete failure"));
+        assert!(image_path.is_file(), "asset deletion must follow DB commit");
+        assert_eq!(
+            database.active_stream_screen().unwrap().unwrap().id,
+            screen.id,
+            "row deletion and activeScreenId clear must roll back together"
+        );
     }
 
     #[test]
@@ -8675,6 +10595,30 @@ mod tests {
         std::fs::remove_file(&missing.image_path).unwrap();
         let error = database.activate_stream_screen(&missing.id).unwrap_err();
         assert!(error.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn active_stream_screen_missing_read_leaves_retirement_to_output_transition_owner() {
+        let database = test_database();
+        let screen = import_stub_screen(&database, "break.png");
+        database.activate_stream_screen(&screen.id).unwrap();
+        std::fs::remove_file(&screen.image_path).unwrap();
+
+        assert!(database.active_stream_screen().unwrap().is_none());
+        assert_eq!(
+            database.active_stream_screen_selection().unwrap(),
+            ActiveStreamScreenSelection::Unavailable {
+                screen_id: screen.id.clone()
+            },
+            "a pure authoritative read must not clear the pointer without clearing output"
+        );
+        assert_eq!(
+            database.active_stream_screen_selection().unwrap(),
+            ActiveStreamScreenSelection::Unavailable {
+                screen_id: screen.id
+            },
+            "the transition owner must still be able to observe and retire it"
+        );
     }
 
     #[test]
@@ -9091,6 +11035,7 @@ mod tests {
         let expectations = QualityExpectations {
             intended_fps: Some(30.0),
             expect_audio: true,
+            pipeline_reported_freezes: false,
         };
 
         let pending = RepairJob::pending(

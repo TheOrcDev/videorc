@@ -1,6 +1,5 @@
 use std::ffi::{c_int, c_void};
 use std::ptr::{self, NonNull};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 
 use anyhow::{Context, Result, bail, ensure};
@@ -10,17 +9,56 @@ use objc2_core_media::{
     CMSampleBuffer, CMTime, CMVideoFormatDescriptionGetH264ParameterSetAtIndex, kCMTimeInvalid,
     kCMVideoCodecType_H264,
 };
-use objc2_core_video::{CVPixelBufferGetHeight, CVPixelBufferGetWidth};
+use objc2_core_video::{
+    CVPixelBufferGetHeight, CVPixelBufferGetWidth, kCVImageBufferColorPrimaries_ITU_R_709_2,
+    kCVImageBufferTransferFunction_ITU_R_709_2, kCVImageBufferYCbCrMatrix_ITU_R_709_2,
+};
 use objc2_video_toolbox::{
     VTCompressionSession, VTEncodeInfoFlags, VTSession, VTSessionSetProperty,
     kVTCompressionPropertyKey_AllowFrameReordering, kVTCompressionPropertyKey_AverageBitRate,
-    kVTCompressionPropertyKey_ExpectedFrameRate, kVTCompressionPropertyKey_MaxFrameDelayCount,
-    kVTCompressionPropertyKey_MaxKeyFrameInterval,
+    kVTCompressionPropertyKey_ColorPrimaries, kVTCompressionPropertyKey_ExpectedFrameRate,
+    kVTCompressionPropertyKey_MaxFrameDelayCount, kVTCompressionPropertyKey_MaxKeyFrameInterval,
     kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality,
-    kVTCompressionPropertyKey_RealTime,
+    kVTCompressionPropertyKey_ProfileLevel, kVTCompressionPropertyKey_RealTime,
+    kVTCompressionPropertyKey_TransferFunction, kVTCompressionPropertyKey_YCbCrMatrix,
+    kVTProfileLevel_H264_High_3_0, kVTProfileLevel_H264_High_3_1, kVTProfileLevel_H264_High_3_2,
+    kVTProfileLevel_H264_High_4_0, kVTProfileLevel_H264_High_4_1, kVTProfileLevel_H264_High_4_2,
+    kVTProfileLevel_H264_High_5_0, kVTProfileLevel_H264_High_5_1, kVTProfileLevel_H264_High_5_2,
+    kVTProfileLevel_H264_High_AutoLevel,
 };
 
+use crate::h264_profile::{h264_high_level_label, quality_posture_canvas_envelope};
 use crate::metal_compositor::MetalCompositorTargetPixelBuffer;
+
+/// The High-profile/level VideoToolbox must write for this output, computed
+/// from the REAL macroblock rate (the encoder's auto pick under-levels 60fps
+/// streams), plus the label recorded in diagnostics. Streams beyond level 5.2
+/// fall back to AutoLevel rather than lying.
+fn vt_h264_high_profile_level(
+    width: usize,
+    height: usize,
+    fps: i32,
+) -> (&'static CFString, &'static str) {
+    let label = h264_high_level_label(
+        u32::try_from(width).unwrap_or(u32::MAX),
+        u32::try_from(height).unwrap_or(u32::MAX),
+        u32::try_from(fps.max(1)).unwrap_or(1),
+    );
+    unsafe {
+        match label {
+            Some("3.0") => (kVTProfileLevel_H264_High_3_0, "High@3.0"),
+            Some("3.1") => (kVTProfileLevel_H264_High_3_1, "High@3.1"),
+            Some("3.2") => (kVTProfileLevel_H264_High_3_2, "High@3.2"),
+            Some("4.0") => (kVTProfileLevel_H264_High_4_0, "High@4.0"),
+            Some("4.1") => (kVTProfileLevel_H264_High_4_1, "High@4.1"),
+            Some("4.2") => (kVTProfileLevel_H264_High_4_2, "High@4.2"),
+            Some("5.0") => (kVTProfileLevel_H264_High_5_0, "High@5.0"),
+            Some("5.1") => (kVTProfileLevel_H264_High_5_1, "High@5.1"),
+            Some("5.2") => (kVTProfileLevel_H264_High_5_2, "High@5.2"),
+            _ => (kVTProfileLevel_H264_High_AutoLevel, "High@Auto"),
+        }
+    }
+}
 
 const NO_ERR: OSStatus = 0;
 type OSStatus = i32;
@@ -33,11 +71,17 @@ pub struct VideoToolboxRealtimePropertyStatuses {
     pub max_key_frame_interval: OSStatus,
     pub average_bit_rate: Option<OSStatus>,
     pub prioritize_encoding_speed: OSStatus,
-    pub max_frame_delay_count: OSStatus,
+    pub max_frame_delay_count: Option<OSStatus>,
+    pub profile_level: OSStatus,
+    pub color_primaries: OSStatus,
+    pub transfer_function: OSStatus,
+    pub ycbcr_matrix: OSStatus,
     pub expected_frame_rate_value: i32,
     pub max_key_frame_interval_value: i32,
     pub average_bit_rate_value: Option<i64>,
-    pub max_frame_delay_count_value: i32,
+    pub max_frame_delay_count_value: Option<i32>,
+    pub prioritize_encoding_speed_value: bool,
+    pub profile_level_label: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -134,19 +178,16 @@ pub struct VideoToolboxH264AsyncAnnexBFrame {
     pub result: std::result::Result<VideoToolboxH264AnnexBFrame, String>,
 }
 
-fn send_bounded_async_annex_b_frame(
-    sender: &mpsc::SyncSender<VideoToolboxH264AsyncAnnexBFrame>,
-    rejected_frames: &AtomicU64,
+fn send_async_annex_b_frame(
+    sender: &mpsc::Sender<VideoToolboxH264AsyncAnnexBFrame>,
     frame: VideoToolboxH264AsyncAnnexBFrame,
 ) {
-    if sender.try_send(frame).is_err() {
-        // VideoToolbox callbacks must never block: complete_pending_frames may
-        // wait for this callback while the bridge thread is not draining. The
-        // bridge observes this counter on its next drain and explicitly fails
-        // the affected output; silently dropping an encoded access unit would
-        // corrupt any H.264 frames that reference it.
-        rejected_frames.fetch_add(1, Ordering::Release);
-    }
+    // This channel must not block a VideoToolbox callback: complete_pending_frames
+    // can wait for the callback on the same bridge thread. It is logically
+    // bounded by the bridge's submitted-frame admission ceiling (16), so an
+    // unbounded mpsc transport removes callback overflow without permitting an
+    // unbounded media backlog.
+    let _ = sender.send(frame);
 }
 
 impl VideoToolboxH264ProbeResult {
@@ -260,26 +301,35 @@ impl VideoToolboxH264Session {
             expected_frame_rate,
             max_key_frame_interval,
             None,
+            true,
         )
     }
 
-    pub fn new_realtime_with_bitrate(
+    /// Session tuned per output intent: `low_latency` keeps today's streaming
+    /// behavior (speed over quality, 1-frame delay cap); record-only sessions
+    /// pass `false` so the hardware spends its headroom on quality — nothing
+    /// downstream needs the frames within a frame interval.
+    pub fn new_tuned(
         width: usize,
         height: usize,
         expected_frame_rate: i32,
         max_key_frame_interval: i32,
-        average_bit_rate_bps: i64,
+        average_bit_rate_bps: Option<i64>,
+        low_latency: bool,
     ) -> Result<Self> {
-        ensure!(
-            average_bit_rate_bps > 0,
-            "VideoToolbox average bit rate must be positive"
-        );
+        if let Some(average_bit_rate_bps) = average_bit_rate_bps {
+            ensure!(
+                average_bit_rate_bps > 0,
+                "VideoToolbox average bit rate must be positive"
+            );
+        }
         Self::new_realtime_configured(
             width,
             height,
             expected_frame_rate,
             max_key_frame_interval,
-            Some(average_bit_rate_bps),
+            average_bit_rate_bps,
+            low_latency,
         )
     }
 
@@ -289,6 +339,7 @@ impl VideoToolboxH264Session {
         expected_frame_rate: i32,
         max_key_frame_interval: i32,
         average_bit_rate_bps: Option<i64>,
+        low_latency: bool,
     ) -> Result<Self> {
         ensure!(width > 0, "VideoToolbox session width must be non-zero");
         ensure!(height > 0, "VideoToolbox session height must be non-zero");
@@ -337,17 +388,24 @@ impl VideoToolboxH264Session {
                 max_key_frame_interval: NO_ERR,
                 average_bit_rate: None,
                 prioritize_encoding_speed: NO_ERR,
-                max_frame_delay_count: NO_ERR,
+                max_frame_delay_count: None,
+                profile_level: NO_ERR,
+                color_primaries: NO_ERR,
+                transfer_function: NO_ERR,
+                ycbcr_matrix: NO_ERR,
                 expected_frame_rate_value: expected_frame_rate,
                 max_key_frame_interval_value: max_key_frame_interval,
                 average_bit_rate_value: average_bit_rate_bps,
-                max_frame_delay_count_value: 1,
+                max_frame_delay_count_value: None,
+                prioritize_encoding_speed_value: true,
+                profile_level_label: "High@Auto",
             },
         };
         session.property_statuses = session.configure_realtime_low_latency(
             expected_frame_rate,
             max_key_frame_interval,
             average_bit_rate_bps,
+            low_latency,
         )?;
         Ok(session)
     }
@@ -399,6 +457,9 @@ impl VideoToolboxH264Session {
             iosurface_backed,
             "retained Metal target is not IOSurface-backed"
         );
+        // Ring correctness: the slot stays out of the compositor's rotation
+        // for the duration of this synchronous encode probe.
+        let _encode_in_flight = target.begin_in_flight();
 
         let state = Arc::new(Mutex::new(EncodeCallbackState::default()));
         let callback_state = state.clone();
@@ -586,8 +647,7 @@ impl VideoToolboxH264Session {
         target: Arc<MetalCompositorTargetPixelBuffer>,
         timing: VideoToolboxFrameTiming,
         frame_index: u64,
-        sender: mpsc::SyncSender<VideoToolboxH264AsyncAnnexBFrame>,
-        rejected_frames: Arc<AtomicU64>,
+        sender: mpsc::Sender<VideoToolboxH264AsyncAnnexBFrame>,
     ) -> Result<()> {
         let pixel_buffer = target.pixel_buffer();
         let width = CVPixelBufferGetWidth(pixel_buffer);
@@ -611,21 +671,26 @@ impl VideoToolboxH264Session {
         };
         let duration = unsafe { CMTime::new(timing.duration_value, timing.duration_time_scale) };
         let retained_target = target.clone();
+        // Ring correctness: mark the slot in-flight for the whole encode.
+        // The guard rides the output-handler block — VideoToolbox releases
+        // the block after the callback (or after a failed submission), which
+        // drops the guard and returns the slot to the compositor ring.
+        let encode_in_flight = target.begin_in_flight();
         let output_handler: RcBlock<dyn Fn(OSStatus, VTEncodeInfoFlags, *mut CMSampleBuffer)> =
             RcBlock::new(
                 move |status: OSStatus,
                       info_flags: VTEncodeInfoFlags,
                       sample_buffer: *mut CMSampleBuffer| {
                     let _retained_target = &retained_target;
+                    let _encode_in_flight = &encode_in_flight;
                     let result = async_annex_b_result_from_callback(
                         status,
                         info_flags,
                         sample_buffer,
                         timing,
                     );
-                    send_bounded_async_annex_b_frame(
+                    send_async_annex_b_frame(
                         &sender,
-                        &rejected_frames,
                         VideoToolboxH264AsyncAnnexBFrame {
                             frame_index,
                             result,
@@ -672,6 +737,7 @@ impl VideoToolboxH264Session {
         expected_frame_rate: i32,
         max_key_frame_interval: i32,
         average_bit_rate_bps: Option<i64>,
+        low_latency: bool,
     ) -> Result<VideoToolboxRealtimePropertyStatuses> {
         let real_time = self.set_property(
             "RealTime",
@@ -702,14 +768,59 @@ impl VideoToolboxH264Session {
                 average_bit_rate_value.as_ref(),
             )
         });
+        // Record-only sessions inside the proven envelope (≤1440p canvas)
+        // trade the streaming latency posture for quality — an explicit
+        // `false` beats the encoder's "auto" default. 4K stays speed-priority
+        // even record-only: the 0.9.44 owner incident showed quality-mode 4K
+        // warmup falls behind realtime and trips the recording output's
+        // latency contract mid-session.
+        let prioritize_speed_value = low_latency
+            || !quality_posture_canvas_envelope(
+                u32::try_from(self.width).unwrap_or(u32::MAX),
+                u32::try_from(self.height).unwrap_or(u32::MAX),
+            );
         let prioritize_encoding_speed = self.set_property_status(
             unsafe { kVTCompressionPropertyKey_PrioritizeEncodingSpeedOverQuality },
-            CFBoolean::new(true).as_ref(),
+            CFBoolean::new(prioritize_speed_value).as_ref(),
         );
-        let max_frame_delay_count_value = 1;
-        let max_frame_delay_count = self.set_property_status(
+        // The frame-delay cap is NOT a latency nicety — it is the compositor
+        // target ring's correctness guard: every in-flight VideoToolbox frame
+        // retains one of the TARGET_RING_SIZE (3) ring slots, and an uncapped
+        // pipeline lets the ring cycle into a slot the encoder still owns
+        // (the 0.9.44 preview-scribble regression). Always cap: 1 for live
+        // legs (frames are needed now), 2 (= ring size - 1, one slot always
+        // free for compose+present) for record-only quality mode.
+        let capped_delay_frames = if low_latency { 1 } else { 2 };
+        let max_frame_delay_count = Some(self.set_property_status(
             unsafe { kVTCompressionPropertyKey_MaxFrameDelayCount },
-            CFNumber::new_i32(max_frame_delay_count_value).as_ref(),
+            CFNumber::new_i32(capped_delay_frames).as_ref(),
+        ));
+        let max_frame_delay_count_value = Some(capped_delay_frames);
+
+        // Spec-valid High profile/level (the audit caught auto picks below the
+        // real macroblock rate at 60fps) — best-effort: a refusing encoder
+        // keeps its auto selection and the status records the refusal.
+        let (profile_level_value, profile_level_label) =
+            vt_h264_high_profile_level(self.width, self.height, expected_frame_rate);
+        let profile_level = self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_ProfileLevel },
+            profile_level_value.as_ref(),
+        );
+
+        // Recording colorimetry law: BT.709 video-range, TAGGED. These drive
+        // both the encoder's internal BGRA→Y'CbCr conversion and the SPS VUI,
+        // so the bytes and the label always agree.
+        let color_primaries = self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_ColorPrimaries },
+            unsafe { kCVImageBufferColorPrimaries_ITU_R_709_2 }.as_ref(),
+        );
+        let transfer_function = self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_TransferFunction },
+            unsafe { kCVImageBufferTransferFunction_ITU_R_709_2 }.as_ref(),
+        );
+        let ycbcr_matrix = self.set_property_status(
+            unsafe { kVTCompressionPropertyKey_YCbCrMatrix },
+            unsafe { kCVImageBufferYCbCrMatrix_ITU_R_709_2 }.as_ref(),
         );
 
         Ok(VideoToolboxRealtimePropertyStatuses {
@@ -720,10 +831,16 @@ impl VideoToolboxH264Session {
             average_bit_rate,
             prioritize_encoding_speed,
             max_frame_delay_count,
+            profile_level,
+            color_primaries,
+            transfer_function,
+            ycbcr_matrix,
             expected_frame_rate_value: expected_frame_rate,
             max_key_frame_interval_value: max_key_frame_interval,
             average_bit_rate_value: average_bit_rate_bps,
             max_frame_delay_count_value,
+            prioritize_encoding_speed_value: prioritize_speed_value,
+            profile_level_label,
         })
     }
 
@@ -1049,26 +1166,25 @@ mod tests {
     use crate::metal_compositor::{GpuSource, GpuSourceKind, MetalSceneCompositor};
 
     #[test]
-    fn bounded_async_output_rejects_without_blocking_and_counts_pressure() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let rejected_frames = AtomicU64::new(0);
+    fn async_output_callback_burst_preserves_every_access_unit_without_blocking() {
+        let (sender, receiver) = mpsc::channel();
         let frame = |frame_index| VideoToolboxH264AsyncAnnexBFrame {
             frame_index,
             result: Err("fixture".to_string()),
         };
 
-        send_bounded_async_annex_b_frame(&sender, &rejected_frames, frame(1));
-        send_bounded_async_annex_b_frame(&sender, &rejected_frames, frame(2));
+        for frame_index in 0..32 {
+            send_async_annex_b_frame(&sender, frame(frame_index));
+        }
 
         assert_eq!(
             receiver
-                .try_recv()
-                .expect("first frame remains queued")
-                .frame_index,
-            1
+                .try_iter()
+                .map(|frame| frame.frame_index)
+                .collect::<Vec<_>>(),
+            (0..32).collect::<Vec<_>>(),
+            "a callback burst must preserve every AU in submission order",
         );
-        assert_eq!(rejected_frames.load(Ordering::Acquire), 1);
-        assert!(receiver.try_recv().is_err());
     }
 
     #[test]
@@ -1112,6 +1228,7 @@ mod tests {
             mirror: false,
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
+            chroma_key: None,
         }];
         compositor
             .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
@@ -1212,6 +1329,7 @@ mod tests {
                 mirror: false,
                 mask: crate::metal_compositor::SourceMask::None,
                 blend: false,
+                chroma_key: None,
             }];
             compositor
                 .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)
@@ -1312,6 +1430,7 @@ mod tests {
             mirror: false,
             mask: crate::metal_compositor::SourceMask::None,
             blend: false,
+            chroma_key: None,
         }];
         compositor
             .compose_bgra(64, 64, [0.0, 0.0, 0.0, 1.0], &sources)

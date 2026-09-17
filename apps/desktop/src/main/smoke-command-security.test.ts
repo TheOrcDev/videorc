@@ -176,6 +176,7 @@ describe('smoke command security', () => {
   it('keeps the protected backend bridge on a small debug-only RPC allowlist', () => {
     expect(SMOKE_BACKEND_RPC_METHOD_NAMES).toEqual(
       new Set([
+        'audio.test.disconnect',
         'audio.test.inject-pcm',
         'captions.test.inject-audio',
         'captions.test.snapshot',
@@ -184,6 +185,17 @@ describe('smoke command security', () => {
         'recording.start_test'
       ])
     )
+    expect(
+      validateSmokeBackendRpcRequest({
+        method: 'audio.test.disconnect',
+        params: { sessionId: 'session-1' },
+        timeoutMs: 30_000
+      })
+    ).toEqual({
+      method: 'audio.test.disconnect',
+      params: { sessionId: 'session-1' },
+      timeoutMs: 30_000
+    })
     expect(
       validateSmokeBackendRpcRequest({
         method: 'captions.test.snapshot',
@@ -278,9 +290,17 @@ describe('smoke command security', () => {
   })
 
   it('restricts an authenticated packaged harness to the preview gate command subset', async () => {
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('app-quit')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('authorize-smoke-resource')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-background')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('inspect-packaged-bundled-background')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-live-audio-harness')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-open')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-save-document')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('comments-window-open')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('captions-window-open')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('drain-native-preview-host-commands')).toBe(true)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('eval-js')).toBe(false)
     const capability = 'x'.repeat(43)
     const server = createServer((request, response) => {
       void handleSmokeCommandRequest(request, response, {

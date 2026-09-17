@@ -4,6 +4,13 @@
 // The WebAudio side lives in hooks/use-mic-level-meter.ts.
 
 export const MIC_METER_FLOOR_DB = -60
+/**
+ * Noise gate for every VISUAL meter path (analyser bands and the coarse
+ * fallback hump): room tone sits around -70..-55 dBFS on an ungated input and
+ * must paint as silence, not as a third of a bar. Below this the bar is at
+ * floor; at/above it the dBFS → level mapping is untouched.
+ */
+export const MIC_METER_GATE_DB = -55
 
 export function samplesRmsAndPeak(samples: Float32Array): { rms: number; peak: number } {
   if (samples.length === 0) {
@@ -31,6 +38,28 @@ export function amplitudeToDb(amplitude: number): number {
 /** Linear-in-dB meter position over the floor..0 dBFS window, clamped to 0..1. */
 export function dbToMeterLevel(db: number, floorDb: number = MIC_METER_FLOOR_DB): number {
   return Math.min(1, Math.max(0, (db - floorDb) / -floorDb))
+}
+
+/** dBFS → meter level with the shared noise gate: below the gate reads as floor. */
+export function gatedDbToMeterLevel(
+  db: number,
+  gateDb: number = MIC_METER_GATE_DB,
+  floorDb: number = MIC_METER_FLOOR_DB
+): number {
+  if (!Number.isFinite(db) || db < gateDb) {
+    return 0
+  }
+  return dbToMeterLevel(db, floorDb)
+}
+
+/** Meter level (floor..0 dBFS, linear-in-dB) back through the shared gate. */
+export function gateMeterLevel(
+  level: number,
+  gateDb: number = MIC_METER_GATE_DB,
+  floorDb: number = MIC_METER_FLOOR_DB
+): number {
+  const clamped = Math.min(1, Math.max(0, level))
+  return clamped < dbToMeterLevel(gateDb, floorDb) ? 0 : clamped
 }
 
 export type MeterBallisticsState = {
@@ -71,6 +100,23 @@ function approach(current: number, target: number, elapsedMs: number, tauMs: num
   return current + (target - current) * (1 - Math.exp(-elapsedMs / tauMs))
 }
 
+/**
+ * Bar-only ballistics (no peak state, no allocation): fast attack toward a
+ * louder target, slow decay toward a quieter one. The analyser pipeline runs
+ * this per band on its 48 ms clock; advanceMeterBallistics layers peak hold on
+ * top of the same curve.
+ */
+export function approachMeterLevel(
+  current: number,
+  targetLevel: number,
+  elapsedMs: number,
+  options: MeterBallisticsOptions = DEFAULT_METER_BALLISTICS
+): number {
+  const target = Math.min(1, Math.max(0, targetLevel))
+  const rising = target > current
+  return approach(current, target, elapsedMs, rising ? options.attackMs : options.decayMs)
+}
+
 export function advanceMeterBallistics(
   state: MeterBallisticsState,
   targetLevel: number,
@@ -79,13 +125,7 @@ export function advanceMeterBallistics(
   options: MeterBallisticsOptions = DEFAULT_METER_BALLISTICS
 ): MeterBallisticsState {
   const target = Math.min(1, Math.max(0, targetLevel))
-  const rising = target > state.level
-  const level = approach(
-    state.level,
-    target,
-    elapsedMs,
-    rising ? options.attackMs : options.decayMs
-  )
+  const level = approachMeterLevel(state.level, target, elapsedMs, options)
 
   let peakLevel = state.peakLevel
   let peakHeldUntilMs = state.peakHeldUntilMs
@@ -152,12 +192,17 @@ export function advanceClipHoldDeadline(
  * Deterministic band heights for the coarse fallback meter paths (backend
  * 1 Hz level, on-demand sample): a center-weighted hump scaled by the real
  * level — never fake noise. The center band equals the level exactly.
+ *
+ * `level` is the backend's linear-in-dB meter position over -60..0 dBFS
+ * (audio.rs db_to_level) — the SAME scale the analyser bands use
+ * (gatedDbToMeterLevel), so a swap between the two paths changes only the
+ * spectral shape, never the height. The shared gate applies here too.
  */
 export function fallbackBandLevels(level: number, bands: number): number[] {
   if (bands <= 0) {
     return []
   }
-  const clamped = Math.min(1, Math.max(0, level))
+  const clamped = gateMeterLevel(level)
   const center = (bands - 1) / 2
   return Array.from({ length: bands }, (_, index) => {
     const distance = center === 0 ? 0 : Math.abs(index - center) / center

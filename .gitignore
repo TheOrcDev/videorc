@@ -10,6 +10,7 @@ vendor/ffmpeg/_src/
 vendor/ffmpeg/current/
 vendor/ffmpeg/macos-*/
 vendor/ffmpeg/windows-x64/
+vendor/ffmpeg/linux-x64/
 docs/acceptance/artifacts/
 
 .DS_Store

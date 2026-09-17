@@ -2,8 +2,7 @@ import * as React from 'react'
 import { Accordion as AccordionPrimitive } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
-import { CaretDownIcon, CaretUpIcon } from '@phosphor-icons/react'
-
+import { ChevronDownIcon, ChevronUpIcon } from '@/components/icons'
 function Accordion({ className, ...props }: React.ComponentProps<typeof AccordionPrimitive.Root>) {
   return (
     <AccordionPrimitive.Root
@@ -43,11 +42,11 @@ function AccordionTrigger({
         {...props}
       >
         {children}
-        <CaretDownIcon
+        <ChevronDownIcon
           data-slot="accordion-trigger-icon"
           className="pointer-events-none shrink-0 group-aria-expanded/accordion-trigger:hidden"
         />
-        <CaretUpIcon
+        <ChevronUpIcon
           data-slot="accordion-trigger-icon"
           className="pointer-events-none hidden shrink-0 group-aria-expanded/accordion-trigger:inline"
         />

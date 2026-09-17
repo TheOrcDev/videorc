@@ -1,20 +1,28 @@
 import {
-  Broadcast,
-  CaretRight,
-  FrameCorners,
-  ImageSquare,
-  Info,
-  Record,
-  StopCircle,
-  type Icon
-} from '@phosphor-icons/react'
-import type { ReactElement, ReactNode } from 'react'
+  AlertIcon,
+  type AppIcon,
+  ChevronRightIcon,
+  CohostIcon,
+  FrameIcon,
+  ImageIcon,
+  InfoIcon,
+  LivestreamIcon,
+  RecordIcon,
+  StopIcon
+} from '@/components/icons'
+import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
+import { CohostPresenceDot } from '@/components/cohost-status'
 import { PanelSection } from '@/components/panel-section'
+import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudioCore } from '@/hooks/use-studio'
+import { useStudioChat, useStudioCore, useStudioShell } from '@/hooks/use-studio'
+import { cohostPresenceView } from '@/lib/cohost-presence'
+import type { SessionRuntimeNotice } from '@/lib/session-runtime-notice'
+import type { SessionStartFailure } from '@/lib/session-start-failure'
 import { outputSummary, streamingSummary } from '@/lib/studio-session-view'
 
 // The session's primary actions rendered as a matched pair of glassy hero
@@ -36,11 +44,16 @@ export function SessionPanel({
   liveStreamBlockedReason,
   blockedReason = null,
   blockedJump = null,
+  startFailure = null,
+  runtimeNotice = null,
   canStop,
   stopLabel,
   onRecord,
   onLiveStream,
-  onStop
+  onStop,
+  onRetryStart,
+  onDismissStartFailure,
+  onDismissRuntimeNotice
 }: {
   active: boolean
   startRequestPending: boolean
@@ -54,11 +67,20 @@ export function SessionPanel({
     label: string
     to: Parameters<ReturnType<typeof useWorkspaceNav>['setActive']>[0]
   } | null
+  /** The last refused Record / Go Live (B0): stays under the controls until
+   * the user starts again or dismisses it — a 4s toast was the only signal. */
+  startFailure?: SessionStartFailure | null
+  /** Mid-session recording failure/degradation: persists until dismissed or
+   * the next session begins. */
+  runtimeNotice?: SessionRuntimeNotice | null
   canStop: boolean
   stopLabel: string
   onRecord: () => void
   onLiveStream: () => void
   onStop: () => void
+  onRetryStart?: () => void
+  onDismissStartFailure?: () => void
+  onDismissRuntimeNotice?: () => void
 }): ReactElement {
   const { captureConfig } = useStudioCore()
   const { openStudioPanel, setActive } = useWorkspaceNav()
@@ -68,17 +90,23 @@ export function SessionPanel({
     <PanelSection>
       <div className="flex flex-col gap-0.5">
         <SessionRow
-          icon={Broadcast}
+          icon={LivestreamIcon}
           label="Streaming"
           value={streamingSummary(captureConfig.streamEnabled, captureConfig.streaming.targets)}
           onNavigate={() => openStudioPanel('live')}
         />
         <SessionRow
-          icon={FrameCorners}
+          icon={FrameIcon}
           label="Output"
           value={outputSummary(video)}
           onNavigate={() => openStudioPanel('recording')}
         />
+        {/* Presence W3: while a session runs, whether the co-host is reading
+            chat is a session fact — knowable without the Comments window.
+            Streaming only: the co-host reads LIVE chat, so a record-only
+            session has no chat for it to read and the row would be an idle
+            status for a feature that is not part of what the user started. */}
+        {active && captureConfig.streamEnabled ? <CohostSessionRow /> : null}
       </div>
 
       <div className="flex flex-col gap-2 border-t border-border pt-4">
@@ -90,7 +118,7 @@ export function SessionPanel({
               variant="destructive"
               onClick={onStop}
             >
-              <StopCircle data-icon="inline-start" weight="fill" />
+              <StopIcon data-icon="inline-start" weight="fill" />
               {stopLabel}
             </Button>
           ) : (
@@ -102,7 +130,7 @@ export function SessionPanel({
                 variant="destructive"
                 onClick={onRecord}
               >
-                <Record data-icon="inline-start" weight="fill" />
+                <RecordIcon data-icon="inline-start" weight="fill" />
                 Record
                 <Kbd className="ml-1.5">␣</Kbd>
               </Button>
@@ -113,7 +141,7 @@ export function SessionPanel({
                 variant="outline"
                 onClick={onLiveStream}
               >
-                <Broadcast data-icon="inline-start" weight="fill" />
+                <LivestreamIcon data-icon="inline-start" weight="fill" />
                 Stream
               </Button>
             </>
@@ -121,7 +149,7 @@ export function SessionPanel({
         </div>
         {!active && blockedReason ? (
           <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <Info className="size-3.5 shrink-0" />
+            <InfoIcon className="size-3.5 shrink-0" />
             <span className="min-w-0">{blockedReason}</span>
             {blockedJump ? (
               <button
@@ -134,10 +162,89 @@ export function SessionPanel({
             ) : null}
           </div>
         ) : null}
+        {/* A refused start is the ONE place destructive red is allowed on chrome:
+            it is status, it persists, and it carries the backend's reason
+            verbatim (the toast can be missed mid-stream; this line cannot). */}
+        {!active && startFailure ? (
+          <Alert data-testid="session-start-failure" key={startFailure.at} variant="destructive">
+            <AlertIcon weight="fill" />
+            <AlertTitle>Could not start.</AlertTitle>
+            <AlertDescription className="min-w-0">
+              <p className="line-clamp-3" title={startFailure.message}>
+                {startFailure.message}
+              </p>
+              <div className="flex flex-wrap gap-1 pt-2">
+                {onRetryStart ? (
+                  <Button
+                    disabled={startRequestPending}
+                    size="xs"
+                    type="button"
+                    variant="ghost"
+                    onClick={onRetryStart}
+                  >
+                    Retry
+                  </Button>
+                ) : null}
+                {onDismissStartFailure ? (
+                  <Button size="xs" type="button" variant="ghost" onClick={onDismissStartFailure}>
+                    Dismiss
+                  </Button>
+                ) : null}
+              </div>
+            </AlertDescription>
+          </Alert>
+        ) : null}
+        {runtimeNotice && onDismissRuntimeNotice ? (
+          <SessionRuntimeAlert
+            notice={runtimeNotice}
+            onDismiss={onDismissRuntimeNotice}
+            onOpenLibrary={() => setActive('library')}
+            onRevealOutput={
+              runtimeNotice.kind === 'recording-failed' &&
+              runtimeNotice.activity === 'recording' &&
+              runtimeNotice.sessionId
+                ? () => void window.videorc?.revealSession?.(runtimeNotice.sessionId!)
+                : undefined
+            }
+          />
+        ) : null}
       </div>
 
       <TakeoverControls onOpenAssets={() => setActive('assets')} />
     </PanelSection>
+  )
+}
+
+/**
+ * One co-host line, same derivation as the Comments window header so the two
+ * surfaces cannot disagree. Dot + label only: this panel is a fact list, not a
+ * working surface, so the typing shimmer stays where the work is read.
+ */
+function CohostSessionRow(): ReactElement {
+  const { cohostState } = useStudioChat()
+  const { openCommentsWindow } = useStudioShell()
+  const [nowMs, setNowMs] = useState(() => Date.now())
+
+  useEffect(() => {
+    const timer = setInterval(() => setNowMs(Date.now()), 5_000)
+    return () => clearInterval(timer)
+  }, [])
+
+  const view = cohostPresenceView(cohostState, nowMs)
+
+  return (
+    <SessionRow
+      icon={CohostIcon}
+      label="Co-host"
+      title={view.tooltipLines.join('\n') || undefined}
+      value={
+        <span className="flex min-w-0 items-center gap-1.5">
+          <CohostPresenceDot view={view} />
+          <span className="truncate">{view.label.replace(/^Co-host\s*(·\s*)?/, '')}</span>
+        </span>
+      }
+      onNavigate={() => void openCommentsWindow()}
+    />
   )
 }
 
@@ -154,7 +261,7 @@ function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): React
       <span className="text-xs font-medium text-muted-foreground">Takeover</span>
       {ready.length === 0 ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-          <ImageSquare className="size-3.5 shrink-0" weight="duotone" />
+          <ImageIcon className="size-3.5 shrink-0" weight="duotone" />
           <span className="min-w-0">No takeover screens yet.</span>
           <button
             className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
@@ -185,17 +292,21 @@ function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): React
                   variant={isActive ? 'default' : 'outline'}
                   onClick={() => void (isActive ? clearActiveScreen() : activateScreen(screen.id))}
                 >
-                  <ImageSquare data-icon="inline-start" weight={isActive ? 'fill' : 'duotone'} />
+                  <ImageIcon data-icon="inline-start" weight={isActive ? 'fill' : 'duotone'} />
                   {screen.name}
                 </Button>
               )
             })}
           </div>
-          <span className="text-xs text-muted-foreground">
+          {/* Reserve two lines of text-xs so swapping between the three hint
+              strings can never reflow the content below (the active-takeover
+              copy is longer than the idle hint and used to push everything
+              down when it wrapped). */}
+          <span className="block min-h-8 text-xs text-muted-foreground">
             {disconnected
               ? `Backend socket is ${wsStatus} — takeovers need the backend.`
               : activeScreen
-                ? `${activeScreen.name} is covering the output. Click it to go back to the scene.`
+                ? `${activeScreen.name} is covering the output — click it to return.`
                 : 'Click a takeover to cover the output — works while live.'}
           </span>
         </>
@@ -210,11 +321,14 @@ function SessionRow({
   icon: RowIcon,
   label,
   value,
+  title,
   onNavigate
 }: {
-  icon: Icon
+  icon: AppIcon
   label: string
   value: ReactNode
+  /** Native tooltip for rows whose value is a summary of more facts. */
+  title?: string
   onNavigate?: () => void
 }): ReactElement {
   const body = (
@@ -223,7 +337,9 @@ function SessionRow({
       <span className="flex-1 truncate text-left text-muted-foreground">{label}</span>
       <span className="flex min-w-0 items-center gap-1.5 font-medium text-foreground">
         {typeof value === 'string' ? <span className="truncate">{value}</span> : value}
-        {onNavigate ? <CaretRight className="size-3.5 shrink-0 text-muted-foreground" /> : null}
+        {onNavigate ? (
+          <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
+        ) : null}
       </span>
     </>
   )
@@ -232,6 +348,7 @@ function SessionRow({
     return (
       <button
         className="flex items-center gap-3 rounded-row px-2.5 py-2 text-sm transition-colors hover:bg-accent"
+        title={title}
         type="button"
         onClick={onNavigate}
       >
@@ -239,5 +356,9 @@ function SessionRow({
       </button>
     )
   }
-  return <div className="flex items-center gap-3 rounded-row px-2.5 py-2 text-sm">{body}</div>
+  return (
+    <div className="flex items-center gap-3 rounded-row px-2.5 py-2 text-sm" title={title}>
+      {body}
+    </div>
+  )
 }

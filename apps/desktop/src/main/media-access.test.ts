@@ -6,7 +6,7 @@ function deps(overrides: Partial<MediaAccessDeps> = {}): MediaAccessDeps {
   return {
     getStatus: vi.fn(() => 'not-determined'),
     askForAccess: vi.fn(async () => true),
-    restartBackend: vi.fn(async () => undefined),
+    restartBackend: vi.fn(async () => ({ restarted: true })),
     stopGrantWatcher: vi.fn(),
     log: vi.fn(),
     ...overrides
@@ -25,21 +25,33 @@ describe('requestMediaAccessWithRestart', () => {
   })
 
   it('not-determined → user grants → watcher stopped + backend restarted', async () => {
-    const d = deps()
+    const d = deps({
+      restartBackend: vi.fn(async () => ({
+        restarted: true,
+        staleBackend: { pid: 42, port: 9988 }
+      }))
+    })
     await expect(requestMediaAccessWithRestart(d, 'camera')).resolves.toEqual({
       granted: true,
-      restarted: true
+      restarted: true,
+      staleBackend: { pid: 42, port: 9988 }
     })
     expect(d.stopGrantWatcher).toHaveBeenCalledOnce()
     expect(d.restartBackend).toHaveBeenCalledOnce()
   })
 
   it('reports a granted permission without claiming a deferred restart already ran', async () => {
-    const d = deps({ restartBackend: vi.fn(async () => false) })
+    const d = deps({
+      restartBackend: vi.fn(async () => ({
+        restarted: false,
+        staleBackend: { pid: 43, port: 9989 }
+      }))
+    })
 
     await expect(requestMediaAccessWithRestart(d, 'camera')).resolves.toEqual({
       granted: true,
-      restarted: false
+      restarted: false,
+      staleBackend: { pid: 43, port: 9989 }
     })
   })
 

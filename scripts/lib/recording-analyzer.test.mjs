@@ -29,16 +29,20 @@ import {
   DEFAULT_GATES,
   analyzeRecording,
   audioPtsGaps,
+  avSkewComponents,
   avSkewMs,
   evaluateGates,
   maxConsecutiveRun,
+  maxKeyframeInterval,
   normalizeProbe,
   pacingStats,
+  requiredH264Level,
   parseCsvFloatColumn,
   parseFramemd5,
   parseFreezedetect,
   parseSilencedetect,
-  renderMarkdownReport
+  renderMarkdownReport,
+  uniqueFrameStats
 } from './recording-analyzer.mjs'
 import { ffmpegAvailable } from './ffmpeg-available.mjs'
 
@@ -106,6 +110,32 @@ describe('maxConsecutiveRun', () => {
 
   it('handles the empty case', () => {
     assert.deepEqual(maxConsecutiveRun([], 2), { maxRun: 0, bursts: [] })
+  })
+})
+
+describe('uniqueFrameStats', () => {
+  it('reports all-unique decoded hashes', () => {
+    assert.deepEqual(uniqueFrameStats(['a', 'b', 'c']), {
+      observedFrameHashes: 3,
+      uniqueFrameCount: 3,
+      uniqueFrameRatio: 1
+    })
+  })
+
+  it('counts uniqueness across repeated runs', () => {
+    assert.deepEqual(uniqueFrameStats(['a', 'a', 'b', 'b', 'b']), {
+      observedFrameHashes: 5,
+      uniqueFrameCount: 2,
+      uniqueFrameRatio: 0.4
+    })
+  })
+
+  it('captures the 277/1014 incident artifact ratio', () => {
+    const hashes = Array.from({ length: 1014 }, (_, index) => `frame-${index % 277}`)
+    const result = uniqueFrameStats(hashes)
+    assert.equal(result.uniqueFrameCount, 277)
+    assert.equal(result.observedFrameHashes, 1014)
+    assert.ok(Math.abs(result.uniqueFrameRatio - 277 / 1014) < Number.EPSILON)
   })
 })
 
@@ -252,13 +282,22 @@ describe('evaluateGates', () => {
     repeatedBurstCount: 0,
     expectedFrames: 90,
     observedFrames: 90,
+    observedFrameHashes: 90,
+    uniqueFrameCount: 90,
+    uniqueFrameRatio: 1,
     maxAudioGapMs: 0,
     longestSilenceMs: 0,
     silenceCount: 0,
     avSkewMs: 10,
     durationSeconds: 3,
     frameDerivedDurationSeconds: 3,
-    durationStretchRatio: 1
+    durationStretchRatio: 1,
+    // The recording colorimetry law (Q1): a clean artifact is TAGGED BT.709
+    // video-range; untagged now warns (or fails under requireColorTags).
+    colorSpace: 'bt709',
+    colorPrimaries: 'bt709',
+    colorTransfer: 'bt709',
+    colorRange: 'tv'
   }
 
   it('passes a clean metrics set', () => {
@@ -289,6 +328,68 @@ describe('evaluateGates', () => {
     assert.match(v.failures[0], /repeated-frame burst of 7/)
   })
 
+  it('gates on corroborated freezes when corroboration metrics are present', () => {
+    const v = evaluateGates({
+      ...clean,
+      longestFreezeMs: 900,
+      freezeCount: 3,
+      corroboratedFreezeCount: 1,
+      longestCorroboratedFreezeMs: 400,
+      similarityOnlyFreezeCount: 2,
+      longestSimilarityOnlyFreezeMs: 900
+    })
+    assert.equal(v.pass, false)
+    assert.match(v.failures[0], /freeze segment 400ms .*exact-repeat corroborated/)
+  })
+
+  it('passes with warnings when every freeze is similarity-only (still subject)', () => {
+    // The 2026-07 incident shape: a technically perfect 23.976p file, 465
+    // freezedetect hits, zero exact frame repeats.
+    const v = evaluateGates({
+      ...clean,
+      longestFreezeMs: 2085,
+      freezeCount: 465,
+      corroboratedFreezeCount: 0,
+      longestCorroboratedFreezeMs: 0,
+      similarityOnlyFreezeCount: 465,
+      longestSimilarityOnlyFreezeMs: 2085
+    })
+    assert.equal(v.pass, true)
+    assert.match(v.warnings[0], /similarity-only .* not a pipeline freeze/)
+  })
+
+  it('keeps the raw freezedetect gate when freezeRequireCorroboration is false', () => {
+    const v = evaluateGates(
+      {
+        ...clean,
+        longestFreezeMs: 2085,
+        freezeCount: 465,
+        corroboratedFreezeCount: 0,
+        longestCorroboratedFreezeMs: 0,
+        similarityOnlyFreezeCount: 465,
+        longestSimilarityOnlyFreezeMs: 2085
+      },
+      { ...DEFAULT_GATES, freezeRequireCorroboration: false }
+    )
+    assert.equal(v.pass, false)
+    assert.match(v.failures[0], /freeze segment 2085ms/)
+  })
+
+  it('fails a container cadence mismatch with an actionable message', () => {
+    const v = evaluateGates({
+      ...clean,
+      cadenceFps: 24000 / 1001,
+      cadenceLabel: '23.976p (NTSC film)',
+      cadenceIntendedFps: 30,
+      cadenceMismatchPct: 20.1
+    })
+    assert.equal(v.pass, false)
+    assert.ok(
+      v.failures.some((f) => /container cadence 23\.976fps/.test(f) && /camera HDMI/.test(f)),
+      `failures: ${v.failures.join('; ')}`
+    )
+  })
+
   it('warns on repeated-frame bursts when visible motion is not required', () => {
     const v = evaluateGates(
       { ...clean, maxRepeatedFrameRun: 7, repeatedBurstCount: 1 },
@@ -303,6 +404,44 @@ describe('evaluateGates', () => {
     const v = evaluateGates({ ...clean, observedFrames: 70, expectedFrames: 90 })
     assert.equal(v.pass, false)
     assert.match(v.failures[0], /frame count 70 vs expected ~90/)
+  })
+
+  it('applies the decoded unique-frame ratio only when explicitly armed', () => {
+    const incident = {
+      ...clean,
+      observedFrameHashes: 1014,
+      uniqueFrameCount: 277,
+      uniqueFrameRatio: 277 / 1014
+    }
+    assert.equal(evaluateGates(incident).pass, true)
+
+    const gated = evaluateGates(incident, {
+      ...DEFAULT_GATES,
+      minUniqueFrameRatio: 0.95
+    })
+    assert.equal(gated.pass, false)
+    assert.match(gated.failures.join(' '), /277\/1014.*below 95\.0%/)
+
+    const passing = evaluateGates(clean, {
+      ...DEFAULT_GATES,
+      minUniqueFrameRatio: 0.95
+    })
+    assert.equal(passing.pass, true)
+  })
+
+  it('fails closed when the unique-frame gate has no decoded video evidence', () => {
+    const gated = evaluateGates(
+      {
+        ...clean,
+        hasVideo: false,
+        observedFrameHashes: 0,
+        uniqueFrameCount: 0,
+        uniqueFrameRatio: null
+      },
+      { ...DEFAULT_GATES, minUniqueFrameRatio: 0.95 }
+    )
+    assert.equal(gated.pass, false)
+    assert.match(gated.failures.join(' '), /unique-frame ratio is unavailable/)
   })
 
   it('fails timestamp stretch when container duration outruns decoded frames', () => {
@@ -339,6 +478,76 @@ describe('evaluateGates', () => {
     assert.equal(v.warnings.length, 1)
   })
 
+  it('warns on missing color tags by default and fails under requireColorTags', () => {
+    const untagged = {
+      ...clean,
+      colorSpace: null,
+      colorPrimaries: null,
+      colorTransfer: null,
+      colorRange: null
+    }
+    const soft = evaluateGates(untagged)
+    assert.equal(soft.pass, true)
+    assert.ok(soft.warnings.some((warning) => /colorimetry not tagged/.test(warning)))
+    const hard = evaluateGates(untagged, { ...DEFAULT_GATES, requireColorTags: true })
+    assert.equal(hard.pass, false)
+    assert.ok(hard.failures.some((failure) => /colorimetry not tagged/.test(failure)))
+  })
+
+  it('flags an under-spec H.264 level (the audit-shipped 1080p60@L4.0 defect)', () => {
+    const underLeveled = {
+      ...clean,
+      width: 1920,
+      height: 1080,
+      intendedFps: 60,
+      level: 40
+    }
+    const soft = evaluateGates(underLeveled)
+    assert.equal(soft.pass, true)
+    assert.ok(soft.warnings.some((warning) => /level 4\.0 below spec minimum 4\.2/.test(warning)))
+    const hard = evaluateGates(underLeveled, { ...DEFAULT_GATES, requireValidLevel: true })
+    assert.equal(hard.pass, false)
+  })
+
+  it('fails an unbounded A/V stop tail only when the gate is armed', () => {
+    const tailed = { ...clean, tailMismatchMs: 273 }
+    assert.equal(evaluateGates(tailed).pass, true)
+    const gated = evaluateGates(tailed, { ...DEFAULT_GATES, maxTailMismatchMs: 100 })
+    assert.equal(gated.pass, false)
+    assert.ok(gated.failures.some((failure) => /tail mismatch 273ms/.test(failure)))
+  })
+
+  it('fails a broken keyframe cadence when the gate is armed', () => {
+    const sparse = { ...clean, keyframeCount: 2, maxKeyframeIntervalSeconds: 5.2 }
+    assert.equal(evaluateGates(sparse).pass, true)
+    const gated = evaluateGates(sparse, { ...DEFAULT_GATES, keyframeMaxIntervalSeconds: 2.5 })
+    assert.equal(gated.pass, false)
+  })
+
+  it('requiredH264Level matches the shipping recording matrix', () => {
+    // Mirrors crates/videorc-backend/src/h264_profile.rs test vectors.
+    assert.equal(requiredH264Level(1920, 1080, 30), 40)
+    assert.equal(requiredH264Level(1920, 1080, 60), 42)
+    assert.equal(requiredH264Level(2560, 1440, 60), 51)
+    assert.equal(requiredH264Level(3840, 2160, 30), 51)
+    assert.equal(requiredH264Level(3840, 2160, 60), 52)
+    assert.equal(requiredH264Level(3840, 2160, 120), null)
+  })
+
+  it('avSkewComponents separates start skew from stop-tail mismatch', () => {
+    const { startSkewMs, tailMismatchMs } = avSkewComponents({
+      video: { startTime: 0, duration: 6.516 },
+      audio: [{ startTime: 0, duration: 6.336 }]
+    })
+    assert.equal(startSkewMs, 0)
+    assert.ok(Math.abs(tailMismatchMs - 180) < 0.001)
+  })
+
+  it('maxKeyframeInterval reports the widest gap', () => {
+    assert.equal(maxKeyframeInterval([0, 2, 4.5, 6]), 2.5)
+    assert.equal(maxKeyframeInterval([0]), null)
+  })
+
   it('fails when audio is expected but missing', () => {
     const v = evaluateGates({ ...clean, hasAudio: false, expectAudio: true })
     assert.equal(v.pass, false)
@@ -366,6 +575,9 @@ describe('renderMarkdownReport', () => {
         observedFps: 30,
         observedFrames: 450,
         expectedFrames: 450,
+        observedFrameHashes: 450,
+        uniqueFrameCount: 449,
+        uniqueFrameRatio: 449 / 450,
         frameDerivedDurationSeconds: 15,
         durationStretchRatio: 1,
         meanIntervalMs: 33.3,
@@ -391,6 +603,7 @@ describe('renderMarkdownReport', () => {
     })
 
     assert.match(markdown, /## Findings/)
+    assert.match(markdown, /Decoded uniqueness: 449\/450 unique \(99\.78%\)/)
     assert.match(markdown, /Freeze segments: 14\.000s for 100\.0ms/)
     assert.match(markdown, /Repeated-frame bursts: frame 420 \(about 14\.000s\), run 3/)
   })
@@ -532,6 +745,8 @@ describe(
         `unexpected failures: ${report.verdict.failures.join('; ')}`
       )
       assert.equal(report.metrics.maxRepeatedFrameRun, 1)
+      assert.equal(report.metrics.uniqueFrameCount, report.metrics.observedFrameHashes)
+      assert.equal(report.metrics.uniqueFrameRatio, 1)
       assert.equal(report.metrics.freezeCount, 0)
     })
 

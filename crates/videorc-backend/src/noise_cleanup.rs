@@ -1106,7 +1106,7 @@ fn read_bounded_tail(mut reader: impl Read, limit: usize) -> Vec<u8> {
     tail
 }
 
-fn parse_progress_line(line: &str, duration_seconds: f64) -> Option<u8> {
+pub(crate) fn parse_progress_line(line: &str, duration_seconds: f64) -> Option<u8> {
     let (key, value) = line.trim().split_once('=')?;
     if !matches!(key, "out_time_us" | "out_time_ms") || duration_seconds <= 0.0 {
         return None;
@@ -1532,6 +1532,11 @@ fn has_cleanup_space(source_size: u64, available: u64) -> bool {
 }
 
 #[cfg(unix)]
+fn saturating_u64_product(left: impl Into<u64>, right: impl Into<u64>) -> u64 {
+    left.into().saturating_mul(right.into())
+}
+
+#[cfg(unix)]
 fn available_space(path: &Path) -> Option<u64> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
@@ -1542,7 +1547,7 @@ fn available_space(path: &Path) -> Option<u64> {
         return None;
     }
     let stats = unsafe { stats.assume_init() };
-    Some((stats.f_bavail as u64).saturating_mul(stats.f_frsize))
+    Some(saturating_u64_product(stats.f_bavail, stats.f_frsize))
 }
 
 #[cfg(target_os = "windows")]
@@ -1765,6 +1770,7 @@ mod tests {
             },
             layout: default_layout_settings(),
             output: OutputSettings {
+                keep_original_mkv: false,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: path.parent().map(|path| path.display().to_string()),
@@ -2328,6 +2334,75 @@ mod tests {
         assert_eq!(retry.job.id, replacement_job.job.id);
         assert_eq!(retry.job.status, NoiseCleanupJobStatus::Queued);
         let _ = std::fs::remove_dir_all(base);
+    }
+
+    #[test]
+    fn mp4_derivative_stores_no_container_and_routes_to_mp4_path() {
+        // The literal "mp4" once landed in the container column, which the
+        // session protocol enum rejects — one such row broke sessions.list
+        // (and recording) for every client. mp4-family derivatives follow the
+        // import convention: file in mp4_path, container empty.
+        let base = std::env::temp_dir().join(format!(
+            "videorc-cleanup-mp4-container-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&base).unwrap();
+        let source_path = base.join("source.mp4");
+        let output_path = base.join("source — Noise Cleaned.mp4");
+        std::fs::write(&source_path, b"source bytes").unwrap();
+        std::fs::write(&output_path, b"cleaned bytes").unwrap();
+        let database = Database::open_in_memory_for_tests();
+        let now = Utc::now().to_rfc3339();
+        database
+            .create_completed_session(
+                &completed_recording(
+                    "source",
+                    &source_path,
+                    "record",
+                    Some("microphone:1".to_string()),
+                ),
+                &now,
+                Some(source_path.to_str().unwrap()),
+                Some(1000),
+                Some(12),
+            )
+            .unwrap();
+        let identity = capture_session_file_bound_identity(&source_path)
+            .unwrap()
+            .unwrap();
+        let full_sha256 = full_file_sha256(&source_path).unwrap();
+        let job = database
+            .create_or_get_noise_cleanup_job("source", &identity, NOISE_CLEANUP_PRESET)
+            .unwrap();
+        database
+            .bind_noise_cleanup_source_fingerprint(&job.job.id, &full_sha256)
+            .unwrap();
+        database
+            .complete_noise_cleanup_derivative(
+                &job.job.id,
+                "source",
+                "derivative",
+                "Source title — Noise Cleaned",
+                "Source title",
+                output_path.to_str().unwrap(),
+                "mp4",
+                Some(1000),
+                19,
+            )
+            .unwrap();
+
+        let derivative = database
+            .list_sessions(20)
+            .unwrap()
+            .into_iter()
+            .find(|session| session.id == "derivative")
+            .expect("derivative session must list");
+        assert_eq!(
+            derivative.container, None,
+            "mp4 must not leak into container"
+        );
+        assert_eq!(derivative.mp4_path.as_deref(), output_path.to_str());
+        assert_eq!(derivative.output_path, None);
     }
 
     #[test]
@@ -3043,6 +3118,7 @@ mod tests {
             },
             layout: default_layout_settings(),
             output: OutputSettings {
+                keep_original_mkv: false,
                 record_enabled: true,
                 stream_enabled: false,
                 output_directory: None,

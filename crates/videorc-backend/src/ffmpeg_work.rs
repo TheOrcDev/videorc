@@ -30,8 +30,13 @@ struct FfmpegWorkState {
     capture_waiting: usize,
     capture_active: bool,
     finalizing_active: bool,
+    /// Background MP4 exports (post-terminal finalization). They block
+    /// maintenance and the shutdown lifecycle join but never a new capture.
+    export_active: usize,
     maintenance_running: bool,
     priority_maintenance_waiting: usize,
+    recording_file_mutation_waiting: usize,
+    recording_file_mutation_active: bool,
     maintenance_cancel_generation: u64,
     maintenance_cancel_requested: bool,
 }
@@ -88,6 +93,22 @@ impl FfmpegWorkCoordinator {
         }
     }
 
+    /// Marks a background recording export (MKV -> MP4 after the terminal
+    /// status). Unlike `begin_finalizing`, it does not block the next capture:
+    /// the user must be able to record again while the previous take exports.
+    // Consumed by the background recording finalization job (instant-record P2).
+    #[allow(dead_code)]
+    pub fn begin_background_export(self: &Arc<Self>) -> ExportPermit {
+        {
+            let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+            state.export_active = state.export_active.saturating_add(1);
+        }
+        self.notify.notify_waiters();
+        ExportPermit {
+            coordinator: self.clone(),
+        }
+    }
+
     pub fn try_begin_maintenance(
         self: &Arc<Self>,
     ) -> Result<MaintenancePermit, MaintenanceDeferral> {
@@ -98,20 +119,39 @@ impl FfmpegWorkCoordinator {
         if state.capture_waiting > 0 {
             return Err(MaintenanceDeferral::CaptureActive);
         }
-        if state.finalizing_active {
+        if state.finalizing_active || state.export_active > 0 {
             return Err(MaintenanceDeferral::FinalizingActive);
         }
-        if state.maintenance_running || state.priority_maintenance_waiting > 0 {
+        if state.maintenance_running
+            || state.priority_maintenance_waiting > 0
+            || state.recording_file_mutation_waiting > 0
+            || state.recording_file_mutation_active
+        {
             return Err(MaintenanceDeferral::MaintenanceRunning);
         }
         Ok(self.begin_maintenance_locked(&mut state))
     }
 
     pub async fn begin_maintenance_when_idle(self: &Arc<Self>) -> MaintenancePermit {
+        self.begin_maintenance_when_idle_after_wait_registered(|| {})
+            .await
+    }
+
+    async fn begin_maintenance_when_idle_after_wait_registered<F>(
+        self: &Arc<Self>,
+        mut after_wait_registered: F,
+    ) -> MaintenancePermit
+    where
+        F: FnMut(),
+    {
         loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            after_wait_registered();
             match self.try_begin_maintenance() {
                 Ok(permit) => return permit,
-                Err(_) => self.notify.notified().await,
+                Err(_) => notified.await,
             }
         }
     }
@@ -127,7 +167,10 @@ impl FfmpegWorkCoordinator {
                 if !state.capture_active
                     && state.capture_waiting == 0
                     && !state.finalizing_active
+                    && state.export_active == 0
                     && !state.maintenance_running
+                    && state.recording_file_mutation_waiting == 0
+                    && !state.recording_file_mutation_active
                 {
                     state.priority_maintenance_waiting =
                         state.priority_maintenance_waiting.saturating_sub(1);
@@ -152,6 +195,40 @@ impl FfmpegWorkCoordinator {
         }
     }
 
+    /// Gives Library deletion an atomic boundary against every repair, restore,
+    /// caption burn, and other maintenance writer. A waiting deletion cancels
+    /// the active maintenance process, then prevents another maintenance job
+    /// from entering until the deletion has durably hidden/quarantined its
+    /// exact files. This closes the copy/rename race where a late repair could
+    /// otherwise recreate a recording after its Library row was deleted.
+    pub async fn begin_recording_file_mutation_when_available(
+        self: &Arc<Self>,
+    ) -> RecordingFileMutationPermit {
+        let mut waiter = RecordingFileMutationWaiter::new(self.clone());
+        loop {
+            let notified = {
+                let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+                if !state.maintenance_running && !state.recording_file_mutation_active {
+                    state.recording_file_mutation_waiting =
+                        state.recording_file_mutation_waiting.saturating_sub(1);
+                    waiter.registered = false;
+                    state.recording_file_mutation_active = true;
+                    return RecordingFileMutationPermit {
+                        coordinator: self.clone(),
+                    };
+                }
+                if state.maintenance_running && !state.maintenance_cancel_requested {
+                    state.maintenance_cancel_generation =
+                        state.maintenance_cancel_generation.saturating_add(1);
+                    state.maintenance_cancel_requested = true;
+                    self.notify.notify_waiters();
+                }
+                self.notify.notified()
+            };
+            notified.await;
+        }
+    }
+
     #[cfg(test)]
     pub fn current_deferral(&self) -> Option<MaintenanceDeferral> {
         self.snapshot().current_deferral()
@@ -163,8 +240,32 @@ impl FfmpegWorkCoordinator {
             capture_waiting: state.capture_waiting,
             capture_active: state.capture_active,
             finalizing_active: state.finalizing_active,
+            export_active: state.export_active,
             maintenance_running: state.maintenance_running,
             maintenance_cancel_requested: state.maintenance_cancel_requested,
+        }
+    }
+
+    /// Wait until the active capture permit, the monitor's finalization
+    /// permit and every background export permit are released.
+    /// `monitor_session` acquires finalization before retiring the
+    /// ActiveRecording (and therefore before dropping capture), so there is no
+    /// false-idle gap between FFmpeg exit and MP4/persistence work; a background
+    /// export registers its permit before the terminal status is published.
+    /// Process shutdown uses this as its exact lifecycle join.
+    pub async fn wait_for_capture_and_finalization_idle(&self) {
+        loop {
+            let notified = self.notify.notified();
+            tokio::pin!(notified);
+            let _ = notified.as_mut().enable();
+            let idle = {
+                let state = self.state.lock().expect("ffmpeg work state poisoned");
+                !state.capture_active && !state.finalizing_active && state.export_active == 0
+            };
+            if idle {
+                return;
+            }
+            notified.await;
         }
     }
 
@@ -189,11 +290,28 @@ impl FfmpegWorkCoordinator {
         self.notify.notify_waiters();
     }
 
+    #[allow(dead_code)]
+    fn end_export(&self) {
+        {
+            let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+            state.export_active = state.export_active.saturating_sub(1);
+        }
+        self.notify.notify_waiters();
+    }
+
     fn end_maintenance(&self) {
         {
             let mut state = self.state.lock().expect("ffmpeg work state poisoned");
             state.maintenance_running = false;
             state.maintenance_cancel_requested = false;
+        }
+        self.notify.notify_waiters();
+    }
+
+    fn end_recording_file_mutation(&self) {
+        {
+            let mut state = self.state.lock().expect("ffmpeg work state poisoned");
+            state.recording_file_mutation_active = false;
         }
         self.notify.notify_waiters();
     }
@@ -238,11 +356,51 @@ impl Drop for PriorityMaintenanceWaiter {
     }
 }
 
+struct RecordingFileMutationWaiter {
+    coordinator: Arc<FfmpegWorkCoordinator>,
+    registered: bool,
+}
+
+impl RecordingFileMutationWaiter {
+    fn new(coordinator: Arc<FfmpegWorkCoordinator>) -> Self {
+        {
+            let mut state = coordinator
+                .state
+                .lock()
+                .expect("ffmpeg work state poisoned");
+            state.recording_file_mutation_waiting += 1;
+        }
+        Self {
+            coordinator,
+            registered: true,
+        }
+    }
+}
+
+impl Drop for RecordingFileMutationWaiter {
+    fn drop(&mut self) {
+        if !self.registered {
+            return;
+        }
+        {
+            let mut state = self
+                .coordinator
+                .state
+                .lock()
+                .expect("ffmpeg work state poisoned");
+            state.recording_file_mutation_waiting =
+                state.recording_file_mutation_waiting.saturating_sub(1);
+        }
+        self.coordinator.notify.notify_waiters();
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FfmpegWorkSnapshot {
     pub capture_waiting: usize,
     pub capture_active: bool,
     pub finalizing_active: bool,
+    pub export_active: usize,
     pub maintenance_running: bool,
     pub maintenance_cancel_requested: bool,
 }
@@ -251,7 +409,7 @@ impl FfmpegWorkSnapshot {
     pub fn current_deferral(&self) -> Option<MaintenanceDeferral> {
         if self.capture_active || self.capture_waiting > 0 {
             Some(MaintenanceDeferral::CaptureActive)
-        } else if self.finalizing_active {
+        } else if self.finalizing_active || self.export_active > 0 {
             Some(MaintenanceDeferral::FinalizingActive)
         } else if self.maintenance_running {
             Some(MaintenanceDeferral::MaintenanceRunning)
@@ -283,6 +441,17 @@ impl Drop for FinalizingPermit {
     }
 }
 
+#[allow(dead_code)]
+pub struct ExportPermit {
+    coordinator: Arc<FfmpegWorkCoordinator>,
+}
+
+impl Drop for ExportPermit {
+    fn drop(&mut self) {
+        self.coordinator.end_export();
+    }
+}
+
 #[derive(Debug)]
 pub struct MaintenancePermit {
     coordinator: Arc<FfmpegWorkCoordinator>,
@@ -302,6 +471,17 @@ impl MaintenancePermit {
 pub struct MaintenanceCancelToken {
     coordinator: Arc<FfmpegWorkCoordinator>,
     generation: u64,
+}
+
+#[derive(Debug)]
+pub struct RecordingFileMutationPermit {
+    coordinator: Arc<FfmpegWorkCoordinator>,
+}
+
+impl Drop for RecordingFileMutationPermit {
+    fn drop(&mut self) {
+        self.coordinator.end_recording_file_mutation();
+    }
 }
 
 impl MaintenanceCancelToken {
@@ -400,6 +580,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn capture_admits_while_background_export_active() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let export = coordinator.begin_background_export();
+
+        // Record-after-stop must never wait on the previous take's MP4 export.
+        let capture = tokio::time::timeout(
+            std::time::Duration::from_millis(200),
+            coordinator.begin_capture_when_available(),
+        )
+        .await
+        .expect("capture must be admitted while an export runs");
+        assert!(coordinator.snapshot().capture_active);
+        assert_eq!(coordinator.snapshot().export_active, 1);
+        drop(capture);
+        drop(export);
+        assert_eq!(coordinator.snapshot().export_active, 0);
+    }
+
+    #[tokio::test]
+    async fn maintenance_defers_while_background_export_active() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let export = coordinator.begin_background_export();
+
+        assert_eq!(
+            coordinator.try_begin_maintenance().unwrap_err(),
+            MaintenanceDeferral::FinalizingActive
+        );
+        assert_eq!(
+            coordinator.current_deferral(),
+            Some(MaintenanceDeferral::FinalizingActive)
+        );
+
+        drop(export);
+        assert!(coordinator.try_begin_maintenance().is_ok());
+    }
+
+    #[tokio::test]
+    async fn shutdown_wait_covers_background_export() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let export = coordinator.begin_background_export();
+        let join = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_for_capture_and_finalization_idle().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !join.is_finished(),
+            "shutdown join must wait for the export"
+        );
+
+        drop(export);
+        tokio::time::timeout(std::time::Duration::from_secs(1), join)
+            .await
+            .expect("shutdown join must resolve once the export permit drops")
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn shutdown_join_has_no_false_idle_gap_between_capture_and_finalization() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let capture = coordinator.begin_capture_when_available().await;
+        let joined = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move { coordinator.wait_for_capture_and_finalization_idle().await }
+        });
+        tokio::task::yield_now().await;
+        assert!(!joined.is_finished());
+
+        let finalizing = coordinator.begin_finalizing();
+        drop(capture);
+        tokio::task::yield_now().await;
+        assert!(
+            !joined.is_finished(),
+            "the monitor's finalization permit must bridge capture retirement"
+        );
+
+        drop(finalizing);
+        tokio::time::timeout(std::time::Duration::from_secs(1), joined)
+            .await
+            .expect("shutdown join")
+            .expect("shutdown join task");
+    }
+
+    #[tokio::test]
     async fn waiting_capture_defers_pending_maintenance() {
         let coordinator = Arc::new(FfmpegWorkCoordinator::new());
         let finalizing = coordinator.begin_finalizing();
@@ -444,5 +708,84 @@ mod tests {
 
         drop(priority_permit);
         drop(background.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn background_maintenance_observes_mutation_release_at_wait_registration_boundary() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let mut mutation = Some(
+            coordinator
+                .begin_recording_file_mutation_when_available()
+                .await,
+        );
+
+        let maintenance = coordinator
+            .begin_maintenance_when_idle_after_wait_registered(|| drop(mutation.take()))
+            .await;
+
+        assert!(coordinator.snapshot().maintenance_running);
+        drop(maintenance);
+    }
+
+    #[tokio::test]
+    async fn recording_file_mutation_cancels_and_excludes_active_maintenance() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let maintenance = coordinator.try_begin_maintenance().unwrap();
+        let cancel_token = maintenance.cancel_token();
+        let mutation = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move {
+                coordinator
+                    .begin_recording_file_mutation_when_available()
+                    .await
+            }
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !cancel_token.is_cancelled() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recording-file mutation requests maintenance cancellation");
+        assert!(cancel_token.is_cancelled());
+        assert!(!mutation.is_finished());
+
+        drop(maintenance);
+        let mutation = mutation.await.unwrap();
+        assert_eq!(
+            coordinator.try_begin_maintenance().unwrap_err(),
+            MaintenanceDeferral::MaintenanceRunning
+        );
+
+        drop(mutation);
+        assert!(coordinator.try_begin_maintenance().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_recording_file_mutation_waiter_does_not_starve_maintenance() {
+        let coordinator = Arc::new(FfmpegWorkCoordinator::new());
+        let maintenance = coordinator.try_begin_maintenance().unwrap();
+        let cancel_token = maintenance.cancel_token();
+        let mutation = tokio::spawn({
+            let coordinator = coordinator.clone();
+            async move {
+                coordinator
+                    .begin_recording_file_mutation_when_available()
+                    .await
+            }
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(1), async {
+            while !cancel_token.is_cancelled() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("recording-file mutation waiter registration");
+        mutation.abort();
+        let _ = mutation.await;
+        drop(maintenance);
+
+        assert!(coordinator.try_begin_maintenance().is_ok());
     }
 }

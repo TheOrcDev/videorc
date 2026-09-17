@@ -24,8 +24,17 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { launchDevApp, stopProcess } from './lib/app-launcher.mjs'
+import {
+  windowsPreviewLifecycleDiagnosticFailures,
+  windowsPreviewLifecycleOpenFailures,
+  windowsPreviewPresenterFailures
+} from './lib/windows-preview-lifecycle-gates.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
+const expectWindowsD3d11 = process.env.VIDEORC_EXPECT_WINDOWS_D3D11 === '1'
+if (expectWindowsD3d11 && process.platform !== 'win32') {
+  throw new Error('VIDEORC_EXPECT_WINDOWS_D3D11=1 requires a physical Windows host.')
+}
 const expectInProcessNative =
   process.platform === 'darwin' && process.env.VIDEORC_NATIVE_PREVIEW_HELPER_FALLBACK !== '1'
 const outputDirectory = join(tmpdir(), `videorc-preview-window-probe-${Date.now()}`)
@@ -72,7 +81,14 @@ async function main() {
     env: {
       VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
       VIDEORC_NATIVE_PREVIEW_SURFACE: '1',
-      VIDEORC_SMOKE_COMMAND_SERVER: '1'
+      VIDEORC_SMOKE_COMMAND_SERVER: '1',
+      ...(expectWindowsD3d11
+        ? {
+            VIDEORC_WINDOWS_D3D11_MEDIA: '1',
+            VIDEORC_WINDOWS_REQUIRE_D3D11_MEDIA: '1',
+            VIDEORC_ENCODER_BRIDGE_VIDEO_OUTPUT: 'windows-media-foundation-h264-mpegts'
+          }
+        : {})
     },
     onLine: (line) => {
       console.log(line)
@@ -86,6 +102,9 @@ async function main() {
   // existed; the in-process drawable contract must exercise an actual present.
   await smokeCommand('enable-synthetic-source', { settleMs: 250 })
   await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-preview-card]' })
+  if (expectWindowsD3d11) {
+    return runWindowsD3d11WindowProbe()
+  }
 
   // --- Open: surface session created at the window's content rect ---------------
   const opened = await smokeCommand('preview-window-open')
@@ -406,6 +425,245 @@ async function main() {
   }
   for (const failure of failures) console.log(`FAIL: ${failure}`)
   return 1
+}
+
+async function runWindowsD3d11WindowProbe() {
+  const opened = await smokeCommand('preview-window-open')
+  assertProbe(
+    opened.open === true,
+    'open: Windows preview window reports open',
+    JSON.stringify(opened)
+  )
+  await smokeCommand('preview-window-set-bounds', {
+    x: 240,
+    y: 160,
+    width: 960,
+    height: 568
+  })
+  let state = await waitForWindowsPresenter('open: D3D11 presenter matches the content rect')
+  let sequence = state.surfaceStatus.windowsD3d11Presenter.lastPresentedSequence
+
+  await smokeCommand('preview-window-set-bounds', { x: 364, y: 246 })
+  state = await waitForWindowsPresenter(
+    'move: D3D11 presenter follows and keeps presenting',
+    sequence
+  )
+  sequence = state.surfaceStatus.windowsD3d11Presenter.lastPresentedSequence
+
+  await smokeCommand('preview-window-set-bounds', { width: 720, height: 460 })
+  state = await waitForWindowsPresenter(
+    'resize: D3D11 presenter follows and keeps presenting',
+    sequence
+  )
+  sequence = state.surfaceStatus.windowsD3d11Presenter.lastPresentedSequence
+
+  const inputProbe = await smokeCommand('windows-preview-os-input-probe', {
+    action: 'prepare'
+  })
+  runWindowsOsInputProbe(inputProbe)
+  const inputResult = await waitFor(
+    async () => smokeCommand('windows-preview-os-input-probe', { action: 'read' }),
+    (candidate) =>
+      candidate?.state?.clicks > 0 &&
+      candidate?.state?.focusEvents > 0 &&
+      candidate?.state?.inputEvents > 0 &&
+      candidate?.state?.value === 'VIDEORC42' &&
+      candidate?.state?.activeElementId === 'videorc-windows-preview-input-target' &&
+      movedAtLeast(inputProbe.initialBounds, candidate.bounds, 12),
+    8000
+  )
+  assertProbe(
+    inputResult.ok,
+    'input: real Win32 click, typing, and drag reached Electron through the presenter',
+    JSON.stringify(inputResult.last)
+  )
+  if (inputResult.last) {
+    assertProbe(
+      inputResult.last.previewFocused === true &&
+        inputResult.last.webContentsFocused === true &&
+        inputResult.last.presenter?.windowActive === false &&
+        inputResult.last.presenter?.windowFocused === false,
+      'input: Electron owns focus and the presenter never activates',
+      JSON.stringify(inputResult.last)
+    )
+  }
+  await smokeCommand('windows-preview-os-input-probe', { action: 'cleanup' })
+  state = await waitForWindowsPresenter(
+    'input: presenter remains live after physical interaction',
+    sequence
+  )
+  sequence = state.surfaceStatus.windowsD3d11Presenter.lastPresentedSequence
+
+  const closed = await smokeCommand('preview-window-toggle')
+  assertProbe(
+    closed.open === false,
+    'close: Windows preview reports closed',
+    JSON.stringify(closed)
+  )
+  const fullyClosed = await waitFor(
+    async () => smokeCommand('preview-window-state'),
+    (candidate) =>
+      candidate.open === false &&
+      candidate.surface?.exists === false &&
+      candidate.framePollingSuppressedFlag === true &&
+      candidate.nativeOwnsPlacement === false,
+    8000
+  )
+  assertProbe(
+    fullyClosed.ok,
+    'close: presenter/proof surface leave the screen and polling stays suppressed',
+    JSON.stringify(fullyClosed.last)
+  )
+
+  const reopened = await smokeCommand('preview-window-toggle')
+  assertProbe(
+    reopened.open === true,
+    'reopen: Windows preview reports open',
+    JSON.stringify(reopened)
+  )
+  state = await waitForWindowsPresenter('reopen: canonical presenter reattaches')
+  sequence = state.surfaceStatus.windowsD3d11Presenter.lastPresentedSequence
+
+  await smokeCommand('main-window-set-bounds', { x: 120, y: 120, width: 1180, height: 780 })
+  await smokeCommand('main-window-focus')
+  await smokeCommand('open-tab', { tab: 'studio', waitFor: '[data-videorc-dock-slot]' })
+  const docked = await smokeCommand('preview-window-set-mode', { mode: 'docked' })
+  assertProbe(
+    docked.mode === 'docked',
+    'dock: Windows preview reports docked mode',
+    JSON.stringify(docked)
+  )
+  state = await waitForWindowsPresenter('dock: presenter matches the live Studio slot', sequence)
+  sequence = state.surfaceStatus.windowsD3d11Presenter.lastPresentedSequence
+
+  await smokeCommand('main-window-set-bounds', { x: 244, y: 208 })
+  state = await waitForWindowsPresenter(
+    'dock-move: presenter follows the main window without renderer placement authority',
+    sequence
+  )
+  sequence = state.surfaceStatus.windowsD3d11Presenter.lastPresentedSequence
+
+  const floating = await smokeCommand('preview-window-set-mode', { mode: 'floating' })
+  assertProbe(
+    floating.mode === 'floating',
+    'undock: Windows preview reports floating mode',
+    JSON.stringify(floating)
+  )
+  await waitForWindowsPresenter('undock: presenter returns to the floating content rect', sequence)
+
+  const diagnostics = await smokeCommand('backend-debug-rpc', {
+    method: 'diagnostics.stats',
+    params: {},
+    timeoutMs
+  })
+  const diagnosticsFailures = windowsPreviewLifecycleDiagnosticFailures(
+    diagnostics,
+    'windows-d3d11'
+  )
+  assertProbe(
+    diagnosticsFailures.length === 0,
+    'diagnostics: D3D11 presents advanced with zero BMP work or fallback',
+    JSON.stringify({
+      failures: diagnosticsFailures,
+      media: diagnostics?.windowsD3d11Media
+    })
+  )
+
+  console.log('\n=== Windows D3D11 preview window probe summary ===')
+  if (failures.length === 0) {
+    console.log(
+      'PASS — open/move/resize/close/reopen/dock/undock and real OS click/type/drag preserved the canonical D3D11 presenter with zero proof polling.'
+    )
+    return 0
+  }
+  for (const failure of failures) console.log(`FAIL: ${failure}`)
+  return 1
+}
+
+async function waitForWindowsPresenter(label, previousPresentedSequence) {
+  const result = await waitFor(
+    async () => smokeCommand('preview-window-state'),
+    (candidate) =>
+      windowsPreviewLifecycleOpenFailures(candidate, 'windows-d3d11').length === 0 &&
+      windowsPreviewPresenterFailures(candidate, { previousPresentedSequence }).length === 0,
+    15000
+  )
+  const openFailures = windowsPreviewLifecycleOpenFailures(result.last, 'windows-d3d11')
+  const presenterFailures = windowsPreviewPresenterFailures(result.last, {
+    previousPresentedSequence
+  })
+  assertProbe(
+    result.ok,
+    label,
+    JSON.stringify({ openFailures, presenterFailures, state: result.last })
+  )
+  return result.last
+}
+
+function runWindowsOsInputProbe(probe) {
+  for (const name of ['inputPoint', 'dragPoint']) {
+    if (!probe?.[name] || !Number.isInteger(probe[name].x) || !Number.isInteger(probe[name].y)) {
+      throw new Error(`Windows OS-input probe did not return a valid ${name}.`)
+    }
+  }
+  const script = String.raw`
+Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class VideorcPreviewInput {
+  [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+  [DllImport("user32.dll")] public static extern void mouse_event(uint flags, uint dx, uint dy, uint data, UIntPtr extra);
+}
+'@
+Add-Type -AssemblyName System.Windows.Forms
+function Click-Point([int]$x, [int]$y) {
+  [VideorcPreviewInput]::SetCursorPos($x, $y) | Out-Null
+  Start-Sleep -Milliseconds 100
+  [VideorcPreviewInput]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+  [VideorcPreviewInput]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+}
+Click-Point ([int]$env:VIDEORC_INPUT_X) ([int]$env:VIDEORC_INPUT_Y)
+Start-Sleep -Milliseconds 150
+[System.Windows.Forms.SendKeys]::SendWait('VIDEORC42')
+Start-Sleep -Milliseconds 150
+$startX = [int]$env:VIDEORC_DRAG_X
+$startY = [int]$env:VIDEORC_DRAG_Y
+[VideorcPreviewInput]::SetCursorPos($startX, $startY) | Out-Null
+[VideorcPreviewInput]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero)
+foreach ($step in 1..6) {
+  [VideorcPreviewInput]::SetCursorPos($startX + (8 * $step), $startY + (6 * $step)) | Out-Null
+  Start-Sleep -Milliseconds 35
+}
+[VideorcPreviewInput]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero)
+`
+  const result = spawnSync(
+    'powershell.exe',
+    ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', script],
+    {
+      encoding: 'utf8',
+      timeout: 30000,
+      env: {
+        ...process.env,
+        VIDEORC_INPUT_X: String(probe.inputPoint.x),
+        VIDEORC_INPUT_Y: String(probe.inputPoint.y),
+        VIDEORC_DRAG_X: String(probe.dragPoint.x),
+        VIDEORC_DRAG_Y: String(probe.dragPoint.y)
+      }
+    }
+  )
+  if (result.error || result.status !== 0) {
+    throw new Error(
+      `Windows OS-input probe failed: ${result.error?.message ?? result.stderr?.trim() ?? `exit ${result.status}`}`
+    )
+  }
+}
+
+function movedAtLeast(before, after, minimum) {
+  return (
+    before &&
+    after &&
+    (Math.abs(after.x - before.x) >= minimum || Math.abs(after.y - before.y) >= minimum)
+  )
 }
 
 /** The Studio slot's live rect (window-relative CSS px) straight from the DOM. */

@@ -1,18 +1,20 @@
+import type { BackendRestartBoundary, MediaAccessResult } from '../shared/backend'
+
 export type MediaAccessPane = 'camera' | 'microphone'
 
-export interface MediaAccessResult {
-  granted: boolean
-  /** True when the grant transitioned and the capture backend was restarted.
-   * Callers that probe a device right after (the mic meter sample) must wait
-   * for the backend to reconnect first — sampling mid-restart is the FX1 race
-   * that left the permissions-dialog chip stuck on "Checked on first use". */
+export type MediaAccessRestartResult = {
+  /** True when the grant transitioned and the capture backend was restarted. */
   restarted: boolean
+  /** The process whose capture state predates the grant, without its renderer token. */
+  staleBackend?: BackendRestartBoundary
 }
+
+export type { MediaAccessResult }
 
 export interface MediaAccessDeps {
   getStatus: (pane: MediaAccessPane) => string
   askForAccess: (pane: MediaAccessPane) => Promise<boolean>
-  restartBackend: (reason: string) => Promise<boolean | void>
+  restartBackend: (reason: string) => Promise<MediaAccessRestartResult>
   stopGrantWatcher: () => void
   log: (level: 'info' | 'warn', message: string) => void
 }
@@ -53,9 +55,8 @@ export async function requestMediaAccessWithRestart(
   }
 
   deps.stopGrantWatcher()
-  const restarted =
-    (await deps.restartBackend(
-      `Restarting capture backend after ${pane} permission became available.`
-    )) !== false
-  return { granted: true, restarted }
+  const restart = await deps.restartBackend(
+    `Restarting capture backend after ${pane} permission became available.`
+  )
+  return { granted: true, ...restart }
 }

@@ -1,7 +1,10 @@
-use crate::protocol::{PreviewSurfaceBacking, PreviewSurfaceBounds, PreviewTransport};
+use crate::protocol::{
+    MainOwnedPreviewSurfaceBounds, OpaqueNativeWindowHandle, PreviewSurfaceBacking,
+    PreviewSurfaceBounds, PreviewTransport, WindowsD3d11PresenterDiagnostics,
+};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePreviewHostBounds {
     pub screen_x: f64,
@@ -23,9 +26,16 @@ pub struct NativePreviewHostBounds {
     // False = hide the surface entirely (slot scrolled away / document hidden).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub visible: Option<bool>,
+    // Corner radius in points; see PreviewSurfaceBounds::corner_radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<f64>,
     // Cross-process stacking target (detached preview window) + always-on-top.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub order_above_window_id: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub order_above_window_handle: Option<OpaqueNativeWindowHandle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_generation: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub elevated: Option<bool>,
 }
@@ -45,16 +55,34 @@ impl NativePreviewHostBounds {
             clip_width: bounds.clip_width.map(|width| width.max(0.0)),
             clip_height: bounds.clip_height.map(|height| height.max(0.0)),
             visible: bounds.visible,
+            corner_radius: bounds.corner_radius,
             order_above_window_id: bounds.order_above_window_id,
+            order_above_window_handle: None,
+            preview_generation: None,
             elevated: bounds.elevated,
         }
     }
 
-    pub fn drawable_size(self) -> (f64, f64) {
+    pub fn from_main_owned(bounds: &MainOwnedPreviewSurfaceBounds, generation: u64) -> Self {
+        let mut host_bounds = Self::from_surface_bounds(&bounds.bounds);
+        host_bounds.order_above_window_handle = bounds.order_above_window_handle.clone();
+        host_bounds.preview_generation = Some(generation);
+        host_bounds
+    }
+
+    pub fn drawable_size(&self) -> (f64, f64) {
         (
             self.width * self.scale_factor,
             self.height * self.scale_factor,
         )
+    }
+
+    /// Sanitized corner radius in points: finite, non-negative, zero when absent.
+    pub fn corner_radius_points(&self) -> f64 {
+        self.corner_radius
+            .filter(|radius| radius.is_finite())
+            .map(|radius| radius.max(0.0))
+            .unwrap_or(0.0)
     }
 
     /// The layer's contentsScale for this bounds' target display (plan 025 S2).
@@ -63,7 +91,7 @@ impl NativePreviewHostBounds {
     /// move to a different-scale display leaves the two disagreeing — a classic
     /// macOS multi-display mismatch that renders the surface wrong / stops it
     /// presenting. Never below 1.0.
-    pub fn contents_scale(self) -> f64 {
+    pub fn contents_scale(&self) -> f64 {
         if self.scale_factor.is_finite() {
             self.scale_factor.max(1.0)
         } else {
@@ -74,7 +102,7 @@ impl NativePreviewHostBounds {
     /// Whether the drawable size is a finite, positive rect — a transient bad
     /// bounds during a cross-display move must never reach `setDrawableSize`
     /// (a NaN/0 drawable is what macOS clamps to the primary's corner).
-    pub fn drawable_is_valid(self) -> bool {
+    pub fn drawable_is_valid(&self) -> bool {
         let (width, height) = self.drawable_size();
         width.is_finite() && height.is_finite() && width >= 1.0 && height >= 1.0
     }
@@ -82,14 +110,14 @@ impl NativePreviewHostBounds {
     // The full slot frame in AppKit coordinates (the window itself uses the clip
     // frame; this remains the reference for tests and future hosts).
     #[allow(dead_code)]
-    pub fn appkit_frame(self) -> (f64, f64, f64, f64) {
+    pub fn appkit_frame(&self) -> (f64, f64, f64, f64) {
         let appkit_y = self.appkit_y(self.screen_y, self.height);
         (self.screen_x, appkit_y, self.width, self.height)
     }
 
     /// Whether the surface should be on screen at all: the renderer's visibility
     /// verdict (absent = legacy caller = visible) plus a non-empty clip.
-    pub fn is_visible(self) -> bool {
+    pub fn is_visible(&self) -> bool {
         if !self.visible.unwrap_or(true) {
             return false;
         }
@@ -99,7 +127,7 @@ impl NativePreviewHostBounds {
 
     /// The window frame in AppKit coordinates: the visible clip rect, so a slot that
     /// is half scrolled out of its container crops instead of floating over other UI.
-    pub fn appkit_clip_frame(self) -> (f64, f64, f64, f64) {
+    pub fn appkit_clip_frame(&self) -> (f64, f64, f64, f64) {
         let (clip_x, clip_y, clip_width, clip_height) = self.clip_rect_screen();
         let appkit_y = self.appkit_y(clip_y, clip_height);
         (clip_x, appkit_y, clip_width.max(1.0), clip_height.max(1.0))
@@ -108,7 +136,7 @@ impl NativePreviewHostBounds {
     /// The layer view's frame inside the clip-sized window (AppKit bottom-left
     /// origin). The view keeps the full slot size; parts outside the window are
     /// clipped by the window surface, which is exactly the wanted crop.
-    pub fn view_frame_in_clip(self) -> (f64, f64, f64, f64) {
+    pub fn view_frame_in_clip(&self) -> (f64, f64, f64, f64) {
         let (clip_x, clip_y, clip_height) = {
             let (x, y, _, h) = self.clip_rect_screen();
             (x, y, h)
@@ -125,14 +153,14 @@ impl NativePreviewHostBounds {
     }
 
     /// Clip rect in screen (top-left origin) coordinates; absent clip = full slot.
-    fn clip_rect_screen(self) -> (f64, f64, f64, f64) {
+    fn clip_rect_screen(&self) -> (f64, f64, f64, f64) {
         match (self.clip_x, self.clip_y, self.clip_width, self.clip_height) {
             (Some(x), Some(y), Some(width), Some(height)) => (x, y, width, height),
             _ => (self.screen_x, self.screen_y, self.width, self.height),
         }
     }
 
-    fn appkit_y(self, top: f64, height: f64) -> f64 {
+    fn appkit_y(&self, top: f64, height: f64) -> f64 {
         self.screen_height
             .filter(|screen_height| screen_height.is_finite())
             .map(|screen_height| screen_height - top - height)
@@ -148,7 +176,7 @@ pub enum NativePreviewHostCommandKind {
     Destroy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NativePreviewHostCommand {
     pub kind: NativePreviewHostCommandKind,
@@ -157,8 +185,8 @@ pub struct NativePreviewHostCommand {
 
 #[cfg(any(target_os = "macos", test))]
 fn native_preview_command_invalidates_iosurface_cache(
-    _previous_bounds: Option<NativePreviewHostBounds>,
-    command: NativePreviewHostCommand,
+    _previous_bounds: Option<&NativePreviewHostBounds>,
+    command: &NativePreviewHostCommand,
 ) -> bool {
     match command.kind {
         NativePreviewHostCommandKind::Create | NativePreviewHostCommandKind::Destroy => true,
@@ -175,6 +203,9 @@ pub struct NativePreviewIosurfaceCacheMetrics {
     pub imports: u64,
     pub invalidations: u64,
     pub import_failures: u64,
+    pub live_count: u64,
+    pub peak_count: u64,
+    pub ceiling: u64,
 }
 
 impl NativePreviewIosurfaceCacheMetrics {
@@ -195,6 +226,13 @@ impl NativePreviewIosurfaceCacheMetrics {
             self.invalidations = self.invalidations.saturating_add(1);
         }
     }
+
+    fn record_cache_state(&mut self, cached_entry_count: usize, ceiling: usize) {
+        self.live_count = u64::try_from(cached_entry_count).unwrap_or(u64::MAX);
+        self.peak_count = self.peak_count.max(self.live_count);
+        self.ceiling = u64::try_from(ceiling).unwrap_or(u64::MAX);
+        debug_assert!(self.live_count <= self.ceiling);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -204,6 +242,7 @@ pub struct NativePreviewHostActivation {
     pub presented_frame_id: u64,
     pub frame_polling_suppressed: bool,
     pub source_pixels_present: bool,
+    pub windows_d3d11_presenter: Option<WindowsD3d11PresenterDiagnostics>,
     pub message: Option<String>,
 }
 
@@ -215,6 +254,7 @@ impl NativePreviewHostActivation {
             presented_frame_id,
             frame_polling_suppressed: true,
             source_pixels_present: true,
+            windows_d3d11_presenter: None,
             message: Some(
                 "Native CAMetalLayer preview surface is presenting compositor output.".to_string(),
             ),
@@ -260,7 +300,7 @@ impl NativePreviewHostLifecycle {
     pub fn create(&mut self, bounds: &PreviewSurfaceBounds) -> NativePreviewHostLifecycleUpdate {
         self.last_command = Some(NativePreviewHostCommandKind::Create);
         let bounds = NativePreviewHostBounds::from_surface_bounds(bounds);
-        self.bounds = Some(bounds);
+        self.bounds = Some(bounds.clone());
         NativePreviewHostLifecycleUpdate {
             command: Some(NativePreviewHostCommand {
                 kind: NativePreviewHostCommandKind::Create,
@@ -276,7 +316,7 @@ impl NativePreviewHostLifecycle {
     ) -> NativePreviewHostLifecycleUpdate {
         self.last_command = Some(NativePreviewHostCommandKind::UpdateBounds);
         let bounds = NativePreviewHostBounds::from_surface_bounds(bounds);
-        self.bounds = Some(bounds);
+        self.bounds = Some(bounds.clone());
         NativePreviewHostLifecycleUpdate {
             command: Some(NativePreviewHostCommand {
                 kind: NativePreviewHostCommandKind::UpdateBounds,
@@ -305,7 +345,7 @@ impl NativePreviewHostLifecycle {
 
     #[cfg(test)]
     pub fn bounds(&self) -> Option<NativePreviewHostBounds> {
-        self.bounds
+        self.bounds.clone()
     }
 }
 
@@ -358,9 +398,9 @@ mod macos {
             mtm: MainThreadMarker,
         ) -> Self {
             let (drawable_width, drawable_height) = bounds.drawable_size();
-            log_surface_sizing("create", bounds);
+            log_surface_sizing("create", &bounds);
             let layer = make_preview_layer(presenter.device(), drawable_width, drawable_height);
-            let view = NSView::initWithFrame(NSView::alloc(mtm), view_frame(bounds));
+            let view = NSView::initWithFrame(NSView::alloc(mtm), view_frame(&bounds));
             // Layer-HOSTING contract: setLayer must come before setWantsLayer,
             // otherwise the view is layer-backed and AppKit owns (and may replace)
             // the backing layer — presents then land in a detached CAMetalLayer
@@ -368,6 +408,7 @@ mod macos {
             let ca_layer: &CALayer = layer.as_super();
             view.setLayer(Some(ca_layer));
             view.setWantsLayer(true);
+            apply_corner_radius(&layer, bounds.corner_radius_points());
             Self {
                 view,
                 layer,
@@ -384,13 +425,13 @@ mod macos {
         }
 
         pub fn bounds(&self) -> NativePreviewHostBounds {
-            self.bounds
+            self.bounds.clone()
         }
 
         pub fn set_bounds(&mut self, bounds: NativePreviewHostBounds) {
-            let drawable_changed = sizing_inputs(self.bounds) != sizing_inputs(bounds);
+            let drawable_changed = sizing_inputs(&self.bounds) != sizing_inputs(&bounds);
             if drawable_changed {
-                log_surface_sizing("update", bounds);
+                log_surface_sizing("update", &bounds);
             }
             // Plan 025 S2: a transient bad bounds during a cross-display move
             // (NaN/0 drawable) must never reach the layer — leave the last good
@@ -409,8 +450,11 @@ mod macos {
                 let ca_layer: &CALayer = self.layer.as_super();
                 ca_layer.setContentsScale(bounds.contents_scale());
             }
+            if self.bounds.corner_radius_points() != bounds.corner_radius_points() {
+                apply_corner_radius(&self.layer, bounds.corner_radius_points());
+            }
             if self.bounds.view_frame_in_clip() != bounds.view_frame_in_clip() {
-                self.view.setFrame(view_frame(bounds));
+                self.view.setFrame(view_frame(&bounds));
             }
             self.bounds = bounds;
         }
@@ -436,7 +480,17 @@ mod macos {
         );
     }
 
-    fn sizing_inputs(bounds: NativePreviewHostBounds) -> (u64, u64, u64) {
+    /// Clip the Metal surface to the docked slot's rounded panel. CALayer
+    /// radii are in POINTS (contentsScale owns the pixel mapping), so the
+    /// value plumbs straight from the renderer's CSS radius. Square corners
+    /// used to poke past the rounded container (owner report, 2026-08-19).
+    fn apply_corner_radius(layer: &CAMetalLayer, radius_points: f64) {
+        let ca_layer: &CALayer = layer.as_super();
+        ca_layer.setCornerRadius(radius_points);
+        ca_layer.setMasksToBounds(radius_points > 0.0);
+    }
+
+    fn sizing_inputs(bounds: &NativePreviewHostBounds) -> (u64, u64, u64) {
         (
             bounds.width.max(0.0).to_bits(),
             bounds.height.max(0.0).to_bits(),
@@ -450,7 +504,7 @@ mod macos {
     // eprintln!, not tracing: this code runs inside the host HELPER process,
     // which has no tracing subscriber and whose stdout is the JSON protocol
     // pipe — stderr is the helper's free-text lane and is relayed to the log.
-    fn log_surface_sizing(reason: &str, bounds: NativePreviewHostBounds) {
+    fn log_surface_sizing(reason: &str, bounds: &NativePreviewHostBounds) {
         let (drawable_width, drawable_height) = bounds.drawable_size();
         // Plan 025 S1: contentsScale + drawable validity are now in the line so a
         // multi-display repro shows the scale the layer WILL adopt (and whether a
@@ -484,11 +538,11 @@ mod macos {
             bounds: NativePreviewHostBounds,
             mtm: MainThreadMarker,
         ) -> Self {
-            let layer_host = NativePreviewLayerHost::new(presenter, bounds, mtm);
+            let layer_host = NativePreviewLayerHost::new(presenter, bounds.clone(), mtm);
             let window = unsafe {
                 NSWindow::initWithContentRect_styleMask_backing_defer(
                     NSWindow::alloc(mtm),
-                    window_frame(bounds),
+                    window_frame(&bounds),
                     NSWindowStyleMask::Borderless,
                     NSBackingStoreType::Buffered,
                     false,
@@ -502,7 +556,7 @@ mod macos {
             // non-layer-backed superview renders black.
             let container = NSView::initWithFrame(
                 NSView::alloc(mtm),
-                NSRect::new(NSPoint::new(0.0, 0.0), window_frame(bounds).size),
+                NSRect::new(NSPoint::new(0.0, 0.0), window_frame(&bounds).size),
             );
             container.setWantsLayer(true);
             container.addSubview(layer_host.view());
@@ -562,9 +616,9 @@ mod macos {
                 .or(self.bounds.order_above_window_id);
             bounds.elevated = bounds.elevated.or(self.bounds.elevated);
             let previous_window_frame = self.bounds.appkit_clip_frame();
-            self.bounds = bounds;
-            self.layer_host.set_bounds(bounds);
-            let frame = window_frame(bounds);
+            self.bounds = bounds.clone();
+            self.layer_host.set_bounds(bounds.clone());
+            let frame = window_frame(&bounds);
             let next_window_frame = bounds.appkit_clip_frame();
             if previous_window_frame != next_window_frame {
                 log_window_placement(frame);
@@ -688,16 +742,22 @@ mod macos {
                 presenter: MetalPreviewPresenter::new_default()?,
                 overlay: None,
                 cached_textures: Vec::new(),
-                cache_metrics: NativePreviewIosurfaceCacheMetrics::default(),
+                cache_metrics: {
+                    let mut metrics = NativePreviewIosurfaceCacheMetrics::default();
+                    metrics.record_cache_state(0, IMPORTED_TEXTURE_CACHE_SIZE);
+                    metrics
+                },
             })
         }
 
         pub fn apply_command(&mut self, command: NativePreviewHostCommand, mtm: MainThreadMarker) {
-            let previous_bounds = self.overlay.as_ref().map(|overlay| overlay.bounds);
-            if native_preview_command_invalidates_iosurface_cache(previous_bounds, command) {
+            let previous_bounds = self.overlay.as_ref().map(|overlay| &overlay.bounds);
+            if native_preview_command_invalidates_iosurface_cache(previous_bounds, &command) {
                 self.cache_metrics
                     .record_invalidation(self.cached_textures.len());
                 self.cached_textures.clear();
+                self.cache_metrics
+                    .record_cache_state(0, IMPORTED_TEXTURE_CACHE_SIZE);
             }
             apply_overlay_command(&self.presenter, &mut self.overlay, command, mtm);
         }
@@ -756,6 +816,10 @@ mod macos {
                         self.cached_textures.remove(0);
                     }
                     self.cached_textures.push(imported);
+                    self.cache_metrics.record_cache_state(
+                        self.cached_textures.len(),
+                        IMPORTED_TEXTURE_CACHE_SIZE,
+                    );
                     self.cached_textures.len() - 1
                 }
             };
@@ -822,12 +886,12 @@ mod macos {
         }
     }
 
-    fn view_frame(bounds: NativePreviewHostBounds) -> NSRect {
+    fn view_frame(bounds: &NativePreviewHostBounds) -> NSRect {
         let (x, y, width, height) = bounds.view_frame_in_clip();
         NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
     }
 
-    fn window_frame(bounds: NativePreviewHostBounds) -> NSRect {
+    fn window_frame(bounds: &NativePreviewHostBounds) -> NSRect {
         let (x, y, width, height) = bounds.appkit_clip_frame();
         NSRect::new(NSPoint::new(x, y), NSSize::new(width, height))
     }
@@ -932,49 +996,53 @@ mod tests {
         for placement_only in [
             NativePreviewHostBounds {
                 screen_x: 50.0,
-                ..base
+                ..base.clone()
             },
             NativePreviewHostBounds {
                 screen_y: 60.0,
                 screen_height: Some(1200.0),
-                ..base
+                ..base.clone()
             },
             NativePreviewHostBounds {
                 visible: Some(false),
-                ..base
+                ..base.clone()
             },
             NativePreviewHostBounds {
                 order_above_window_id: Some(42),
                 elevated: Some(true),
-                ..base
+                ..base.clone()
             },
         ] {
+            let command = update(placement_only);
             assert!(!native_preview_command_invalidates_iosurface_cache(
-                Some(base),
-                update(placement_only)
+                Some(&base),
+                &command
             ));
         }
 
+        let width_command = update(NativePreviewHostBounds {
+            width: 800.0,
+            ..base.clone()
+        });
         assert!(!native_preview_command_invalidates_iosurface_cache(
-            Some(base),
-            update(NativePreviewHostBounds {
-                width: 800.0,
-                ..base
-            })
+            Some(&base),
+            &width_command
         ));
+        let scale_command = update(NativePreviewHostBounds {
+            scale_factor: 1.0,
+            ..base.clone()
+        });
         assert!(!native_preview_command_invalidates_iosurface_cache(
-            Some(base),
-            update(NativePreviewHostBounds {
-                scale_factor: 1.0,
-                ..base
-            })
+            Some(&base),
+            &scale_command
         ));
+        let destroy_command = NativePreviewHostCommand {
+            kind: NativePreviewHostCommandKind::Destroy,
+            bounds: None,
+        };
         assert!(native_preview_command_invalidates_iosurface_cache(
-            Some(base),
-            NativePreviewHostCommand {
-                kind: NativePreviewHostCommandKind::Destroy,
-                bounds: None,
-            }
+            Some(&base),
+            &destroy_command
         ));
     }
 
@@ -995,13 +1063,39 @@ mod tests {
                 imports: 1,
                 invalidations: 1,
                 import_failures: 1,
+                live_count: 0,
+                peak_count: 0,
+                ceiling: 0,
             }
         );
     }
 
     #[test]
+    fn iosurface_cache_metrics_bound_churn_and_reach_zero_on_destroy() {
+        let mut metrics = NativePreviewIosurfaceCacheMetrics::default();
+        for live in 1..=4 {
+            metrics.record_import_success();
+            metrics.record_cache_state(live, 4);
+        }
+        // A fifth distinct surface evicts the oldest entry before insertion.
+        metrics.record_import_success();
+        metrics.record_invalidation(1);
+        metrics.record_cache_state(4, 4);
+        assert_eq!(metrics.live_count, 4);
+        assert_eq!(metrics.peak_count, 4);
+        assert_eq!(metrics.ceiling, 4);
+
+        metrics.record_invalidation(4);
+        metrics.record_cache_state(0, 4);
+        assert_eq!(metrics.live_count, 0);
+        assert_eq!(metrics.peak_count, 4);
+        assert_eq!(metrics.ceiling, 4);
+    }
+
+    #[test]
     fn host_bounds_clamp_to_visible_drawable_size() {
         let bounds = PreviewSurfaceBounds {
+            corner_radius: None,
             screen_x: 10.0,
             screen_y: 20.0,
             width: 0.0,
@@ -1020,9 +1114,38 @@ mod tests {
     }
 
     #[test]
+    fn windows_d3d11_main_owned_host_bounds_preserve_opaque_handle_and_generation() {
+        let trusted = MainOwnedPreviewSurfaceBounds {
+            bounds: PreviewSurfaceBounds {
+                screen_x: 10.0,
+                screen_y: 20.0,
+                width: 640.0,
+                height: 360.0,
+                scale_factor: 1.5,
+                elevated: Some(false),
+                ..Default::default()
+            },
+            order_above_window_handle: Some(
+                OpaqueNativeWindowHandle::parse("0x000000001234abcd").unwrap(),
+            ),
+        };
+        let host_bounds = NativePreviewHostBounds::from_main_owned(&trusted, 17);
+        assert_eq!(
+            host_bounds
+                .order_above_window_handle
+                .as_ref()
+                .map(OpaqueNativeWindowHandle::as_str),
+            Some("0x000000001234abcd")
+        );
+        assert_eq!(host_bounds.preview_generation, Some(17));
+        assert_eq!(host_bounds.elevated, Some(false));
+    }
+
+    #[test]
     fn clip_frame_and_view_offset_crop_the_scrolled_slot() {
         // Slot spans screen rows 20..380; the scroll container only shows rows 120..320.
         let bounds = NativePreviewHostBounds {
+            corner_radius: None,
             screen_x: 10.0,
             screen_y: 20.0,
             width: 640.0,
@@ -1035,6 +1158,8 @@ mod tests {
             clip_height: Some(200.0),
             visible: Some(true),
             order_above_window_id: None,
+            order_above_window_handle: None,
+            preview_generation: None,
             elevated: None,
         };
 
@@ -1100,6 +1225,7 @@ mod tests {
     #[test]
     fn host_bounds_carry_clip_and_visibility() {
         let bounds = PreviewSurfaceBounds {
+            corner_radius: None,
             screen_x: 10.0,
             screen_y: 20.0,
             width: 640.0,
@@ -1178,6 +1304,7 @@ mod tests {
         assert_eq!(
             lifecycle
                 .bounds()
+                .as_ref()
                 .map(NativePreviewHostBounds::appkit_frame),
             Some((10.0, 620.0, 640.0, 360.0))
         );
@@ -1213,6 +1340,7 @@ mod tests {
         assert_eq!(
             lifecycle
                 .bounds()
+                .as_ref()
                 .map(NativePreviewHostBounds::drawable_size),
             Some((1600.0, 900.0))
         );

@@ -21,7 +21,8 @@ import {
   formatArtifactPath,
   formatReleaseArtifactValidationReport,
   sanitizeReleaseValidationOutput,
-  selectLatestReleaseArtifacts
+  selectLatestReleaseArtifacts,
+  stdoutExpectationFailures
 } from './lib/macos-release-artifact-validation.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -194,8 +195,13 @@ function runCheck(check) {
   // e.g. the capture-entitlement gate requires the device entitlements to appear
   // in `codesign -d --entitlements` output (a signed binary without them exits 0).
   const missing = (check.expectOutputIncludes ?? []).filter((needle) => !rawOutput.includes(needle))
+  const stdoutFailures = stdoutExpectationFailures(check, result.stdout)
   const output = sanitizeReleaseValidationOutput(
-    [rawOutput, ...missing.map((needle) => `missing required entitlement: ${needle}`)]
+    [
+      rawOutput,
+      ...missing.map((needle) => `missing required entitlement: ${needle}`),
+      ...stdoutFailures
+    ]
       .filter(Boolean)
       .join('\n'),
     context()
@@ -203,7 +209,7 @@ function runCheck(check) {
 
   return {
     label: check.label,
-    ok: result.status === 0 && missing.length === 0,
+    ok: result.status === 0 && missing.length === 0 && stdoutFailures.length === 0,
     output
   }
 }

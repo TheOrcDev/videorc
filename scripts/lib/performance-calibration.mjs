@@ -17,6 +17,7 @@ export const PERFORMANCE_BUDGET_CANDIDATE_SCHEMA_VERSION = 1
 export const PERFORMANCE_CALIBRATION_RUN_COUNT = 3
 export const PERFORMANCE_CALIBRATION_MIN_WARMUP_MS = 60_000
 export const PERFORMANCE_CALIBRATION_MIN_MEASUREMENT_MS = 600_000
+export const PERFORMANCE_CALIBRATION_MIN_SHORT_MEASUREMENT_MS = 120_000
 
 // These are comparability tolerances, not product performance budgets. Three
 // 10-minute runs that spread beyond these bands represent materially different
@@ -33,10 +34,25 @@ export const PERFORMANCE_CALIBRATION_COMPARABILITY_POLICY = Object.freeze({
   nearZeroTrendFractionOfMemoryScale: 0.01
 })
 
-const PREVIEW_SCENARIOS = new Set(['docked-native-preview', 'detached-native-preview'])
+const PREVIEW_SCENARIOS = new Set([
+  'docked-native-preview',
+  'detached-native-preview',
+  'studio-live-mic-visuals'
+])
 const DETACHED_PREVIEW_SCENARIO = 'detached-native-preview'
-const RECORDING_SCENARIOS = new Set(['real-devices-1080p', 'record-4k', 'record-4k-stream-1080p'])
-const SUPPORTED_SCENARIOS = new Set([...PREVIEW_SCENARIOS, ...RECORDING_SCENARIOS])
+const RECORDING_SCENARIOS = new Set([
+  'real-devices-1080p',
+  'record-1080p60',
+  'record-vertical-4k30',
+  'record-4k',
+  'record-4k-stream-1080p'
+])
+const LIFECYCLE_SCENARIOS = new Set(['lifecycle-churn'])
+const SUPPORTED_SCENARIOS = new Set([
+  ...PREVIEW_SCENARIOS,
+  ...RECORDING_SCENARIOS,
+  ...LIFECYCLE_SCENARIOS
+])
 const REQUIRED_MEMORY_ROLES = ['backend', 'electron-main', 'electron-renderer']
 const SERIES_FIELDS = [
   'samples',
@@ -78,16 +94,26 @@ export function aggregatePackagedPerformanceCalibration({ reports, reportPaths =
   const first = reports[0]
   const roleNames = Object.keys(first.metrics.memory.roles).sort()
   const cpuRoleNames = Object.keys(first.metrics.cpuAveragePercentByRole).sort()
-  const cadence = {
-    presentFps: observedMetric(reports, (report) => report.metrics.pipeline.presentFps, 'fps'),
-    measuredFramesPerSecond: observedMetric(
-      reports,
-      (report) => report.metrics.pipeline.framesPerSecond,
-      'fps'
-    ),
-    intervalP95Ms: observedMetric(reports, (report) => report.metrics.pipeline.intervalP95Ms, 'ms'),
-    intervalP99Ms: observedMetric(reports, (report) => report.metrics.pipeline.intervalP99Ms, 'ms')
-  }
+  const cadence = LIFECYCLE_SCENARIOS.has(first.scenario)
+    ? {}
+    : {
+        presentFps: observedMetric(reports, (report) => report.metrics.pipeline.presentFps, 'fps'),
+        measuredFramesPerSecond: observedMetric(
+          reports,
+          (report) => report.metrics.pipeline.framesPerSecond,
+          'fps'
+        ),
+        intervalP95Ms: observedMetric(
+          reports,
+          (report) => report.metrics.pipeline.intervalP95Ms,
+          'ms'
+        ),
+        intervalP99Ms: observedMetric(
+          reports,
+          (report) => report.metrics.pipeline.intervalP99Ms,
+          'ms'
+        )
+      }
   if (PREVIEW_SCENARIOS.has(first.scenario)) {
     cadence.wireKibPerSecond = observedMetric(
       reports,
@@ -120,15 +146,35 @@ export function aggregatePackagedPerformanceCalibration({ reports, reportPaths =
         observedMetric(reports, (report) => report.metrics.cpuAveragePercentByRole[role], 'percent')
       ])
     ),
+    cpuPercentByRole: Object.fromEntries(
+      cpuRoleNames.map((role) => [
+        role,
+        {
+          average: observedMetric(
+            reports,
+            (report) => report.metrics.cpuAveragePercentByRole[role],
+            'percent'
+          ),
+          p95: observedMetric(
+            reports,
+            (report) => report.metrics.cpuP95PercentByRole[role],
+            'percent'
+          )
+        }
+      ])
+    ),
     resources: observedResources(reports, roleNames)
   }
   const provenance = {
     commit: first.metadata.commit,
     executableSha256: first.metadata.executable.sha256,
+    packagePayloadSha256: first.metadata.packagePayload.sha256,
     machineModel: first.metadata.machineModel,
     hardwareClass: first.metadata.hardwareClass ?? null,
     operatingSystem: first.metadata.operatingSystem,
     displayScaleFactor: effectiveDisplayScaleFactor(first),
+    profileClass: first.metadata.profileClass,
+    appVersion: first.metadata.appVersion,
     buildMode: 'packaged',
     powerAssertion: first.metadata.powerAssertion,
     powerAssertionVerified: first.metadata.powerAssertionVerified,
@@ -184,10 +230,13 @@ export function validatePackagedPerformanceCalibrationReports(reports) {
     ['scenario', (report) => report.scenario],
     ['commit', (report) => report.metadata.commit],
     ['executable SHA-256', (report) => report.metadata.executable.sha256],
+    ['packaged app payload SHA-256', (report) => report.metadata.packagePayload.sha256],
     ['machine model', (report) => report.metadata.machineModel],
     ['hardware class', (report) => report.metadata.hardwareClass ?? null],
     ['operating system', (report) => report.metadata.operatingSystem],
     ['display scale', (report) => effectiveDisplayScaleFactor(report)],
+    ['profile class', (report) => report.metadata.profileClass],
+    ['app version', (report) => report.metadata.appVersion],
     ['power assertion', (report) => report.metadata.powerAssertion],
     ['power assertion verification', (report) => report.metadata.powerAssertionVerified],
     ['app role', (report) => report.metadata.appRole],
@@ -196,6 +245,7 @@ export function validatePackagedPerformanceCalibrationReports(reports) {
     ['timing', (report) => calibrationTiming(report)],
     ['memory roles', (report) => Object.keys(report.metrics.memory.roles).sort()],
     ['CPU roles', (report) => Object.keys(report.metrics.cpuAveragePercentByRole).sort()],
+    ['CPU p95 roles', (report) => Object.keys(report.metrics.cpuP95PercentByRole).sort()],
     ['measurement thresholds', (report) => report.metrics.thresholds]
   ]
   if (first.scenario === DETACHED_PREVIEW_SCENARIO) {
@@ -231,9 +281,12 @@ export function createPerformanceBudgetCandidate(calibration) {
     calibrationId: calibration.calibrationId,
     scope: {
       scenario: calibration.scenario,
+      profileClass: calibration.provenance.profileClass,
+      appVersion: calibration.provenance.appVersion,
       buildMode: calibration.provenance.buildMode,
-      machineModel: calibration.provenance.machineModel,
-      hardwareClass: calibration.provenance.hardwareClass,
+      ...(calibration.provenance.hardwareClass
+        ? { hardwareClass: calibration.provenance.hardwareClass }
+        : { machineModel: calibration.provenance.machineModel }),
       operatingSystem: calibration.provenance.operatingSystem,
       displayScaleFactor: calibration.provenance.displayScaleFactor,
       appRole: calibration.provenance.appRole,
@@ -242,8 +295,12 @@ export function createPerformanceBudgetCandidate(calibration) {
       timing: calibration.timing
     },
     evidence: {
+      calibrationId: calibration.calibrationId,
       commit: calibration.provenance.commit,
       executableSha256: calibration.provenance.executableSha256,
+      packagePayloadSha256: calibration.provenance.packagePayloadSha256,
+      calibrationSha256: canonicalSha256(calibration),
+      calibrationGeneratedAt: calibration.generatedAt,
       powerAssertion: calibration.provenance.powerAssertion,
       powerAssertionVerified: calibration.provenance.powerAssertionVerified,
       runCount: calibration.runCount,
@@ -263,18 +320,20 @@ export function createPerformanceBudgetCandidate(calibration) {
 function validateObservedComparability(reports) {
   const policy = PERFORMANCE_CALIBRATION_COMPARABILITY_POLICY
   const failures = []
-  addRelativeRangeFailure(
-    failures,
-    'present FPS',
-    reports.map((report) => report.metrics.pipeline.presentFps),
-    policy.maxCadenceRelativeRange
-  )
-  addRelativeRangeFailure(
-    failures,
-    'present interval p95',
-    reports.map((report) => report.metrics.pipeline.intervalP95Ms),
-    policy.maxLatencyRelativeRange
-  )
+  if (!LIFECYCLE_SCENARIOS.has(reports[0].scenario)) {
+    addRelativeRangeFailure(
+      failures,
+      'present FPS',
+      reports.map((report) => report.metrics.pipeline.presentFps),
+      policy.maxCadenceRelativeRange
+    )
+    addRelativeRangeFailure(
+      failures,
+      'present interval p95',
+      reports.map((report) => report.metrics.pipeline.intervalP95Ms),
+      policy.maxLatencyRelativeRange
+    )
+  }
   addRelativeRangeFailure(
     failures,
     'owned RSS maximum',
@@ -321,6 +380,20 @@ function validateObservedComparability(reports) {
     ]
   ]) {
     addSignedTrendSpreadFailure(failures, label, reports.map(select), ownedRssScale, policy)
+  }
+
+  for (const role of Object.keys(reports[0].metrics.cpuAveragePercentByRole).sort()) {
+    for (const [label, field] of [
+      [`${role} average CPU`, 'cpuAveragePercentByRole'],
+      [`${role} p95 CPU`, 'cpuP95PercentByRole']
+    ]) {
+      addRelativeRangeFailure(
+        failures,
+        label,
+        reports.map((report) => report.metrics[field][role]),
+        policy.maxLatencyRelativeRange
+      )
+    }
   }
 
   const firstFootprints = reports.map(
@@ -387,15 +460,21 @@ export function formatPerformanceCalibrationSummary(calibration) {
   const lines = [
     `Calibration ${calibration.calibrationId}`,
     `${calibration.runCount} packaged ${calibration.scenario} runs on ${calibration.provenance.machineModel}`,
-    `commit ${calibration.provenance.commit}; executable ${calibration.provenance.executableSha256}`,
-    `warm-up ${calibration.timing.warmupMs}ms; measurement ${calibration.timing.measurementMs}ms`,
-    `present FPS median ${format(observed.cadence.presentFps.median)}, min ${format(observed.cadence.presentFps.min)}`,
-    `interval p95 median ${format(observed.cadence.intervalP95Ms.median)}ms, max ${format(observed.cadence.intervalP95Ms.max)}ms`,
+    `commit provenance ${calibration.provenance.commit}; executable ${calibration.provenance.executableSha256}; app payload ${calibration.provenance.packagePayloadSha256}`,
+    `${calibration.provenance.profileClass} profile; app ${calibration.provenance.appVersion}; warm-up ${calibration.timing.warmupMs}ms; measurement ${calibration.timing.measurementMs}ms; interval ${calibration.timing.intervalMs}ms`,
     `owned RSS maximum median ${format(observed.memoryMiB.maximumOwnedRss.median)}MiB, max ${format(observed.memoryMiB.maximumOwnedRss.max)}MiB`,
     `owned RSS slope median ${format(observed.memoryMiB.ownedRss.slopePerMinute.median)}MiB/min, second-half ${format(observed.memoryMiB.ownedRss.secondHalfSlopePerMinute.median)}MiB/min`,
     `owned RSS plateau growth median ${format(observed.memoryMiB.ownedRss.plateauGrowth.median)}MiB`,
     `physical footprint growth median ${format(observed.resources.physicalFootprintMiB.growth.median)}MiB`
   ]
+  if (observed.cadence.presentFps) {
+    lines.splice(
+      4,
+      0,
+      `present FPS median ${format(observed.cadence.presentFps.median)}, min ${format(observed.cadence.presentFps.min)}`,
+      `interval p95 median ${format(observed.cadence.intervalP95Ms.median)}ms, max ${format(observed.cadence.intervalP95Ms.max)}ms`
+    )
+  }
   for (const [role, metrics] of Object.entries(observed.memoryMiB.perRole)) {
     lines.push(
       `${role}: max RSS median ${format(metrics.maximumRss.median)}MiB; slope ${format(metrics.slopePerMinute.median)}MiB/min; plateau ${format(metrics.plateauGrowth.median)}MiB`
@@ -444,24 +523,45 @@ function validateDetailedReport(report, index) {
   if (!validSha256(metadata?.executable?.sha256)) {
     failures.push(`${label} packaged executable SHA-256 was missing or invalid`)
   }
+  if (!validSha256(metadata?.packagePayload?.sha256)) {
+    failures.push(`${label} packaged app payload SHA-256 was missing or invalid`)
+  }
   if (!nonEmptyString(metadata?.appRole)) failures.push(`${label} app role was missing`)
+  if (!['short-sentinel', 'endurance'].includes(metadata?.profileClass)) {
+    failures.push(`${label} profile class was missing or invalid`)
+  }
+  if (!nonEmptyString(metadata?.appVersion)) failures.push(`${label} app version was missing`)
   if (!validSource(metadata?.source)) failures.push(`${label} source metadata was incomplete`)
   if (!validOutputs(metadata?.outputs)) failures.push(`${label} output metadata was incomplete`)
 
   const timing = calibrationTiming(report)
+  if (stableJson(metadata?.performanceWindow) !== stableJson(timing)) {
+    failures.push(`${label} performance window identity did not match report timing`)
+  }
   if (!finiteAtLeast(timing?.warmupMs, PERFORMANCE_CALIBRATION_MIN_WARMUP_MS)) {
     failures.push(`${label} warm-up was shorter than ${PERFORMANCE_CALIBRATION_MIN_WARMUP_MS}ms`)
   }
-  if (!finiteAtLeast(timing?.measurementMs, PERFORMANCE_CALIBRATION_MIN_MEASUREMENT_MS)) {
-    failures.push(
-      `${label} measurement was shorter than ${PERFORMANCE_CALIBRATION_MIN_MEASUREMENT_MS}ms`
-    )
+  const minimumMeasurementMs =
+    metadata?.profileClass === 'short-sentinel'
+      ? PERFORMANCE_CALIBRATION_MIN_SHORT_MEASUREMENT_MS
+      : PERFORMANCE_CALIBRATION_MIN_MEASUREMENT_MS
+  if (!finiteAtLeast(timing?.measurementMs, minimumMeasurementMs)) {
+    failures.push(`${label} measurement was shorter than ${minimumMeasurementMs}ms`)
+  }
+  if (
+    metadata?.profileClass === 'short-sentinel' &&
+    Number.isFinite(timing?.measurementMs) &&
+    timing.measurementMs >= PERFORMANCE_CALIBRATION_MIN_MEASUREMENT_MS
+  ) {
+    failures.push(`${label} short-sentinel measurement overlapped the endurance window`)
   }
   if (!positiveFinite(timing?.intervalMs)) failures.push(`${label} sample interval was invalid`)
 
   const metrics = report?.metrics
   if (metrics?.teardownClean !== true) failures.push(`${label} teardown was not clean`)
-  validatePipeline(metrics?.pipeline, report?.scenario, label, failures)
+  if (!LIFECYCLE_SCENARIOS.has(report?.scenario)) {
+    validatePipeline(metrics?.pipeline, report?.scenario, label, failures)
+  }
   validateMemory(metrics?.memory, timing, label, failures)
   validateSampling(metrics?.sampling, metrics?.memory, timing, metadata, label, failures, {
     requirePowerAssertionBoundary: PREVIEW_SCENARIOS.has(report?.scenario)
@@ -469,7 +569,7 @@ function validateDetailedReport(report, index) {
   if (report?.scenario === DETACHED_PREVIEW_SCENARIO) {
     validateDetachedPreviewGeometry(report, label, failures)
   }
-  validateCpu(metrics?.cpuAveragePercentByRole, label, failures)
+  validateCpu(metrics?.cpuAveragePercentByRole, metrics?.cpuP95PercentByRole, label, failures)
   validateResources(metrics?.resourceCheckpoints, label, failures)
   if (!isRecord(metrics?.thresholds)) failures.push(`${label} measurement thresholds were missing`)
   return failures
@@ -821,16 +921,26 @@ function validateMemory(memory, timing, label, failures) {
   }
 }
 
-function validateCpu(cpu, label, failures) {
-  if (!isRecord(cpu)) {
+function validateCpu(cpuAverage, cpuP95, label, failures) {
+  if (!isRecord(cpuAverage) || !isRecord(cpuP95)) {
     failures.push(`${label} per-role CPU metrics were missing`)
     return
   }
   for (const role of REQUIRED_MEMORY_ROLES) {
-    if (!Number.isFinite(cpu[role])) failures.push(`${label} ${role} CPU metric was missing`)
+    if (!Number.isFinite(cpuAverage[role])) {
+      failures.push(`${label} ${role} CPU average metric was missing`)
+    }
+    if (!Number.isFinite(cpuP95[role])) failures.push(`${label} ${role} CPU p95 metric was missing`)
   }
-  for (const [role, value] of Object.entries(cpu)) {
-    if (!Number.isFinite(value)) failures.push(`${label} CPU metric for ${role} was invalid`)
+  for (const [role, value] of Object.entries(cpuAverage)) {
+    if (!Number.isFinite(value))
+      failures.push(`${label} CPU average metric for ${role} was invalid`)
+  }
+  for (const [role, value] of Object.entries(cpuP95)) {
+    if (!Number.isFinite(value)) failures.push(`${label} CPU p95 metric for ${role} was invalid`)
+    if (Number.isFinite(value) && Number.isFinite(cpuAverage[role]) && value < cpuAverage[role]) {
+      failures.push(`${label} ${role} CPU p95 was below its average`)
+    }
   }
 }
 
@@ -983,8 +1093,11 @@ function calibrationIdentifier({ provenance, timing, runs }) {
       stableJson({
         commit: provenance.commit,
         executableSha256: provenance.executableSha256,
+        packagePayloadSha256: provenance.packagePayloadSha256,
         machineModel: provenance.machineModel,
         hardwareClass: provenance.hardwareClass,
+        profileClass: provenance.profileClass,
+        appVersion: provenance.appVersion,
         operatingSystem: provenance.operatingSystem,
         timing,
         runNonces: runs.map((run) => run.runNonce)
@@ -997,6 +1110,10 @@ function calibrationIdentifier({ provenance, timing, runs }) {
 function median(values) {
   const sorted = [...values].sort((left, right) => left - right)
   return sorted[1]
+}
+
+function canonicalSha256(value) {
+  return createHash('sha256').update(stableJson(value)).digest('hex')
 }
 
 function format(value) {

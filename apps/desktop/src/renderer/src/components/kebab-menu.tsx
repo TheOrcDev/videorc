@@ -1,5 +1,4 @@
-import { DotsThree } from '@phosphor-icons/react'
-import type { Icon } from '@phosphor-icons/react'
+import { AppIcon, MoreIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
@@ -15,7 +14,7 @@ import { cn } from '@/lib/utils'
 export interface KebabMenuItem {
   id: string
   label: string
-  icon?: Icon
+  icon?: AppIcon
   /** Destructive items render in the destructive tone and sort last by convention. */
   destructive?: boolean
   disabled?: boolean
@@ -51,7 +50,7 @@ export function KebabMenu({
           variant="ghost"
           onClick={(event) => event.stopPropagation()}
         >
-          <DotsThree className="size-4" weight="bold" />
+          <MoreIcon className="size-4" weight="bold" />
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" onClick={(event) => event.stopPropagation()}>

@@ -4,7 +4,7 @@ import type {
   BackendHealth,
   Device,
   RecordingStatus,
-  SessionSummary,
+  SessionWithDetails,
   StreamHealth
 } from '../../../shared/backend'
 import { isActiveRecordingState as isSharedActiveRecordingState } from '../../../shared/capture-state'
@@ -96,7 +96,10 @@ export function mergeStreamHealth(
     ...update,
     fps: update.fps ?? current.fps,
     droppedFrames: update.droppedFrames ?? current.droppedFrames,
-    speed: update.speed ?? current.speed
+    speed: update.speed ?? current.speed,
+    bitrateKbps: update.bitrateKbps ?? current.bitrateKbps,
+    totalBytes: update.totalBytes ?? current.totalBytes,
+    duplicatedFrames: update.duplicatedFrames ?? current.duplicatedFrames
   }
 }
 
@@ -204,7 +207,7 @@ export function setupChecklist({
 }
 
 export function latestArtifact(
-  session: SessionSummary,
+  session: SessionWithDetails,
   kind: AiArtifact['kind']
 ): AiArtifact | undefined {
   return session.aiArtifacts
@@ -216,7 +219,7 @@ export function latestArtifact(
 // reviewable content — a pending-consent or failed stub is the proof a run
 // happened. The ready-only lookup above made finished runs read as "Not run".
 export function latestArtifactAnyStatus(
-  session: SessionSummary,
+  session: SessionWithDetails,
   kind: AiArtifact['kind']
 ): AiArtifact | undefined {
   return session.aiArtifacts.filter((artifact) => artifact.kind === kind).at(-1)

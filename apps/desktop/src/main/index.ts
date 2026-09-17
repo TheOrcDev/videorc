@@ -4,6 +4,7 @@ import {
   contentTracing,
   desktopCapturer,
   dialog,
+  globalShortcut,
   nativeImage,
   nativeTheme,
   net,
@@ -39,7 +40,7 @@ import {
 } from 'node:http'
 import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
-import { basename, delimiter, dirname, join, resolve } from 'node:path'
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
@@ -50,7 +51,25 @@ import {
   ownedProcessLedgerPath,
   ownedProcessStartupLockPath
 } from './backend-owned-processes'
-import { stopBackendProcess } from './backend-process-shutdown'
+import { BACKEND_FILE_MUTATION_REQUEST_TIMEOUT_MS } from './backend-admin-timing'
+import {
+  backendShutdownAllowsForceKill,
+  classifyBackendShutdownTarget,
+  handleBackendBeforeQuit,
+  installPersistentBackendShutdownSignalHandlers,
+  stopPreBootstrapBackendProcess,
+  stopBackendProcess,
+  waitForBackendBootstrapOutputDrain,
+  type BackendShutdownResult
+} from './backend-process-shutdown'
+import {
+  BackendRuntimeOwner,
+  backendRuntimeAcceptsBootstrap,
+  claimDurableBackendPid,
+  requestBackendRuntimeTermination,
+  settleBackendRuntimeExit,
+  type OwnedBackendRuntime
+} from './backend-runtime-owner'
 import {
   acquireBackendInterruptionLease,
   type BackendInterruptionLease
@@ -58,6 +77,7 @@ import {
 import { runBackendInterruptingAction } from './interruption-actions'
 import { AccountSignInTransactions } from './account-sign-in-transactions'
 import { ProviderOAuthCallbacks } from './provider-oauth-callbacks'
+import { unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
 import {
   createSafeStoragePersistenceCodec,
   type SecurePersistenceCodec
@@ -67,13 +87,20 @@ import { runNativePreviewDriverReset } from './native-preview-driver-reset'
 import {
   nativePreviewClosedWindowUnsuppressStatus,
   nativePreviewDriverFailureFallbackStatus,
+  nativePreviewFramePollingSuppressionGenerationMatches,
   nativePreviewFramePollingSuppressionStatus,
   nativePreviewHelperFallbackAllowed,
+  nativePreviewLifecycleFramePollingSuppressed,
   nativePreviewPlacementOwnedByNativeSurface,
   nativePreviewPresentFailureDisposition,
   nativePreviewProofPollingSuppressed,
+  reconcileWindowsD3d11PresenterStatus,
   nativePreviewSurfaceHasAttachedNativePixels,
-  nativePreviewValidatedHandoffStatus
+  nativePreviewSupervisorFallbackReason,
+  nativePreviewSupervisorDisposition,
+  nativePreviewValidatedHandoffStatus,
+  windowsD3d11BackendEventAuthority,
+  windowsD3d11BackendStatusIsStale
 } from './native-preview-host-policy'
 import { loadNativePreviewInProcessDriver } from './native-preview-in-process-loader'
 import { resolveNativePreviewInProcessModule } from './native-preview-in-process-module-path'
@@ -91,17 +118,38 @@ import {
 import { NativePreviewRunAuthority } from './native-preview-run-authority'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
 import { compositorSceneConflictsWithCommitted } from '../shared/native-preview-scene-authority'
+import { isCanonicalWindowsD3d11PreviewStatus } from '../shared/native-preview-capability'
 import { applyCommentsSnapshotDelta } from '../shared/comments-snapshot-delta'
+import {
+  CommentsHistoryCache,
+  CommentsViewSelection,
+  prepareAndSelectCommentsView,
+  type HistoryCommentsView
+} from './comments-history-cache'
 import { compositorStatusFromFrameReady } from '../shared/compositor-frame-ready'
+import {
+  validateWindowsLiveAudioSmokeRequest,
+  type WindowsLiveAudioSmokeRequest
+} from '../shared/windows-live-audio-smoke'
 import {
   parseMainBackendWireMessage,
   parseMainCompositorFrameReadyEvent,
   parseMainCompositorStatusEvent,
+  parseMainPreviewSurfaceStatus,
+  parseMainPreviewSurfaceStatusEvent,
   parseMainRecordingStatus,
   parseMainRecordingStatusEvent
 } from './backend-event-message'
 import { safeConsole } from './safe-console'
-import { parseBackendBootstrap, publicBackendConnectionJson } from './backend-bootstrap'
+import {
+  BACKEND_PROCESS_OWNERSHIP_PREFIX,
+  backendOwnershipLineageMatches,
+  backendReadyMatchesOwnershipMarker,
+  observeBackendOwnershipMarker,
+  parseBackendBootstrap,
+  parseBackendProcessOwnership,
+  publicBackendConnectionJson
+} from './backend-bootstrap'
 import { trashPaths } from './trash-paths'
 import {
   MainResourceCapabilityRegistry,
@@ -126,16 +174,39 @@ import {
   buildRuntimeInfo,
   permissionUrlForPane
 } from './runtime-info'
-import { requestMediaAccessWithRestart, type MediaAccessResult } from './media-access'
 import {
+  requestMediaAccessWithRestart,
+  type MediaAccessRestartResult,
+  type MediaAccessResult
+} from './media-access'
+import {
+  BACKEND_CRASH_LOG_LIMIT,
+  BackendStderrTail,
+  appendBackendCrashRecord,
+  backendCrashLogPath,
+  buildBackendCrashRecord,
+  describeBackendCrashRecord,
+  readBackendCrashLog,
+  shouldRecordBackendExit
+} from './backend-crash-log'
+import { RotatingLogFile, backendLogFilePath, formatBackendLogFileLine } from './backend-log-file'
+import {
+  GPU_RETRY_STABILITY_MS,
   clearGpuFallbackState,
   decideGpuFallback,
   gpuFallbackStatePath,
   isGpuCrashReason,
   readGpuFallbackState,
+  scheduleGpuFallbackRetry,
+  startGpuFallbackRetry,
   shouldPersistGpuFallback,
   writeGpuFallbackState
 } from './gpu-fallback'
+import {
+  backgroundThrottlingFor,
+  electronBackgroundPolicyFromEnv,
+  shouldDisableOcclusionThrottling
+} from './electron-background-policy'
 import { createMediaPermissionGrantWatcher } from './system-permission-watch'
 import {
   flushPermissionRestart,
@@ -162,28 +233,51 @@ import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_CACHE_MAX_FILES,
   AVATAR_MAX_BYTES,
+  type AvatarCacheRejection,
   avatarCacheFileName,
-  avatarHostAllowed
+  avatarCacheRejectionKey,
+  avatarCacheRejectionMessage,
+  avatarUrlDecision,
+  httpStatusClass,
+  redactAvatarFetchError,
+  withAvatarFetchDeadline
 } from './avatar-cache'
 import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
 import {
+  applyVideorcWindowCaptureProtection,
+  type VideorcWindowRole,
+  WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS
+} from './window-capture-protection'
+import {
+  assessProofPresentationWatch,
   assessProofSourceFrame,
   assessFirstFrame,
   assessPresenting,
   emptyFirstFrameLedger,
   emptyPresentingWatch,
   nativePreviewFirstFrameWatchdogEnabled,
+  nativePreviewProofWatchdogEnabled,
+  ProofWatchdogRendererReadSingleFlight,
+  proofPresentationFallbackReason,
+  proofWatchdogRendererReadAllowed,
+  WatchdogTickOwnership,
   type FirstFrameLedger,
   type FirstFrameSnapshot,
   type PresentingAssessment,
-  type PresentingWatchState
+  type PresentingWatchState,
+  type WatchdogRunToken
 } from './native-preview-first-frame'
 import { NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT } from './native-preview-proof-poller-runtime'
-import { NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT } from './native-preview-proof-measurement-runtime'
 import {
+  NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT,
+  resetNativePreviewProofMeasurementStatus
+} from './native-preview-proof-measurement-runtime'
+import {
+  type NativePreviewProofPollingProfile,
   nativePreviewProofFrameUrl,
   nativePreviewProofPollingProfile,
-  nativePreviewProofPollingProfileKey
+  nativePreviewProofPollingProfileKey,
+  nativePreviewProofPresentStatus
 } from '../shared/native-preview-proof-polling'
 import {
   DEFAULT_MAIN_PUMP_FRAME_STALL_TIMEOUT_MS,
@@ -192,6 +286,10 @@ import {
 } from './native-preview-main-pump-health'
 import { discoverObs, readObsSetup, readObsStreamKey } from './obs-import'
 import { initAutoUpdater, registerUpdaterIpc } from './updater'
+import {
+  sanitizedChildProcessEnvironment,
+  scrubReleaseAuthorityEnvironment
+} from './release-authority-env'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import {
   MAX_NOTES_TEXT_LENGTH,
@@ -216,6 +314,11 @@ import {
   liveCommentsCommandAllowed,
   parseCommentsViewMode
 } from './comments-command-broker'
+import {
+  COMMENTS_COMMAND_RELAY_TIMEOUT_MS,
+  COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS
+} from '../shared/comments-command-timing'
+import { AccountRefreshBroker } from './account-refresh-broker'
 import { reconcileCommentsSendOperation } from '../shared/comments-send-operation'
 import {
   captureStateAfterStatusPayload,
@@ -242,8 +345,10 @@ import {
   normalizePreviewSurfaceBounds,
   previewSurfaceBoundsChanged,
   previewSurfaceDrawableBoundsChanged,
-  previewSurfaceNativeDrawableMatchesBounds
+  previewSurfaceNativeDrawableMatchesBounds,
+  sanitizeRendererPreviewSurfaceStatus
 } from '../shared/native-preview-bounds'
+import { withTrustedPreviewWindowStacking } from './native-preview-window-stacking'
 import {
   accountCoalescedPreviewFrame,
   accountSkippedPreviewFrame
@@ -262,6 +367,10 @@ import type {
   CaptionWindowSnapshot,
   CaptionsUpdate,
   CaptionsWindowState,
+  CohostActionCommand,
+  CohostEnableCommand,
+  CohostState,
+  CohostWindowState,
   CommentHighlightCommand,
   CommentHighlightState,
   CommentsClearCommand,
@@ -276,6 +385,7 @@ import type {
   CompositorStatus,
   LayoutSettings,
   LiveChatSnapshot,
+  LiveChatMessage,
   NativePreviewHostCommand,
   NotesDocument,
   NotesFontScale,
@@ -298,11 +408,111 @@ import type {
   StreamScreen,
   SystemPermissionPane,
   RuntimeInfo,
+  SessionCommentsPage,
   VideorcAccountSnapshot,
   ViewerSample
 } from '../shared/backend'
+import { offCohostWindowState } from '../shared/backend'
+
+publishLaunchServicesSmokeOwnership()
+
+function publishLaunchServicesSmokeOwnership(): void {
+  const path = process.env.VIDEORC_SMOKE_APP_OWNERSHIP_PATH?.trim()
+  const token = process.env.VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN?.trim()
+  if (!path && !token) return
+  if (!path || !isAbsolute(path)) {
+    throw new Error('VIDEORC_SMOKE_APP_OWNERSHIP_PATH must be an absolute path.')
+  }
+  if (!token || token.length < 32) {
+    throw new Error('VIDEORC_SMOKE_APP_OWNERSHIP_TOKEN must contain at least 32 characters.')
+  }
+  // The LaunchServices controller cannot infer the new instance's PID from
+  // `open -n -W`. Publish ownership before normal main-process setup so every
+  // timeout/error path can stop this exact process without a broad scan. `wx`
+  // also makes a stale or substituted ownership path fail the smoke app closed.
+  const executablePath = resolve(process.execPath)
+  const bundlePath = launchServicesAppBundlePath(executablePath)
+  writeFileSync(
+    path,
+    JSON.stringify({
+      schemaVersion: 1,
+      appPid: process.pid,
+      executablePath,
+      bundlePath,
+      token
+    }),
+    {
+      encoding: 'utf8',
+      flag: 'wx',
+      mode: 0o600
+    }
+  )
+}
+
+function launchServicesAppBundlePath(executablePath: string): string {
+  const normalized = resolve(executablePath)
+  const markerIndex = normalized.toLocaleLowerCase('en-US').indexOf('.app/contents/')
+  if (markerIndex === -1) {
+    throw new Error('LaunchServices smoke ownership requires an executable inside a .app bundle.')
+  }
+  return normalized.slice(0, markerIndex + '.app'.length)
+}
 
 let mainWindow: BrowserWindow | null = null
+
+// ── OS-global shortcuts (remote-control plan RC0) ─────────────────────────
+// Registered system-wide so a Stream Deck's native Hotkey action can drive
+// record/stream/mic with the app unfocused. Off unless the user configures
+// accelerators in Settings; every set call replaces the previous set.
+const registeredGlobalShortcuts = new Set<string>()
+
+function setGlobalShortcuts(shortcuts: {
+  recordToggle?: string
+  streamToggle?: string
+  micToggle?: string
+}): { registered: Record<string, boolean> } {
+  for (const accelerator of registeredGlobalShortcuts) {
+    try {
+      globalShortcut.unregister(accelerator)
+    } catch {
+      // Unregistering a stale accelerator must never block the update.
+    }
+  }
+  registeredGlobalShortcuts.clear()
+  const requested: Array<['record-toggle' | 'stream-toggle' | 'mic-toggle', string | undefined]> = [
+    ['record-toggle', shortcuts.recordToggle],
+    ['stream-toggle', shortcuts.streamToggle],
+    ['mic-toggle', shortcuts.micToggle]
+  ]
+  const registered: Record<string, boolean> = {}
+  for (const [action, accelerator] of requested) {
+    const trimmed = accelerator?.trim()
+    if (!trimmed) {
+      continue
+    }
+    let ok: boolean
+    try {
+      ok = globalShortcut.register(trimmed, () => {
+        const window = mainWindow
+        if (window && !window.isDestroyed()) {
+          sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
+        }
+      })
+    } catch {
+      // An invalid accelerator string reports as not registered.
+      ok = false
+    }
+    registered[action] = ok
+    if (ok) {
+      registeredGlobalShortcuts.add(trimmed)
+    }
+  }
+  return { registered }
+}
+
+app.on('will-quit', () => {
+  unregisterGlobalShortcutsWhenReady(globalShortcut, () => app.isReady())
+})
 let nativePreviewSurfaceWindow: BrowserWindow | null = null
 let notesWindow: BrowserWindow | null = null
 let notesWindowLastFrame: Electron.Rectangle | null = null
@@ -318,11 +528,13 @@ let commentsWindowAlwaysOnTop = false
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
+// Off-shaped from the start (co-host presence W1): the Comments window's
+// mount-time `cohost-get` must always receive a concrete state, never null.
+let latestCohostWindowState: CohostWindowState = offCohostWindowState()
 let latestLiveCommentsSnapshot: LiveChatSnapshot | null = null
-const commentsHistorySnapshots = new Map<string, LiveChatSnapshot>()
-let commentsViewMode: CommentsViewMode = { kind: 'live' }
+const commentsHistoryCache = new CommentsHistoryCache()
+const commentsViewSelection = new CommentsViewSelection({ kind: 'live' })
 let latestLiveCommentsSendOperation: CommentsSendOperation | undefined
-const commentsHistorySendOperations = new Map<string, CommentsSendOperation>()
 const commentsCommandBroker = new CommentsCommandBroker()
 type CommentsSmokeCommandFixture =
   | {
@@ -378,19 +590,32 @@ const nativePreviewPlacementQueue = new NativePreviewPlacementQueue(
       return
     }
     await runNativePreviewSurfaceMutation(() => {
-      if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
+      // Closing does not advance the generation, so a placement that waited
+      // behind another host mutation must re-check the full lifecycle gate.
+      // Generation-only validation lets a pre-close placement enter proof
+      // window script work after close and hold teardown behind it.
+      if (!nativePreviewPresentationAllowedForGeneration(generation)) {
         return nativePreviewSurfaceStatus
       }
       return applyNativePreviewHostCommands(
         [{ kind: nativePreviewSurfaceWindowExists() ? 'update-bounds' : 'create', bounds }],
         generation
       )
-    })
+    }, 'placement')
   },
-  (error) => safeConsole.error('Preview window placement push failed:', error)
+  (error) => {
+    if (previewWindowIsOpenForSurface()) {
+      safeConsole.error('Preview window placement push failed:', error)
+    }
+  }
 )
 let nativePreviewSurfaceStatus: PreviewSurfaceStatus = idleNativePreviewSurfaceStatus()
-let nativePreviewSurfaceFramePollingSuppressed = false
+// Armed only after Electron main has sent a freshly-read preview HWND for the
+// current lifecycle generation. Backend presenter events cannot claim native
+// ownership across close/reopen without this authority.
+let nativePreviewBackendD3d11TrustedGeneration: number | null = null
+let nativePreviewBackendD3d11LastStatus: PreviewSurfaceStatus | null = null
+let nativePreviewSurfaceFramePollingSuppressed = nativePreviewLifecycleFramePollingSuppressed(false)
 let nativePreviewProofPollingRecordingActive = false
 let nativePreviewAppliedProofPollingProfile: string | null = null
 let nativePreviewProofPollingProfileSerial = 0
@@ -400,10 +625,10 @@ let nativePreviewAppliedProofPollingSuppression: boolean | null = null
 let nativePreviewProofAnimationSuspended: boolean | null = null
 let nativePreviewFramePollingSuppressionSerial = 0
 let backendProcess: ChildProcessWithoutNullStreams | null = null
-let backendQuitComplete = false
-let backendQuitInProgress = false
+const backendQuitState = { complete: false, inProgress: false }
 let backendRestartInProgress: Promise<void> | null = null
-let backendOwnedProcessPids = new Set<number>()
+const backendRuntimeOwner = new BackendRuntimeOwner<ChildProcessWithoutNullStreams>()
+type BackendRuntime = OwnedBackendRuntime<ChildProcessWithoutNullStreams>
 let backendPermissionTargetPath: string | null = null
 let ownedProcessRegistry: OwnedProcessRegistry | null = null
 let ownedProcessRegistryLockDepth = 0
@@ -422,7 +647,6 @@ let nativePreviewCommittedCompositorRunId: string | undefined
 const nativePreviewCompositorRunAuthority = new NativePreviewRunAuthority()
 let nativePreviewPendingSceneRevision: number | null = null
 let nativePreviewSurfaceSceneRevisionGuardUntilMs = 0
-let stdoutBuffer = ''
 let appIsQuitting = false
 let appIcon: NativeImage | null | undefined
 const backendLogs: BackendLogEvent[] = []
@@ -457,6 +681,77 @@ const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
 
 installWebContentsSecurity(app)
+
+function installCaptureProtectionSmokeMarker(window: BrowserWindow, role: VideorcWindowRole): void {
+  if (!isWindows || !notesWindowSmokeMarkerEnabled) {
+    return
+  }
+  captureProtectionMarkerStates.set(window, false)
+  const color = WINDOW_CAPTURE_PROTECTION_SMOKE_MARKERS[role]
+  window.webContents.on('did-finish-load', () => {
+    if (window.isDestroyed() || window.webContents.isDestroyed()) {
+      return
+    }
+    captureProtectionMarkerStates.set(window, false)
+    const markerId = `videorc-capture-protection-marker-${role}`
+    void window.webContents
+      .executeJavaScript(
+        `(() => {
+          const markerId = ${JSON.stringify(markerId)};
+          const role = ${JSON.stringify(role)};
+          const color = ${JSON.stringify(color)};
+          let marker = document.getElementById(markerId);
+          if (!marker) {
+            marker = document.createElement('div');
+            marker.id = markerId;
+            document.documentElement.appendChild(marker);
+          }
+          marker.dataset.videorcCaptureProtectionRole = role;
+          marker.style.cssText =
+            'position:fixed;inset:0;z-index:2147483647;pointer-events:none;opacity:1;background:' +
+            color;
+          return { role, color, installed: true };
+        })()`,
+        true
+      )
+      .then((result) => {
+        captureProtectionMarkerStates.set(
+          window,
+          result?.installed === true && result?.role === role && result?.color === color
+        )
+      })
+      .catch((error) => {
+        captureProtectionMarkerStates.set(window, false)
+        safeConsole.warn(`Capture-protection marker could not be installed for ${role}:`, error)
+      })
+  })
+}
+
+const captureProtectionMarkerStates = new WeakMap<BrowserWindow, boolean>()
+
+function captureProtectionMarkerInstalled(window: BrowserWindow | null): boolean {
+  return Boolean(window && !window.isDestroyed() && captureProtectionMarkerStates.get(window))
+}
+
+function smokeNativeWindowIdentity(window: BrowserWindow | null): {
+  nativeWindowHandle: string | null
+  processId: number | null
+} {
+  if (process.platform !== 'win32' || !window || window.isDestroyed()) {
+    return { nativeWindowHandle: null, processId: null }
+  }
+  try {
+    const handle = window.getNativeWindowHandle()
+    const value = handle.length >= 8 ? handle.readBigUInt64LE(0) : BigInt(handle.readUInt32LE(0))
+    return {
+      nativeWindowHandle: `0x${value.toString(16).padStart(16, '0')}`,
+      processId: process.pid
+    }
+  } catch {
+    return { nativeWindowHandle: null, processId: null }
+  }
+}
+
 const glassVibrancyEnabled = process.env.VIDEORC_GLASS_VIBRANCY !== '0'
 const glassVibrancyRaw = process.env.VIDEORC_GLASS_VIBRANCY
 const glassVibrancyMaterial: GlassVibrancyMaterial =
@@ -546,6 +841,12 @@ async function refreshGlassWallpaper(): Promise<void> {
 }
 // Lifecycle smokes can isolate the app-level backend ledger without touching
 // the developer's real app data.
+if (app.isPackaged) {
+  // Packaged runtime code never needs build/signing/storage authority. Retain
+  // the operator-only pilot bearer only until updater initialization copies it.
+  scrubReleaseAuthorityEnvironment(process.env, { preservePilotToken: true })
+}
+
 const appDataDirOverride = process.env.VIDEORC_APP_DATA_DIR?.trim()
 if (appDataDirOverride) {
   app.setPath('appData', appDataDirOverride)
@@ -565,18 +866,38 @@ if (remoteDebugPortOverride) {
 if (process.env.VIDEORC_SMOKE_DISABLE_ELECTRON_GPU === '1') {
   app.commandLine.appendSwitch('disable-gpu')
 }
+const electronBackgroundPolicy = electronBackgroundPolicyFromEnv(process.env)
 // GPU fallback (Windows Insider incident: broken Chromium GPU process boots
 // only with GPU flags and composites transparent windows as BLANK). Must run
 // before app.ready: VIDEORC_DISABLE_GPU=1 is the explicit user hatch, a
 // persisted gpu-fallback.json (written after repeated GPU crashes, below)
 // self-heals the next launch, and VIDEORC_FORCE_GPU=1 overrides + clears it.
 const gpuFallbackFile = gpuFallbackStatePath(app.getPath('userData'))
+let gpuFallbackState = readGpuFallbackState(gpuFallbackFile)
+const gpuFallbackLaunchState = gpuFallbackState
 const gpuFallbackDecision = decideGpuFallback({
   env: process.env,
-  persisted: readGpuFallbackState(gpuFallbackFile)
+  persisted: gpuFallbackState
 })
 if (gpuFallbackDecision.clearPersisted) {
   clearGpuFallbackState(gpuFallbackFile)
+  gpuFallbackState = null
+}
+if (gpuFallbackDecision.source === 'retry' && gpuFallbackState) {
+  gpuFallbackState = startGpuFallbackRetry(gpuFallbackState, new Date().toISOString())
+  writeGpuFallbackState(gpuFallbackFile, gpuFallbackState)
+} else if (
+  gpuFallbackDecision.source === 'persisted' &&
+  gpuFallbackState?.retryStartedAt &&
+  !gpuFallbackState.disableHardwareAcceleration
+) {
+  gpuFallbackState = {
+    ...gpuFallbackState,
+    disableHardwareAcceleration: true,
+    reason: 'gpu-retry-incomplete',
+    updatedAt: gpuFallbackState.retryStartedAt
+  }
+  writeGpuFallbackState(gpuFallbackFile, gpuFallbackState)
 }
 if (gpuFallbackDecision.disable) {
   app.disableHardwareAcceleration()
@@ -603,35 +924,72 @@ app.on('child-process-gone', (_event, details) => {
   if (!gpuFallbackDecision.disable && !gpuFallbackPersistedThisLaunch) {
     if (shouldPersistGpuFallback(gpuProcessCrashCount)) {
       gpuFallbackPersistedThisLaunch = true
-      writeGpuFallbackState(gpuFallbackFile, {
+      gpuFallbackState = {
         disableHardwareAcceleration: true,
-        reason: 'gpu-process-crashes',
+        reason: gpuFallbackDecision.source === 'retry' ? 'gpu-retry-failed' : 'gpu-process-crashes',
         crashCount: gpuProcessCrashCount,
-        updatedAt: new Date().toISOString()
-      })
+        updatedAt: new Date().toISOString(),
+        ...((gpuFallbackState ?? gpuFallbackLaunchState)?.retryRequestedAt
+          ? { retryRequestedAt: (gpuFallbackState ?? gpuFallbackLaunchState)?.retryRequestedAt }
+          : {}),
+        ...((gpuFallbackState ?? gpuFallbackLaunchState)?.retryAttempts !== undefined
+          ? { retryAttempts: (gpuFallbackState ?? gpuFallbackLaunchState)?.retryAttempts }
+          : {})
+      }
+      writeGpuFallbackState(gpuFallbackFile, gpuFallbackState)
       logBackend(
         'warn',
-        'GPU process is unreliable on this machine — Videorc will use software rendering from the next launch (set VIDEORC_FORCE_GPU=1 to undo).'
+        'GPU process is unreliable on this machine — Videorc will use software rendering from the next launch. Retry hardware acceleration from Settings when ready.'
       )
     }
   }
 })
+// Backend crash evidence that survives restarts (live-feedback batch 3, B1).
+// The supervisor used to keep exit code/signal in memory and stderr in a ring
+// that died with the process, so a bundle exported after "Backend crashed,
+// restarting (attempt 3)" said nothing about the crash. Records live in
+// userData/backend-crashes.json (last 5) and ride into the bundle through
+// runtimeInfo.backendCrashes; every backend log line also lands in a rotating
+// userData/logs/backend.log so packaged Windows builds keep logs at all.
+const backendCrashLogFile = backendCrashLogPath(app.getPath('userData'))
+let backendCrashRecords = readBackendCrashLog(backendCrashLogFile)
+const backendLogFile = new RotatingLogFile({
+  path: backendLogFilePath(app.getPath('userData')),
+  onError: (error) => {
+    safeConsole.warn(`Backend log file disabled: ${errorMessageText(error)}`)
+  }
+})
+interface BackendGenerationEvidence {
+  startedAtMs: number
+  stderrTail: BackendStderrTail
+  ownershipToken: string
+  ownershipMarkerPid?: number
+  authorityEstablished: boolean
+  adminConnection?: BackendConnection
+  durableOwnedProcessPids: Set<number>
+}
+const backendGenerationEvidence = new WeakMap<BackendRuntime, BackendGenerationEvidence>()
 // Keep the detached preview window live while it sits behind the main window.
 // A scene change is made in the main window, so the preview is occluded at that
 // moment — and macOS/Chromium stops compositing a fully-occluded window, which
 // froze the preview until it was clicked to the front. These switches keep
 // occluded/background windows rendering so the preview updates in place. The
-// per-window backgroundThrottling:false flags only cover timers/visibility; the
-// occlusion-driven compositor suspension needs these process-level switches.
-app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
-app.commandLine.appendSwitch('disable-renderer-backgrounding')
+// per-window backgroundThrottling:false flag only covers timers/visibility; the
+// occlusion-driven compositor suspension needs these process-level switches on
+// the production macOS CAMetalLayer path. Windows keeps Chromium's defaults.
+if (shouldDisableOcclusionThrottling(process.platform, electronBackgroundPolicy)) {
+  app.commandLine.appendSwitch('disable-backgrounding-occluded-windows')
+  app.commandLine.appendSwitch('disable-renderer-backgrounding')
+}
 const packagedSmokeHarnessCapability =
   app.isPackaged && process.env.VIDEORC_PACKAGED_SMOKE_TEST === '1'
     ? process.env.VIDEORC_SMOKE_COMMAND_CAPABILITY
     : undefined
+const windowsLiveAudioSmokeMode = process.env.VIDEORC_WINDOWS_LIVE_AUDIO_SMOKE === '1'
 const smokeCommandServerEnabled = smokeCommandServerAllowed(
   process.env.VIDEORC_SMOKE_PREVIEW_MOTION === '1' ||
-    process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1',
+    process.env.VIDEORC_SMOKE_COMMAND_SERVER === '1' ||
+    windowsLiveAudioSmokeMode,
   app.isPackaged,
   packagedSmokeHarnessCapability
 )
@@ -679,7 +1037,8 @@ function nativeSurfaceOwnsPlacement(
     status,
     driverKind: nativePreviewRealSurfaceDriverKind,
     recentPresent:
-      Date.now() - nativePreviewNativePresentConfirmedAtMs < NATIVE_PREVIEW_NATIVE_AUTHORITY_MS
+      Date.now() - nativePreviewNativePresentConfirmedAtMs < NATIVE_PREVIEW_NATIVE_AUTHORITY_MS,
+    generation: previewWindowSurfaceGeneration()
   })
 }
 
@@ -706,16 +1065,24 @@ let firstFrameLastPresentedFrameId: number | null = null
 // states distinct makes the first hide update observable without a magic
 // string sentinel (and keeps this source file valid text).
 let firstFrameLastHint: string | null | undefined
-let firstFrameTickInFlight = false
+const firstFrameTickOwnership = new WatchdogTickOwnership()
+const firstFrameProofRendererReads = new ProofWatchdogRendererReadSingleFlight<Record<
+  string,
+  unknown
+> | null>()
+let firstFrameWatchdogRun: WatchdogRunToken | null = null
 // After the first frame lands the watchdog does NOT stop: it flips into the
 // presenting watch (plan 021 F1) and keeps assessing the same chain so a
 // mid-session stall self-heals instead of leaving the placeholder forever.
 let firstFrameWatchdogMode: 'first-frame' | 'presenting-watch' = 'first-frame'
 let presentingWatch: PresentingWatchState = emptyPresentingWatch()
 let presentingWatchLastKind: PresentingAssessment['kind'] = 'presenting'
+let nativePreviewProofPendingStartedAtMs: number | null = null
 
 function startFirstFrameWatchdog(): void {
   stopFirstFrameWatchdog()
+  const watchdogRun = firstFrameTickOwnership.startRun()
+  firstFrameWatchdogRun = watchdogRun
   firstFrameWatchdogStartedAtMs = Date.now()
   firstFrameLedger = emptyFirstFrameLedger()
   firstFrameLastFramesRendered = null
@@ -726,16 +1093,41 @@ function startFirstFrameWatchdog(): void {
   presentingWatchLastKind = 'presenting'
   setFirstFrameStatus('pending', 'Preview surface is starting.')
   firstFrameWatchdogTimer = setInterval(() => {
-    void runFirstFrameWatchdogTick()
+    void runFirstFrameWatchdogTick(watchdogRun)
   }, FIRST_FRAME_TICK_MS)
 }
 
-function stopFirstFrameWatchdog(): void {
+function startWindowsProofFrameWatchdog(): void {
+  stopFirstFrameWatchdog()
+  const watchdogRun = firstFrameTickOwnership.startRun()
+  firstFrameWatchdogRun = watchdogRun
+  firstFrameWatchdogStartedAtMs = Date.now()
+  firstFrameLastFramesRendered = null
+  firstFrameLastHint = undefined
+  nativePreviewProofPendingStartedAtMs = firstFrameWatchdogStartedAtMs
+  const reason = 'Waiting for the Windows preview surface to deliver pixels.'
+  setFirstFrameStatus('pending', reason)
+  updatePreviewWindowWaitDetail(reason)
+  firstFrameWatchdogTimer = setInterval(() => {
+    void runWindowsProofFrameWatchdogTick(watchdogRun)
+  }, FIRST_FRAME_TICK_MS)
+}
+
+function stopFirstFrameWatchdog(expectedRun?: WatchdogRunToken): void {
+  if (expectedRun && firstFrameWatchdogRun !== expectedRun) {
+    return
+  }
   if (firstFrameWatchdogTimer) {
     clearInterval(firstFrameWatchdogTimer)
     firstFrameWatchdogTimer = null
   }
-  firstFrameTickInFlight = false
+  const watchdogRun = firstFrameWatchdogRun
+  firstFrameWatchdogRun = null
+  if (watchdogRun) {
+    firstFrameTickOwnership.stopRun(watchdogRun)
+  }
+  firstFrameProofRendererReads.retire()
+  nativePreviewProofPendingStartedAtMs = null
 }
 
 function setFirstFrameStatus(
@@ -794,40 +1186,202 @@ async function fetchFirstFrameCompositorStatus(): Promise<CompositorStatus | nul
   }
 }
 
-async function runFirstFrameWatchdogTick(): Promise<void> {
-  if (firstFrameTickInFlight) {
+function observeFirstFrameCompositorProgress(compositor: CompositorStatus | null): boolean {
+  const framesRendered = compositor?.framesRendered ?? null
+  const framesAdvancing =
+    framesRendered != null &&
+    firstFrameLastFramesRendered != null &&
+    framesRendered > firstFrameLastFramesRendered
+  if (framesRendered != null) {
+    firstFrameLastFramesRendered = framesRendered
+  }
+  return framesAdvancing
+}
+
+function nativePreviewProofSourceExpected(): boolean {
+  return Boolean(
+    nativePreviewSurfaceScene?.sources.some(
+      (source) =>
+        source.visible &&
+        (source.kind === 'screen' || source.kind === 'window' || source.kind === 'camera')
+    )
+  )
+}
+
+function retireStalledNativePreviewMainPump(framesAdvancing: boolean): void {
+  const mainPumpSocket = backendEventSocket
+  const mainPumpConnection = backendAdminConnection
+  if (
+    !mainPumpSocket ||
+    !mainPumpConnection ||
+    !mainPumpFrameDeliveryStalled({
+      active: nativePreviewMainPumpActive,
+      surfaceLive: nativePreviewSurfaceStatus.state === 'live',
+      compositorFramesAdvancing: framesAdvancing,
+      activatedAtMs: nativePreviewMainPumpActivatedAtMs,
+      lastPresentDrivingEventAtMs: nativePreviewMainLastPresentDrivingEventAtMs,
+      nowMs: Date.now()
+    })
+  ) {
     return
   }
-  firstFrameTickInFlight = true
+  retireBackendEventSocket(
+    mainPumpSocket,
+    mainPumpConnection,
+    `presentation event heartbeat stalled for ${Math.max(0, Date.now() - Math.max(nativePreviewMainPumpActivatedAtMs, nativePreviewMainLastPresentDrivingEventAtMs))}ms while compositor frames advanced`
+  )
+}
+
+async function runWindowsProofFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise<void> {
+  const tick = firstFrameTickOwnership.tryAcquire(watchdogRun)
+  if (!tick) {
+    return
+  }
   try {
     const window = previewWindow
     if (!window || window.isDestroyed() || appIsQuitting) {
-      stopFirstFrameWatchdog()
+      stopFirstFrameWatchdog(watchdogRun)
+      return
+    }
+    const compositor = await fetchFirstFrameCompositorStatus()
+    if (
+      !firstFrameTickOwnership.isCurrent(tick) ||
+      firstFrameWatchdogRun !== watchdogRun ||
+      firstFrameWatchdogTimer == null ||
+      previewWindow !== window ||
+      window.isDestroyed()
+    ) {
       return
     }
 
-    const watchdogGeneration = firstFrameWatchdogStartedAtMs
+    const framePollingSuppressed = nativePreviewProofPollingIsSuppressed()
+    const intentionallyHidden = nativePreviewSurfaceStatus.bounds?.visible === false
+    const proofWindow = nativePreviewSurfaceWindow
+    const proofWindowCanPaint = Boolean(
+      proofWindow &&
+      !proofWindow.isDestroyed() &&
+      !proofWindow.webContents.isDestroyed() &&
+      proofWindow.isVisible()
+    )
+    const metrics =
+      !proofWatchdogRendererReadAllowed({
+        framePollingSuppressed,
+        intentionallyHidden,
+        proofWindowVisible: proofWindowCanPaint
+      }) || !proofWindow
+        ? null
+        : await firstFrameProofRendererReads.read(
+            { watchdogRun, webContents: proofWindow.webContents },
+            () => readNativePreviewSurfaceMetricsAfterPaint(proofWindow)
+          )
+    if (
+      !firstFrameTickOwnership.isCurrent(tick) ||
+      firstFrameWatchdogRun !== watchdogRun ||
+      firstFrameWatchdogTimer == null ||
+      previewWindow !== window ||
+      window.isDestroyed() ||
+      (proofWindow != null &&
+        (nativePreviewSurfaceWindow !== proofWindow ||
+          proofWindow.isDestroyed() ||
+          proofWindow.webContents.isDestroyed()))
+    ) {
+      return
+    }
+
+    retireStalledNativePreviewMainPump(observeFirstFrameCompositorProgress(compositor))
+    if (framePollingSuppressed || intentionallyHidden) {
+      nativePreviewProofPendingStartedAtMs = null
+      return
+    }
+
+    const nowMs = Date.now()
+    const pendingStartedAtMs = nativePreviewProofPendingStartedAtMs ?? nowMs
+    nativePreviewProofPendingStartedAtMs = pendingStartedAtMs
+    const presentedFrameId = finiteMetric(metrics?.presentedCompositorFrame)
+    const sourceFrameAgeMs = finiteMetric(metrics?.sourceFrameAgeMs)
+    const sourceFrameHistoryComplete = metrics?.sourceFrameHistoryComplete === true
+    const assessment = assessProofPresentationWatch({
+      platform: process.platform,
+      framePollingSuppressed,
+      surfaceReady: (presentedFrameId ?? 0) > 0,
+      sourceExpected: nativePreviewProofSourceExpected(),
+      sourcePollerCount: finiteMetric(metrics?.sourcePollerCount) ?? 0,
+      freshSourceLayerCount: finiteMetric(metrics?.freshSourceLayerCount) ?? 0,
+      sourceFrameHistoryComplete,
+      sourceFrameAgeMs,
+      pendingElapsedMs: Math.max(0, nowMs - pendingStartedAtMs)
+    })
+
+    if (assessment === 'paused') {
+      nativePreviewProofPendingStartedAtMs = null
+      return
+    }
+    if (assessment === 'pending') {
+      if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
+        const reason = 'Waiting for the Windows preview surface to deliver pixels.'
+        setFirstFrameStatus('pending', reason)
+        updatePreviewWindowWaitDetail(reason)
+      }
+    } else if (assessment === 'met' || assessment === 'not-applicable') {
+      nativePreviewProofPendingStartedAtMs = null
+      if (nativePreviewSurfaceStatus.firstFrameContract !== 'met') {
+        const reason =
+          assessment === 'met'
+            ? 'Windows preview pixels are live.'
+            : 'Windows preview compositor output is live.'
+        setFirstFrameStatus('met', reason)
+        updatePreviewWindowWaitDetail(null)
+        logBackend('info', '[proof-preview] presentation watchdog is live')
+      }
+    } else if (nativePreviewSurfaceStatus.firstFrameContract !== 'fallback') {
+      const pendingElapsedMs = Math.max(0, nowMs - pendingStartedAtMs)
+      const reason = proofPresentationFallbackReason({
+        sourceFrameHistoryComplete,
+        sourceFrameAgeMs,
+        pendingElapsedMs
+      })
+      setFirstFrameStatus('fallback', reason)
+      updatePreviewWindowWaitDetail(reason)
+      logBackend('warn', `[proof-preview] ${reason}`)
+    }
+
+    syncPreviewSupervisorSurface(
+      nativePreviewSurfaceStatus,
+      previewWindowSurfaceGeneration(),
+      nativePreviewSurfaceStatus.message ?? 'Electron proof preview surface.'
+    )
+  } finally {
+    firstFrameTickOwnership.release(tick)
+  }
+}
+
+async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise<void> {
+  const tick = firstFrameTickOwnership.tryAcquire(watchdogRun)
+  if (!tick) {
+    return
+  }
+  try {
+    const window = previewWindow
+    if (!window || window.isDestroyed() || appIsQuitting) {
+      stopFirstFrameWatchdog(watchdogRun)
+      return
+    }
+
     const compositor = await fetchFirstFrameCompositorStatus()
     // The window may have closed — or the watchdog restarted for a new
     // surface — while the status fetch was in flight. Assessing (and above
     // all HEALING) after teardown respawns the helper post-destroy, which the
     // lifecycle probe's rapid toggle cycles catch.
     if (
+      !firstFrameTickOwnership.isCurrent(tick) ||
+      firstFrameWatchdogRun !== watchdogRun ||
       firstFrameWatchdogTimer == null ||
-      watchdogGeneration !== firstFrameWatchdogStartedAtMs ||
       previewWindow !== window ||
       window.isDestroyed()
     ) {
       return
     }
-    const framesRendered = compositor?.framesRendered ?? null
-    const framesAdvancing =
-      framesRendered != null &&
-      firstFrameLastFramesRendered != null &&
-      framesRendered > firstFrameLastFramesRendered
-    if (framesRendered != null) {
-      firstFrameLastFramesRendered = framesRendered
-    }
+    const framesAdvancing = observeFirstFrameCompositorProgress(compositor)
     const presentedFrameId = nativePreviewSurfaceStatus.presentedFrameId ?? null
     const presentationAdvancing =
       presentedFrameId != null &&
@@ -836,26 +1390,7 @@ async function runFirstFrameWatchdogTick(): Promise<void> {
     if (presentedFrameId != null) {
       firstFrameLastPresentedFrameId = presentedFrameId
     }
-    const mainPumpSocket = backendEventSocket
-    const mainPumpConnection = backendAdminConnection
-    if (
-      mainPumpSocket &&
-      mainPumpConnection &&
-      mainPumpFrameDeliveryStalled({
-        active: nativePreviewMainPumpActive,
-        surfaceLive: nativePreviewSurfaceStatus.state === 'live',
-        compositorFramesAdvancing: framesAdvancing,
-        activatedAtMs: nativePreviewMainPumpActivatedAtMs,
-        lastPresentDrivingEventAtMs: nativePreviewMainLastPresentDrivingEventAtMs,
-        nowMs: Date.now()
-      })
-    ) {
-      retireBackendEventSocket(
-        mainPumpSocket,
-        mainPumpConnection,
-        `presentation event heartbeat stalled for ${Math.max(0, Date.now() - Math.max(nativePreviewMainPumpActivatedAtMs, nativePreviewMainLastPresentDrivingEventAtMs))}ms while compositor frames advanced`
-      )
-    }
+    retireStalledNativePreviewMainPump(framesAdvancing)
 
     const snapshot: FirstFrameSnapshot = {
       elapsedMs: Date.now() - firstFrameWatchdogStartedAtMs,
@@ -908,11 +1443,11 @@ async function runFirstFrameWatchdogTick(): Promise<void> {
         setFirstFrameStatus('fallback', assessment.reason)
         updatePreviewWindowWaitDetail(`Preview could not start natively: ${assessment.reason}`)
         logBackend('warn', `[first-frame] contract failed: ${assessment.reason}`)
-        stopFirstFrameWatchdog()
+        stopFirstFrameWatchdog(watchdogRun)
         return
     }
   } finally {
-    firstFrameTickInFlight = false
+    firstFrameTickOwnership.release(tick)
   }
 }
 
@@ -1114,9 +1649,14 @@ function createWindow(): void {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('main'),
-      backgroundThrottling: false
+      backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(mainWindow, 'main', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Main window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(mainWindow, 'main')
   registerRendererWindow(mainWindow, 'main')
 
   let mainWindowShown = false
@@ -1142,12 +1682,31 @@ function createWindow(): void {
     mainWindow.loadFile(rendererPath)
   }
 
+  // Deduped so a held key's repeat storm does not flood the renderer.
+  let lastPublishedShortcutModifier = false
+  const publishShortcutModifier = (held: boolean): void => {
+    if (held === lastPublishedShortcutModifier) {
+      return
+    }
+    lastPublishedShortcutModifier = held
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      sendElectronEvent(mainWindow.webContents, 'shortcut:modifier', held)
+    }
+  }
+
   // Page-navigation shortcuts must be caught here, not in the renderer:
   // Chromium reserves ⌘1–⌘9 (tab switching) and ⌘0 (zoom) and never delivers
   // them to the page's keydown, so a document listener silently misses them.
   // before-input-event runs ahead of that handling; we preventDefault and
   // forward the raw key to the renderer, which owns the key→tab mapping.
   mainWindow.webContents.on('before-input-event', (event, input) => {
+    // Modifier state is published from HERE because here is the only place it
+    // can be observed. The renderer never sees a ⌘+digit chord (we swallow it
+    // below), and in practice it never sees the keyup that ends one either —
+    // which left the sidebar's shortcut chips stuck on after every ⌘1–⌘9.
+    // before-input-event still receives every keyUp, so main stays truthful.
+    publishShortcutModifier(input.meta || input.control)
+
     if (input.type !== 'keyDown' || input.alt || input.shift) {
       return
     }
@@ -1161,6 +1720,35 @@ function createWindow(): void {
         sendElectronEvent(mainWindow.webContents, 'shortcut:navigate', input.key)
       }
     }
+  })
+
+  // Focus leaving the window means the modifier can be released without any
+  // event ever reaching us (⌘Tab is exactly that).
+  mainWindow.on('blur', () => publishShortcutModifier(false))
+
+  // The renderer cannot detect minimise/hide on its own: this window disables
+  // backgroundThrottling (and macOS occlusion backgrounding), which also
+  // freezes the Page Visibility API — document.visibilityState stays
+  // 'visible' and no visibilitychange fires. Anything that must release
+  // hardware when the window goes away (the microphone meter) depends on
+  // this signal, so publish it from the side that knows.
+  let lastPublishedWindowVisible: boolean | null = null
+  const publishWindowVisible = (visible: boolean): void => {
+    if (visible === lastPublishedWindowVisible) {
+      return
+    }
+    lastPublishedWindowVisible = visible
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      sendElectronEvent(mainWindow.webContents, 'window:visible', visible)
+    }
+  }
+  mainWindow.on('show', () => publishWindowVisible(true))
+  mainWindow.on('restore', () => publishWindowVisible(true))
+  mainWindow.on('maximize', () => publishWindowVisible(true))
+  mainWindow.on('hide', () => publishWindowVisible(false))
+  mainWindow.on('minimize', () => publishWindowVisible(false))
+  mainWindow.webContents.on('did-finish-load', () => {
+    publishWindowVisible(Boolean(mainWindow?.isVisible() && !mainWindow.isMinimized()))
   })
 
   mainWindow.on('closed', () => {
@@ -1553,6 +2141,7 @@ function notesWindowState(message?: string): NotesWindowState {
     windowId: notesWindowGlobalId(),
     alwaysOnTop: notesWindowAlwaysOnTop,
     protected: notesWindowContentProtected,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: notesWindowFeatureEnabled,
     message:
       message ??
@@ -1642,6 +2231,15 @@ function notesWindowHtml(document: NotesDocument): string {
       font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       overflow: hidden; user-select: none; -webkit-user-select: none; }
     body { display: flex; flex-direction: column; }
+    /* Same scrollbar recipe as the app (styles.css): no track, a barely-there
+       thumb inset inside its hit area. This window is a data-URL document, so
+       it cannot inherit the app stylesheet — keep the two in step by hand. */
+    ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
+    ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
+    ::-webkit-scrollbar-button { display: none; }
+    ::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.12); border: 3px solid transparent;
+      background-clip: content-box; border-radius: 999px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
+    ::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.22); }
     .drag-bar { height: 34px; display: flex; align-items: center; gap: 10px;
       padding: 0 12px 0 78px; box-sizing: border-box; background: ${DARK_WINDOW_PALETTE.panel};
       border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline}; -webkit-app-region: drag; }
@@ -1882,7 +2480,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('notes'),
-      backgroundThrottling: false
+      backgroundThrottling: backgroundThrottlingFor('notes', electronBackgroundPolicy)
     }
   })
   registerRendererWindow(window, 'notes')
@@ -1891,13 +2489,11 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   notesWindow = window
   attachAuxWindowShortcuts(window)
   notesWindowAlwaysOnTop = notesWindowAlwaysOnTopPreference(prefs)
-  notesWindowContentProtected = false
-  try {
-    window.setContentProtection(true)
-    notesWindowContentProtected = true
-  } catch (error) {
-    safeConsole.warn('Notes window content protection could not be enabled:', error)
-  }
+  notesWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'notes', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Notes window content protection could not be enabled: ${reason}`)
+  }).protected
+  installCaptureProtectionSmokeMarker(window, 'notes')
   if (notesWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
   }
@@ -2074,6 +2670,7 @@ function commentsWindowState(message?: string): CommentsWindowState {
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
     protected: open ? commentsWindowContentProtected : false,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: commentsWindowFeatureEnabled,
     message:
       message ??
@@ -2084,9 +2681,10 @@ function commentsWindowState(message?: string): CommentsWindowState {
 }
 
 function currentCommentsView(): CommentsViewSnapshot | null {
-  if (commentsViewMode.kind === 'live') {
+  const mode = commentsViewSelection.current()
+  if (mode.kind === 'live') {
     return {
-      mode: commentsViewMode,
+      mode,
       snapshot: latestLiveCommentsSnapshot ?? {
         providers: [],
         messages: [],
@@ -2096,20 +2694,14 @@ function currentCommentsView(): CommentsViewSnapshot | null {
       latestSendOperation: latestLiveCommentsSendOperation
     }
   }
-  const snapshot = commentsHistorySnapshots.get(commentsViewMode.sessionId) ?? null
-  return snapshot
-    ? {
-        mode: commentsViewMode,
-        snapshot,
-        latestSendOperation: commentsHistorySendOperations.get(commentsViewMode.sessionId)
-      }
-    : null
+  const cached = commentsHistoryCache.get(mode.sessionId)
+  return cached ? { ...cached, mode } : null
 }
 
 function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId is string {
   if (
     !liveCommentsCommandAllowed({
-      mode: commentsViewMode,
+      mode: commentsViewSelection.current(),
       liveSessionId: latestLiveCommentsSnapshot?.sessionId,
       commandSessionId: typeof sessionId === 'string' ? sessionId : undefined
     })
@@ -2139,18 +2731,18 @@ function cacheCommentsView(view: CommentsViewSnapshot): void {
         : undefined
     }
   } else {
-    commentsHistorySnapshots.set(view.mode.sessionId, view.snapshot)
-    if (view.latestSendOperation) {
-      commentsHistorySendOperations.set(
-        view.mode.sessionId,
-        reconcileCommentsSendOperation(
-          commentsHistorySendOperations.get(view.mode.sessionId),
-          view.latestSendOperation
-        )
-      )
-    } else {
-      commentsHistorySendOperations.delete(view.mode.sessionId)
-    }
+    const existing = commentsHistoryCache.peek(view.mode.sessionId)
+    const selectedMode = commentsViewSelection.current()
+    commentsHistoryCache.put(
+      {
+        ...view,
+        mode: view.mode,
+        latestSendOperation: view.latestSendOperation
+          ? reconcileCommentsSendOperation(existing?.latestSendOperation, view.latestSendOperation)
+          : undefined
+      },
+      selectedMode.kind === 'history' ? selectedMode.sessionId : undefined
+    )
   }
 }
 
@@ -2162,14 +2754,58 @@ function cacheCommentsSendResult(operation: CommentsSendOperation): 'live' | 'hi
     )
     return 'live'
   }
-  commentsHistorySendOperations.set(
-    operation.sessionId,
-    reconcileCommentsSendOperation(
-      commentsHistorySendOperations.get(operation.sessionId),
-      operation
+  const history = commentsHistoryCache.peek(operation.sessionId)
+  if (history) {
+    const selectedMode = commentsViewSelection.current()
+    commentsHistoryCache.put(
+      {
+        ...history,
+        latestSendOperation: reconcileCommentsSendOperation(history.latestSendOperation, operation)
+      },
+      selectedMode.kind === 'history' ? selectedMode.sessionId : undefined
     )
-  )
+  }
   return 'history'
+}
+
+async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: 'history' }>) {
+  const maxMessages = 500
+  let messages: LiveChatMessage[] = []
+  let cursor: string | undefined
+  do {
+    const page = await requestBackendAdmin<SessionCommentsPage>('sessions.comments.list', {
+      sessionId: mode.sessionId,
+      cursor,
+      limit: Math.min(200, maxMessages - messages.length)
+    })
+    messages = [...page.messages, ...messages].slice(-maxMessages)
+    cursor = page.nextCursor
+  } while (cursor && messages.length < maxMessages)
+
+  const latestSendOperation = await requestBackendAdmin<CommentsSendOperation | null>(
+    'liveChat.sendOperations.latest',
+    { sessionId: mode.sessionId }
+  ).catch(() => null)
+  return {
+    mode,
+    snapshot: {
+      sessionId: mode.sessionId,
+      providers: [],
+      messages,
+      unreadCount: messages.length,
+      updatedAt: new Date().toISOString()
+    },
+    latestSendOperation: latestSendOperation ?? undefined
+  } satisfies HistoryCommentsView
+}
+
+async function selectCommentsViewMode(mode: CommentsViewMode): Promise<boolean> {
+  return prepareAndSelectCommentsView(
+    commentsViewSelection,
+    commentsHistoryCache,
+    mode,
+    loadCommentsHistoryView
+  )
 }
 
 function emitCommentsView(): void {
@@ -2183,6 +2819,17 @@ function emitCommentHighlightState(state: CommentHighlightState): void {
   latestCommentHighlightState = state
   if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
     sendElectronEvent(commentsWindow.webContents, 'comments-window:highlight-state', state)
+  }
+}
+
+// Co-host relay (Live Chat Co-host S2): the MAIN renderer owns the backend
+// socket, the entitlement snapshot and the renderer-local cloud-AI consent, so
+// it resolves the whole segment and pushes ONE value; the Comments window seeds
+// from the cache and follows pushes, exactly like the highlight relay.
+function emitCohostWindowState(state: CohostWindowState): void {
+  latestCohostWindowState = state
+  if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:cohost', state)
   }
 }
 
@@ -2388,20 +3035,18 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('comments'),
-      backgroundThrottling: false
+      backgroundThrottling: backgroundThrottlingFor('comments', electronBackgroundPolicy)
     }
   })
   registerRendererWindow(window, 'comments')
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
-  commentsWindowContentProtected = false
-  try {
-    window.setContentProtection(true)
-    commentsWindowContentProtected = true
-  } catch (error) {
-    safeConsole.warn('Comments window content protection could not be enabled:', error)
-  }
+  commentsWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'comments', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Comments window content protection could not be enabled: ${reason}`)
+  }).protected
+  installCaptureProtectionSmokeMarker(window, 'comments')
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
   if (commentsWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
@@ -2547,6 +3192,7 @@ function captionsWindowState(message?: string): CaptionsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: captionsWindowGlobalId(),
     alwaysOnTop: captionsWindowAlwaysOnTop,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: captionsWindowFeatureEnabled,
     message:
       message ??
@@ -2609,9 +3255,14 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
       ...rendererWindowWebPreferences('captions'),
-      backgroundThrottling: false
+      backgroundThrottling: backgroundThrottlingFor('captions', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(window, 'captions', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Captions window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(window, 'captions')
   registerRendererWindow(window, 'captions')
   captionsWindowClosing = false
   captionsWindow = window
@@ -2725,7 +3376,9 @@ function previewSurfacePresentationAllowed(generation = previewWindowSurfaceGene
 type PreviewWindowState = {
   open: boolean
   visible: boolean
+  bounds: Electron.Rectangle | null
   contentBounds: Electron.Rectangle | null
+  captureProtectionMarkerInstalled: boolean
   scaleFactor: number
   // Primary display height: the native helper needs it to flip top-left screen
   // coordinates into AppKit's bottom-left-origin global space.
@@ -2750,7 +3403,9 @@ function previewWindowState(): PreviewWindowState {
   return {
     open,
     visible: open ? window!.isVisible() && !window!.isMinimized() : false,
+    bounds: open ? window!.getBounds() : null,
     contentBounds,
+    captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     scaleFactor: contentBounds ? screen.getDisplayMatching(contentBounds).scaleFactor : 1,
     screenHeight: screen.getPrimaryDisplay().bounds.height,
     alwaysOnTop: previewWindowAlwaysOnTop,
@@ -2856,6 +3511,9 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
     scaleFactor: state.scaleFactor,
     screenHeight: state.screenHeight,
     visible,
+    // Docked previews clip to the studio slot's rounded panel (--radius-panel
+    // = 18pt); the floating window stays square. CALayer radii are in points.
+    cornerRadius: state.mode === 'docked' ? 18 : 0,
     ...(orderAboveWindowId === undefined
       ? {}
       : {
@@ -3010,6 +3668,19 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   }
 
   previewSupervisor.openWindow()
+  nativePreviewBackendD3d11TrustedGeneration = null
+  nativePreviewBackendD3d11LastStatus = null
+  nativePreviewSurfaceStatus = reconcileWindowsD3d11PresenterStatus(
+    nativePreviewSurfaceStatus,
+    null,
+    {
+      platform: process.platform,
+      previewWindowOpen: previewWindowIsOpenForSurface(),
+      proofSurfaceAvailable: nativePreviewSurfaceWindowExists(),
+      generation: previewWindowSurfaceGeneration(),
+      trustedGeneration: null
+    }
+  )
   const prefs = loadPreviewWindowPrefs()
   const mode = currentPreviewWindowMode()
   const docked = mode === 'docked'
@@ -3038,11 +3709,24 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       sandbox: true,
       contextIsolation: true,
       nodeIntegration: false,
-      backgroundThrottling: false
+      backgroundThrottling: backgroundThrottlingFor('preview', electronBackgroundPolicy)
     }
   })
+  applyVideorcWindowCaptureProtection(window, 'preview', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Preview window content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(window, 'preview')
   previewWindowClosing = false
   previewWindow = window
+  if (process.platform === 'win32') {
+    // A new BrowserWindow generation starts in proof mode until its fresh HWND
+    // has been accepted and a live D3D11 present is reported. Never inherit
+    // proof suppression or placement authority from the retired window.
+    nativePreviewNativeOwnsProofPollingSuppression = false
+    nativePreviewNativeFailureFallbackActive = true
+    clearNativePreviewNativePlacementAuthority()
+  }
   previewWindowFloatingFrame = frame
   previewSupervisor.windowOpened(window.isVisible() && !window.isMinimized())
   previewWindowAlwaysOnTop = prefs.alwaysOnTop === true
@@ -3118,9 +3802,20 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       // Host teardown happens here, renderer-independent (the renderer's own
       // teardown adds the backend session destroy when its state event lands).
       nativePreviewPlacementQueue.cancelPending()
-      void setNativePreviewSurfaceFramePollingSuppressed(true)
-      void runNativePreviewSurfaceMutation(() =>
-        applyNativePreviewHostCommands([{ kind: 'destroy' }])
+      // A hidden/throttled Windows proof renderer can be inside a webContents
+      // call owned by the serialized placement mutation. Destroy its window
+      // immediately so that call settles and the queued native-host destroy
+      // can acquire the mutation queue. Native driver teardown remains ordered
+      // below; this only retires Electron's proof BrowserWindow.
+      if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
+        nativePreviewSurfaceWindow.destroy()
+      }
+      void setNativePreviewSurfaceFramePollingSuppressed(
+        nativePreviewLifecycleFramePollingSuppressed(false)
+      )
+      void runNativePreviewSurfaceMutation(
+        () => applyNativePreviewHostCommands([{ kind: 'destroy' }]),
+        'close-teardown'
       ).catch((error) => {
         safeConsole.error('Preview window close teardown failed:', error)
       })
@@ -3143,7 +3838,9 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     setDockedPreviewChromeClass(window, true)
     engageDockedPreviewPlacement(window)
   }
-  void setNativePreviewSurfaceFramePollingSuppressed(false)
+  void setNativePreviewSurfaceFramePollingSuppressed(
+    nativePreviewLifecycleFramePollingSuppressed(true)
+  )
   pushPreviewWindowPlacement()
   emitPreviewWindowState()
   // The first-frame watchdog proves and heals the macOS CAMetalLayer chain.
@@ -3151,11 +3848,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   // guarantees false resets because an IOSurface can never appear.
   if (nativePreviewFirstFrameWatchdogEnabled(process.platform)) {
     startFirstFrameWatchdog()
+  } else if (nativePreviewProofWatchdogEnabled(process.platform)) {
+    startWindowsProofFrameWatchdog()
   } else {
     stopFirstFrameWatchdog()
-    firstFrameLastHint = undefined
-    setFirstFrameStatus('pending', 'Waiting for the Windows preview surface to deliver pixels.')
-    updatePreviewWindowWaitDetail('Waiting for the Windows preview surface to deliver pixels.')
   }
   return previewWindowState()
 }
@@ -3863,6 +4559,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         let frames = 0;
         let blankFrames = 0;
         let liveLayerCount = 0;
+        let proofTransportRateBaseline = null;
         let proofMeasurementEpoch = createNativePreviewProofMeasurementEpoch(
           performance.now(),
           blankFrames,
@@ -4046,6 +4743,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             const abortController = new AbortController();
             poller.abortController = abortController;
             try {
+              markProofPollerRequestStarted(poller);
               const response = await fetch(frameRequestUrl(url, poller), {
                 cache: 'no-store',
                 signal: abortController.signal
@@ -4056,6 +4754,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               const cursor = responseFrameCursor(response);
               if (response.status === 204) {
                 markProofPollerTransportSuccess(poller, performance.now());
+                markProofPollerNotModified(poller);
                 if (cursor) {
                   poller.generation = cursor.generation;
                   poller.sequence = cursor.sequence;
@@ -4095,6 +4794,13 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
                 throw new Error('Preview frame decoded without any visible pixels.');
               }
               presentProofPollerFrame(poller, objectUrl);
+              markProofPollerFrameDecoded(
+                poller,
+                blob.size,
+                next.naturalWidth,
+                next.naturalHeight,
+                performance.now()
+              );
               if (cursor) {
                 poller.generation = cursor.generation;
                 poller.sequence = cursor.sequence;
@@ -4352,6 +5058,16 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             const healthySourceTransportCount = [...pollers.values()].filter((poller) =>
               proofPollerTransportIsFresh(poller, measuredAt, sourceFreshnessBudgetMs)
             ).length;
+            const transportTotals = proofPollerTransportTotals(pollers);
+            const transportBaseline = proofTransportRateBaseline;
+            proofTransportRateBaseline = { at: measuredAt, ...transportTotals };
+            const transportElapsedMs = transportBaseline
+              ? Math.max(1, measuredAt - transportBaseline.at)
+              : null;
+            const transportRate = (current, previous) =>
+              transportElapsedMs === null
+                ? null
+                : Math.max(0, current - previous) / transportElapsedMs * 1000;
             return {
               frames,
               measuredFps: measurement.measuredFps,
@@ -4372,6 +5088,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               compositorSources: compositorStatus?.sources ?? [],
               layerCount: layers.size,
               sourcePollerCount: pollers.size,
+              sourceFrameHistoryComplete: proofPollersHaveCompleteFrameHistory(pollers),
               liveLayerCount,
               freshSourceLayerCount,
               sourceFrames: Object.fromEntries(sourceFrames),
@@ -4384,6 +5101,20 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
               framePollingSuppressed,
               framePollingIntervalMs,
               framePollingMaxWidth,
+              proofTransportRequestCount: transportTotals.requestCount,
+              proofTransportNotModifiedCount: transportTotals.notModifiedCount,
+              proofTransportBytesReceived: transportTotals.bytesReceived,
+              proofTransportDecodedFrames: transportTotals.decodedFrames,
+              proofTransportRequestsPerSecond: transportBaseline
+                ? transportRate(transportTotals.requestCount, transportBaseline.requestCount)
+                : null,
+              proofTransportBytesPerSecond: transportBaseline
+                ? transportRate(transportTotals.bytesReceived, transportBaseline.bytesReceived)
+                : null,
+              proofTransportDecodedFramesPerSecond: transportBaseline
+                ? transportRate(transportTotals.decodedFrames, transportBaseline.decodedFrames)
+                : null,
+              proofSourceDimensions: transportTotals.sourceDimensions,
               proofSurfaceSuspended,
               sourcePixelsPresent: liveLayerCount > 0,
               blankFrames: measurement.blankFrames,
@@ -4457,11 +5188,20 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
         sandbox: true,
         contextIsolation: true,
         nodeIntegration: false,
-        backgroundThrottling: true
+        backgroundThrottling: backgroundThrottlingFor('proof-surface', electronBackgroundPolicy)
       }
     })
+    applyVideorcWindowCaptureProtection(surfaceWindow, 'proof-surface', {
+      onFailure: (reason) =>
+        safeConsole.warn(`Proof-surface content protection could not be enabled: ${reason}`)
+    })
+    installCaptureProtectionSmokeMarker(surfaceWindow, 'proof-surface')
     nativePreviewSurfaceWindow = surfaceWindow
     surfaceWindow.setIgnoreMouseEvents(true)
+    // Geometry changes re-derive the DPR-aware frame width cap; moving across
+    // displays changes the scale factor even at constant logical size.
+    surfaceWindow.on('resize', scheduleNativePreviewProofPollingProfileResync)
+    surfaceWindow.on('move', scheduleNativePreviewProofPollingProfileResync)
     surfaceWindow.on('closed', () => {
       if (nativePreviewSurfaceWindow === surfaceWindow) {
         nativePreviewSurfaceWindow = null
@@ -4653,18 +5393,11 @@ async function createNativePreviewSurface(
     updatedAt: new Date().toISOString(),
     message: preserveNativeSurface ? nativePreviewSurfaceStatus.message : fallbackMessage
   }
-  if (preserveNativeSurface) {
-    previewSupervisor.surfaceLive({
-      generation,
-      transport: nativePreviewSurfaceStatus.transport,
-      backing: nativePreviewSurfaceStatus.backing
-    })
-  } else {
-    previewSupervisor.surfaceFallback(
-      generation,
-      nativePreviewSurfaceStatus.message ?? 'Electron proof preview surface.'
-    )
-  }
+  syncPreviewSupervisorSurface(
+    nativePreviewSurfaceStatus,
+    generation,
+    nativePreviewSurfaceStatus.message ?? 'Electron proof preview surface.'
+  )
   return nativePreviewSurfaceStatus
 }
 
@@ -4729,6 +5462,17 @@ async function updateNativePreviewSurfaceBounds(
 }
 
 async function showNativePreviewProofSurfaceIfVisible(): Promise<void> {
+  if (
+    process.platform === 'win32' &&
+    isCanonicalWindowsD3d11PreviewStatus(
+      nativePreviewSurfaceStatus,
+      previewWindowSurfaceGeneration()
+    )
+  ) {
+    nativePreviewNativeOwnsProofPollingSuppression = true
+    await syncNativePreviewProofPollingSuppression()
+    return
+  }
   nativePreviewNativeOwnsProofPollingSuppression = false
   await syncNativePreviewProofPollingSuppression()
   await setNativePreviewProofAnimationSuspended(false)
@@ -4770,22 +5514,67 @@ async function applyNativePreviewHostCommands(
   if (!previewSurfacePresentationAllowed(generation)) {
     return destroyNativePreviewSurfaceForBlockedPresentation(generation)
   }
-  // Every bounds command carries the Electron preview window's global number so
-  // the native surface stacks as one app with it (normal level; floating only
-  // when always-on-top is on).
+  // Every bounds command is normalized first so renderer/backend supplied
+  // identities are deleted before main adds any trusted stacking metadata.
   const orderAboveWindowId = previewWindowGlobalId()
-  if (orderAboveWindowId !== undefined) {
-    // Docked previews are part of the app: never elevated above other apps,
-    // whatever the (floating-mode) always-on-top preference says.
-    const elevated = previewWindowAlwaysOnTop && currentPreviewWindowMode() !== 'docked'
-    commands = commands.map((command) =>
-      command.bounds
-        ? {
-            ...command,
-            bounds: { ...command.bounds, orderAboveWindowId, elevated }
+  const elevated = previewWindowAlwaysOnTop && currentPreviewWindowMode() !== 'docked'
+  commands = commands.map((command) => {
+    if (!command.bounds) {
+      return command
+    }
+    return { ...command, bounds: normalizePreviewSurfaceBounds(command.bounds) }
+  })
+  if (process.platform === 'win32') {
+    for (const command of commands) {
+      if (!command.bounds) {
+        continue
+      }
+      await withTrustedPreviewWindowStacking(
+        {
+          platform: process.platform,
+          bounds: command.bounds,
+          generation,
+          currentGeneration: previewWindowSurfaceGeneration(),
+          previewWindowOpen: previewWindowIsOpenForSurface(),
+          previewWindow,
+          elevated
+        },
+        async (request) => {
+          const status = parseMainPreviewSurfaceStatus(
+            await requestBackendAdmin<unknown>('resource.admin.preview_surface_bounds', {
+              ...request
+            })
+          )
+          if (
+            previewWindowSurfaceGenerationIsCurrent(generation) &&
+            previewWindowIsOpenForSurface()
+          ) {
+            nativePreviewBackendD3d11TrustedGeneration = generation
+            applyBackendWindowsD3d11PresenterStatus(status, generation)
           }
-        : command
-    )
+          return status
+        }
+      )
+    }
+  } else {
+    commands = commands.map((command) => {
+      if (!command.bounds) {
+        return command
+      }
+      return withTrustedPreviewWindowStacking(
+        {
+          platform: process.platform,
+          bounds: command.bounds,
+          generation,
+          currentGeneration: previewWindowSurfaceGeneration(),
+          previewWindowOpen: previewWindowIsOpenForSurface(),
+          previewWindow,
+          orderAboveWindowId,
+          elevated
+        },
+        (request) => ({ ...command, bounds: request.bounds })
+      )
+    })
   }
   await applyNativePreviewRealSurfaceHostCommands(commands)
   if (!previewWindowIsOpenForSurface()) {
@@ -4825,8 +5614,9 @@ async function drainBackendNativePreviewHostCommands(
     takeCommands: () =>
       requestBackendAdmin<NativePreviewHostCommand[]>('preview.surface.take_native_host_commands'),
     applyCommands: (commands, requestedGeneration) =>
-      runNativePreviewSurfaceMutation(() =>
-        applyNativePreviewHostCommands(commands, requestedGeneration)
+      runNativePreviewSurfaceMutation(
+        () => applyNativePreviewHostCommands(commands, requestedGeneration),
+        'drain-host-commands'
       ),
     currentStatus: () => nativePreviewSurfaceStatus
   })
@@ -4890,7 +5680,7 @@ async function resetNativePreviewRealSurfaceDriver(reason: string): Promise<void
       },
       reconcile: () => reconcileNativePreviewSurfaceForPreviewWindow({ force: true })
     })
-  })
+  }, 'reset-real-surface-driver')
 }
 
 async function applyNativePreviewRealSurfaceHostCommands(
@@ -4917,16 +5707,20 @@ async function applyNativePreviewRealSurfaceHostCommands(
 }
 
 async function runNativePreviewSurfaceMutation(
-  operation: () => PreviewSurfaceStatus | Promise<PreviewSurfaceStatus>
+  operation: () => PreviewSurfaceStatus | Promise<PreviewSurfaceStatus>,
+  label = 'surface-mutation'
 ): Promise<PreviewSurfaceStatus> {
-  return nativePreviewSurfaceMutationQueue.run(operation)
+  return nativePreviewSurfaceMutationQueue.run(operation, label)
 }
 
 async function updateNativePreviewSurfaceScene(
   params: PreviewSurfaceSceneUpdateParams
 ): Promise<PreviewSurfaceStatus> {
   const generation = previewWindowSurfaceGeneration()
-  return runNativePreviewSurfaceMutation(() => applyNativePreviewSurfaceScene(params, generation))
+  return runNativePreviewSurfaceMutation(
+    () => applyNativePreviewSurfaceScene(params, generation),
+    'update-scene'
+  )
 }
 
 async function applyNativePreviewSurfaceScene(
@@ -5016,11 +5810,12 @@ async function updateNativePreviewSurfaceCompositor(
           message: `Native preview skipped stale compositor frame ${status.framesRendered}; presenting the newest queued frame.`
         }
         return nativePreviewSurfaceStatus
-      })
+      }, 'skip-stale-compositor')
     }
   }
 
   const update = runPreparedNativePreviewMutation(nativePreviewSurfaceMutationQueue, {
+    label: 'update-compositor',
     canApply: () => nativePreviewPresentationAllowedForGeneration(generation) && ownershipAllowed(),
     prepare: () => prepareNativePreviewSurfaceCompositor(status),
     apply: (effectiveStatus) =>
@@ -5155,7 +5950,8 @@ async function presentNativePreviewSurfaceCompositor(
     previewSupervisor.surfaceLive({
       generation: previewWindowSurfaceGeneration(),
       transport: realSurfaceAttempt.status.transport,
-      backing: realSurfaceAttempt.status.backing
+      backing: realSurfaceAttempt.status.backing,
+      nativePreviewHostKind: realSurfaceAttempt.status.nativePreviewHostKind
     })
     return realSurfaceAttempt.status
   }
@@ -5178,12 +5974,13 @@ async function presentNativePreviewSurfaceCompositor(
       updatedAt: new Date().toISOString(),
       message:
         realSurfaceAttempt.reason ??
-        'Native preview skipped a compositor frame without downgrading the active CAMetalLayer surface.'
+        'Native preview skipped a compositor frame without downgrading the active platform presenter.'
     }
     previewSupervisor.surfaceLive({
       generation: previewWindowSurfaceGeneration(),
       transport: nativePreviewSurfaceStatus.transport,
-      backing: nativePreviewSurfaceStatus.backing
+      backing: nativePreviewSurfaceStatus.backing,
+      nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind
     })
     return nativePreviewSurfaceStatus
   }
@@ -5204,13 +6001,16 @@ async function presentNativePreviewSurfaceCompositor(
       compositorScene && compositorSceneIsCurrent
         ? `window.__videorcSetPreviewScene?.(${jsonForInlineScript(compositorScene)});`
         : ''
-    const statusJson = jsonForInlineScript(effectiveStatus)
+    // Compact present DTO (issue #157): only the fields the proof script
+    // consumes ride the per-present hot path; full diagnostics stay on the
+    // status channel. Present + metrics happen in ONE script round trip.
+    const statusJson = jsonForInlineScript(nativePreviewProofPresentStatus(effectiveStatus))
     if (nativePreviewSurfaceWindow === surfaceWindow && !surfaceWindow.isDestroyed()) {
-      await surfaceWindow.webContents.executeJavaScript(
-        `${sceneScript}window.__videorcSetCompositorStatus?.(${statusJson})`,
+      metrics = await surfaceWindow.webContents.executeJavaScript(
+        `${sceneScript}window.__videorcSetCompositorStatus?.(${statusJson});` +
+          `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
         true
       )
-      metrics = await readNativePreviewSurfaceMetricsAfterPaint()
     }
   }
   if (!nativePreviewPresentationAllowedForGeneration(generation)) {
@@ -5235,6 +6035,12 @@ async function presentNativePreviewSurfaceCompositor(
   const freshSourceLayerCount = finiteMetric(metrics?.freshSourceLayerCount) ?? 0
   const sourcePollerCount = finiteMetric(metrics?.sourcePollerCount) ?? 0
   const sourceFrameAgeMs = finiteMetric(metrics?.sourceFrameAgeMs)
+  const proofTransportRequestsPerSecond = finiteMetric(metrics?.proofTransportRequestsPerSecond)
+  const proofTransportBytesPerSecond = finiteMetric(metrics?.proofTransportBytesPerSecond)
+  const proofTransportDecodedFramesPerSecond = finiteMetric(
+    metrics?.proofTransportDecodedFramesPerSecond
+  )
+  const proofSourceDimensions = proofSourceDimensionMetrics(metrics?.proofSourceDimensions)
   nativePreviewSurfaceStatus = {
     ...nativePreviewSurfaceStatus,
     ...nativePreviewRendererTimingStatusFields(effectiveStatus),
@@ -5256,6 +6062,10 @@ async function presentNativePreviewSurfaceCompositor(
     presentFps,
     intervalP95Ms,
     intervalP99Ms,
+    proofTransportRequestsPerSecond,
+    proofTransportBytesPerSecond,
+    proofTransportDecodedFramesPerSecond,
+    proofSourceDimensions,
     framePollingSuppressed: nativePreviewProofPollingIsSuppressed(),
     sourcePixelsPresent: freshSourceLayerCount > 0,
     nativePreviewHostKind: 'proof-surface',
@@ -5270,8 +6080,10 @@ async function presentNativePreviewSurfaceCompositor(
   const proofSourceAssessment = assessProofSourceFrame({
     platform: process.platform,
     framePollingSuppressed: nativePreviewProofPollingIsSuppressed(),
+    sourceExpected: nativePreviewProofSourceExpected(),
     sourcePollerCount,
     freshSourceLayerCount,
+    sourceFrameHistoryComplete: metrics?.sourceFrameHistoryComplete === true,
     sourceFrameAgeMs
   })
   if (proofSourceAssessment === 'met') {
@@ -5288,13 +6100,215 @@ async function presentNativePreviewSurfaceCompositor(
       logBackend('warn', `[proof-preview] ${reason}`)
     }
   }
-  previewSupervisor.surfaceFallback(
+  syncPreviewSupervisorSurface(
+    nativePreviewSurfaceStatus,
     previewWindowSurfaceGeneration(),
     nativePreviewSurfaceStatus.message ??
       realSurfaceAttempt.reason ??
       'Electron proof preview surface.'
   )
   return nativePreviewSurfaceStatus
+}
+
+function syncPreviewSupervisorSurface(
+  status: PreviewSurfaceStatus,
+  generation: number,
+  fallbackReason: string
+): void {
+  if (process.platform === 'win32') {
+    if (nativePreviewProofWatchdogEnabled(process.platform, status)) {
+      if (!firstFrameWatchdogTimer && previewWindowIsOpenForSurface()) {
+        startWindowsProofFrameWatchdog()
+      }
+    } else if (firstFrameWatchdogTimer) {
+      // The backend-owned D3D11 presenter carries its own first-present/source
+      // liveness contract. Never keep reading the hidden BMP proof window.
+      stopFirstFrameWatchdog()
+    }
+  }
+  const disposition = nativePreviewSupervisorDisposition(status, process.platform)
+  if (disposition === 'failed') {
+    previewSupervisor.surfaceFailed({ generation, message: fallbackReason })
+    return
+  }
+  if (disposition === 'pending') {
+    previewSupervisor.requestSurface()
+    return
+  }
+  if (disposition === 'live') {
+    previewSupervisor.surfaceLive({
+      generation,
+      transport: status.transport,
+      backing: status.backing,
+      nativePreviewHostKind: status.nativePreviewHostKind
+    })
+    return
+  }
+  previewSupervisor.surfaceFallback(
+    generation,
+    nativePreviewSupervisorFallbackReason(status, process.platform, fallbackReason)
+  )
+}
+
+function applyBackendWindowsD3d11PresenterStatus(
+  backendStatus: PreviewSurfaceStatus,
+  generation: number
+): void {
+  if (process.platform !== 'win32') {
+    return
+  }
+  if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return
+  }
+  const generationIsTrusted =
+    previewWindowIsOpenForSurface() && nativePreviewBackendD3d11TrustedGeneration === generation
+  if (
+    generationIsTrusted &&
+    windowsD3d11BackendStatusIsStale(nativePreviewBackendD3d11LastStatus, backendStatus, generation)
+  ) {
+    return
+  }
+  if (generationIsTrusted) {
+    nativePreviewBackendD3d11LastStatus = backendStatus
+  }
+  const previousWasCanonical = isCanonicalWindowsD3d11PreviewStatus(
+    nativePreviewSurfaceStatus,
+    generation
+  )
+  nativePreviewSurfaceStatus = reconcileWindowsD3d11PresenterStatus(
+    nativePreviewSurfaceStatus,
+    backendStatus,
+    {
+      platform: process.platform,
+      previewWindowOpen: previewWindowIsOpenForSurface(),
+      proofSurfaceAvailable: nativePreviewSurfaceWindowExists(),
+      generation,
+      trustedGeneration: nativePreviewBackendD3d11TrustedGeneration
+    }
+  )
+  const canonical = isCanonicalWindowsD3d11PreviewStatus(nativePreviewSurfaceStatus, generation)
+  const proofFallbackActive =
+    !canonical &&
+    previewWindowIsOpenForSurface() &&
+    nativePreviewSurfaceWindowExists() &&
+    nativePreviewSurfaceStatus.state === 'live' &&
+    nativePreviewSurfaceStatus.transport === 'electron-proof-surface' &&
+    nativePreviewSurfaceStatus.backing === 'electron-browser-window' &&
+    nativePreviewSurfaceStatus.nativePreviewHostKind === 'proof-surface'
+  nativePreviewNativeOwnsProofPollingSuppression = canonical
+  nativePreviewNativeFailureFallbackActive = proofFallbackActive
+  if (canonical) {
+    nativePreviewNativePresentConfirmedAtMs = Date.now()
+    updatePreviewWindowWaitDetail(null)
+  } else {
+    clearNativePreviewNativePlacementAuthority()
+  }
+  syncPreviewSupervisorSurface(
+    nativePreviewSurfaceStatus,
+    generation,
+    nativePreviewSurfaceStatus.windowsD3d11Presenter?.fallbackReason ??
+      nativePreviewSurfaceStatus.message ??
+      'Backend D3D11 presenter is unavailable.'
+  )
+
+  void runNativePreviewSurfaceMutation(async () => {
+    if (!previewWindowSurfaceGenerationIsCurrent(generation) || !previewWindowIsOpenForSurface()) {
+      return nativePreviewSurfaceStatus
+    }
+    const takeoverStillMatches = (): boolean =>
+      isCanonicalWindowsD3d11PreviewStatus(nativePreviewSurfaceStatus, generation) === canonical
+    if (!takeoverStillMatches()) {
+      return nativePreviewSurfaceStatus
+    }
+    if (canonical) {
+      await syncNativePreviewProofPollingSuppression()
+      if (!takeoverStillMatches()) {
+        return nativePreviewSurfaceStatus
+      }
+      await setNativePreviewProofAnimationSuspended(true)
+      if (!takeoverStillMatches()) {
+        return nativePreviewSurfaceStatus
+      }
+      if (
+        nativePreviewSurfaceWindow &&
+        !nativePreviewSurfaceWindow.isDestroyed() &&
+        nativePreviewSurfaceWindow.isVisible()
+      ) {
+        nativePreviewSurfaceWindow.hide()
+      }
+    } else {
+      await syncNativePreviewProofPollingSuppression()
+      if (!takeoverStillMatches() || !nativePreviewNativeFailureFallbackActive) {
+        return nativePreviewSurfaceStatus
+      }
+      if (
+        previousWasCanonical ||
+        nativePreviewProofAnimationSuspended === true ||
+        (nativePreviewSurfaceWindow &&
+          !nativePreviewSurfaceWindow.isDestroyed() &&
+          !nativePreviewSurfaceWindow.isVisible())
+      ) {
+        await showNativePreviewProofSurfaceIfVisible()
+      }
+    }
+    return nativePreviewSurfaceStatus
+  }, 'backend-d3d11-presenter-status').catch((error) => {
+    logBackend(
+      'warn',
+      `Backend D3D11 presenter status reconciliation failed: ${errorMessageText(error)}`
+    )
+  })
+}
+
+function clearBackendWindowsD3d11PresenterAuthority(reason: string): void {
+  const hadAuthority =
+    nativePreviewBackendD3d11TrustedGeneration !== null ||
+    nativePreviewSurfaceStatus.nativePreviewHostKind === 'backend-d3d11-presenter' ||
+    nativePreviewSurfaceStatus.windowsD3d11Presenter !== undefined
+  nativePreviewBackendD3d11TrustedGeneration = null
+  nativePreviewBackendD3d11LastStatus = null
+  if (!hadAuthority) {
+    return
+  }
+  const generation = previewWindowSurfaceGeneration()
+  nativePreviewSurfaceStatus = reconcileWindowsD3d11PresenterStatus(
+    nativePreviewSurfaceStatus,
+    null,
+    {
+      platform: process.platform,
+      previewWindowOpen: previewWindowIsOpenForSurface(),
+      proofSurfaceAvailable: nativePreviewSurfaceWindowExists(),
+      generation,
+      trustedGeneration: null
+    }
+  )
+  nativePreviewSurfaceStatus = {
+    ...nativePreviewSurfaceStatus,
+    message: reason,
+    updatedAt: new Date().toISOString()
+  }
+  nativePreviewNativeOwnsProofPollingSuppression = false
+  nativePreviewNativeFailureFallbackActive =
+    previewWindowIsOpenForSurface() &&
+    nativePreviewSurfaceWindowExists() &&
+    nativePreviewSurfaceStatus.state === 'live' &&
+    nativePreviewSurfaceStatus.transport === 'electron-proof-surface'
+  clearNativePreviewNativePlacementAuthority()
+  if (!previewWindowIsOpenForSurface()) {
+    return
+  }
+  syncPreviewSupervisorSurface(nativePreviewSurfaceStatus, generation, reason)
+  void runNativePreviewSurfaceMutation(async () => {
+    if (previewWindowSurfaceGenerationIsCurrent(generation) && previewWindowIsOpenForSurface()) {
+      await showNativePreviewProofSurfaceIfVisible()
+    }
+    return nativePreviewSurfaceStatus
+  }, 'backend-d3d11-presenter-clear').catch((error) => {
+    logBackend(
+      'warn',
+      `Backend D3D11 presenter teardown reconciliation failed: ${errorMessageText(error)}`
+    )
+  })
 }
 
 type NativePreviewRealSurfacePresentAttempt =
@@ -5612,8 +6626,17 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
 
 async function setNativePreviewSurfaceFramePollingSuppressed(
   suppressed: boolean,
-  recordingActive?: boolean
+  recordingActive?: boolean,
+  generation = previewWindowSurfaceGeneration()
 ): Promise<PreviewSurfaceStatus> {
+  if (
+    !nativePreviewFramePollingSuppressionGenerationMatches(
+      generation,
+      previewWindowSurfaceGeneration()
+    )
+  ) {
+    return nativePreviewSurfaceStatus
+  }
   if (typeof recordingActive === 'boolean') {
     nativePreviewProofPollingRecordingActive = recordingActive
   }
@@ -5624,21 +6647,66 @@ async function setNativePreviewSurfaceFramePollingSuppressed(
     nativePreviewRealSurfaceDriver?.resetMetrics?.()
   }
   await syncNativePreviewProofPollingProfile()
+  if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return nativePreviewSurfaceStatus
+  }
   const effectiveSuppression = await syncNativePreviewProofPollingSuppression()
+  if (!previewWindowSurfaceGenerationIsCurrent(generation)) {
+    return nativePreviewSurfaceStatus
+  }
   nativePreviewSurfaceStatus = nativePreviewFramePollingSuppressionStatus(
     nativePreviewSurfaceStatus,
-    effectiveSuppression
+    effectiveSuppression,
+    process.platform,
+    generation
   )
   return nativePreviewSurfaceStatus
 }
 
+// DPR-aware cap input (issue #157): the proof surface can never display more
+// source pixels than its own content width × display scale, so that is the
+// width the frame requests are bounded by (quantized + floored in shared
+// nativePreviewProofPollingMaxWidth).
+function nativePreviewProofSurfacePixelWidth(surfaceWindow: BrowserWindow): number | undefined {
+  try {
+    const contentWidth = surfaceWindow.getContentBounds().width
+    if (!Number.isFinite(contentWidth) || contentWidth <= 0) {
+      return undefined
+    }
+    const scaleFactor = screen.getDisplayMatching(surfaceWindow.getBounds()).scaleFactor
+    return contentWidth * (Number.isFinite(scaleFactor) && scaleFactor > 0 ? scaleFactor : 1)
+  } catch {
+    return undefined
+  }
+}
+
+let nativePreviewProofPollingResyncTimer: NodeJS.Timeout | null = null
+
+// Trailing debounce: bounds changes arrive in bursts (drag-resize, slot
+// follow); the profile key dedupes identical results, this just keeps the
+// script round trips off the resize hot path.
+function scheduleNativePreviewProofPollingProfileResync(): void {
+  if (nativePreviewProofPollingResyncTimer) {
+    return
+  }
+  nativePreviewProofPollingResyncTimer = setTimeout(() => {
+    nativePreviewProofPollingResyncTimer = null
+    void syncNativePreviewProofPollingProfile()
+  }, 150)
+}
+
 async function syncNativePreviewProofPollingProfile(): Promise<void> {
-  const profile = nativePreviewProofPollingProfile(nativePreviewProofPollingRecordingActive)
   const surfaceWindow = nativePreviewSurfaceWindow
   if (!surfaceWindow || surfaceWindow.isDestroyed()) {
     nativePreviewAppliedProofPollingProfile = null
     return
   }
+  const currentProfile = (): NativePreviewProofPollingProfile =>
+    nativePreviewProofPollingProfile(
+      nativePreviewProofPollingRecordingActive,
+      nativePreviewProofSurfacePixelWidth(surfaceWindow)
+    )
+  const profile = currentProfile()
   const profileKey = nativePreviewProofPollingProfileKey(surfaceWindow.id, profile)
   if (nativePreviewAppliedProofPollingProfile === profileKey) {
     return
@@ -5647,11 +6715,7 @@ async function syncNativePreviewProofPollingProfile(): Promise<void> {
   await waitForNativePreviewSurfaceScript(surfaceWindow)
   if (
     requestSerial !== nativePreviewProofPollingProfileSerial ||
-    profileKey !==
-      nativePreviewProofPollingProfileKey(
-        surfaceWindow.id,
-        nativePreviewProofPollingProfile(nativePreviewProofPollingRecordingActive)
-      ) ||
+    profileKey !== nativePreviewProofPollingProfileKey(surfaceWindow.id, currentProfile()) ||
     surfaceWindow.isDestroyed() ||
     nativePreviewSurfaceWindow !== surfaceWindow
   ) {
@@ -5664,11 +6728,7 @@ async function syncNativePreviewProofPollingProfile(): Promise<void> {
   )
   if (
     requestSerial === nativePreviewProofPollingProfileSerial &&
-    profileKey ===
-      nativePreviewProofPollingProfileKey(
-        surfaceWindow.id,
-        nativePreviewProofPollingProfile(nativePreviewProofPollingRecordingActive)
-      ) &&
+    profileKey === nativePreviewProofPollingProfileKey(surfaceWindow.id, currentProfile()) &&
     !surfaceWindow.isDestroyed() &&
     nativePreviewSurfaceWindow === surfaceWindow
   ) {
@@ -5691,6 +6751,15 @@ async function setNativePreviewProofAnimationSuspended(suspended: boolean): Prom
   const surfaceWindow = nativePreviewSurfaceWindow
   if (!surfaceWindow || surfaceWindow.isDestroyed()) {
     nativePreviewProofAnimationSuspended = null
+    return
+  }
+  // A hidden proof renderer is already suspended by Chromium's per-window
+  // background policy. Do not await executeJavaScript after hiding it: on
+  // Windows that command may not run until the window is shown again, while
+  // close teardown is serialized behind this mutation. Cache the desired
+  // state; the visible resume path below pushes `false` after showInactive().
+  if (suspended && !surfaceWindow.isVisible()) {
+    nativePreviewProofAnimationSuspended = true
     return
   }
   await waitForNativePreviewSurfaceScript(surfaceWindow)
@@ -5742,21 +6811,42 @@ async function syncNativePreviewProofPollingSuppression(): Promise<boolean> {
   return nativePreviewProofPollingIsSuppressed()
 }
 
-async function readNativePreviewSurfaceMetricsAfterPaint(): Promise<Record<
-  string,
-  unknown
-> | null> {
-  if (!nativePreviewSurfaceWindow || nativePreviewSurfaceWindow.isDestroyed()) {
+async function readNativePreviewSurfaceMetricsAfterPaint(
+  surfaceWindow: BrowserWindow | null = nativePreviewSurfaceWindow
+): Promise<Record<string, unknown> | null> {
+  if (
+    !surfaceWindow ||
+    surfaceWindow.isDestroyed() ||
+    surfaceWindow.webContents.isDestroyed() ||
+    nativePreviewSurfaceWindow !== surfaceWindow
+  ) {
     return null
   }
-  return nativePreviewSurfaceWindow.webContents.executeJavaScript(
-    `window.__videorcPresentNativePreviewNow?.() ?? new Promise((resolve) => requestAnimationFrame(() => resolve(window.__videorcNativePreviewMetrics?.() ?? null)))`,
+  return surfaceWindow.webContents.executeJavaScript(
+    `window.__videorcPresentNativePreviewNow?.() ?? window.__videorcNativePreviewMetrics?.() ?? null`,
     true
   )
 }
 
 function finiteMetric(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function proofSourceDimensionMetrics(
+  value: unknown
+): Record<string, { width: number; height: number }> | undefined {
+  if (!value || typeof value !== 'object') {
+    return undefined
+  }
+  const dimensions: Record<string, { width: number; height: number }> = {}
+  for (const [id, entry] of Object.entries(value as Record<string, unknown>)) {
+    const width = finiteMetric((entry as { width?: unknown })?.width)
+    const height = finiteMetric((entry as { height?: unknown })?.height)
+    if (width !== undefined && height !== undefined) {
+      dimensions[id] = { width, height }
+    }
+  }
+  return Object.keys(dimensions).length > 0 ? dimensions : undefined
 }
 
 function proofSourceFrameTotal(metrics: unknown): number {
@@ -6077,6 +7167,8 @@ function destroyNativePreviewSurface(
     return nativePreviewSurfaceStatus
   }
   nativePreviewPlacementQueue.cancelPending()
+  nativePreviewBackendD3d11TrustedGeneration = null
+  nativePreviewBackendD3d11LastStatus = null
   resetNativePreviewStaleHandoffDiagnostic()
   resetNativePreviewMainHandoffMetrics()
   nativePreviewSurfaceCompositorRequestSerial += 1
@@ -6245,7 +7337,7 @@ function createNativePreviewHelperProcessDriverConfig():
   const ffmpegBinDir = resolvePackagedFfmpegBinDir()
   const pathEntries = [ffmpegBinDir, cargoBinDir, process.env.PATH].filter(Boolean)
   const env = {
-    ...process.env,
+    ...sanitizedChildProcessEnvironment(process.env),
     ...devCargoEnvOverrides(),
     PATH: pathEntries.join(delimiter)
   }
@@ -6343,6 +7435,16 @@ function resolveAppIconPaths(): string[] {
 
 function setDockIcon(): void {
   if (process.platform !== 'darwin') {
+    return
+  }
+  // Packaged builds must NOT override the Dock icon: the bundle's icon.icns
+  // is drawn on Apple's icon grid (art at ~80% with transparent margins),
+  // while this override replaced it at runtime with the full-bleed
+  // videorc-logo.png — which is why the Dock icon rendered visibly larger
+  // than every neighbor no matter how the .icns was fixed. The override only
+  // earns its keep in dev, where Electron would otherwise show its default
+  // icon.
+  if (app.isPackaged) {
     return
   }
 
@@ -6563,11 +7665,16 @@ function withProcessRegistryLock<T>(operation: () => T): T {
   }
 }
 
+function persistOwnedProcess(pid: number, label: string): void {
+  withProcessRegistryLock(() => processRegistry().record(pid, label))
+}
+
 function recordOwnedProcess(pid: number, label: string): void {
   try {
-    withProcessRegistryLock(() => processRegistry().record(pid, label))
+    persistOwnedProcess(pid, label)
   } catch (error) {
-    logBackend('warn', `Could not record ${label} process ${pid}: ${errorMessage(error)}`)
+    logBackend('error', `Could not record ${label} process ${pid}: ${errorMessage(error)}`)
+    throw error
   }
 }
 
@@ -6603,28 +7710,108 @@ function shouldDisableBackendReap(): boolean {
   )
 }
 
-function recordBackendOwnedProcess(pid: unknown, label: string): void {
+function recordBackendOwnedProcess(runtime: BackendRuntime, pid: unknown, label: string): void {
   if (!validOwnedProcessPid(pid)) {
     return
   }
-  backendOwnedProcessPids.add(pid)
-  recordOwnedProcess(pid, label)
+  claimDurableBackendPid(backendRuntimeOwner, runtime, pid, {
+    persist: () => persistOwnedProcess(pid, label),
+    terminate: () => terminateBackendRuntimeAfterOwnershipFailure(runtime, pid)
+  })
+  backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids.add(pid)
 }
 
-function removeBackendOwnedProcesses(): void {
-  for (const pid of backendOwnedProcessPids) {
-    removeOwnedProcess(pid)
+function terminateBackendRuntimeAfterOwnershipFailure(runtime: BackendRuntime, pid: number): void {
+  if (backendRuntimeOwner.isCurrent(runtime)) {
+    clearBackendConnectionState()
+    sendToWindows('backend:lifecycle', { state: 'lost' })
   }
-  backendOwnedProcessPids.clear()
+  requestBackendRuntimeTermination(runtime, pid, {
+    runtimePid: runtime.process.pid,
+    // Persistence failed, so no ledger identity can safely authenticate a raw
+    // numeric child PID. Retain it as unconfirmed and signal only the spawned
+    // wrapper through its ChildProcess handle.
+    signalExactPid: () => false,
+    signalRuntimeProcess: (child) => child.kill('SIGKILL')
+  })
 }
 
-function recordBackendRuntimeProcess(connection: BackendConnection): void {
+function recordedBackendProcessMayStillBeOwned(runtime: BackendRuntime, pid: number): boolean {
+  if (!backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids.has(pid)) {
+    // In-memory ownership without a successfully persisted birth identity can
+    // never be disproved by a possibly stale/missing ledger entry.
+    return true
+  }
+  try {
+    return withProcessRegistryLock(() => processRegistry().probeRecordedOwnership(pid) !== 'gone')
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Could not reconcile durable identity for backend pid ${pid}; retaining ownership: ${errorMessage(error)}`
+    )
+    return true
+  }
+}
+
+/**
+ * Force-stop only PIDs whose durable birth/executable identity still matches
+ * this runtime. This is permitted before renderer authority exists, or after
+ * an exact capture-finalization receipt. Signal acceptance is not treated as
+ * death; the runtime owner remains blocked until a later identity probe says
+ * every PID is gone.
+ */
+function signalExactlyOwnedBackendProcesses(runtime: BackendRuntime, signal: NodeJS.Signals): void {
+  backendRuntimeOwner.markShutdownUnconfirmed(runtime)
+  const durablePids = backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids
+  for (const pid of runtime.ownedProcessPids) {
+    if (!durablePids?.has(pid)) {
+      continue
+    }
+    let result: ReturnType<OwnedProcessRegistry['signalRecordedOwnership']>
+    try {
+      result = withProcessRegistryLock(() => processRegistry().signalRecordedOwnership(pid, signal))
+    } catch (error) {
+      logBackend(
+        'warn',
+        `Could not revalidate backend process ${pid} for exact termination; retaining ownership: ${errorMessage(error)}`
+      )
+      continue
+    }
+    if (result === 'gone') {
+      runtime.ownedProcessPids.delete(pid)
+      durablePids.delete(pid)
+      removeOwnedProcess(pid)
+    }
+  }
+}
+
+function rejectBackendBootstrapAuthority(runtime: BackendRuntime, reason: string): void {
+  const evidence = backendGenerationEvidence.get(runtime)
+  logBackend('error', `Backend bootstrap authority rejected: ${reason}`)
+  if (!evidence?.authorityEstablished) {
+    backendRuntimeOwner.beginShutdown(runtime)
+    signalExactlyOwnedBackendProcesses(runtime, 'SIGTERM')
+  }
+  if (backendRuntimeOwner.isCurrent(runtime)) {
+    clearBackendConnectionState()
+    sendToWindows('backend:lifecycle', { state: 'lost' })
+  }
+}
+
+function recordBackendRuntimePid(runtime: BackendRuntime, pid: number, parentPid?: number): void {
+  if (!validOwnedProcessPid(pid) || runtime.ownedProcessPids.has(pid)) {
+    return
+  }
+  recordBackendOwnedProcess(runtime, pid, 'videorc-backend')
+  const parent = validProcessPid(parentPid) ? ` parentPid=${parentPid}` : ''
+  logBackend('info', `Backend runtime pid=${pid}${parent}`)
+}
+
+function recordBackendRuntimeProcess(runtime: BackendRuntime, connection: BackendConnection): void {
   if (!validOwnedProcessPid(connection.pid)) {
     return
   }
-  recordBackendOwnedProcess(connection.pid, 'videorc-backend')
-  const parent = validProcessPid(connection.parentPid) ? ` parentPid=${connection.parentPid}` : ''
-  logBackend('info', `Backend runtime pid=${connection.pid}${parent}`)
+  recordBackendRuntimePid(runtime, connection.pid, connection.parentPid)
 }
 
 function resolveCargoBinary(): string {
@@ -6666,14 +7853,16 @@ function resolveBackendPermissionTargetPath(): string {
 }
 
 function resolvePackagedFfmpegBinDir(): string | null {
-  // Dev mode on Windows: use the pinned vendor FFmpeg from
-  // `pnpm ffmpeg:fetch:windows` when present, so development does not depend
-  // on a system-wide ffmpeg install. macOS dev keeps resolving via PATH.
+  // Dev mode on Windows and Linux: use the platform's pinned vendor FFmpeg
+  // when present, so runtime capability probes exercise the exact binary that
+  // will be packaged. macOS dev keeps resolving via PATH.
   const binDir = app.isPackaged
     ? join(process.resourcesPath, 'ffmpeg', 'bin')
     : process.platform === 'win32'
       ? join(workspaceRoot(), 'vendor', 'ffmpeg', 'windows-x64', 'bin')
-      : null
+      : process.platform === 'linux'
+        ? join(workspaceRoot(), 'vendor', 'ffmpeg', 'linux-x64', 'bin')
+        : null
   if (!binDir) {
     return null
   }
@@ -6684,7 +7873,7 @@ function resolvePackagedFfmpegBinDir(): string | null {
 // Single-backend policy: reap only children a previous Videorc launch recorded.
 // Never scan command lines; substring process matching can kill cargo builds,
 // editors, or unrelated processes.
-function reapStaleBackendProcesses(): void {
+function reapStaleBackendProcesses(): boolean {
   let stale: ReturnType<OwnedProcessRegistry['reapStale']>
   try {
     stale = withProcessRegistryLock(() =>
@@ -6694,18 +7883,68 @@ function reapStaleBackendProcesses(): void {
     )
   } catch (error) {
     logBackend('warn', `Could not reap stale owned backend processes: ${errorMessage(error)}`)
-    return
+    return false
   }
-  if (stale.length > 0) {
+  if (stale.attempted.length > 0) {
     logBackend(
       'warn',
-      `Reaping ${stale.length} stale owned backend process(es): ${stale.map((record) => `${record.label}:${record.pid}`).join(', ')}`
+      `Confirmed ${stale.confirmedDead.length} stale owned process record(s) dead after reaping ${stale.attempted.length} live pid(s): ${stale.attempted.map((record) => `${record.label}:${record.pid}`).join(', ')}`
     )
   }
+  if (stale.identityMismatches.length > 0) {
+    logBackend(
+      'warn',
+      `Pruned ${stale.identityMismatches.length} stale owned process record(s) whose pid now belongs to a different process without signaling the current occupant: ${stale.identityMismatches.map((record) => `${record.label}:${record.pid}`).join(', ')}`
+    )
+  }
+  if (stale.unconfirmed.length > 0) {
+    logBackend(
+      'error',
+      `Refusing backend startup because owned pid(s) ${stale.unconfirmed.map((record) => record.pid).join(', ')} remain live or unprobeable.`
+    )
+    sendToWindows('backend:lifecycle', { state: 'lost' })
+    return false
+  }
+  return true
+}
+
+function reconcileUnconfirmedBackendRuntime(reportBlocked = true): boolean {
+  const runtime = backendRuntimeOwner.current()
+  if (!runtime || runtime.state !== 'shutdown-unconfirmed') {
+    return runtime === null
+  }
+
+  const settlement = settleBackendRuntimeExit(backendRuntimeOwner, runtime, undefined, (pid) =>
+    recordedBackendProcessMayStillBeOwned(runtime, pid)
+  )
+  for (const pid of settlement.confirmedDead) {
+    backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids.delete(pid)
+    removeOwnedProcess(pid)
+  }
+  if (!settlement.completed) {
+    if (reportBlocked) {
+      logBackend(
+        'error',
+        `Refusing backend startup because generation ${runtime.generation} still owns live or unprobeable pid(s) ${settlement.stillLive.join(', ')}.`
+      )
+      sendToWindows('backend:lifecycle', { state: 'lost' })
+    }
+    return false
+  }
+
+  if (backendProcess === runtime.process) {
+    backendProcess = null
+  }
+  clearBackendConnectionState()
+  logBackend('info', `Backend generation ${runtime.generation} death is now exactly confirmed.`)
+  return true
 }
 
 function startBackend(): void {
-  if (backendProcess) {
+  if (backendRuntimeOwner.current()?.state === 'shutdown-unconfirmed') {
+    reconcileUnconfirmedBackendRuntime()
+  }
+  if (backendProcess || backendRuntimeOwner.current()) {
     return
   }
 
@@ -6724,11 +7963,14 @@ const BACKEND_RESTART_WINDOW_MS = 5 * 60_000
 const BACKEND_STABLE_UPTIME_MS = 60_000
 let backendCrashTimestamps: number[] = []
 let backendRestartTimer: ReturnType<typeof setTimeout> | null = null
+let backendRuntimeReconcileTimer: ReturnType<typeof setTimeout> | null = null
 let backendLastStartAt = 0
 
-function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | null): void {
-  if (appIsQuitting || backendQuitInProgress || backendQuitComplete) {
-    return
+/** Returns the restart attempt number, or null when no restart was scheduled
+ * (the app is quitting, or the crash budget is exhausted). */
+function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | null): number | null {
+  if (appIsQuitting || backendQuitState.inProgress || backendQuitState.complete) {
+    return null
   }
   const now = Date.now()
   // A long stable run forgives earlier crashes (sleep/wake storms must not
@@ -6747,7 +7989,7 @@ function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | nu
       'Backend crashed repeatedly; automatic restarts stopped. Restart Videorc to recover.'
     )
     sendToWindows('backend:lifecycle', { state: 'failed', code, signal, attempt })
-    return
+    return attempt
   }
   const delayMs = BACKEND_RESTART_BACKOFF_MS[attempt - 1]
   logBackend(
@@ -6759,6 +8001,67 @@ function scheduleBackendRestart(code: number | null, signal: NodeJS.Signals | nu
     backendRestartTimer = null
     startBackend()
   }, delayMs)
+  return attempt
+}
+
+function recordBackendExit(
+  runtime: BackendRuntime,
+  code: number | null,
+  signal: NodeJS.Signals | null,
+  intentional: boolean,
+  attempt: number | null
+): void {
+  if (!shouldRecordBackendExit({ intentional, code, signal })) {
+    return
+  }
+  const evidence = backendGenerationEvidence.get(runtime)
+  const record = buildBackendCrashRecord({
+    at: new Date().toISOString(),
+    generation: runtime.generation,
+    code,
+    signal,
+    attempt,
+    uptimeMs: evidence ? Date.now() - evidence.startedAtMs : 0,
+    intentional,
+    stderrTail: evidence?.stderrTail.snapshot() ?? []
+  })
+  try {
+    backendCrashRecords = appendBackendCrashRecord(backendCrashLogFile, record, backendCrashRecords)
+    logBackend(
+      'warn',
+      `Recorded backend crash evidence: ${describeBackendCrashRecord(record)}; ${record.stderrTail.length} stderr line(s) kept in ${backendCrashLogFile}.`
+    )
+  } catch (error) {
+    // Keep the in-memory copy so this launch's bundle still carries it.
+    backendCrashRecords = [record, ...backendCrashRecords].slice(0, BACKEND_CRASH_LOG_LIMIT)
+    logBackend(
+      'error',
+      `Could not persist backend crash evidence to ${backendCrashLogFile}: ${errorMessageText(error)}`
+    )
+  }
+}
+
+function scheduleUnexpectedBackendRuntimeReconciliation(
+  runtime: BackendRuntime,
+  code: number | null,
+  signal: NodeJS.Signals | null
+): void {
+  if (backendRuntimeReconcileTimer || appIsQuitting) {
+    return
+  }
+  const poll = (): void => {
+    backendRuntimeReconcileTimer = null
+    if (backendRuntimeOwner.current() !== runtime) {
+      return
+    }
+    if (!reconcileUnconfirmedBackendRuntime(false)) {
+      backendRuntimeReconcileTimer = setTimeout(poll, 250)
+      return
+    }
+    const attempt = scheduleBackendRestart(code, signal)
+    recordBackendExit(runtime, code, signal, false, attempt)
+  }
+  backendRuntimeReconcileTimer = setTimeout(poll, 250)
 }
 
 function cancelBackendRestart(): void {
@@ -6766,15 +8069,76 @@ function cancelBackendRestart(): void {
     clearTimeout(backendRestartTimer)
     backendRestartTimer = null
   }
+  if (backendRuntimeReconcileTimer) {
+    clearTimeout(backendRuntimeReconcileTimer)
+    backendRuntimeReconcileTimer = null
+  }
+}
+
+function clearBackendConnectionState(): void {
+  backendConnection = null
+  backendAdminConnection = null
+  backendAuthorityReady = Promise.resolve()
+  mainResourceCapabilities.clear()
+  disconnectBackendEventSocket()
+}
+
+function finalizeBackendRuntimeExit(
+  runtime: BackendRuntime,
+  code: number | null,
+  signal: NodeJS.Signals | null
+): void {
+  const settlement = settleBackendRuntimeExit(
+    backendRuntimeOwner,
+    runtime,
+    validOwnedProcessPid(runtime.process.pid) ? runtime.process.pid : undefined,
+    (pid) => recordedBackendProcessMayStillBeOwned(runtime, pid)
+  )
+  for (const pid of settlement.confirmedDead) {
+    backendGenerationEvidence.get(runtime)?.durableOwnedProcessPids.delete(pid)
+    removeOwnedProcess(pid)
+  }
+  if (settlement.stillLive.length > 0) {
+    logBackend(
+      settlement.completed ? 'warn' : 'error',
+      `Backend generation ${runtime.generation} exited while owned pid(s) ${settlement.stillLive.join(', ')} remain live; retaining exact ownership${settlement.completed ? ' ledger evidence for reaping' : ' and refusing replacement startup'}.`
+    )
+  }
+  if (!settlement.completed) {
+    // Keep the wrapper handle paired with the still-owned real backend. A later
+    // quit/reconciliation must remain an exact target instead of degrading to
+    // the inconsistent (null process, live runtime) state.
+    clearBackendConnectionState()
+    sendToWindows('backend:lifecycle', { state: 'lost' })
+    if (!settlement.wasIntentional) {
+      scheduleUnexpectedBackendRuntimeReconciliation(runtime, code, signal)
+    }
+    return
+  }
+  if (!settlement.wasCurrent) {
+    return
+  }
+
+  logBackend(
+    'warn',
+    `Backend generation ${runtime.generation} exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`
+  )
+  if (backendProcess === runtime.process) {
+    backendProcess = null
+  }
+  clearBackendConnectionState()
+  const attempt = settlement.wasIntentional ? null : scheduleBackendRestart(code, signal)
+  recordBackendExit(runtime, code, signal, settlement.wasIntentional, attempt)
 }
 
 function startBackendWithRegistryLock(): void {
-  if (backendProcess) {
+  if (backendProcess || backendRuntimeOwner.current()) {
     return
   }
-  backendOwnedProcessPids = new Set()
 
-  reapStaleBackendProcesses()
+  if (!reapStaleBackendProcesses()) {
+    return
+  }
 
   const root = workspaceRoot()
   const cargoBinDir = join(homedir(), '.cargo', 'bin')
@@ -6791,10 +8155,11 @@ function startBackendWithRegistryLock(): void {
     logBackend('info', `Using bundled FFmpeg from ${ffmpegBinDir}`)
   }
   backendLastStartAt = Date.now()
-  backendProcess = spawn(command, args, {
+  const ownershipToken = randomUUID()
+  const child = spawn(command, args, {
     cwd: root,
     env: {
-      ...process.env,
+      ...sanitizedChildProcessEnvironment(process.env),
       ...devCargoEnvOverrides(),
       // Full isolation or none: when app/user data dirs are overridden (smokes,
       // probes), the backend's sqlite + secrets must move with them instead of
@@ -6813,37 +8178,51 @@ function startBackendWithRegistryLock(): void {
       // check alone misses the dev chain (electron -> cargo -> backend), where
       // killing Electron leaves cargo alive as the backend's parent.
       VIDEORC_SUPERVISOR_PID: String(process.pid),
+      // Cargo is only the development wrapper. The backend publishes this
+      // generation-bound token with its real PID before any fallible startup
+      // work so pre-READY shutdown can retain and reap the exact child.
+      VIDEORC_BACKEND_OWNERSHIP_TOKEN: ownershipToken,
       RUST_LOG: process.env.RUST_LOG ?? 'videorc_backend=info'
     }
   })
-  const backendPid = backendProcess.pid
-  recordBackendOwnedProcess(
-    backendPid,
-    app.isPackaged ? 'videorc-backend' : 'cargo-run-videorc-backend'
+  backendProcess = child
+  const runtime = backendRuntimeOwner.start(child)
+  const stderrTail = new BackendStderrTail()
+  backendGenerationEvidence.set(runtime, {
+    startedAtMs: backendLastStartAt,
+    stderrTail,
+    ownershipToken,
+    authorityEstablished: false,
+    durableOwnedProcessPids: new Set<number>()
+  })
+  logBackend(
+    'info',
+    `Backend generation ${runtime.generation} spawned as pid ${child.pid ?? 'unknown'}.`
   )
-
-  backendProcess.stdout.on('data', (chunk: Buffer) => handleBackendStdout(chunk.toString()))
-  backendProcess.stderr.on('data', (chunk: Buffer) => {
+  let runtimeStdoutBuffer = ''
+  child.stdout.on('data', (chunk: Buffer) => {
+    runtimeStdoutBuffer = handleBackendStdout(chunk.toString(), runtime, runtimeStdoutBuffer)
+  })
+  child.stderr.on('data', (chunk: Buffer) => {
     for (const line of chunk.toString().split(/\r?\n/)) {
-      if (line.trim()) {
-        logBackend(inferBackendLogLevel(line), line.trim())
+      const trimmed = line.trim()
+      if (trimmed) {
+        stderrTail.push(trimmed)
+        logBackend(inferBackendLogLevel(line), trimmed)
       }
     }
   })
-  backendProcess.on('error', (error) => {
+  child.on('error', (error) => {
     logBackend('error', `Backend process error: ${error.message}`)
   })
-  backendProcess.on('close', (code, signal) => {
-    removeBackendOwnedProcesses()
-    logBackend('warn', `Backend exited with code ${code ?? 'null'} and signal ${signal ?? 'null'}`)
-    backendProcess = null
-    backendConnection = null
-    backendAdminConnection = null
-    backendAuthorityReady = Promise.resolve()
-    mainResourceCapabilities.clear()
-    disconnectBackendEventSocket()
-    scheduleBackendRestart(code, signal)
+  child.on('close', (code, signal) => {
+    finalizeBackendRuntimeExit(runtime, code, signal)
   })
+  recordBackendOwnedProcess(
+    runtime,
+    child.pid,
+    app.isPackaged ? 'videorc-backend' : 'cargo-run-videorc-backend'
+  )
 }
 
 // ---------------------------------------------------------------------------
@@ -6927,6 +8306,7 @@ function disconnectBackendEventSocket(): void {
   }
   const socket = backendEventSocket
   backendEventSocket = null
+  clearBackendWindowsD3d11PresenterAuthority('Backend preview event connection stopped.')
   mainCaptureState = captureStateAfterTransportLoss()
   clearNativePreviewMainPumpWork()
   void setNativePreviewMainPumpActive(false)
@@ -6960,6 +8340,7 @@ function retireBackendEventSocket(
     return
   }
   backendEventSocket = null
+  clearBackendWindowsD3d11PresenterAuthority(`Backend preview event connection retired: ${reason}`)
   mainCaptureState = captureStateAfterTransportLoss()
   nativePreviewMainPumpDisconnectCount += 1
   nativePreviewMainPumpLastDisconnectReason = reason
@@ -6985,11 +8366,16 @@ function connectBackendEventSocket(connection: BackendConnection): void {
   )
   const eventFilterRequestId = `main-event-filter-${Date.now()}`
   const recordingStatusRequestId = `main-recording-status-${Date.now()}`
+  const previewSurfaceStatusRequestId = `main-preview-surface-status-${Date.now()}`
+  let previewSurfaceStatusRequestGeneration: number | null = null
   backendEventSocket = socket
   socket.onopen = () => {
     if (backendEventSocket === socket) {
       logBackend('info', 'Main process connected to backend events.')
       const includedEvents = ['recording.status']
+      if (process.platform === 'win32') {
+        includedEvents.push('preview.surface.status')
+      }
       if (mainPresentPumpEnabled) {
         includedEvents.push('preview.frameReady', 'compositor.status')
       }
@@ -7018,6 +8404,15 @@ function connectBackendEventSocket(connection: BackendConnection): void {
             socket.send(
               JSON.stringify({ id: recordingStatusRequestId, method: 'recording.status' })
             )
+            if (process.platform === 'win32') {
+              previewSurfaceStatusRequestGeneration = previewWindowSurfaceGeneration()
+              socket.send(
+                JSON.stringify({
+                  id: previewSurfaceStatusRequestId,
+                  method: 'preview.surface.status'
+                })
+              )
+            }
             if (mainPresentPumpEnabled) {
               nativePreviewMainStatusPump.cancelPending()
               void setNativePreviewMainPumpActive(true)
@@ -7033,12 +8428,31 @@ function connectBackendEventSocket(connection: BackendConnection): void {
           }
           updateMainCaptureState(parseMainRecordingStatus(parsed.payload))
         }
+        if (parsed.id === previewSurfaceStatusRequestId) {
+          if (parsed.ok !== true) {
+            throw new Error('Initial preview surface status request was rejected.')
+          }
+          if (previewSurfaceStatusRequestGeneration !== null) {
+            applyBackendWindowsD3d11PresenterStatus(
+              parseMainPreviewSurfaceStatus(parsed.payload),
+              previewSurfaceStatusRequestGeneration
+            )
+          }
+        }
         // Responses to fire-and-forget present reports are deliberately ignored.
         return
       }
 
       if (parsed.event === 'recording.status') {
         updateMainCaptureState(parseMainRecordingStatusEvent(parsed.payload))
+        return
+      }
+      if (parsed.event === 'preview.surface.status') {
+        const status = parseMainPreviewSurfaceStatusEvent(parsed.payload)
+        const authority = windowsD3d11BackendEventAuthority(status)
+        if (authority) {
+          applyBackendWindowsD3d11PresenterStatus(status, authority.previewGeneration)
+        }
         return
       }
       if (
@@ -7099,6 +8513,7 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
   'health.ping',
   'account.auth.begin_intent',
+  'account.refresh',
   'account.sign_out',
   'resource.capability.issue',
   'resource.capability.revoke',
@@ -7106,9 +8521,12 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.resolve_session_path',
   'resource.admin.resolve_screen_path',
   'resource.admin.resolve_background_path',
+  'resource.admin.preview_surface_bounds',
   'preview.surface.take_native_host_commands',
+  'sessions.comments.list',
   'sessions.delete.resolve',
-  'sessions.delete.complete'
+  'sessions.delete.complete',
+  'liveChat.sendOperations.latest'
 ])
 
 async function requestBackendAdmin<T>(
@@ -7192,6 +8610,11 @@ async function requestBackendAdmin<T>(
   })
 }
 
+const accountRefreshBroker = new AccountRefreshBroker(
+  () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
+  () => requestBackendAdmin<VideorcAccountSnapshot>('account.refresh', {}, 10_000)
+)
+
 async function waitForBackendAdminConnection(timeoutMs: number): Promise<BackendConnection> {
   const deadline = Date.now() + Math.max(1, timeoutMs)
   while (backendProcess && !appIsQuitting && Date.now() < deadline) {
@@ -7244,11 +8667,13 @@ async function handleMainPumpCompositorStatus(status: CompositorStatus): Promise
   }
   if (compositorFrameSceneRevisionMismatch(status)) {
     const generation = previewWindowSurfaceGeneration()
-    const surfaceStatus = await runNativePreviewSurfaceMutation(() =>
-      nativePreviewPumpOwnership.accepts(ownershipTicket) &&
-      nativePreviewPresentationAllowedForGeneration(generation)
-        ? recordNativePreviewMainSceneMismatch(status)
-        : nativePreviewSurfaceStatus
+    const surfaceStatus = await runNativePreviewSurfaceMutation(
+      () =>
+        nativePreviewPumpOwnership.accepts(ownershipTicket) &&
+        nativePreviewPresentationAllowedForGeneration(generation)
+          ? recordNativePreviewMainSceneMismatch(status)
+          : nativePreviewSurfaceStatus,
+      'record-scene-mismatch'
     )
     if (nativePreviewPumpOwnership.accepts(ownershipTicket)) {
       queueMainPresentReport(surfaceStatus)
@@ -7305,6 +8730,9 @@ function queueMainPresentReport(status: PreviewSurfaceStatus): void {
     nativePreviewMainLastSkippedSceneRevision: status.nativePreviewMainLastSkippedSceneRevision,
     nativePreviewMainLastSkippedFrameSceneRevision:
       status.nativePreviewMainLastSkippedFrameSceneRevision,
+    nativePreviewIosurfaceImportLiveCount: status.nativePreviewIosurfaceImportLiveCount,
+    nativePreviewIosurfaceImportPeakCount: status.nativePreviewIosurfaceImportPeakCount,
+    nativePreviewIosurfaceImportCeiling: status.nativePreviewIosurfaceImportCeiling,
     message: status.message,
     framePollingSuppressed: status.framePollingSuppressed,
     sourcePixelsPresent: status.sourcePixelsPresent
@@ -7326,10 +8754,13 @@ function errorMessageText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-function handleBackendStdout(text: string): void {
-  stdoutBuffer += text
-  const lines = stdoutBuffer.split(/\r?\n/)
-  stdoutBuffer = lines.pop() ?? ''
+function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText: string): string {
+  const lines = `${bufferedText}${text}`.split(/\r?\n/)
+  const remaining = lines.pop() ?? ''
+
+  if (!backendRuntimeOwner.isCurrent(runtime)) {
+    return remaining
+  }
 
   for (const line of lines) {
     const trimmed = line.trim()
@@ -7337,13 +8768,99 @@ function handleBackendStdout(text: string): void {
       continue
     }
 
+    if (trimmed.startsWith(BACKEND_PROCESS_OWNERSHIP_PREFIX)) {
+      try {
+        const evidence = backendGenerationEvidence.get(runtime)
+        if (!evidence) {
+          throw new Error('Backend generation ownership token is unavailable.')
+        }
+        const ownership = parseBackendProcessOwnership(
+          JSON.parse(trimmed.slice(BACKEND_PROCESS_OWNERSHIP_PREFIX.length)),
+          evidence.ownershipToken
+        )
+        if (!validOwnedProcessPid(ownership.pid)) {
+          throw new Error('Backend ownership marker named a forbidden process.')
+        }
+        // Claim the token-authenticated PID before evaluating advisory lineage.
+        // Cargo may exit and reparent the backend to pid 1 during this exact
+        // race; losing the PID here would lose the only safe cleanup evidence.
+        recordBackendRuntimePid(runtime, ownership.pid, ownership.parentPid)
+        const markerDecision = observeBackendOwnershipMarker(
+          evidence.ownershipMarkerPid,
+          ownership.pid
+        )
+        evidence.ownershipMarkerPid = markerDecision.markerPid
+        const lineageMatches = backendOwnershipLineageMatches({
+          packaged: app.isPackaged,
+          platform: process.platform,
+          wrapperPid: runtime.process.pid,
+          backendPid: ownership.pid,
+          parentPid: ownership.parentPid
+        })
+        if (markerDecision.conflict || !lineageMatches) {
+          rejectBackendBootstrapAuthority(
+            runtime,
+            markerDecision.conflict
+              ? 'multiple real backend PIDs claimed one generation.'
+              : 'the real backend process lineage did not match its spawned wrapper.'
+          )
+          continue
+        }
+        if (!backendRuntimeAcceptsBootstrap(runtime)) {
+          signalExactlyOwnedBackendProcesses(runtime, 'SIGTERM')
+        }
+      } catch {
+        rejectBackendBootstrapAuthority(runtime, 'process ownership could not be authenticated.')
+      }
+      continue
+    }
+
     if (trimmed.startsWith('READY ')) {
       try {
+        const evidence = backendGenerationEvidence.get(runtime)
+        if (!evidence) {
+          throw new Error('Backend generation evidence is unavailable.')
+        }
         const bootstrap = parseBackendBootstrap(JSON.parse(trimmed.slice('READY '.length)))
+        const readyPid = bootstrap.renderer.pid
+        if (!validOwnedProcessPid(readyPid)) {
+          throw new Error('Backend READY omitted a valid process identity.')
+        }
+        if (evidence.ownershipMarkerPid === undefined) {
+          recordBackendRuntimeProcess(runtime, bootstrap.renderer)
+          rejectBackendBootstrapAuthority(
+            runtime,
+            'READY arrived without the authenticated pre-start process marker.'
+          )
+          continue
+        }
+        if (!backendReadyMatchesOwnershipMarker(evidence.ownershipMarkerPid, readyPid)) {
+          recordBackendRuntimeProcess(runtime, bootstrap.renderer)
+          rejectBackendBootstrapAuthority(
+            runtime,
+            'READY process identity did not match the authenticated pre-start marker.'
+          )
+          continue
+        }
+        if (!backendRuntimeAcceptsBootstrap(runtime)) {
+          // READY may race a pre-bootstrap quit. Keep its real PID evidence,
+          // but never publish socket authority after shutdown began.
+          signalExactlyOwnedBackendProcesses(runtime, 'SIGTERM')
+          logBackend('info', 'Backend READY arrived after shutdown began; authority was rejected.')
+          continue
+        }
+        evidence.authorityEstablished = true
+        evidence.adminConnection = bootstrap.admin
         backendConnection = bootstrap.renderer
         backendAdminConnection = bootstrap.admin
         logBackend('info', `Backend ready on ${backendConnection.host}:${backendConnection.port}`)
-        recordBackendRuntimeProcess(backendConnection)
+        if (runtime.state === 'awaiting-shutdown-receipt') {
+          logBackend(
+            'info',
+            'Backend READY ownership was captured while app quit awaited its shutdown receipt.'
+          )
+          continue
+        }
         if (process.env.VIDEORC_SMOKE_PRINT_BACKEND_READY === '1') {
           // The admin credential is private bootstrap authority. Even debug
           // smoke output receives only the renderer-scoped connection.
@@ -7360,6 +8877,8 @@ function handleBackendStdout(text: string): void {
         })
         void backendAuthorityReady.then(() => {
           if (
+            backendRuntimeOwner.isCurrent(runtime) &&
+            runtime.state === 'active' &&
             backendConnection === rendererConnection &&
             backendAdminConnection === adminConnection
           ) {
@@ -7367,15 +8886,16 @@ function handleBackendStdout(text: string): void {
             sendToWindows('backend:lifecycle', { state: 'running' })
           }
         })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        logBackend('error', `Could not parse backend READY line: ${message}`)
+      } catch {
+        rejectBackendBootstrapAuthority(runtime, 'READY could not be authenticated.')
       }
       continue
     }
 
     logBackend('info', trimmed)
   }
+
+  return remaining
 }
 
 function logBackend(level: BackendLogEvent['level'], message: string): void {
@@ -7388,6 +8908,7 @@ function logBackend(level: BackendLogEvent['level'], message: string): void {
   if (backendLogs.length > 200) {
     backendLogs.shift()
   }
+  backendLogFile.write(formatBackendLogFileLine(level, message, log.timestamp))
 
   sendToWindows('backend:log', log)
 
@@ -7631,6 +9152,20 @@ async function runSmokePreviewMotionCommand(
     throw new Error('Main window is not ready for preview motion smoke.')
   }
 
+  if (command === 'windows-live-audio-harness') {
+    if (!app.isPackaged || !packagedSmokeHarnessCapability || !windowsLiveAudioSmokeMode) {
+      throw new Error('Windows live audio harness is unavailable in this app mode.')
+    }
+    const request = validateWindowsLiveAudioSmokeRequest(params)
+    if (!request) {
+      throw new Error('Invalid Windows live audio harness action.')
+    }
+    return mainWindow.webContents.executeJavaScript(
+      windowsLiveAudioSmokeRendererScript(request),
+      true
+    )
+  }
+
   if (command === 'resize-window') {
     const width = typeof params.width === 'number' ? params.width : 1180
     const height = typeof params.height === 'number' ? params.height : 780
@@ -7670,7 +9205,7 @@ async function runSmokePreviewMotionCommand(
     const sceneScript = finalScene
       ? `window.__videorcSetPreviewScene?.(${jsonForInlineScript(finalScene)});`
       : ''
-    const statusScript = `window.__videorcSetCompositorStatus?.(${jsonForInlineScript(finalStatus)});`
+    const statusScript = `window.__videorcSetCompositorStatus?.(${jsonForInlineScript(nativePreviewProofPresentStatus(finalStatus))});`
     const result = await nativePreviewSurfaceWindow.webContents.executeJavaScript(
       `${sceneScript}${statusScript}window.__videorcPresentNativePreviewNow?.();(() => {
         const layer = document.querySelector('[data-layer-id="source:camera"]');
@@ -7703,7 +9238,7 @@ async function runSmokePreviewMotionCommand(
     const finalStatus = smokeCompositorStatusFromSceneParams(params)
     const status = await updateNativePreviewSurfaceCompositor(finalStatus)
     const result = await nativePreviewSurfaceWindow.webContents.executeJavaScript(
-      `window.__videorcSetCompositorStatus?.(${jsonForInlineScript(finalStatus)});window.__videorcPresentNativePreviewNow?.();(() => {
+      `window.__videorcSetCompositorStatus?.(${jsonForInlineScript(nativePreviewProofPresentStatus(finalStatus))});window.__videorcPresentNativePreviewNow?.();(() => {
         const background = document.querySelector('[data-layer-id="background:builtin-bg-01"]');
         const screen = document.querySelector('[data-layer-id="source:test-pattern"]');
         const image = background?.querySelector('img');
@@ -7755,7 +9290,7 @@ async function runSmokePreviewMotionCommand(
       const sceneScript = finalScene
         ? `window.__videorcSetPreviewScene?.(${jsonForInlineScript(finalScene)});`
         : ''
-      const statusScript = `window.__videorcSetCompositorStatus?.(${jsonForInlineScript(finalStatus)});`
+      const statusScript = `window.__videorcSetCompositorStatus?.(${jsonForInlineScript(nativePreviewProofPresentStatus(finalStatus))});`
       metrics = await surfaceWindow.webContents.executeJavaScript(
         `${sceneScript}${statusScript}window.__videorcPresentNativePreviewNow?.();window.__videorcNativePreviewMetrics?.() ?? null`,
         true
@@ -7805,6 +9340,16 @@ async function runSmokePreviewMotionCommand(
           true
         )
       : null
+    if (measuringProofSurface) {
+      // Keep the status sampled by smoke diagnostics on the same epoch as the
+      // proof host. Otherwise a pre-reset startup percentile can be observed
+      // after the steady-state measurement timestamp and fail the performance
+      // gate even though the direct proof-host measurement is healthy.
+      nativePreviewSurfaceStatus = {
+        ...resetNativePreviewProofMeasurementStatus(nativePreviewSurfaceStatus),
+        updatedAt: new Date().toISOString()
+      }
+    }
     const measurementStartedAtMs = Date.now()
     await new Promise((resolveMeasure) => setTimeout(resolveMeasure, durationMs))
     if (nativePreviewSurfaceStatusIsRealSurface(nativePreviewSurfaceStatus)) {
@@ -7860,13 +9405,19 @@ async function runSmokePreviewMotionCommand(
     return destroyNativePreviewSurface()
   }
 
+  if (command === 'drain-native-preview-host-commands') {
+    return drainBackendNativePreviewHostCommands()
+  }
+
   if (command === 'apply-native-preview-host-commands') {
     if (!Array.isArray(params.commands)) {
       throw new Error('Native preview host command smoke requires a commands array.')
     }
     const generation = previewSurfaceGenerationFromIpc(params.generation)
-    return runNativePreviewSurfaceMutation(() =>
-      applyNativePreviewHostCommands(params.commands as NativePreviewHostCommand[], generation)
+    return runNativePreviewSurfaceMutation(
+      () =>
+        applyNativePreviewHostCommands(params.commands as NativePreviewHostCommand[], generation),
+      'smoke-apply-host-commands'
     )
   }
 
@@ -7942,6 +9493,11 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    previewWindow.show()
+    previewWindow.moveTop()
+    if (nativePreviewSurfaceWindow && !nativePreviewSurfaceWindow.isDestroyed()) {
+      nativePreviewSurfaceWindow.moveTop()
+    }
     // macOS does not reliably emit 'move' for programmatic position-only
     // setBounds, so push placement and state explicitly.
     pushPreviewWindowPlacement()
@@ -7974,6 +9530,8 @@ async function runSmokePreviewMotionCommand(
       width: typeof params.width === 'number' ? params.width : current.width,
       height: typeof params.height === 'number' ? params.height : current.height
     })
+    mainWindow.show()
+    mainWindow.moveTop()
     // Position-only programmatic setBounds does not reliably emit 'move' on
     // macOS; kick the docked follower directly like preview-window-set-bounds.
     if (currentPreviewWindowMode() === 'docked') {
@@ -8045,35 +9603,67 @@ async function runSmokePreviewMotionCommand(
   }
 
   if (command === 'main-window-state') {
+    const displays = screen.getAllDisplays().map((display) => ({
+      id: String(display.id),
+      bounds: display.bounds,
+      scaleFactor: display.scaleFactor
+    }))
     if (!mainWindow || mainWindow.isDestroyed()) {
-      return { open: false, bounds: null, contentBounds: null }
+      return {
+        open: false,
+        visible: false,
+        bounds: null,
+        contentBounds: null,
+        captureProtectionMarkerInstalled: false,
+        displays
+      }
     }
     return {
       open: true,
+      visible: mainWindow.isVisible() && !mainWindow.isMinimized(),
       bounds: mainWindow.getBounds(),
-      contentBounds: mainWindow.getContentBounds()
+      ...smokeNativeWindowIdentity(mainWindow),
+      contentBounds: mainWindow.getContentBounds(),
+      captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(mainWindow),
+      displays
     }
   }
 
   if (command === 'preview-window-state') {
     const surface = nativePreviewSurfaceWindow
+    const mutationQueue = nativePreviewSurfaceMutationQueue.metrics()
     return {
       ...previewWindowState(),
+      ...smokeNativeWindowIdentity(previewWindow),
       surface: {
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
-        bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null
+        bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null,
+        ...smokeNativeWindowIdentity(surface),
+        captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(surface)
       },
       nativeOwnsPlacement: nativeSurfaceOwnsPlacement(),
       framePollingSuppressedFlag: nativePreviewSurfaceFramePollingSuppressed,
+      nativePreviewMutationQueueDepth: mutationQueue.currentDepth,
+      nativePreviewMutationQueuePendingCount: mutationQueue.pendingCount,
+      nativePreviewMutationQueueRejectedCount: mutationQueue.rejected,
+      nativePreviewMutationQueueActiveOperation:
+        nativePreviewSurfaceMutationQueue.activeOperationLabel,
       surfaceStatus: {
         state: nativePreviewSurfaceStatus.state,
         transport: nativePreviewSurfaceStatus.transport,
+        backing: nativePreviewSurfaceStatus.backing,
         framePollingSuppressed: nativePreviewSurfaceStatus.framePollingSuppressed,
         nativePreviewHostKind: nativePreviewSurfaceStatus.nativePreviewHostKind,
+        nativePreviewHostAttached: nativePreviewSurfaceStatus.nativePreviewHostAttached,
+        firstFrameContract: nativePreviewSurfaceStatus.firstFrameContract,
+        firstFrameReason: nativePreviewSurfaceStatus.firstFrameReason,
+        sourcePixelsPresent: nativePreviewSurfaceStatus.sourcePixelsPresent,
+        message: nativePreviewSurfaceStatus.message,
         nativePreviewDrawableWidth: nativePreviewSurfaceStatus.nativePreviewDrawableWidth,
         nativePreviewDrawableHeight: nativePreviewSurfaceStatus.nativePreviewDrawableHeight,
-        nativePreviewContentsScale: nativePreviewSurfaceStatus.nativePreviewContentsScale
+        nativePreviewContentsScale: nativePreviewSurfaceStatus.nativePreviewContentsScale,
+        windowsD3d11Presenter: nativePreviewSurfaceStatus.windowsD3d11Presenter
       }
     }
   }
@@ -8099,16 +9689,52 @@ async function runSmokePreviewMotionCommand(
       height: typeof params.height === 'number' ? params.height : current.height
     })
     window.show()
+    window.moveTop()
     emitNotesWindowState()
     return notesWindowState()
   }
 
   if (command === 'notes-window-state') {
-    return notesWindowState()
+    return {
+      ...notesWindowState(),
+      ...smokeNativeWindowIdentity(notesWindow)
+    }
   }
 
   if (command === 'comments-window-open') {
     return openCommentsWindow()
+  }
+
+  if (command === 'captions-window-open') {
+    return openCaptionsWindow()
+  }
+
+  if (command === 'captions-window-close') {
+    return closeCaptionsWindow()
+  }
+
+  if (command === 'captions-window-set-bounds') {
+    const window = captionsWindow
+    if (!captionsWindowIsOpen() || !window) {
+      return captionsWindowState('Captions window is not open.')
+    }
+    const current = window.getBounds()
+    window.setBounds({
+      x: typeof params.x === 'number' ? params.x : current.x,
+      y: typeof params.y === 'number' ? params.y : current.y,
+      width: typeof params.width === 'number' ? params.width : current.width,
+      height: typeof params.height === 'number' ? params.height : current.height
+    })
+    window.show()
+    window.moveTop()
+    return captionsWindowState()
+  }
+
+  if (command === 'captions-window-state') {
+    return {
+      ...captionsWindowState(),
+      ...smokeNativeWindowIdentity(captionsWindow)
+    }
   }
 
   if (command === 'comments-window-close') {
@@ -8132,12 +9758,16 @@ async function runSmokePreviewMotionCommand(
       height: typeof params.height === 'number' ? params.height : current.height
     })
     window.show()
+    window.moveTop()
     emitCommentsWindowState()
     return commentsWindowState()
   }
 
   if (command === 'comments-window-state') {
-    return commentsWindowState()
+    return {
+      ...commentsWindowState(),
+      ...smokeNativeWindowIdentity(commentsWindow)
+    }
   }
 
   if (command === 'comments-window-push-snapshot') {
@@ -8150,7 +9780,7 @@ async function runSmokePreviewMotionCommand(
       snapshot,
       latestSendOperation: params.latestSendOperation as CommentsSendOperation | undefined
     })
-    commentsViewMode = mode
+    commentsViewSelection.set(mode)
     emitCommentsView()
     return currentCommentsView()
   }
@@ -8160,8 +9790,9 @@ async function runSmokePreviewMotionCommand(
     if (!mode || (mode.kind !== 'live' && mode.kind !== 'history')) {
       throw new Error('Comments view mode must be live or history.')
     }
-    commentsViewMode = mode
-    emitCommentsView()
+    if (await selectCommentsViewMode(mode)) {
+      emitCommentsView()
+    }
     return currentCommentsView()
   }
 
@@ -8170,7 +9801,10 @@ async function runSmokePreviewMotionCommand(
     const outcome = params.outcome
     const delayMs =
       typeof params.delayMs === 'number' && Number.isFinite(params.delayMs)
-        ? Math.min(5_000, Math.max(0, Math.round(params.delayMs)))
+        ? Math.min(
+            COMMENTS_COMMAND_RELAY_TIMEOUT_MS - 1_000,
+            Math.max(0, Math.round(params.delayMs))
+          )
         : 100
     const reason =
       typeof params.reason === 'string' && params.reason.trim()
@@ -8210,7 +9844,7 @@ async function runSmokePreviewMotionCommand(
       routedTo,
       currentView: currentCommentsView(),
       liveOperation: latestLiveCommentsSendOperation,
-      historyOperation: commentsHistorySendOperations.get(operation.sessionId)
+      historyOperation: commentsHistoryCache.peek(operation.sessionId)?.latestSendOperation
     }
   }
 
@@ -8548,6 +10182,108 @@ async function runSmokePreviewMotionCommand(
     return nativePreviewSurfaceStatus
   }
 
+  if (command === 'windows-preview-os-input-probe') {
+    if (process.platform !== 'win32') {
+      throw new Error('The Windows preview OS-input probe is available only on Windows.')
+    }
+    if (!previewWindowIsOpenForSurface() || !previewWindow || previewWindow.isDestroyed()) {
+      throw new Error('Preview window must be open before preparing the Windows OS-input probe.')
+    }
+    const action = params.action
+    if (action === 'cleanup') {
+      await previewWindow.webContents.executeJavaScript(
+        `document.getElementById('videorc-windows-preview-input-probe')?.remove();
+         delete window.__videorcWindowsPreviewInputProbe;
+         true`,
+        true
+      )
+      return { cleaned: true }
+    }
+    if (action === 'prepare') {
+      const presenter = nativePreviewSurfaceStatus.windowsD3d11Presenter
+      if (
+        nativePreviewSurfaceStatus.state !== 'live' ||
+        presenter?.firstPresentSucceeded !== true ||
+        presenter.sourceLive !== true
+      ) {
+        throw new Error('The D3D11 presenter must be live before preparing the OS-input probe.')
+      }
+      const rects = (await previewWindow.webContents.executeJavaScript(
+        `(() => {
+          document.getElementById('videorc-windows-preview-input-probe')?.remove()
+          const state = { clicks: 0, focusEvents: 0, inputEvents: 0, value: '' }
+          window.__videorcWindowsPreviewInputProbe = state
+          const root = document.createElement('div')
+          root.id = 'videorc-windows-preview-input-probe'
+          root.style.cssText = 'position:fixed;inset:0;z-index:2147483647;pointer-events:none'
+          const drag = document.createElement('div')
+          drag.id = 'videorc-windows-preview-drag-target'
+          drag.style.cssText = 'position:fixed;left:260px;top:24px;width:280px;height:48px;pointer-events:auto;opacity:.01;background:#fff;-webkit-app-region:drag'
+          const input = document.createElement('input')
+          input.id = 'videorc-windows-preview-input-target'
+          input.type = 'text'
+          input.autocomplete = 'off'
+          input.style.cssText = 'position:fixed;left:80px;top:112px;width:240px;height:44px;pointer-events:auto;opacity:.01;-webkit-app-region:no-drag'
+          input.addEventListener('click', () => { state.clicks += 1 })
+          input.addEventListener('focus', () => { state.focusEvents += 1 })
+          input.addEventListener('input', () => {
+            state.inputEvents += 1
+            state.value = input.value
+          })
+          root.append(drag, input)
+          document.body.append(root)
+          const serialize = (rect) => ({
+            x: rect.x,
+            y: rect.y,
+            width: rect.width,
+            height: rect.height
+          })
+          return {
+            input: serialize(input.getBoundingClientRect()),
+            drag: serialize(drag.getBoundingClientRect())
+          }
+        })()`,
+        true
+      )) as {
+        input: { x: number; y: number; width: number; height: number }
+        drag: { x: number; y: number; width: number; height: number }
+      }
+      const contentBounds = previewWindow.getContentBounds()
+      const physicalPoint = (rect: { x: number; y: number; width: number; height: number }) =>
+        screen.dipToScreenPoint({
+          x: Math.round(contentBounds.x + rect.x + rect.width / 2),
+          y: Math.round(contentBounds.y + rect.y + rect.height / 2)
+        })
+      return {
+        prepared: true,
+        inputPoint: physicalPoint(rects.input),
+        dragPoint: physicalPoint(rects.drag),
+        initialBounds: previewWindow.getBounds(),
+        presenter,
+        previewFocused: previewWindow.isFocused(),
+        webContentsFocused: previewWindow.webContents.isFocused()
+      }
+    }
+    if (action === 'read') {
+      const state = await previewWindow.webContents.executeJavaScript(
+        `(() => ({
+          ...(window.__videorcWindowsPreviewInputProbe ?? {}),
+          activeElementId: document.activeElement?.id ?? null
+        }))()`,
+        true
+      )
+      return {
+        state,
+        bounds: previewWindow.getBounds(),
+        contentBounds: previewWindow.getContentBounds(),
+        previewFocused: previewWindow.isFocused(),
+        webContentsFocused: previewWindow.webContents.isFocused(),
+        presenter: nativePreviewSurfaceStatus.windowsD3d11Presenter
+      }
+    }
+    throw new Error('windows-preview-os-input-probe requires action prepare, read, or cleanup.')
+  }
+
   if (command === 'exercise-preview-click-focus') {
     if (!previewWindowIsOpenForSurface() || !previewWindow || previewWindow.isDestroyed()) {
       throw new Error('Preview window must be open before exercising click/focus.')
@@ -8823,7 +10559,11 @@ async function runSmokePreviewMotionCommand(
 }
 
 function nativePreviewSurfaceStatusIsRealSurface(status: PreviewSurfaceStatus): boolean {
-  return nativePreviewSurfaceHasAttachedNativePixels(status)
+  return nativePreviewSurfaceHasAttachedNativePixels(
+    status,
+    process.platform,
+    previewWindowSurfaceGeneration()
+  )
 }
 
 function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record<string, unknown> {
@@ -8872,6 +10612,9 @@ function nativePreviewSurfaceStatusMetrics(status: PreviewSurfaceStatus): Record
     nativePreviewIosurfaceImports: status.nativePreviewIosurfaceImports,
     nativePreviewIosurfaceInvalidations: status.nativePreviewIosurfaceInvalidations,
     nativePreviewIosurfaceImportFailures: status.nativePreviewIosurfaceImportFailures,
+    nativePreviewIosurfaceImportLiveCount: status.nativePreviewIosurfaceImportLiveCount,
+    nativePreviewIosurfaceImportPeakCount: status.nativePreviewIosurfaceImportPeakCount,
+    nativePreviewIosurfaceImportCeiling: status.nativePreviewIosurfaceImportCeiling,
     nativePreviewPresentedSceneRevision: status.nativePreviewPresentedSceneRevision,
     framePollingSuppressed: status.framePollingSuppressed,
     sourcePixelsPresent: status.sourcePixelsPresent,
@@ -8912,6 +10655,11 @@ function smokePreviewSceneParams(
     cameraShape: 'circle',
     cameraCornerRadiusPct: 12,
     cameraAspect: 'source',
+    cameraChromaKeyEnabled: false,
+    cameraChromaKeyColor: '#00FF00',
+    cameraChromaKeySimilarityPct: 40,
+    cameraChromaKeySmoothnessPct: 8,
+    cameraChromaKeySpillPct: 10,
     cameraMargin: 32,
     cameraFit: 'fill',
     cameraMirror: true,
@@ -9029,6 +10777,23 @@ function smokeCompositorStatusFromSceneParams(
   }
 }
 
+function windowsLiveAudioSmokeRendererScript(request: WindowsLiveAudioSmokeRequest): string {
+  const requestJson = jsonForInlineScript(request)
+  return `
+    (async () => {
+      const deadline = performance.now() + 15000;
+      while (performance.now() < deadline) {
+        const harness = window.__videorcWindowsLiveAudioHarness;
+        if (typeof harness === 'function') {
+          return harness(${requestJson});
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 50));
+      }
+      throw new Error('Windows live audio renderer harness did not become ready.');
+    })()
+  `
+}
+
 function smokeRendererScript(command: string, params: Record<string, unknown>): string {
   const paramsJson = JSON.stringify(params)
   return `
@@ -9097,12 +10862,14 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
       if (${JSON.stringify(command)} === 'enable-synthetic-source') {
         await openTab('sources', '[data-videorc-synthetic-source-toggle]');
         const toggle = await waitFor('[data-videorc-synthetic-source-toggle]');
+        if (toggle.getAttribute('aria-checked') === 'true') {
+          await sleep(Number(params.settleMs ?? 600));
+          return { enabled: true, alreadyEnabled: true };
+        }
         if (toggle.disabled) {
           throw new Error('Synthetic source toggle is disabled.');
         }
-        if (toggle.getAttribute('aria-checked') !== 'true') {
-          toggle.click();
-        }
+        toggle.click();
         const deadline = Date.now() + 5000;
         while (Date.now() < deadline) {
           if (toggle.getAttribute('aria-checked') === 'true') {
@@ -9378,9 +11145,12 @@ function smokeRendererScript(command: string, params: Record<string, unknown>): 
           hasNativePlaceholder: Boolean(previewWindowState?.open && surfaceStatus?.transport && surfaceStatus.transport !== 'unavailable'),
           previewWindowOpen: Boolean(previewWindowState?.open),
           previewWindowVisible: Boolean(previewWindowState?.visible),
-          surfaceTransport: surfaceStatus?.transport ?? null,
-          surfaceBacking: surfaceStatus?.backing ?? null,
-          previewImageCount: previewImages.length,
+	          surfaceTransport: surfaceStatus?.transport ?? null,
+	          surfaceBacking: surfaceStatus?.backing ?? null,
+	          nativePreviewHostKind: surfaceStatus?.nativePreviewHostKind ?? null,
+	          firstFrameContract: surfaceStatus?.firstFrameContract ?? null,
+	          framePollingSuppressed: Boolean(surfaceStatus?.framePollingSuppressed),
+	          previewImageCount: previewImages.length,
           previewImageSrcs,
           hasJpegPollingPreviewImage: previewImageSrcs.some((src) => src.includes('/preview/live.jpg') || src.includes('/preview/live.mjpeg')),
           surfaceWidth,
@@ -9480,28 +11250,187 @@ function inferBackendLogLevel(line: string): BackendLogEvent['level'] {
   return 'info'
 }
 
-async function stopBackend(): Promise<void> {
+async function waitForBackendShutdownConnection(
+  child: ChildProcessWithoutNullStreams,
+  runtime: BackendRuntime
+): Promise<BackendConnection | null> {
+  while (
+    child.exitCode === null &&
+    child.signalCode === null &&
+    backendRuntimeOwner.isCurrent(runtime) &&
+    runtime.state === 'awaiting-shutdown-receipt'
+  ) {
+    if (backendAdminConnection) {
+      return backendAdminConnection
+    }
+    await delay(25)
+  }
+  return backendAdminConnection
+}
+
+async function requestBackendShutdownPreparation(
+  connection: BackendConnection,
+  requestId: string
+): Promise<unknown> {
+  const query = new URLSearchParams({ token: connection.token, requestId })
+  const response = await net.fetch(
+    `http://${connection.host}:${connection.port}/process/shutdown/prepare?${query.toString()}`,
+    { method: 'POST' }
+  )
+  const text = await response.text()
+  let payload: unknown = null
+  try {
+    payload = JSON.parse(text)
+  } catch {
+    // The status below still supplies a stable failure if the backend closed
+    // before a response body could be completed.
+  }
+  if (!response.ok) {
+    const detail =
+      payload &&
+      typeof payload === 'object' &&
+      typeof (payload as { error?: unknown }).error === 'string'
+        ? (payload as { error: string }).error
+        : `HTTP ${response.status}`
+    throw new Error(`Backend shutdown preparation failed: ${detail}`)
+  }
+  return payload
+}
+
+async function stopBackend(): Promise<BackendShutdownResult> {
   destroyNativePreviewSurface()
   smokePreviewMotionServer?.close()
   smokePreviewMotionServer = null
-  const child = backendProcess
-  if (!child) {
-    return
+  const target = classifyBackendShutdownTarget(backendProcess, backendRuntimeOwner.current())
+  if (target === 'absent') {
+    return 'skipped'
+  }
+  if (target === 'inconsistent') {
+    throw new Error(
+      'Backend shutdown ownership is inconsistent; app quit remains blocked to protect any active recording.'
+    )
+  }
+  const child = backendProcess as ChildProcessWithoutNullStreams
+  const runtime = backendRuntimeOwner.current() as BackendRuntime
+  const generationEvidence = backendGenerationEvidence.get(runtime)
+  const authorityEstablished = generationEvidence ? generationEvidence.authorityEstablished : true
+
+  if (!authorityEstablished) {
+    // READY is the first moment any renderer can receive backend authority, so
+    // capture is impossible before it. Move to `stopping` synchronously before
+    // the first await: a racing late READY is then rejected by
+    // backendRuntimeAcceptsBootstrap instead of upgrading this into an unsafe
+    // receipt-free shutdown after capture might have begun.
+    backendRuntimeOwner.beginShutdown(runtime)
+    signalExactlyOwnedBackendProcesses(runtime, 'SIGTERM')
+    logBackend(
+      'info',
+      `Backend generation ${runtime.generation} is quitting before READY; using bounded pre-bootstrap shutdown.`
+    )
+    const result = await stopPreBootstrapBackendProcess(child)
+    if (result === 'timed-out') {
+      clearBackendConnectionState()
+      logBackend(
+        'error',
+        `Backend generation ${runtime.generation} pre-bootstrap graceful shutdown timed out; forcing only identity-matched processes and waiting for exact death.`
+      )
+      sendToWindows('backend:lifecycle', { state: 'lost' })
+      signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+      await waitForBackendBootstrapOutputDrain(child)
+    }
+
+    signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+    finalizeBackendRuntimeExit(runtime, child.exitCode, child.signalCode)
+    while (backendRuntimeOwner.current() === runtime) {
+      signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+      if (reconcileUnconfirmedBackendRuntime(false)) {
+        break
+      }
+      await delay(250)
+    }
+    return result
   }
 
-  const result = await stopBackendProcess(child)
+  // Arm provisional fail-closed ownership before the first await. In dev,
+  // `cargo run` is only a wrapper; its close event must retain the real backend
+  // PID until an exact finalization receipt arrives or exact death is proven.
+  backendRuntimeOwner.beginShutdownReceiptWait(runtime)
+  const shutdownConnection =
+    generationEvidence?.adminConnection ??
+    backendAdminConnection ??
+    (await waitForBackendShutdownConnection(child, runtime))
+  let shutdownReceipt: unknown
+  let expectedShutdownReceipt: { requestId: string; backendPid: number } | undefined
+  const requestId = randomUUID()
+  const backendPid = shutdownConnection?.pid
+  if (
+    shutdownConnection &&
+    validOwnedProcessPid(backendPid) &&
+    runtime.ownedProcessPids.has(backendPid) &&
+    backendRuntimeOwner.isCurrent(runtime)
+  ) {
+    expectedShutdownReceipt = { requestId, backendPid }
+    try {
+      shutdownReceipt = await requestBackendShutdownPreparation(shutdownConnection, requestId)
+      if (!backendShutdownAllowsForceKill(shutdownReceipt, expectedShutdownReceipt)) {
+        logBackend(
+          'warn',
+          'Backend shutdown preparation returned without an exact generation-bound capture-finalization acknowledgement; forced termination remains disabled.'
+        )
+      }
+    } catch (error) {
+      // No OS signal is safe here: Node maps signals to TerminateProcess on
+      // Windows. The authenticated endpoint wakes the backend shutdown task;
+      // if no exact receipt returns, keep the app alive until the child exits.
+      logBackend(
+        'warn',
+        `Backend capture-finalization acknowledgement was unavailable; waiting without forced termination: ${errorMessageText(error)}`
+      )
+    }
+  } else {
+    logBackend(
+      'warn',
+      'Backend shutdown authority did not match the owned process; waiting without signalling or forced termination.'
+    )
+  }
+  const receiptConfirmed =
+    expectedShutdownReceipt !== undefined &&
+    backendShutdownAllowsForceKill(shutdownReceipt, expectedShutdownReceipt)
+  if (receiptConfirmed) {
+    backendRuntimeOwner.confirmShutdownReceipt(runtime)
+  } else {
+    // A dev `cargo run` wrapper can exit before the real backend. Preserve
+    // exact PID ownership now so wrapper close alone can never unblock Quit.
+    backendRuntimeOwner.markShutdownUnconfirmed(runtime)
+  }
+  const result = await stopBackendProcess(child, {
+    shutdownReceipt,
+    expectedShutdownReceipt
+  })
   if (result === 'timed-out') {
-    logBackend('warn', 'Backend shutdown timed out; continuing app quit after SIGKILL.')
+    backendRuntimeOwner.markShutdownUnconfirmed(runtime)
+    clearBackendConnectionState()
+    logBackend(
+      'error',
+      `Backend generation ${runtime.generation} shutdown timed out after SIGKILL; retaining exact ownership and refusing replacement startup.`
+    )
+    sendToWindows('backend:lifecycle', { state: 'lost' })
   }
-  if (backendProcess === child) {
-    removeBackendOwnedProcesses()
-    backendProcess = null
-    backendConnection = null
-    backendAdminConnection = null
-    backendAuthorityReady = Promise.resolve()
-    mainResourceCapabilities.clear()
-    disconnectBackendEventSocket()
+
+  if (receiptConfirmed) {
+    signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
   }
+  finalizeBackendRuntimeExit(runtime, child.exitCode, child.signalCode)
+  while (backendRuntimeOwner.current() === runtime) {
+    if (receiptConfirmed) {
+      signalExactlyOwnedBackendProcesses(runtime, 'SIGKILL')
+    }
+    if (reconcileUnconfirmedBackendRuntime(false)) {
+      break
+    }
+    await delay(250)
+  }
+  return result
 }
 
 async function openSystemPermissions(pane: SystemPermissionPane = 'privacy'): Promise<void> {
@@ -9519,8 +11448,9 @@ async function openSystemPermissions(pane: SystemPermissionPane = 'privacy'): Pr
   }
 }
 
-// Permissions onboarding: fire the native macOS grant prompt without also
-// jumping to System Settings (openSystemPermissions does both). Restart logic
+// Fire the native macOS grant prompt without jumping to System Settings.
+// openSystemPermissions remains navigation-only; renderer policy selects the
+// correct user-initiated path from the exact TCC status. Restart logic
 // lives in media-access.ts (FX1: an already-granted pane must NOT restart the
 // backend — that restart raced the renderer's follow-up meter sample).
 async function requestMediaAccessNative(pane: 'camera' | 'microphone'): Promise<MediaAccessResult> {
@@ -9571,7 +11501,10 @@ async function restartBackend(reason: string): Promise<void> {
 
   backendRestartInProgress = (async () => {
     logBackend('info', reason)
-    await stopBackend()
+    const result = await stopBackend()
+    if (result === 'timed-out') {
+      throw new Error('Backend restart was refused because shutdown could not be confirmed.')
+    }
     if (!appIsQuitting) {
       startBackend()
     }
@@ -9607,11 +11540,22 @@ function retainDeferredPermissionRestart(reason: string): void {
   deferredPermissionRestartState = deferred.state
 }
 
-async function runPermissionBackendRestart(reason: string): Promise<boolean> {
+function currentBackendRestartBoundary(): MediaAccessRestartResult['staleBackend'] {
+  const connection = backendConnection
+  return connection
+    ? { port: connection.port, ...(connection.pid === undefined ? {} : { pid: connection.pid }) }
+    : undefined
+}
+
+async function runPermissionBackendRestart(reason: string): Promise<MediaAccessRestartResult> {
+  let staleBackend = currentBackendRestartBoundary()
   try {
     const restarted = await runBackendInterruptingAction(
       () => acquireCurrentBackendInterruption(reason),
-      () => restartBackend(reason)
+      () => {
+        staleBackend = currentBackendRestartBoundary()
+        return restartBackend(reason)
+      }
     )
     if (!restarted) {
       retainDeferredPermissionRestart(reason)
@@ -9620,7 +11564,10 @@ async function runPermissionBackendRestart(reason: string): Promise<boolean> {
         'Permission restart deferred because capture became active, started, or could not be confirmed idle.'
       )
     }
-    return restarted
+    return {
+      restarted,
+      ...(staleBackend ? { staleBackend } : {})
+    }
   } catch (error) {
     retainDeferredPermissionRestart(reason)
     throw error
@@ -9639,7 +11586,7 @@ function updateMainCaptureState(payload: unknown): void {
   }
 }
 
-async function requestPermissionBackendRestart(reason: string): Promise<boolean> {
+async function requestPermissionBackendRestart(reason: string): Promise<MediaAccessRestartResult> {
   const decision = requestPermissionRestart(
     deferredPermissionRestartState,
     mainCaptureState,
@@ -9648,7 +11595,11 @@ async function requestPermissionBackendRestart(reason: string): Promise<boolean>
   deferredPermissionRestartState = decision.state
   if (!decision.runReason) {
     logBackend('info', 'Permission restart deferred until the active capture is idle.')
-    return false
+    const staleBackend = currentBackendRestartBoundary()
+    return {
+      restarted: false,
+      ...(staleBackend ? { staleBackend } : {})
+    }
   }
   return runPermissionBackendRestart(decision.runReason)
 }
@@ -9672,8 +11623,43 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
     osRelease: release(),
     gpuInfo,
     hardwareAccelerationDisabled: gpuFallbackDecision.disable,
+    gpuFallback: {
+      source: gpuFallbackDecision.source,
+      reason:
+        gpuFallbackLaunchState?.reason ??
+        gpuFallbackState?.reason ??
+        (gpuFallbackDecision.source === 'env' ? 'environment-override' : null),
+      crashCount: gpuFallbackState?.crashCount ?? gpuFallbackLaunchState?.crashCount ?? 0,
+      updatedAt: gpuFallbackLaunchState?.updatedAt ?? gpuFallbackState?.updatedAt ?? null,
+      retryScheduled: Boolean(
+        gpuFallbackState?.retryRequestedAt &&
+        !gpuFallbackState.retryStartedAt &&
+        !gpuFallbackState.disableHardwareAcceleration
+      ),
+      retryAttempts: gpuFallbackState?.retryAttempts ?? gpuFallbackLaunchState?.retryAttempts ?? 0
+    },
+    backendCrashes: backendCrashRecords,
     env: process.env
   })
+}
+
+async function retryHardwareAcceleration(): Promise<RuntimeInfo> {
+  if (gpuFallbackDecision.source === 'env') {
+    throw new Error(
+      'Hardware acceleration is disabled by VIDEORC_DISABLE_GPU and cannot be retried in Settings.'
+    )
+  }
+  if (!gpuFallbackDecision.disable || !gpuFallbackState?.disableHardwareAcceleration) {
+    throw new Error('Software rendering is not active for this launch.')
+  }
+
+  gpuFallbackState = scheduleGpuFallbackRetry(gpuFallbackState, new Date().toISOString())
+  writeGpuFallbackState(gpuFallbackFile, gpuFallbackState)
+  logBackend(
+    'info',
+    'Hardware acceleration retry scheduled for the next launch; the current launch remains in software rendering mode.'
+  )
+  return runtimeInfo()
 }
 
 async function revealPermissionTarget(): Promise<void> {
@@ -9750,10 +11736,22 @@ async function trashSessionDeletion(operationId: unknown): Promise<{
     trashItem: (target) => shell.trashItem(target)
   })
   const failedPaths = [...(operation.blockedPaths ?? []), ...trash.failures]
-  const completion = await requestBackendAdmin<{ deleted: boolean }>('sessions.delete.complete', {
-    operationId,
-    failedPaths
-  })
+  const completion = await requestBackendAdmin<{ deleted: boolean }>(
+    'sessions.delete.complete',
+    {
+      operationId,
+      failedPaths
+    },
+    BACKEND_FILE_MUTATION_REQUEST_TIMEOUT_MS
+  )
+  if (completion.deleted) {
+    commentsHistoryCache.delete(operation.sessionId)
+    const selectedMode = commentsViewSelection.current()
+    if (selectedMode.kind === 'history' && selectedMode.sessionId === operation.sessionId) {
+      commentsViewSelection.set({ kind: 'live' })
+      emitCommentsView()
+    }
+  }
   return { deleted: completion.deleted, failedCount: failedPaths.length }
 }
 
@@ -9930,11 +11928,29 @@ function avatarCacheDirectory(): string {
 
 const avatarFetchesInFlight = new Map<string, Promise<string | null>>()
 
-async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
-  if (typeof rawUrl !== 'string' || !avatarHostAllowed(rawUrl)) {
-    return null
+// Rejections used to be silent, so a monogram-only sidebar or Comments window
+// left nothing in a support bundle. Log each distinct (host, reason) once per
+// process — host/scheme/size/status class only, never the URL (CDN paths can
+// carry per-user tokens).
+const avatarRejectionsLogged = new Set<string>()
+
+function rejectChatAvatar(rejection: AvatarCacheRejection): null {
+  const key = avatarCacheRejectionKey(rejection)
+  if (!avatarRejectionsLogged.has(key)) {
+    avatarRejectionsLogged.add(key)
+    logBackend('warn', avatarCacheRejectionMessage(rejection))
   }
-  const fileName = avatarCacheFileName(rawUrl)
+  return null
+}
+
+async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
+  const decision = avatarUrlDecision(rawUrl)
+  if (!decision.allowed) {
+    return rejectChatAvatar(decision.rejection)
+  }
+  const { host } = decision
+  const avatarUrl = rawUrl as string
+  const fileName = avatarCacheFileName(avatarUrl)
   const localUrl = `${MANAGED_ASSET_SCHEME}://avatar/${fileName}`
   const filePath = join(avatarCacheDirectory(), fileName)
   if (existsSync(filePath)) {
@@ -9946,20 +11962,40 @@ async function cacheChatAvatar(rawUrl: unknown): Promise<string | null> {
   }
   const fetchPromise = (async () => {
     try {
-      const response = await net.fetch(rawUrl)
-      if (!response.ok) {
-        return null
+      const result = await withAvatarFetchDeadline(async (signal) => {
+        const response = await net.fetch(avatarUrl, { signal })
+        if (!response.ok) {
+          return { ok: false as const, status: response.status }
+        }
+        return {
+          ok: true as const,
+          bytes: Buffer.from(await response.arrayBuffer())
+        }
+      })
+      if (!result.ok) {
+        return rejectChatAvatar({
+          kind: 'http-status',
+          host,
+          statusClass: httpStatusClass(result.status)
+        })
       }
-      const bytes = Buffer.from(await response.arrayBuffer())
-      if (bytes.length === 0 || bytes.length > AVATAR_MAX_BYTES) {
-        return null
+      const { bytes } = result
+      if (bytes.length === 0) {
+        return rejectChatAvatar({ kind: 'empty-body', host })
+      }
+      if (bytes.length > AVATAR_MAX_BYTES) {
+        return rejectChatAvatar({ kind: 'too-large', host, bytes: bytes.length })
       }
       mkdirSync(avatarCacheDirectory(), { recursive: true })
       writeFileSync(filePath, bytes)
       pruneAvatarCache()
       return localUrl
-    } catch {
-      return null
+    } catch (error) {
+      return rejectChatAvatar({
+        kind: 'fetch-error',
+        host,
+        message: redactAvatarFetchError(error)
+      })
     } finally {
       avatarFetchesInFlight.delete(fileName)
     }
@@ -10334,6 +12370,19 @@ app.whenReady().then(async () => {
     return
   }
 
+  if (gpuFallbackDecision.source === 'retry') {
+    setTimeout(() => {
+      if (!gpuFallbackPersistedThisLaunch) {
+        clearGpuFallbackState(gpuFallbackFile)
+        gpuFallbackState = null
+        logBackend(
+          'info',
+          'Hardware acceleration remained stable during the recovery window; the persisted GPU fallback was cleared.'
+        )
+      }
+    }, GPU_RETRY_STABILITY_MS).unref()
+  }
+
   installRendererSessionPermissions(session.defaultSession)
 
   // Warm the glass-wallpaper cache while Electron/renderer boot: the underlay
@@ -10376,6 +12425,7 @@ app.whenReady().then(async () => {
     )
     await openOAuthUrl(accountSignInCoordinator().begin(authorizeUrl, intent.intentGeneration))
   })
+  secureIpcHandle('account:refresh', () => accountRefreshBroker.refresh())
   secureIpcHandle('account:sign-out', async () => {
     const account = await requestBackendAdmin<VideorcAccountSnapshot>(
       'account.sign_out',
@@ -10402,6 +12452,7 @@ app.whenReady().then(async () => {
       : false
   )
   secureIpcHandle('app:get-runtime-info', () => runtimeInfo())
+  secureIpcHandle('app:retry-hardware-acceleration', () => retryHardwareAcceleration())
   secureIpcHandle('system:open-permissions', (_event, pane?: SystemPermissionPane) =>
     openSystemPermissions(pane)
   )
@@ -10512,6 +12563,13 @@ app.whenReady().then(async () => {
     }
     return previewWindowState()
   })
+  secureIpcHandle(
+    'global-shortcuts:set',
+    (
+      _event,
+      shortcuts: { recordToggle?: string; streamToggle?: string; micToggle?: string } | undefined
+    ) => setGlobalShortcuts(shortcuts ?? {})
+  )
   secureIpcHandle('notes-window:open', () => openNotesWindow())
   secureIpcHandle('notes-window:close', () => closeNotesWindow())
   secureIpcHandle('notes-window:get-state', () => notesWindowState())
@@ -10544,10 +12602,11 @@ app.whenReady().then(async () => {
       return currentCommentsView()
     }
     cacheCommentsView(view)
-    if (commentsViewMode.kind === view.mode.kind) {
+    const selectedMode = commentsViewSelection.current()
+    if (selectedMode.kind === view.mode.kind) {
       if (
         view.mode.kind === 'live' ||
-        (commentsViewMode.kind === 'history' && commentsViewMode.sessionId === view.mode.sessionId)
+        (selectedMode.kind === 'history' && selectedMode.sessionId === view.mode.sessionId)
       ) {
         emitCommentsView()
       }
@@ -10555,7 +12614,7 @@ app.whenReady().then(async () => {
     return view
   })
   secureIpcHandle('comments-window:get-snapshot', () => currentCommentsView())
-  secureIpcHandle('comments-window:set-view-mode', (event, value: unknown) => {
+  secureIpcHandle('comments-window:set-view-mode', async (event, value: unknown) => {
     const mode = parseCommentsViewMode(value)
     if (!mode) {
       throw new Error('Comments view mode must be live or a complete history selection.')
@@ -10570,14 +12629,9 @@ app.whenReady().then(async () => {
     ) {
       throw new Error('This window cannot change the Comments view mode.')
     }
-    if (
-      mode.kind === 'history' &&
-      commentsHistorySnapshots.get(mode.sessionId)?.sessionId !== mode.sessionId
-    ) {
-      throw new Error('The requested Comments history snapshot is unavailable.')
+    if (await selectCommentsViewMode(mode)) {
+      emitCommentsView()
     }
-    commentsViewMode = mode
-    emitCommentsView()
     return currentCommentsView()
   })
   secureIpcHandle('comments-window:push-delta', (event, delta: CommentsSnapshotDelta) => {
@@ -10600,7 +12654,7 @@ app.whenReady().then(async () => {
     }
     latestLiveCommentsSnapshot = next
     if (
-      commentsViewMode.kind === 'live' &&
+      commentsViewSelection.current().kind === 'live' &&
       commentsWindow &&
       !commentsWindow.webContents.isDestroyed()
     ) {
@@ -10624,12 +12678,16 @@ app.whenReady().then(async () => {
       return Promise.reject(new Error('Comments highlight requires a message id.'))
     }
     assertLiveCommentsCommandSession(command.sessionId)
-    return commentsCommandBroker.request(requestId, () => {
-      if (dispatchSmokeCommentHighlight(command)) return true
-      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
-      sendElectronEvent(mainWindow.webContents, 'comments-window:highlight-request', command)
-      return true
-    })
+    return commentsCommandBroker.request(
+      requestId,
+      () => {
+        if (dispatchSmokeCommentHighlight(command)) return true
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:highlight-request', command)
+        return true
+      },
+      COMMENTS_HIGHLIGHT_RELAY_TIMEOUT_MS
+    )
   })
   secureIpcHandle(
     'comments-window:highlight-result-push',
@@ -10662,6 +12720,95 @@ app.whenReady().then(async () => {
     }
   })
   secureIpcHandle('comments-window:viewers-get', () => latestViewerSample)
+  secureIpcHandle('comments-window:cohost-push', (event, state: unknown) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+      return undefined
+    }
+    if (!state || typeof state !== 'object' || !('state' in state)) {
+      return undefined
+    }
+    emitCohostWindowState(state as CohostWindowState)
+  })
+  secureIpcHandle('comments-window:cohost-get', () => latestCohostWindowState)
+  secureIpcHandle(
+    'comments-window:cohost-action',
+    (event, value: unknown): Promise<CohostState> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Comments window can send co-host actions.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      if (
+        !value ||
+        typeof value !== 'object' ||
+        !('sessionId' in value) ||
+        !('kind' in value) ||
+        !('targetId' in value)
+      ) {
+        return Promise.reject(new Error('Co-host action requires a session, kind, and target.'))
+      }
+      const command = value as CohostActionCommand
+      if (
+        (command.kind !== 'answered' &&
+          command.kind !== 'dismiss-question' &&
+          command.kind !== 'dismiss-flag') ||
+        typeof command.targetId !== 'string' ||
+        !command.targetId.trim()
+      ) {
+        return Promise.reject(new Error('Co-host action requires a known kind and target id.'))
+      }
+      assertLiveCommentsCommandSession(command.sessionId)
+      return commentsCommandBroker.request(requestId, () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-action-request', command)
+        return true
+      })
+    }
+  )
+  secureIpcHandle(
+    'comments-window:cohost-action-result-push',
+    (event, resolution: CommentsCommandResolution<CohostState>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
+  // Turning the co-host on from the window's presence popover / nudge. Unlike
+  // the row actions this is deliberately session-independent: a streamer who
+  // is not live yet is exactly who needs to find the switch.
+  secureIpcHandle(
+    'comments-window:cohost-enable',
+    (event, value: unknown): Promise<CohostWindowState> => {
+      if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+        return Promise.reject(new Error('Only the Comments window can change co-host settings.'))
+      }
+      const requestId = commentsCommandRequestId(value)
+      if (!value || typeof value !== 'object' || !('enabled' in value)) {
+        return Promise.reject(new Error('Co-host enable requires an enabled flag.'))
+      }
+      const command = value as CohostEnableCommand
+      if (typeof command.enabled !== 'boolean') {
+        return Promise.reject(new Error('Co-host enable requires a boolean enabled flag.'))
+      }
+      if (command.grantConsent !== undefined && typeof command.grantConsent !== 'boolean') {
+        return Promise.reject(new Error('Co-host consent grant must be a boolean.'))
+      }
+      return commentsCommandBroker.request(requestId, () => {
+        if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+        sendElectronEvent(mainWindow.webContents, 'comments-window:cohost-enable-request', {
+          requestId,
+          enabled: command.enabled,
+          ...(command.grantConsent === true ? { grantConsent: true } : {})
+        })
+        return true
+      })
+    }
+  )
+  secureIpcHandle(
+    'comments-window:cohost-enable-result-push',
+    (event, resolution: CommentsCommandResolution<CohostWindowState>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
   // Send relay (Comments upgrade S5): the window types, the MAIN renderer owns
   // the backend call, and the per-platform results relay back to the window.
   secureIpcHandle(
@@ -10770,34 +12917,41 @@ app.whenReady().then(async () => {
   secureIpcHandle('captions-window:get-lines', () => latestCaptionLines)
   secureIpcHandle('preview-surface:create', (_event, bounds: PreviewSurfaceBounds, generation) => {
     const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
-    return runNativePreviewSurfaceMutation(() =>
-      createNativePreviewSurface(bounds, requestedGeneration)
-    )
+    return runNativePreviewSurfaceMutation(
+      () => applyNativePreviewHostCommands([{ kind: 'create', bounds }], requestedGeneration),
+      'ipc-create-surface'
+    ).then(sanitizeRendererPreviewSurfaceStatus)
   })
   secureIpcHandle(
     'preview-surface:update-bounds',
     (_event, bounds: PreviewSurfaceBounds, generation) => {
       const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
-      return runNativePreviewSurfaceMutation(() =>
-        updateNativePreviewSurfaceBounds(bounds, requestedGeneration)
-      )
+      return runNativePreviewSurfaceMutation(
+        () =>
+          applyNativePreviewHostCommands([{ kind: 'update-bounds', bounds }], requestedGeneration),
+        'ipc-update-bounds'
+      ).then(sanitizeRendererPreviewSurfaceStatus)
     }
   )
   secureIpcHandle(
     'preview-surface:apply-host-commands',
     (_event, commands: NativePreviewHostCommand[], generation) => {
       const requestedGeneration = previewSurfaceGenerationFromIpc(generation)
-      return runNativePreviewSurfaceMutation(() =>
-        applyNativePreviewHostCommands(commands, requestedGeneration)
-      )
+      return runNativePreviewSurfaceMutation(
+        () => applyNativePreviewHostCommands(commands, requestedGeneration),
+        'ipc-apply-host-commands'
+      ).then(sanitizeRendererPreviewSurfaceStatus)
     }
   )
   secureIpcHandle('preview-surface:drain-host-commands', (_event, generation) =>
-    drainBackendNativePreviewHostCommands(previewSurfaceGenerationFromIpc(generation))
+    drainBackendNativePreviewHostCommands(previewSurfaceGenerationFromIpc(generation)).then(
+      sanitizeRendererPreviewSurfaceStatus
+    )
   )
   secureIpcHandle(
     'preview-surface:update-scene',
-    (_event, scene: PreviewSurfaceSceneUpdateParams) => updateNativePreviewSurfaceScene(scene)
+    (_event, scene: PreviewSurfaceSceneUpdateParams) =>
+      updateNativePreviewSurfaceScene(scene).then(sanitizeRendererPreviewSurfaceStatus)
   )
   secureIpcHandle(
     'preview-surface:update-compositor',
@@ -10805,16 +12959,29 @@ app.whenReady().then(async () => {
       const ownershipTicket = nativePreviewPumpOwnership.ticket('renderer')
       return nativePreviewPumpOwnership.accepts(ownershipTicket)
         ? updateNativePreviewSurfaceCompositor(status, { ownershipTicket }).then((result) =>
-            result.compositorUpdateAccepted === false
-              ? result
-              : { ...result, compositorUpdateAccepted: true }
+            sanitizeRendererPreviewSurfaceStatus(
+              result.compositorUpdateAccepted === false
+                ? result
+                : { ...result, compositorUpdateAccepted: true }
+            )
           )
-        : rejectedNativePreviewCompositorUpdateStatus()
+        : sanitizeRendererPreviewSurfaceStatus(rejectedNativePreviewCompositorUpdateStatus())
     }
   )
   secureIpcHandle(
     'preview-surface:set-frame-polling-suppressed',
-    (_event, suppressed: boolean, recordingActive?: boolean) => {
+    (_event, suppressed: boolean, generation: number, recordingActive?: boolean) => {
+      if (
+        !nativePreviewFramePollingSuppressionGenerationMatches(
+          generation,
+          previewWindowSurfaceGeneration()
+        )
+      ) {
+        return sanitizeRendererPreviewSurfaceStatus({
+          ...nativePreviewSurfaceStatus,
+          ...nativePreviewPlacementStatusFields()
+        })
+      }
       if (typeof recordingActive === 'boolean') {
         nativePreviewProofPollingRecordingActive = recordingActive
       }
@@ -10828,24 +12995,31 @@ app.whenReady().then(async () => {
         nativePreviewSurfaceStatus = nativePreviewClosedWindowUnsuppressStatus(
           nativePreviewSurfaceStatus
         )
-        return {
+        return sanitizeRendererPreviewSurfaceStatus({
           ...nativePreviewSurfaceStatus,
           ...nativePreviewPlacementStatusFields()
-        }
+        })
       }
-      return setNativePreviewSurfaceFramePollingSuppressed(suppressed, recordingActive)
+      return setNativePreviewSurfaceFramePollingSuppressed(
+        suppressed,
+        recordingActive,
+        generation
+      ).then(sanitizeRendererPreviewSurfaceStatus)
     }
   )
   secureIpcHandle('preview-surface:destroy', (_event, generation) => {
     nativePreviewPlacementQueue.cancelPending()
-    return runNativePreviewSurfaceMutation(() =>
-      destroyNativePreviewSurface(previewSurfaceGenerationFromIpc(generation))
-    )
+    return runNativePreviewSurfaceMutation(
+      () => destroyNativePreviewSurface(previewSurfaceGenerationFromIpc(generation)),
+      'ipc-destroy-surface'
+    ).then(sanitizeRendererPreviewSurfaceStatus)
   })
-  secureIpcHandle('preview-surface:status', () => ({
-    ...nativePreviewSurfaceStatus,
-    ...nativePreviewPlacementStatusFields()
-  }))
+  secureIpcHandle('preview-surface:status', () =>
+    sanitizeRendererPreviewSurfaceStatus({
+      ...nativePreviewSurfaceStatus,
+      ...nativePreviewPlacementStatusFields()
+    })
+  )
 
   createWindow()
   setDockIcon()
@@ -10867,14 +13041,13 @@ app.on('window-all-closed', () => {
 })
 
 // Smoke/performance harnesses stop the isolated process group with SIGTERM.
-// Route that through Electron's normal before-quit path so the backend child
-// and its owned-process ledger are cleared before the launcher escalates.
-for (const signal of ['SIGTERM', 'SIGINT'] as const) {
-  process.once(signal, () => {
-    logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
-    app.quit()
-  })
-}
+// Keep these listeners installed for the entire drain: a repeated signal must
+// remain routed through Electron's prevented before-quit path instead of
+// restoring Node's default immediate process termination while export runs.
+installPersistentBackendShutdownSignalHandlers(process, (signal) => {
+  logBackend('info', `Received ${signal}; requesting graceful app shutdown.`)
+  app.quit()
+})
 
 app.on('before-quit', (event) => {
   if (smokeAppQuitGuard.shouldPreventQuit()) {
@@ -10886,15 +13059,14 @@ app.on('before-quit', (event) => {
   accountSignInTransactions?.dispose()
   providerOAuthCallbacks?.dispose()
   cancelBackendRestart()
-  if (backendQuitComplete || backendQuitInProgress) {
-    return
-  }
-
-  event.preventDefault()
-  backendQuitInProgress = true
-  void stopBackend().finally(() => {
-    backendQuitComplete = true
-    backendQuitInProgress = false
-    app.quit()
+  handleBackendBeforeQuit(event, backendQuitState, {
+    stopBackend,
+    quit: () => app.quit(),
+    onFailure: (error) => {
+      logBackend(
+        'error',
+        `Backend shutdown could not be confirmed; app quit remains blocked: ${errorMessageText(error)}`
+      )
+    }
   })
 })

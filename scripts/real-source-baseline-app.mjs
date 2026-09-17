@@ -46,9 +46,10 @@
 //   VIDEORC_BASELINE_LAYOUT_PRESET  force layout preset; otherwise inferred from selected sources
 //   VIDEORC_SMOKE_FFMPEG_PATH / VIDEORC_SMOKE_FFPROBE_PATH
 
+import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { deflateSync } from 'node:zlib'
 
 import { launchDevApp, repoRoot, stopProcess } from './lib/app-launcher.mjs'
@@ -60,6 +61,7 @@ import {
   launchScreenMotionStimulus,
   refreshScreenMotionStimulusVisibility,
   screenMotionStimulusOptionsForSource,
+  stimulusVisibilityFromBgraBmp,
   stopScreenMotionStimulus
 } from './lib/screen-motion-stimulus.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
@@ -109,6 +111,13 @@ import {
   writePerformanceReport
 } from './lib/performance-contract.mjs'
 import { performanceSamplingInvariants } from './lib/performance-sampling-schedule.mjs'
+import {
+  activePerformanceBudgetRequest,
+  evaluateActivePerformanceBudget,
+  preflightActivePerformanceBudget,
+  readActivePerformanceBudget,
+  selectActivePerformanceBudget
+} from './lib/performance-budget.mjs'
 
 const config = {
   recordingMs: Number(process.env.VIDEORC_BASELINE_RECORDING_MS ?? 60000),
@@ -194,6 +203,49 @@ const config = {
 if (config.packagedExecutable && !existsSync(config.packagedExecutable)) {
   throw new Error(`Packaged app executable not found: ${config.packagedExecutable}`)
 }
+const packagedSmokeCommandCapability = config.packagedExecutable
+  ? randomBytes(32).toString('base64url')
+  : undefined
+
+const performanceReportScenario =
+  process.env.VIDEORC_PERF_SCENARIO ??
+  (config.streamEnabled ? 'record-4k-stream-1080p' : 'record-4k')
+const performanceReportMetadata = config.performanceReportRequested
+  ? await collectPerformanceMetadata({ cwd: repoRoot })
+  : null
+const activeBudgetRequest = config.performanceReportRequested
+  ? activePerformanceBudgetRequest()
+  : null
+let activeBudget = null
+if (activeBudgetRequest) {
+  const validatedBudget = await readActivePerformanceBudget({
+    path: resolve(repoRoot, activeBudgetRequest.path)
+  })
+  const budgetContext = {
+    scenario: performanceReportScenario,
+    profileClass: performanceReportMetadata.profileClass,
+    appVersion: performanceReportMetadata.appVersion,
+    machineModel: performanceReportMetadata.machineModel,
+    hardwareClass: performanceReportMetadata.hardwareClass,
+    buildMode: performanceReportMetadata.buildMode,
+    packagePayloadSha256: performanceReportMetadata.packagePayload?.sha256,
+    operatingSystem: performanceReportMetadata.operatingSystem,
+    timing: performanceReportMetadata.performanceWindow
+  }
+  preflightActivePerformanceBudget({
+    budget: validatedBudget,
+    profileId: activeBudgetRequest.profileId,
+    context: budgetContext
+  })
+  activeBudget = selectActivePerformanceBudget({
+    budget: validatedBudget,
+    profileId: activeBudgetRequest.profileId,
+    context: {
+      ...budgetContext,
+      displayScaleFactor: performanceReportMetadata.displayScaleFactor
+    }
+  })
+}
 
 const NATIVE_PREFIX = {
   screen: 'screen:screencapturekit:',
@@ -258,6 +310,19 @@ if (process.env.VIDEORC_PERF_REPORT_PATH) {
     const measurementMs = Math.max(0, config.recordingMs - config.warmupMs)
     const samplingInvariants = performanceSamplingInvariants(measurementMs, config.sampleIntervalMs)
     const minimumSamples = Math.max(2, samplingInvariants.minSamples)
+    const detailedMetrics = performanceEnduranceMetrics({
+      evidence: processEndurance,
+      teardown: teardownEvidence,
+      pipeline: performancePipeline,
+      thresholds: activeBudget?.profile?.thresholds ?? {}
+    })
+    const activeBudgetEvaluation = activeBudget
+      ? evaluateActivePerformanceBudget({
+          profile: activeBudget.profile,
+          metrics: detailedMetrics,
+          metricContract: 'recording'
+        })
+      : null
     const enduranceFailures = [
       ...(processEnduranceError
         ? [`process endurance collection failed: ${processEnduranceError}`]
@@ -266,26 +331,31 @@ if (process.env.VIDEORC_PERF_REPORT_PATH) {
         minimumSamples,
         minimumDurationMs: samplingInvariants.minDurationMs
       }),
-      ...evaluateOwnedTeardown(teardownEvidence)
+      ...evaluateOwnedTeardown(teardownEvidence),
+      ...(activeBudgetEvaluation?.metricFailures ?? []),
+      ...(activeBudgetEvaluation?.thresholdFailures ?? [])
     ]
     const enforcedEnduranceFailures = config.gate ? enduranceFailures : []
     const performanceReport = createPerformanceReport({
-      scenario:
-        process.env.VIDEORC_PERF_SCENARIO ??
-        (config.streamEnabled ? 'record-4k-stream-1080p' : 'record-4k'),
+      scenario: performanceReportScenario,
       mode: config.gate ? 'gate' : 'report-only',
-      metadata: await collectPerformanceMetadata(),
+      metadata: performanceReportMetadata,
       timing: {
         warmupMs: config.warmupMs,
         measurementMs,
         sampleIntervalMs: config.sampleIntervalMs
       },
       metrics: {
-        ...performanceEnduranceMetrics({
-          evidence: processEndurance,
-          teardown: teardownEvidence,
-          pipeline: performancePipeline
-        }),
+        ...detailedMetrics,
+        activeBudget: activeBudget
+          ? {
+              path: activeBudget.path,
+              profileId: activeBudget.profile.id,
+              scope: activeBudget.profile.scope,
+              evidence: activeBudget.profile.evidence
+            }
+          : null,
+        activeBudgetEvaluation,
         requestedOutput: {
           width: config.width,
           height: config.height,
@@ -339,9 +409,13 @@ async function main() {
   const requiresPreviewHostCommandServer = !config.noPreviewSurface && !config.fallbackLivePreview
   const needsSmokeResourceAuthorization = !config.packagedExecutable
   const needsSmokeCommandServer =
-    requiresPreviewHostCommandServer || config.notesOverlay || needsSmokeResourceAuthorization
+    requiresPreviewHostCommandServer ||
+    config.notesOverlay ||
+    needsSmokeResourceAuthorization ||
+    config.performanceReportRequested
   launched = await launchDevApp({
     timeoutMs: config.timeoutMs,
+    packagedSmokeCommandCapability,
     spawnSpec: config.packagedExecutable
       ? {
           command: config.packagedExecutable,
@@ -363,6 +437,13 @@ async function main() {
       VIDEORC_SMOKE_COMMAND_SERVER: needsSmokeCommandServer ? '1' : '0',
       VIDEORC_SMOKE_PACKAGED_APP: config.packagedExecutable ? '1' : '0',
       VIDEORC_SMOKE_NATIVE_PREVIEW_SUSPENDED: requiresPreviewHostCommandServer ? '1' : '0',
+      ...(config.packagedExecutable
+        ? {
+            VIDEORC_PACKAGED_SMOKE_TEST: '1',
+            VIDEORC_SMOKE_COMMAND_CAPABILITY: packagedSmokeCommandCapability,
+            VIDEORC_SMOKE_PRINT_BACKEND_READY: '1'
+          }
+        : {}),
       ...(config.noPreviewSurface ? { VIDEORC_SMOKE_DISABLE_ELECTRON_GPU: '1' } : {}),
       ...(config.notesOverlay
         ? {
@@ -548,7 +629,7 @@ async function main() {
           targetFps: 60,
           source: previewSurfaceSource(sourceSelection)
         })
-        const hostStatus = await applyPendingNativePreviewHostCommands(ws)
+        const hostStatus = await applyPendingNativePreviewHostCommands()
         previewTransport = hostStatus?.transport ?? status?.transport ?? previewTransport
       })
     }
@@ -936,18 +1017,46 @@ async function setupNotesOverlay(screenSource) {
 
 async function requireMotionStimulusVisibleBeforeRecording() {
   if (!config.screenMotionStimulus || !motionStimulus) return
-  const visibility = await refreshScreenMotionStimulusVisibility(motionStimulus, {
-    outputDirectory: config.outputDirectory,
-    ffmpegPath: config.ffmpegPath
-  })
+  const visibility =
+    process.env.VIDEORC_SCREEN_MOTION_VERIFY_VISIBLE === '0'
+      ? await verifyMotionStimulusThroughBackendCapture()
+      : await refreshScreenMotionStimulusVisibility(motionStimulus, {
+          outputDirectory: config.outputDirectory,
+          ffmpegPath: config.ffmpegPath
+        })
+  motionStimulus.visibility = visibility
   console.log(
-    `Screen motion stimulus pre-recording visibility: ${visibility?.visible ? 'PASS' : 'FAIL'} (${visibility?.reason ?? 'not measured'}; ${visibility?.screenshotPath ?? 'no screenshot'}).`
+    `Screen motion stimulus pre-recording visibility: ${visibility?.visible ? 'PASS' : 'FAIL'} (${visibility?.reason ?? 'not measured'}; ${visibility?.screenshotPath ?? 'no screenshot'}; source=${visibility?.source ?? 'system-screenshot'}).`
   )
   if (!visibility?.visible) {
     throw new Error(
       `Screen motion stimulus is not visible immediately before recording (${visibility?.reason ?? 'not measured'}). ` +
         `Bring the Chromium stimulus window to the selected screen foreground or adjust VIDEORC_SCREEN_MOTION_* bounds.`
     )
+  }
+}
+
+async function verifyMotionStimulusThroughBackendCapture() {
+  const connection = launched?.connections?.['backend-ready']
+  if (!connection) {
+    throw new Error('Backend-ready connection was unavailable for motion stimulus proof.')
+  }
+  const url = new URL(`http://${connection.host}:${connection.port}/preview/screen/latest.bmp`)
+  url.searchParams.set('token', connection.token)
+  url.searchParams.set('maxWidth', '1280')
+  const response = await fetch(url, { cache: 'no-store' })
+  if (response.status !== 200) {
+    throw new Error(`Backend screen frame proof failed with HTTP ${response.status}.`)
+  }
+  const bytes = Buffer.from(await response.arrayBuffer())
+  mkdirSync(config.outputDirectory, { recursive: true })
+  const screenshotPath = join(config.outputDirectory, 'screen-motion-stimulus-backend.bmp')
+  writeFileSync(screenshotPath, bytes)
+  const visibility = stimulusVisibilityFromBgraBmp(bytes)
+  return {
+    ...visibility,
+    screenshotPath,
+    captureRegion: { x: 0, y: 0, width: visibility.width, height: visibility.height }
   }
 }
 
@@ -3547,22 +3656,15 @@ function crc32(bytes) {
   return (c ^ 0xffffffff) >>> 0
 }
 
-async function applyPendingNativePreviewHostCommands(ws) {
+async function applyPendingNativePreviewHostCommands() {
   const smoke = launched?.connections?.['preview-motion-ready']
   if (!smoke) {
     throw new Error('Preview host command server was not available for visible-preview baseline.')
   }
-  const commands = await request(ws, config.timeoutMs, 'preview.surface.take_native_host_commands')
-  if (!Array.isArray(commands)) {
-    throw new Error('Backend returned an invalid native preview host command batch.')
-  }
-  if (commands.length === 0) {
-    return await smokeCommand(smoke, 'native-preview-surface-status')
-  }
-  console.log(
-    `Applying ${commands.length} native preview host command(s) to Electron preview host.`
-  )
-  return await smokeCommand(smoke, 'apply-native-preview-host-commands', { commands })
+  // Native-host command draining requires Electron main's private backend
+  // credential. The public backend-ready marker intentionally contains only
+  // the renderer token, so the harness asks main to perform the bounded drain.
+  return await smokeCommand(smoke, 'drain-native-preview-host-commands')
 }
 
 async function smokeCommand(smoke, command, params = {}, timeoutMs = config.timeoutMs) {
@@ -3609,6 +3711,7 @@ async function teardownPerformanceApp() {
 
   try {
     const smoke = launched?.connections?.['preview-motion-ready']
+    let gracefulQuitCompleted = false
     if (smoke) {
       try {
         result.gracefulQuitRequested = true
@@ -3617,13 +3720,14 @@ async function teardownPerformanceApp() {
           ledgerPaths: performanceLedgerPaths,
           pgid,
           timeoutMs: 10_000
-        }).catch(() => undefined)
+        })
+        gracefulQuitCompleted = true
       } catch (error) {
         result.gracefulQuitError = error?.message ?? String(error)
       }
     }
 
-    result.stopResult = await launched.stop()
+    if (!gracefulQuitCompleted) result.stopResult = await launched.stop()
     result.stoppedCensus = await waitForNoLiveProcessState({
       ledgerPaths: performanceLedgerPaths,
       pgid,

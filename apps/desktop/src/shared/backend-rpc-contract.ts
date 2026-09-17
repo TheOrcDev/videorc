@@ -1,13 +1,21 @@
 import type {
   BackendHealth,
+  CohostFlagParams,
+  CohostQuestionParams,
+  CohostSettings,
+  CohostSettingsPatch,
+  CohostStartParams,
+  CohostState,
   CompositorFrameReady,
   CompositorStatus,
+  CaptureRecoveryStatus,
   DeviceList,
   DiagnosticStats,
   EntitlementsSnapshot,
   FileAssessment,
   GateStatus,
   LiveLayoutApplyStatus,
+  MainOwnedPreviewSurfaceBoundsParams,
   NoiseCleanupJob,
   OAuthCallbackResult,
   OAuthCompleteParams,
@@ -23,12 +31,24 @@ import type {
   ServerResponse,
   SessionCommentsListParams,
   SessionCommentsPage,
+  SessionAiArtifactsPage,
   SessionDeletionOperation,
+  SessionDetailListParams,
+  SessionHealthEventsPage,
+  SessionListPage,
+  SessionListParams,
+  SessionLogsPage,
   SessionStorageTotals,
-  SessionSummary,
+  RecordingFinalizationEvent,
+  SessionStopParams,
   StartSessionParams,
+  StreamOutputTopologyProbeParams,
+  StreamOutputTopologyProbeResult,
+  StreamTargetsSnapshot,
+  VideoSettings,
   VideorcAccountSnapshot
 } from './backend'
+import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
@@ -40,6 +60,7 @@ import {
   numberSchema,
   objectSchema,
   optionalSchema,
+  RuntimeSchemaError,
   runtimeSchema,
   stringSchema,
   undefinedSchema,
@@ -69,6 +90,7 @@ export interface BackendRpcMethodMap {
   'entitlements.get': BackendRpcDefinition<undefined, EntitlementsSnapshot>
   'entitlements.refresh': BackendRpcDefinition<undefined, EntitlementsSnapshot>
   'account.get': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
+  'account.refresh': BackendRpcDefinition<undefined, VideorcAccountSnapshot>
   'account.complete_sign_in': BackendRpcDefinition<
     { code: string; state: string; verifier: string; intentGeneration: number },
     VideorcAccountSnapshot
@@ -77,8 +99,13 @@ export interface BackendRpcMethodMap {
   'platformAccounts.oauth.complete': BackendRpcDefinition<OAuthCompleteParams, OAuthCallbackResult>
   'devices.list': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, DeviceList>
   'recording.status': BackendRpcDefinition<undefined, RecordingStatus>
+  'stream.output.topology.probe': BackendRpcDefinition<
+    StreamOutputTopologyProbeParams,
+    StreamOutputTopologyProbeResult
+  >
+  'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
-  'session.stop': BackendRpcDefinition<undefined, RecordingStatus>
+  'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
   'scene.get': BackendRpcDefinition<undefined, Scene>
   'scene.load_from_capture_config': BackendRpcDefinition<SceneConfigParams, SceneCommitStatus>
   'scene.layout.apply_preview': BackendRpcDefinition<
@@ -94,8 +121,16 @@ export interface BackendRpcMethodMap {
   'preview.surface.status': BackendRpcDefinition<undefined, PreviewSurfaceStatus>
   'preview.camera.status': BackendRpcDefinition<undefined, PreviewCameraStatus>
   'preview.screen.status': BackendRpcDefinition<undefined, PreviewScreenStatus>
+  'capture.recovery.status': BackendRpcDefinition<undefined, CaptureRecoveryStatus>
+  'capture.recovery.retry': BackendRpcDefinition<undefined, CaptureRecoveryStatus>
   'diagnostics.stats': BackendRpcDefinition<undefined, DiagnosticStats>
-  'sessions.list': BackendRpcDefinition<{ limit?: number } | undefined, SessionSummary[]>
+  'sessions.list': BackendRpcDefinition<SessionListParams, SessionListPage>
+  'sessions.healthEvents.list': BackendRpcDefinition<
+    SessionDetailListParams,
+    SessionHealthEventsPage
+  >
+  'sessions.logs.list': BackendRpcDefinition<SessionDetailListParams, SessionLogsPage>
+  'sessions.aiArtifacts.list': BackendRpcDefinition<SessionDetailListParams, SessionAiArtifactsPage>
   'sessions.storage': BackendRpcDefinition<undefined, SessionStorageTotals>
   'sessions.comments.list': BackendRpcDefinition<SessionCommentsListParams, SessionCommentsPage>
   'sessions.delete': BackendRpcDefinition<{ sessionIds: string[] }, SessionDeletionOperation[]>
@@ -109,6 +144,14 @@ export interface BackendRpcMethodMap {
     GateStatus
   >
   'repair.restore_file': BackendRpcDefinition<{ sessionId: string }, { restored: boolean }>
+  'cohost.status': BackendRpcDefinition<undefined, CohostState>
+  'cohost.start': BackendRpcDefinition<CohostStartParams, CohostState>
+  'cohost.stop': BackendRpcDefinition<undefined, CohostState>
+  'cohost.question.answered': BackendRpcDefinition<CohostQuestionParams, CohostState>
+  'cohost.question.dismiss': BackendRpcDefinition<CohostQuestionParams, CohostState>
+  'cohost.flag.dismiss': BackendRpcDefinition<CohostFlagParams, CohostState>
+  'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
+  'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
 }
 
 export type BackendRpcMethod = keyof BackendRpcMethodMap
@@ -121,15 +164,19 @@ export interface BackendEventMap {
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
   'noiseCleanup.status': NoiseCleanupJob
+  'recording.finalization': RecordingFinalizationEvent
   'platformAccounts.oauth.callback': OAuthCallbackResult
   'recording.status': RecordingStatus
+  'stream.targets': StreamTargetsSnapshot
   'scene.changed': Scene
   'compositor.status': CompositorStatus
   'preview.live.status': PreviewLiveStatus
   'preview.surface.status': PreviewSurfaceStatus
   'preview.camera.status': PreviewCameraStatus
   'preview.screen.status': PreviewScreenStatus
+  'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
+  'cohost.state': CohostState
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -152,6 +199,11 @@ const MAX_BACKEND_WIRE_MESSAGE_CHARS = 16_000_000
 const nonNegativeInteger = numberSchema({
   integer: true,
   min: 0,
+  max: Number.MAX_SAFE_INTEGER
+})
+const positiveSafeInteger = numberSchema({
+  integer: true,
+  min: 1,
   max: Number.MAX_SAFE_INTEGER
 })
 
@@ -206,7 +258,8 @@ const entitlementCapabilitySchema = objectSchema(
       'livestreaming',
       'multistreaming',
       'cloud-ai',
-      'noise-cleanup'
+      'noise-cleanup',
+      'live-cohost'
     ]),
     state: enumSchema(['enabled', 'disabled', 'developer-override']),
     reason: optionalText
@@ -244,8 +297,7 @@ const entitlementsSchema = objectSchema(
             maxHeight: numberSchema({ integer: true, min: 1, max: 65_536 }),
             maxFps: numberSchema({ integer: true, min: 1, max: 1000 }),
             maxBitrateKbps: nonNegativeInteger,
-            maxDestinations: numberSchema({ integer: true, min: 1, max: 1000 }),
-            maxDestinationsPerOrientation: numberSchema({ integer: true, min: 1, max: 1000 })
+            maxDestinations: numberSchema({ integer: true, min: 1, max: 1000 })
           },
           { allowUnknown: false }
         )
@@ -294,6 +346,220 @@ const recordingStatusSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<RecordingStatus>
 
+const videoSettingsSchema = objectSchema(
+  {
+    preset: enumSchema([
+      'tutorial-1080p30',
+      'tutorial-1440p30',
+      'record-4k30',
+      'record-4k60-experimental',
+      'stream-safe-1080p30',
+      'stream-safe-1080p60',
+      'stream-youtube-1080p30',
+      'stream-youtube-1080p60',
+      'stream-youtube-4k30',
+      'stream-1080p60',
+      'vertical-1080x1920',
+      'custom'
+    ]),
+    width: numberSchema({ integer: true, min: 1, max: 65_536 }),
+    height: numberSchema({ integer: true, min: 1, max: 65_536 }),
+    fps: numberSchema({ integer: true, min: 1, max: 1000 }),
+    bitrateKbps: numberSchema({ integer: true, min: 1, max: 1_000_000 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<VideoSettings>
+
+const streamOutputTopologyRoleSchema = enumSchema(['shared', 'recording', 'stream'])
+const streamOutputBridgeSchema = enumSchema([
+  'raw-yuv420p',
+  'videotoolbox-h264-annex-b',
+  'videotoolbox-h264-mpegts',
+  'windows-media-foundation-h264-mpegts'
+])
+const encodeBackendSchema = enumSchema([
+  'software-x264',
+  'hardware-videotoolbox',
+  'hardware-vaapi',
+  'hardware-media-foundation',
+  'software-media-foundation',
+  'software-open-h264'
+])
+const streamOutputTopologyProbeStateSchema = enumSchema([
+  'not-required',
+  'passed',
+  'rejected',
+  'unsupported'
+])
+
+const streamOutputTopologyProbeParamsFields = objectSchema(
+  {
+    ffmpegPath: optionalSchema(boundedPath),
+    streamProfile: videoSettingsSchema,
+    recordingProfile: optionalSchema(videoSettingsSchema),
+    outputRoles: arraySchema(streamOutputTopologyRoleSchema, { maxLength: 2 })
+  },
+  { allowUnknown: false }
+)
+
+const streamOutputTopologyProbeParamsSchema = runtimeSchema<StreamOutputTopologyProbeParams>(
+  'a secret-free stream output topology probe',
+  (value, path) => {
+    const parsed = streamOutputTopologyProbeParamsFields.parse(
+      value,
+      path
+    ) as StreamOutputTopologyProbeParams
+    validateStreamOutputTopologyRoles(parsed, path, false)
+    return parsed
+  }
+)
+
+const streamOutputTopologyProbeResultFields = objectSchema(
+  {
+    capabilityKey: stringSchema({ minLength: 1, maxLength: 256 }),
+    streamProfile: videoSettingsSchema,
+    recordingProfile: optionalSchema(videoSettingsSchema),
+    outputRoles: arraySchema(streamOutputTopologyRoleSchema, { maxLength: 2 }),
+    requestedBridgeOutput: streamOutputBridgeSchema,
+    effectiveBridgeOutput: streamOutputBridgeSchema,
+    effectiveEncodeBackend: encodeBackendSchema,
+    probeState: streamOutputTopologyProbeStateSchema,
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 480 }))
+  },
+  { allowUnknown: false }
+)
+
+const streamOutputTopologyProbeResultSchema = boundedSemanticValue(
+  'a completed stream output topology probe',
+  runtimeSchema<StreamOutputTopologyProbeResult>(
+    'a completed stream output topology probe',
+    (value, path) => {
+      const parsed = streamOutputTopologyProbeResultFields.parse(
+        value,
+        path
+      ) as StreamOutputTopologyProbeResult
+      validateStreamOutputTopologyRoles(parsed, path, true)
+      if (!/^stream-output-topology-v1:[0-9a-f]{64}$/.test(parsed.capabilityKey)) {
+        throw new RuntimeSchemaError(`${path}.capabilityKey`, 'a versioned SHA-256 capability key')
+      }
+      const fallbackVerdict =
+        parsed.probeState === 'rejected' || parsed.probeState === 'unsupported'
+      if (fallbackVerdict && !parsed.fallbackReason) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'a non-empty reason for a rejected or unsupported topology'
+        )
+      }
+      if (!fallbackVerdict && parsed.fallbackReason !== undefined) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'absent for a passed or not-required topology'
+        )
+      }
+      if (parsed.requestedBridgeOutput !== parsed.effectiveBridgeOutput && !parsed.fallbackReason) {
+        throw new RuntimeSchemaError(
+          `${path}.fallbackReason`,
+          'a non-empty reason when the effective bridge differs'
+        )
+      }
+      return parsed
+    }
+  )
+) as RuntimeSchema<StreamOutputTopologyProbeResult>
+
+const streamTargetRuntimeSchema = objectSchema(
+  {
+    targetId: boundedString,
+    platform: enumSchema(['youtube', 'twitch', 'x', 'custom']),
+    label: boundedString,
+    state: enumSchema([
+      'not-configured',
+      'ready',
+      'connecting',
+      'live',
+      'warning',
+      'failed',
+      'stopped'
+    ]),
+    message: optionalText,
+    redactedUrl: optionalText
+  },
+  { allowUnknown: false }
+)
+
+const streamTargetsSnapshotSchema = boundedSemanticValue(
+  'a secret-free authoritative stream-target snapshot',
+  runtimeSchema<StreamTargetsSnapshot>(
+    'a secret-free authoritative stream-target snapshot',
+    (value, path) => {
+      const parsed = objectSchema(
+        {
+          sessionId: boundedString,
+          targets: arraySchema(streamTargetRuntimeSchema, { maxLength: 16 })
+        },
+        { allowUnknown: false }
+      ).parse(value, path) as StreamTargetsSnapshot
+      const targetIds = parsed.targets.map((target) => target.targetId)
+      if (new Set(targetIds).size !== targetIds.length) {
+        throw new RuntimeSchemaError(`${path}.targets`, 'unique targetId values')
+      }
+      return parsed
+    }
+  )
+) as RuntimeSchema<StreamTargetsSnapshot>
+
+function validateStreamOutputTopologyRoles(
+  value: Pick<
+    StreamOutputTopologyProbeParams,
+    'streamProfile' | 'recordingProfile' | 'outputRoles'
+  >,
+  path: string,
+  requireCanonicalSplitOrder: boolean
+): void {
+  const roles = value.outputRoles
+  if (roles.length === 1 && roles[0] === 'shared') {
+    if (
+      value.recordingProfile &&
+      !sameVideoOutputProfile(value.recordingProfile, value.streamProfile)
+    ) {
+      throw new RuntimeSchemaError(
+        `${path}.recordingProfile`,
+        'the same effective profile as streamProfile for a shared topology'
+      )
+    }
+    return
+  }
+
+  const splitRoles =
+    roles.length === 2 &&
+    roles.includes('recording') &&
+    roles.includes('stream') &&
+    new Set(roles).size === 2
+  if (
+    !splitRoles ||
+    (requireCanonicalSplitOrder && (roles[0] !== 'recording' || roles[1] !== 'stream'))
+  ) {
+    throw new RuntimeSchemaError(
+      `${path}.outputRoles`,
+      requireCanonicalSplitOrder
+        ? '["shared"] or the canonical ["recording", "stream"] pair'
+        : '["shared"] or one recording/stream pair'
+    )
+  }
+  if (!value.recordingProfile) {
+    throw new RuntimeSchemaError(`${path}.recordingProfile`, 'present for a split output topology')
+  }
+}
+
+function sameVideoOutputProfile(left: VideoSettings, right: VideoSettings): boolean {
+  return (
+    left.width === right.width &&
+    left.height === right.height &&
+    left.fps === right.fps &&
+    left.bitrateKbps === right.bitrateKbps
+  )
+}
+
 const sourceSelectionSchema = objectSchema(
   {
     screenId: optionalText,
@@ -319,6 +585,11 @@ const layoutSchema = objectSchema(
     cameraShape: enumSchema(['rectangle', 'rounded', 'circle']),
     cameraCornerRadiusPct: numberSchema({ min: 0, max: 100 }),
     cameraAspect: enumSchema(['source', 'square', 'portrait']),
+    cameraChromaKeyEnabled: booleanSchema,
+    cameraChromaKeyColor: stringSchema({ minLength: 1, maxLength: 16 }),
+    cameraChromaKeySimilarityPct: numberSchema({ min: 0, max: 100 }),
+    cameraChromaKeySmoothnessPct: numberSchema({ min: 0, max: 100 }),
+    cameraChromaKeySpillPct: numberSchema({ min: 0, max: 100 }),
     cameraMargin: numberSchema({ min: 0 }),
     cameraFit: enumSchema(['fit', 'fill']),
     cameraMirror: booleanSchema,
@@ -339,7 +610,8 @@ const sceneConfigSchema = objectSchema(
     background: optionalSchema(boundedBackendParamValueSchema),
     protectedOverlayWindowIds: optionalSchema(
       arraySchema(numberSchema({ integer: true, min: 0 }), { maxLength: 16 })
-    )
+    ),
+    transitionMs: optionalSchema(numberSchema({ integer: true, min: 0, max: 1000 }))
   },
   { allowUnknown: false }
 )
@@ -420,12 +692,18 @@ const previewLiveStatusSchema = objectSchema(
     source: enumSchema(['idle-preview', 'recording-session', 'unavailable']),
     transport: enumSchema([
       'native-surface',
+      'd3d11-shared-texture',
       'electron-proof-surface',
       'latest-jpeg-polling',
       'mjpeg-stream',
       'unavailable'
     ]),
-    backing: enumSchema(['cametal-layer', 'electron-browser-window', 'none']),
+    backing: enumSchema([
+      'cametal-layer',
+      'directcomposition-swapchain',
+      'electron-browser-window',
+      'none'
+    ]),
     targetFps: optionalSchema(numberSchema({ min: 0, max: 1000 })),
     width: optionalSchema(nonNegativeInteger),
     height: optionalSchema(nonNegativeInteger),
@@ -435,33 +713,203 @@ const previewLiveStatusSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<PreviewLiveStatus>
 
+const rendererSafePreviewBoundsSchema = objectSchema(
+  {
+    screenX: numberSchema(),
+    screenY: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    scaleFactor: numberSchema({ min: 0.1, max: 16 }),
+    screenHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipX: optionalSchema(numberSchema()),
+    clipY: optionalSchema(numberSchema()),
+    clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    visible: optionalSchema(booleanSchema),
+    orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    elevated: optionalSchema(booleanSchema),
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
+  },
+  { allowUnknown: false }
+)
+
+const opaqueNativeWindowHandleSchema = runtimeSchema<string>(
+  'a nonzero fixed-width 64-bit hexadecimal window handle',
+  (value, path) => {
+    const handle = stringSchema({ minLength: 18, maxLength: 18 }).parse(value, path)
+    if (!/^0x[0-9a-f]{16}$/.test(handle) || handle === '0x0000000000000000') {
+      throw new RuntimeSchemaError(path, 'a nonzero lowercase 0x-prefixed 64-bit handle')
+    }
+    return handle
+  }
+)
+
+const mainOwnedPreviewBoundsSchema = objectSchema(
+  {
+    screenX: numberSchema(),
+    screenY: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    scaleFactor: numberSchema({ min: 0.1, max: 16 }),
+    screenHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipX: optionalSchema(numberSchema()),
+    clipY: optionalSchema(numberSchema()),
+    clipWidth: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    clipHeight: optionalSchema(numberSchema({ min: 0, max: 65_536 })),
+    visible: optionalSchema(booleanSchema),
+    orderAboveWindowId: optionalSchema(numberSchema({ integer: true, min: 0 })),
+    orderAboveWindowHandle: optionalSchema(opaqueNativeWindowHandleSchema),
+    elevated: optionalSchema(booleanSchema),
+    cornerRadius: optionalSchema(numberSchema({ min: 0, max: 256 }))
+  },
+  { allowUnknown: false }
+)
+
+const mainOwnedPreviewSurfaceBoundsParamsSchema = objectSchema(
+  {
+    bounds: mainOwnedPreviewBoundsSchema,
+    generation: numberSchema({ integer: true, min: 0, max: Number.MAX_SAFE_INTEGER })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<MainOwnedPreviewSurfaceBoundsParams>
+
+/** Validate the privileged main-to-backend shape without registering a renderer-callable RPC. */
+export function validateMainOwnedPreviewSurfaceBoundsParams(
+  value: unknown
+): MainOwnedPreviewSurfaceBoundsParams {
+  return mainOwnedPreviewSurfaceBoundsParamsSchema.parse(
+    value,
+    'main.previewSurfaceBounds'
+  ) as MainOwnedPreviewSurfaceBoundsParams
+}
+
+const windowsD3d11PresenterBoundsSchema = objectSchema(
+  {
+    x: numberSchema({ integer: true }),
+    y: numberSchema({ integer: true }),
+    width: nonNegativeInteger,
+    height: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
+const windowsD3d11PresenterDiagnosticsSchema = objectSchema(
+  {
+    layered: booleanSchema,
+    transparent: booleanSchema,
+    noActivate: booleanSchema,
+    excludedFromCapture: booleanSchema,
+    windowActive: booleanSchema,
+    windowFocused: booleanSchema,
+    previewGeneration: optionalSchema(nonNegativeInteger),
+    mediaGeneration: nonNegativeInteger,
+    generationMatches: booleanSchema,
+    ownerProcessMatches: booleanSchema,
+    sameAdapter: booleanSchema,
+    sourceLive: booleanSchema,
+    firstPresentSucceeded: booleanSchema,
+    successfulPresents: nonNegativeInteger,
+    lastPresentedSequence: optionalSchema(nonNegativeInteger),
+    latestWinsDrops: nonNegativeInteger,
+    hiddenDrops: nonNegativeInteger,
+    busyDrops: nonNegativeInteger,
+    staleFrameDrops: nonNegativeInteger,
+    actualBounds: optionalSchema(windowsD3d11PresenterBoundsSchema),
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 1024 }))
+  },
+  { allowUnknown: false }
+)
+
+const previewSurfaceStatusFieldsSchema = objectSchema(
+  {
+    state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
+    source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
+    transport: enumSchema([
+      'native-surface',
+      'd3d11-shared-texture',
+      'electron-proof-surface',
+      'latest-jpeg-polling',
+      'mjpeg-stream',
+      'unavailable'
+    ]),
+    backing: enumSchema([
+      'cametal-layer',
+      'directcomposition-swapchain',
+      'electron-browser-window',
+      'none'
+    ]),
+    targetFps: numberSchema({ min: 0, max: 1000 }),
+    width: nonNegativeInteger,
+    height: nonNegativeInteger,
+    framesRendered: nonNegativeInteger,
+    droppedFrames: nonNegativeInteger,
+    framePollingSuppressed: booleanSchema,
+    sourcePixelsPresent: booleanSchema,
+    pendingHostCommandCount: nonNegativeInteger,
+    nativePreviewIosurfaceImportLiveCount: optionalSchema(nonNegativeInteger),
+    nativePreviewIosurfaceImportPeakCount: optionalSchema(nonNegativeInteger),
+    nativePreviewIosurfaceImportCeiling: optionalSchema(nonNegativeInteger),
+    nativePreviewHostKind: optionalSchema(
+      enumSchema([
+        'in-process',
+        'helper-process',
+        'external-module',
+        'proof-surface',
+        'backend-d3d11-presenter'
+      ])
+    ),
+    bounds: optionalSchema(rendererSafePreviewBoundsSchema),
+    windowsD3d11Presenter: optionalSchema(windowsD3d11PresenterDiagnosticsSchema),
+    updatedAt: timestamp
+  },
+  { allowUnknown: true }
+)
+
 const previewSurfaceStatusSchema = boundedSemanticValue(
-  'a native preview surface status',
-  objectSchema(
-    {
-      state: enumSchema(['unavailable', 'starting', 'live', 'stopped', 'failed']),
-      source: enumSchema(['synthetic', 'camera', 'screen', 'window']),
-      transport: enumSchema([
-        'native-surface',
-        'electron-proof-surface',
-        'latest-jpeg-polling',
-        'mjpeg-stream',
-        'unavailable'
-      ]),
-      backing: enumSchema(['cametal-layer', 'electron-browser-window', 'none']),
-      targetFps: numberSchema({ min: 0, max: 1000 }),
-      width: nonNegativeInteger,
-      height: nonNegativeInteger,
-      framesRendered: nonNegativeInteger,
-      droppedFrames: nonNegativeInteger,
-      framePollingSuppressed: booleanSchema,
-      sourcePixelsPresent: booleanSchema,
-      pendingHostCommandCount: nonNegativeInteger,
-      updatedAt: timestamp
-    },
-    { allowUnknown: true }
+  'a renderer-safe native preview surface status',
+  runtimeSchema<PreviewSurfaceStatus>(
+    'a renderer-safe native preview surface status',
+    (value, path) => {
+      rejectPrivilegedPreviewIdentity(value, path)
+      return previewSurfaceStatusFieldsSchema.parse(value, path) as PreviewSurfaceStatus
+    }
   )
 ) as RuntimeSchema<PreviewSurfaceStatus>
+
+function rejectPrivilegedPreviewIdentity(value: unknown, path: string): void {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return
+  }
+  const record = value as Record<string, unknown>
+  for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+    if (field in record) {
+      throw new RuntimeSchemaError(`${path}.${field}`, 'absent from renderer-facing state')
+    }
+  }
+  const bounds = record.bounds
+  if (typeof bounds === 'object' && bounds !== null && !Array.isArray(bounds)) {
+    const boundsRecord = bounds as Record<string, unknown>
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in boundsRecord) {
+        throw new RuntimeSchemaError(
+          `${path}.bounds.${field}`,
+          'absent from renderer-facing bounds'
+        )
+      }
+    }
+  }
+  const presenter = record.windowsD3d11Presenter
+  if (typeof presenter === 'object' && presenter !== null && !Array.isArray(presenter)) {
+    for (const field of PRIVILEGED_PREVIEW_FIELDS) {
+      if (field in presenter) {
+        throw new RuntimeSchemaError(
+          `${path}.windowsD3d11Presenter.${field}`,
+          'absent from renderer-facing presenter diagnostics'
+        )
+      }
+    }
+  }
+}
 
 const previewCameraStatusSchema = boundedSemanticValue(
   'a preview camera status',
@@ -487,6 +935,7 @@ const previewScreenStatusSchema = boundedSemanticValue(
       framesCaptured: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
       frameAgeMs: optionalSchema(nonNegativeInteger),
+      d3d11TextureAvailable: optionalSchema(booleanSchema),
       includeCursor: booleanSchema,
       excludeCurrentProcessWindows: booleanSchema,
       updatedAt: timestamp
@@ -495,12 +944,222 @@ const previewScreenStatusSchema = boundedSemanticValue(
   )
 ) as RuntimeSchema<PreviewScreenStatus>
 
+const windowsD3d11MediaDiagnosticsSchema = objectSchema(
+  {
+    state: enumSchema(['unavailable', 'probing', 'live', 'draining', 'fallback', 'failed']),
+    requested: booleanSchema,
+    required: booleanSchema,
+    adapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    captureAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    compositorAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    primaryEncoderAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    auxiliaryEncoderAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    generation: optionalSchema(nonNegativeInteger),
+    captureBackend: optionalSchema(
+      enumSchema(['desktop-duplication', 'windows-graphics-capture-monitor', 'legacy-ffmpeg'])
+    ),
+    cursorMode: optionalSchema(
+      enumSchema(['embedded', 'separate', 'excluded-wgc', 'disabled-fallback'])
+    ),
+    cursorRequested: booleanSchema,
+    cursorPixelsSource: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
+    cursorExclusionGuaranteed: booleanSchema,
+    captureReadbackFrames: nonNegativeInteger,
+    protectedContentMaskedFrames: nonNegativeInteger,
+    textureImportFrames: nonNegativeInteger,
+    cameraUploadFrames: nonNegativeInteger,
+    cursorShapeUploads: nonNegativeInteger,
+    cursorCompositedFrames: nonNegativeInteger,
+    compositorCpuFallbackFrames: nonNegativeInteger,
+    previewPresents: nonNegativeInteger,
+    previewDrops: nonNegativeInteger,
+    previewBmpRequests: nonNegativeInteger,
+    previewBmpBytes: nonNegativeInteger,
+    messagePumpLagP95Ms: optionalSchema(numberSchema({ min: 0 })),
+    messagePumpLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    mediaCommandLagP95Ms: optionalSchema(numberSchema({ min: 0 })),
+    mediaCommandLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    maximumConsecutiveMessageBatch: nonNegativeInteger,
+    maximumConsecutiveMediaBatch: nonNegativeInteger,
+    encoderGpuSamples: nonNegativeInteger,
+    encoderSystemMemorySamples: nonNegativeInteger,
+    rawVideoCopiedFrames: nonNegativeInteger,
+    texturePoolCapacity: nonNegativeInteger,
+    texturePoolInUse: nonNegativeInteger,
+    texturePoolPressureEvents: nonNegativeInteger,
+    adapterMismatches: nonNegativeInteger,
+    deviceResets: nonNegativeInteger,
+    synchronizationTimeouts: nonNegativeInteger,
+    staleGenerationCallbacks: nonNegativeInteger,
+    renderTickOverruns: nonNegativeInteger,
+    renderTickLagMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    renderComposeStageMaxMs: optionalSchema(numberSchema({ min: 0 })),
+    fallbackReason: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
+  },
+  { allowUnknown: false }
+)
+
+const previewImagePollCountsSchema = objectSchema(
+  {
+    cameraPng: nonNegativeInteger,
+    screenPng: nonNegativeInteger,
+    productionPng: nonNegativeInteger,
+    cameraBmp: nonNegativeInteger,
+    screenBmp: nonNegativeInteger,
+    liveJpeg: nonNegativeInteger,
+    liveMjpeg: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
+const previewCameraDropReasonStatsSchema = objectSchema(
+  {
+    frameWasLate: nonNegativeInteger,
+    outOfBuffers: nonNegativeInteger,
+    discontinuity: nonNegativeInteger,
+    unknown: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
+const previewScreenFrameStatusStatsSchema = objectSchema(
+  {
+    complete: nonNegativeInteger,
+    idle: nonNegativeInteger,
+    blank: nonNegativeInteger,
+    suspended: nonNegativeInteger,
+    started: nonNegativeInteger,
+    stopped: nonNegativeInteger,
+    unknown: nonNegativeInteger
+  },
+  { allowUnknown: false }
+)
+
+const previewSourceSurfaceBackingStatsSchema = objectSchema(
+  {
+    liveCount: nonNegativeInteger,
+    peakCount: nonNegativeInteger,
+    estimatedBytes: nonNegativeInteger,
+    peakEstimatedBytes: nonNegativeInteger,
+    oldestAgeMs: optionalSchema(nonNegativeInteger)
+  },
+  { allowUnknown: false }
+)
+
+const captureRecoveryPhaseSchema = enumSchema([
+  'idle',
+  'degraded',
+  'restarting',
+  'verifying',
+  'recovered',
+  'failed'
+])
+const captureRecoverySourceSchema = enumSchema(['camera', 'screen'])
+const captureRecoveryStatusSchema = objectSchema(
+  {
+    revision: nonNegativeInteger,
+    phase: captureRecoveryPhaseSchema,
+    retryable: booleanSchema,
+    attempts: nonNegativeInteger,
+    stage: optionalSchema(enumSchema(['camera-delivery', 'screen-delivery', 'compositor-render'])),
+    source: optionalSchema(captureRecoverySourceSchema),
+    trigger: optionalSchema(enumSchema(['automatic', 'manual'])),
+    sourceGeneration: optionalSchema(positiveSafeInteger),
+    detectedAt: optionalSchema(timestamp),
+    updatedAt: optionalSchema(timestamp),
+    message: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 })),
+    lastError: optionalSchema(stringSchema({ minLength: 1, maxLength: 16_384 })),
+    lastDurationMs: optionalSchema(numberSchema({ min: 0 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CaptureRecoveryStatus>
+
 const diagnosticStatsSchema = boundedSemanticValue(
   'bounded diagnostic statistics',
   objectSchema(
     {
       skippedFrames: nonNegativeInteger,
       droppedFrames: nonNegativeInteger,
+      compositorBackend: optionalSchema(enumSchema(['metal', 'd3d11', 'cpu', 'cpu-fallback'])),
+      compositorCpuFrames: optionalSchema(nonNegativeInteger),
+      compositorCpuFallbackFrames: optionalSchema(nonNegativeInteger),
+      compositorTicks: optionalSchema(nonNegativeInteger),
+      compositorTickSkipped: optionalSchema(nonNegativeInteger),
+      encoderBridgeFreshFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeMfSubmittedFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeMfInputCreditTimeouts: optionalSchema(nonNegativeInteger),
+      // Nullable for defense in depth: serde emits null if the backend ever
+      // regresses the skip_serializing_if on this Windows-only field.
+      encoderBridgeMfInputCreditWaitP95Ms: optionalSchema(nullableSchema(numberSchema({ min: 0 }))),
+      encoderBridgeOutputQueueHighWaterFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeOutputQueueOldestFrameAgeMs: optionalSchema(nullableSchema(nonNegativeInteger)),
+      encoderBridgeOutputQueueOldestFrameAgeHighWaterMs: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      encoderBridgeOutputLastProgressAgeMs: optionalSchema(nullableSchema(nonNegativeInteger)),
+      encoderBridgeOutputPressureRecoveryEvents: optionalSchema(nonNegativeInteger),
+      encoderBridgeOutputPreEncodeSkippedFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeVideoToolboxPendingEncodeFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeVideoToolboxPendingFifoFrames: optionalSchema(nonNegativeInteger),
+      encoderBridgeEncodedAccessUnitDroppedFrames: optionalSchema(nonNegativeInteger),
+      windowsD3d11Media: optionalSchema(windowsD3d11MediaDiagnosticsSchema),
+      previewImagePollCounts: optionalSchema(previewImagePollCountsSchema),
+      compositorSourceCaptureTextureReuses: nonNegativeInteger,
+      compositorCameraSourceCaptureTextureReuses: nonNegativeInteger,
+      compositorScreenSourceCaptureTextureReuses: nonNegativeInteger,
+      compositorSourceTextureCacheFlushes: nonNegativeInteger,
+      compositorMetalCachedCaptureSourceImportsLiveCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalCachedCaptureSourceImportsPeakCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalCachedCaptureSourceImportsCeiling: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      compositorMetalTargetRingSlotsLiveCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      compositorMetalTargetRingSlotsPeakCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      compositorMetalTargetRingSlotsCeiling: optionalSchema(nullableSchema(nonNegativeInteger)),
+      encoderBridgeMetalTargetRefsInFlightLiveCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      encoderBridgeMetalTargetRefsInFlightPeakCount: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      encoderBridgeMetalTargetRefsInFlightCeiling: optionalSchema(
+        nullableSchema(nonNegativeInteger)
+      ),
+      nativePreviewIosurfaceImportLiveCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      nativePreviewIosurfaceImportPeakCount: optionalSchema(nullableSchema(nonNegativeInteger)),
+      nativePreviewIosurfaceImportCeiling: optionalSchema(nullableSchema(nonNegativeInteger)),
+      previewCameraCaptureCallbackCount: nonNegativeInteger,
+      previewCameraDidDropCallbackCount: nonNegativeInteger,
+      previewCameraFrameStorePublications: nonNegativeInteger,
+      previewCameraCaptureCallbackAgeMs: optionalSchema(nonNegativeInteger),
+      previewCameraLatestSequence: optionalSchema(nonNegativeInteger),
+      previewCameraCapturePixelFormat: optionalSchema(
+        stringSchema({ minLength: 1, maxLength: 16 })
+      ),
+      previewCameraDropReasons: previewCameraDropReasonStatsSchema,
+      previewCameraSurfaceBacking: previewSourceSurfaceBackingStatsSchema,
+      previewScreenCaptureCallbackCount: nonNegativeInteger,
+      previewScreenFrameStorePublications: nonNegativeInteger,
+      previewScreenCaptureCallbackAgeMs: optionalSchema(nonNegativeInteger),
+      previewScreenLatestSequence: optionalSchema(nonNegativeInteger),
+      previewScreenFrameStatuses: previewScreenFrameStatusStatsSchema,
+      previewScreenSurfaceBacking: previewSourceSurfaceBackingStatsSchema,
+      // Absent while the capture pipeline is healthy; nullable for defense in
+      // depth against the serde-null trap (0.9.68 / 0.9.79 outage class).
+      capturePipelineDegradedStage: optionalSchema(
+        nullableSchema(stringSchema({ minLength: 1, maxLength: 64 }))
+      ),
+      captureRecoveryPhase: optionalSchema(nullableSchema(captureRecoveryPhaseSchema)),
+      captureRecoverySource: optionalSchema(nullableSchema(captureRecoverySourceSchema)),
+      captureRecoveryAttempts: optionalSchema(nullableSchema(nonNegativeInteger)),
+      captureRecoveryLastError: optionalSchema(
+        nullableSchema(stringSchema({ minLength: 1, maxLength: 16_384 }))
+      ),
+      captureRecoveryLastDurationMs: optionalSchema(nullableSchema(numberSchema({ min: 0 }))),
       updatedAt: optionalSchema(timestamp)
     },
     { allowUnknown: true }
@@ -541,6 +1200,26 @@ const sceneCommitStatusSchema = boundedSemanticValue(
   )
 )
 
+const recordingFinalizationStateSchema = enumSchema(['none', 'finalizing', 'finalized', 'failed'])
+
+const recordingFinalizationEventSchema = boundedSemanticValue(
+  'a recording finalization event',
+  objectSchema(
+    {
+      sessionId: boundedString,
+      state: recordingFinalizationStateSchema,
+      progressPercent: optionalSchema(numberSchema({ min: 0, max: 100 })),
+      mp4Path: optionalSchema(boundedPath),
+      outputPath: optionalSchema(boundedPath),
+      durationMs: optionalSchema(nonNegativeInteger),
+      fileSizeBytes: optionalSchema(nonNegativeInteger),
+      error: optionalSchema(stringSchema({ maxLength: 16_384 })),
+      updatedAt: timestamp
+    },
+    { allowUnknown: false }
+  )
+) as RuntimeSchema<RecordingFinalizationEvent>
+
 const sessionSummarySchema = boundedSemanticValue(
   'a session summary',
   objectSchema(
@@ -548,15 +1227,133 @@ const sessionSummarySchema = boundedSemanticValue(
       id: boundedString,
       title: stringSchema({ maxLength: 16_384 }),
       startedAt: timestamp,
+      endedAt: optionalSchema(timestamp),
       status: boundedString,
       mode: boundedString,
+      outputPath: optionalSchema(boundedPath),
+      mp4Path: optionalSchema(boundedPath),
+      streamPreset: optionalSchema(stringSchema({ maxLength: 1024 })),
+      container: optionalSchema(enumSchema(['none', 'mkv', 'flv', 'tee'])),
+      durationMs: optionalSchema(nonNegativeInteger),
+      fileSizeBytes: optionalSchema(nonNegativeInteger),
+      sceneLabel: optionalSchema(stringSchema({ maxLength: 1024 })),
+      qualityStatus: optionalSchema(boundedBackendPayloadSchema),
+      healthEventCount: nonNegativeInteger,
+      sessionLogCount: nonNegativeInteger,
+      aiArtifactCount: nonNegativeInteger,
+      readyAiArtifactKinds: optionalSchema(
+        arraySchema(
+          enumSchema([
+            'audio-extract',
+            'transcript',
+            'title-description',
+            'summary',
+            'chapters',
+            'highlights',
+            'social-posts',
+            'smart-zoom',
+            'noise-cleanup',
+            'silence-removal',
+            'health-assistant'
+          ]),
+          { maxLength: 11 }
+        )
+      ),
       commentCount: nonNegativeInteger,
       derivedFromSessionId: optionalSchema(boundedString),
       sourceTitle: optionalSchema(stringSchema({ maxLength: 16_384 })),
-      processingKind: optionalSchema(literalSchema('noise-cleanup'))
+      processingKind: optionalSchema(literalSchema('noise-cleanup')),
+      finalizationState: optionalSchema(recordingFinalizationStateSchema),
+      finalizationProgressPercent: optionalSchema(numberSchema({ min: 0, max: 100 })),
+      finalizationError: optionalSchema(stringSchema({ maxLength: 16_384 }))
     },
-    { allowUnknown: true }
+    { allowUnknown: false }
   )
+)
+
+const sessionListParamsSchema = objectSchema(
+  {
+    cursor: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 })),
+    limit: optionalSchema(numberSchema({ integer: true, min: 1, max: 200 }))
+  },
+  { allowUnknown: false }
+)
+
+const sessionDetailListParamsSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    cursor: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 })),
+    limit: optionalSchema(numberSchema({ integer: true, min: 1, max: 120 }))
+  },
+  { allowUnknown: false }
+)
+
+const healthEventSchema = objectSchema(
+  {
+    id: boundedString,
+    sessionId: nullableSchema(boundedString),
+    level: enumSchema(['info', 'warn', 'error']),
+    code: boundedString,
+    message: stringSchema({ maxLength: 16_384 }),
+    permissionPane: nullableSchema(
+      enumSchema(['privacy', 'screen-recording', 'camera', 'microphone'])
+    ),
+    createdAt: timestamp
+  },
+  { allowUnknown: false }
+)
+
+const sessionLogEntrySchema = objectSchema(
+  {
+    id: boundedString,
+    sessionId: boundedString,
+    level: enumSchema(['info', 'warn', 'error']),
+    code: boundedString,
+    message: stringSchema({ maxLength: 16_384 }),
+    sourceId: nullableSchema(stringSchema({ maxLength: 16_384 })),
+    permissionPane: nullableSchema(
+      enumSchema(['privacy', 'screen-recording', 'camera', 'microphone'])
+    ),
+    createdAt: timestamp
+  },
+  { allowUnknown: false }
+)
+
+const aiArtifactSchema = objectSchema(
+  {
+    id: boundedString,
+    sessionId: boundedString,
+    kind: enumSchema([
+      'audio-extract',
+      'transcript',
+      'title-description',
+      'summary',
+      'chapters',
+      'highlights',
+      'social-posts',
+      'smart-zoom',
+      'noise-cleanup',
+      'silence-removal',
+      'health-assistant'
+    ]),
+    status: enumSchema(['ready', 'pending-consent', 'failed']),
+    content: boundedBackendPayloadSchema,
+    filePath: nullableSchema(boundedPath),
+    createdAt: timestamp
+  },
+  { allowUnknown: false }
+)
+
+const nextCursorSchema = optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 }))
+
+const sessionDeletionOperationSchema: RuntimeSchema<SessionDeletionOperation> = objectSchema(
+  {
+    operationId: boundedString,
+    sessionId: boundedString,
+    pathCount: numberSchema({ integer: true, min: 0, max: 16 }),
+    blockedPathCount: numberSchema({ integer: true, min: 0, max: 16 })
+  },
+  { allowUnknown: false }
 )
 
 const noiseCleanupJobFieldsSchema = objectSchema(
@@ -630,6 +1427,7 @@ const sessionStartParamsSchema = objectSchema(
         recordEnabled: booleanSchema,
         streamEnabled: booleanSchema,
         outputDirectoryCapability: optionalSchema(boundedString),
+        keepOriginalMkv: optionalSchema(booleanSchema),
         video: boundedBackendParamValueSchema,
         rtmp: boundedBackendParamValueSchema
       },
@@ -649,9 +1447,14 @@ const sessionStartParamsSchema = objectSchema(
         },
         { allowUnknown: false }
       )
-    )
+    ),
+    requestedAtMs: optionalSchema(nonNegativeInteger)
   },
   { allowUnknown: false }
+)
+
+const sessionStopParamsSchema = optionalSchema(
+  objectSchema({ requestedAtMs: optionalSchema(nonNegativeInteger) }, { allowUnknown: false })
 )
 
 const undefinedOrFfmpegPathSchema = unionSchema([
@@ -712,11 +1515,116 @@ const oauthCallbackResultSchema = runtimeSchema<OAuthCallbackResult>(
   }
 )
 
+const cohostToneSchema = enumSchema(['friendly', 'short', 'professional'])
+const cohostNotesSchema = stringSchema({ maxLength: 4000 })
+const cohostSettingsSchema = objectSchema(
+  {
+    enabled: booleanSchema,
+    tone: cohostToneSchema,
+    notes: cohostNotesSchema,
+    autoHighlight: booleanSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostSettings>
+const cohostSettingsPatchSchema = objectSchema(
+  {
+    enabled: optionalSchema(booleanSchema),
+    tone: optionalSchema(cohostToneSchema),
+    notes: optionalSchema(cohostNotesSchema),
+    autoHighlight: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostSettingsPatch>
+const cohostQuestionSchema = objectSchema(
+  {
+    id: boundedString,
+    text: stringSchema({ maxLength: 2000 }),
+    messageIds: arraySchema(boundedString, { maxLength: 500 }),
+    askers: arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 500 }),
+    platforms: arraySchema(enumSchema(['youtube', 'twitch', 'x', 'custom']), { maxLength: 4 }),
+    priority: enumSchema(['high', 'normal', 'low']),
+    suggestedReply: stringSchema({ maxLength: 2000 }),
+    fromNotes: booleanSchema,
+    firstSeenAt: timestamp,
+    updatedAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const cohostFlagSchema = objectSchema(
+  {
+    messageId: boundedString,
+    kind: enumSchema(['toxicity', 'spam', 'self-promo', 'personal-info']),
+    severity: enumSchema(['high', 'medium', 'low']),
+    reason: stringSchema({ maxLength: 2000 }),
+    at: timestamp
+  },
+  { allowUnknown: false }
+)
+const cohostErrorDetailSchema = objectSchema(
+  {
+    code: stringSchema({ minLength: 1, maxLength: 128 }),
+    message: stringSchema({ maxLength: 2000 }),
+    status: nullableSchema(numberSchema({ integer: true, min: 100, max: 599 }))
+  },
+  { allowUnknown: false }
+)
+const cohostStateSchema = objectSchema(
+  {
+    sessionId: nullableSchema(boundedString),
+    status: enumSchema(['off', 'listening', 'paused', 'error']),
+    reason: nullableSchema(
+      enumSchema([
+        'premium-required',
+        'consent-required',
+        'session-expired',
+        'signed-out',
+        'quota-exhausted',
+        'server-unconfigured',
+        'network',
+        'gateway-error'
+      ])
+    ),
+    // Optional on the wire: a backend from before `detail` existed omits it.
+    detail: optionalSchema(nullableSchema(cohostErrorDetailSchema)),
+    questions: arraySchema(cohostQuestionSchema, { maxLength: 40 }),
+    flags: arraySchema(cohostFlagSchema, { maxLength: 50 }),
+    mood: nullableSchema(enumSchema(['hype', 'calm', 'tense', 'mixed'])),
+    lastTickAt: nullableSchema(timestamp),
+    tickSeq: nonNegativeInteger,
+    partial: booleanSchema,
+    // Presence fields (W1): optional on the wire so pre-presence backends
+    // still validate; the current backend always sends them.
+    tickInFlight: optionalSchema(booleanSchema),
+    pendingMessages: optionalSchema(nonNegativeInteger),
+    nextTickAt: optionalSchema(nullableSchema(timestamp)),
+    messagesSeen: optionalSchema(nonNegativeInteger),
+    questionsTotal: optionalSchema(nonNegativeInteger)
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostState>
+const cohostStartParamsSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    consentToProcessChat: optionalSchema(booleanSchema),
+    streamTitle: optionalSchema(nullableSchema(stringSchema({ maxLength: 1000 })))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostStartParams>
+const cohostQuestionParamsSchema = objectSchema(
+  { sessionId: boundedString, questionId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostQuestionParams>
+const cohostFlagParamsSchema = objectSchema(
+  { sessionId: boundedString, messageId: boundedString },
+  { allowUnknown: false }
+) as RuntimeSchema<CohostFlagParams>
+
 const runtimeContracts = {
   'health.ping': { params: undefinedOrFfmpegPathSchema, result: backendHealthSchema },
   'entitlements.get': { params: undefinedSchema, result: entitlementsSchema },
   'entitlements.refresh': { params: undefinedSchema, result: entitlementsSchema },
   'account.get': { params: undefinedSchema, result: accountSchema },
+  'account.refresh': { params: undefinedSchema, result: accountSchema },
   'account.complete_sign_in': {
     params: objectSchema(
       {
@@ -736,8 +1644,16 @@ const runtimeContracts = {
   },
   'devices.list': { params: undefinedOrFfmpegPathSchema, result: deviceListSchema },
   'recording.status': { params: undefinedSchema, result: recordingStatusSchema },
+  'stream.output.topology.probe': {
+    params: streamOutputTopologyProbeParamsSchema,
+    result: streamOutputTopologyProbeResultSchema
+  },
+  'stream.targets.snapshot': {
+    params: undefinedSchema,
+    result: streamTargetsSnapshotSchema
+  },
   'session.start': { params: sessionStartParamsSchema, result: recordingStatusSchema },
-  'session.stop': { params: undefinedSchema, result: recordingStatusSchema },
+  'session.stop': { params: sessionStopParamsSchema, result: recordingStatusSchema },
   'scene.get': { params: undefinedSchema, result: sceneSchema },
   'scene.load_from_capture_config': {
     params: sceneConfigSchema,
@@ -756,16 +1672,48 @@ const runtimeContracts = {
   'preview.surface.status': { params: undefinedSchema, result: previewSurfaceStatusSchema },
   'preview.camera.status': { params: undefinedSchema, result: previewCameraStatusSchema },
   'preview.screen.status': { params: undefinedSchema, result: previewScreenStatusSchema },
+  'capture.recovery.status': { params: undefinedSchema, result: captureRecoveryStatusSchema },
+  'capture.recovery.retry': { params: undefinedSchema, result: captureRecoveryStatusSchema },
   'diagnostics.stats': { params: undefinedSchema, result: diagnosticStatsSchema },
   'sessions.list': {
-    params: unionSchema([
-      undefinedSchema,
-      objectSchema(
-        { limit: optionalSchema(numberSchema({ integer: true, min: 1, max: 1000 })) },
-        { allowUnknown: false }
-      )
-    ]),
-    result: arraySchema(sessionSummarySchema, { maxLength: 1000 })
+    params: sessionListParamsSchema,
+    result: objectSchema(
+      {
+        items: arraySchema(sessionSummarySchema, { maxLength: 200 }),
+        nextCursor: nextCursorSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'sessions.healthEvents.list': {
+    params: sessionDetailListParamsSchema,
+    result: objectSchema(
+      {
+        events: arraySchema(healthEventSchema, { maxLength: 120 }),
+        nextCursor: nextCursorSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'sessions.logs.list': {
+    params: sessionDetailListParamsSchema,
+    result: objectSchema(
+      {
+        entries: arraySchema(sessionLogEntrySchema, { maxLength: 120 }),
+        nextCursor: nextCursorSchema
+      },
+      { allowUnknown: false }
+    )
+  },
+  'sessions.aiArtifacts.list': {
+    params: sessionDetailListParamsSchema,
+    result: objectSchema(
+      {
+        artifacts: arraySchema(aiArtifactSchema, { maxLength: 120 }),
+        nextCursor: nextCursorSchema
+      },
+      { allowUnknown: false }
+    )
   },
   'sessions.storage': {
     params: undefinedSchema,
@@ -801,33 +1749,11 @@ const runtimeContracts = {
       },
       { allowUnknown: false }
     ),
-    result: arraySchema(
-      objectSchema(
-        {
-          operationId: boundedString,
-          sessionId: boundedString,
-          pathCount: numberSchema({ integer: true, min: 0, max: 16 }),
-          blockedPathCount: numberSchema({ integer: true, min: 0, max: 16 })
-        },
-        { allowUnknown: false }
-      ),
-      { maxLength: 500 }
-    )
+    result: arraySchema(sessionDeletionOperationSchema, { maxLength: 500 })
   },
   'sessions.delete.pending': {
     params: undefinedSchema,
-    result: arraySchema(
-      objectSchema(
-        {
-          operationId: boundedString,
-          sessionId: boundedString,
-          paths: arraySchema(boundedPath, { maxLength: 16 }),
-          blockedPaths: optionalSchema(arraySchema(boundedPath, { maxLength: 16 }))
-        },
-        { allowUnknown: false }
-      ),
-      { maxLength: 500 }
-    )
+    result: arraySchema(sessionDeletionOperationSchema, { maxLength: 500 })
   },
   'noiseCleanup.start': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
@@ -859,7 +1785,15 @@ const runtimeContracts = {
   'repair.restore_file': {
     params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
     result: objectSchema({ restored: booleanSchema }, { allowUnknown: false })
-  }
+  },
+  'cohost.status': { params: undefinedSchema, result: cohostStateSchema },
+  'cohost.start': { params: cohostStartParamsSchema, result: cohostStateSchema },
+  'cohost.stop': { params: undefinedSchema, result: cohostStateSchema },
+  'cohost.question.answered': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
+  'cohost.question.dismiss': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
+  'cohost.flag.dismiss': { params: cohostFlagParamsSchema, result: cohostStateSchema },
+  'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
+  'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema }
 } satisfies Record<BackendRpcMethod, RuntimeBackendRpcContract>
 
 export function isTypedBackendRpcMethod(method: string): method is BackendRpcMethod {
@@ -889,15 +1823,19 @@ const runtimeEventSchemas = {
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,
   'noiseCleanup.status': noiseCleanupJobSchema,
+  'recording.finalization': recordingFinalizationEventSchema,
   'platformAccounts.oauth.callback': oauthCallbackResultSchema,
   'recording.status': recordingStatusSchema,
+  'stream.targets': streamTargetsSnapshotSchema,
   'scene.changed': sceneSchema,
   'compositor.status': compositorStatusSchema,
   'preview.live.status': previewLiveStatusSchema,
   'preview.surface.status': previewSurfaceStatusSchema,
   'preview.camera.status': previewCameraStatusSchema,
   'preview.screen.status': previewScreenStatusSchema,
-  'diagnostics.stats': diagnosticStatsSchema
+  'capture.recovery.status': captureRecoveryStatusSchema,
+  'diagnostics.stats': diagnosticStatsSchema,
+  'cohost.state': cohostStateSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

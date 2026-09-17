@@ -52,6 +52,7 @@ import {
   waitForCleanProcessState,
   waitForNoLiveProcessState
 } from './lib/process-census.mjs'
+import { evaluateOwnedTeardown } from './lib/process-endurance.mjs'
 import {
   evaluateProcessMemoryGate,
   formatProcessMemorySummary,
@@ -69,6 +70,7 @@ const timeoutMs = numberFromEnv('VIDEORC_PROBE_TIMEOUT_MS', 180000)
 const warmupSeconds = numberFromEnv('VIDEORC_PERF_WARMUP_SECONDS', 8)
 const sampleSeconds = numberFromEnv('VIDEORC_PERF_SAMPLE_SECONDS', 30)
 const sampleIntervalMs = numberFromEnv('VIDEORC_PERF_SAMPLE_INTERVAL_MS', 1000)
+const requireStudioMicVisuals = process.env.VIDEORC_PERF_REQUIRE_STUDIO_MIC_VISUALS === '1'
 const measurementMs = sampleSeconds * 1000
 const samplingInvariants = performanceSamplingInvariants(measurementMs, sampleIntervalMs)
 const previewMode = process.env.VIDEORC_PERF_PREVIEW_MODE ?? 'detached'
@@ -150,10 +152,16 @@ const reportMetadata = await collectPerformanceMetadata({
 })
 const performanceBudgetStaticContext = {
   scenario: reportScenario,
+  profileClass: reportMetadata.profileClass,
+  appVersion: reportMetadata.appVersion,
   machineModel: reportMetadata.machineModel,
   hardwareClass: reportMetadata.hardwareClass,
   buildMode: reportMetadata.buildMode,
-  operatingSystem: reportMetadata.operatingSystem
+  commit: reportMetadata.commit,
+  executableSha256: reportMetadata.executable?.sha256,
+  packagePayloadSha256: reportMetadata.packagePayload?.sha256,
+  operatingSystem: reportMetadata.operatingSystem,
+  timing: reportMetadata.performanceWindow
 }
 const validatedActiveBudget = budgetRequest
   ? await readActivePerformanceBudget({ path: resolve(repoRoot, budgetRequest.path) })
@@ -181,7 +189,7 @@ let samplingEvidence = null
 let mainPumpDiagnostics = null
 let memorySummary = null
 let resourceCheckpoints = null
-let cpuSummary = {}
+let cpuSummary = { averagePercentByRole: {}, p95PercentByRole: {} }
 let pipeline = null
 let compositorStatusAfter = null
 let diagnosticStatusAfter = null
@@ -191,9 +199,12 @@ let budgetFailures = []
 let activeBudget = null
 let activeBudgetEvaluation = null
 let activeBudgetMetricFailures = []
+let studioMicVisualStatus = null
 let runError = null
 let teardownError = null
 let teardownClean = false
+let teardownEvidence = null
+let teardownFailures = []
 let teardownRecovery = null
 const detachedPreviewGeometryPhases = {}
 let detachedPreviewGeometryEvidence =
@@ -232,6 +243,9 @@ try {
     } catch (error) {
       console.log(attempt[0], 'FAILED:', String(error?.message ?? error))
     }
+  }
+  if (requireStudioMicVisuals) {
+    studioMicVisualStatus = await ensureStudioMicVisuals(smoke)
   }
   await smokeCommandRetry(smoke, 'preview-window-open')
   let budgetSurfaceStatus = null
@@ -422,14 +436,7 @@ try {
     }
   }
 
-  if (activeBudget) {
-    activeBudgetEvaluation = evaluateActivePerformanceBudget({
-      profile: activeBudget.profile,
-      metrics: { pipeline, memory: memorySummary, resourceCheckpoints }
-    })
-    activeBudgetMetricFailures = activeBudgetEvaluation.metricFailures
-    budgetFailures.push(...activeBudgetEvaluation.thresholdFailures)
-  } else {
+  if (!activeBudget) {
     budgetFailures.push(
       ...cadenceFailures({
         presentFps: pipeline.presentFps,
@@ -494,8 +501,11 @@ try {
   console.log('\n=== process memory ===')
   console.log(formatProcessMemorySummary(memorySummary))
   console.log('\n=== average CPU by role ===')
-  for (const [role, cpu] of Object.entries(cpuSummary).sort()) {
+  for (const [role, cpu] of Object.entries(cpuSummary.averagePercentByRole).sort()) {
     console.log(`${role.padEnd(24)} ${cpu.toFixed(1).padStart(6)}%`)
+  }
+  if (requireStudioMicVisuals) {
+    studioMicVisualStatus = await ensureStudioMicVisuals(smoke, { selectDevice: false })
   }
   console.log('\n=== native pipeline ===')
   console.log(JSON.stringify(pipeline, null, 2))
@@ -506,27 +516,42 @@ try {
   try {
     if (launched) {
       const smoke = launched.connections['preview-motion-ready']
+      let gracefulQuitError = null
+      let gracefulQuitCompleted = false
       if (smoke) {
-        await smokeCommand(smoke, 'app-quit').catch(() => undefined)
-        await waitForNoLiveProcessState({
-          ledgerPaths,
-          pgid: launched.process.pid,
-          timeoutMs: 10000
-        }).catch(() => undefined)
+        try {
+          await smokeCommand(smoke, 'app-quit')
+          await waitForNoLiveProcessState({
+            ledgerPaths,
+            pgid: launched.process.pid,
+            timeoutMs: 10000
+          })
+          gracefulQuitCompleted = true
+        } catch (error) {
+          gracefulQuitError = error?.message ?? String(error)
+        }
       }
-      await launched.stop()
+      const stopResult = gracefulQuitCompleted ? null : await launched.stop()
+      const finalCensus = await waitForCleanProcessState({
+        ledgerPaths,
+        pgid: launched.process.pid,
+        timeoutMs: 1000
+      })
+      teardownEvidence = {
+        clean: finalCensus.records.length === 0 && finalCensus.processGroupRows.length === 0,
+        gracefulQuitRequested: Boolean(smoke),
+        gracefulQuitError,
+        stopResult,
+        finalCensus
+      }
     }
     await waitForNoLiveProcessState({
       ledgerPaths,
       pgid: launched?.process?.pid,
       timeoutMs: 10000
     })
-    const clean = await waitForCleanProcessState({
-      ledgerPaths,
-      pgid: launched?.process?.pid,
-      timeoutMs: 1000
-    })
-    teardownClean = clean.records.length === 0 && clean.processGroupRows.length === 0
+    teardownFailures = evaluateOwnedTeardown(teardownEvidence)
+    teardownClean = teardownFailures.length === 0
   } catch (error) {
     teardownError = error
     try {
@@ -537,6 +562,22 @@ try {
   }
 }
 
+if (activeBudget) {
+  activeBudgetEvaluation = evaluateActivePerformanceBudget({
+    profile: activeBudget.profile,
+    metrics: {
+      pipeline,
+      memory: memorySummary,
+      resourceCheckpoints,
+      cpuAveragePercentByRole: cpuSummary.averagePercentByRole,
+      cpuP95PercentByRole: cpuSummary.p95PercentByRole,
+      teardownClean
+    }
+  })
+  activeBudgetMetricFailures = activeBudgetEvaluation.metricFailures
+  budgetFailures.push(...activeBudgetEvaluation.thresholdFailures)
+}
+
 if (previewMode === 'detached') {
   detachedPreviewGeometryEvidence = createDetachedPreviewCalibrationEvidence(
     detachedPreviewGeometryPhases
@@ -545,7 +586,11 @@ if (previewMode === 'detached') {
 const truthFailures = [
   ...(runError ? [runError.message] : []),
   ...(teardownError ? [teardownError.message] : []),
+  ...teardownFailures,
   ...activeBudgetMetricFailures,
+  ...(requireStudioMicVisuals && studioMicVisualStatus?.live !== true
+    ? ['Studio live microphone visualizer did not remain active through measurement']
+    : []),
   ...(detachedPreviewGeometryEvidence?.failures ?? []).map(
     (failure) => `detached preview geometry: ${failure}`
   ),
@@ -601,8 +646,11 @@ const report = createPerformanceReport({
   },
   metrics: {
     teardownClean,
+    teardownEvidence,
     pipeline,
-    cpuAveragePercentByRole: cpuSummary,
+    cpuAveragePercentByRole: cpuSummary.averagePercentByRole,
+    cpuP95PercentByRole: cpuSummary.p95PercentByRole,
+    studioMicVisualStatus,
     memory: memorySummary,
     sampling: samplingEvidence,
     resourceCheckpoints,
@@ -692,13 +740,59 @@ async function sampleProcessGroupCpu(pgid) {
 
 function summarizeCpu(samples) {
   const roles = new Set(samples.flatMap((sample) => Object.keys(sample)))
-  return Object.fromEntries(
-    [...roles].map((role) => [
-      role,
-      samples.reduce((total, sample) => total + (sample[role] ?? 0), 0) /
-        Math.max(1, samples.length)
-    ])
-  )
+  const summaries = [...roles].map((role) => {
+    const values = samples.map((sample) => sample[role] ?? 0).sort((left, right) => left - right)
+    const average = values.reduce((total, value) => total + value, 0) / Math.max(1, values.length)
+    const p95 = values.length > 0 ? values[Math.max(0, Math.ceil(values.length * 0.95) - 1)] : 0
+    return [role, { average, p95 }]
+  })
+  return {
+    averagePercentByRole: Object.fromEntries(
+      summaries.map(([role, summary]) => [role, summary.average])
+    ),
+    p95PercentByRole: Object.fromEntries(summaries.map(([role, summary]) => [role, summary.p95]))
+  }
+}
+
+async function ensureStudioMicVisuals(smoke, { selectDevice = true } = {}) {
+  const response = await smokeCommandRetry(smoke, 'eval-js', {
+    code: `
+      await openTab('sources', '[data-videorc-mic-preview]');
+      if (${selectDevice ? 'true' : 'false'}) {
+        const label = Array.from(document.querySelectorAll('label')).find(
+          (candidate) => candidate.textContent?.trim() === 'Microphone'
+        );
+        const trigger = label?.htmlFor ? document.getElementById(label.htmlFor) : null;
+        if (!trigger) throw new Error('Studio microphone picker was not found.');
+        trigger.click();
+        await sleep(250);
+        const option = Array.from(document.querySelectorAll('[role="option"]')).find(
+          (candidate) =>
+            candidate.getAttribute('aria-disabled') !== 'true' &&
+            !candidate.hasAttribute('data-disabled') &&
+            candidate.textContent?.trim() !== 'None'
+        );
+        if (!option) throw new Error('No available Studio microphone could be selected.');
+        option.click();
+        await sleep(1000);
+      }
+      await openTab('studio', '[data-videorc-mic-visualizer]');
+      const deadline = Date.now() + 10000;
+      while (Date.now() < deadline) {
+        const visualizer = document.querySelector('[data-videorc-mic-visualizer]');
+        const live = Array.from(document.querySelectorAll('span')).some(
+          (candidate) => candidate.textContent?.trim() === 'Live'
+        );
+        if (visualizer && live) return { mounted: true, live: true };
+        await sleep(100);
+      }
+      return {
+        mounted: Boolean(document.querySelector('[data-videorc-mic-visualizer]')),
+        live: false
+      };
+    `
+  })
+  return response?.result ?? response
 }
 
 async function openBackendWireTap(backend) {
@@ -807,7 +901,11 @@ function smokeCommand(smoke, command, params = {}) {
         port: smoke.port,
         path: '/command',
         method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body), Authorization: `Bearer ${smoke.capability}` }
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body),
+          Authorization: `Bearer ${smoke.capability}`
+        }
       },
       (response) => {
         response.setEncoding('utf8')

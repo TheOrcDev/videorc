@@ -2,10 +2,13 @@ import { describe, expect, it } from 'vitest'
 
 import type { PreviewSurfaceBounds } from './backend'
 import {
+  mainOwnedPreviewSurfaceBoundsParams,
   normalizePreviewSurfaceBounds,
+  normalizeOpaqueNativeWindowHandle,
   previewSurfaceBoundsChanged,
   previewSurfaceDrawableBoundsChanged,
-  previewSurfaceNativeDrawableMatchesBounds
+  previewSurfaceNativeDrawableMatchesBounds,
+  sanitizeRendererPreviewSurfaceStatus
 } from './native-preview-bounds'
 
 type FuturePreviewSurfaceBounds = PreviewSurfaceBounds & { futurePlacementToken: string }
@@ -125,6 +128,93 @@ describe('normalizePreviewSurfaceBounds', () => {
     expect(normalized.screenX).toBe(0)
     expect(normalized.width).toBe(1)
     expect(normalized.futurePlacementToken).toBe('keep-me')
+  })
+
+  it('strips privileged native-window identities from renderer-supplied bounds', () => {
+    const forged = {
+      screenX: 0,
+      screenY: 0,
+      width: 640,
+      height: 360,
+      scaleFactor: 1,
+      orderAboveWindowHandle: '0xffffffffffffffff',
+      nativeWindowHandle: '0x1111111111111111',
+      processId: 42
+    } as PreviewSurfaceBounds
+
+    const normalized = normalizePreviewSurfaceBounds(forged) as unknown as Record<string, unknown>
+    expect(normalized).not.toHaveProperty('orderAboveWindowHandle')
+    expect(normalized).not.toHaveProperty('nativeWindowHandle')
+    expect(normalized).not.toHaveProperty('processId')
+  })
+})
+
+describe('main-owned Windows preview stacking', () => {
+  const bounds: PreviewSurfaceBounds = {
+    screenX: 10,
+    screenY: 20,
+    width: 640,
+    height: 360,
+    scaleFactor: 2
+  }
+
+  it('canonicalizes a nonzero fixed-width HWND and binds it to the generation', () => {
+    expect(normalizeOpaqueNativeWindowHandle('0x000000000000ABCD')).toBe('0x000000000000abcd')
+    expect(mainOwnedPreviewSurfaceBoundsParams(bounds, 7, '0x000000000000ABCD')).toEqual({
+      bounds: { ...bounds, screenHeight: undefined, orderAboveWindowHandle: '0x000000000000abcd' },
+      generation: 7
+    })
+  })
+
+  it('rejects zero, truncated, malformed, and unsafe identities', () => {
+    for (const handle of [
+      '0x0000000000000000',
+      '0x1234',
+      '1234567890abcdef',
+      '0x00000000000000xz'
+    ]) {
+      expect(() => normalizeOpaqueNativeWindowHandle(handle)).toThrow()
+    }
+    expect(() =>
+      mainOwnedPreviewSurfaceBoundsParams(bounds, Number.MAX_SAFE_INTEGER + 1, '0x0000000000000001')
+    ).toThrow(/generation/)
+  })
+
+  it('redacts privileged identities from renderer-facing status', () => {
+    const status = {
+      state: 'live',
+      source: 'screen',
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      targetFps: 60,
+      width: 640,
+      height: 360,
+      framesRendered: 1,
+      droppedFrames: 0,
+      framePollingSuppressed: true,
+      sourcePixelsPresent: true,
+      pendingHostCommandCount: 0,
+      bounds: { ...bounds, orderAboveWindowHandle: '0x0000000000000001' },
+      nativeWindowHandle: '0x0000000000000002',
+      processId: 42,
+      sharedTextureHandle: '0x0000000000000003',
+      windowsD3d11Presenter: {
+        nativeWindowHandle: '0x0000000000000004',
+        resourceHandle: '0x0000000000000005'
+      },
+      updatedAt: '2026-07-29T00:00:00.000Z'
+    } as unknown as import('./backend').PreviewSurfaceStatus
+
+    const sanitized = sanitizeRendererPreviewSurfaceStatus(status) as unknown as Record<
+      string,
+      unknown
+    >
+    expect(sanitized).not.toHaveProperty('nativeWindowHandle')
+    expect(sanitized).not.toHaveProperty('processId')
+    expect(sanitized).not.toHaveProperty('sharedTextureHandle')
+    expect(sanitized.bounds).not.toHaveProperty('orderAboveWindowHandle')
+    expect(sanitized.windowsD3d11Presenter).not.toHaveProperty('nativeWindowHandle')
+    expect(sanitized.windowsD3d11Presenter).not.toHaveProperty('resourceHandle')
   })
 })
 

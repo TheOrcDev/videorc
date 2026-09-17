@@ -31,7 +31,15 @@
     "scope": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["scenario", "buildMode", "displayScaleFactor", "operatingSystem"],
+      "required": [
+        "scenario",
+        "profileClass",
+        "appVersion",
+        "buildMode",
+        "displayScaleFactor",
+        "operatingSystem",
+        "timing"
+      ],
       "oneOf": [
         {
           "required": ["machineModel"],
@@ -44,6 +52,8 @@
       ],
       "properties": {
         "scenario": { "type": "string", "minLength": 1 },
+        "profileClass": { "enum": ["short-sentinel", "endurance"] },
+        "appVersion": { "type": "string", "minLength": 1, "pattern": "^[^*?]+$" },
         "machineModel": { "type": "string", "minLength": 1, "pattern": "^[^*?]+$" },
         "hardwareClass": { "type": "string", "minLength": 1, "pattern": "^[^*?]+$" },
         "buildMode": { "enum": ["development", "packaged"] },
@@ -57,6 +67,16 @@
             "arch": { "type": "string", "minLength": 1 },
             "macosVersion": { "type": "string", "minLength": 1 }
           }
+        },
+        "timing": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["warmupMs", "measurementMs", "intervalMs"],
+          "properties": {
+            "warmupMs": { "type": "integer", "minimum": 1 },
+            "measurementMs": { "type": "integer", "minimum": 1 },
+            "intervalMs": { "type": "integer", "minimum": 1 }
+          }
         }
       }
     },
@@ -67,23 +87,52 @@
         "calibrationId",
         "commit",
         "executableSha256",
+        "packagePayloadSha256",
+        "calibrationSha256",
+        "calibrationGeneratedAt",
         "powerAssertion",
         "powerAssertionVerified",
-        "runCount"
+        "runCount",
+        "runNonces",
+        "reportPaths"
       ],
       "properties": {
         "calibrationId": { "type": "string", "pattern": "^[0-9a-f]{24}$" },
         "commit": { "type": "string", "pattern": "^[0-9a-f]{40}([0-9a-f]{24})?$" },
         "executableSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "packagePayloadSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "calibrationSha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "calibrationGeneratedAt": { "type": "string", "format": "date-time" },
         "powerAssertion": { "const": "caffeinate:-d,-i,-s" },
         "powerAssertionVerified": { "const": true },
-        "runCount": { "const": 3 }
+        "runCount": { "const": 3 },
+        "runNonces": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "reportPaths": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": { "type": "string", "minLength": 1 }
+        }
       }
     },
     "thresholds": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["cadence", "pipeline", "memoryMiB", "resources", "perRoleMemoryMiB"],
+      "required": [
+        "cadence",
+        "pipeline",
+        "memoryMiB",
+        "resources",
+        "perRoleMemoryMiB",
+        "perRoleCpuPercent",
+        "teardown"
+      ],
       "properties": {
         "cadence": {
           "type": "object",
@@ -134,6 +183,17 @@
           "type": "object",
           "minProperties": 3,
           "additionalProperties": { "$ref": "#/$defs/roleThresholds" }
+        },
+        "perRoleCpuPercent": {
+          "type": "object",
+          "minProperties": 3,
+          "additionalProperties": { "$ref": "#/$defs/cpuRoleThresholds" }
+        },
+        "teardown": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["requireClean"],
+          "properties": { "requireClean": { "const": true } }
         }
       }
     },
@@ -151,6 +211,15 @@
         "maximumSlopePerMinute": { "type": "number", "minimum": 0 },
         "maximumSecondHalfSlopePerMinute": { "type": "number", "minimum": 0 },
         "maximumPlateauGrowth": { "type": "number", "minimum": 0 }
+      }
+    },
+    "cpuRoleThresholds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["maximumAverage", "maximumP95"],
+      "properties": {
+        "maximumAverage": { "type": "number", "minimum": 0 },
+        "maximumP95": { "type": "number", "minimum": 0 }
       }
     },
     "approval": {

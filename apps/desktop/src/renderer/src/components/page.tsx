@@ -55,6 +55,13 @@ export function PageHeader({
 /**
  * Config-grid archetype: grouped sections in a responsive grid that collapses
  * to one column below `lg`. Reading order is top-to-bottom, then left-to-right.
+ *
+ * `items-start` is the default on purpose: a grid row stretches its items to
+ * the tallest one, so a short card (e.g. Settings' Remote control when it is
+ * off) grew a lake of empty glass next to a tall neighbour. Every card is now
+ * exactly as tall as its own content. Pages that want balanced columns stack
+ * their sections in `flex flex-col gap-5` children instead of relying on the
+ * grid to even them out.
  */
 export function ConfigGrid({
   children,
@@ -63,7 +70,7 @@ export function ConfigGrid({
   children: ReactNode
   className?: string
 }): ReactElement {
-  return <div className={cn('grid gap-5 lg:grid-cols-2', className)}>{children}</div>
+  return <div className={cn('grid items-start gap-5 lg:grid-cols-2', className)}>{children}</div>
 }
 
 /** Gallery archetype: a responsive card grid that fills by available width. */

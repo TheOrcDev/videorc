@@ -113,6 +113,17 @@ fn pipe_registry()
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Direct test-only visibility into the Windows server-handle registry.
+/// Recreating a named pipe is not cleanup evidence because `create` first
+/// removes any stale entry itself.
+#[cfg(all(test, windows))]
+pub(crate) fn test_pipe_registry_contains(path: &Path) -> io::Result<bool> {
+    let registry = pipe_registry()
+        .lock()
+        .map_err(|_| io::Error::other("named-pipe registry lock poisoned"))?;
+    Ok(registry.contains_key(path))
+}
+
 /// Byte-type pipe buffer sized to hold one 1080p BGRA overlay frame (~8.3 MiB)
 /// with headroom. A 4K RGBA frame is ~33 MiB and intentionally exceeds this
 /// advisory quota, so bounded media writers must finish frames across partial

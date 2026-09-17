@@ -26,8 +26,8 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(93)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(93)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(102)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(102)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -39,7 +39,7 @@ describe('Electron IPC contract', () => {
   it('keeps the preload invoke and event surface exactly aligned with the maps', () => {
     expectTypeOf<ElectronEventChannelInvariant>().toEqualTypeOf<true>()
     const preload = readFileSync(new URL('../preload/index.ts', import.meta.url), 'utf8')
-    const invoked = [...preload.matchAll(/\binvoke\('([^']+)'/g)].map((match) => match[1]).sort()
+    const invoked = [...preload.matchAll(/\binvoke\(\s*'([^']+)'/g)].map((match) => match[1]).sort()
     const subscribed = [...preload.matchAll(/\bsubscribe\('([^']+)'/g)]
       .map((match) => match[1])
       .sort()
@@ -69,6 +69,24 @@ describe('Electron IPC contract', () => {
   })
 
   it('validates account authorization URLs and callback identifiers', () => {
+    expect(validateElectronInvokeArgs('account:refresh', [])).toEqual([])
+    expect(
+      validateElectronInvokeResult('account:refresh', {
+        status: 'signed-in',
+        username: 'orc',
+        avatarUrl: 'https://example.com/avatar.png'
+      })
+    ).toEqual({
+      status: 'signed-in',
+      username: 'orc',
+      avatarUrl: 'https://example.com/avatar.png'
+    })
+    expect(() =>
+      validateElectronInvokeResult('account:refresh', {
+        status: 'signed-in',
+        adminToken: 'must-not-cross-ipc'
+      })
+    ).toThrow('account:refresh.result')
     expect(
       validateElectronInvokeArgs('account:begin-sign-in', [
         'https://www.videorc.com/desktop/authorize/v2?state=abc'
@@ -147,6 +165,12 @@ describe('Electron IPC contract', () => {
       validateElectronInvokeArgs('preview-surface:create', [{ ...bounds, width: Number.NaN }, 3])
     ).toThrow('finite number')
     expect(() =>
+      validateElectronInvokeArgs('preview-surface:create', [
+        { ...bounds, orderAboveWindowHandle: '0x0000000000000001' },
+        3
+      ])
+    ).toThrow('orderAboveWindowHandle')
+    expect(() =>
       validateElectronInvokeArgs('resource:trash-session-deletion', ['x'.repeat(1025)])
     ).toThrow('at most 1024')
   })
@@ -157,7 +181,8 @@ describe('Electron IPC contract', () => {
       screenY: 0,
       width: 1280,
       height: 720,
-      scaleFactor: 2
+      scaleFactor: 2,
+      cornerRadius: 18
     }
     const layout = {
       layoutPreset: 'screen-camera',
@@ -168,6 +193,11 @@ describe('Electron IPC contract', () => {
       cameraShape: 'rounded',
       cameraCornerRadiusPct: 10,
       cameraAspect: 'source',
+      cameraChromaKeyEnabled: false,
+      cameraChromaKeyColor: '#00FF00',
+      cameraChromaKeySimilarityPct: 40,
+      cameraChromaKeySmoothnessPct: 8,
+      cameraChromaKeySpillPct: 10,
       cameraMargin: 24,
       cameraFit: 'fill',
       cameraMirror: true,
@@ -259,6 +289,12 @@ describe('Electron IPC contract', () => {
     expect(validateElectronInvokeArgs('preview-surface:update-compositor', [compositor])).toEqual([
       compositor
     ])
+    expect(
+      validateElectronInvokeArgs('preview-surface:set-frame-polling-suppressed', [true, 7, true])
+    ).toEqual([true, 7, true])
+    expect(() =>
+      validateElectronInvokeArgs('preview-surface:set-frame-polling-suppressed', [true, true])
+    ).toThrow('set-frame-polling-suppressed.args')
     expect(() =>
       validateElectronInvokeArgs('preview-surface:update-compositor', [
         { ...compositor, state: 'attacker-controlled' }
@@ -278,6 +314,46 @@ describe('Electron IPC contract', () => {
     expect(
       validateElectronInvokeResult('preview-surface:set-frame-polling-suppressed', surfaceStatus)
     ).toEqual(surfaceStatus)
+    expect(
+      validateElectronInvokeResult('preview-surface:drain-host-commands', surfaceStatus)
+    ).toEqual(surfaceStatus)
+    const d3d11SurfaceStatus = {
+      ...surfaceStatus,
+      transport: 'd3d11-shared-texture',
+      backing: 'directcomposition-swapchain',
+      nativePreviewHostKind: 'backend-d3d11-presenter'
+    }
+    expect(validateElectronInvokeResult('preview-surface:status', d3d11SurfaceStatus)).toEqual(
+      d3d11SurfaceStatus
+    )
+    for (const invalid of [
+      { ...surfaceStatus, bounds: { ...bounds, cornerRadius: -1 } },
+      { ...surfaceStatus, bounds: { ...bounds, cornerRadius: 257 } }
+    ]) {
+      expect(() => validateElectronInvokeResult('preview-surface:status', invalid)).toThrow()
+      expect(() =>
+        validateElectronInvokeResult('preview-surface:drain-host-commands', invalid)
+      ).toThrow()
+    }
+    for (const leaked of [
+      { ...d3d11SurfaceStatus, nativeWindowHandle: '0x0000000000000001' },
+      { ...d3d11SurfaceStatus, processId: 42 },
+      { ...d3d11SurfaceStatus, sharedTextureHandle: '0x0000000000000002' },
+      {
+        ...d3d11SurfaceStatus,
+        bounds: { ...bounds, orderAboveWindowHandle: '0x0000000000000001' }
+      },
+      {
+        ...d3d11SurfaceStatus,
+        windowsD3d11Presenter: {
+          resourceHandle: '0x0000000000000003'
+        }
+      }
+    ]) {
+      expect(() => validateElectronInvokeResult('preview-surface:status', leaked)).toThrow(
+        /renderer-facing/
+      )
+    }
     expect(() =>
       validateElectronInvokeResult('preview-surface:set-frame-polling-suppressed', true)
     ).toThrow('set-frame-polling-suppressed.result')

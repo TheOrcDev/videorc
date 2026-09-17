@@ -128,7 +128,9 @@ impl SourceFrame {
     /// Builds a frame from interleaved rgb24 bytes (one captured rawvideo frame).
     pub fn from_rgb24(width: usize, height: usize, bytes: &[u8]) -> Self {
         let pixels = bytes
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .map(|chunk| [chunk[0], chunk[1], chunk[2]])
             .collect();
         Self {

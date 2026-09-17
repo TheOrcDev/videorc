@@ -78,8 +78,10 @@ describe('NativePreviewMutationQueue', () => {
       expect(queue.activeCount).toBe(1)
       expect(queue.pendingCount).toBe(0)
       await firstMayFinish
-    })
+    }, 'first-operation')
     await Promise.resolve()
+
+    expect(queue.activeOperationLabel).toBe('first-operation')
 
     const second = queue.run(() => undefined)
     expect(queue.depth).toBe(2)
@@ -97,6 +99,7 @@ describe('NativePreviewMutationQueue', () => {
     expect(queue.depth).toBe(0)
     expect(queue.activeCount).toBe(0)
     expect(queue.pendingCount).toBe(0)
+    expect(queue.activeOperationLabel).toBeNull()
   })
 
   it('admits exactly its active-plus-waiting capacity and explicitly rejects overflow', async () => {

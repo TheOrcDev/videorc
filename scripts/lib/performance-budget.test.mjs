@@ -10,6 +10,7 @@ import {
   evaluateActivePerformanceBudget,
   loadActivePerformanceBudget,
   preflightActivePerformanceBudget,
+  preflightActivePerformanceBudgetArtifact,
   readActivePerformanceBudget,
   selectActivePerformanceBudget,
   validateActivePerformanceBudgetDocument
@@ -102,6 +103,22 @@ describe('active performance budget loading', () => {
       [{ ...staticRunContext(), scenario: 'record-4k' }, /scenario record-4k != detached/],
       [{ ...staticRunContext(), machineModel: 'Mac99,9' }, /machineModel Mac99,9 != Mac16,1/],
       [{ ...staticRunContext(), buildMode: 'development' }, /buildMode development != packaged/],
+      [{ ...staticRunContext(), appVersion: '0.9.46' }, /appVersion 0.9.46 != 0.9.45/],
+      [
+        { ...staticRunContext(), profileClass: 'short-sentinel' },
+        /profileClass short-sentinel != endurance/
+      ],
+      [
+        {
+          ...staticRunContext(),
+          timing: { ...staticRunContext().timing, measurementMs: 120_000 }
+        },
+        /timing.measurementMs 120000 != 600000/
+      ],
+      [
+        { ...staticRunContext(), packagePayloadSha256: 'e'.repeat(64) },
+        /packagePayloadSha256 e+ != d+/
+      ],
       [
         {
           ...staticRunContext(),
@@ -120,6 +137,18 @@ describe('active performance budget loading', () => {
         expected
       )
     }
+
+    assert.doesNotThrow(() =>
+      preflightActivePerformanceBudget({
+        budget,
+        profileId: 'mac16-packaged-detached',
+        context: {
+          ...staticRunContext(),
+          commit: 'f'.repeat(40),
+          executableSha256: '0'.repeat(64)
+        }
+      })
+    )
 
     const hardwareDocument = budgetDocument()
     delete hardwareDocument.profiles[0].scope.machineModel
@@ -146,6 +175,40 @@ describe('active performance budget loading', () => {
           context: { ...staticRunContext(), machineModel: 'Mac99,9' }
         }),
       /did not contain a statically matching profile.*machine=Mac99,9/
+    )
+  })
+
+  it('preflights a named packaged artifact without treating provenance HEAD as runtime scope', async () => {
+    const budget = await readBudgetDocument(budgetDocument())
+    const context = {
+      ...staticRunContext(),
+      commit: 'f'.repeat(40),
+      executableSha256: '0'.repeat(64),
+      machineModel: 'different-build-host',
+      hardwareClass: 'different-build-class',
+      operatingSystem: { platform: 'darwin', arch: 'x64', macosVersion: '99.0' }
+    }
+
+    assert.deepEqual(
+      preflightActivePerformanceBudgetArtifact({
+        budget,
+        profileId: 'mac16-packaged-detached',
+        context
+      }).candidateProfileIds,
+      ['mac16-packaged-detached']
+    )
+    assert.throws(
+      () => preflightActivePerformanceBudgetArtifact({ budget, context }),
+      /requires an explicit active budget profile id/
+    )
+    assert.throws(
+      () =>
+        preflightActivePerformanceBudgetArtifact({
+          budget,
+          profileId: 'mac16-packaged-detached',
+          context: { ...context, packagePayloadSha256: 'e'.repeat(64) }
+        }),
+      /packagePayloadSha256 e+ != d+/
     )
   })
 
@@ -267,6 +330,18 @@ describe('active performance budget loading', () => {
     assert.ok(failures.some((failure) => /approval was missing/.test(failure)))
   })
 
+  it('requires immutable three-run evidence references', () => {
+    const document = budgetDocument()
+    delete document.profiles[0].evidence.calibrationSha256
+    document.profiles[0].evidence.runNonces[2] = document.profiles[0].evidence.runNonces[1]
+    document.profiles[0].evidence.reportPaths[0] = ''
+
+    const failures = validateActivePerformanceBudgetDocument(document)
+    assert.ok(failures.some((failure) => /calibrationSha256 was invalid/.test(failure)))
+    assert.ok(failures.some((failure) => /runNonces.*unique/.test(failure)))
+    assert.ok(failures.some((failure) => /reportPaths.*invalid/.test(failure)))
+  })
+
   it('requires a positive display scale in both runtime and JSON schema validation', () => {
     const document = budgetDocument()
     document.profiles[0].scope.displayScaleFactor = 0
@@ -299,6 +374,24 @@ describe('active performance budget loading', () => {
     )
     assert.ok(failures.some((failure) => /minimumPresentFps weakened/.test(failure)))
     assert.ok(failures.some((failure) => /maximumIntervalP95Ms weakened/.test(failure)))
+  })
+
+  it('keeps short-sentinel and endurance windows non-overlapping', () => {
+    const short = budgetDocument()
+    short.profiles[0].scope.profileClass = 'short-sentinel'
+    assert.ok(
+      validateActivePerformanceBudgetDocument(short).some((failure) =>
+        /short-sentinel profile overlapped/.test(failure)
+      )
+    )
+
+    const endurance = budgetDocument()
+    endurance.profiles[0].scope.timing.measurementMs = 120_000
+    assert.ok(
+      validateActivePerformanceBudgetDocument(endurance).some((failure) =>
+        /endurance profile measurement was shorter/.test(failure)
+      )
+    )
   })
 })
 
@@ -338,7 +431,20 @@ describe('active performance budget evaluation', () => {
           'electron-renderer': 16
         }
       },
-      resources: { maxPhysicalFootprintGrowthMb: 32, maxOpenFileGrowth: 8 }
+      resources: { maxPhysicalFootprintGrowthMb: 32, maxOpenFileGrowth: 8 },
+      cpu: {
+        maxAveragePercentByRole: {
+          backend: 45,
+          'electron-main': 30,
+          'electron-renderer': 55
+        },
+        maxP95PercentByRole: {
+          backend: 75,
+          'electron-main': 50,
+          'electron-renderer': 85
+        }
+      },
+      teardown: { requireClean: true }
     })
   })
 
@@ -348,6 +454,31 @@ describe('active performance budget evaluation', () => {
       metricFailures: [],
       thresholdFailures: []
     })
+  })
+
+  it('evaluates recording and lifecycle resources without inventing preview-only wire metrics', () => {
+    const recording = metrics()
+    delete recording.pipeline.statusHttpFetchesPerSecond
+    delete recording.pipeline.wireKibPerSecond
+    assert.deepEqual(
+      evaluateActivePerformanceBudget({
+        profile: profile(),
+        metrics: recording,
+        metricContract: 'recording'
+      }).metricFailures,
+      []
+    )
+
+    const lifecycle = metrics()
+    delete lifecycle.pipeline
+    assert.deepEqual(
+      evaluateActivePerformanceBudget({
+        profile: profile(),
+        metrics: lifecycle,
+        metricContract: 'lifecycle'
+      }).metricFailures,
+      []
+    )
   })
 
   it('fails closed when an explicitly budgeted metric is missing or not comparable', () => {
@@ -377,6 +508,9 @@ describe('active performance budget evaluation', () => {
     actual.memory.maxOwnedRssKb = 600 * 1024
     actual.memory.roles.backend.slopeRssKbPerMinute = 4 * 1024
     actual.resourceCheckpoints.comparison.metrics.openFileCount.delta = 12
+    actual.cpuAveragePercentByRole.backend = 50
+    actual.cpuP95PercentByRole['electron-renderer'] = 90
+    actual.teardownClean = false
     const result = evaluateActivePerformanceBudget({ profile: profile(), metrics: actual })
 
     assert.ok(result.thresholdFailures.some((failure) => /present FPS.*below/.test(failure)))
@@ -392,6 +526,44 @@ describe('active performance budget evaluation', () => {
     assert.ok(
       result.thresholdFailures.some((failure) => /open-file growth.*exceeded/.test(failure))
     )
+    assert.ok(
+      result.thresholdFailures.some((failure) => /backend average CPU.*exceeded/.test(failure))
+    )
+    assert.ok(
+      result.thresholdFailures.some((failure) =>
+        /electron-renderer p95 CPU.*exceeded/.test(failure)
+      )
+    )
+    assert.ok(result.thresholdFailures.some((failure) => /teardown was not clean/.test(failure)))
+  })
+
+  it('fails synthetic monotonic growth and CPU regressions even below gross RSS ceilings', () => {
+    const actual = metrics()
+    actual.memory.ownedRss.slopePerMinute = 8 * 1024
+    actual.memory.ownedRss.secondHalfSlopePerMinute = 7 * 1024
+    actual.memory.ownedRss.plateauGrowth = 40 * 1024
+    actual.memory.roles.backend.slopeRssKbPerMinute = 5 * 1024
+    actual.memory.roles.backend.secondHalfSlopeRssKbPerMinute = 4 * 1024
+    actual.memory.roles.backend.plateauGrowthRssKb = 20 * 1024
+    actual.cpuAveragePercentByRole.backend = 60
+    actual.cpuP95PercentByRole.backend = 90
+
+    const result = evaluateActivePerformanceBudget({ profile: profile(), metrics: actual })
+    for (const expected of [
+      /owned process RSS slope.*exceeded/,
+      /owned process RSS second-half slope.*exceeded/,
+      /owned process RSS plateau growth.*exceeded/,
+      /backend RSS slope.*exceeded/,
+      /backend RSS second-half slope.*exceeded/,
+      /backend RSS plateau growth.*exceeded/,
+      /backend average CPU.*exceeded/,
+      /backend p95 CPU.*exceeded/
+    ]) {
+      assert.ok(
+        result.thresholdFailures.some((failure) => expected.test(failure)),
+        String(expected)
+      )
+    }
   })
 })
 
@@ -424,18 +596,26 @@ function profile() {
     id: 'mac16-packaged-detached',
     scope: {
       scenario: 'detached-native-preview',
+      profileClass: 'endurance',
+      appVersion: '0.9.45',
       machineModel: 'Mac16,1',
       buildMode: 'packaged',
       displayScaleFactor: 2,
-      operatingSystem: { platform: 'darwin', arch: 'arm64' }
+      operatingSystem: { platform: 'darwin', arch: 'arm64' },
+      timing: { warmupMs: 60_000, measurementMs: 600_000, intervalMs: 1_000 }
     },
     evidence: {
       calibrationId: 'a'.repeat(24),
       commit: 'b'.repeat(40),
       executableSha256: 'c'.repeat(64),
+      packagePayloadSha256: 'd'.repeat(64),
+      calibrationSha256: 'd'.repeat(64),
+      calibrationGeneratedAt: '2026-07-10T12:00:00.000Z',
       powerAssertion: 'caffeinate:-d,-i,-s',
       powerAssertionVerified: true,
-      runCount: 3
+      runCount: 3,
+      runNonces: ['run-1', 'run-2', 'run-3'],
+      reportPaths: ['run-1.child.json', 'run-2.child.json', 'run-3.child.json']
     },
     thresholds: {
       cadence: { minimumPresentFps: 58, maximumIntervalP95Ms: 30 },
@@ -452,6 +632,14 @@ function profile() {
         backend: roleThresholds(128, 2, 1, 8),
         'electron-main': roleThresholds(256, 2, 1, 12),
         'electron-renderer': roleThresholds(384, 3, 2, 16)
+      },
+      perRoleCpuPercent: {
+        backend: { maximumAverage: 45, maximumP95: 75 },
+        'electron-main': { maximumAverage: 30, maximumP95: 50 },
+        'electron-renderer': { maximumAverage: 55, maximumP95: 85 }
+      },
+      teardown: {
+        requireClean: true
       }
     },
     approval: {
@@ -474,10 +662,16 @@ function roleThresholds(rss, slope, secondHalfSlope, plateau) {
 function runContext() {
   return {
     scenario: 'detached-native-preview',
+    profileClass: 'endurance',
+    appVersion: '0.9.45',
     machineModel: 'Mac16,1',
     buildMode: 'packaged',
+    commit: 'b'.repeat(40),
+    executableSha256: 'c'.repeat(64),
+    packagePayloadSha256: 'd'.repeat(64),
     displayScaleFactor: 2,
-    operatingSystem: { platform: 'darwin', arch: 'arm64', macosVersion: '26.5.1' }
+    operatingSystem: { platform: 'darwin', arch: 'arm64', macosVersion: '26.5.1' },
+    timing: { warmupMs: 60_000, measurementMs: 600_000, intervalMs: 1_000 }
   }
 }
 
@@ -489,6 +683,7 @@ function staticRunContext() {
 
 function metrics() {
   return {
+    teardownClean: true,
     pipeline: {
       presentFps: 59,
       framesPerSecond: 58.5,
@@ -517,6 +712,16 @@ function metrics() {
           openFileCount: { comparable: true, delta: 4 }
         }
       }
+    },
+    cpuAveragePercentByRole: {
+      backend: 25,
+      'electron-main': 15,
+      'electron-renderer': 35
+    },
+    cpuP95PercentByRole: {
+      backend: 40,
+      'electron-main': 25,
+      'electron-renderer': 50
     }
   }
 }

@@ -13,6 +13,7 @@ const entry = {
   version: '0.9.2-beta.1',
   date: '2026-07-01',
   channel: 'beta',
+  platforms: ['macos'],
   title: 'Camera and microphone fixed in the installed app',
   summary: 'The capture bug is fixed & delivered through the in-app updater.',
   highlights: ['Camera and mic now work.', 'Delivered via **in-app updates**.'],
@@ -43,13 +44,38 @@ describe('renderChangelogEmail', () => {
     assert.match(email.html, /fixed &amp; delivered/)
     assert.match(email.text, /fixed & delivered/)
     assert.match(email.text, /Update Videorc: https:\/\/videorc\.com\/account\/download/)
-    assert.match(email.text, /Full release notes: https:\/\/videorc\.com\/releases\/0\.9\.2-beta\.1/)
+    assert.match(
+      email.text,
+      /Full release notes: https:\/\/videorc\.com\/releases\/0\.9\.2-beta\.1/
+    )
   })
 
   it('renders highlight inline markdown in both formats', () => {
     const email = renderChangelogEmail(entry)
     assert.match(email.html, /<strong style="color:#ffffff;">in-app updates<\/strong>/)
     assert.match(email.text, /- Delivered via in-app updates\./)
+  })
+
+  it('renders Windows Alpha as a download instead of an established update', () => {
+    const windowsAlpha = {
+      ...entry,
+      version: '0.10.0-alpha.1',
+      channel: 'alpha',
+      platforms: ['windows'],
+      summary: 'The signed Windows test build is ready.'
+    }
+    const email = renderChangelogEmail(windowsAlpha, { webBaseUrl: 'https://videorc.com/' })
+
+    assert.equal(
+      email.subject,
+      'Videorc 0.10.0 Alpha 1 for Windows — The signed Windows test build is ready.'
+    )
+    assert.match(email.html, /Videorc Windows Alpha changelog/)
+    assert.match(email.html, /Videorc 0\.10\.0 Alpha 1 for Windows/)
+    assert.match(email.html, /href="https:\/\/videorc\.com\/download\/windows"/)
+    assert.match(email.html, />Download Windows Alpha<\/a>/)
+    assert.match(email.text, /Download Windows Alpha: https:\/\/videorc\.com\/download\/windows/)
+    assert.doesNotMatch(email.text, /Update Videorc:/)
   })
 })
 
@@ -81,6 +107,7 @@ describe('markdown subset rendering', () => {
 
 describe('helpers', () => {
   it('formats versions for subjects and headings', () => {
+    assert.equal(formatVersion('0.10.0-alpha.1'), '0.10.0 Alpha 1')
     assert.equal(formatVersion('0.9.2-beta.1'), '0.9.2 Beta 1')
     assert.equal(formatVersion('1.0.0'), '1.0.0')
   })

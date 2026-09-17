@@ -2323,6 +2323,7 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "windows",
+ "windows-core",
 ]
 
 [[package]]

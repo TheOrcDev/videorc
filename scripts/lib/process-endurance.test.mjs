@@ -3,7 +3,9 @@ import { describe, it } from 'node:test'
 
 import {
   collectProcessEndurance,
+  collectWindowsProcessTreeTelemetry,
   compactProcessMemorySample,
+  createProcessTreeCpuSampler,
   evaluateOwnedTeardown,
   evaluateProcessEnduranceEvidence,
   parseProcessGroupCpu,
@@ -55,6 +57,7 @@ describe('process endurance evidence', () => {
     )
     assert.equal(evidence.cpu.samples.length, 2)
     assert.equal(evidence.cpu.summary.byRole.backend.averagePercent, 10)
+    assert.equal(evidence.cpu.summary.byRole.backend.p95Percent, 10)
     assert.deepEqual(evidence.sampling, {
       expectedSamples: 2,
       collectedSamples: 2,
@@ -162,9 +165,23 @@ describe('process endurance evidence', () => {
     assert.deepEqual(cpu, {
       samples: 2,
       byRole: {
-        backend: { samples: 2, averagePercent: 15, maxPercent: 20 },
-        'electron-main': { samples: 2, averagePercent: 10, maxPercent: 15 }
+        backend: { samples: 2, averagePercent: 15, p95Percent: 20, maxPercent: 20 },
+        'electron-main': { samples: 2, averagePercent: 10, p95Percent: 15, maxPercent: 15 }
       }
+    })
+  })
+
+  it('uses a nearest-rank p95 that exposes sustained CPU spikes', () => {
+    const samples = Array.from({ length: 20 }, (_, index) => ({
+      sampledAtMs: index * 1_000,
+      byRole: { backend: index < 18 ? 10 : index === 18 ? 70 : 90 }
+    }))
+
+    assert.deepEqual(summarizeProcessCpu(samples).byRole.backend, {
+      samples: 20,
+      averagePercent: 17,
+      p95Percent: 70,
+      maxPercent: 90
     })
   })
 
@@ -180,10 +197,121 @@ describe('process endurance evidence', () => {
     assert.deepEqual(parsed, { backend: 12.5, 'electron-main': 5.5 })
   })
 
+  it('samples Windows CPU from the packaged app tree instead of a POSIX process group', async () => {
+    let nowMs = 1_000
+    const tables = [
+      windowsProcessTable({
+        mainCpuTimeMs: 1_000,
+        backendCpuTimeMs: 2_000,
+        rendererCpuTimeMs: 500
+      }),
+      windowsProcessTable({ mainCpuTimeMs: 1_100, backendCpuTimeMs: 2_300, rendererCpuTimeMs: 650 })
+    ]
+    const sampleCpu = createProcessTreeCpuSampler({
+      rootPid: 100,
+      platform: 'win32',
+      now: () => nowMs,
+      readProcessTable: async () => tables.shift() ?? []
+    })
+
+    assert.deepEqual(await sampleCpu(), {})
+    nowMs += 1_000
+    assert.deepEqual(await sampleCpu(), {
+      backend: 30,
+      'electron-main': 10,
+      'electron-renderer': 15
+    })
+  })
+
+  it('does not charge Windows CPU time across reused process IDs', async () => {
+    let nowMs = 1_000
+    const sampleCpu = createProcessTreeCpuSampler({
+      rootPid: 100,
+      platform: 'win32',
+      now: () => nowMs
+    })
+
+    await sampleCpu([windowsProcess({ pid: 100, cpuTimeMs: 100, creationDate: 'first-process' })])
+    nowMs += 1_000
+    assert.deepEqual(
+      await sampleCpu([
+        windowsProcess({ pid: 100, cpuTimeMs: 900, creationDate: 'reused-process' })
+      ]),
+      {}
+    )
+    nowMs += 1_000
+    assert.deepEqual(
+      await sampleCpu([
+        windowsProcess({ pid: 100, cpuTimeMs: 1_000, creationDate: 'reused-process' })
+      ]),
+      { 'electron-main': 10 }
+    )
+  })
+
+  it('collects Windows CPU and RSS evidence with a root-PID tree', async () => {
+    let nowMs = 0
+    let sample = 0
+    const evidence = await collectWindowsProcessTreeTelemetry({
+      rootPid: 100,
+      warmupMs: 100,
+      measurementMs: 200,
+      intervalMs: 100,
+      now: () => nowMs,
+      sleep: async (ms) => {
+        nowMs += ms
+      },
+      collectCensus: async ({ rootPid }) => {
+        assert.equal(rootPid, 100)
+        sample += 1
+        return fakeCensus(sample)
+      },
+      collectCpu: async () => ({
+        backend: 20,
+        'electron-main': 10,
+        'electron-renderer': 5
+      })
+    })
+
+    assert.equal(evidence.timing.measurementStartedAtMs, 100)
+    assert.equal(evidence.timing.measuredDurationMs, 200)
+    assert.equal(evidence.memory.samples.length, 2)
+    assert.deepEqual(evidence.cpu.summary.byRole.backend, {
+      samples: 2,
+      averagePercent: 20,
+      p95Percent: 20,
+      maxPercent: 20
+    })
+    assert.deepEqual(evidence.sampling.observations, [
+      { sampleIndex: 0, scheduledAtMs: 100, observedAtMs: 100 },
+      { sampleIndex: 1, scheduledAtMs: 200, observedAtMs: 200 }
+    ])
+  })
+
   it('fails closed when memory, CPU, resource checkpoints, or teardown are incomplete', () => {
     const evidence = completeEvidence()
     assert.deepEqual(evaluateProcessEnduranceEvidence(evidence), [])
     assert.deepEqual(evaluateOwnedTeardown(cleanTeardown()), [])
+
+    assert.deepEqual(
+      evaluateOwnedTeardown({
+        ...cleanTeardown(),
+        gracefulQuitRequested: true,
+        gracefulQuitError: 'app quit timed out',
+        stopResult: { state: 'killed', escalated: true }
+      }),
+      [
+        'app-owned graceful quit failed: app quit timed out',
+        'app-owned teardown required forced process termination'
+      ]
+    )
+    assert.deepEqual(
+      evaluateOwnedTeardown({
+        ...cleanTeardown(),
+        gracefulQuitRequested: true,
+        stopResult: { state: 'terminated', escalated: false }
+      }),
+      ['app-owned teardown required forced process termination']
+    )
 
     const incomplete = structuredClone(evidence)
     incomplete.memory.samples = []
@@ -223,6 +351,7 @@ describe('process endurance evidence', () => {
     assert.equal(metrics.memorySamples, evidence.memory.samples)
     assert.equal(metrics.sampling, evidence.sampling)
     assert.equal(metrics.cpuAveragePercentByRole.backend, 10)
+    assert.equal(metrics.cpuP95PercentByRole.backend, 20)
     assert.equal(metrics.resourceCheckpoints, evidence.resourceCheckpoints)
     assert.equal(metrics.processEndurance, evidence)
     assert.deepEqual(metrics.thresholds, {})
@@ -236,7 +365,7 @@ function completeEvidence() {
   const cpuRoles = Object.fromEntries(
     ['backend', 'electron-main', 'electron-renderer'].map((role) => [
       role,
-      { samples: 2, averagePercent: 10, maxPercent: 20 }
+      { samples: 2, averagePercent: 10, p95Percent: 20, maxPercent: 20 }
     ])
   )
   return {
@@ -324,5 +453,46 @@ function resourceCheckpoint(rows) {
       ),
       openFileCount: resourceRows.reduce((total, row) => total + row.openFileCount, 0)
     }
+  }
+}
+
+function windowsProcessTable({ mainCpuTimeMs, backendCpuTimeMs, rendererCpuTimeMs }) {
+  return [
+    windowsProcess({ pid: 100, cpuTimeMs: mainCpuTimeMs }),
+    {
+      pid: 101,
+      ppid: 100,
+      command: 'C:\\Videorc.exe',
+      args: '--type=renderer',
+      cpuTimeMs: rendererCpuTimeMs,
+      creationDate: 'renderer-created'
+    },
+    {
+      pid: 102,
+      ppid: 100,
+      command: 'C:\\videorc-backend.exe',
+      args: '',
+      cpuTimeMs: backendCpuTimeMs,
+      creationDate: 'backend-created'
+    },
+    {
+      pid: 200,
+      ppid: 1,
+      command: 'C:\\unrelated.exe',
+      args: '',
+      cpuTimeMs: 99_999,
+      creationDate: 'unrelated-created'
+    }
+  ]
+}
+
+function windowsProcess({ pid, cpuTimeMs, creationDate = 'main-created' }) {
+  return {
+    pid,
+    ppid: 1,
+    command: 'C:\\Videorc.exe',
+    args: '',
+    cpuTimeMs,
+    creationDate
   }
 }

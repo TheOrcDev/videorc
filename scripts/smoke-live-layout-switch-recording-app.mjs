@@ -188,7 +188,11 @@ async function runSwitchScenario(ws, smoke, { label, sources, streamTarget, dura
       layout: layout(preset),
       video,
       background: null,
-      protectedOverlayWindowIds: []
+      protectedOverlayWindowIds: [],
+      // Scene motion ON: each switch glides for 320ms mid-recording, so this
+      // smoke also gates that transitions never stall scene proof or corrupt
+      // the recording artifact.
+      transitionMs: 320
     })
     if (!status.applied) {
       throw new Error(`[${label}] ${preset} did not apply: ${JSON.stringify(status)}`)
@@ -202,9 +206,13 @@ async function runSwitchScenario(ws, smoke, { label, sources, streamTarget, dura
     stopping = true
   }
   const stopped = await request(ws, timeoutMs, 'session.stop')
-  await assertRecordingArtifact(label, stopped.outputPath ?? started.outputPath, {
-    minVideoSeconds: 2
-  })
+  await assertRecordingArtifact(
+    label,
+    await resolveFinalRecordingPath({ started, stopped, timeoutMs: 120_000 }),
+    {
+      minVideoSeconds: 2
+    }
+  )
 }
 
 function sessionParams({ sources, streamTarget, outputDirectoryCapability }) {

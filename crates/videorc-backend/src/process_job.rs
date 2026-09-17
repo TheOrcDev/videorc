@@ -1,5 +1,8 @@
-use std::io;
-use std::process::{Child as StdChild, Command as StdCommand, ExitStatus, Output as ProcessOutput};
+use std::io::{self, Read};
+use std::process::{
+    Child as StdChild, Command as StdCommand, ExitStatus, Output as ProcessOutput, Stdio,
+};
+use std::time::{Duration, Instant};
 
 use tokio::process::{Child as TokioChild, Command as TokioCommand};
 
@@ -16,6 +19,7 @@ pub fn spawn_owned_std(command: &mut StdCommand) -> io::Result<StdChild> {
     let mut child = command.spawn()?;
     if let Err(error) = assign_std_child(&child) {
         let _ = child.kill();
+        let _ = child.wait();
         return Err(error);
     }
     Ok(child)
@@ -32,6 +36,136 @@ pub async fn status_owned_tokio(command: &mut TokioCommand) -> io::Result<ExitSt
 
 pub fn output_owned_std(command: &mut StdCommand) -> io::Result<ProcessOutput> {
     spawn_owned_std(command)?.wait_with_output()
+}
+
+/// Capture an owned child process's output without allowing a hung tool to
+/// retain its caller forever. On timeout the exact child is killed and reaped
+/// before this function returns.
+pub fn output_owned_std_with_timeout(
+    command: &mut StdCommand,
+    timeout: Duration,
+) -> io::Result<ProcessOutput> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_bounded_process_tree(command);
+    let mut child = spawn_owned_std(command)?;
+    let child_pid = child.id();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = spawn_child_pipe_reader(stdout);
+    let stderr_reader = spawn_child_pipe_reader(stderr);
+    let deadline = Instant::now()
+        .checked_add(timeout)
+        .unwrap_or_else(Instant::now);
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => {
+                std::thread::sleep(
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .min(Duration::from_millis(10)),
+                );
+            }
+            Ok(None) => {
+                let _ = terminate_bounded_process_tree(child_pid);
+                let kill_error = child.kill().err();
+                let wait_error = child.wait().err();
+                let detail = kill_error
+                    .or(wait_error)
+                    .map(|error| format!(" Child cleanup also failed: {error}."))
+                    .unwrap_or_default();
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "Owned child exceeded its {}ms deadline.{detail}",
+                        timeout.as_millis()
+                    ),
+                ));
+            }
+            Err(error) => {
+                let _ = terminate_bounded_process_tree(child_pid);
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        }
+    };
+
+    let stdout = receive_child_pipe(stdout_reader, deadline).inspect_err(|_| {
+        let _ = terminate_bounded_process_tree(child_pid);
+    })?;
+    let stderr = receive_child_pipe(stderr_reader, deadline).inspect_err(|_| {
+        let _ = terminate_bounded_process_tree(child_pid);
+    })?;
+    Ok(ProcessOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+fn read_child_pipe<R: Read>(pipe: Option<R>) -> io::Result<Vec<u8>> {
+    let mut output = Vec::new();
+    if let Some(mut pipe) = pipe {
+        pipe.read_to_end(&mut output)?;
+    }
+    Ok(output)
+}
+
+fn spawn_child_pipe_reader<R: Read + Send + 'static>(
+    pipe: Option<R>,
+) -> std::sync::mpsc::Receiver<io::Result<Vec<u8>>> {
+    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+    std::thread::spawn(move || {
+        let _ = sender.send(read_child_pipe(pipe));
+    });
+    receiver
+}
+
+fn receive_child_pipe(
+    reader: std::sync::mpsc::Receiver<io::Result<Vec<u8>>>,
+    deadline: Instant,
+) -> io::Result<Vec<u8>> {
+    reader
+        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+        .map_err(|error| match error {
+            std::sync::mpsc::RecvTimeoutError::Timeout => io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Owned child exited but inherited output pipes exceeded the same deadline.",
+            ),
+            std::sync::mpsc::RecvTimeoutError::Disconnected => {
+                io::Error::other("owned child output reader disconnected")
+            }
+        })?
+}
+
+#[cfg(unix)]
+fn configure_bounded_process_tree(command: &mut StdCommand) {
+    use std::os::unix::process::CommandExt as _;
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_bounded_process_tree(_command: &mut StdCommand) {}
+
+#[cfg(unix)]
+fn terminate_bounded_process_tree(process_group_id: u32) -> io::Result<()> {
+    let result = unsafe { libc::kill(-(process_group_id as libc::pid_t), libc::SIGKILL) };
+    if result == 0 {
+        return Ok(());
+    }
+    let error = io::Error::last_os_error();
+    if error.raw_os_error() == Some(libc::ESRCH) {
+        Ok(())
+    } else {
+        Err(error)
+    }
+}
+
+#[cfg(not(unix))]
+fn terminate_bounded_process_tree(_process_group_id: u32) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -261,5 +395,36 @@ mod tests {
         terminate_process(pid, true).expect("terminate child");
         child.wait().expect("reap terminated child");
         assert!(!process_is_running(pid).expect("probe reaped child"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_kills_and_reaps_a_hung_owned_child() {
+        let mut command = long_running_command();
+        let started = Instant::now();
+        let error = output_owned_std_with_timeout(&mut command, Duration::from_millis(25))
+            .expect_err("long-running child must exceed the bounded wait");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "timeout cleanup must stay bounded"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bounded_output_does_not_join_inherited_pipes_forever() {
+        let mut command = StdCommand::new("sh");
+        command.args(["-c", "sleep 30 & exit 0"]);
+        let started = Instant::now();
+        let error = output_owned_std_with_timeout(&mut command, Duration::from_millis(50))
+            .expect_err("a descendant retaining both pipes must exhaust the shared deadline");
+
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "inherited pipe drain must remain bounded with the child process tree"
+        );
     }
 }
