@@ -1,5 +1,6 @@
 import type {
   BackendHealth,
+  CaptureRecoveryStatus,
   CohostFlagParams,
   CohostQuestionParams,
   CohostSettings,
@@ -8,7 +9,6 @@ import type {
   CohostState,
   CompositorFrameReady,
   CompositorStatus,
-  CaptureRecoveryStatus,
   DeviceList,
   DiagnosticStats,
   EntitlementsSnapshot,
@@ -23,30 +23,31 @@ import type {
   PreviewLiveStatus,
   PreviewScreenStatus,
   PreviewSurfaceStatus,
+  RecordingFinalizationEvent,
   RecordingStatus,
   Scene,
   SceneCommitStatus,
   SceneConfigParams,
   ServerEvent,
   ServerResponse,
+  SessionAiArtifactsPage,
   SessionCommentsListParams,
   SessionCommentsPage,
-  SessionAiArtifactsPage,
   SessionDeletionOperation,
   SessionDetailListParams,
   SessionHealthEventsPage,
   SessionListPage,
   SessionListParams,
   SessionLogsPage,
-  SessionStorageTotals,
-  RecordingFinalizationEvent,
   SessionStopParams,
+  SessionStorageTotals,
   StartSessionParams,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
+  StreamPlatform,
   StreamTargetsSnapshot,
-  VideoSettings,
-  VideorcAccountSnapshot
+  VideorcAccountSnapshot,
+  VideoSettings
 } from './backend'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { LAYOUT_PRESET_VALUES } from './backend'
@@ -467,10 +468,17 @@ const streamOutputTopologyProbeResultSchema = boundedSemanticValue(
   )
 ) as RuntimeSchema<StreamOutputTopologyProbeResult>
 
+// Every StreamPlatform on the wire (mirror of the shared union): TikTok and
+// Instagram are manual-key vertical destinations, so they show up in stream
+// target snapshots, OAuth callback results (refused, but typed) and co-host
+// question provenance exactly like the OAuth platforms.
+const STREAM_PLATFORMS = ['youtube', 'twitch', 'x', 'tiktok', 'instagram', 'custom'] as const
+const streamPlatformSchema = enumSchema(STREAM_PLATFORMS) as RuntimeSchema<StreamPlatform>
+
 const streamTargetRuntimeSchema = objectSchema(
   {
     targetId: boundedString,
-    platform: enumSchema(['youtube', 'twitch', 'x', 'custom']),
+    platform: streamPlatformSchema,
     label: boundedString,
     state: enumSchema([
       'not-configured',
@@ -1486,7 +1494,7 @@ const oauthCallbackResultFields = {
 const oauth2CallbackResultSchema = objectSchema(
   {
     ...oauthCallbackResultFields,
-    platform: optionalSchema(enumSchema(['youtube', 'twitch', 'x', 'custom'])),
+    platform: optionalSchema(streamPlatformSchema),
     state: oauthStateSchema
   },
   { allowUnknown: false }
@@ -1541,7 +1549,7 @@ const cohostQuestionSchema = objectSchema(
     text: stringSchema({ maxLength: 2000 }),
     messageIds: arraySchema(boundedString, { maxLength: 500 }),
     askers: arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 500 }),
-    platforms: arraySchema(enumSchema(['youtube', 'twitch', 'x', 'custom']), { maxLength: 4 }),
+    platforms: arraySchema(streamPlatformSchema, { maxLength: 6 }),
     priority: enumSchema(['high', 'normal', 'low']),
     suggestedReply: stringSchema({ maxLength: 2000 }),
     fromNotes: booleanSchema,

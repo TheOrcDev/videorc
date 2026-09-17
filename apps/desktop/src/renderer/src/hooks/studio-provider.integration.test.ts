@@ -3073,7 +3073,7 @@ describe('real StudioProvider lifecycle', () => {
           enabledTargetIds: ['youtube'],
           targets: defaultCaptureConfig.streaming.targets.map((target) => ({
             ...target,
-            enabled: target.platform === 'youtube'
+            enabled: target.id === 'youtube'
           }))
         }
       }
@@ -5676,7 +5676,7 @@ describe('real StudioProvider lifecycle', () => {
           enabled: true,
           enabledTargetIds: ['twitch', 'x'],
           targets: current.streaming.targets.map((target) =>
-            target.platform === 'twitch'
+            target.id === 'twitch'
               ? {
                   ...target,
                   enabled: true,
@@ -5684,7 +5684,7 @@ describe('real StudioProvider lifecycle', () => {
                   accountId: 'twitch-account',
                   status: { state: 'ready' as const }
                 }
-              : target.platform === 'x'
+              : target.id === 'x'
                 ? {
                     ...target,
                     enabled: true,
@@ -5703,7 +5703,7 @@ describe('real StudioProvider lifecycle', () => {
       () =>
         latest()?.core.captureConfig.streamEnabled === false &&
         latest()?.core.captureConfig.streaming.targets.some(
-          (target) => target.platform === 'twitch' && target.enabled && target.authMode === 'oauth'
+          (target) => target.id === 'twitch' && target.enabled && target.authMode === 'oauth'
         ) === true
     )
 
@@ -6343,9 +6343,8 @@ describe('real StudioProvider lifecycle', () => {
       })
       expect(stopped).toBe(true)
       expect(
-        latest()?.core.captureConfig.streaming.targets.find(
-          (target) => target.platform === 'youtube'
-        )?.status?.state
+        latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
+          ?.status?.state
       ).toBe('stopped')
 
       await act(async () => {
@@ -6368,9 +6367,8 @@ describe('real StudioProvider lifecycle', () => {
         )
       ).toHaveLength(1)
       expect(
-        latest()?.core.captureConfig.streaming.targets.find(
-          (target) => target.platform === 'youtube'
-        )?.status?.state
+        latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
+          ?.status?.state
       ).toBe('stopped')
       expect(
         toastSpies.warning.mock.calls.some(([message]) =>
@@ -6420,12 +6418,12 @@ describe('real StudioProvider lifecycle', () => {
     expect(
       observations.some((observation) =>
         observation.core.captureConfig.streaming.targets.some(
-          (target) => target.platform === 'youtube' && target.status?.state === 'live'
+          (target) => target.id === 'youtube' && target.status?.state === 'live'
         )
       )
     ).toBe(false)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
         ?.status?.state
     ).toBe('stopped')
   })
@@ -6503,7 +6501,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(
       observations.some((observation) =>
         observation.core.captureConfig.streaming.targets.some(
-          (target) => target.platform === 'youtube' && target.status?.state === 'live'
+          (target) => target.id === 'youtube' && target.status?.state === 'live'
         )
       )
     ).toBe(false)
@@ -6512,7 +6510,7 @@ describe('real StudioProvider lifecycle', () => {
       sessionId: 'session-1'
     })
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
         ?.status?.state
     ).toBe('stopped')
   })
@@ -6572,13 +6570,13 @@ describe('real StudioProvider lifecycle', () => {
     expect(
       observations.some((observation) =>
         observation.core.captureConfig.streaming.targets.some(
-          (target) => target.platform === 'x' && target.status?.state === 'live'
+          (target) => target.id === 'x' && target.status?.state === 'live'
         )
       )
     ).toBe(false)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
-        ?.status?.state
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
+        ?.state
     ).toBe('stopped')
   })
 
@@ -6614,8 +6612,7 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
-        ?.status
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
     ).toMatchObject({
       state: 'live',
       lastError: 'The announcement post was rejected.',
@@ -6702,7 +6699,7 @@ describe('real StudioProvider lifecycle', () => {
       Boolean(
         latest()
           ?.core.captureConfig.streaming.targets.filter(
-            (target) => target.platform === 'youtube' || target.platform === 'x'
+            (target) => target.id === 'youtube' || target.id === 'x'
           )
           .every((target) => target.status?.state === 'stopped')
       )
@@ -6782,9 +6779,8 @@ describe('real StudioProvider lifecycle', () => {
             command.method === 'streamTargets.youtube.transition' &&
             (command.params as { status?: string }).status === 'complete'
         ).length === 1 &&
-        latest()?.core.captureConfig.streaming.targets.find(
-          (target) => target.platform === 'youtube'
-        )?.status?.state === 'warning'
+        latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
+          ?.status?.state === 'warning'
     )
 
     await act(async () => {
@@ -6801,7 +6797,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(backend.youtubePrepareCount).toBe(1)
     expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
         ?.status?.state
     ).toBe('stopped')
   })
@@ -6885,7 +6881,7 @@ describe('real StudioProvider lifecycle', () => {
       )
     ).toHaveLength(1)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
         ?.status?.state
     ).toBe('stopped')
   })
@@ -6970,7 +6966,7 @@ describe('real StudioProvider lifecycle', () => {
       )
     ).toHaveLength(1)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
         ?.status?.state
     ).toBe('warning')
 
@@ -6986,7 +6982,7 @@ describe('real StudioProvider lifecycle', () => {
       )
     ).toHaveLength(2)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'youtube')
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
         ?.status?.state
     ).toBe('stopped')
   })
@@ -7029,8 +7025,8 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
     ).toHaveLength(1)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
-        ?.status?.state
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
+        ?.state
     ).toBe('warning')
 
     await act(async () => {
@@ -7041,8 +7037,8 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
     ).toHaveLength(2)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
-        ?.status?.state
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
+        ?.state
     ).toBe('stopped')
     expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
   })
@@ -7121,8 +7117,8 @@ describe('real StudioProvider lifecycle', () => {
       backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
     ).toHaveLength(1)
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
-        ?.status?.state
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
+        ?.state
     ).toBe('stopped')
     expect(latest()?.core.goLiveConfirmationOpen).toBe(true)
   })
@@ -7257,7 +7253,7 @@ describe('real StudioProvider lifecycle', () => {
         streaming: {
           ...current.streaming,
           targets: current.streaming.targets.map((target) =>
-            target.platform === 'x'
+            target.id === 'x'
               ? {
                   ...target,
                   platformBroadcastId: 'x-region-1',
@@ -7270,7 +7266,7 @@ describe('real StudioProvider lifecycle', () => {
       })
     })
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')
         ?.platformBroadcastId
     ).toBe('x-region-1')
 
@@ -7297,8 +7293,8 @@ describe('real StudioProvider lifecycle', () => {
       })
     ])
     expect(
-      latest()?.core.captureConfig.streaming.targets.find((target) => target.platform === 'x')
-        ?.status?.state
+      latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'x')?.status
+        ?.state
     ).toBe('stopped')
     expect(latest()?.recording.recording.state).toBe('idle')
     expect(latest()?.chat.liveChatSnapshot).toMatchObject({
