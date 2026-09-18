@@ -29,8 +29,8 @@ pub(crate) const COHOST_TICK_TIMEOUT: std::time::Duration = std::time::Duration:
 const COHOST_TICK_PATH: &str = "/api/ai/cohost/tick";
 
 use crate::cohost::{
-    CohostErrorDetail, CohostFlagKind, CohostFlagSeverity, CohostMood, CohostPriority,
-    CohostReason, CohostTone,
+    CohostAlertKind, CohostErrorDetail, CohostFlagAction, CohostFlagKind, CohostFlagSeverity,
+    CohostFlagTarget, CohostHighlightType, CohostMood, CohostPriority, CohostReason, CohostTone,
 };
 use crate::streaming::StreamPlatform;
 
@@ -123,7 +123,7 @@ pub struct AiObjectUploadRequest<'a> {
     pub workflow_kind: &'a str,
 }
 
-// --- Live Co-host tick wire types (contract v1; field names are load-bearing) ---
+// --- Live Co-host tick wire types (contract v2, additive over v1; field names are load-bearing) ---
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -135,6 +135,11 @@ pub struct CohostTickRequest {
     pub consent_to_process_chat: bool,
     pub tone: CohostTone,
     pub notes: String,
+    /// v2 only: the streamer's normalised chat rules. `None` in the v1
+    /// fallback, where the key must not appear at all (the v1 server rejects
+    /// unknown keys as `invalid-request`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<String>>,
     pub stream_title: Option<String>,
     pub open_questions: Vec<CohostTickOpenQuestion>,
     pub messages: Vec<CohostTickMessage>,
@@ -161,7 +166,12 @@ pub struct CohostTickMessage {
     pub at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+/// Every v2 field is optional and absent means its default, so a v1 body
+/// parses unchanged. Unknown extra fields are ignored; unknown enum strings
+/// land on each enum's `Unknown` catch-all; and one item the desktop cannot
+/// read (`flags`, `highlights`, `alerts`) is dropped on its own — none of these
+/// may fail the whole tick as `MalformedResponse`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostTickResponse {
     #[serde(default)]
@@ -170,12 +180,38 @@ pub struct CohostTickResponse {
     pub questions: Vec<CohostTickQuestion>,
     #[serde(default)]
     pub resolved: Vec<String>,
+    /// v2: the server did not regenerate the open set this tick. `questions`
+    /// is `[]` and must be ignored; only `resolved` ids leave.
     #[serde(default)]
+    pub keep_questions: bool,
+    #[serde(default, deserialize_with = "lenient_items")]
     pub flags: Vec<CohostTickFlag>,
     #[serde(default)]
     pub mood: Option<CohostMood>,
     #[serde(default)]
     pub usage: Option<CohostTickUsage>,
+    /// v2: comments worth showing on stream, best first, already safety-gated.
+    #[serde(default, deserialize_with = "lenient_items")]
+    pub highlights: Vec<CohostTickHighlight>,
+    /// v2: viewers telling the streamer something is broken.
+    #[serde(default, deserialize_with = "lenient_items")]
+    pub alerts: Vec<CohostTickAlert>,
+    #[serde(default)]
+    pub mood_scores: Option<CohostTickMoodScores>,
+}
+
+/// Item-wise tolerant array: an entry that does not fit the desktop's shape is
+/// skipped instead of failing the body. `null` reads as empty.
+fn lenient_items<'de, D, T>(deserializer: D) -> std::result::Result<Vec<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: DeserializeOwned,
+{
+    let items = Option::<Vec<serde_json::Value>>::deserialize(deserializer)?.unwrap_or_default();
+    Ok(items
+        .into_iter()
+        .filter_map(|item| serde_json::from_value(item).ok())
+        .collect())
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -197,7 +233,7 @@ pub struct CohostTickQuestion {
     pub from_notes: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostTickFlag {
     pub message_id: String,
@@ -205,6 +241,47 @@ pub struct CohostTickFlag {
     pub severity: CohostFlagSeverity,
     #[serde(default)]
     pub reason: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<CohostFlagTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<CohostFlagAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_kinds: Vec<CohostFlagKind>,
+    /// Index into the REQUEST's `rules` when `kind` is `rule`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickHighlight {
+    pub message_id: String,
+    #[serde(default)]
+    pub score: f64,
+    #[serde(default, rename = "type")]
+    pub highlight_type: CohostHighlightType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickAlert {
+    pub message_id: String,
+    pub kind: CohostAlertKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostTickMoodScores {
+    #[serde(default)]
+    pub hype: f64,
+    #[serde(default)]
+    pub tension: f64,
+    #[serde(default)]
+    pub confusion: f64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]

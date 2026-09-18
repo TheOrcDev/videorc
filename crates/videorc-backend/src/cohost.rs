@@ -7,7 +7,7 @@
 //! as the non-coalescible `cohost.state` event. Raw drafts live only in memory
 //! and are cleared when the session stops. The renderer never talks to the web.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -25,15 +25,21 @@ use crate::storage::Database;
 use crate::streaming::StreamPlatform;
 use crate::videorc_api::{
     CohostApiError, CohostApiErrorKind, CohostTickMessage, CohostTickOpenQuestion,
-    CohostTickRequest, CohostTickResponse, VideorcApiClient,
+    CohostTickQuestion, CohostTickRequest, CohostTickResponse, VideorcApiClient,
 };
 
 pub const COHOST_STATE_EVENT: &str = "cohost.state";
 /// Pinned by the desktop; the server rejects unknown versions with 400
-/// `prompt-version-unsupported`.
-pub const COHOST_PROMPT_VERSION: u32 = 1;
+/// `prompt-version-unsupported`. A session that gets that answer to a v2 tick
+/// drops to `COHOST_PROMPT_VERSION_FALLBACK` until it ends (server rollback).
+pub const COHOST_PROMPT_VERSION: u32 = 2;
+pub const COHOST_PROMPT_VERSION_FALLBACK: u32 = 1;
 pub const COHOST_SETTINGS_KEY: &str = "cohostSettings";
 pub const COHOST_NOTES_MAX_CHARS: usize = 4000;
+/// The server rejects more or longer rules as `invalid-request`, so settings
+/// are normalised to these caps before they are stored or sent.
+pub const COHOST_RULES_MAX: usize = 10;
+pub const COHOST_RULE_MAX_CHARS: usize = 120;
 const DESKTOP_CLIENT_VERSION: &str = concat!("videorc-desktop/", env!("CARGO_PKG_VERSION"));
 
 const TICK_MESSAGE_TEXT_MAX_CHARS: usize = 500;
@@ -56,6 +62,13 @@ const PRECONDITION_RECHECK: Duration = Duration::from_secs(5);
 const SCHEDULER_POLL: Duration = Duration::from_secs(1);
 const KNOWN_MESSAGE_IDS_CAP: usize = 5000;
 const FLAGS_CAP: usize = 50;
+const HIGHLIGHTS_CAP: usize = 5;
+/// An alert kind is only shown once two different viewers said it within this
+/// window — one confused viewer is not a broken stream.
+const ALERT_CORROBORATION_WINDOW: Duration = Duration::from_secs(60);
+const ALERT_MIN_AUTHORS: usize = 2;
+/// A report stops counting (and its kind leaves the state) after this long.
+const ALERT_EXPIRY: Duration = Duration::from_secs(120);
 const ALLOWED_ROLES: [&str; 5] = ["mod", "owner", "subscriber", "member", "vip"];
 
 // --- Wire enums --------------------------------------------------------------
@@ -98,6 +111,10 @@ pub enum CohostPriority {
     #[default]
     Normal,
     Low,
+    /// Forward tolerance: a priority this build does not know. Never reaches
+    /// the renderer — `apply_response` reads it as `normal`.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -107,6 +124,9 @@ pub enum CohostMood {
     Calm,
     Tense,
     Mixed,
+    /// Forward tolerance; read as `mixed`, never sent to the renderer.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -116,6 +136,19 @@ pub enum CohostFlagKind {
     Spam,
     SelfPromo,
     PersonalInfo,
+    Hate,
+    Harassment,
+    Threat,
+    Sexual,
+    Scam,
+    SelfHarm,
+    Spoiler,
+    Impersonation,
+    Rule,
+    /// Forward tolerance: the vocabulary will grow. An unknown kind is kept
+    /// and reaches the renderer as `unknown`, which renders as "Flagged".
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -124,6 +157,61 @@ pub enum CohostFlagSeverity {
     High,
     Medium,
     Low,
+    /// Forward tolerance; read as `medium`, never sent to the renderer.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Who a flagged message is aimed at. Absent means nobody in particular.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostFlagTarget {
+    Streamer,
+    Viewer,
+    Group,
+    /// Forward tolerance; read as absent.
+    #[serde(other)]
+    Unknown,
+}
+
+/// A moderation action the server SUGGESTS. The desktop only labels it.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostFlagAction {
+    Hide,
+    Timeout,
+    Ban,
+    /// Forward tolerance; read as absent.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostHighlightType {
+    Question,
+    Joke,
+    Praise,
+    Insight,
+    Milestone,
+    #[default]
+    Other,
+    /// Forward tolerance; read as `other`.
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostAlertKind {
+    Audio,
+    Video,
+    StreamHealth,
+    Game,
+    Other,
+    /// Forward tolerance; read as `other` ("something is wrong").
+    #[serde(other)]
+    Unknown,
 }
 
 // --- Settings ----------------------------------------------------------------
@@ -135,6 +223,10 @@ pub struct CohostSettings {
     pub tone: CohostTone,
     pub notes: String,
     pub auto_highlight: bool,
+    /// Plain-language chat rules the co-host flags against (wire v2). `default`
+    /// so a settings row from before the field still loads.
+    #[serde(default)]
+    pub rules: Vec<String>,
 }
 
 impl Default for CohostSettings {
@@ -144,6 +236,7 @@ impl Default for CohostSettings {
             tone: CohostTone::Friendly,
             notes: String::new(),
             auto_highlight: false,
+            rules: Vec::new(),
         }
     }
 }
@@ -151,6 +244,7 @@ impl Default for CohostSettings {
 impl CohostSettings {
     fn normalized(mut self) -> Self {
         self.notes = truncate_chars(&self.notes, COHOST_NOTES_MAX_CHARS);
+        self.rules = normalize_rules(self.rules);
         self
     }
 
@@ -167,7 +261,22 @@ impl CohostSettings {
         if let Some(auto_highlight) = patch.auto_highlight {
             self.auto_highlight = auto_highlight;
         }
+        if let Some(rules) = patch.rules {
+            self.rules = normalize_rules(rules);
+        }
     }
+}
+
+/// Trimmed, non-empty, at most `COHOST_RULES_MAX` rules of at most
+/// `COHOST_RULE_MAX_CHARS` characters — exactly what the server accepts.
+fn normalize_rules(rules: Vec<String>) -> Vec<String> {
+    rules
+        .iter()
+        .map(|rule| truncate_chars(rule.trim(), COHOST_RULE_MAX_CHARS))
+        .map(|rule| rule.trim_end().to_string())
+        .filter(|rule| !rule.is_empty())
+        .take(COHOST_RULES_MAX)
+        .collect()
 }
 
 pub fn load_cohost_settings(database: &Database) -> CohostSettings {
@@ -205,7 +314,9 @@ pub struct CohostQuestion {
     pub updated_at: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// The v2 extras are absent keys when the server did not send them — never
+/// `null`: the renderer contract rejects null for optional fields.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostFlag {
     pub message_id: String,
@@ -213,6 +324,52 @@ pub struct CohostFlag {
     pub severity: CohostFlagSeverity,
     pub reason: String,
     pub at: String,
+    /// 0..1. The renderer's Sensitivity control filters on it; a flag without
+    /// one always shows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<CohostFlagTarget>,
+    /// Suggested action — a label only, the desktop never acts on a flag.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<CohostFlagAction>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub also_kinds: Vec<CohostFlagKind>,
+    /// The streamer rule this message broke, resolved from the tick's
+    /// `ruleIndex` against the rules that tick actually sent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rule: Option<String>,
+}
+
+/// A comment the server suggests showing on stream. Suggest-first: nothing is
+/// highlighted because of this entry.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostHighlight {
+    pub message_id: String,
+    pub score: f64,
+    #[serde(rename = "type")]
+    pub highlight_type: CohostHighlightType,
+}
+
+/// One entry per alert kind viewers reported in the last `ALERT_EXPIRY`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAlert {
+    pub kind: CohostAlertKind,
+    /// Distinct authors who reported it.
+    pub viewers: u32,
+    pub last_seen_at: String,
+    /// At least two distinct authors reported it within 60 s of each other.
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostMoodScores {
+    pub hype: f64,
+    pub tension: f64,
+    pub confusion: f64,
 }
 
 /// What the last failed tick actually said, so the toast, the chip and a bug
@@ -243,8 +400,10 @@ impl CohostErrorDetail {
 /// Nullable fields serialize as explicit `null` (the renderer reducer keys on
 /// them), never as absent keys. `detail` and the presence fields are
 /// additionally `default` on read so a payload from before they existed still
-/// parses.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+/// parses. The wire-v2 fields are the exception: they are omitted while empty
+/// (`skip_serializing_if`), because the renderer contract treats them as
+/// optional and rejects `null`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostState {
     pub session_id: Option<String>,
@@ -280,6 +439,13 @@ pub struct CohostState {
     /// the open count.
     #[serde(default)]
     pub questions_total: u64,
+    /// Latest tick's suggested comments, best first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub highlights: Vec<CohostHighlight>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub alerts: Vec<CohostAlert>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mood_scores: Option<CohostMoodScores>,
 }
 
 impl CohostState {
@@ -300,6 +466,9 @@ impl CohostState {
             next_tick_at: None,
             messages_seen: 0,
             questions_total: 0,
+            highlights: Vec::new(),
+            alerts: Vec::new(),
+            mood_scores: None,
         }
     }
 }
@@ -352,6 +521,16 @@ pub(crate) struct PreparedTick {
     pub(crate) generation: u64,
 }
 
+/// One viewer saying "something is broken" (`alerts[]`), kept until it expires
+/// so the state can count distinct authors per kind.
+#[derive(Debug, Clone)]
+struct AlertReport {
+    kind: CohostAlertKind,
+    author: String,
+    at: Instant,
+    at_iso: String,
+}
+
 struct CohostSession {
     session_id: String,
     generation: u64,
@@ -388,6 +567,24 @@ struct CohostSession {
     /// counts each grouped question exactly once across ticks.
     counted_question_ids: HashSet<String>,
     questions_total: u64,
+    /// Wire version this session speaks: v2 until the server answers
+    /// `prompt-version-unsupported`, then v1 until the session ends.
+    prompt_version: u32,
+    /// The version fallback just happened: the rejected batch is back in the
+    /// delta and goes out again as soon as the min gap allows.
+    version_retry: bool,
+    /// What the outstanding tick sent: the batch (restored on a version
+    /// fallback) and the rules its `ruleIndex` values point into.
+    in_flight_messages: Vec<CohostTickMessage>,
+    in_flight_dropped: u64,
+    in_flight_rules: Vec<String>,
+    /// Author identity per known message id, for distinct-author alert counts.
+    authors: HashMap<String, String>,
+    /// Known rows that were deleted after they were sent in a tick.
+    deleted_ids: HashSet<String>,
+    highlights: Vec<CohostHighlight>,
+    alert_reports: Vec<AlertReport>,
+    mood_scores: Option<CohostMoodScores>,
 }
 
 impl CohostSession {
@@ -427,6 +624,16 @@ impl CohostSession {
             messages_seen: 0,
             counted_question_ids: HashSet::new(),
             questions_total: 0,
+            prompt_version: COHOST_PROMPT_VERSION,
+            version_retry: false,
+            in_flight_messages: Vec::new(),
+            in_flight_dropped: 0,
+            in_flight_rules: Vec::new(),
+            authors: HashMap::new(),
+            deleted_ids: HashSet::new(),
+            highlights: Vec::new(),
+            alert_reports: Vec::new(),
+            mood_scores: None,
         }
     }
 
@@ -436,7 +643,7 @@ impl CohostSession {
 
     fn snapshot_at(&self, now: Instant) -> CohostState {
         let next_tick_at = next_tick_due_at(
-            self.pending.len(),
+            self.cadence_pending(),
             self.last_tick_at.unwrap_or(self.started_at),
             self.last_tick_at,
             self.next_attempt_at,
@@ -459,15 +666,81 @@ impl CohostSession {
             next_tick_at,
             messages_seen: self.messages_seen,
             questions_total: self.questions_total,
+            highlights: self.highlights.clone(),
+            alerts: self.alerts_at(now),
+            mood_scores: self.mood_scores,
         }
     }
 
-    fn remember_id(&mut self, id: &str) {
+    /// Pending count as the cadence rules see it. After a version fallback the
+    /// restored batch counts as a burst, so it is retried as soon as the 8 s
+    /// min gap allows instead of waiting out the 20 s trickle rule.
+    fn cadence_pending(&self) -> usize {
+        if self.version_retry && !self.pending.is_empty() {
+            self.pending.len().max(TICK_BURST_THRESHOLD)
+        } else {
+            self.pending.len()
+        }
+    }
+
+    /// One entry per alert kind with an unexpired report, in first-reported
+    /// order. `active` needs two distinct authors within the corroboration
+    /// window; a single viewer never raises the chip.
+    fn alerts_at(&self, now: Instant) -> Vec<CohostAlert> {
+        let live: Vec<&AlertReport> = self
+            .alert_reports
+            .iter()
+            .filter(|report| now.saturating_duration_since(report.at) < ALERT_EXPIRY)
+            .collect();
+        let mut kinds: Vec<CohostAlertKind> = Vec::new();
+        for report in &live {
+            if !kinds.contains(&report.kind) {
+                kinds.push(report.kind);
+            }
+        }
+        kinds
+            .into_iter()
+            .filter_map(|kind| {
+                let reports: Vec<&AlertReport> = live
+                    .iter()
+                    .copied()
+                    .filter(|report| report.kind == kind)
+                    .collect();
+                let last = reports.iter().max_by_key(|report| report.at)?;
+                let authors: HashSet<&str> = reports
+                    .iter()
+                    .map(|report| report.author.as_str())
+                    .collect();
+                let active = reports.iter().any(|anchor| {
+                    let corroborating: HashSet<&str> = reports
+                        .iter()
+                        .filter(|report| {
+                            report.at >= anchor.at
+                                && report.at.duration_since(anchor.at) <= ALERT_CORROBORATION_WINDOW
+                        })
+                        .map(|report| report.author.as_str())
+                        .collect();
+                    corroborating.len() >= ALERT_MIN_AUTHORS
+                });
+                Some(CohostAlert {
+                    kind,
+                    viewers: u32::try_from(authors.len()).unwrap_or(u32::MAX),
+                    last_seen_at: last.at_iso.clone(),
+                    active,
+                })
+            })
+            .collect()
+    }
+
+    fn remember_id(&mut self, id: &str, author: String) {
         if self.known_set.insert(id.to_string()) {
             self.known_ids.push_back(id.to_string());
+            self.authors.insert(id.to_string(), author);
             while self.known_ids.len() > KNOWN_MESSAGE_IDS_CAP {
                 if let Some(evicted) = self.known_ids.pop_front() {
                     self.known_set.remove(&evicted);
+                    self.authors.remove(&evicted);
+                    self.deleted_ids.remove(&evicted);
                 }
             }
         }
@@ -485,6 +758,12 @@ impl CohostSession {
         for message in ordered {
             if message.is_deleted || message.event_type == LiveChatEventType::Deleted {
                 self.pending.retain(|pending| pending.id != message.id);
+                // A deleted comment is never suggested for the stream.
+                if self.known_set.contains(&message.id) {
+                    self.deleted_ids.insert(message.id.clone());
+                    self.highlights
+                        .retain(|highlight| highlight.message_id != message.id);
+                }
                 continue;
             }
             let key = (message.received_at.clone(), message.id.clone());
@@ -497,7 +776,7 @@ impl CohostSession {
             let Some(mapped) = tick_message_from_chat(message) else {
                 continue;
             };
-            self.remember_id(&message.id);
+            self.remember_id(&message.id, alert_author_key(message));
             self.pending.push_back(mapped);
             while self.pending.len() > TICK_DELTA_CAP {
                 self.pending.pop_front();
@@ -517,7 +796,7 @@ impl CohostSession {
             return false;
         }
         tick_due(
-            self.pending.len(),
+            self.cadence_pending(),
             self.last_tick_at.unwrap_or(self.started_at),
             self.last_tick_at,
             now,
@@ -528,8 +807,15 @@ impl CohostSession {
         self.tick_seq = self.tick_seq.saturating_add(1);
         self.last_tick_at = Some(now);
         self.in_flight = true;
+        self.version_retry = false;
         let messages: Vec<CohostTickMessage> = self.pending.drain(..).collect();
         let dropped_messages = std::mem::take(&mut self.dropped);
+        // v1 fallback: no `rules` key at all, so the body stays byte-identical
+        // to what a v1 desktop sends.
+        let rules = (self.prompt_version >= COHOST_PROMPT_VERSION).then(|| settings.rules.clone());
+        self.in_flight_messages = messages.clone();
+        self.in_flight_dropped = dropped_messages;
+        self.in_flight_rules = rules.clone().unwrap_or_default();
         let open_questions = self
             .questions
             .iter()
@@ -544,10 +830,11 @@ impl CohostSession {
             client_version: DESKTOP_CLIENT_VERSION.to_string(),
             session_client_id: self.session_id.clone(),
             tick_seq: self.tick_seq,
-            prompt_version: COHOST_PROMPT_VERSION,
+            prompt_version: self.prompt_version,
             consent_to_process_chat: self.consent,
             tone: settings.tone,
             notes: settings.notes.clone(),
+            rules,
             stream_title: self.stream_title.clone(),
             open_questions,
             messages,
@@ -558,8 +845,19 @@ impl CohostSession {
     /// Merge a successful tick. `questions` is the full open set: existing ids
     /// keep `first_seen_at`, `resolved` ids leave, dismissed ids never return,
     /// and message ids are sanitized against rows this engine actually sent.
-    fn apply_response(&mut self, response: CohostTickResponse, dropped: u64, now_iso: &str) {
+    /// With `keepQuestions` (v2) the server skipped regeneration: the open set
+    /// stays as it is and only `resolved` ids leave.
+    fn apply_response(
+        &mut self,
+        response: CohostTickResponse,
+        dropped: u64,
+        now: Instant,
+        now_iso: &str,
+    ) {
         self.in_flight = false;
+        self.in_flight_messages.clear();
+        self.in_flight_dropped = 0;
+        let sent_rules = std::mem::take(&mut self.in_flight_rules);
         self.backoff_index = 0;
         self.next_attempt_at = None;
         self.status = CohostStatus::Listening;
@@ -567,11 +865,125 @@ impl CohostSession {
         self.detail = None;
         self.last_tick_iso = Some(now_iso.to_string());
         self.partial = dropped > 0;
-        self.mood = response.mood;
+        self.mood = response.mood.map(|mood| match mood {
+            CohostMood::Unknown => CohostMood::Mixed,
+            known => known,
+        });
+        self.mood_scores = response.mood_scores.map(|scores| CohostMoodScores {
+            hype: unit_interval(scores.hype).unwrap_or(0.0),
+            tension: unit_interval(scores.tension).unwrap_or(0.0),
+            confusion: unit_interval(scores.confusion).unwrap_or(0.0),
+        });
 
         let resolved: HashSet<String> = response.resolved.into_iter().collect();
-        let mut next_questions = Vec::with_capacity(response.questions.len());
-        for incoming in response.questions {
+        if response.keep_questions {
+            self.questions
+                .retain(|question| !resolved.contains(&question.id));
+        } else {
+            self.replace_questions(response.questions, &resolved, now_iso);
+        }
+
+        for flag in response.flags {
+            if !self.known_set.contains(&flag.message_id)
+                || self.dismissed_flags.contains(&flag.message_id)
+                || self
+                    .flags
+                    .iter()
+                    .any(|existing| existing.message_id == flag.message_id)
+            {
+                continue;
+            }
+            let mut also_kinds: Vec<CohostFlagKind> = Vec::new();
+            for kind in flag.also_kinds {
+                if kind != CohostFlagKind::Unknown
+                    && kind != flag.kind
+                    && !also_kinds.contains(&kind)
+                {
+                    also_kinds.push(kind);
+                }
+            }
+            self.flags.push(CohostFlag {
+                message_id: flag.message_id,
+                kind: flag.kind,
+                severity: match flag.severity {
+                    CohostFlagSeverity::Unknown => CohostFlagSeverity::Medium,
+                    known => known,
+                },
+                reason: flag.reason,
+                at: now_iso.to_string(),
+                confidence: flag.confidence.and_then(unit_interval),
+                target: flag
+                    .target
+                    .filter(|target| *target != CohostFlagTarget::Unknown),
+                action: flag
+                    .action
+                    .filter(|action| *action != CohostFlagAction::Unknown),
+                also_kinds,
+                // Resolved against the rules THIS tick sent: the streamer may
+                // have edited the list while the request was in flight.
+                rule: (flag.kind == CohostFlagKind::Rule)
+                    .then(|| flag.rule_index.and_then(|index| sent_rules.get(index)))
+                    .flatten()
+                    .cloned(),
+            });
+        }
+        while self.flags.len() > FLAGS_CAP {
+            self.flags.remove(0);
+        }
+
+        // Latest set wins. A flagged (or flag-dismissed) or deleted message is
+        // never suggested, whatever the server ranked.
+        let mut highlights: Vec<CohostHighlight> = Vec::new();
+        for highlight in response.highlights {
+            let id = &highlight.message_id;
+            if !self.known_set.contains(id)
+                || self.deleted_ids.contains(id)
+                || self.dismissed_flags.contains(id)
+                || self.flags.iter().any(|flag| &flag.message_id == id)
+                || highlights.iter().any(|kept| &kept.message_id == id)
+            {
+                continue;
+            }
+            highlights.push(CohostHighlight {
+                message_id: highlight.message_id,
+                score: unit_interval(highlight.score).unwrap_or(0.0),
+                highlight_type: match highlight.highlight_type {
+                    CohostHighlightType::Unknown => CohostHighlightType::Other,
+                    known => known,
+                },
+            });
+            if highlights.len() >= HIGHLIGHTS_CAP {
+                break;
+            }
+        }
+        self.highlights = highlights;
+
+        self.alert_reports
+            .retain(|report| now.saturating_duration_since(report.at) < ALERT_EXPIRY);
+        for alert in response.alerts {
+            let Some(author) = self.authors.get(&alert.message_id) else {
+                continue;
+            };
+            self.alert_reports.push(AlertReport {
+                kind: match alert.kind {
+                    CohostAlertKind::Unknown => CohostAlertKind::Other,
+                    known => known,
+                },
+                author: author.clone(),
+                at: now,
+                at_iso: now_iso.to_string(),
+            });
+        }
+    }
+
+    fn replace_questions(
+        &mut self,
+        incoming_questions: Vec<CohostTickQuestion>,
+        resolved: &HashSet<String>,
+        now_iso: &str,
+    ) {
+        let mut next_questions = Vec::with_capacity(incoming_questions.len());
+        for incoming in incoming_questions {
             if incoming.id.trim().is_empty()
                 || resolved.contains(&incoming.id)
                 || self.dismissed_questions.contains(&incoming.id)
@@ -602,7 +1014,10 @@ impl CohostSession {
                 message_ids,
                 askers: incoming.askers,
                 platforms: incoming.platforms,
-                priority: incoming.priority,
+                priority: match incoming.priority {
+                    CohostPriority::Unknown => CohostPriority::Normal,
+                    known => known,
+                },
                 suggested_reply: incoming.suggested_reply,
                 from_notes: incoming.from_notes,
                 first_seen_at: existing
@@ -615,32 +1030,32 @@ impl CohostSession {
             }
         }
         self.questions = next_questions;
-
-        for flag in response.flags {
-            if !self.known_set.contains(&flag.message_id)
-                || self.dismissed_flags.contains(&flag.message_id)
-                || self
-                    .flags
-                    .iter()
-                    .any(|existing| existing.message_id == flag.message_id)
-            {
-                continue;
-            }
-            self.flags.push(CohostFlag {
-                message_id: flag.message_id,
-                kind: flag.kind,
-                severity: flag.severity,
-                reason: flag.reason,
-                at: now_iso.to_string(),
-            });
-        }
-        while self.flags.len() > FLAGS_CAP {
-            self.flags.remove(0);
-        }
     }
 
     fn apply_failure(&mut self, error: &CohostApiError, now: Instant) {
         self.in_flight = false;
+        let batch = std::mem::take(&mut self.in_flight_messages);
+        let batch_dropped = std::mem::take(&mut self.in_flight_dropped);
+        self.in_flight_rules.clear();
+        if error.kind == CohostApiErrorKind::PromptVersionUnsupported
+            && self.prompt_version != COHOST_PROMPT_VERSION_FALLBACK
+        {
+            // The server rolled back to v1. Not a failure the streamer should
+            // see: no pause, no error status, no backoff. Speak v1 for the rest
+            // of the session and put the rejected batch back in front of
+            // whatever arrived meanwhile so nothing is lost.
+            self.prompt_version = COHOST_PROMPT_VERSION_FALLBACK;
+            self.version_retry = true;
+            self.dropped = self.dropped.saturating_add(batch_dropped);
+            for message in batch.into_iter().rev() {
+                self.pending.push_front(message);
+            }
+            while self.pending.len() > TICK_DELTA_CAP {
+                self.pending.pop_front();
+                self.dropped = self.dropped.saturating_add(1);
+            }
+            return;
+        }
         let reason = error.reason();
         match error.kind {
             CohostApiErrorKind::QuotaExhausted { retry_after } => {
@@ -684,6 +1099,8 @@ impl CohostSession {
 
     fn dismiss_flag(&mut self, message_id: &str) -> bool {
         let before = self.flags.len();
+        self.highlights
+            .retain(|highlight| highlight.message_id != message_id);
         self.flags.retain(|flag| flag.message_id != message_id);
         self.dismissed_flags.insert(message_id.to_string());
         before != self.flags.len()
@@ -786,6 +1203,26 @@ pub(crate) fn tick_message_from_chat(message: &LiveChatMessage) -> Option<Cohost
     })
 }
 
+/// Who counts as one viewer for alert corroboration: the platform account when
+/// the provider gave one, else the display name.
+fn alert_author_key(message: &LiveChatMessage) -> String {
+    let author = message
+        .author_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .unwrap_or_else(|| message.author_name.trim());
+    format!(
+        "{}:{author}",
+        serde_json::to_string(&message.platform).unwrap_or_default()
+    )
+}
+
+/// A wire probability clamped to 0..1; NaN/infinite reads as absent.
+fn unit_interval(value: f64) -> Option<f64> {
+    value.is_finite().then(|| value.clamp(0.0, 1.0))
+}
+
 fn normalize_role(role: &str) -> Option<String> {
     let normalized = match role.trim().to_ascii_lowercase().as_str() {
         "moderator" | "mod" => "mod",
@@ -877,6 +1314,13 @@ impl CohostEngine {
             .unwrap_or(0)
     }
 
+    fn highlights_len(&self) -> usize {
+        self.session
+            .as_ref()
+            .map(|session| session.highlights.len())
+            .unwrap_or(0)
+    }
+
     /// Decide whether the scheduler owning `generation` should send a tick now.
     /// `signed_in`, `premium`, and the session's consent are the run
     /// preconditions; each maps to a paused reason rather than a request.
@@ -942,7 +1386,7 @@ impl CohostEngine {
             return false;
         }
         match result {
-            Ok(response) => session.apply_response(response, dropped, now_iso),
+            Ok(response) => session.apply_response(response, dropped, now, now_iso),
             Err(error) => session.apply_failure(&error, now),
         }
         true
@@ -1179,9 +1623,12 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
             return;
         }
         let bucket_before = pending_bucket(engine.pending_len());
+        let highlights_before = engine.highlights_len();
         engine.note_messages(messages);
         let bucket_after = pending_bucket(engine.pending_len());
-        if bucket_before == bucket_after {
+        // A tombstone that pulled a suggested comment is also news: the
+        // renderer must stop offering it now, not at the next tick.
+        if bucket_before == bucket_after && highlights_before == engine.highlights_len() {
             return;
         }
         engine.snapshot()
@@ -1334,6 +1781,20 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
                 response.flags.len()
             ),
         )),
+        Err(error)
+            if error.kind == CohostApiErrorKind::PromptVersionUnsupported
+                && prepared.request.prompt_version != COHOST_PROMPT_VERSION_FALLBACK =>
+        {
+            Some((
+                "info",
+                format!(
+                    "Co-host tick {}: the server does not speak tick contract v{}; using v{} for the rest of this session.",
+                    prepared.request.tick_seq,
+                    prepared.request.prompt_version,
+                    COHOST_PROMPT_VERSION_FALLBACK
+                ),
+            ))
+        }
         Err(error) => Some((
             "warn",
             format!(
@@ -1435,6 +1896,7 @@ mod tests {
             tone: CohostTone::Short,
             notes: "Keyboard: Keychron Q1".to_string(),
             auto_highlight: false,
+            rules: Vec::new(),
         }
     }
 
@@ -1468,7 +1930,25 @@ mod tests {
             resolved: Vec::new(),
             flags: Vec::new(),
             mood: Some(CohostMood::Hype),
-            usage: None,
+            ..CohostTickResponse::default()
+        }
+    }
+
+    fn flag(
+        message_id: &str,
+        kind: CohostFlagKind,
+        severity: CohostFlagSeverity,
+    ) -> CohostTickFlag {
+        CohostTickFlag {
+            message_id: message_id.to_string(),
+            kind,
+            severity,
+            reason: "reason".to_string(),
+            confidence: None,
+            target: None,
+            action: None,
+            also_kinds: Vec::new(),
+            rule_index: None,
         }
     }
 
@@ -1693,13 +2173,15 @@ mod tests {
                 "notes",
                 "openQuestions",
                 "promptVersion",
+                "rules",
                 "sessionClientId",
                 "streamTitle",
                 "tickSeq",
                 "tone",
             ]
         );
-        assert_eq!(json["promptVersion"], 1);
+        assert_eq!(json["promptVersion"], 2);
+        assert_eq!(json["rules"], serde_json::json!([]));
         assert_eq!(json["tickSeq"], 1);
         assert_eq!(json["consentToProcessChat"], true);
         assert_eq!(json["tone"], "short");
@@ -1771,18 +2253,16 @@ mod tests {
         ]);
         second.resolved = vec!["q_3".to_string()];
         second.flags = vec![
-            CohostTickFlag {
-                message_id: rows[3].id.clone(),
-                kind: CohostFlagKind::Spam,
-                severity: CohostFlagSeverity::Medium,
-                reason: "link spam".to_string(),
-            },
-            CohostTickFlag {
-                message_id: "not-ours".to_string(),
-                kind: CohostFlagKind::Toxicity,
-                severity: CohostFlagSeverity::High,
-                reason: "ignored".to_string(),
-            },
+            flag(
+                &rows[3].id,
+                CohostFlagKind::Spam,
+                CohostFlagSeverity::Medium,
+            ),
+            flag(
+                "not-ours",
+                CohostFlagKind::Toxicity,
+                CohostFlagSeverity::High,
+            ),
         ];
         assert!(engine.apply_tick_result(generation, 0, Ok(second), start + secs(31), "t2"));
         let snapshot = engine.snapshot();
@@ -1807,6 +2287,526 @@ mod tests {
 
         assert!(engine.dismiss_flag("session-1", &rows[3].id).unwrap());
         assert!(engine.snapshot().flags.is_empty());
+    }
+
+    #[test]
+    fn v2_request_carries_the_normalised_rules() {
+        let start = Instant::now();
+        let mut engine = CohostEngine::new(CohostSettings {
+            rules: vec![
+                "  No spoilers  ".to_string(),
+                String::new(),
+                "r".repeat(COHOST_RULE_MAX_CHARS + 30),
+            ]
+            .into_iter()
+            .chain((0..20).map(|index| format!("rule {index}")))
+            .collect(),
+            ..enabled_settings()
+        });
+        let generation = engine.start_session("session-1".to_string(), true, None, start);
+        engine.note_messages(&messages("session-1", 0..5));
+        let prepared = engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let rules = prepared.request.rules.clone().unwrap();
+        assert_eq!(rules.len(), COHOST_RULES_MAX);
+        assert_eq!(rules[0], "No spoilers");
+        assert_eq!(rules[1].chars().count(), COHOST_RULE_MAX_CHARS);
+        assert!(
+            rules
+                .iter()
+                .all(|rule| !rule.is_empty() && rule.chars().count() <= COHOST_RULE_MAX_CHARS)
+        );
+    }
+
+    #[test]
+    fn prompt_version_unsupported_falls_back_to_v1_without_pausing() {
+        let start = Instant::now();
+        let mut engine = CohostEngine::new(CohostSettings {
+            rules: vec!["No spoilers".to_string()],
+            ..enabled_settings()
+        });
+        let generation = engine.start_session(
+            "session-1".to_string(),
+            true,
+            Some("Rust night".into()),
+            start,
+        );
+        let rows = messages("session-1", 0..2);
+        engine.note_messages(&rows);
+        let v2 = engine
+            .prepare_tick(generation, true, true, start + secs(20))
+            .unwrap();
+        assert_eq!(v2.request.prompt_version, 2);
+        assert_eq!(v2.request.rules, Some(vec!["No spoilers".to_string()]));
+
+        // Server rolled back: not an error the streamer sees, no backoff.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(
+                400,
+                "prompt-version-unsupported",
+                "promptVersion 2 is not supported."
+            )),
+            start + secs(21),
+            "t1",
+        ));
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.status, CohostStatus::Listening);
+        assert_eq!(snapshot.reason, None);
+        assert_eq!(snapshot.detail, None);
+        assert!(!snapshot.tick_in_flight);
+        // The rejected batch is back in the delta.
+        assert_eq!(snapshot.pending_messages, 2);
+
+        // Retried as soon as the contract's 8 s floor allows — not after the
+        // 20 s trickle wait two pending rows would normally get.
+        assert_eq!(
+            engine.prepare_tick(generation, true, true, start + secs(27)),
+            Err(TickGate::Idle)
+        );
+        let v1 = engine
+            .prepare_tick(generation, true, true, start + secs(28))
+            .unwrap();
+        assert_eq!(v1.request.prompt_version, 1);
+        assert_eq!(v1.request.rules, None);
+        assert_eq!(v1.request.messages, v2.request.messages);
+        // Byte-identical to a v1 desktop's body: no `rules` key at all.
+        let json = serde_json::to_value(&v1.request).unwrap();
+        assert!(json.get("rules").is_none());
+        assert_eq!(json["promptVersion"], 1);
+        assert_eq!(json.as_object().unwrap().len(), 11);
+
+        // v1 for the rest of the session, back on the normal cadence.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(Vec::new())),
+            start + secs(29),
+            "t2"
+        ));
+        engine.note_messages(&messages("session-1", 2..4));
+        assert_eq!(
+            engine.prepare_tick(generation, true, true, start + secs(40)),
+            Err(TickGate::Idle)
+        );
+        let next = engine
+            .prepare_tick(generation, true, true, start + secs(48))
+            .unwrap();
+        assert_eq!(next.request.prompt_version, 1);
+
+        // A v1 rejection is a real failure, as before.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Err(server_error(400, "prompt-version-unsupported", "no")),
+            start + secs(49),
+            "t3",
+        ));
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.status, CohostStatus::Error);
+        assert_eq!(snapshot.reason, Some(CohostReason::ServerUnconfigured));
+
+        // A new session starts on v2 again.
+        let generation = engine.start_session("session-2".to_string(), true, None, start);
+        engine.note_messages(&messages("session-2", 0..5));
+        let fresh = engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        assert_eq!(fresh.request.prompt_version, 2);
+    }
+
+    #[test]
+    fn unknown_enum_values_and_extra_fields_still_apply() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..5);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let body = serde_json::json!({
+            "promptVersion": 3,
+            "somethingNew": { "nested": [1, 2, 3] },
+            "questions": [{
+                "id": "q_1",
+                "text": "What keyboard?",
+                "messageIds": [rows[0].id],
+                "priority": "urgent",
+                "futureField": true
+            }],
+            "mood": "chaotic",
+            "moodScores": { "hype": 1.7, "tension": 0.4, "boredom": 0.9 },
+            "flags": [
+                { "messageId": rows[1].id, "kind": "brigading", "severity": "critical",
+                  "reason": "new kind", "target": "bots", "action": "shadowban",
+                  "alsoKinds": ["scam", "brigading"], "confidence": 0.8, "extra": 1 },
+                { "messageId": rows[2].id, "kind": "hate", "severity": "high" },
+                { "messageId": rows[3].id, "kind": 7, "severity": "high" },
+                "not-an-object"
+            ],
+            "highlights": [
+                { "messageId": rows[4].id, "score": 0.9, "type": "meme" },
+                { "score": 0.5 }
+            ],
+            "alerts": [
+                { "messageId": rows[0].id, "kind": "chat-bridge", "confidence": 0.7 }
+            ]
+        });
+        let response: CohostTickResponse = serde_json::from_value(body).unwrap();
+        assert!(engine.apply_tick_result(generation, 0, Ok(response), start + secs(2), "t1"));
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.status, CohostStatus::Listening);
+        assert_eq!(snapshot.mood, Some(CohostMood::Mixed));
+        assert_eq!(snapshot.questions[0].priority, CohostPriority::Normal);
+        assert_eq!(
+            snapshot.mood_scores,
+            Some(CohostMoodScores {
+                hype: 1.0,
+                tension: 0.4,
+                confusion: 0.0
+            })
+        );
+        // Unknown kind is kept for a generic render; the unreadable items
+        // (non-string kind, non-object) are dropped on their own.
+        assert_eq!(snapshot.flags.len(), 2);
+        assert_eq!(snapshot.flags[0].kind, CohostFlagKind::Unknown);
+        assert_eq!(snapshot.flags[0].severity, CohostFlagSeverity::Medium);
+        assert_eq!(snapshot.flags[0].target, None);
+        assert_eq!(snapshot.flags[0].action, None);
+        assert_eq!(snapshot.flags[0].also_kinds, vec![CohostFlagKind::Scam]);
+        assert_eq!(snapshot.flags[0].confidence, Some(0.8));
+        assert_eq!(snapshot.flags[1].kind, CohostFlagKind::Hate);
+        assert_eq!(snapshot.highlights.len(), 1);
+        assert_eq!(
+            snapshot.highlights[0].highlight_type,
+            CohostHighlightType::Other
+        );
+        assert_eq!(snapshot.alerts.len(), 1);
+        assert_eq!(snapshot.alerts[0].kind, CohostAlertKind::Other);
+
+        // What reaches the renderer: "unknown" only as a flag kind, and no
+        // nulls for the optional v2 fields.
+        let wire = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(wire["flags"][0]["kind"], "unknown");
+        let flag = wire["flags"][1].as_object().unwrap();
+        for key in ["confidence", "target", "action", "alsoKinds", "rule"] {
+            assert!(!flag.contains_key(key), "{key} must be absent, not null");
+        }
+    }
+
+    #[test]
+    fn keep_questions_keeps_the_open_set_and_only_removes_resolved() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..5);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let first = response(vec![
+            question("q_1", &[rows[0].id.as_str()]),
+            question("q_2", &[rows[1].id.as_str()]),
+        ]);
+        assert!(engine.apply_tick_result(generation, 0, Ok(first), start + secs(2), "t1"));
+
+        engine.note_messages(&messages("session-1", 5..10));
+        engine
+            .prepare_tick(generation, true, true, start + secs(30))
+            .unwrap();
+        let kept: CohostTickResponse = serde_json::from_value(serde_json::json!({
+            "promptVersion": 2,
+            "questions": [],
+            "resolved": ["q_2"],
+            "keepQuestions": true,
+            "mood": "calm"
+        }))
+        .unwrap();
+        assert!(engine.apply_tick_result(generation, 0, Ok(kept), start + secs(31), "t2"));
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.questions.len(), 1);
+        assert_eq!(snapshot.questions[0].id, "q_1");
+        // Untouched, not re-stamped: the server did not regenerate it.
+        assert_eq!(snapshot.questions[0].updated_at, "t1");
+        assert_eq!(snapshot.questions_total, 2);
+
+        // Without the flag an empty `questions` still means "none open" (v1).
+        engine.note_messages(&messages("session-1", 10..15));
+        engine
+            .prepare_tick(generation, true, true, start + secs(60))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(Vec::new())),
+            start + secs(61),
+            "t3"
+        ));
+        assert!(engine.snapshot().questions.is_empty());
+    }
+
+    #[test]
+    fn flag_extras_ride_the_state_and_rule_index_resolves_to_the_sent_rule() {
+        let start = Instant::now();
+        let mut engine = CohostEngine::new(CohostSettings {
+            rules: vec!["No spoilers".to_string(), "English only".to_string()],
+            ..enabled_settings()
+        });
+        let generation = engine.start_session("session-1".to_string(), true, None, start);
+        let rows = messages("session-1", 0..5);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        // The streamer edits the list while the tick is in flight; the index
+        // still means what it meant when the request was built.
+        engine.settings.rules = vec!["Be kind".to_string()];
+        let mut tick = response(Vec::new());
+        tick.flags = vec![
+            CohostTickFlag {
+                confidence: Some(0.93),
+                target: Some(CohostFlagTarget::Streamer),
+                action: Some(CohostFlagAction::Timeout),
+                also_kinds: vec![CohostFlagKind::Scam, CohostFlagKind::Harassment],
+                ..flag(
+                    &rows[0].id,
+                    CohostFlagKind::Harassment,
+                    CohostFlagSeverity::High,
+                )
+            },
+            CohostTickFlag {
+                rule_index: Some(1),
+                ..flag(&rows[1].id, CohostFlagKind::Rule, CohostFlagSeverity::Low)
+            },
+            CohostTickFlag {
+                rule_index: Some(9),
+                ..flag(&rows[2].id, CohostFlagKind::Rule, CohostFlagSeverity::Low)
+            },
+            // A rule index on a non-rule flag means nothing.
+            CohostTickFlag {
+                rule_index: Some(0),
+                ..flag(&rows[3].id, CohostFlagKind::Spam, CohostFlagSeverity::Low)
+            },
+        ];
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), start + secs(2), "t1"));
+        let flags = engine.snapshot().flags;
+        assert_eq!(flags[0].confidence, Some(0.93));
+        assert_eq!(flags[0].target, Some(CohostFlagTarget::Streamer));
+        assert_eq!(flags[0].action, Some(CohostFlagAction::Timeout));
+        assert_eq!(flags[0].also_kinds, vec![CohostFlagKind::Scam]);
+        assert_eq!(flags[1].rule.as_deref(), Some("English only"));
+        assert_eq!(flags[2].rule, None);
+        assert_eq!(flags[3].rule, None);
+        let wire = serde_json::to_value(&flags[0]).unwrap();
+        assert_eq!(wire["target"], "streamer");
+        assert_eq!(wire["action"], "timeout");
+        assert_eq!(wire["alsoKinds"], serde_json::json!(["scam"]));
+    }
+
+    #[test]
+    fn highlights_keep_the_latest_validated_set_and_never_a_flagged_or_deleted_row() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..8);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let highlight = |id: &str, score: f64| crate::videorc_api::CohostTickHighlight {
+            message_id: id.to_string(),
+            score,
+            highlight_type: CohostHighlightType::Joke,
+        };
+        let mut tick = response(Vec::new());
+        tick.flags = vec![flag(
+            &rows[1].id,
+            CohostFlagKind::Spam,
+            CohostFlagSeverity::Low,
+        )];
+        tick.highlights = vec![
+            highlight(&rows[0].id, 0.9),
+            highlight(&rows[1].id, 0.8),
+            highlight("not-ours", 0.7),
+            highlight(&rows[0].id, 0.6),
+            highlight(&rows[2].id, 0.5),
+        ];
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), start + secs(2), "t1"));
+        let ids = |engine: &CohostEngine| -> Vec<String> {
+            engine
+                .snapshot()
+                .highlights
+                .into_iter()
+                .map(|highlight| highlight.message_id)
+                .collect()
+        };
+        assert_eq!(ids(&engine), vec![rows[0].id.clone(), rows[2].id.clone()]);
+
+        // A tombstone pulls the suggestion at once, and keeps it out later.
+        let mut deleted = rows[0].clone();
+        deleted.is_deleted = true;
+        engine.note_messages(&[deleted]);
+        assert_eq!(ids(&engine), vec![rows[2].id.clone()]);
+
+        // Dismissing a flag does not make that message suggestible.
+        assert!(engine.dismiss_flag("session-1", &rows[1].id).unwrap());
+        engine.note_messages(&messages("session-1", 8..13));
+        engine
+            .prepare_tick(generation, true, true, start + secs(30))
+            .unwrap();
+        let mut tick = response(Vec::new());
+        tick.highlights = (0..8)
+            .map(|index| highlight(&rows[index].id, 0.5))
+            .collect();
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), start + secs(31), "t2"));
+        let kept = ids(&engine);
+        assert_eq!(kept.len(), HIGHLIGHTS_CAP);
+        assert!(!kept.contains(&rows[0].id));
+        assert!(!kept.contains(&rows[1].id));
+
+        // The latest set wins: a tick without highlights clears them.
+        engine.note_messages(&messages("session-1", 13..18));
+        engine
+            .prepare_tick(generation, true, true, start + secs(60))
+            .unwrap();
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(Vec::new())),
+            start + secs(61),
+            "t3"
+        ));
+        assert!(ids(&engine).is_empty());
+    }
+
+    #[test]
+    fn alerts_need_two_distinct_authors_within_a_minute_and_expire() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        // chat_message authors cycle viewer-0, viewer-1, viewer-2.
+        let rows = messages("session-1", 0..6);
+        engine.note_messages(&rows);
+        engine
+            .prepare_tick(generation, true, true, start + secs(1))
+            .unwrap();
+        let alert = |id: &str, kind: CohostAlertKind| crate::videorc_api::CohostTickAlert {
+            message_id: id.to_string(),
+            kind,
+            confidence: Some(0.9),
+        };
+        let mut tick = response(Vec::new());
+        tick.alerts = vec![
+            alert(&rows[0].id, CohostAlertKind::Audio),
+            // Same author again: still one viewer.
+            alert(&rows[3].id, CohostAlertKind::Audio),
+            alert("not-ours", CohostAlertKind::Audio),
+            alert(&rows[1].id, CohostAlertKind::Video),
+        ];
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), start + secs(2), "t1"));
+        let session = engine.session.as_ref().unwrap();
+        let alerts = session.alerts_at(start + secs(2));
+        assert_eq!(alerts.len(), 2);
+        assert_eq!(alerts[0].kind, CohostAlertKind::Audio);
+        assert_eq!(alerts[0].viewers, 1);
+        assert!(!alerts[0].active);
+        assert!(!alerts[1].active);
+
+        // A second author 70 s later is outside the corroboration window...
+        engine.note_messages(&messages("session-1", 6..11));
+        engine
+            .prepare_tick(generation, true, true, start + secs(71))
+            .unwrap();
+        let mut tick = response(Vec::new());
+        tick.alerts = vec![alert(&rows[1].id, CohostAlertKind::Audio)];
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), start + secs(72), "t2"));
+        let session = engine.session.as_ref().unwrap();
+        let alerts = session.alerts_at(start + secs(72));
+        assert_eq!(alerts[0].viewers, 2);
+        assert_eq!(alerts[0].last_seen_at, "t2");
+        assert!(!alerts[0].active);
+
+        // ...a third one 20 s after that is inside it.
+        engine.note_messages(&messages("session-1", 11..16));
+        engine
+            .prepare_tick(generation, true, true, start + secs(91))
+            .unwrap();
+        let mut tick = response(Vec::new());
+        tick.alerts = vec![alert(&rows[2].id, CohostAlertKind::Audio)];
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), start + secs(92), "t3"));
+        let session = engine.session.as_ref().unwrap();
+        let alerts = session.alerts_at(start + secs(92));
+        let audio = alerts
+            .iter()
+            .find(|alert| alert.kind == CohostAlertKind::Audio)
+            .unwrap();
+        assert!(audio.active);
+        assert_eq!(audio.viewers, 3);
+        let wire = serde_json::to_value(audio).unwrap();
+        assert_eq!(
+            wire,
+            serde_json::json!({ "kind": "audio", "viewers": 3, "lastSeenAt": "t3", "active": true })
+        );
+        // The lone video report from t+2 is still listed, never active.
+        assert!(
+            alerts
+                .iter()
+                .any(|alert| alert.kind == CohostAlertKind::Video && !alert.active)
+        );
+
+        // Reports expire 120 s after they were seen: at t+193 only the t+92
+        // report is left, so audio is one viewer again and video is gone.
+        let alerts = session.alerts_at(start + secs(193));
+        assert_eq!(alerts.len(), 1);
+        assert_eq!(alerts[0].viewers, 1);
+        assert!(!alerts[0].active);
+        assert!(session.alerts_at(start + secs(212)).is_empty());
+    }
+
+    #[test]
+    fn settings_from_before_rules_still_load_and_rules_round_trip() {
+        let legacy: CohostSettings = serde_json::from_value(serde_json::json!({
+            "enabled": true,
+            "tone": "short",
+            "notes": "n",
+            "autoHighlight": false
+        }))
+        .unwrap();
+        assert!(legacy.rules.is_empty());
+
+        let database = Database::open_in_memory_for_tests();
+        let mut settings = CohostSettings::default();
+        settings.apply(CohostSettingsPatch {
+            rules: Some(
+                (0..14)
+                    .map(|index| format!("  rule {index} {}", "x".repeat(200)))
+                    .collect(),
+            ),
+            ..CohostSettingsPatch::default()
+        });
+        assert_eq!(settings.rules.len(), COHOST_RULES_MAX);
+        assert!(
+            settings
+                .rules
+                .iter()
+                .all(|rule| rule.chars().count() == COHOST_RULE_MAX_CHARS
+                    && rule.starts_with("rule"))
+        );
+        database
+            .save_setting(COHOST_SETTINGS_KEY, &settings)
+            .unwrap();
+        assert_eq!(load_cohost_settings(&database), settings);
+        assert_eq!(
+            serde_json::to_value(CohostSettings::default()).unwrap()["rules"],
+            serde_json::json!([])
+        );
+        // An absent patch field leaves the list alone; an empty one clears it.
+        settings.apply(CohostSettingsPatch::default());
+        assert_eq!(settings.rules.len(), COHOST_RULES_MAX);
+        settings.apply(CohostSettingsPatch {
+            rules: Some(Vec::new()),
+            ..CohostSettingsPatch::default()
+        });
+        assert!(settings.rules.is_empty());
     }
 
     #[test]
@@ -1930,6 +2930,11 @@ mod tests {
         ];
         for (error, status, reason, retry_secs) in cases {
             let (mut engine, generation) = running_engine(start);
+            if error.kind == CohostApiErrorKind::PromptVersionUnsupported {
+                // Only a rejected v1 tick is a failure; a rejected v2 tick is
+                // the silent fallback (covered by its own test).
+                engine.session.as_mut().unwrap().prompt_version = COHOST_PROMPT_VERSION_FALLBACK;
+            }
             engine.note_messages(&messages("session-1", 0..5));
             engine
                 .prepare_tick(generation, true, true, start + secs(1))
@@ -2244,8 +3249,10 @@ mod tests {
             tone: Some(CohostTone::Professional),
             notes: Some("n".repeat(COHOST_NOTES_MAX_CHARS + 25)),
             auto_highlight: Some(true),
+            rules: Some(vec!["  No spoilers ".to_string(), "   ".to_string()]),
         });
         assert_eq!(settings.notes.chars().count(), COHOST_NOTES_MAX_CHARS);
+        assert_eq!(settings.rules, vec!["No spoilers".to_string()]);
         database
             .save_setting(COHOST_SETTINGS_KEY, &settings)
             .unwrap();
@@ -2274,6 +3281,11 @@ mod tests {
         assert_eq!(json["nextTickAt"], serde_json::Value::Null);
         assert_eq!(json["messagesSeen"], 0);
         assert_eq!(json["questionsTotal"], 0);
+        // Wire-v2 fields are omitted while empty — never null (the renderer
+        // contract rejects null for optional fields).
+        for key in ["highlights", "alerts", "moodScores"] {
+            assert!(json.get(key).is_none(), "{key} must be absent while empty");
+        }
     }
 
     #[test]
@@ -2533,6 +3545,7 @@ mod tests {
                 tone: None,
                 notes: Some("hello".to_string()),
                 auto_highlight: None,
+                rules: None,
             },
         )
         .await
@@ -2600,6 +3613,7 @@ mod tests {
                 tone: None,
                 notes: None,
                 auto_highlight: None,
+                rules: None,
             },
         )
         .await
@@ -2912,6 +3926,7 @@ mod tests {
                 tone: None,
                 notes: None,
                 auto_highlight: None,
+                rules: None,
             },
         )
         .await

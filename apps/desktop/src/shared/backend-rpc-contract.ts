@@ -1525,12 +1525,15 @@ const oauthCallbackResultSchema = runtimeSchema<OAuthCallbackResult>(
 
 const cohostToneSchema = enumSchema(['friendly', 'short', 'professional'])
 const cohostNotesSchema = stringSchema({ maxLength: 4000 })
+// The backend normalises rules to these caps before it stores or sends them.
+const cohostRulesSchema = arraySchema(stringSchema({ maxLength: 120 }), { maxLength: 10 })
 const cohostSettingsSchema = objectSchema(
   {
     enabled: booleanSchema,
     tone: cohostToneSchema,
     notes: cohostNotesSchema,
-    autoHighlight: booleanSchema
+    autoHighlight: booleanSchema,
+    rules: cohostRulesSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettings>
@@ -1539,7 +1542,9 @@ const cohostSettingsPatchSchema = objectSchema(
     enabled: optionalSchema(booleanSchema),
     tone: optionalSchema(cohostToneSchema),
     notes: optionalSchema(cohostNotesSchema),
-    autoHighlight: optionalSchema(booleanSchema)
+    autoHighlight: optionalSchema(booleanSchema),
+    // The patch is what the streamer typed; the backend trims and caps it.
+    rules: optionalSchema(arraySchema(stringSchema({ maxLength: 2000 }), { maxLength: 100 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
@@ -1558,14 +1563,61 @@ const cohostQuestionSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// `unknown` is the backend's serde catch-all for a kind newer than this build;
+// it must validate, or one new server kind would drop the whole state event.
+const cohostFlagKindSchema = enumSchema([
+  'toxicity',
+  'spam',
+  'self-promo',
+  'personal-info',
+  'hate',
+  'harassment',
+  'threat',
+  'sexual',
+  'scam',
+  'self-harm',
+  'spoiler',
+  'impersonation',
+  'rule',
+  'unknown'
+])
+const unitInterval = numberSchema({ min: 0, max: 1 })
 const cohostFlagSchema = objectSchema(
   {
     messageId: boundedString,
-    kind: enumSchema(['toxicity', 'spam', 'self-promo', 'personal-info']),
+    kind: cohostFlagKindSchema,
     severity: enumSchema(['high', 'medium', 'low']),
     reason: stringSchema({ maxLength: 2000 }),
-    at: timestamp
+    at: timestamp,
+    // Wire v2 extras: absent when the server sent none — the backend never
+    // serializes them as null.
+    confidence: optionalSchema(unitInterval),
+    target: optionalSchema(enumSchema(['streamer', 'viewer', 'group'])),
+    action: optionalSchema(enumSchema(['hide', 'timeout', 'ban'])),
+    alsoKinds: optionalSchema(arraySchema(cohostFlagKindSchema, { maxLength: 16 })),
+    rule: optionalSchema(stringSchema({ maxLength: 120 }))
   },
+  { allowUnknown: false }
+)
+const cohostHighlightSchema = objectSchema(
+  {
+    messageId: boundedString,
+    score: unitInterval,
+    type: enumSchema(['question', 'joke', 'praise', 'insight', 'milestone', 'other'])
+  },
+  { allowUnknown: false }
+)
+const cohostAlertSchema = objectSchema(
+  {
+    kind: enumSchema(['audio', 'video', 'stream-health', 'game', 'other']),
+    viewers: nonNegativeInteger,
+    lastSeenAt: timestamp,
+    active: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const cohostMoodScoresSchema = objectSchema(
+  { hype: unitInterval, tension: unitInterval, confusion: unitInterval },
   { allowUnknown: false }
 )
 const cohostErrorDetailSchema = objectSchema(
@@ -1606,7 +1658,11 @@ const cohostStateSchema = objectSchema(
     pendingMessages: optionalSchema(nonNegativeInteger),
     nextTickAt: optionalSchema(nullableSchema(timestamp)),
     messagesSeen: optionalSchema(nonNegativeInteger),
-    questionsTotal: optionalSchema(nonNegativeInteger)
+    questionsTotal: optionalSchema(nonNegativeInteger),
+    // Tick wire v2: omitted by the backend while empty.
+    highlights: optionalSchema(arraySchema(cohostHighlightSchema, { maxLength: 5 })),
+    alerts: optionalSchema(arraySchema(cohostAlertSchema, { maxLength: 8 })),
+    moodScores: optionalSchema(cohostMoodScoresSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>

@@ -546,13 +546,17 @@ function assertGap(earlier, later, minimumMs, label) {
 }
 
 function assertRequestShape(body) {
-  const keys = Object.keys(body).sort()
+  // Wire v2 adds `rules`; everything else is the v1 key set.
+  const keys = Object.keys(body)
+    .filter((key) => key !== 'rules')
+    .sort()
+  expect(Array.isArray(body.rules), 'A v2 tick request must carry the rules array.')
   expect(
     JSON.stringify(keys) === JSON.stringify([...COHOST_TICK_REQUEST_KEYS]),
     `Tick request keys drifted from the contract: ${keys.join(',')}`
   )
   expect(
-    body.promptVersion === 1 &&
+    body.promptVersion === 2 &&
       body.consentToProcessChat === true &&
       typeof body.clientVersion === 'string' &&
       body.clientVersion.startsWith('videorc-desktop/'),

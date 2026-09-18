@@ -373,7 +373,8 @@ class StudioBackend {
     enabled: true,
     tone: 'friendly',
     notes: '',
-    autoHighlight: false
+    autoHighlight: false,
+    rules: []
   }
   cohostState: CohostState = {
     sessionId: null,

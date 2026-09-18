@@ -1,6 +1,12 @@
 import type {
+  CohostAlert,
+  CohostAlertKind,
   CohostErrorDetail,
   CohostFlag,
+  CohostFlagAction,
+  CohostFlagKind,
+  CohostFlagTarget,
+  CohostMoodScores,
   CohostPriority,
   CohostQuestion,
   CohostReason,
@@ -306,11 +312,178 @@ export function cohostAgeLabel(iso: string, nowMs: number = Date.now()): string 
   return `${Math.round(hours / 24)}d`
 }
 
-export const COHOST_FLAG_KIND_LABELS: Record<CohostFlag['kind'], string> = {
+export const COHOST_FLAG_KIND_LABELS: Record<CohostFlagKind, string> = {
   toxicity: 'Toxicity',
   spam: 'Spam',
   'self-promo': 'Self-promo',
-  'personal-info': 'Personal info'
+  'personal-info': 'Personal info',
+  hate: 'Hate',
+  harassment: 'Harassment',
+  threat: 'Threat',
+  sexual: 'Sexual',
+  scam: 'Scam',
+  'self-harm': 'Self-harm',
+  spoiler: 'Spoiler',
+  impersonation: 'Impersonation',
+  rule: 'Chat rule',
+  // The server's vocabulary grows faster than the desktop ships: a kind this
+  // build does not know is still a flag worth a look.
+  unknown: 'Flagged'
+}
+
+/** Never undefined, whatever string the wire carried. */
+export function cohostFlagKindLabel(kind: CohostFlagKind): string {
+  return COHOST_FLAG_KIND_LABELS[kind] ?? COHOST_FLAG_KIND_LABELS.unknown
+}
+
+const COHOST_FLAG_TARGET_LABELS: Record<CohostFlagTarget, string> = {
+  streamer: 'at you',
+  viewer: 'at a viewer',
+  group: 'at a group'
+}
+
+/** "Harassment · at you", "Chat rule · No spoilers", "Flagged". */
+export function cohostFlagChipLabel(flag: Pick<CohostFlag, 'kind' | 'target' | 'rule'>): string {
+  const parts = [cohostFlagKindLabel(flag.kind)]
+  if (flag.kind === 'rule' && flag.rule) parts.push(flag.rule)
+  const target = flag.target ? COHOST_FLAG_TARGET_LABELS[flag.target] : undefined
+  if (target) parts.push(target)
+  return parts.join(' · ')
+}
+
+const COHOST_FLAG_ACTION_LABELS: Record<CohostFlagAction, string> = {
+  hide: 'Suggests hide',
+  timeout: 'Suggests timeout',
+  ban: 'Suggests ban'
+}
+
+/** A suggestion LABEL only — the co-host never moderates, and neither does
+ * this chip. Null when the server suggested nothing. */
+export function cohostFlagActionLabel(flag: Pick<CohostFlag, 'action'>): string | null {
+  return flag.action ? (COHOST_FLAG_ACTION_LABELS[flag.action] ?? null) : null
+}
+
+/** Tooltip: the server's reason, plus anything else that also scored high. */
+export function cohostFlagDetail(flag: Pick<CohostFlag, 'reason' | 'alsoKinds'>): string {
+  const also = (flag.alsoKinds ?? []).map(cohostFlagKindLabel)
+  const lines = [flag.reason.trim(), also.length > 0 ? `Also: ${also.join(', ')}` : '']
+  return lines.filter(Boolean).join('\n')
+}
+
+// --- Flag sensitivity (renderer-only filter) --------------------------------
+
+/**
+ * How sure the co-host must be before a flag is SHOWN. A pure view filter over
+ * `confidence` — it never reaches the backend or the model, so moving it is
+ * instant and costs nothing. Flags without a confidence (wire v1) always show.
+ */
+export type CohostSensitivity = 'relaxed' | 'balanced' | 'strict'
+
+export const COHOST_SENSITIVITIES: readonly CohostSensitivity[] = ['relaxed', 'balanced', 'strict']
+export const DEFAULT_COHOST_SENSITIVITY: CohostSensitivity = 'balanced'
+export const COHOST_SENSITIVITY_STORAGE_KEY = 'videorc.cohostSensitivity'
+
+export const COHOST_SENSITIVITY_LABELS: Record<CohostSensitivity, string> = {
+  relaxed: 'Relaxed',
+  balanced: 'Balanced',
+  strict: 'Strict'
+}
+
+/** Minimum confidence shown per step. Strict shows everything the server sent. */
+export const COHOST_SENSITIVITY_MIN_CONFIDENCE: Record<CohostSensitivity, number> = {
+  relaxed: 0.85,
+  balanced: 0.6,
+  strict: 0
+}
+
+export function cohostSensitivityFromStorage(raw: string | null | undefined): CohostSensitivity {
+  return COHOST_SENSITIVITIES.find((step) => step === raw) ?? DEFAULT_COHOST_SENSITIVITY
+}
+
+export function cohostFlagVisible(
+  flag: Pick<CohostFlag, 'confidence'>,
+  sensitivity: CohostSensitivity
+): boolean {
+  if (flag.confidence === undefined) return true
+  return flag.confidence >= COHOST_SENSITIVITY_MIN_CONFIDENCE[sensitivity]
+}
+
+/** The state every surface renders: same object when nothing was filtered, so
+ * memoised derivations downstream keep their identity. */
+export function cohostStateForSensitivity<T extends CohostState | null>(
+  state: T,
+  sensitivity: CohostSensitivity
+): T {
+  if (!state) return state
+  const flags = state.flags.filter((flag) => cohostFlagVisible(flag, sensitivity))
+  return flags.length === state.flags.length ? state : { ...state, flags }
+}
+
+// --- Comment-row marks -------------------------------------------------------
+
+export interface CohostCommentMarks {
+  /** Flag per flagged message id. */
+  flags: ReadonlyMap<string, CohostFlag>
+  /** Message ids the co-host suggests showing on stream. */
+  suggested: ReadonlySet<string>
+}
+
+export const EMPTY_COHOST_COMMENT_MARKS: CohostCommentMarks = {
+  flags: new Map(),
+  suggested: new Set()
+}
+
+/** What the message list needs from `cohost.state`. A flagged message is never
+ * also suggested (the backend enforces it; this keeps the row honest anyway). */
+export function cohostCommentMarks(state: CohostState | null): CohostCommentMarks {
+  if (!state || state.status === 'off') return EMPTY_COHOST_COMMENT_MARKS
+  const highlights = state.highlights ?? []
+  if (state.flags.length === 0 && highlights.length === 0) return EMPTY_COHOST_COMMENT_MARKS
+  const flags = new Map(state.flags.map((flag) => [flag.messageId, flag]))
+  const suggested = new Set(
+    highlights.map((highlight) => highlight.messageId).filter((id) => !flags.has(id))
+  )
+  return { flags, suggested }
+}
+
+// --- Attention alerts ----------------------------------------------------------
+
+/** Mirrors the backend's expiry so a chip cannot outlive its reports when no
+ * further `cohost.state` event arrives. */
+export const COHOST_ALERT_EXPIRY_MS = 120_000
+
+const COHOST_ALERT_KIND_LABELS: Record<CohostAlertKind, string> = {
+  audio: 'no audio',
+  video: 'video problem',
+  'stream-health': 'stream is lagging',
+  game: 'game problem',
+  other: 'something is wrong'
+}
+
+/** Alerts worth a chip right now: corroborated by the backend and not expired. */
+export function activeCohostAlerts(
+  state: CohostState | null,
+  nowMs: number = Date.now()
+): CohostAlert[] {
+  if (!state || state.status === 'off') return []
+  return (state.alerts ?? []).filter((alert) => {
+    if (!alert.active) return false
+    const seen = Date.parse(alert.lastSeenAt)
+    return !Number.isFinite(seen) || nowMs - seen < COHOST_ALERT_EXPIRY_MS
+  })
+}
+
+/** "Chat says: no audio · 3 viewers" */
+export function cohostAlertLabel(alert: Pick<CohostAlert, 'kind' | 'viewers'>): string {
+  const what = COHOST_ALERT_KIND_LABELS[alert.kind] ?? COHOST_ALERT_KIND_LABELS.other
+  return `Chat says: ${what} · ${alert.viewers} ${alert.viewers === 1 ? 'viewer' : 'viewers'}`
+}
+
+/** "Hype 20% · Tension 70% · Confusion 10%" — the mood label's tooltip. */
+export function cohostMoodScoresLabel(scores: CohostMoodScores | null | undefined): string | null {
+  if (!scores) return null
+  const percent = (value: number): string => `${Math.round(value * 100)}%`
+  return `Hype ${percent(scores.hype)} · Tension ${percent(scores.tension)} · Confusion ${percent(scores.confusion)}`
 }
 
 export const COHOST_PRIORITY_LABELS: Record<CohostPriority, string> = {

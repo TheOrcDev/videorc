@@ -3808,8 +3808,31 @@ export type CohostReason =
   | 'gateway-error'
 export type CohostPriority = 'high' | 'normal' | 'low'
 export type CohostMood = 'hype' | 'calm' | 'tense' | 'mixed'
-export type CohostFlagKind = 'toxicity' | 'spam' | 'self-promo' | 'personal-info'
+/**
+ * Tick wire v2 vocabulary. It WILL grow: a kind this build does not know
+ * arrives as `unknown` (the backend's serde catch-all) and renders generically.
+ */
+export type CohostFlagKind =
+  | 'toxicity'
+  | 'spam'
+  | 'self-promo'
+  | 'personal-info'
+  | 'hate'
+  | 'harassment'
+  | 'threat'
+  | 'sexual'
+  | 'scam'
+  | 'self-harm'
+  | 'spoiler'
+  | 'impersonation'
+  | 'rule'
+  | 'unknown'
 export type CohostFlagSeverity = 'high' | 'medium' | 'low'
+export type CohostFlagTarget = 'streamer' | 'viewer' | 'group'
+/** A SUGGESTED moderation action. The desktop only labels it. */
+export type CohostFlagAction = 'hide' | 'timeout' | 'ban'
+export type CohostHighlightType = 'question' | 'joke' | 'praise' | 'insight' | 'milestone' | 'other'
+export type CohostAlertKind = 'audio' | 'video' | 'stream-health' | 'game' | 'other'
 
 /** Persisted per-profile co-host settings (`cohost.settings.get/set`). */
 export interface CohostSettings {
@@ -3819,6 +3842,8 @@ export interface CohostSettings {
   notes: string
   /** "Show questions on stream automatically" (default off). */
   autoHighlight: boolean
+  /** Plain-language chat rules the co-host flags against; ≤ 10 × 120 chars. */
+  rules: string[]
 }
 
 /** `cohost.settings.set`: absent fields are unchanged. */
@@ -3827,6 +3852,8 @@ export interface CohostSettingsPatch {
   tone?: CohostTone
   notes?: string
   autoHighlight?: boolean
+  /** Replaces the whole list; the backend trims, drops empties and caps it. */
+  rules?: string[]
 }
 
 /** One open viewer question grouped across platforms and askers. */
@@ -3850,6 +3877,38 @@ export interface CohostFlag {
   severity: CohostFlagSeverity
   reason: string
   at: string
+  /** Wire v2 extras: absent keys when the server did not send them, never null. */
+  /** 0..1; the Sensitivity control filters on it. Absent = always shown. */
+  confidence?: number
+  /** Who the message is aimed at; absent = nobody in particular. */
+  target?: CohostFlagTarget
+  action?: CohostFlagAction
+  alsoKinds?: CohostFlagKind[]
+  /** For `rule` flags: the text of the streamer rule the message broke. */
+  rule?: string
+}
+
+/** A comment the co-host suggests showing on stream. Never shown by itself. */
+export interface CohostHighlight {
+  messageId: string
+  score: number
+  type: CohostHighlightType
+}
+
+/** Viewers saying something is broken, aggregated per kind by the backend. */
+export interface CohostAlert {
+  kind: CohostAlertKind
+  /** Distinct authors who reported it in the last two minutes. */
+  viewers: number
+  lastSeenAt: string
+  /** At least two distinct authors reported it within 60 s of each other. */
+  active: boolean
+}
+
+export interface CohostMoodScores {
+  hype: number
+  tension: number
+  confusion: number
 }
 
 /**
@@ -3901,6 +3960,14 @@ export interface CohostState {
   messagesSeen?: number
   /** Distinct question ids surfaced this session — lifetime, not open count. */
   questionsTotal?: number
+  /**
+   * Tick wire v2. Omitted by the backend while empty (never null); absent
+   * means none.
+   */
+  /** Latest tick's suggested comments, best first, at most 5. */
+  highlights?: CohostHighlight[]
+  alerts?: CohostAlert[]
+  moodScores?: CohostMoodScores
 }
 
 /**

@@ -8,8 +8,20 @@ import type {
   CohostState
 } from '@/lib/backend'
 import {
+  activeCohostAlerts,
   applyCohostState,
   cohostAgeLabel,
+  cohostAlertLabel,
+  cohostCommentMarks,
+  cohostFlagActionLabel,
+  cohostFlagChipLabel,
+  cohostFlagDetail,
+  cohostFlagKindLabel,
+  cohostFlagVisible,
+  cohostMoodScoresLabel,
+  cohostSensitivityFromStorage,
+  cohostStateForSensitivity,
+  EMPTY_COHOST_COMMENT_MARKS,
   cohostAskersLabel,
   cohostChipView,
   cohostErrorDetailText,
@@ -636,5 +648,100 @@ describe('cohostNudgeVisible', () => {
     expect(cohostNudgeDismissedFromStorage('true')).toBe(true)
     expect(cohostNudgeDismissedFromStorage('0')).toBe(false)
     expect(cohostNudgeDismissedFromStorage(null)).toBe(false)
+  })
+})
+
+describe('tick wire v2 view', () => {
+  it('labels every flag kind, and renders an unknown one generically', () => {
+    expect(cohostFlagKindLabel('harassment')).toBe('Harassment')
+    expect(cohostFlagKindLabel('unknown')).toBe('Flagged')
+    // A string the type does not know (newer backend) still gets a label.
+    expect(cohostFlagKindLabel('brigading' as CohostFlag['kind'])).toBe('Flagged')
+  })
+
+  it('builds the chip from kind, target and the broken rule', () => {
+    expect(cohostFlagChipLabel(flag())).toBe('Spam')
+    expect(cohostFlagChipLabel(flag({ kind: 'harassment', target: 'streamer' }))).toBe(
+      'Harassment · at you'
+    )
+    expect(cohostFlagChipLabel(flag({ kind: 'rule', rule: 'No spoilers' }))).toBe(
+      'Chat rule · No spoilers'
+    )
+    // Rule text only belongs to a rule flag; a rule flag without it still reads.
+    expect(cohostFlagChipLabel(flag({ kind: 'spam', rule: 'No spoilers' }))).toBe('Spam')
+    expect(cohostFlagChipLabel(flag({ kind: 'rule' }))).toBe('Chat rule')
+  })
+
+  it('labels a suggested action without ever being one', () => {
+    expect(cohostFlagActionLabel(flag())).toBeNull()
+    expect(cohostFlagActionLabel(flag({ action: 'timeout' }))).toBe('Suggests timeout')
+    expect(cohostFlagDetail(flag({ alsoKinds: ['scam', 'unknown'] }))).toBe(
+      'Repeated link drop.\nAlso: Scam, Flagged'
+    )
+  })
+
+  it('filters shown flags by confidence per sensitivity step', () => {
+    expect(cohostSensitivityFromStorage(null)).toBe('balanced')
+    expect(cohostSensitivityFromStorage('nonsense')).toBe('balanced')
+    expect(cohostSensitivityFromStorage('strict')).toBe('strict')
+
+    // No confidence (wire v1) always shows.
+    expect(cohostFlagVisible(flag(), 'relaxed')).toBe(true)
+    expect(cohostFlagVisible(flag({ confidence: 0.7 }), 'relaxed')).toBe(false)
+    expect(cohostFlagVisible(flag({ confidence: 0.7 }), 'balanced')).toBe(true)
+    expect(cohostFlagVisible(flag({ confidence: 0.3 }), 'balanced')).toBe(false)
+    expect(cohostFlagVisible(flag({ confidence: 0.3 }), 'strict')).toBe(true)
+
+    const current = state({
+      flags: [flag({ messageId: 'a', confidence: 0.95 }), flag({ messageId: 'b', confidence: 0.4 })]
+    })
+    expect(cohostStateForSensitivity(current, 'balanced').flags.map((f) => f.messageId)).toEqual([
+      'a'
+    ])
+    // Nothing filtered → same object, so memoised derivations keep identity.
+    expect(cohostStateForSensitivity(current, 'strict')).toBe(current)
+    expect(cohostStateForSensitivity(null, 'strict')).toBeNull()
+  })
+
+  it('marks flagged and suggested comment rows, never both', () => {
+    expect(cohostCommentMarks(null)).toBe(EMPTY_COHOST_COMMENT_MARKS)
+    expect(cohostCommentMarks(state())).toBe(EMPTY_COHOST_COMMENT_MARKS)
+    const marks = cohostCommentMarks(
+      state({
+        flags: [flag({ messageId: 'm-flagged' })],
+        highlights: [
+          { messageId: 'm-good', score: 0.8, type: 'joke' },
+          { messageId: 'm-flagged', score: 0.9, type: 'other' }
+        ]
+      })
+    )
+    expect(marks.flags.get('m-flagged')?.kind).toBe('spam')
+    expect([...marks.suggested]).toEqual(['m-good'])
+  })
+
+  it('shows only corroborated, unexpired alerts', () => {
+    const seen = '2026-08-22T12:00:00.000Z'
+    const nowMs = Date.parse(seen) + 30_000
+    const current = state({
+      alerts: [
+        { kind: 'audio', viewers: 3, lastSeenAt: seen, active: true },
+        { kind: 'video', viewers: 1, lastSeenAt: seen, active: false }
+      ]
+    })
+    expect(activeCohostAlerts(current, nowMs).map((alert) => alert.kind)).toEqual(['audio'])
+    expect(activeCohostAlerts(current, nowMs + 120_000)).toEqual([])
+    expect(activeCohostAlerts(state(), nowMs)).toEqual([])
+    expect(activeCohostAlerts({ ...current, status: 'off' }, nowMs)).toEqual([])
+    expect(cohostAlertLabel({ kind: 'audio', viewers: 3 })).toBe('Chat says: no audio · 3 viewers')
+    expect(cohostAlertLabel({ kind: 'other', viewers: 1 })).toBe(
+      'Chat says: something is wrong · 1 viewer'
+    )
+  })
+
+  it('formats mood scores for the mood tooltip', () => {
+    expect(cohostMoodScoresLabel(undefined)).toBeNull()
+    expect(cohostMoodScoresLabel({ hype: 0.2, tension: 0.7, confusion: 0.1 })).toBe(
+      'Hype 20% · Tension 70% · Confusion 10%'
+    )
   })
 })

@@ -71,6 +71,7 @@ interface HighRiskContractFixtures {
     offState: CohostState
     errorState: CohostState
     timeoutState: CohostState
+    stateV2: CohostState
     legacyState: CohostState
   }
 }
@@ -209,6 +210,24 @@ describe('shared high-risk protocol fixture', () => {
       messagesSeen: 84,
       questionsTotal: 5
     })
+    // Tick wire v2: flag extras, an `unknown` flag kind, suggested highlights,
+    // aggregated alerts and mood scores validate; a null where the backend
+    // would omit the key does not (serde-null trap).
+    expect(validateBackendEventPayload('cohost.state', fixtures.cohost.stateV2)).toStrictEqual(
+      fixtures.cohost.stateV2
+    )
+    expect(fixtures.cohost.stateV2.flags.map((flag) => flag.kind)).toContain('unknown')
+    for (const key of ['highlights', 'alerts', 'moodScores'] as const) {
+      expect(() =>
+        validateBackendEventPayload('cohost.state', { ...fixtures.cohost.stateV2, [key]: null })
+      ).toThrow('cohost.state')
+    }
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...fixtures.cohost.stateV2,
+        flags: [{ ...fixtures.cohost.stateV2.flags[0], target: null }]
+      })
+    ).toThrow('cohost.state')
     // `detail` carries the failed tick's envelope verbatim, or a desktop code
     // with no HTTP status; a pre-`detail` payload validates unchanged.
     for (const shape of ['errorState', 'timeoutState', 'legacyState'] as const) {

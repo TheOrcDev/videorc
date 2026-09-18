@@ -3738,7 +3738,7 @@ pub enum HealthLevel {
     Error,
 }
 
-// --- Live Co-host RPC params (wire contract v1; mirrored in shared/backend.ts) ---
+// --- Live Co-host RPC params (mirrored in shared/backend.ts) ---
 
 /// `cohost.start`. Consent is renderer-owned state (the cloud-AI consent
 /// toggle), so the renderer passes it explicitly on every start; the backend
@@ -3781,6 +3781,9 @@ pub struct CohostSettingsPatch {
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_highlight: Option<bool>,
+    /// Replaces the whole list; the engine normalises it (trim, <= 10 x 120).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rules: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -5028,6 +5031,17 @@ mod tests {
             None
         );
         assert_eq!(serde_json::to_value(timed_out).unwrap(), timeout_wire);
+
+        // Wire v2: flag extras, suggested highlights, alerts and mood scores
+        // round-trip; absent optionals stay absent (never null), and an
+        // unknown flag kind rides as "unknown".
+        let v2_wire = shared_high_risk_contract_fixture_value("/cohost/stateV2");
+        let v2: crate::cohost::CohostState = serde_json::from_value(v2_wire.clone()).unwrap();
+        assert_eq!(v2.flags[1].rule.as_deref(), Some("No spoilers"));
+        assert_eq!(v2.flags[2].kind, crate::cohost::CohostFlagKind::Unknown);
+        assert_eq!(v2.flags[2].confidence, None);
+        assert!(v2.alerts[0].active);
+        assert_eq!(serde_json::to_value(v2).unwrap(), v2_wire);
 
         // A payload from before `detail` and the presence fields existed still
         // parses (serde defaults).
