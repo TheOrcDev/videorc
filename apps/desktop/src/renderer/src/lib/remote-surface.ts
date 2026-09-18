@@ -80,6 +80,15 @@ export interface RemoteIntentContext {
   activateTakeover: (assetId: string) => Promise<boolean>
   clearTakeover: () => Promise<boolean>
   openWindow: (name: string) => Promise<boolean>
+  /** Phone remote: EXPLICIT show (never the button's toggle) — a double tap
+   * must not flash the card off. Resolves the user-facing refusal reason. */
+  showCommentHighlight: (messageId: string) => Promise<RemoteIntentOutcome>
+  clearCommentHighlight: () => Promise<RemoteIntentOutcome>
+}
+
+export interface RemoteIntentOutcome {
+  ok: boolean
+  message?: string
 }
 
 /** Coalesce same-commit bursts; deck latency is invisible below ~50ms. */
@@ -291,6 +300,16 @@ export async function executeRemoteIntent(
           return void (await ack(false, `Unknown window "${windowName}".`))
         }
         return void (await ack(true))
+      }
+      case 'commentHighlight': {
+        const messageId = intent.messageId as string | undefined
+        if (!messageId) return void (await ack(false, 'commentHighlight needs a messageId.'))
+        const outcome = await context.showCommentHighlight(messageId)
+        return void (await ack(outcome.ok, outcome.message))
+      }
+      case 'commentHighlightClear': {
+        const outcome = await context.clearCommentHighlight()
+        return void (await ack(outcome.ok, outcome.message))
       }
       default:
         return void (await ack(false, `Unsupported intent "${intent.kind}".`))

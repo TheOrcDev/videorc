@@ -12,6 +12,9 @@ chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = "2"
 futures-util = "0.3"
 hmac = "0.12"
+# Phone remote: enumerate LAN interfaces for the pairing QR (the UDP-connect
+# trick returns the VPN address when a tunnel is up).
+if-addrs = "0.15"
 # png for screenshots/assets, webp for the BUNDLED background library
 # (background-assets/bundled/*.webp), jpeg for user-imported backgrounds — the
 # importer accepts PNG/JPG/WebP, so the backend must decode all three (pure-Rust

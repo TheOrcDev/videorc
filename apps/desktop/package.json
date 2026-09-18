@@ -32,7 +32,8 @@
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "sonner": "^2.0.7",
-    "tailwind-merge": "^3.6.0"
+    "tailwind-merge": "^3.6.0",
+    "uqr": "^0.1.3"
   },
   "devDependencies": {
     "@tailwindcss/vite": "^4.3.0",

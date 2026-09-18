@@ -1075,6 +1075,10 @@ pub struct AppState {
     /// Bumped on remote token regenerate/disable: live remote sockets watch
     /// it and close, so a rotated token cuts existing clients immediately.
     pub remote_generation: tokio::sync::watch::Sender<u64>,
+    /// Phone remote (LAN, protocol 2): paired devices, pairing ticket, the
+    /// listener's shutdown handle, and the client count that gates chat
+    /// projection in `emit_event`.
+    pub remote_lan: crate::remote_lan::RemoteLanSlot,
     pub resource_authority: ResourceAuthority,
     pub oauth: Arc<OAuthSessions>,
     /// Pending 3-legged OAuth 1.0a authorizations for X Live (keyed by
@@ -1207,6 +1211,9 @@ impl AppState {
                 crate::remote_control::RemoteControlRuntime::load_from_secrets(),
             )),
             remote_generation: tokio::sync::watch::channel(0).0,
+            remote_lan: crate::remote_lan::new_remote_lan_slot(
+                crate::remote_lan::LanRuntime::load_from_secrets(),
+            ),
             resource_authority: ResourceAuthority::default(),
             oauth: Arc::new(OAuthSessions::new_with_secret_store(
                 oauth_store_path,
@@ -1272,7 +1279,14 @@ impl AppState {
                     .expect("serializable WebSocket transport diagnostics"),
             );
         }
+        // Phone remote: chat and highlight reach LAN sockets only as a
+        // whitelisted projection, and only while a phone is connected.
+        let projected =
+            crate::remote_lan::project_event(&self.remote_lan, &event.event, &event.payload);
         let _ = self.events.send(event);
+        if let Some((name, payload)) = projected {
+            let _ = self.events.send(ServerEvent::new(name, payload));
+        }
     }
 
     /// Spawn process-owned work independently of the caller's Tokio runtime.

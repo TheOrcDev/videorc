@@ -141,7 +141,10 @@ fn renderer_smoke_method(method: &str) -> bool {
 }
 
 fn remote_allowed_method(method: &str) -> bool {
-    matches!(method, "remote.describe" | "remote.intent")
+    matches!(
+        method,
+        "remote.describe" | "remote.intent" | "remote.chat.snapshot"
+    )
 }
 
 /// Constant-time check of a supplied token against the (optional, runtime-
@@ -392,7 +395,7 @@ mod remote_role_tests {
 
     #[test]
     fn remote_role_is_a_hard_allowlist() {
-        for allowed in ["remote.describe", "remote.intent"] {
+        for allowed in ["remote.describe", "remote.intent", "remote.chat.snapshot"] {
             assert!(authorize_backend_method(BackendRole::Remote, allowed, false).is_ok());
         }
         // The public repo assumption: hostile local software probes the port.
@@ -407,6 +410,13 @@ mod remote_role_tests {
             "preview.surface.status",
             "remote.control.enable",
             "remote.control.regenerate",
+            "remote.lan.enable",
+            "remote.lan.status",
+            "remote.lan.pairing.begin",
+            "remote.lan.devices.revoke",
+            "liveChat.snapshot",
+            "liveChat.send",
+            "comments.highlight.set",
             "remote.surface.publish",
             "remote.intent.ack",
             "resource.capability.mint",

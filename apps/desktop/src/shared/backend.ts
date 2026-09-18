@@ -3389,6 +3389,36 @@ export interface RemoteControlStatus {
   discoveryPath: string | null
 }
 
+/** Phone remote (LAN, protocol 2 — docs/remote-control.md). Carries no key
+ * material: device keys never leave the backend. */
+export interface RemoteLanDevice {
+  id: string
+  name: string
+  createdAt: string
+  lastSeenAt?: string
+  connected: boolean
+}
+
+export interface RemoteLanStatus {
+  enabled: boolean
+  /** Bound port; absent while off or when the bind failed. */
+  port?: number
+  /** Private IPv4 addresses a phone could reach this computer on. */
+  addresses: string[]
+  devices: RemoteLanDevice[]
+  bindError?: string
+  pairingExpiresAt?: string
+}
+
+/** The one place the single-use pairing secret exists outside the backend:
+ * rendered as a QR code, never logged or persisted. */
+export interface RemoteLanPairing {
+  url: string
+  address: string
+  addresses: string[]
+  expiresAt: string
+}
+
 export interface GlobalShortcutsConfig {
   recordToggle?: string
   streamToggle?: string

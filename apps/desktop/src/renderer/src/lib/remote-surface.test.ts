@@ -22,6 +22,8 @@ function remoteIntentContext(overrides: Partial<RemoteIntentContext> = {}) {
     activateTakeover: vi.fn(async () => true),
     clearTakeover: vi.fn(async () => true),
     openWindow: vi.fn(async () => true),
+    showCommentHighlight: vi.fn(async () => ({ ok: true })),
+    clearCommentHighlight: vi.fn(async () => ({ ok: true })),
     ...overrides
   }
   return { context, requests }
@@ -239,6 +241,61 @@ describe('executeRemoteIntent', () => {
     expect(requests.at(-1)).toEqual({
       method: 'remote.intent.ack',
       params: { intentId: 'intent-4', ok: false, message: 'start rejected' }
+    })
+  })
+
+  it('shows a comment by id and relays the refusal reason verbatim', async () => {
+    const { context, requests } = remoteIntentContext({
+      showCommentHighlight: vi.fn(async (messageId: string) =>
+        messageId === 'youtube:1'
+          ? { ok: true }
+          : { ok: false, message: 'That comment is no longer available.' }
+      )
+    })
+
+    await executeRemoteIntent(
+      { intentId: 'intent-h1', intent: { kind: 'commentHighlight', messageId: 'youtube:1' } },
+      context
+    )
+    await executeRemoteIntent(
+      { intentId: 'intent-h2', intent: { kind: 'commentHighlight', messageId: 'youtube:gone' } },
+      context
+    )
+    await executeRemoteIntent(
+      { intentId: 'intent-h3', intent: { kind: 'commentHighlight' } },
+      context
+    )
+
+    expect(context.showCommentHighlight).toHaveBeenCalledTimes(2)
+    expect(requests).toEqual([
+      { method: 'remote.intent.ack', params: { intentId: 'intent-h1', ok: true } },
+      {
+        method: 'remote.intent.ack',
+        params: {
+          intentId: 'intent-h2',
+          ok: false,
+          message: 'That comment is no longer available.'
+        }
+      },
+      {
+        method: 'remote.intent.ack',
+        params: { intentId: 'intent-h3', ok: false, message: 'commentHighlight needs a messageId.' }
+      }
+    ])
+  })
+
+  it('clears the on-stream comment', async () => {
+    const { context, requests } = remoteIntentContext()
+
+    await executeRemoteIntent(
+      { intentId: 'intent-h4', intent: { kind: 'commentHighlightClear' } },
+      context
+    )
+
+    expect(context.clearCommentHighlight).toHaveBeenCalledOnce()
+    expect(requests.at(-1)).toEqual({
+      method: 'remote.intent.ack',
+      params: { intentId: 'intent-h4', ok: true }
     })
   })
 })

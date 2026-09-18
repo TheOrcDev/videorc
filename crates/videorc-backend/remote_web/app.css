@@ -1,0 +1,448 @@
+/* Videorc Remote — the desktop's black-glass language (videorc-design) in
+   plain CSS: monochrome chrome, hairlines, one LED-red accent that only ever
+   means record / live / on stream. Light mode is the porcelain twin. */
+
+:root {
+  --bg: #0d0d0f;
+  --card: #141417;
+  --text: #f4f4f5;
+  --text-2: #a1a1aa;
+  --text-3: #71717a;
+  --hairline: rgba(255, 255, 255, 0.1);
+  --hover: rgba(255, 255, 255, 0.08);
+  --pressed: rgba(255, 255, 255, 0.12);
+  --red: oklch(0.62 0.24 27);
+  --green: oklch(0.7 0.15 150);
+  --radius-panel: 18px;
+  --radius-row: 10px;
+  --radius-chip: 6px;
+  color-scheme: dark;
+}
+
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #fafafb;
+    --card: #ffffff;
+    --text: #1c1c1e;
+    --text-2: #6e6e73;
+    --text-3: #98989d;
+    --hairline: rgba(0, 0, 0, 0.08);
+    --hover: rgba(0, 0, 0, 0.06);
+    --pressed: rgba(0, 0, 0, 0.1);
+    --red: oklch(0.55 0.24 27);
+    --green: oklch(0.55 0.14 150);
+    color-scheme: light;
+  }
+}
+
+* {
+  box-sizing: border-box;
+  -webkit-tap-highlight-color: transparent;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font:
+    400 15px/1.35 -apple-system,
+    BlinkMacSystemFont,
+    'SF Pro Text',
+    'Segoe UI',
+    Roboto,
+    system-ui,
+    sans-serif;
+  -webkit-font-smoothing: antialiased;
+  overscroll-behavior: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+[hidden] {
+  display: none !important;
+}
+
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
+  text-align: inherit;
+  touch-action: manipulation;
+}
+
+button:focus-visible {
+  outline: 2px solid rgba(255, 255, 255, 0.28);
+  outline-offset: 2px;
+}
+
+.spring {
+  flex: 1;
+}
+
+/* Header ------------------------------------------------------------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: calc(env(safe-area-inset-top) + 10px) calc(env(safe-area-inset-right) + 16px) 10px
+    calc(env(safe-area-inset-left) + 16px);
+  border-bottom: 1px solid var(--hairline);
+}
+
+.bar h1 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.live {
+  padding: 2px 6px;
+  border-radius: var(--radius-chip);
+  background: var(--red);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.pill::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--text-3);
+}
+
+.pill[data-status='connected']::before {
+  background: var(--green);
+}
+
+.pill[data-status='unpaired']::before {
+  background: var(--red);
+}
+
+/* Views -------------------------------------------------------------- */
+
+main {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+
+.view,
+.gate {
+  position: absolute;
+  inset: 0;
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 8px calc(env(safe-area-inset-right) + 8px) 16px calc(env(safe-area-inset-left) + 8px);
+}
+
+.gate {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 8px;
+  padding: 32px;
+  text-align: center;
+}
+
+.gate h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 500;
+}
+
+.gate p,
+.empty {
+  margin: 0;
+  color: var(--text-3);
+  font-size: 13px;
+}
+
+.empty {
+  padding: 48px 24px;
+  text-align: center;
+}
+
+.label {
+  margin: 16px 8px 8px;
+  color: var(--text-3);
+  font-size: 12px;
+  font-weight: 400;
+}
+
+/* Comments ----------------------------------------------------------- */
+
+.comments {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.comment {
+  display: grid;
+  grid-template-columns: 24px 1fr;
+  gap: 2px 12px;
+  width: 100%;
+  min-height: 44px;
+  padding: 8px;
+  border-radius: var(--radius-row);
+  user-select: none;
+}
+
+.comment:active {
+  background: var(--pressed);
+}
+
+.comment[data-live='true'] {
+  background: var(--hover);
+  box-shadow: inset 2px 0 0 var(--red);
+}
+
+.comment[data-pending='true'] {
+  opacity: 0.6;
+}
+
+.comment[data-deleted='true'] {
+  opacity: 0.4;
+  text-decoration: line-through;
+  pointer-events: none;
+}
+
+.glyph {
+  grid-row: span 2;
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--radius-chip);
+  background: var(--text-3);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+/* Platform colour is information (which chat this came from) — the only
+   saturated colour on the page besides red. */
+.glyph[data-platform='youtube'] {
+  background: #e62117;
+}
+.glyph[data-platform='twitch'] {
+  background: #9146ff;
+}
+.glyph[data-platform='x'] {
+  background: #000;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.glyph[data-platform='tiktok'] {
+  background: #111;
+  box-shadow: inset 0 0 0 1px var(--hairline);
+}
+.glyph[data-platform='instagram'] {
+  background: #d6249f;
+}
+
+.meta {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.author {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.role,
+.amount,
+.onstream {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-chip);
+  color: var(--text-2);
+  font-size: 11px;
+}
+
+.amount {
+  color: var(--text);
+  font-weight: 500;
+}
+
+.onstream {
+  border-color: transparent;
+  background: var(--red);
+  color: #fff;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.text {
+  grid-column: 2;
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.comment[data-kind='system'] .text,
+.comment[data-kind='moderation'] .text {
+  color: var(--text-2);
+}
+
+.jump {
+  position: sticky;
+  bottom: 8px;
+  display: block;
+  margin: 0 auto;
+  padding: 8px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: 999px;
+  background: var(--card);
+  box-shadow: 0 8px 30px rgba(0, 0, 0, 0.45);
+  font-size: 13px;
+}
+
+/* Deck --------------------------------------------------------------- */
+
+.keys {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 8px;
+}
+
+@media (min-width: 560px) {
+  .keys {
+    grid-template-columns: repeat(4, 1fr);
+  }
+}
+
+.key {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: 2px;
+  min-height: 84px;
+  padding: 12px;
+  overflow: hidden;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-row);
+  background: var(--card);
+  transition: background 100ms ease-out;
+}
+
+.key:active {
+  background: var(--pressed);
+}
+
+.key:disabled {
+  opacity: 0.4;
+}
+
+.key .name {
+  font-size: 14px;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+
+.key .hint {
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.key[data-on='true'] {
+  border-color: rgba(255, 255, 255, 0.28);
+  background: var(--hover);
+}
+
+.key[data-accent='red'][data-on='true'] {
+  border-color: var(--red);
+  box-shadow: inset 0 0 0 1px var(--red);
+}
+
+.key[data-accent='red'][data-on='true'] .hint {
+  color: var(--red);
+}
+
+/* Press-and-hold fill for stop: a pocket tap must never end a stream. */
+.key .hold {
+  position: absolute;
+  inset: auto 0 0 0;
+  height: 3px;
+  background: var(--red);
+  transform: scaleX(0);
+  transform-origin: left;
+}
+
+.key[data-holding='true'] .hold {
+  transform: scaleX(1);
+  transition: transform 700ms linear;
+}
+
+/* Snackbar + tabs ---------------------------------------------------- */
+
+.snack {
+  position: fixed;
+  right: 16px;
+  bottom: calc(env(safe-area-inset-bottom) + 68px);
+  left: 16px;
+  padding: 10px 14px;
+  border: 1px solid var(--hairline);
+  border-radius: var(--radius-row);
+  background: var(--card);
+  box-shadow: 0 16px 70px rgba(0, 0, 0, 0.55);
+  font-size: 13px;
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  padding: 6px calc(env(safe-area-inset-right) + 8px) calc(env(safe-area-inset-bottom) + 6px)
+    calc(env(safe-area-inset-left) + 8px);
+  border-top: 1px solid var(--hairline);
+}
+
+.tabs button {
+  height: 44px;
+  border-radius: var(--radius-row);
+  color: var(--text-2);
+  font-size: 14px;
+  text-align: center;
+}
+
+.tabs button[aria-pressed='true'] {
+  background: var(--hover);
+  color: var(--text);
+  font-weight: 500;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+  }
+}
