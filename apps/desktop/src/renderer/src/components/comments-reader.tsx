@@ -1,5 +1,5 @@
 import { ChatIcon, PinIcon, PreviewIcon, SendIcon } from '@/components/icons'
-import { useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
 import { CohostNudge } from '@/components/cohost-nudge'
@@ -34,10 +34,13 @@ import type {
   ViewerSample
 } from '@/lib/backend'
 import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
+import { useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { cohostGroupedDeltaFlash } from '@/lib/cohost-presence'
 import {
+  cohostCommentMarks,
   cohostNudgeVisible,
   cohostQuestionToast,
+  cohostStateForSensitivity,
   draftForQuestion,
   COHOST_QUESTION_TOAST_ID
 } from '@/lib/cohost-view'
@@ -160,6 +163,14 @@ export function CommentsReader({
     text: string
     questionId: string
   } | null>(null)
+  // Sensitivity is a view filter over flag confidence: the pane and the rows
+  // read the same filtered state, so they cannot disagree about a flag.
+  const cohostSensitivity = useCohostSensitivity()
+  const shownCohostState = useMemo(
+    () => cohostStateForSensitivity(cohostState, cohostSensitivity),
+    [cohostSensitivity, cohostState]
+  )
+  const cohostMarks = useMemo(() => cohostCommentMarks(shownCohostState), [shownCohostState])
   const cohostVisible =
     cohostState !== null &&
     cohostGate !== undefined &&
@@ -380,7 +391,7 @@ export function CommentsReader({
             gate={cohostGate!}
             highlightedMessageId={highlightedId}
             starting={cohostStarting}
-            state={cohostState}
+            state={shownCohostState}
             onAnswered={(question) => onCohostAnswered?.(question)}
             onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
             onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
@@ -408,6 +419,8 @@ export function CommentsReader({
             {messages.map((message) => (
               <CommentRow
                 key={message.id}
+                cohostFlag={cohostVisible ? cohostMarks.flags.get(message.id) : undefined}
+                cohostSuggested={cohostVisible && cohostMarks.suggested.has(message.id)}
                 density="comfortable"
                 highlight={commentHighlightPresentationForMessage({
                   messageId: message.id,

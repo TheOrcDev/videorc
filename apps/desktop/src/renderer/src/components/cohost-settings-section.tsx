@@ -1,18 +1,34 @@
-import { AlertIcon, CohostIcon } from '@/components/icons'
+import { AlertIcon, CloseIcon, CohostIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupButton,
+  InputGroupInput
+} from '@/components/ui/input-group'
+import { Kbd } from '@/components/ui/kbd'
 import { Switch } from '@/components/ui/switch'
 import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { CohostTone } from '@/lib/backend'
+import {
+  COHOST_SENSITIVITIES,
+  COHOST_SENSITIVITY_LABELS,
+  type CohostSensitivity
+} from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
 
 export const COHOST_NOTES_MAX_CHARS = 4000
+/** Mirrors the backend caps (`COHOST_RULES_MAX` / `COHOST_RULE_MAX_CHARS`). */
+export const COHOST_RULES_MAX = 10
+export const COHOST_RULE_MAX_CHARS = 120
 
 const TONE_LABELS: Record<CohostTone, string> = {
   friendly: 'Friendly',
@@ -30,6 +46,8 @@ export function CohostSettingsSection(): ReactElement | null {
   const [notesDraft, setNotesDraft] = useState('')
   const [notesError, setNotesError] = useState<string | null>(null)
   const savedNotesRef = useRef<string | null>(null)
+  const [ruleDraft, setRuleDraft] = useState('')
+  const sensitivity = useCohostSensitivity()
 
   // Follow the backend value until the streamer starts typing; after that the
   // draft is the truth until it is saved.
@@ -53,6 +71,15 @@ export function CohostSettingsSection(): ReactElement | null {
     void patchCohostSettings(patch).catch((error: unknown) =>
       setNotesError(error instanceof Error ? error.message : 'Could not save co-host settings.')
     )
+  }
+
+  const rules = cohostSettings.rules ?? []
+  const rulesFull = rules.length >= COHOST_RULES_MAX
+  const addRule = (): void => {
+    const rule = ruleDraft.trim()
+    if (!rule || rulesFull) return
+    setRuleDraft('')
+    save({ rules: [...rules, rule] })
   }
 
   return (
@@ -161,6 +188,107 @@ export function CohostSettingsSection(): ReactElement | null {
             ) : null}
             {notesError ? <span className="text-xs text-destructive">{notesError}</span> : null}
           </div>
+        </Field>
+
+        <Field>
+          <FieldLabel htmlFor="cohost-rule-new">Chat rules</FieldLabel>
+          <FieldDescription>
+            Plain-language rules the co-host flags for you, like “no spoilers” or “English only”.
+          </FieldDescription>
+          {rules.length > 0 ? (
+            <ul aria-label="Chat rules" className="flex flex-col gap-1.5">
+              {rules.map((rule, index) => (
+                // Keyed on the saved text: a save (or a backend trim) remounts
+                // the row with the stored value instead of syncing a draft.
+                <li key={`${index}:${rule}`}>
+                  <InputGroup>
+                    <InputGroupInput
+                      aria-label={`Chat rule ${index + 1}`}
+                      defaultValue={rule}
+                      disabled={locked}
+                      maxLength={COHOST_RULE_MAX_CHARS}
+                      onBlur={(event) => {
+                        const next = event.target.value.trim()
+                        if (next === rule) return
+                        save({
+                          rules: next
+                            ? rules.map((current, at) => (at === index ? next : current))
+                            : rules.filter((_, at) => at !== index)
+                        })
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') event.currentTarget.blur()
+                      }}
+                    />
+                    <InputGroupAddon align="inline-end">
+                      <InputGroupButton
+                        aria-label={`Remove chat rule ${index + 1}`}
+                        disabled={locked}
+                        size="icon-xs"
+                        onClick={() => save({ rules: rules.filter((_, at) => at !== index) })}
+                      >
+                        <CloseIcon />
+                      </InputGroupButton>
+                    </InputGroupAddon>
+                  </InputGroup>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+          <InputGroup>
+            <InputGroupInput
+              disabled={locked || rulesFull}
+              id="cohost-rule-new"
+              maxLength={COHOST_RULE_MAX_CHARS}
+              placeholder={rulesFull ? 'Remove a rule to add another' : 'Add a rule…'}
+              value={ruleDraft}
+              onChange={(event) => setRuleDraft(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') {
+                  event.preventDefault()
+                  addRule()
+                }
+              }}
+            />
+            <InputGroupAddon align="inline-end">
+              <InputGroupButton
+                disabled={locked || rulesFull || ruleDraft.trim().length === 0}
+                size="xs"
+                onClick={addRule}
+              >
+                Add
+                <Kbd>↵</Kbd>
+              </InputGroupButton>
+            </InputGroupAddon>
+          </InputGroup>
+          <span className="text-xs tabular-nums text-subtle">
+            {rules.length}/{COHOST_RULES_MAX}
+          </span>
+        </Field>
+
+        <Field>
+          <FieldLabel htmlFor="cohost-sensitivity">Flag sensitivity</FieldLabel>
+          <FieldDescription>
+            How sure the co-host must be before a flag shows up. Relaxed shows only the clear cases,
+            Strict shows everything it noticed.
+          </FieldDescription>
+          <ToggleGroup
+            className="w-fit"
+            disabled={locked}
+            id="cohost-sensitivity"
+            size="sm"
+            type="single"
+            value={sensitivity}
+            onValueChange={(next) => {
+              if (next) setCohostSensitivity(next as CohostSensitivity)
+            }}
+          >
+            {COHOST_SENSITIVITIES.map((step) => (
+              <ToggleGroupItem key={step} className="px-3 text-xs" value={step}>
+                {COHOST_SENSITIVITY_LABELS[step]}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </Field>
 
         <Field>

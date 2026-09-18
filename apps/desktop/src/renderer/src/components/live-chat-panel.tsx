@@ -17,6 +17,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import type {
   CohostFlag,
   CohostQuestion,
@@ -26,6 +27,7 @@ import type {
   LiveChatSnapshot,
   StreamPlatform
 } from '@/lib/backend'
+import { cohostCommentMarks, cohostStateForSensitivity } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import {
   LIVE_CHAT_PLATFORMS,
@@ -145,6 +147,15 @@ export function LiveChatPanel({
     viewport?.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
   }
 
+  // Sensitivity is a view filter over flag confidence: the pane and the rows
+  // read the same filtered state, so they cannot disagree about a flag.
+  const cohostSensitivity = useCohostSensitivity()
+  const shownCohostState = useMemo(
+    () => cohostStateForSensitivity(cohostState, cohostSensitivity),
+    [cohostSensitivity, cohostState]
+  )
+  const cohostMarks = useMemo(() => cohostCommentMarks(shownCohostState), [shownCohostState])
+
   const hasMessages = messages.length > 0
   const emptyMessage =
     activePlatforms.length > 0
@@ -162,7 +173,7 @@ export function LiveChatPanel({
           enabled={cohostEnabled}
           gate={cohostGate}
           highlightedMessageId={highlightedId}
-          state={cohostState}
+          state={shownCohostState}
           onAnswered={(question) => onCohostAnswered?.(question)}
           onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
           onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
@@ -220,6 +231,8 @@ export function LiveChatPanel({
               {visibleMessages(messages, MAX_RENDERED_LIVE_CHAT_MESSAGES).map((message) => (
                 <CommentRow
                   key={message.id}
+                  cohostFlag={cohostMarks.flags.get(message.id)}
+                  cohostSuggested={cohostMarks.suggested.has(message.id)}
                   highlight={commentHighlightPresentationForMessage({
                     messageId: message.id,
                     highlightedId,
