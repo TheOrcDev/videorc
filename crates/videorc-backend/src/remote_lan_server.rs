@@ -657,12 +657,16 @@ mod tests {
 
     fn test_state() -> AppState {
         let (events, _) = tokio::sync::broadcast::channel(64);
-        AppState::new(
+        let state = AppState::new(
             "renderer-token".to_string(),
             1234,
             events,
             Database::open_in_memory_for_tests(),
-        )
+        );
+        // The test secret store is one process-global cache: a device paired
+        // (and persisted) by a parallel test would otherwise be loaded here.
+        *state.remote_lan.runtime.lock().unwrap() = crate::remote_lan::LanRuntime::default();
+        state
     }
 
     async fn serve(state: &AppState) -> SocketAddr {
