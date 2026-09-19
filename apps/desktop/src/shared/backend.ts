@@ -959,10 +959,9 @@ export interface XEndParams {
 export interface XLiveChatStartParams {
   sessionId: string
   broadcastId: string
-  mediaKey: string
+  /** Unused since X chat moved to the X Activity API relay; still accepted. */
+  mediaKey?: string
   targetId?: string
-  statusBaseUrl?: string
-  accessUrl?: string
 }
 
 export interface XNativeLiveCapability {

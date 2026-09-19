@@ -48,6 +48,8 @@ describe('avatarHostAllowed', () => {
     expect(avatarHostAllowed('https://yt3.ggpht.com/abc/photo=s64')).toBe(true)
     expect(avatarHostAllowed('https://lh3.googleusercontent.com/a/user=s96')).toBe(true)
     expect(avatarHostAllowed('https://static-cdn.jtvnw.net/jtv_user_pictures/x.png')).toBe(true)
+    expect(avatarHostAllowed('https://pbs.twimg.com/profile_images/1/a_normal.jpg')).toBe(true)
+    expect(avatarHostAllowed('https://pbs.twimg.com.evil.example/a.jpg')).toBe(false)
     expect(avatarHostAllowed('http://yt3.ggpht.com/abc')).toBe(false)
   })
 

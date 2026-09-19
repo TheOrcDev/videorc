@@ -976,7 +976,7 @@ fn classify_caption_failure(status: u16, code: String, message: String) -> Capti
     }
 }
 
-async fn read_error_code_and_message(response: reqwest::Response) -> (String, String) {
+pub(crate) async fn read_error_code_and_message(response: reqwest::Response) -> (String, String) {
     let text = response.text().await.unwrap_or_default();
     parse_error_envelope(&text)
 }

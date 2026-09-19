@@ -9357,7 +9357,14 @@ async fn handle_text_message_with_role(
                             if params.platform == StreamPlatform::X {
                                 // Disconnecting X revokes the local live authorization
                                 // too — the OAuth 1.0a token pair must not outlive the
-                                // account it belongs to.
+                                // account it belongs to. The chat relay subscription
+                                // is dropped first, while the credentials still exist.
+                                if let Ok(Some(credentials)) = x_live::x_livestream_credentials() {
+                                    tokio::spawn(x_chat::forget_x_chat_relay(
+                                        state.clone(),
+                                        credentials,
+                                    ));
+                                }
                                 for secret_ref in [
                                     x_live::X_OAUTH1_ACCESS_TOKEN_SECRET_REF,
                                     x_live::X_OAUTH1_TOKEN_SECRET_SECRET_REF,

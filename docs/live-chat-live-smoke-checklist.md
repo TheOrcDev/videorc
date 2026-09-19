@@ -52,16 +52,26 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
 - [ ] Force a reconnect (toggle network); confirm the provider shows `reconnecting` then
       recovers, and `liveChat.diagnostics` reconnect count increments.
 
-## X native comments (receive-only)
+## X native comments
 
-- [ ] Use an account approved for Videorc's private X Livestream API and start a native X
-      broadcast so `broadcastId` and `mediaKey` are bound to the active stream target.
-- [ ] Confirm X transitions from waiting/connecting to readable, then post from a separate
-      viewer account and verify the comment appears in chronological order in the same feed.
-- [ ] Interrupt the X chat socket and confirm bounded reconnect returns to readable without
-      duplicating replayed messages.
-- [ ] Confirm X is visibly `receive-only` in the composer destination results. Do not claim or
-      test native X chat sending until X supplies a documented, approved write contract.
+X delivers broadcast chat only through the X Activity API `broadcast.chat` event, pushed to the
+videorc.com webhook; the backend long-polls that relay (`crates/videorc-backend/src/x_chat.rs`,
+web side documented in `videorcweb/docs/x-chat.md`). Requires a signed-in Videorc account and
+"Authorize X Live".
+
+- [ ] Sign in to Videorc, authorize X Live, and start a native X broadcast so `broadcastId` is
+      bound to the active stream target.
+- [ ] Confirm X transitions from connecting to `X live chat connected.`, then post from a separate
+      viewer account and verify the comment (name, avatar) appears within ~2 s in the same feed.
+- [ ] Send from Videorc and confirm the message appears on X once and is not duplicated in the feed
+      when X echoes it back.
+- [ ] Toggle the network for ~20 s; confirm the provider shows `reconnecting`, recovers on its own,
+      and no comment is duplicated or lost. A sustained outage records one `x-live-chat-failed`
+      health event and keeps retrying.
+- [ ] Sign out of Videorc and go live: X must show a failed state that says to sign in, never a
+      silently empty feed. Manual-RTMP X targets have no chat by design.
+- [ ] Disconnect X and confirm the `broadcast.chat` subscription is gone
+      (`GET /2/activity/subscriptions`).
 
 ## Multistream + partial release
 

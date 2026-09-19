@@ -16,6 +16,8 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
   'googleusercontent.com',
   // Twitch profile images
   'static-cdn.jtvnw.net',
+  // X profile images (broadcast.chat authors)
+  'pbs.twimg.com',
   // Videorc account avatars uploaded on videorc.com (Vercel Blob storage).
   // Any store subdomain, matching the web's own isAccountAvatarBlobUrl check;
   // Google account photos are covered by googleusercontent.com above.
