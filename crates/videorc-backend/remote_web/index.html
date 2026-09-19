@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no"
+    />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#0d0d0f" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Videorc" />
+    <meta name="referrer" content="no-referrer" />
+    <title>Videorc Remote</title>
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="stylesheet" href="/app.css" />
+  </head>
+  <body>
+    <header class="bar">
+      <h1>Videorc</h1>
+      <span id="live" class="live" hidden>LIVE</span>
+      <span class="spring"></span>
+      <span id="status" class="pill" data-status="connecting">Connecting…</span>
+    </header>
+
+    <main>
+      <section id="view-gate" class="gate" hidden>
+        <h2 id="gate-title">Pair this phone</h2>
+        <p id="gate-text">
+          In Videorc on your computer, open Settings → Phone remote → Pair a phone, then scan the
+          code with this phone's camera.
+        </p>
+      </section>
+
+      <section id="view-comments" class="view" hidden>
+        <div id="comments" class="comments" role="list"></div>
+        <p id="comments-empty" class="empty">Comments appear here when you are live.</p>
+        <button id="jump" class="jump" type="button" hidden></button>
+      </section>
+
+      <section id="view-deck" class="view" hidden>
+        <div id="deck-main" class="keys"></div>
+        <h2 class="label" id="scenes-label" hidden>Scenes</h2>
+        <div id="deck-scenes" class="keys"></div>
+        <h2 class="label" id="takeovers-label" hidden>Takeovers</h2>
+        <div id="deck-takeovers" class="keys"></div>
+      </section>
+    </main>
+
+    <div id="snack" class="snack" role="status" hidden></div>
+
+    <nav id="tabs" class="tabs" hidden>
+      <button type="button" data-view="comments" aria-pressed="true">Comments</button>
+      <button type="button" data-view="deck" aria-pressed="false">Deck</button>
+    </nav>
+
+    <noscript>Videorc Remote needs JavaScript.</noscript>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

@@ -56,6 +56,8 @@ mod recording;
 mod recording_finalization;
 mod recording_timeline;
 mod remote_control;
+mod remote_lan;
+mod remote_lan_server;
 mod repair;
 mod repair_service;
 mod resource_authority;
@@ -423,6 +425,7 @@ async fn run_backend() -> Result<()> {
             format!("Remote-control discovery file could not be written: {error:#}"),
         );
     }
+    crate::remote_lan_server::start_if_enabled(&state).await;
     // Restore the signed-in account's verified entitlement at boot so a
     // premium user's cloud AI, co-host, and streaming-quality limits survive
     // an app restart without touching the AI tab first (fail-closed: no
@@ -552,6 +555,7 @@ async fn cleanup_process_owners_after_finalization(state: AppState) {
     if let Some(path) = crate::remote_control::discovery_path(state.database.path()) {
         crate::remote_control::remove_discovery(&path);
     }
+    crate::remote_lan_server::stop(&state);
     captions::shutdown_caption_runtime(&state).await;
     state.noise_cleanup.interrupt_all_for_shutdown();
     if !compositor::shutdown_compositor(&state).await {
@@ -4543,6 +4547,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "remote.control.enable"
         | "remote.control.disable"
         | "remote.control.regenerate"
+        | "remote.lan.enable"
+        | "remote.lan.disable"
+        | "remote.lan.pairing.begin"
+        | "remote.lan.pairing.cancel"
+        | "remote.lan.devices.revoke"
+        | "remote.lan.devices.rename"
         | "remote.surface.publish"
         | "remote.intent.ack"
         | "remote.intent"
@@ -4661,6 +4671,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "capture.recovery.status"
         | "preview.surface.status"
         | "remote.control.status"
+        | "remote.lan.status"
+        | "remote.chat.snapshot"
         | "remote.describe"
         | "compositor.status"
         | "preview.camera.status"
@@ -6448,6 +6460,12 @@ fn disable_remote_control(state: &AppState) -> anyhow::Result<RemoteControlStatu
         crate::remote_control::persist_enabled(false, None)?;
     }
     sync_remote_discovery_file(state)?;
+    // The master switch closes the network port too: "remote control off"
+    // must never leave a LAN listener behind.
+    if let Err(error) = crate::remote_lan_server::disable(state) {
+        tracing::warn!("Could not switch Phone remote off with remote control: {error:#}");
+        crate::remote_lan_server::stop(state);
+    }
     // Cut live remote clients immediately.
     state
         .remote_generation
@@ -6615,6 +6633,7 @@ async fn websocket_session(socket: WebSocket, state: AppState, role: BackendRole
         production_websocket_command_handler(role),
         role,
         role == BackendRole::Renderer,
+        None,
     )
     .await;
 }
@@ -6631,6 +6650,7 @@ async fn websocket_session_with_handler(
         command_handler,
         BackendRole::Admin,
         false,
+        None,
     )
     .await;
 }
@@ -6641,6 +6661,13 @@ async fn websocket_session_with_handler_role_and_redaction(
     command_handler: WebSocketCommandHandler,
     role: BackendRole,
     redact_renderer_paths: bool,
+    // Phone remote (LAN) sockets arrive here already authenticated by
+    // `remote_lan_server`; they carry a signed-frame verifier and a cut
+    // channel. `None` for every loopback socket.
+    lan: Option<(
+        crate::remote_lan::LanSession,
+        tokio::sync::broadcast::Receiver<crate::remote_lan::LanCut>,
+    )>,
 ) {
     let (sender, mut receiver) = socket.split();
     let events = state.events.subscribe();
@@ -6668,10 +6695,20 @@ async fn websocket_session_with_handler_role_and_redaction(
     let event_filter = std::sync::Arc::new(std::sync::Mutex::new(if role == BackendRole::Remote {
         ConnectionEventFilter {
             excluded: std::collections::HashSet::new(),
-            included: Some(std::collections::HashSet::from([
-                "remote.state".to_string(),
-                "remote.ack".to_string(),
-            ])),
+            included: Some(if lan.is_some() {
+                // Phones additionally get the whitelisted chat/highlight
+                // projection. Loopback (protocol 1) clients keep the
+                // original two events.
+                crate::remote_lan::LAN_EVENTS
+                    .iter()
+                    .map(|event| (*event).to_string())
+                    .collect()
+            } else {
+                std::collections::HashSet::from([
+                    "remote.state".to_string(),
+                    "remote.ack".to_string(),
+                ])
+            }),
         }
     } else {
         ConnectionEventFilter::default()
@@ -6691,7 +6728,9 @@ async fn websocket_session_with_handler_role_and_redaction(
                 .emit_event("remote.control.status", remote_control_status(&self.0));
         }
     }
-    let _remote_client_guard = (role == BackendRole::Remote).then(|| {
+    // Phones are counted by `remote_lan_server::LanClientGuard`; this count is
+    // the loopback "N clients connected" line in Settings.
+    let _remote_client_guard = (role == BackendRole::Remote && lan.is_none()).then(|| {
         if let Ok(mut runtime) = state.remote_control.lock() {
             runtime.connected_clients = runtime.connected_clients.saturating_add(1);
         }
@@ -6710,11 +6749,15 @@ async fn websocket_session_with_handler_role_and_redaction(
         slow_pressure.clone(),
     ));
 
+    // backend.ready carries the RENDERER credential. A remote socket must
+    // never receive it: that would let any paired deck or phone reconnect as
+    // the renderer role and walk straight past the remote allowlist.
     let ready_event = ServerEvent::new(
         "backend.ready",
         backend_connection(state.port, state.token.clone()),
     );
-    if let Ok(text) = serde_json::to_string(&ready_event)
+    if role != BackendRole::Remote
+        && let Ok(text) = serde_json::to_string(&ready_event)
         && !send_tracked_reliable_websocket_item(
             &outgoing_tx,
             &reliable_metrics,
@@ -6757,6 +6800,10 @@ async fn websocket_session_with_handler_role_and_redaction(
     // just future ones: watch the generation and close when it moves.
     let mut remote_generation_rx = state.remote_generation.subscribe();
     let watch_remote_generation = role == BackendRole::Remote;
+    let (mut lan_session, mut lan_cuts) = match lan {
+        Some((session, cuts)) => (Some(session), Some(cuts)),
+        None => (None, None),
+    };
 
     loop {
         let incoming = tokio::select! {
@@ -6777,6 +6824,27 @@ async fn websocket_session_with_handler_role_and_redaction(
                 }
                 break;
             }
+            cut = async {
+                match lan_cuts.as_mut() {
+                    Some(cuts) => cuts.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                let applies = match (&cut, lan_session.as_ref()) {
+                    (Ok(crate::remote_lan::LanCut::All), _) => true,
+                    (Ok(crate::remote_lan::LanCut::Device(id)), Some(session)) => {
+                        *id == session.device_id
+                    }
+                    // Lagged/closed: we may have missed our own revoke.
+                    (Err(_), _) => true,
+                    _ => false,
+                };
+                if applies {
+                    tracing::info!("Phone remote disabled or device revoked; closing phone client.");
+                    break;
+                }
+                continue;
+            }
         };
         let Some(incoming) = incoming else {
             break;
@@ -6784,6 +6852,19 @@ async fn websocket_session_with_handler_role_and_redaction(
 
         match incoming {
             Ok(Message::Text(text)) => {
+                // Phone frames are signed envelopes. Anything that does not
+                // verify — unsigned, replayed, tampered — ends the socket: a
+                // legitimate client never produces one.
+                let text = match lan_session.as_mut() {
+                    Some(session) => match session.verifier.open(text.as_str()) {
+                        Ok(body) => axum::extract::ws::Utf8Bytes::from(body),
+                        Err(error) => {
+                            tracing::warn!("Phone remote frame rejected ({error:?}); closing.");
+                            break;
+                        }
+                    },
+                    None => text,
+                };
                 // Connection-local control messages never reach the shared
                 // dispatcher (the exclusion set is per socket).
                 if role == BackendRole::Remote
@@ -8165,6 +8246,84 @@ async fn handle_text_message_with_role(
             Ok(status) => ServerResponse::ok(command.id, status),
             Err(error) => ServerResponse::error(command.id, "remote-control", error.to_string()),
         },
+        "remote.lan.status" => {
+            ServerResponse::ok(command.id, crate::remote_lan_server::status(state))
+        }
+        "remote.lan.enable" => {
+            // Phones ride the remote-control intent bus: the master switch
+            // comes on with them.
+            let enabled = match enable_remote_control(state) {
+                Ok(_) => crate::remote_lan_server::enable(state).await,
+                Err(error) => Err(error),
+            };
+            match enabled {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, "remote-lan", error.to_string()),
+            }
+        }
+        "remote.lan.disable" => match crate::remote_lan_server::disable(state) {
+            Ok(status) => ServerResponse::ok(command.id, status),
+            Err(error) => ServerResponse::error(command.id, "remote-lan", error.to_string()),
+        },
+        "remote.lan.pairing.begin" => {
+            match serde_json::from_value::<crate::remote_lan_server::BeginPairingParams>(
+                if command.params.is_null() {
+                    serde_json::json!({})
+                } else {
+                    command.params
+                },
+            ) {
+                Ok(params) => match crate::remote_lan_server::begin_pairing(state, params) {
+                    Ok(pairing) => ServerResponse::ok(command.id, pairing),
+                    Err(message) => ServerResponse::error(command.id, "remote-lan", message),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "remote.lan.pairing.cancel" => {
+            ServerResponse::ok(command.id, crate::remote_lan_server::cancel_pairing(state))
+        }
+        "remote.lan.devices.revoke" | "remote.lan.devices.rename" => {
+            match serde_json::from_value::<crate::remote_lan_server::DeviceParams>(command.params) {
+                Ok(params) => {
+                    let result = if command.method == "remote.lan.devices.revoke" {
+                        crate::remote_lan_server::revoke_device(state, params)
+                    } else {
+                        crate::remote_lan_server::rename_device(state, params)
+                    };
+                    match result {
+                        Ok(status) => ServerResponse::ok(command.id, status),
+                        Err(error) => {
+                            ServerResponse::error(command.id, "remote-lan", error.to_string())
+                        }
+                    }
+                }
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "remote.chat.snapshot" => {
+            // Same whitelist projection as the live events — a remote socket
+            // never sees a raw LiveChatMessage.
+            let snapshot = serde_json::to_value(live_chat::current_status(state).await)
+                .unwrap_or(serde_json::Value::Null);
+            let highlight = serde_json::to_value(state.comment_highlight.lock().await.clone())
+                .unwrap_or(serde_json::Value::Null);
+            ServerResponse::ok(
+                command.id,
+                serde_json::json!({
+                    "chatSeq": state
+                        .remote_lan
+                        .chat_seq
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    "messages": crate::remote_lan::project_chat_messages(&snapshot),
+                    "highlight": crate::remote_lan::project_highlight(&highlight),
+                }),
+            )
+        }
         "remote.surface.publish" => {
             // Renderer-published catalog + state projection. The state event
             // is the ONLY payload remote sockets receive (their event filter

@@ -230,6 +230,8 @@ import type {
   OAuthProviderCredentialStatus,
   RecordingStatus,
   RemoteControlStatus,
+  RemoteLanPairing,
+  RemoteLanStatus,
   RuntimeInfo,
   RtmpPreset,
   Scene,
@@ -1030,6 +1032,16 @@ export type StudioContextValue = {
     enable: () => Promise<RemoteControlStatus | null>
     disable: () => Promise<RemoteControlStatus | null>
     regenerate: () => Promise<RemoteControlStatus | null>
+    /** Phone remote (LAN): status is pushed (remote.lan.status), never polled. */
+    phone: {
+      status: RemoteLanStatus | null
+      enable: () => Promise<RemoteLanStatus | null>
+      disable: () => Promise<RemoteLanStatus | null>
+      beginPairing: (address?: string) => Promise<RemoteLanPairing | null>
+      cancelPairing: () => Promise<RemoteLanStatus | null>
+      revokeDevice: (id: string) => Promise<RemoteLanStatus | null>
+      renameDevice: (id: string, name: string) => Promise<RemoteLanStatus | null>
+    }
   }
   // settings + capture config
   settings: SettingsState
@@ -1797,6 +1809,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   // Remote control (issue #143): the backend pushes remote.control.status on
   // every change (enable/disable/regenerate/deck connect), so nothing polls.
   const [remoteControlStatus, setRemoteControlStatus] = useState<RemoteControlStatus | null>(null)
+  const [remoteLanStatus, setRemoteLanStatus] = useState<RemoteLanStatus | null>(null)
   // Keep the remote-control bridges out of the eager Studio bundle. They are
   // loaded only when their lifecycle starts, while refs preserve their
   // imperative change-detection, debounce, and retry behavior.
@@ -2303,7 +2316,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     async (
       message: LiveChatMessage,
       expectedSessionId: string | undefined,
-      intent: number
+      intent: number,
+      // 'show' (phone remote) always sets — re-showing the live card restarts
+      // its lifetime instead of toggling it off.
+      mode: 'toggle' | 'show' = 'toggle'
     ): Promise<CommentHighlightState | null> => {
       if (!client) throw new Error('Backend socket is not connected.')
       const sessionId = expectedSessionId ?? liveChatSnapshot.sessionId
@@ -2313,6 +2329,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setCommentHighlightApplyingId(message.id)
       try {
         if (
+          mode === 'toggle' &&
           commentHighlightState.phase === 'live' &&
           commentHighlightState.messageId === message.id
         ) {
@@ -5269,6 +5286,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           .request<RemoteControlStatus>('remote.control.status')
           .then(setRemoteControlStatus)
           .catch(reportError)
+        void nextClient
+          .request<RemoteLanStatus>('remote.lan.status')
+          .then(setRemoteLanStatus)
+          .catch(reportError)
       }),
       // Remote-control intents (Stream Deck et al) arrive as events relayed
       // by the backend. Preserve arrival order across asynchronous handlers:
@@ -5285,6 +5306,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('remote.control.status', (payload) => {
         setRemoteControlStatus(payload as RemoteControlStatus)
+      }),
+      nextClient.on('remote.lan.status', (payload) => {
+        setRemoteLanStatus(payload as RemoteLanStatus)
+      }),
+      nextClient.on('remote.lan.paired', (payload) => {
+        // A new device on the control surface is never silent: an unexpected
+        // pairing must be visible to the person at the desk.
+        const deviceName = (payload as { deviceName?: string } | null)?.deviceName ?? 'A phone'
+        toast.success(`${deviceName} paired with Videorc`)
       }),
       // OS-global shortcut triggers ride the same lifecycle as the backend
       // subscriptions: they can only act when a backend exists anyway.
@@ -12341,6 +12371,41 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         else if (name === 'preview') await openPreviewWindow()
         else return false
         return true
+      },
+      showCommentHighlight: async (messageId) => {
+        const message = liveChatSnapshot.messages.find((candidate) => candidate.id === messageId)
+        if (!message || message.isDeleted) {
+          return { ok: false, message: 'That comment is no longer available.' }
+        }
+        const highlightIntent = ++commentHighlightIntentRef.current
+        setCommentHighlightFailure(null)
+        try {
+          const state = await applyCommentHighlight(message, undefined, highlightIntent, 'show')
+          if (!state) return { ok: false, message: 'A newer comment replaced this one.' }
+          publishCommentHighlightState(state)
+          return state.phase === 'live'
+            ? { ok: true }
+            : { ok: false, message: state.reason ?? 'The comment did not reach the stream.' }
+        } catch (error) {
+          // The backend's eligibility reason ("not live", ...) verbatim.
+          return {
+            ok: false,
+            message: error instanceof Error ? error.message : 'Highlight failed.'
+          }
+        }
+      },
+      clearCommentHighlight: async () => {
+        ++commentHighlightIntentRef.current
+        try {
+          const state = await client.request<CommentHighlightState>('comments.highlight.clear')
+          publishCommentHighlightState(state)
+          return { ok: true }
+        } catch (error) {
+          return {
+            ok: false,
+            message: error instanceof Error ? error.message : 'Could not clear the comment.'
+          }
+        }
       }
     }
     const intentKind = (payload as { kind?: unknown } | null)?.kind
@@ -12416,14 +12481,59 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [client, reportError]
   )
+  const remoteLanRequest = useCallback(
+    async (method: string, params?: unknown): Promise<RemoteLanStatus | null> => {
+      if (!client) return null
+      try {
+        const status = await client.request<RemoteLanStatus>(method, params)
+        setRemoteLanStatus(status)
+        return status
+      } catch (error) {
+        reportError(error)
+        return null
+      }
+    },
+    [client, reportError]
+  )
+  const beginRemoteLanPairing = useCallback(
+    async (address?: string): Promise<RemoteLanPairing | null> => {
+      if (!client) return null
+      try {
+        return await client.request<RemoteLanPairing>(
+          'remote.lan.pairing.begin',
+          address ? { address } : {}
+        )
+      } catch (error) {
+        reportError(error)
+        return null
+      }
+    },
+    [client, reportError]
+  )
   const remoteControl = useMemo(
     () => ({
       status: remoteControlStatus,
       enable: () => remoteControlRequest('remote.control.enable'),
       disable: () => remoteControlRequest('remote.control.disable'),
-      regenerate: () => remoteControlRequest('remote.control.regenerate')
+      regenerate: () => remoteControlRequest('remote.control.regenerate'),
+      phone: {
+        status: remoteLanStatus,
+        enable: () => remoteLanRequest('remote.lan.enable'),
+        disable: () => remoteLanRequest('remote.lan.disable'),
+        beginPairing: beginRemoteLanPairing,
+        cancelPairing: () => remoteLanRequest('remote.lan.pairing.cancel'),
+        revokeDevice: (id: string) => remoteLanRequest('remote.lan.devices.revoke', { id }),
+        renameDevice: (id: string, name: string) =>
+          remoteLanRequest('remote.lan.devices.rename', { id, name })
+      }
     }),
-    [remoteControlRequest, remoteControlStatus]
+    [
+      beginRemoteLanPairing,
+      remoteControlRequest,
+      remoteControlStatus,
+      remoteLanRequest,
+      remoteLanStatus
+    ]
   )
 
   // OS-global shortcuts (RC0): registration follows Settings via the

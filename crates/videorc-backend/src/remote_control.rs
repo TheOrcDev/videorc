@@ -76,7 +76,18 @@ pub enum RemoteIntent {
     WindowFront {
         window: RemoteWindow,
     },
+    /// Put a chat message on stream. EXPLICIT show — idempotent, never a
+    /// toggle: a double tap on a phone must not flash the card off again.
+    #[serde(rename_all = "camelCase")]
+    CommentHighlight {
+        message_id: String,
+    },
+    CommentHighlightClear,
 }
+
+/// Live-chat message ids are `{platform}:{providerMessageId}`; anything far
+/// longer is not an id we minted.
+pub const REMOTE_MESSAGE_ID_MAX_BYTES: usize = 512;
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -97,6 +108,7 @@ impl RemoteIntent {
             Self::SceneApply { .. } => "scene",
             Self::TakeoverShow { .. } | Self::TakeoverHide => "takeover",
             Self::WindowFront { .. } => "window",
+            Self::CommentHighlight { .. } | Self::CommentHighlightClear => "highlight",
         }
     }
 
@@ -113,6 +125,12 @@ impl RemoteIntent {
             }
             Self::TakeoverShow { asset_id } if asset_id.trim().is_empty() => {
                 Err("takeoverShow needs a non-empty assetId.".to_string())
+            }
+            Self::CommentHighlight { message_id }
+                if message_id.trim().is_empty()
+                    || message_id.len() > REMOTE_MESSAGE_ID_MAX_BYTES =>
+            {
+                Err("commentHighlight needs a valid messageId.".to_string())
             }
             _ => Ok(()),
         }
@@ -269,6 +287,44 @@ mod tests {
             }
         );
         assert!(serde_json::from_str::<RemoteIntent>(r#"{"kind":"fsRead"}"#).is_err());
+        let intent: RemoteIntent =
+            serde_json::from_str(r#"{"kind":"commentHighlight","messageId":"youtube:abc"}"#)
+                .unwrap();
+        assert_eq!(
+            intent,
+            RemoteIntent::CommentHighlight {
+                message_id: "youtube:abc".to_string()
+            }
+        );
+        assert_eq!(
+            serde_json::to_value(&intent).unwrap(),
+            serde_json::json!({ "kind": "commentHighlight", "messageId": "youtube:abc" })
+        );
+        assert_eq!(
+            serde_json::from_str::<RemoteIntent>(r#"{"kind":"commentHighlightClear"}"#).unwrap(),
+            RemoteIntent::CommentHighlightClear
+        );
+    }
+
+    #[test]
+    fn comment_highlight_needs_a_bounded_message_id_and_shares_one_bucket() {
+        for message_id in ["", "   ", &"x".repeat(REMOTE_MESSAGE_ID_MAX_BYTES + 1)] {
+            assert!(
+                RemoteIntent::CommentHighlight {
+                    message_id: message_id.to_string()
+                }
+                .validate()
+                .is_err()
+            );
+        }
+        let show = RemoteIntent::CommentHighlight {
+            message_id: "twitch:1".to_string(),
+        };
+        assert!(show.validate().is_ok());
+        assert_eq!(
+            show.debounce_kind(),
+            RemoteIntent::CommentHighlightClear.debounce_kind()
+        );
     }
 
     #[test]

@@ -27,6 +27,7 @@ import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { ConfigGrid } from '@/components/page'
 import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { PanelSection } from '@/components/panel-section'
+import { PhoneRemoteSection } from '@/components/phone-remote-section'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -540,6 +541,8 @@ export function SettingsTab({
               <p className="text-xs text-muted-foreground">{REMOTE_CONTROL_OFF_HINT}</p>
             )}
           </PanelSection>
+
+          <PhoneRemoteSection />
         </div>
 
         <div className="flex flex-col gap-5">
