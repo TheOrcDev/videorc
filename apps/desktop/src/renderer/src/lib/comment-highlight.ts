@@ -1,9 +1,11 @@
 import type { CommentHighlightState, LiveChatMessage, StreamPlatform } from '@/lib/backend'
 
-// Click-to-highlight (Comments upgrade S3): puts one comment ON the stream as
-// a glass card — avatar, username, text — via the compositor's dedicated
-// highlight slot (top; captions own the bottom). Pure layout + lifecycle live
-// here (unit-tested); the canvas painter is a thin shell.
+// Click-to-highlight (Comments upgrade S3): puts one message ON the stream as
+// a glass card via the compositor's dedicated highlight slot, anchored to the
+// corner the streamer picked. The card mirrors a Chat window row: an identity
+// row (small avatar with the username beside it) and the message underneath at
+// full card width. Pure layout + lifecycle live here (unit-tested); the canvas
+// painter is a thin shell.
 
 export const HIGHLIGHT_AUTO_DISMISS_MS = 10_000
 export const HIGHLIGHT_MAX_TEXT_LINES = 3
@@ -38,24 +40,37 @@ export interface HighlightMetrics {
   textFontPx: number
   lineHeightPx: number
   paddingPx: number
+  /** Identity-row avatar: sized to the name line, never the whole card. */
   avatarPx: number
+  /** Space between the avatar and the username on the identity row. */
+  identityGapPx: number
+  /** Space between the identity row and the first message line. */
+  rowGapPx: number
   radiusPx: number
+  /** Message lines span the full content width of the card. */
   maxTextWidthPx: number
+  /** The username shares its row with the avatar, so it gets less. */
+  maxNameWidthPx: number
 }
 
 export function highlightMetrics(canvasWidth: number): HighlightMetrics {
   const textFontPx = Math.max(20, Math.round(canvasWidth / 48))
   const paddingPx = Math.round(textFontPx * 0.8)
-  const avatarPx = Math.round(textFontPx * 2.2)
+  const avatarPx = Math.round(textFontPx * 1.5)
+  const identityGapPx = Math.round(textFontPx * 0.5)
+  const maxTextWidthPx = Math.floor(canvasWidth * MAX_CARD_WIDTH_FRACTION) - paddingPx * 2
   return {
     nameFontPx: Math.round(textFontPx * 0.95),
     textFontPx,
     lineHeightPx: Math.round(textFontPx * 1.3),
     paddingPx,
     avatarPx,
+    identityGapPx,
+    rowGapPx: Math.round(textFontPx * 0.45),
     // Panel-tier corners (videorc-design).
     radiusPx: Math.round(textFontPx * 0.6),
-    maxTextWidthPx: Math.floor(canvasWidth * MAX_CARD_WIDTH_FRACTION) - paddingPx * 3 - avatarPx
+    maxTextWidthPx,
+    maxNameWidthPx: maxTextWidthPx - avatarPx - identityGapPx
   }
 }
 
@@ -133,6 +148,22 @@ export function commentHighlightIdentity(authorName: string, platform?: StreamPl
   return platformLabel ? `${platformLabel} · ${author}` : author
 }
 
+/** Canvas `maxWidth` squeezes glyphs instead of cutting them, so an over-long
+ * username is ellipsized here, keeping its head (the platform label). */
+function fitHighlightName(
+  name: string,
+  fontPx: number,
+  maxWidthPx: number,
+  measure: HighlightTextMeasurer
+): string {
+  if (measure(name, fontPx) <= maxWidthPx) return name
+  const chars = Array.from(name)
+  while (chars.length > 1 && measure(`${chars.join('')}…`, fontPx) > maxWidthPx) {
+    chars.pop()
+  }
+  return `${chars.join('').trimEnd()}…`
+}
+
 export function layoutCommentHighlight(params: {
   authorName: string
   text: string
@@ -145,23 +176,28 @@ export function layoutCommentHighlight(params: {
     return null
   }
   const textLines = wrapHighlightText(params.text, metrics, params.measure)
-  const name = commentHighlightIdentity(params.authorName, params.platform)
-  const nameWidth = Math.min(params.measure(name, metrics.nameFontPx), metrics.maxTextWidthPx)
+  const name = fitHighlightName(
+    commentHighlightIdentity(params.authorName, params.platform),
+    metrics.nameFontPx,
+    metrics.maxNameWidthPx,
+    params.measure
+  )
+  const nameWidth = Math.min(params.measure(name, metrics.nameFontPx), metrics.maxNameWidthPx)
+  const identityRowWidth = metrics.avatarPx + metrics.identityGapPx + nameWidth
   const widestLine = textLines.reduce(
     (widest, line) => Math.max(widest, params.measure(line, metrics.textFontPx)),
     0
   )
-  const contentWidth = Math.min(Math.max(nameWidth, widestLine), metrics.maxTextWidthPx)
-  const contentHeight =
-    metrics.nameFontPx +
-    Math.round(metrics.textFontPx * 0.35) +
-    textLines.length * metrics.lineHeightPx
+  const contentWidth = Math.min(Math.max(identityRowWidth, widestLine), metrics.maxTextWidthPx)
+  // Identity row, then the message. A message-less card is just the identity row.
+  const messageHeight =
+    textLines.length > 0 ? metrics.rowGapPx + textLines.length * metrics.lineHeightPx : 0
   return {
     metrics,
     name,
     textLines,
-    cardWidthPx: Math.ceil(metrics.paddingPx * 3 + metrics.avatarPx + contentWidth),
-    cardHeightPx: Math.ceil(metrics.paddingPx * 2 + Math.max(metrics.avatarPx, contentHeight))
+    cardWidthPx: Math.ceil(metrics.paddingPx * 2 + contentWidth),
+    cardHeightPx: Math.ceil(metrics.paddingPx * 2 + metrics.avatarPx + messageHeight)
   }
 }
 

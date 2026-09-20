@@ -411,8 +411,9 @@ export async function renderCaptionCueFramePng(params: {
 
 /**
  * Render a comment-highlight card (Comments upgrade S3) to a PNG (base64, no
- * data: prefix): the same glass treatment as the caption bar, with an avatar
- * circle (monogram fallback), the author name, and up to three text lines.
+ * data: prefix): the same glass treatment as the caption bar. Row one is the
+ * identity row — a small avatar circle (monogram fallback) with the username
+ * beside it — and up to three message lines sit below at full card width.
  * Best-effort: a failed avatar load still renders the card.
  */
 export async function renderCommentHighlightPng(params: {
@@ -570,21 +571,23 @@ export async function renderCommentHighlightPng(params: {
     context.restore()
   }
 
-  // Name + comment text.
-  const textX = avatarX + metrics.avatarPx + metrics.paddingPx
+  // Username beside the avatar (centred on it), message below from the card's
+  // left padding.
+  const nameX = avatarX + metrics.avatarPx + metrics.identityGapPx
+  const textX = originX + metrics.paddingPx
   context.save()
   context.shadowColor = 'rgba(0, 0, 0, 0.45)'
   context.shadowBlur = metrics.textFontPx * 0.08
   context.shadowOffsetY = Math.max(1, Math.round(metrics.textFontPx * 0.03))
   context.textAlign = 'left'
-  context.textBaseline = 'top'
+  context.textBaseline = 'middle'
   context.font = canvasFont(metrics.nameFontPx)
   context.fillStyle = '#F5F5F7'
-  context.fillText(layout.name, textX, originY + metrics.paddingPx)
+  context.fillText(layout.name, nameX, avatarY + metrics.avatarPx / 2 + 1, metrics.maxNameWidthPx)
+  context.textBaseline = 'top'
   context.font = `400 ${metrics.textFontPx}px -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif`
   context.fillStyle = 'rgba(244, 244, 245, 0.92)'
-  const textTop =
-    originY + metrics.paddingPx + metrics.nameFontPx + Math.round(metrics.textFontPx * 0.35)
+  const textTop = avatarY + metrics.avatarPx + metrics.rowGapPx
   layout.textLines.forEach((line, index) => {
     context.fillText(line, textX, textTop + metrics.lineHeightPx * index, metrics.maxTextWidthPx)
   })

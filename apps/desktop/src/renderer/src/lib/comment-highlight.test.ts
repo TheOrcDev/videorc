@@ -63,6 +63,65 @@ describe('layoutCommentHighlight', () => {
     expect(layout.name).toBe('YouTube · Orc Dev')
   })
 
+  it('puts the username beside a small avatar and the message below at full width', () => {
+    const layout = layoutCommentHighlight({
+      authorName: 'criticalmass11',
+      text: '@OrcDev , twitch has tons of hidden stuff hahaha',
+      canvasWidth: 1920,
+      platform: 'twitch',
+      measure
+    })!
+    const { metrics } = layout
+    // The avatar belongs to the name line, not to the whole card.
+    expect(metrics.avatarPx).toBeLessThan(metrics.lineHeightPx * 2)
+    expect(metrics.maxNameWidthPx).toBe(
+      metrics.maxTextWidthPx - metrics.avatarPx - metrics.identityGapPx
+    )
+    // Two stacked rows: identity row, gap, then the message lines.
+    expect(layout.cardHeightPx).toBe(
+      metrics.paddingPx * 2 +
+        metrics.avatarPx +
+        metrics.rowGapPx +
+        layout.textLines.length * metrics.lineHeightPx
+    )
+    // The message starts at the card's padding, so the card is only as wide as
+    // its widest row plus padding — no avatar column beside the text.
+    const widestLine = Math.max(
+      ...layout.textLines.map((line) => measure(line, metrics.textFontPx))
+    )
+    const identityRow =
+      metrics.avatarPx + metrics.identityGapPx + measure(layout.name, metrics.nameFontPx)
+    expect(layout.cardWidthPx).toBe(
+      Math.ceil(metrics.paddingPx * 2 + Math.max(widestLine, identityRow))
+    )
+  })
+
+  it('keeps a very long username inside the width budget', () => {
+    const layout = layoutCommentHighlight({
+      authorName: 'x'.repeat(200),
+      text: 'hi',
+      canvasWidth: 1080,
+      platform: 'youtube',
+      measure
+    })!
+    expect(layout.cardWidthPx).toBeLessThanOrEqual(Math.floor(1080 * 0.6))
+    expect(layout.name.startsWith('YouTube · x')).toBe(true)
+    expect(layout.name.endsWith('…')).toBe(true)
+    expect(measure(layout.name, layout.metrics.nameFontPx)).toBeLessThanOrEqual(
+      layout.metrics.maxNameWidthPx
+    )
+  })
+
+  it('collapses to the identity row when there is no message text', () => {
+    const layout = layoutCommentHighlight({
+      authorName: 'Orc Dev',
+      text: '',
+      canvasWidth: 1280,
+      measure
+    })!
+    expect(layout.cardHeightPx).toBe(layout.metrics.paddingPx * 2 + layout.metrics.avatarPx)
+  })
+
   it('falls back to a Viewer name and survives empty text', () => {
     const layout = layoutCommentHighlight({
       authorName: '  ',
