@@ -51,6 +51,7 @@
     "release:candidate:verify:macos-d3": "node scripts/verify-macos-d3-sealed-candidate.mjs",
     "release:create:capture-decay-debug-provenance": "node scripts/create-capture-decay-debug-runner-provenance.mjs",
     "release:upload:macos": "node scripts/upload-macos-beta-release.mjs",
+    "release:sync:origins": "node scripts/sync-release-origins.mjs",
     "release:preflight:windows": "node scripts/preflight-windows-release.mjs",
     "release:secrets:windows": "node scripts/check-windows-release-secrets.mjs",
     "release:upload:preflight:windows": "node scripts/preflight-windows-release-upload.mjs",

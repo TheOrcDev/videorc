@@ -11,7 +11,12 @@ import {
   mergeChangelogDocuments,
   requireChangelogEntryForRelease
 } from './lib/changelog.mjs'
-import { buildSignedS3Request, getReleaseUploadS3Config } from './lib/release-upload-s3.mjs'
+import {
+  assertNoReleaseOriginPending,
+  planReleaseUploadOrigins,
+  writeReleaseOriginPending
+} from './lib/release-upload-origins.mjs'
+import { buildSignedS3Request } from './lib/release-upload-s3.mjs'
 import { loadValidatedWindowsAcceptanceHistory } from './lib/windows-acceptance-history.mjs'
 import { buildWindowsReleaseUploadPlan } from './lib/windows-release-upload.mjs'
 import {
@@ -37,7 +42,20 @@ async function main() {
   const acceptedReleaseIds = await loadValidatedWindowsAcceptanceHistory(
     join(repoRoot, 'docs', 'acceptance', 'windows-alpha')
   )
-  const config = getReleaseUploadS3Config()
+  await assertNoReleaseOriginPending(repoRoot)
+  const originPlan = await planReleaseUploadOrigins({
+    allowMirrorOnly: ['1', 'true', 'yes', 'on'].includes(
+      process.env.VIDEORC_RELEASE_ALLOW_MIRROR_ONLY?.trim().toLowerCase() ?? ''
+    )
+  })
+  for (const origin of originPlan.blocked) {
+    console.warn(
+      `windows-alpha-release-upload: WARNING origin ${origin.name} is unreachable and will be skipped (${origin.reason})`
+    )
+  }
+  // Feed-transition and changelog state are read from the best reachable
+  // origin (the primary when it answers); every origin receives the same bytes.
+  const config = originPlan.reachable.at(-1).config
   const changelogJsonPath =
     (process.env.VIDEORC_WINDOWS_RELEASE_STAGE?.trim() || 'public') === 'public'
       ? await prepareChangelog(manifest.releaseId, config)
@@ -69,25 +87,41 @@ async function main() {
     trustedCurrentVersion: trustedDesktopPackage.version
   })
 
-  console.log(
-    `windows-alpha-release-upload: ${plan.stage} ${plan.releaseId} (${transition.kind}) to s3://${config.bucket}/${plan.prefix}`
-  )
-  for (const artifact of plan.artifacts) {
-    const result = artifact.immutable
-      ? await inspectRemoteArtifact({ artifact, config })
-      : { state: 'mutable' }
-    if (result.state === 'identical') {
+  for (const target of originPlan.reachable) {
+    console.log(
+      `windows-alpha-release-upload: ${plan.stage} ${plan.releaseId} (${transition.kind}) to ${target.name} s3://${target.config.bucket}/${plan.prefix}`
+    )
+    for (const artifact of plan.artifacts) {
+      const result = artifact.immutable
+        ? await inspectRemoteArtifact({ artifact, config: target.config })
+        : { state: 'mutable' }
+      if (result.state === 'identical') {
+        console.log(
+          `windows-alpha-release-upload: [${target.name}] reused exact immutable ${artifact.label} -> ${artifact.objectKey}`
+        )
+      } else {
+        await uploadArtifact({ artifact, config: target.config })
+        console.log(
+          `windows-alpha-release-upload: [${target.name}] uploaded ${artifact.label} -> ${artifact.objectKey}`
+        )
+      }
+      await inspectRemoteArtifact({ artifact, config: target.config })
       console.log(
-        `windows-alpha-release-upload: reused exact immutable ${artifact.label} -> ${artifact.objectKey}`
-      )
-    } else {
-      await uploadArtifact({ artifact, config })
-      console.log(
-        `windows-alpha-release-upload: uploaded ${artifact.label} -> ${artifact.objectKey}`
+        `windows-alpha-release-upload: [${target.name}] verified SHA-256 ${artifact.objectKey}`
       )
     }
-    await inspectRemoteArtifact({ artifact, config })
-    console.log(`windows-alpha-release-upload: verified SHA-256 ${artifact.objectKey}`)
+  }
+  if (originPlan.blocked.length) {
+    const pendingPaths = await writeReleaseOriginPending({
+      artifacts: plan.artifacts,
+      blocked: originPlan.blocked,
+      platform: 'windows',
+      releaseId: plan.releaseId,
+      repoRoot
+    })
+    console.warn(
+      `windows-alpha-release-upload: WARNING published WITHOUT ${originPlan.blocked.map((origin) => origin.name).join(', ')}. Run pnpm release:sync:origins -- --pending once it is reachable (${pendingPaths.join(', ')}).`
+    )
   }
   console.log('windows-alpha-release-upload: PASS')
 }

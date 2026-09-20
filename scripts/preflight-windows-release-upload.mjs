@@ -9,7 +9,10 @@ import {
   mergeChangelogDocuments,
   requireChangelogEntryForRelease
 } from './lib/changelog.mjs'
-import { getReleaseUploadS3Config } from './lib/release-upload-s3.mjs'
+import {
+  assertNoReleaseOriginPending,
+  planReleaseUploadOrigins
+} from './lib/release-upload-origins.mjs'
 import { loadValidatedWindowsAcceptanceHistory } from './lib/windows-acceptance-history.mjs'
 import { buildWindowsReleaseUploadPlan } from './lib/windows-release-upload.mjs'
 import {
@@ -34,7 +37,10 @@ async function main() {
   const acceptedReleaseIds = await loadValidatedWindowsAcceptanceHistory(
     join(repoRoot, 'docs', 'acceptance', 'windows-alpha')
   )
-  const config = getReleaseUploadS3Config()
+  await assertNoReleaseOriginPending(repoRoot)
+  // Preflight reads the same origin the upload will treat as authoritative:
+  // the primary, which must be reachable here.
+  const config = (await planReleaseUploadOrigins()).reachable.at(-1).config
   const entries = await loadChangelogEntries(join(repoRoot, 'changelog'))
   requireChangelogEntryForRelease(entries, manifest.releaseId, {
     requiredPlatform: 'windows'

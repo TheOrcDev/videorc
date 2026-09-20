@@ -39,6 +39,12 @@ import {
   publishReleaseUploadPhases,
   reverifyReleaseUploadPublication
 } from './lib/release-upload-s3.mjs'
+import {
+  assertNoReleaseOriginPending,
+  LEGACY_RELEASE_UPLOAD_ORIGIN,
+  planReleaseUploadOrigins,
+  writeReleaseOriginPending
+} from './lib/release-upload-origins.mjs'
 import { readRemoteTextObject } from './lib/windows-release-publication.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -87,7 +93,27 @@ async function main() {
       })
     : null
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-  const config = getReleaseUploadS3Config()
+  // The one-time D3 exact promotion binds a single destination and needs the
+  // S3 checksum envelope in its receipt, so it keeps the historical
+  // single-origin path. Every regular beta goes to all configured origins.
+  const singleOrigin = d3Gate.record.status === 'accepted'
+  if (!singleOrigin) await assertNoReleaseOriginPending(repoRoot)
+  const originPlan = singleOrigin
+    ? null
+    : await planReleaseUploadOrigins({
+        allowMirrorOnly: envFlag(process.env.VIDEORC_RELEASE_ALLOW_MIRROR_ONLY)
+      })
+  for (const origin of originPlan?.blocked ?? []) {
+    console.warn(
+      `macos-beta-release-upload: WARNING origin ${origin.name} is unreachable and will be skipped (${origin.reason})`
+    )
+  }
+  const targets = originPlan
+    ? originPlan.reachable
+    : [{ config: getReleaseUploadS3Config(), name: LEGACY_RELEASE_UPLOAD_ORIGIN }]
+  // The changelog is merged once, against the best reachable origin (the
+  // primary when it answers), and those exact bytes go to every origin.
+  const config = targets.at(-1).config
   const changelogJsonPath = await prepareChangelogUpload(
     manifest.releaseId,
     config,
@@ -172,24 +198,45 @@ async function main() {
     }
   }
 
-  console.log(
-    `macos-beta-release-upload: uploading ${plan.releaseId} to s3://${config.bucket}/${plan.prefix}`
-  )
-
   const verifyAfterPut = !envFlag(process.env.VIDEORC_RELEASE_UPLOAD_SKIP_VERIFY)
-  const publicationResults = await publishReleaseUploadPhases({
-    artifacts: plan.artifacts,
-    config,
-    onPublished: ({ artifact, result }) => {
-      console.log(
-        `macos-beta-release-upload: ${result.action} ${artifact.label} ${artifact.sizeBytes} bytes -> ${artifact.objectKey}`
+  let publicationResults = null
+  for (const target of targets) {
+    console.log(
+      `macos-beta-release-upload: uploading ${plan.releaseId} to ${target.name} s3://${target.config.bucket}/${plan.prefix}`
+    )
+    publicationResults = await publishReleaseUploadPhases({
+      artifacts: plan.artifacts,
+      config: target.config,
+      onPublished: ({ artifact, result }) => {
+        console.log(
+          `macos-beta-release-upload: [${target.name}] ${result.action} ${artifact.label} ${artifact.sizeBytes} bytes -> ${artifact.objectKey}`
+        )
+      },
+      reservationArtifactFactory: firstD3Publication
+        ? async () => firstD3Publication.reservation.artifact
+        : null,
+      verifyAfterPut
+    })
+  }
+
+  if (originPlan?.blocked.length) {
+    const pendingPaths = await writeReleaseOriginPending({
+      artifacts: plan.artifacts,
+      blocked: originPlan.blocked,
+      platform: 'macos',
+      releaseId: plan.releaseId,
+      repoRoot
+    })
+    console.warn(
+      `macos-beta-release-upload: WARNING published WITHOUT ${originPlan.blocked.map((origin) => origin.name).join(', ')}. ` +
+        `Run pnpm release:sync:origins -- --pending once it is reachable (${pendingPaths.join(', ')}).`
+    )
+    if (originPlan.primaryBlocked) {
+      console.warn(
+        `macos-beta-release-upload: WARNING the PRIMARY origin ${originPlan.primaryName} was skipped. Clients keep the previous release until videorc-web's VIDEORC_DOWNLOAD_STORAGE_PRIMARY points at ${targets.at(-1).name}.`
       )
-    },
-    reservationArtifactFactory: firstD3Publication
-      ? async () => firstD3Publication.reservation.artifact
-      : null,
-    verifyAfterPut
-  })
+    }
+  }
 
   if (d3Gate.record.status === 'accepted') {
     const publishedReservation = requireCaptureDecayD3PublishedReservation(
