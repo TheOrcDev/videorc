@@ -94,7 +94,21 @@ describe('CommentRow', () => {
     expect(markup).toContain('Ada Lovelace')
     expect(markup).toContain('Ship it!')
     expect(markup).toContain('aria-pressed="false"')
-    expect(markup).toContain('Show Ada Lovelace&#x27;s comment on the stream')
+    expect(markup).toContain('Show Ada Lovelace&#x27;s message on the stream')
+  })
+
+  it('keeps the username beside the avatar instead of centring it over the message', () => {
+    // A highlightable row is a Button (centred text). Without an explicit
+    // left alignment the flex-1 name floats to the middle of the row.
+    const markup = renderRow({ phase: 'idle' })
+    const nameSpan = /<span class="([^"]*)">Ada Lovelace<\/span>/.exec(markup)
+
+    expect(nameSpan?.[1]).toContain('text-left')
+    // The name also appears earlier in the button's aria-label, so order the
+    // rendered name span itself: avatar, then name, then message.
+    const nameAt = nameSpan?.index ?? -1
+    expect(markup.indexOf('data-slot="avatar"')).toBeLessThan(nameAt)
+    expect(nameAt).toBeLessThan(markup.indexOf('Ship it!'))
   })
 
   it.each([

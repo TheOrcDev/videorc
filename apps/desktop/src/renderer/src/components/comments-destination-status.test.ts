@@ -86,7 +86,7 @@ describe('comments destination status', () => {
       })
     )
 
-    expect(providerMarkup).toContain('aria-label="Comments destination status"')
+    expect(providerMarkup).toContain('aria-label="Chat destination status"')
     expect(providerMarkup).toContain('YouTube')
     expect(providerMarkup).toContain('Connected')
     expect(providerMarkup).toContain('Receive-only')

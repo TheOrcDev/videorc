@@ -385,7 +385,7 @@ export function chatSetupToastWarnings(providers: LiveChatProviderState[]): Chat
     .map((provider) => ({
       id: provider.id,
       platform: provider.platform,
-      message: provider.message || 'Live comments are unavailable for this destination.'
+      message: provider.message || 'Live chat is unavailable for this destination.'
     }))
 }
 
@@ -404,7 +404,7 @@ export function liveChatEmptyMessage(
   const provider = snapshot.providers
     .filter(providerNeedsAction)
     .sort((left, right) => providerStatePriority(left) - providerStatePriority(right))[0]
-  return provider?.message ?? 'No comments yet. Comments appear here once you go live.'
+  return provider?.message ?? 'No messages yet. Chat appears here once you go live.'
 }
 
 /**

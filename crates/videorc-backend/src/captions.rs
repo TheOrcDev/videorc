@@ -2220,14 +2220,51 @@ pub enum CaptionOverlayPosition {
     Bottom,
 }
 
+/// Horizontal anchoring of a composited overlay. Internal only: captions are
+/// always `Center`; the comment-highlight card maps its wire anchor onto
+/// `Left`/`Right` (see `comment_highlight::CommentHighlightAnchor`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum OverlayHorizontal {
+    Left,
+    #[default]
+    Center,
+    Right,
+}
+
+/// Where an overlay bitmap lands on a canvas: a vertical edge plus a
+/// horizontal anchor. Not a wire type — `CaptionOverlayPosition` stays the
+/// captions wire enum and converts to a centred placement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverlayPlacement {
+    pub vertical: CaptionOverlayPosition,
+    pub horizontal: OverlayHorizontal,
+}
+
+impl From<CaptionOverlayPosition> for OverlayPlacement {
+    fn from(vertical: CaptionOverlayPosition) -> Self {
+        Self {
+            vertical,
+            horizontal: OverlayHorizontal::Center,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct CaptionOverlay {
     pub rgba: Arc<Vec<u8>>,
     pub bgra: Arc<Vec<u8>>,
     pub width: u32,
     pub height: u32,
-    pub position: CaptionOverlayPosition,
+    pub placement: OverlayPlacement,
     pub revision: u64,
+}
+
+impl CaptionOverlay {
+    /// The vertical edge this overlay occupies.
+    #[cfg(test)]
+    pub fn position(&self) -> CaptionOverlayPosition {
+        self.placement.vertical
+    }
 }
 
 pub type CaptionOverlaySlot = Arc<std::sync::Mutex<Option<CaptionOverlay>>>;
@@ -2362,8 +2399,9 @@ pub(crate) fn prepare_caption_overlay(png_base64: &str) -> Result<PreparedCaptio
 pub(crate) fn install_prepared_caption_overlay(
     slot: &CaptionOverlaySlot,
     prepared: PreparedCaptionOverlay,
-    position: CaptionOverlayPosition,
+    placement: impl Into<OverlayPlacement>,
 ) -> CaptionOverlayInfo {
+    let placement = placement.into();
     let mut guard = slot.lock().expect("caption overlay lock");
     let revision = guard.as_ref().map_or(1, |overlay| overlay.revision + 1);
     *guard = Some(CaptionOverlay {
@@ -2371,7 +2409,7 @@ pub(crate) fn install_prepared_caption_overlay(
         bgra: prepared.bgra,
         width: prepared.width,
         height: prepared.height,
-        position,
+        placement,
         revision,
     });
     CaptionOverlayInfo {
@@ -2553,7 +2591,7 @@ fn install_decoded_caption_overlay(
         bgra: decoded.bgra.clone(),
         width: decoded.width,
         height: decoded.height,
-        position,
+        placement: position.into(),
         revision: target.revision,
     });
 }
@@ -3058,7 +3096,7 @@ pub async fn install_caption_sign_out_test_session(state: &AppState) -> CaptionS
             bgra: Arc::new(vec![255, 255, 255, 255]),
             width: 1,
             height: 1,
-            position: CaptionOverlayPosition::Bottom,
+            placement: CaptionOverlayPosition::Bottom.into(),
             revision: 1,
         };
         overlays.primary.overlay = Some(overlay.clone());
@@ -7919,7 +7957,7 @@ mod tests {
         {
             assert_eq!(bgra, &[rgba[2], rgba[1], rgba[0], rgba[3]]);
         }
-        assert_eq!(overlay.position, CaptionOverlayPosition::Bottom);
+        assert_eq!(overlay.position(), CaptionOverlayPosition::Bottom);
 
         let second =
             install_caption_overlay(&slot, &encode_test_png(6, 2), CaptionOverlayPosition::Top)
@@ -8053,7 +8091,7 @@ mod tests {
         assert_eq!(caption_overlay_error_code(&stale), "captions-overlay-stale");
         let survivor = current_caption_overlays(&slots).primary.unwrap();
         assert_eq!(
-            (survivor.width, survivor.position),
+            (survivor.width, survivor.position()),
             (700, CaptionOverlayPosition::Bottom)
         );
 

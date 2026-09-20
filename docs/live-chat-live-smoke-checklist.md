@@ -94,8 +94,10 @@ web has `VIDEORC_AI_COHOST_DISABLED` off. Offline proof: `pnpm smoke:cohost-fake
       `listening` only after `cohost.start` succeeded; with consent OFF it must read
       `paused · consent` and no tick request leaves the machine.
 - [ ] Have viewers ask the same question three times in different words. Confirm ONE grouped
-      question appears with all askers and platforms, and a `suggestedReply` in the chat's
-      language; confirm no tick fires while chat is idle for 30 s.
+      question appears with all askers and platforms, and a `suggestedReply` in English
+      (the server pins question summaries and replies to English until a language setting
+      exists — ask one of the three in another language and confirm the draft is still
+      English); confirm no tick fires while chat is idle for 30 s.
 - [ ] Press `R` on the question, edit the draft, send with ⌘↩. Confirm one message per
       writable destination (X stays receive-only) and the question leaves the list on its own
       (`answered` via `inReplyToQuestionId`) — never by auto-send.

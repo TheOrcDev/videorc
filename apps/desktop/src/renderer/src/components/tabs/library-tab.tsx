@@ -940,7 +940,7 @@ function RowActions({
               }
             >
               <ChatIcon />
-              Open Comments
+              Open Chat
             </DropdownMenuItem>
           </DropdownMenuGroup>
           <DropdownMenuSeparator />

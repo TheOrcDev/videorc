@@ -165,6 +165,7 @@ import type {
   CohostSettingsPatch,
   CohostState,
   CohostWindowState,
+  CommentHighlightAnchor,
   CommentHighlightCommand,
   CommentHighlightState,
   CommentsClearCommand,
@@ -273,9 +274,15 @@ import type {
   YouTubeBroadcastTransitionResult,
   YouTubeChannel,
   YouTubeStreamStatusResult,
+  SetCommentHighlightParams,
   ViewerSample
 } from '@/lib/backend'
-import { createEmptyLiveChatSnapshot, offCohostState } from '@/lib/backend'
+import {
+  createEmptyLiveChatSnapshot,
+  DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
+  normalizeCommentHighlightAnchor,
+  offCohostState
+} from '@/lib/backend'
 import {
   appendCaptionLine,
   captionDwellMs,
@@ -1632,9 +1639,10 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   visible: false,
   bounds: null,
   alwaysOnTop: false,
+  highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   protected: false,
   enabled: false,
-  message: 'Comments window is disabled by VIDEORC_COMMENTS_WINDOW=0.'
+  message: 'Chat window is disabled by VIDEORC_COMMENTS_WINDOW=0.'
 })
 
 const idleCaptionsWindowState = (): CaptionsWindowState => ({
@@ -2074,7 +2082,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         continue
       }
       chatSetupWarnedRef.current.warned.add(warning.id)
-      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} comments are not connected`, {
+      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat is not connected`, {
         description: warning.message,
         action: {
           label: 'Open Livestream',
@@ -2237,24 +2245,42 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await openCaptionsWindow()
   }, [captionsWindow.open, closeCaptionsWindow, openCaptionsWindow])
   const [commentsWindow, setCommentsWindow] = useState<CommentsWindowState>(idleCommentsWindowState)
+  // The streamer's corner pick lives in main (it must survive the Chat window
+  // being closed). A ref, not state, feeds the highlight RPC so a pick applies
+  // to the very next highlight without re-creating the relay listeners.
+  const commentHighlightAnchorRef = useRef<CommentHighlightAnchor>(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR)
+  const moveLiveCommentHighlightRef = useRef<((anchor: CommentHighlightAnchor) => void) | null>(
+    null
+  )
   useEffect(() => {
     let cancelled = false
+    const noteHighlightAnchor = (state: CommentsWindowState, move: boolean): void => {
+      const anchor = normalizeCommentHighlightAnchor(state.highlightAnchor)
+      if (anchor === commentHighlightAnchorRef.current) return
+      commentHighlightAnchorRef.current = anchor
+      // A card already on the stream follows the pick immediately.
+      if (move) moveLiveCommentHighlightRef.current?.(anchor)
+    }
     const reconcile = async (): Promise<void> => {
       const fresh = await window.videorc?.getCommentsWindowState?.()
       if (!fresh || cancelled) {
         return
       }
+      noteHighlightAnchor(fresh, false)
       setCommentsWindow((current) =>
         JSON.stringify(current) === JSON.stringify(fresh) ? current : fresh
       )
     }
     void reconcile()
-    const offState = window.videorc?.onCommentsWindowState?.((state) => setCommentsWindow(state))
+    const offState = window.videorc?.onCommentsWindowState?.((state) => {
+      noteHighlightAnchor(state, true)
+      setCommentsWindow(state)
+    })
     const offClear = window.videorc?.onCommentsClearRequest?.((command: CommentsClearCommand) => {
       void (async () => {
         if (!client) throw new Error('Backend socket is not connected.')
         if (liveChatSnapshotRef.current.sessionId !== command.sessionId) {
-          throw new Error('That Comments view is no longer the active livestream.')
+          throw new Error('That chat view is no longer the active livestream.')
         }
         return client.request<LiveChatSnapshot>('liveChat.clearLocal')
       })()
@@ -2269,7 +2295,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCommentsClearResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not clear Comments.'
+            error: error instanceof Error ? error.message : 'Could not clear the chat view.'
           })
         })
     })
@@ -2303,16 +2329,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     async (
       message: LiveChatMessage,
       expectedSessionId: string | undefined,
-      intent: number
+      intent: number,
+      // `move` re-sends the message that is already live (new corner) instead
+      // of reading the repeat as "un-pin".
+      options?: { move?: boolean }
     ): Promise<CommentHighlightState | null> => {
       if (!client) throw new Error('Backend socket is not connected.')
       const sessionId = expectedSessionId ?? liveChatSnapshot.sessionId
       if (!sessionId || message.sessionId !== sessionId) {
-        throw new Error('That comment does not belong to the active livestream.')
+        throw new Error('That message does not belong to the active livestream.')
       }
       setCommentHighlightApplyingId(message.id)
       try {
         if (
+          !options?.move &&
           commentHighlightState.phase === 'live' &&
           commentHighlightState.messageId === message.id
         ) {
@@ -2351,7 +2381,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           canvasWidth: streamVideo.width,
           platform: message.platform
         })
-        if (!pngBase64) throw new Error('Could not render this comment for the stream.')
+        if (!pngBase64) throw new Error('Could not render this message for the stream.')
         if (commentHighlightIntentRef.current !== intent) return null
         let state: CommentHighlightState
         try {
@@ -2359,8 +2389,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sessionId,
             messageId: message.id,
             pngBase64,
-            position: 'top'
-          })
+            anchor: commentHighlightAnchorRef.current
+          } satisfies SetCommentHighlightParams)
         } catch (error) {
           const failurePolicy = await loadCommandFailurePolicy()
           if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') throw error
@@ -2421,6 +2451,34 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [applyCommentHighlight, client, publishCommentHighlightState]
   )
 
+  // Corner changed while a card is live: re-send the same message so it moves.
+  // The backend TTL restarts, which suits an adjustment the streamer is watching.
+  moveLiveCommentHighlightRef.current = () => {
+    if (commentHighlightState.phase !== 'live') return
+    const message = liveChatSnapshotRef.current.messages.find(
+      (candidate) =>
+        candidate.id === commentHighlightState.messageId &&
+        candidate.sessionId === commentHighlightState.sessionId
+    )
+    if (!message) return
+    const intent = ++commentHighlightIntentRef.current
+    void applyCommentHighlight(message, commentHighlightState.sessionId, intent, { move: true })
+      .then((state) => {
+        if (state && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(state)
+        }
+      })
+      .catch(async () => {
+        // The card stays where the backend says it is; never guess.
+        const authoritative = await client
+          ?.request<CommentHighlightState>('comments.highlight.status')
+          .catch(() => null)
+        if (authoritative && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(authoritative)
+        }
+      })
+  }
+
   useEffect(() => {
     const off = window.videorc?.onCommentHighlightRequest?.((command: CommentHighlightCommand) => {
       const intent = ++commentHighlightIntentRef.current
@@ -2432,11 +2490,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void (
         message
           ? applyCommentHighlight(message, command.sessionId, intent)
-          : Promise.reject(new Error('The selected live comment is no longer available.'))
+          : Promise.reject(new Error('The selected live message is no longer available.'))
       )
         .then(async (state) => {
           if (!state) {
-            throw new Error('A newer comment highlight replaced this request.')
+            throw new Error('A newer highlight replaced this request.')
           }
           if (commentHighlightIntentRef.current === intent) {
             publishCommentHighlightState(state)
@@ -8022,9 +8080,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeCommentsWindow?.().then(() => {
-      toast.warning('Comments closed for this recording', {
+      toast.warning('Chat closed for this recording', {
         description:
-          'Comments window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
+          'Chat window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
       })
     })
   }, [
@@ -10019,7 +10077,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               await client.request<LiveChatSnapshot>('liveChat.x.start', params)
             } catch (chatError) {
               const chatMessage = chatError instanceof Error ? chatError.message : String(chatError)
-              toast.warning(`X comments need review for ${target.label}.`, {
+              toast.warning(`X chat needs review for ${target.label}.`, {
                 description: chatMessage
               })
             }

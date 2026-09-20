@@ -142,11 +142,11 @@ export function CommandPalette({
           )}
           {runtimeInfo?.commentsWindowEnabled ? (
             <CommandItem
-              value="Toggle comments window"
+              value="Toggle chat window"
               onSelect={() => run(() => toggleCommentsWindow())}
             >
               <ChatIcon className="size-4" />
-              {commentsWindow.open ? 'Close comments window' : 'Open comments window'}
+              {commentsWindow.open ? 'Close chat window' : 'Open chat window'}
               <CommandShortcut className="tracking-normal">
                 <Kbd>
                   {modKey}

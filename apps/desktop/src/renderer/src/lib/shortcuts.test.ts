@@ -31,12 +31,12 @@ describe('SHORTCUTS registry', () => {
     }
   })
 
-  it('groups cover Navigation, Session, Windows, Comments, and Appearance', () => {
+  it('groups cover Navigation, Session, Windows, Chat, and Appearance', () => {
     expect([...shortcutsByGroup().keys()]).toEqual([
       'Navigation',
       'Session',
       'Windows',
-      'Comments',
+      'Chat',
       'Appearance'
     ])
   })
@@ -54,7 +54,7 @@ describe('SHORTCUTS registry', () => {
       'cohost-answered',
       'cohost-dismiss'
     ])
-    expect(cohost.every((entry) => entry.group === 'Comments')).toBe(true)
+    expect(cohost.every((entry) => entry.group === 'Chat')).toBe(true)
     expect(cohost.find((entry) => entry.id === 'cohost-focus')?.keys).toEqual(['⌘', 'J'])
     expect(cohost.find((entry) => entry.id === 'cohost-dismiss')?.keys).toEqual(['⌫'])
   })

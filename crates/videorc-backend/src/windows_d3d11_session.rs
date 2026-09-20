@@ -24,6 +24,50 @@ fn windows_d3d11_terminal_source_error(
     })
 }
 
+/// Normalized destination transform + source crop for a caption/highlight
+/// overlay layer. Pure so it is unit-tested on every host; the pixel layout
+/// comes from the shared compositor oracle, so D3D11 cannot diverge from the
+/// CPU and Metal paths (including the highlight's corner anchors).
+#[cfg(any(target_os = "windows", test))]
+fn windows_d3d11_overlay_layer_geometry(
+    overlay_size: (u32, u32),
+    output_size: (u32, u32),
+    placement: crate::captions::OverlayPlacement,
+    safe_inset: usize,
+) -> (
+    crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform,
+    crate::windows_d3d11_compositor::WindowsD3d11Crop,
+) {
+    let overlay_width = overlay_size.0.max(1) as usize;
+    let overlay_height = overlay_size.1.max(1) as usize;
+    let output_width = output_size.0.max(1) as usize;
+    let output_height = output_size.1.max(1) as usize;
+    let (source_left, destination_left, destination_top, draw_width) =
+        crate::compositor::caption_overlay_layout_with_inset(
+            overlay_width,
+            overlay_height,
+            output_width,
+            output_height,
+            placement,
+            safe_inset,
+        );
+    let draw_height = overlay_height.min(output_height);
+    (
+        crate::windows_d3d11_compositor::WindowsD3d11NormalizedTransform {
+            x: destination_left as f32 / output_width as f32,
+            y: destination_top as f32 / output_height as f32,
+            width: draw_width as f32 / output_width as f32,
+            height: draw_height as f32 / output_height as f32,
+        },
+        crate::windows_d3d11_compositor::WindowsD3d11Crop {
+            left: source_left as f32 / overlay_width as f32,
+            top: 0.0,
+            right: (overlay_width - source_left - draw_width) as f32 / overlay_width as f32,
+            bottom: (overlay_height - draw_height) as f32 / overlay_height as f32,
+        },
+    )
+}
+
 /// Screen-camera composition keeps one more full-frame layer in flight and
 /// stretches NV12/BGRA lease residency past the screen-only envelope. Size the
 /// capture and primary render pools so transient fence lag cannot starve a CFR
@@ -478,7 +522,7 @@ mod runtime {
     };
     use crate::compositor::{
         CompositorFrameExportHandle, CompositorFrameStore, CompositorPixelFormat,
-        caption_overlay_layout_with_inset, caption_overlay_safe_inset,
+        caption_overlay_safe_inset,
     };
     use crate::frame_store::{FrameHandle, FrameStore};
     use crate::preview_camera::{PreviewCameraFrameSource, PreviewCameraPixelFormat};
@@ -1304,6 +1348,7 @@ mod runtime {
                     .highlight_on_primary
                     .then_some(highlight.as_ref())
                     .flatten(),
+                primary_dimensions.width,
                 primary_dimensions.height,
             );
             frames.push(WindowsD3d11OverlayFrame {
@@ -1326,6 +1371,7 @@ mod runtime {
                     .highlight_on_auxiliary
                     .then_some(highlight.as_ref())
                     .flatten(),
+                output_dimensions.width,
                 output_dimensions.height,
             );
             frames.push(WindowsD3d11OverlayFrame {
@@ -1870,20 +1916,15 @@ mod runtime {
             });
         }
         for overlay in overlays {
-            let overlay_width = overlay.overlay.width.max(1) as usize;
-            let overlay_height = overlay.overlay.height.max(1) as usize;
-            let output_width = overlay.output_dimensions.width.max(1) as usize;
-            let output_height = overlay.output_dimensions.height.max(1) as usize;
-            let (source_left, destination_left, destination_top, draw_width) =
-                caption_overlay_layout_with_inset(
-                    overlay_width,
-                    overlay_height,
-                    output_width,
-                    output_height,
-                    overlay.overlay.position,
-                    overlay.safe_inset,
-                );
-            let draw_height = overlay_height.min(output_height);
+            let (transform, crop) = super::windows_d3d11_overlay_layer_geometry(
+                (overlay.overlay.width, overlay.overlay.height),
+                (
+                    overlay.output_dimensions.width,
+                    overlay.output_dimensions.height,
+                ),
+                overlay.overlay.placement,
+                overlay.safe_inset,
+            );
             layers.push(WindowsD3d11SceneLayerInput {
                 source_id: overlay.source_id,
                 source_kind: overlay.source_kind,
@@ -1892,18 +1933,8 @@ mod runtime {
                     overlay.overlay.height,
                 )
                 .map_err(|error| error.to_string())?,
-                transform: WindowsD3d11NormalizedTransform {
-                    x: destination_left as f32 / output_width as f32,
-                    y: destination_top as f32 / output_height as f32,
-                    width: draw_width as f32 / output_width as f32,
-                    height: draw_height as f32 / output_height as f32,
-                },
-                crop: WindowsD3d11Crop {
-                    left: source_left as f32 / overlay_width as f32,
-                    top: 0.0,
-                    right: (overlay_width - source_left - draw_width) as f32 / overlay_width as f32,
-                    bottom: (overlay_height - draw_height) as f32 / overlay_height as f32,
-                },
+                transform,
+                crop,
                 fit: WindowsD3d11SceneFit::Contain,
                 mirror_x: false,
                 mask: WindowsD3d11SceneMask::None,
@@ -2120,6 +2151,67 @@ mod tests {
             },
             auxiliary: None,
         }
+    }
+
+    #[test]
+    fn windows_d3d11_overlay_layer_geometry_follows_the_shared_corner_oracle() {
+        use crate::captions::{CaptionOverlayPosition, OverlayPlacement};
+        use crate::comment_highlight::CommentHighlightAnchor;
+
+        // 1920x1080: margin = round(1080 * 0.04) = 43 px on BOTH axes.
+        let (right, crop) = windows_d3d11_overlay_layer_geometry(
+            (600, 200),
+            (1920, 1080),
+            CommentHighlightAnchor::BottomRight.into(),
+            0,
+        );
+        assert_eq!(right.x, (1920 - 600 - 43) as f32 / 1920.0);
+        assert_eq!(right.y, (1080 - 200 - 43) as f32 / 1080.0);
+        assert_eq!(right.width, 600.0 / 1920.0);
+        assert_eq!(right.height, 200.0 / 1080.0);
+        assert_eq!(
+            (crop.left, crop.top, crop.right, crop.bottom),
+            (0.0, 0.0, 0.0, 0.0)
+        );
+
+        let (left, _) = windows_d3d11_overlay_layer_geometry(
+            (600, 200),
+            (1920, 1080),
+            CommentHighlightAnchor::TopLeft.into(),
+            0,
+        );
+        assert_eq!(left.x, 43.0 / 1920.0);
+        assert_eq!(left.y, 43.0 / 1080.0);
+
+        // Vertical 1080x1920: margin = round(1920 * 0.04) = 77 px.
+        let (vertical, _) = windows_d3d11_overlay_layer_geometry(
+            (600, 200),
+            (1080, 1920),
+            CommentHighlightAnchor::TopRight.into(),
+            0,
+        );
+        assert_eq!(vertical.x, (1080 - 600 - 77) as f32 / 1080.0);
+        assert_eq!(vertical.y, 77.0 / 1920.0);
+
+        // Captions stay centred and honour the collision inset.
+        let (caption, _) = windows_d3d11_overlay_layer_geometry(
+            (1000, 100),
+            (1920, 1080),
+            OverlayPlacement::from(CaptionOverlayPosition::Top),
+            222,
+        );
+        assert_eq!(caption.x, 460.0 / 1920.0);
+        assert_eq!(caption.y, (43 + 222) as f32 / 1080.0);
+
+        // Over-wide overlays centre-crop regardless of anchor.
+        let (wide, wide_crop) = windows_d3d11_overlay_layer_geometry(
+            (2400, 100),
+            (1920, 1080),
+            CommentHighlightAnchor::TopRight.into(),
+            0,
+        );
+        assert_eq!((wide.x, wide.width), (0.0, 1.0));
+        assert_eq!((wide_crop.left, wide_crop.right), (0.1, 0.1));
     }
 
     #[test]

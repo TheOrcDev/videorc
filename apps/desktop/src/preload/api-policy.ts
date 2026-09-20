@@ -20,6 +20,7 @@ export const AUXILIARY_API_KEYS = {
     'clearComments',
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
+    'setCommentsWindowHighlightAnchor',
     'onCommentsWindowState',
     'getCommentsSnapshot',
     'setCommentsViewMode',
@@ -33,14 +34,21 @@ export const AUXILIARY_API_KEYS = {
     'getCohostWindowState',
     'onCohostWindowState',
     'sendCohostAction',
-    'sendCohostEnable'
+    'sendCohostEnable',
+    // Black-glass underlay: same wallpaper feed as the main window.
+    'getGlassWallpaper',
+    'onGlassWallpaper',
+    'onGlassGeometry'
   ],
   captions: [
     'getCaptionsWindowState',
     'setCaptionsWindowAlwaysOnTop',
     'onCaptionsWindowState',
     'getCaptionSnapshot',
-    'onCaptionSnapshot'
+    'onCaptionSnapshot',
+    'getGlassWallpaper',
+    'onGlassWallpaper',
+    'onGlassGeometry'
   ]
 } as const satisfies Record<Exclude<RendererRole, 'main'>, readonly VideorcApiKey[]>
 

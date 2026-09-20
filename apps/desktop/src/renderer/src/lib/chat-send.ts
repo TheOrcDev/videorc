@@ -75,7 +75,7 @@ export function pendingCommentsSendOperation({
         destinationId: provider.id,
         platform: provider.platform,
         phase: 'read-only',
-        reason: 'This destination supports receiving comments only.'
+        reason: 'This destination supports receiving chat only.'
       }
     }
     if (provider.write === 'missing-scope') {
@@ -91,7 +91,7 @@ export function pendingCommentsSendOperation({
         destinationId: provider.id,
         platform: provider.platform,
         phase: 'failed',
-        reason: "This destination's comment sender is unavailable."
+        reason: "This destination's chat sender is unavailable."
       }
     }
     if (provider.write === 'ready') {

@@ -91,7 +91,7 @@ export class CommentsHistoryCache {
     this.limits = { ...DEFAULT_LIMITS, ...limits }
     for (const [name, value] of Object.entries(this.limits)) {
       if (!Number.isInteger(value) || value < 1) {
-        throw new Error(`Comments history cache ${name} must be a positive integer.`)
+        throw new Error(`Chat history cache ${name} must be a positive integer.`)
       }
     }
   }
@@ -125,7 +125,7 @@ export class CommentsHistoryCache {
     const loading = this.load(sessionId, load)
       .then((view) => {
         if (this.pendingCacheLoads.get(sessionId) !== loading) {
-          throw new Error('Comments history load was invalidated before completion.')
+          throw new Error('Chat history load was invalidated before completion.')
         }
         return this.put(view, sessionId)
       })
@@ -150,7 +150,7 @@ export class CommentsHistoryCache {
     const loading = load()
       .then((view) => {
         if (this.pendingLoads.get(sessionId) !== loading) {
-          throw new Error('Comments history load was invalidated before completion.')
+          throw new Error('Chat history load was invalidated before completion.')
         }
         if (view.mode.sessionId !== sessionId) {
           throw new Error('Loaded comments history did not match the requested session.')
@@ -168,7 +168,7 @@ export class CommentsHistoryCache {
 
   put(view: HistoryCommentsView, protectedSessionId?: string): HistoryCommentsView {
     if (view.snapshot.sessionId !== view.mode.sessionId) {
-      throw new Error('Comments history snapshot must match its view-mode session.')
+      throw new Error('Chat history snapshot must match its view-mode session.')
     }
     const boundedView = this.boundView(view)
     const entry = cachedHistory(boundedView)
@@ -205,7 +205,7 @@ export class CommentsHistoryCache {
       bytes = serializedBytes(bounded)
     }
     if (bytes > this.limits.maxBytes) {
-      throw new Error('Comments history metadata exceeds the cache byte capacity.')
+      throw new Error('Chat history metadata exceeds the cache byte capacity.')
     }
     return bounded
   }

@@ -1,4 +1,4 @@
-import { ChatIcon, PinIcon, PreviewIcon, SendIcon } from '@/components/icons'
+import { ChatIcon, FrameIcon, PinIcon, PreviewIcon, SendIcon } from '@/components/icons'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -10,6 +10,14 @@ import { CommentsDestinationStatus } from '@/components/comments-destination-sta
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger
+} from '@/components/ui/dropdown-menu'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import {
   InputGroup,
@@ -24,6 +32,7 @@ import type {
   CohostFlag,
   CohostQuestion,
   CohostState,
+  CommentHighlightAnchor,
   CommentHighlightState,
   CommentsSendOperation,
   CommentsViewMode,
@@ -33,6 +42,7 @@ import type {
   StreamPlatform,
   ViewerSample
 } from '@/lib/backend'
+import { COMMENT_HIGHLIGHT_ANCHORS, normalizeCommentHighlightAnchor } from '@/lib/backend'
 import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
 import { useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { cohostGroupedDeltaFlash } from '@/lib/cohost-presence'
@@ -51,6 +61,13 @@ import { viewerChipDetail, viewerChipLabel, viewerSampleStale } from '@/lib/view
 
 const BOTTOM_THRESHOLD_PX = 64
 
+const HIGHLIGHT_ANCHOR_LABELS: Record<CommentHighlightAnchor, string> = {
+  'top-left': 'Top left',
+  'top-right': 'Top right',
+  'bottom-left': 'Bottom left',
+  'bottom-right': 'Bottom right'
+}
+
 function scrollViewport(root: HTMLDivElement | null): HTMLDivElement | null {
   return root?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null
 }
@@ -63,6 +80,8 @@ export function CommentsReader({
   onClear,
   alwaysOnTop = false,
   onToggleAlwaysOnTop,
+  highlightAnchor,
+  onHighlightAnchorChange,
   highlightedId = null,
   highlightState,
   highlightApplyingId = null,
@@ -96,6 +115,9 @@ export function CommentsReader({
   onClear?: () => void
   alwaysOnTop?: boolean
   onToggleAlwaysOnTop?: () => void
+  /** Corner of the stream where highlighted messages appear. */
+  highlightAnchor?: CommentHighlightAnchor
+  onHighlightAnchorChange?: (anchor: CommentHighlightAnchor) => void
   /** Latest live concurrent-viewer sample; null hides the chip. */
   viewerSample?: ViewerSample | null
   /** The comment currently shown on the stream. */
@@ -303,9 +325,14 @@ export function CommentsReader({
   }
 
   return (
-    <div className="relative flex h-screen flex-col bg-background text-foreground">
-      <header className="flex min-h-10 shrink-0 items-center gap-2 pl-[78px] pr-3 [-webkit-app-region:drag]">
-        <span className="shrink-0 text-xs font-medium">Comments</span>
+    // No bg-background here: the body paints the one translucent coat over the
+    // wallpaper underlay. A second coat is what made this window read flat black.
+    <div className="relative flex h-screen flex-col text-foreground">
+      {/* Fixed height, not min-height: the macOS traffic lights are centred on
+          this exact strip from main (AUX_WINDOW_HEADER_HEIGHT), so a child that
+          grew the row would silently pull the title off their centre line. */}
+      <header className="flex h-10 shrink-0 items-center gap-2 overflow-hidden pl-[78px] pr-3 [-webkit-app-region:drag]">
+        <span className="shrink-0 text-xs font-medium">Chat</span>
         <Badge
           className="h-4 shrink-0 px-1.5 text-[10px]"
           variant={mode === 'Live' ? 'success' : mode === 'History' ? 'secondary' : 'outline'}
@@ -315,10 +342,6 @@ export function CommentsReader({
         {viewMode?.kind === 'history' ? (
           <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
             {viewMode.title} · {new Date(viewMode.startedAt).toLocaleDateString()}
-          </span>
-        ) : onClear ? (
-          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
-            Clear view keeps Library history.
           </span>
         ) : (
           <span className="flex-1" />
@@ -358,6 +381,36 @@ export function CommentsReader({
               Back to live
             </Button>
           ) : null}
+          {highlightAnchor && onHighlightAnchorChange ? (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  aria-label="Highlight position"
+                  size="icon-sm"
+                  title={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[highlightAnchor]}`}
+                  type="button"
+                  variant="ghost"
+                >
+                  <FrameIcon data-icon="inline-start" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end">
+                <DropdownMenuLabel>Show highlighted messages in</DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  value={highlightAnchor}
+                  onValueChange={(value) =>
+                    onHighlightAnchorChange(normalizeCommentHighlightAnchor(value))
+                  }
+                >
+                  {COMMENT_HIGHLIGHT_ANCHORS.map((anchor) => (
+                    <DropdownMenuRadioItem key={anchor} value={anchor}>
+                      {HIGHLIGHT_ANCHOR_LABELS[anchor]}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          ) : null}
           {onToggleAlwaysOnTop ? (
             <Button
               aria-label="Keep this window on top"
@@ -372,7 +425,13 @@ export function CommentsReader({
             </Button>
           ) : null}
           {onClear ? (
-            <Button size="sm" type="button" variant="ghost" onClick={onClear}>
+            <Button
+              size="sm"
+              title="Clear view keeps Library history."
+              type="button"
+              variant="ghost"
+              onClick={onClear}
+            >
               Clear view
             </Button>
           ) : null}
@@ -415,7 +474,7 @@ export function CommentsReader({
         {messages.length === 0 ? (
           <OffAir providers={snapshot.providers} />
         ) : (
-          <ol aria-label="Comments" className="flex flex-col gap-1">
+          <ol aria-label="Chat messages" className="flex flex-col gap-1">
             {messages.map((message) => (
               <CommentRow
                 key={message.id}
@@ -535,7 +594,7 @@ function SendRow({
       <InputGroup>
         <InputGroupInput
           ref={inputRef}
-          aria-label="Send a comment to all writable destinations"
+          aria-label="Send a message to all writable destinations"
           disabled={targets.length === 0}
           maxLength={maxChars}
           placeholder={
@@ -566,7 +625,7 @@ function SendRow({
           ) : null}
           <Kbd aria-label="Enter">↵</Kbd>
           <InputGroupButton
-            aria-label={pending ? 'Sending comment' : 'Send comment to all writable destinations'}
+            aria-label={pending ? 'Sending message' : 'Send message to all writable destinations'}
             disabled={!canSend || !validateChatDraft(draft, maxChars)}
             size="icon-xs"
             onClick={submit}
@@ -592,7 +651,7 @@ function SendRow({
           <CohostNudge onDismiss={onCohostNudgeDismiss} onTurnOn={onCohostNudgeTurnOn} />
         ) : null}
         {operation ? (
-          <div className="mt-1.5 flex flex-col gap-1" aria-label="Latest comment delivery">
+          <div className="mt-1.5 flex flex-col gap-1" aria-label="Latest message delivery">
             <Badge
               className="max-w-full truncate"
               title={operation.text}
@@ -647,9 +706,9 @@ function OffAir({ providers }: { providers: LiveChatProviderState[] }): ReactEle
         <EmptyMedia variant="icon">
           <ChatIcon weight="duotone" />
         </EmptyMedia>
-        <EmptyTitle className="text-base">No comments yet</EmptyTitle>
+        <EmptyTitle className="text-base">No messages yet</EmptyTitle>
         <EmptyDescription>
-          {liveChatEmptyMessage({ providers }, 'Start a livestream to see comments here.')}
+          {liveChatEmptyMessage({ providers }, 'Start a livestream to see chat here.')}
         </EmptyDescription>
       </EmptyHeader>
       <CommentsDestinationStatus providers={providers} />

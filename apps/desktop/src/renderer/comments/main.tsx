@@ -3,17 +3,23 @@ import ReactDOM from 'react-dom/client'
 import { toast } from 'sonner'
 
 import { CommentsReader } from '@/components/comments-reader'
+import { GlassWallpaperUnderlay } from '@/components/glass-wallpaper'
 import { AppErrorBoundary } from '@/components/error-boundary'
 import type {
   CohostQuestion,
   CohostWindowState,
+  CommentHighlightAnchor,
   CommentHighlightState,
   CommentsSendOperation,
   CommentsViewSnapshot,
   LiveChatMessage,
   ViewerSample
 } from '@/lib/backend'
-import { offCohostWindowState } from '@/lib/backend'
+import {
+  DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
+  normalizeCommentHighlightAnchor,
+  offCohostWindowState
+} from '@/lib/backend'
 import {
   cohostHighlightMessageId,
   cohostNudgeDismissedFromStorage,
@@ -58,6 +64,9 @@ function CommentsWindowApp(): ReactElement {
     snapshot: emptyLiveChatSnapshot(new Date().toISOString())
   }))
   const [alwaysOnTop, setAlwaysOnTop] = useState(false)
+  const [highlightAnchor, setHighlightAnchor] = useState<CommentHighlightAnchor>(
+    DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
+  )
   const [highlightState, setHighlightState] = useState<CommentHighlightState>({
     generation: 0,
     phase: 'idle'
@@ -144,7 +153,11 @@ function CommentsWindowApp(): ReactElement {
       .catch(() => {})
     void window.videorc
       ?.getCommentsWindowState?.()
-      .then((state) => state && setAlwaysOnTop(state.alwaysOnTop))
+      .then((state) => {
+        if (!state) return
+        setAlwaysOnTop(state.alwaysOnTop)
+        setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
+      })
       .catch(() => {})
     const offSnapshot = window.videorc?.onCommentsSnapshot?.((next) => applyView(next))
     const offDelta = window.videorc?.onCommentsDelta?.((delta) => {
@@ -159,9 +172,10 @@ function CommentsWindowApp(): ReactElement {
       .then((sample) => setViewerSample(sample ?? null))
       .catch(() => {})
     const offViewers = window.videorc?.onViewerSample?.((sample) => setViewerSample(sample))
-    const offState = window.videorc?.onCommentsWindowState?.((state) =>
+    const offState = window.videorc?.onCommentsWindowState?.((state) => {
       setAlwaysOnTop(state.alwaysOnTop)
-    )
+      setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
+    })
     // Which comment is on stream: seeded + followed via the main-process relay
     // (the main renderer owns the highlight lifecycle).
     void window.videorc
@@ -288,11 +302,16 @@ function CommentsWindowApp(): ReactElement {
 
   return (
     <>
+      {/* Same black glass as the main window: blurred wallpaper under the
+          body's single translucent coat, plus the specular sweep. */}
+      <GlassWallpaperUnderlay />
+      <div aria-hidden className="glass-shine pointer-events-none fixed inset-0 z-50" />
       <CommentsReader
         viewerSample={view.mode.kind === 'live' ? viewerSample : null}
         snapshot={snapshot}
         viewMode={view.mode}
         alwaysOnTop={alwaysOnTop}
+        highlightAnchor={highlightAnchor}
         highlightApplyingId={highlightApplyingId}
         highlightFailure={highlightFailure}
         highlightState={highlightState}
@@ -338,7 +357,8 @@ function CommentsWindowApp(): ReactElement {
                       {
                         destinationId: 'comments-clear-command',
                         platform: 'custom',
-                        reason: error instanceof Error ? error.message : 'Could not clear Comments.'
+                        reason:
+                          error instanceof Error ? error.message : 'Could not clear the chat view.'
                       }
                     ])
                   )
@@ -396,6 +416,11 @@ function CommentsWindowApp(): ReactElement {
                 }
               ])
             })
+        }}
+        onHighlightAnchorChange={(anchor) => {
+          // Optimistic: main echoes the persisted value back on the state event.
+          setHighlightAnchor(anchor)
+          void window.videorc?.setCommentsWindowHighlightAnchor?.(anchor)
         }}
         onToggleAlwaysOnTop={() =>
           void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)

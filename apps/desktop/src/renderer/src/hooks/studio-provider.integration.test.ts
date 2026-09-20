@@ -10,6 +10,12 @@ const toastSpies = vi.hoisted(() => ({
   warning: vi.fn()
 }))
 vi.mock('sonner', () => ({ toast: toastSpies }))
+// The highlight card is painted on an OffscreenCanvas, which the node test
+// environment lacks. Only the painter is stubbed; layout stays real elsewhere.
+vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/caption-overlay')>()),
+  renderCommentHighlightPng: async () => 'cG5n'
+}))
 
 import type {
   AccountCallbackEnvelope,
@@ -1648,6 +1654,84 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(1)
   })
 
+  it('sends the picked corner with a highlight and moves a live card when the pick changes', async () => {
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: highlightMessage.sessionId,
+      providers: [],
+      messages: [highlightMessage],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    // The provider has the live chat once it has asked the backend for it.
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        backend.commands.some((command) => command.method === 'liveChat.status')
+    )
+    const windowState = (highlightAnchor: string): Record<string, unknown> => ({
+      open: true,
+      visible: true,
+      bounds: null,
+      alwaysOnTop: false,
+      highlightAnchor,
+      protected: false,
+      enabled: true
+    })
+    const highlightSets = (): BackendCommand[] =>
+      backend.commands.filter((command) => command.method === 'comments.highlight.set')
+
+    // The pick arrives from main (the Chat window's corner menu persists there).
+    await act(async () => emitIpc?.('onCommentsWindowState', windowState('bottom-right')))
+    await act(async () => latest()!.core.toggleCommentHighlight(highlightMessage))
+    await waitForObservation(() => latest()?.core.commentHighlightState.phase === 'live')
+
+    expect(highlightSets()).toHaveLength(1)
+    expect(highlightSets()[0]!.params).toMatchObject({
+      messageId: highlightMessage.id,
+      anchor: 'bottom-right'
+    })
+    expect(highlightSets()[0]!.params).not.toHaveProperty('position')
+
+    // Changing the corner while the card is live re-sends the SAME message
+    // (a move), never the un-pin a repeated click would mean.
+    await act(async () => emitIpc?.('onCommentsWindowState', windowState('top-right')))
+    await waitForObservation(() => highlightSets().length === 2)
+    expect(highlightSets()[1]!.params).toMatchObject({
+      messageId: highlightMessage.id,
+      anchor: 'top-right'
+    })
+    expect(
+      backend.commands.filter((command) => command.method === 'comments.highlight.clear')
+    ).toHaveLength(0)
+    expect(latest()?.core.commentHighlightState.phase).toBe('live')
+
+    // An unknown value from an old prefs file lands on the default corner.
+    await act(async () => emitIpc?.('onCommentsWindowState', windowState('middle')))
+    await waitForObservation(() => highlightSets().length === 3)
+    expect(highlightSets()[2]!.params).toMatchObject({ anchor: 'top-left' })
+  })
+
   it('returns success to Main after reconciling an outcome-unknown detached highlight request', async () => {
     const backend = new StudioBackend()
     backend.liveChatSnapshot = {
@@ -1770,7 +1854,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(resolutions.find(({ requestId }) => requestId === first.requestId)).toEqual({
       requestId: first.requestId,
       ok: false,
-      error: 'A newer comment highlight replaced this request.'
+      error: 'A newer highlight replaced this request.'
     })
     expect(resolutions.find(({ requestId }) => requestId === second.requestId)).toEqual({
       requestId: second.requestId,

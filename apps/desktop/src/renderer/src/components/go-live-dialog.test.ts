@@ -19,7 +19,7 @@ describe('Go Live comments status', () => {
       })
     )
 
-    expect(markup).toContain('aria-label="Comments read and send status"')
+    expect(markup).toContain('aria-label="Chat read and send status"')
     expect(markup).toContain('Read: After publish')
     expect(markup).toContain('Send: Receive only')
     expect(markup).toContain('X comments attach after the native broadcast is published')
@@ -40,12 +40,12 @@ describe('Go Live comments status', () => {
     expect(markup).toContain('data-variant="warning"')
   })
 
-  it('keeps video ready while summarizing non-blocking comment limitations', () => {
+  it('keeps video ready while summarizing non-blocking chat limitations', () => {
     const markup = renderToStaticMarkup(
       createElement(GoLiveDestinationSummary, { issueCount: 0, warningCount: 2 })
     )
 
-    expect(markup).toContain('Ready · 2 comment limitations')
+    expect(markup).toContain('Ready · 2 chat limitations')
     expect(markup).toContain('data-variant="warning"')
     expect(markup).not.toContain('data-variant="destructive"')
   })

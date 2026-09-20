@@ -159,7 +159,7 @@ export function LiveChatPanel({
   const hasMessages = messages.length > 0
   const emptyMessage =
     activePlatforms.length > 0
-      ? 'No comments from the selected destinations.'
+      ? 'No messages from the selected destinations.'
       : liveChatEmptyMessage(snapshot)
 
   return (
@@ -196,7 +196,7 @@ export function LiveChatPanel({
             {filterablePlatforms.map((platform) => (
               <ToggleGroupItem
                 key={platform}
-                aria-label={`Filter ${CHAT_PLATFORM_LABELS[platform]} comments`}
+                aria-label={`Filter ${CHAT_PLATFORM_LABELS[platform]} chat`}
                 className="px-2 text-xs"
                 value={platform}
               >
@@ -227,7 +227,7 @@ export function LiveChatPanel({
       <div className="relative min-h-0 flex-1">
         <ScrollArea ref={scrollRootRef} className="h-full max-h-[28rem] min-h-[8rem]">
           {hasMessages ? (
-            <ol aria-label="Comments" className="flex flex-col gap-0.5 py-1">
+            <ol aria-label="Chat messages" className="flex flex-col gap-0.5 py-1">
               {visibleMessages(messages, MAX_RENDERED_LIVE_CHAT_MESSAGES).map((message) => (
                 <CommentRow
                   key={message.id}
@@ -251,7 +251,7 @@ export function LiveChatPanel({
                 <EmptyMedia variant="icon">
                   <ChatIcon weight="duotone" />
                 </EmptyMedia>
-                <EmptyTitle className="text-sm">No comments yet</EmptyTitle>
+                <EmptyTitle className="text-sm">No messages yet</EmptyTitle>
                 <EmptyDescription className="text-xs">{emptyMessage}</EmptyDescription>
               </EmptyHeader>
               {chatNeedsConnectionAction(snapshot.providers) ? (

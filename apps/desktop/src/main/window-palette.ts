@@ -1,6 +1,9 @@
 // Main-side palette for surfaces that CANNOT read the renderer's CSS tokens:
-// the data-URL windows (Notes, Comments, Preview — dark-always by design, they
-// frame video) and BrowserWindow backgroundColor fallbacks. Values are the
+// the data-URL windows (Notes, Preview — dark-always by design, they frame
+// video) and BrowserWindow backgroundColor fallbacks. The detached Chat and
+// Captions windows are black glass on macOS (transparent + the renderer's
+// wallpaper underlay) and fall back to this solid base off macOS or when glass
+// is opted out. Values are the
 // solid equivalents of styles.css (the black-glass / porcelain columns) —
 // styles.css is the source of truth; change them together.
 // (.claude/skills/videorc-design documents both.)

@@ -132,7 +132,7 @@ function CohostMarks({
   return (
     <Badge
       data-slot="cohost-comment-suggested"
-      title="Co-host suggests showing this comment on the stream"
+      title="Co-host suggests showing this message on the stream"
       variant="outline"
     >
       <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
@@ -182,7 +182,9 @@ function CommentContent({
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-center gap-1.5">
           <ChatPlatformIcon decorative platform={message.platform} />
-          <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+          {/* text-left: a highlightable row is a Button, whose centred text
+              would otherwise float the name mid-row, away from the avatar. */}
+          <span className="min-w-0 flex-1 truncate text-left font-medium text-foreground">
             {message.authorName}
           </span>
           <EventStatus message={message} />
@@ -250,10 +252,10 @@ export function CommentRow({
         <Button
           aria-label={
             highlight.phase === 'live'
-              ? `Remove ${message.authorName}'s comment from the stream`
+              ? `Remove ${message.authorName}'s message from the stream`
               : suggested
-                ? `Show ${message.authorName}'s comment on the stream (co-host suggestion)`
-                : `Show ${message.authorName}'s comment on the stream`
+                ? `Show ${message.authorName}'s message on the stream (co-host suggestion)`
+                : `Show ${message.authorName}'s message on the stream`
           }
           aria-pressed={highlight.phase === 'live'}
           disabled={highlight.phase === 'applying'}
@@ -262,7 +264,7 @@ export function CommentRow({
             message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
           )}
           title={
-            highlight.phase === 'live' ? 'Remove from stream' : 'Show this comment on the stream'
+            highlight.phase === 'live' ? 'Remove from stream' : 'Show this message on the stream'
           }
           type="button"
           variant={highlight.phase === 'live' ? 'secondary' : 'ghost'}
