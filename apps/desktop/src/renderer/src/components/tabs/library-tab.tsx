@@ -63,6 +63,7 @@ import {
   isFinalizingSession
 } from '@/lib/session-finalization'
 import { dayLabel, durationMsLabel, formatBytes, isActiveRecordingState } from '@/lib/format'
+import { revealInFileManagerLabel } from '@/lib/platform'
 import {
   LIBRARY_FILTERS,
   filterLibrarySessions,
@@ -915,7 +916,7 @@ function RowActions({
               onClick={() => filePath && void window.videorc?.revealSession?.(session.id)}
             >
               <FolderIcon />
-              Show in Finder
+              {revealInFileManagerLabel()}
             </DropdownMenuItem>
             {cleanupView.menuLabel ? (
               <DropdownMenuItem

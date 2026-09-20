@@ -42,7 +42,7 @@ import { isActiveRecordingState } from '@/lib/format'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
 import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 import { shortcutsByGroup } from '@/lib/shortcuts'
-import { displayKeyGlyphs, osSettingsName } from '@/lib/platform'
+import { displayAccelerator, displayKeyGlyphs, osSettingsName } from '@/lib/platform'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isUpdateInstallable } from '@/lib/update-ui'
 
@@ -440,7 +440,7 @@ export function SettingsTab({
           <CohostSettingsSection />
 
           <PanelSection
-            description="Work system-wide, even when Videorc is in the background — bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. Cmd+Shift+R."
+            description={`Work system-wide, even when Videorc is in the background — bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. ${displayAccelerator('Cmd+Shift+R', runtimeInfo?.platform)}.`}
             icon={SettingsIcon}
             title="Global shortcuts"
           >
@@ -458,7 +458,7 @@ export function SettingsTab({
                     <Input
                       className="w-44 font-mono text-xs"
                       id={`global-shortcut-${key}`}
-                      placeholder={placeholder}
+                      placeholder={displayAccelerator(placeholder, runtimeInfo?.platform)}
                       value={settings.globalShortcuts?.[key] ?? ''}
                       onChange={(event) =>
                         setSettings((current) => ({

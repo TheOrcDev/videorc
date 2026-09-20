@@ -11,6 +11,7 @@ import {
   type SessionRuntimeActivity,
   type SessionRuntimeNotice
 } from '@/lib/session-runtime-notice'
+import { revealInFileManagerLabel } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { recordingStartupHealthToast } from '@/lib/studio-health'
 import { isTransientBackendError, shouldToastBackendError } from '@/lib/backend-transport'
@@ -117,7 +118,7 @@ export function showRecordingFailure({ notice }: RecordingFailurePresentation): 
     ...(notice.activity === 'recording' && sessionId && notice.outputPath && revealSession
       ? {
           cancel: {
-            label: 'Show in Finder',
+            label: revealInFileManagerLabel(),
             onClick: () => void revealSession(sessionId)
           }
         }
@@ -327,7 +328,7 @@ export function showNoiseCleanupCompleted(jobId: string, outputSessionId: string
       }
     },
     cancel: {
-      label: 'Show in Finder',
+      label: revealInFileManagerLabel(),
       onClick: () => void window.videorc?.revealSession?.(outputSessionId)
     }
   })

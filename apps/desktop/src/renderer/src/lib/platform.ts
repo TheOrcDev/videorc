@@ -58,3 +58,45 @@ export function displayKeyGlyph(glyph: string, platform: string | undefined): st
 export function displayKeyGlyphs(keys: readonly string[], platform: string | undefined): string[] {
   return keys.map((key) => displayKeyGlyph(key, platform))
 }
+
+// Non-React callers (sonner toasts) cannot read runtimeInfo. Electron's
+// user agent names the host OS reliably, so it stands in ONLY when no
+// explicit platform was passed.
+function detectedPlatform(): string | undefined {
+  const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent
+  if (userAgent.includes('Windows')) {
+    return 'win32'
+  }
+  if (userAgent.includes('Macintosh')) {
+    return 'darwin'
+  }
+  return userAgent ? 'linux' : undefined
+}
+
+/** Label for "reveal this file in the OS file manager" actions. */
+export function revealInFileManagerLabel(
+  platform: string | undefined = detectedPlatform()
+): string {
+  switch (appPlatform(platform)) {
+    case 'darwin':
+      return 'Show in Finder'
+    case 'win32':
+      return 'Show in Explorer'
+    default:
+      return 'Show in folder'
+  }
+}
+
+/** Electron accelerator examples are authored mac-style (`Cmd+Shift+R`). */
+export function displayAccelerator(
+  accelerator: string,
+  platform: string | undefined = detectedPlatform()
+): string {
+  if (appPlatform(platform) === 'darwin') {
+    return accelerator
+  }
+  return accelerator
+    .split('+')
+    .map((part) => (part === 'Cmd' ? 'Ctrl' : part === 'Option' ? 'Alt' : part))
+    .join('+')
+}

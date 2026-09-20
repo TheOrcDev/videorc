@@ -19,6 +19,7 @@ import {
   type SystemAccessAction,
   type SystemAccessRow
 } from '@/lib/system-access'
+import { displayAccelerator } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 type PreviewStageProps = {
@@ -402,7 +403,7 @@ function DetachedPreviewCard({
             <Button data-videorc-open-preview-window size="sm" onClick={onOpen}>
               Open preview
               <kbd className="ml-2 rounded bg-background/40 px-1.5 font-mono text-[10px]">
-                Cmd+P
+                {displayAccelerator('Cmd+P')}
               </kbd>
             </Button>
           </>

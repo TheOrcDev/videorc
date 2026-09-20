@@ -11,6 +11,7 @@ const toastSpies = vi.hoisted(() => ({
 }))
 vi.mock('sonner', () => ({ toast: toastSpies }))
 
+import { revealInFileManagerLabel } from '@/lib/platform'
 import type {
   AccountCallbackEnvelope,
   AiArtifact,
@@ -2037,7 +2038,7 @@ describe('real StudioProvider lifecycle', () => {
         description: failedStatus.message,
         duration: Infinity,
         action: expect.objectContaining({ label: 'Open Library' }),
-        cancel: expect.objectContaining({ label: 'Show in Finder' })
+        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
     expect(toastSpies.success).not.toHaveBeenCalled()
@@ -2252,7 +2253,7 @@ describe('real StudioProvider lifecycle', () => {
         description: failureEvent.message,
         duration: Infinity,
         action: expect.objectContaining({ label: 'Open Library' }),
-        cancel: expect.objectContaining({ label: 'Show in Finder' })
+        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
     expect(reconnectedBackend.commands).toContainEqual(
@@ -2341,7 +2342,7 @@ describe('real StudioProvider lifecycle', () => {
       'Recording stopped unexpectedly',
       expect.objectContaining({
         description: failedSnapshotEvent.message,
-        cancel: expect.objectContaining({ label: 'Show in Finder' })
+        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
   })
@@ -7696,7 +7697,7 @@ describe('real StudioProvider lifecycle', () => {
         }
       | undefined
     expect(completionToast?.action?.label).toBe('Play')
-    expect(completionToast?.cancel?.label).toBe('Show in Finder')
+    expect(completionToast?.cancel?.label).toBe(revealInFileManagerLabel())
     completionToast?.action?.onClick()
     completionToast?.cancel?.onClick()
     await act(async () => Promise.resolve())
