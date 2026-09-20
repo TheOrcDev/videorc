@@ -1333,6 +1333,37 @@ describe('backend RPC contract', () => {
       questionsTotal: 5
     }
     expect(validateBackendEventPayload('cohost.state', working)).toEqual(working)
+
+    // Tick wire v2: every flag kind the backend can emit validates — including
+    // `unknown`, its catch-all for a kind newer than this build — and the
+    // optional extras are absent-or-typed, never null.
+    const v2 = {
+      ...working,
+      flags: [
+        {
+          ...state.flags[0],
+          kind: 'unknown',
+          confidence: 0.4,
+          target: 'group',
+          action: 'hide',
+          alsoKinds: ['scam', 'unknown'],
+          rule: 'No spoilers'
+        }
+      ],
+      highlights: [{ messageId: 'session-1:twitch:default:m-3', score: 0.8, type: 'joke' }],
+      alerts: [{ kind: 'audio', viewers: 2, lastSeenAt: '2026-08-22T10:00:20Z', active: true }],
+      moodScores: { hype: 0.2, tension: 0.7, confusion: 0.1 }
+    }
+    expect(validateBackendEventPayload('cohost.state', v2)).toEqual(v2)
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...v2,
+        flags: [{ ...v2.flags[0], confidence: null }]
+      })
+    ).toThrow('cohost.state')
+    expect(() => validateBackendEventPayload('cohost.state', { ...v2, moodScores: null })).toThrow(
+      'cohost.state'
+    )
     expect(validateBackendRpcResult('cohost.status', working)).toEqual(working)
     expect(validateBackendEventPayload('cohost.state', { ...working, nextTickAt: null })).toEqual({
       ...working,
@@ -1427,8 +1458,21 @@ describe('backend RPC contract', () => {
     const flag = { sessionId: 'session-1', messageId: 'session-1:twitch:default:m-2' }
     expect(validateBackendRpcParams('cohost.flag.dismiss', flag)).toEqual(flag)
 
-    const settings = { enabled: true, tone: 'short', notes: 'Keychron Q1', autoHighlight: false }
+    const settings = {
+      enabled: true,
+      tone: 'short',
+      notes: 'Keychron Q1',
+      autoHighlight: false,
+      rules: ['No spoilers']
+    }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
+    expect(validateBackendRpcParams('cohost.settings.set', { rules: [' English only '] })).toEqual({
+      rules: [' English only ']
+    })
+    // The backend normalises rules to <= 10 x 120 before it answers.
+    expect(() =>
+      validateBackendRpcResult('cohost.settings.get', { ...settings, rules: Array(11).fill('r') })
+    ).toThrow('cohost.settings.get')
     expect(validateBackendRpcParams('cohost.settings.set', { tone: 'professional' })).toEqual({
       tone: 'professional'
     })

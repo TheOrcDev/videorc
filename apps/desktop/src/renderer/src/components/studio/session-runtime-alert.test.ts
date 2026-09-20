@@ -2,6 +2,7 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it, vi } from 'vitest'
 
+import { revealInFileManagerLabel } from '@/lib/platform'
 import { SessionRuntimeAlert } from './session-runtime-alert'
 
 describe('SessionRuntimeAlert', () => {
@@ -27,7 +28,7 @@ describe('SessionRuntimeAlert', () => {
     expect(markup).toContain('Recording stopped unexpectedly')
     expect(markup).toContain('Encoder FIFO write exceeded the delivery budget.')
     expect(markup).toContain('Open Library')
-    expect(markup).toContain('Show in Finder')
+    expect(markup).toContain(revealInFileManagerLabel())
     expect(markup).toContain('Dismiss')
   })
 
@@ -52,7 +53,7 @@ describe('SessionRuntimeAlert', () => {
     expect(markup).toContain('The selected microphone stopped providing audio.')
     expect(markup).toContain('Dismiss')
     expect(markup).not.toContain('Open Library')
-    expect(markup).not.toContain('Show in Finder')
+    expect(markup).not.toContain(revealInFileManagerLabel())
   })
 
   it('uses live-session copy when stream-only output is active', () => {

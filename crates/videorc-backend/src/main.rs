@@ -42,6 +42,7 @@ mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
 mod panic_hook;
+mod performance_check;
 mod pipeline;
 mod posters;
 mod preflight;
@@ -4641,9 +4642,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_PROBE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
-        COMMAND_LANE_SMOKE_BLOCK_METHOD | "noiseCleanup.start" | "noiseCleanup.cancel" => {
-            Some(DEFAULT_MUTATION_POLICY)
-        }
+        COMMAND_LANE_SMOKE_BLOCK_METHOD
+        | "noiseCleanup.start"
+        | "noiseCleanup.cancel"
+        | "performance.check.run"
+        | "performance.check.cancel" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -4680,6 +4683,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "audio.meter.probeNative"
         | "scene.get"
         | "stream.output.topology.probe"
+        | "performance.check.get"
         | "sessions.list"
         | "sessions.healthEvents.list"
         | "sessions.logs.list"
@@ -6567,6 +6571,11 @@ async fn relay_websocket_events(
 
         // A recovery frame is mandatory connection control, not an ordinary event a
         // renderer can exclude. Keep the pre-bounded-queue protocol behavior intact.
+        // Benchmark sessions are invisible to every client; see
+        // `performance_check::SUPPRESSED_EVENTS` for why this is the relay's job.
+        if !is_recovery && state.performance_check.suppresses_event(&event.event) {
+            continue;
+        }
         let allowed = is_recovery
             || event_filter
                 .lock()
@@ -8841,6 +8850,31 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "performance.check.get" => {
+            ServerResponse::ok(command.id, performance_check::current_state(state).await)
+        }
+        "performance.check.run" => {
+            match serde_json::from_value::<protocol::PerformanceCheckRunParams>(command.params) {
+                Ok(params) => match performance_check::start(state.clone(), params).await {
+                    Ok(()) => ServerResponse::ok(
+                        command.id,
+                        performance_check::current_state(state).await,
+                    ),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "performance-check-refused",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "performance.check.cancel" => {
+            state.performance_check.request_cancel();
+            ServerResponse::ok(command.id, performance_check::current_state(state).await)
+        }
         "session.start" => {
             let mut params_value = command.params;
             if let Err(error) = resolve_start_session_resources(state, &mut params_value, role) {
@@ -9516,7 +9550,14 @@ async fn handle_text_message_with_role(
                             if params.platform == StreamPlatform::X {
                                 // Disconnecting X revokes the local live authorization
                                 // too — the OAuth 1.0a token pair must not outlive the
-                                // account it belongs to.
+                                // account it belongs to. The chat relay subscription
+                                // is dropped first, while the credentials still exist.
+                                if let Ok(Some(credentials)) = x_live::x_livestream_credentials() {
+                                    tokio::spawn(x_chat::forget_x_chat_relay(
+                                        state.clone(),
+                                        credentials,
+                                    ));
+                                }
                                 for secret_ref in [
                                     x_live::X_OAUTH1_ACCESS_TOKEN_SECRET_REF,
                                     x_live::X_OAUTH1_TOKEN_SECRET_SECRET_REF,
@@ -10616,6 +10657,7 @@ async fn export_support_bundle_for_state(
         diagnostics: current_diagnostics_stats(state).await,
         logs: state.recent_logs(200),
         sessions,
+        performance_check: performance_check::current_state(state).await.result,
     })
 }
 

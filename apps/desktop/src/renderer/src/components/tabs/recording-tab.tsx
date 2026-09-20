@@ -1,4 +1,4 @@
-import { AlertIcon, VideoFileIcon } from '@/components/icons'
+import { AlertIcon, SpinnerIcon, VideoFileIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -17,6 +17,7 @@ import {
   videoProfileCompatibility
 } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
+import { performanceCheckLine } from '@/lib/performance-check'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 
 export function RecordingTab(): ReactElement {
@@ -26,7 +27,10 @@ export function RecordingTab(): ReactElement {
     patchVideo,
     applyVideoPreset,
     isSessionActive,
-    entitlements
+    entitlements,
+    performanceCheck,
+    performanceCheckProgress,
+    runPerformanceCheck
   } = useStudioCore()
   const { video } = captureConfig
   // One-click resolutions so nobody has to remember pixel counts; picking one
@@ -39,6 +43,11 @@ export function RecordingTab(): ReactElement {
   const compatibilityMessage = compatibility.blockingReason ?? compatibility.warning
   const profileGate = videoProfileEntitlementGate({ entitlements, kind: 'recording', video })
   const profileEntitlementMessage = profileGate.allowed ? null : profileGate.reason
+  const checkLine = performanceCheckLine({
+    state: performanceCheck,
+    progress: performanceCheckProgress,
+    video
+  })
 
   return (
     <div className="grid gap-5">
@@ -80,12 +89,47 @@ export function RecordingTab(): ReactElement {
                   entitlements={entitlements}
                   kind="recording"
                   orientation={orientation}
+                  performanceResult={performanceCheck?.result}
                 />
               </SelectContent>
             </Select>
             <FieldDescription>
               Editing a value below switches the preset to Custom.
             </FieldDescription>
+            {checkLine ? (
+              <div
+                aria-live="polite"
+                className={`flex flex-wrap items-center gap-2 text-xs ${
+                  checkLine.tone === 'warning' ? 'text-warning' : 'text-muted-foreground'
+                }`}
+              >
+                {checkLine.busy ? <SpinnerIcon className="size-3.5 animate-spin" /> : null}
+                <span>{checkLine.text}</span>
+                {checkLine.applyPreset ? (
+                  <Button
+                    disabled={isSessionActive}
+                    size="xs"
+                    variant="outline"
+                    onClick={() =>
+                      checkLine.applyPreset &&
+                      applyVideoPreset(checkLine.applyPreset, { kind: 'recording' })
+                    }
+                  >
+                    {checkLine.applyLabel}
+                  </Button>
+                ) : null}
+                {checkLine.checkLabel ? (
+                  <Button
+                    disabled={isSessionActive}
+                    size="xs"
+                    variant="ghost"
+                    onClick={() => void runPerformanceCheck()}
+                  >
+                    {checkLine.checkLabel}
+                  </Button>
+                ) : null}
+              </div>
+            ) : null}
             {profileEntitlementMessage ? (
               <Alert variant="warning">
                 <AlertIcon />

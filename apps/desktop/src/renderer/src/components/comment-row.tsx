@@ -1,11 +1,13 @@
 import type { ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
+import { SparkleIcon } from '@/components/icons'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import type { CommentHighlightState, LiveChatMessage } from '@/lib/backend'
+import type { CohostFlag, CommentHighlightState, LiveChatMessage } from '@/lib/backend'
 import { monogramInitials, useCachedAvatar } from '@/lib/chat-avatar'
+import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
 
 export type CommentHighlightPhase = 'idle' | 'applying' | 'live' | 'failed'
@@ -97,6 +99,48 @@ function HighlightStatus({
   }
 }
 
+/**
+ * What the co-host says about this comment. A flag names its kind (plus who it
+ * is aimed at, or the chat rule it broke) and, at most, LABELS a suggested
+ * action — the row never moderates. "Suggested" marks a comment worth showing;
+ * it sits inside the row's own show-on-stream button, so activating it is the
+ * same manual highlight as any other row. Nothing goes on stream by itself.
+ */
+function CohostMarks({
+  flag,
+  suggested
+}: {
+  flag?: CohostFlag
+  suggested: boolean
+}): ReactElement | null {
+  if (flag) {
+    const action = cohostFlagActionLabel(flag)
+    return (
+      <span className="flex min-w-0 items-center gap-1" data-slot="cohost-comment-flag">
+        <Badge
+          className={cn('max-w-40', flag.severity === 'high' ? 'text-destructive' : 'text-subtle')}
+          title={cohostFlagDetail(flag)}
+          variant="outline"
+        >
+          <span className="truncate">{cohostFlagChipLabel(flag)}</span>
+        </Badge>
+        {action ? <span className="shrink-0 text-[10px] text-subtle">{action}</span> : null}
+      </span>
+    )
+  }
+  if (!suggested) return null
+  return (
+    <Badge
+      data-slot="cohost-comment-suggested"
+      title="Co-host suggests showing this message on the stream"
+      variant="outline"
+    >
+      <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
+      Suggested
+    </Badge>
+  )
+}
+
 function EventStatus({ message }: { message: LiveChatMessage }): ReactElement | null {
   if (message.amountText) {
     return <Badge variant="warning">{message.amountText}</Badge>
@@ -116,11 +160,15 @@ function EventStatus({ message }: { message: LiveChatMessage }): ReactElement | 
 function CommentContent({
   message,
   density,
-  highlight
+  highlight,
+  flag,
+  suggested
 }: {
   message: LiveChatMessage
   density: 'compact' | 'comfortable'
   highlight: CommentHighlightPresentation
+  flag?: CohostFlag
+  suggested: boolean
 }): ReactElement {
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
@@ -134,10 +182,13 @@ function CommentContent({
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-center gap-1.5">
           <ChatPlatformIcon decorative platform={message.platform} />
-          <span className="min-w-0 flex-1 truncate font-medium text-foreground">
+          {/* text-left: a highlightable row is a Button, whose centred text
+              would otherwise float the name mid-row, away from the avatar. */}
+          <span className="min-w-0 flex-1 truncate text-left font-medium text-foreground">
             {message.authorName}
           </span>
           <EventStatus message={message} />
+          <CohostMarks flag={flag} suggested={suggested} />
           <HighlightStatus status={highlight} />
           {time ? (
             <time
@@ -168,15 +219,32 @@ export function CommentRow({
   message,
   density = 'compact',
   highlight = { phase: 'idle' },
+  cohostFlag,
+  cohostSuggested = false,
   onHighlight
 }: {
   message: LiveChatMessage
   density?: 'compact' | 'comfortable'
   highlight?: CommentHighlightPresentation
+  /** The co-host's flag for this message, already filtered by Sensitivity. */
+  cohostFlag?: CohostFlag
+  /** The co-host suggests showing this comment (`cohost.state.highlights`). */
+  cohostSuggested?: boolean
   onHighlight?: (message: LiveChatMessage) => void
 }): ReactElement {
   const highlightable = Boolean(onHighlight) && commentCanHighlight(message)
-  const content = <CommentContent density={density} highlight={highlight} message={message} />
+  // A suggestion is only offered where tapping the row can act on it, and
+  // never once the comment is already on (or on its way to) the stream.
+  const suggested = cohostSuggested && highlightable && highlight.phase === 'idle'
+  const content = (
+    <CommentContent
+      density={density}
+      flag={cohostFlag}
+      highlight={highlight}
+      message={message}
+      suggested={suggested}
+    />
+  )
 
   return (
     <li data-highlight-phase={highlight.phase} data-message-id={message.id}>
@@ -184,8 +252,10 @@ export function CommentRow({
         <Button
           aria-label={
             highlight.phase === 'live'
-              ? `Remove ${message.authorName}'s comment from the stream`
-              : `Show ${message.authorName}'s comment on the stream`
+              ? `Remove ${message.authorName}'s message from the stream`
+              : suggested
+                ? `Show ${message.authorName}'s message on the stream (co-host suggestion)`
+                : `Show ${message.authorName}'s message on the stream`
           }
           aria-pressed={highlight.phase === 'live'}
           disabled={highlight.phase === 'applying'}
@@ -194,7 +264,7 @@ export function CommentRow({
             message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
           )}
           title={
-            highlight.phase === 'live' ? 'Remove from stream' : 'Show this comment on the stream'
+            highlight.phase === 'live' ? 'Remove from stream' : 'Show this message on the stream'
           }
           type="button"
           variant={highlight.phase === 'live' ? 'secondary' : 'ghost'}

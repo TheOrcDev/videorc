@@ -1269,6 +1269,20 @@ pub struct EncoderBridgeOutputProfile {
     pub bitrate_kbps: u32,
 }
 
+/// A record-only session has no stream to reassure the user about, and the
+/// only fix within their reach is a smaller output, so say that.
+fn recording_degraded_message(streaming: bool, produced_fps: f64, target_fps: u32) -> String {
+    if streaming {
+        format!(
+            "Recording quality is degraded while streaming: the recording leg is producing {produced_fps:.0} fps against the selected {target_fps} fps. The stream continues; the saved file will be choppy."
+        )
+    } else {
+        format!(
+            "This PC can't keep up with the selected output: the recording is producing {produced_fps:.0} fps against the selected {target_fps} fps, so the saved file will be choppy. Choose a lower resolution in Output settings."
+        )
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EncoderBridgeDiagnosticsContext {
     pub role: EncoderBridgeOutputRole,
@@ -7231,9 +7245,10 @@ async fn emit_encoder_bridge_diagnostics(
             )
         };
         if fire {
-            let message = format!(
-                "Recording quality is degraded while streaming: the recording leg is producing                  {:.0} fps against the selected {recording_diagnostics_target_fps} fps. The stream continues; the                  saved file will be choppy.",
-                runtime.input_fps.unwrap_or(0.0)
+            let message = recording_degraded_message(
+                diagnostics_context.stream_output.is_some(),
+                runtime.input_fps.unwrap_or(0.0),
+                recording_diagnostics_target_fps,
             );
             let _ = crate::recording::emit_health_event(
                 state,
@@ -11450,5 +11465,26 @@ mod tests {
         let timestamped_stalled = plan_bridge_tick(Duration::from_secs(5), interval);
         assert!(timestamped_stalled.skip_fresh_wait);
         assert_eq!(timestamped_stalled.reanchor_skipped_intervals, 150); // 5s / 33.33ms
+    }
+}
+
+#[cfg(test)]
+mod recording_degraded_message_tests {
+    use super::recording_degraded_message;
+
+    #[test]
+    fn record_only_copy_never_mentions_a_stream_and_has_no_whitespace_runs() {
+        let record_only = recording_degraded_message(false, 4.2, 30);
+        assert!(!record_only.to_ascii_lowercase().contains("stream"));
+        assert!(record_only.contains("4 fps") && record_only.contains("30 fps"));
+        assert!(record_only.contains("Output settings"));
+        let streaming = recording_degraded_message(true, 8.0, 30);
+        assert!(streaming.contains("The stream continues"));
+        for message in [record_only, streaming] {
+            assert!(
+                !message.contains("  "),
+                "line-continuation whitespace leaked: {message}"
+            );
+        }
     }
 }

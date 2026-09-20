@@ -219,6 +219,30 @@ describe('recordingStartupHealthToast', () => {
     })
   })
 
+  it('surfaces the low-end PC output events as keyed warnings', () => {
+    const steppedDown = recordingStartupHealthToast({
+      code: 'recording-output-stepped-down',
+      level: 'warn',
+      message: "This PC's GPU video encoder can't record at 2560x1440."
+    })
+    expect(steppedDown).toMatchObject({
+      variant: 'warning',
+      id: 'recording-output-stepped-down',
+      title: 'Recording at a lower resolution'
+    })
+    const degraded = recordingStartupHealthToast({
+      code: 'recording-degraded',
+      level: 'warn',
+      message: "This PC can't keep up with the selected output."
+    })
+    expect(degraded).toMatchObject({
+      variant: 'warning',
+      id: 'recording-degraded',
+      title: 'Recording is falling behind'
+    })
+    expect(degraded?.duration).toBeLessThan(Infinity)
+  })
+
   it('ignores every other health event, including non-error barrier levels', () => {
     expect(
       recordingStartupHealthToast({

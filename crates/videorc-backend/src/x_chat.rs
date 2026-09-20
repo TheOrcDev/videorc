@@ -1,21 +1,27 @@
-//! X Livestream read-only chat connector.
+//! X Livestream chat connector (read side).
 //!
-//! The X Livestream API document describes chat as a legacy Periscope/X handoff:
-//! fetch a chat token from `api.twitter.com`, exchange it through
-//! `proxsee.pscp.tv`, then connect to the returned WebSocket endpoint. This
-//! module implements read access only. Sending X chat is intentionally
-//! unsupported because the documented API does not include a send flow.
+//! X delivers live chat for native broadcasts only through the X Activity API
+//! (XAA) event `broadcast.chat`. XAA pushes to a public HTTPS webhook signed
+//! with the app consumer secret, and its app-bearer stream is an app-wide
+//! firehose, so neither can terminate inside a desktop app. The Videorc web
+//! relay receives the webhook and this connector long-polls it:
+//!
+//! 1. prove the X identity to the relay (OAuth Echo — only a signed
+//!    `GET /2/users/me` header leaves the machine, never the token);
+//! 2. make sure one `broadcast.chat` subscription points at the relay webhook
+//!    (OAuth 1.0a user context, the "Authorize X Live" credentials);
+//! 3. long-poll the relay for this broadcast's messages.
+//!
+//! The legacy Periscope WebSocket handoff this replaced was shut off by X: the
+//! socket closed right after subscribe on every session and never delivered a
+//! message. Sending lives in `x_live::send_broadcast_chat_message`.
 
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use tokio::time::{sleep, timeout};
-use tokio_tungstenite::connect_async;
-use tokio_tungstenite::tungstenite::Message;
-use uuid::Uuid;
+use serde_json::json;
+use tokio::time::sleep;
 
 use crate::live_chat::{
     LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, live_chat_message_id,
@@ -24,35 +30,23 @@ use crate::live_chat::{
 use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
+use crate::x_live::XLivestreamCredentials;
 
-const CHAT_STATUS_BASE_URL: &str = "https://api.twitter.com";
-const CHAT_ACCESS_URL: &str = "https://proxsee.pscp.tv/api/v2/accessChatPublic";
-const PERISCOPE_USER_AGENT: &str = "Twitter/m5";
+const RELAY_BIND_PATH: &str = "/api/desktop/x-chat/bind";
+const RELAY_READ_PATH: &str = "/api/desktop/x-chat";
+/// After this many consecutive failed attempts the outage is written to the
+/// session health record once. The connector keeps retrying while the session
+/// is live: a relay or network outage mid-stream must heal on its own.
+const FAILURE_REPORT_ATTEMPTS: usize = 8;
 #[cfg(not(test))]
-const CHAT_TOKEN_ATTEMPTS: usize = 10;
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
-const CHAT_TOKEN_ATTEMPTS: usize = 3;
+const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_millis(150);
+/// How long the relay may hold a read open waiting for messages.
 #[cfg(not(test))]
-const CHAT_TOKEN_RETRY_MS: u64 = 2_000;
+const RELAY_READ_WAIT_MS: u64 = 20_000;
 #[cfg(test)]
-const CHAT_TOKEN_RETRY_MS: u64 = 10;
-const MAX_RECONNECT_ATTEMPTS: usize = 8;
-#[cfg(not(test))]
-const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg(test)]
-const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
-const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-#[cfg(test)]
-const WEBSOCKET_HANDSHAKE_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
-const WEBSOCKET_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
-#[cfg(test)]
-const WEBSOCKET_IDLE_TIMEOUT: Duration = Duration::from_millis(100);
-#[cfg(not(test))]
-const CONNECT_READY_GRACE_MS: u64 = 1_000;
-#[cfg(test)]
-const CONNECT_READY_GRACE_MS: u64 = 25;
+const RELAY_READ_WAIT_MS: u64 = 20;
 #[cfg(not(test))]
 const MIN_RECONNECT_BACKOFF_MS: u64 = 500;
 #[cfg(test)]
@@ -62,52 +56,105 @@ const MAX_RECONNECT_BACKOFF_MS: u64 = 30_000;
 #[cfg(test)]
 const MAX_RECONNECT_BACKOFF_MS: u64 = 40;
 
+#[cfg(not(test))]
+const DEFAULT_X_API_BASE_URL: &str = crate::x_live::DEFAULT_API_BASE_URL;
+// Unit tests must never reach production hosts, even through a code path that
+// forgot to set the overrides.
+#[cfg(test)]
+const DEFAULT_X_API_BASE_URL: &str = "http://127.0.0.1:9";
+
+#[cfg(not(test))]
+fn default_relay_base_url() -> String {
+    crate::videorc_api::api_base_url()
+}
+
+#[cfg(test)]
+fn default_relay_base_url() -> String {
+    "http://127.0.0.1:9".to_string()
+}
+
 pub const X_NATIVE_COMMENTS_AVAILABLE: bool = true;
 
 pub const X_COMMENTS_EVIDENCE_CHECKLIST: &[&str] = &[
-    "Official X Livestream API documentation covers read-only live chat token handoff.",
+    "Official X documentation delivers live chat through the X Activity API broadcast.chat event.",
     "Approved X Livestream API access exists for source and broadcast lifecycle.",
-    "The connector uses only documented read endpoints and does not send X chat messages.",
+    "Chat is read through the Videorc relay webhook and sent with the documented chat endpoint.",
 ];
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct XChatConfig {
     pub broadcast_id: String,
-    pub media_key: String,
     #[serde(default)]
     pub target_id: Option<String>,
-    #[serde(default)]
-    pub status_base_url: Option<String>,
-    #[serde(default)]
-    pub access_url: Option<String>,
+    /// Test seam. Never deserialized: a renderer must not be able to point the
+    /// account bearer or the X signature at another host.
+    #[serde(skip)]
+    pub overrides: XChatOverrides,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct XChatOverrides {
+    pub relay_base_url: Option<String>,
+    pub x_api_base_url: Option<String>,
+    pub session_token: Option<String>,
+    pub credentials: Option<XLivestreamCredentials>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct XChatStatusResponse {
-    #[serde(default)]
-    chat_token: Option<String>,
+struct RelayBinding {
+    webhook_id: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "snake_case")]
-struct XChatAccessResponse {
+#[serde(rename_all = "camelCase")]
+struct RelayPage {
+    cursor: String,
     #[serde(default)]
-    endpoint: Option<String>,
-    #[serde(default)]
-    access_token: Option<String>,
-    #[serde(default)]
-    replay_endpoint: Option<String>,
-    #[serde(default)]
-    replay_access_token: Option<String>,
+    events: Vec<RelayEvent>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct XChatFrame {
-    kind: i64,
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayEvent {
+    message_id: String,
+    text: String,
     #[serde(default)]
-    payload: Option<String>,
+    is_subscriber: bool,
+    #[serde(default)]
+    received_at: Option<String>,
+    #[serde(default)]
+    author: RelayAuthor,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayAuthor {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+}
+
+/// Retrying cannot fix this; the user has to act (sign in, re-authorize X).
+#[derive(Debug)]
+struct XChatTerminalFailure(String);
+
+impl std::fmt::Display for XChatTerminalFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for XChatTerminalFailure {}
+
+fn terminal(message: impl Into<String>) -> anyhow::Error {
+    XChatTerminalFailure(message.into()).into()
 }
 
 pub fn x_chat_message(has_x_account: bool) -> &'static str {
@@ -162,7 +209,7 @@ pub async fn run_x_chat_connector(
     )
     .await;
 
-    let mut reconnect_attempts = 0;
+    let mut failed_attempts = 0;
     let mut backoff_ms = MIN_RECONNECT_BACKOFF_MS;
     loop {
         let mut reached_ready = false;
@@ -175,7 +222,7 @@ pub async fn run_x_chat_connector(
         )
         .await
         {
-            Ok(()) => anyhow::anyhow!("X live chat WebSocket ended."),
+            Ok(()) => anyhow::anyhow!("X live chat relay read ended."),
             Err(error) => error,
         };
 
@@ -190,9 +237,19 @@ pub async fn run_x_chat_connector(
             return;
         }
 
-        if let Some(failure) = error.downcast_ref::<LiveChatPersistenceFailure>()
-            && failure.is_terminal()
-        {
+        let storage_terminal = error
+            .downcast_ref::<LiveChatPersistenceFailure>()
+            .filter(|failure| failure.is_terminal())
+            .map(|failure| {
+                format!("X live chat stopped because comments storage failed: {failure}")
+            });
+        let terminal_message = storage_terminal.or_else(|| {
+            error
+                .downcast_ref::<XChatTerminalFailure>()
+                .map(ToString::to_string)
+        });
+        if let Some(message) = terminal_message {
+            report_failure(&state, &session_id, &message);
             set_provider_and_emit(
                 &state,
                 &session_id,
@@ -200,43 +257,29 @@ pub async fn run_x_chat_connector(
                 StreamPlatform::X,
                 config.target_id.as_deref(),
                 LiveChatProviderConnectionState::Failed,
-                &format!("X live chat stopped because comments storage failed: {failure}"),
+                &message,
             )
             .await;
             return;
         }
 
         if reached_ready {
-            reconnect_attempts = 0;
+            failed_attempts = 0;
             backoff_ms = MIN_RECONNECT_BACKOFF_MS;
         }
-        reconnect_attempts += 1;
-        if reconnect_attempts >= MAX_RECONNECT_ATTEMPTS {
-            let message = format!(
-                "X live chat stopped after {MAX_RECONNECT_ATTEMPTS} consecutive connection attempts: {error}"
-            );
+        failed_attempts += 1;
+        if failed_attempts == FAILURE_REPORT_ATTEMPTS {
             // Owner report 2026-08-19: an empty X comment feed with no trace
-            // anywhere burned a livestream's worth of debugging. The terminal
-            // failure lands in the session health record so the cause is on
+            // anywhere burned a livestream's worth of debugging. A sustained
+            // outage lands in the session health record so the cause is on
             // file even if nobody watched the provider row live.
-            let _ = crate::recording::emit_health_event(
-                &state,
-                Some(&session_id),
-                crate::protocol::HealthLevel::Warn,
-                "x-live-chat-failed",
-                &message,
-            );
-            set_provider_and_emit(
+            report_failure(
                 &state,
                 &session_id,
-                session_generation,
-                StreamPlatform::X,
-                config.target_id.as_deref(),
-                LiveChatProviderConnectionState::Failed,
-                &message,
-            )
-            .await;
-            return;
+                &format!(
+                    "X live chat has failed {FAILURE_REPORT_ATTEMPTS} consecutive connection attempts and keeps retrying: {error}"
+                ),
+            );
         }
 
         set_provider_and_emit(
@@ -254,6 +297,16 @@ pub async fn run_x_chat_connector(
     }
 }
 
+fn report_failure(state: &AppState, session_id: &str, message: &str) {
+    let _ = crate::recording::emit_health_event(
+        state,
+        Some(session_id),
+        crate::protocol::HealthLevel::Warn,
+        "x-live-chat-failed",
+        message,
+    );
+}
+
 async fn run_x_chat_session(
     state: &AppState,
     session_id: &str,
@@ -262,181 +315,263 @@ async fn run_x_chat_session(
     reached_ready: &mut bool,
 ) -> Result<()> {
     ensure_active_session(state, session_id, session_generation).await?;
-    let client = reqwest::Client::new();
-    let chat_token = fetch_chat_token_with_retry(&client, config).await?;
+    let session_token = config
+        .overrides
+        .session_token
+        .clone()
+        .or_else(crate::account::stored_session_token)
+        .ok_or_else(|| terminal("Sign in to your Videorc account to receive X comments."))?;
+    let credentials = match config.overrides.credentials.clone() {
+        Some(credentials) => credentials,
+        None => crate::x_live::x_livestream_credentials()
+            .context("Could not load the X Live authorization.")?
+            .ok_or_else(|| terminal("Authorize X Live to receive X comments."))?,
+    };
+    let relay = RelayClient::new(config, session_token)?;
+    let x_api_base_url = config
+        .overrides
+        .x_api_base_url
+        .as_deref()
+        .unwrap_or(DEFAULT_X_API_BASE_URL);
+
+    let echo = crate::x_live::x_identity_echo_authorization(&credentials, x_api_base_url)?;
+    let binding = relay.bind(&echo).await?;
     ensure_active_session(state, session_id, session_generation).await?;
-    let access = access_chat(&client, config, &chat_token).await?;
-    ensure_active_session(state, session_id, session_generation).await?;
-    let (endpoint, access_token) = select_chat_access_pair(access)?;
-    let ws_url = chat_ws_url(&endpoint)?;
-    let (mut ws, _response) = timeout(WEBSOCKET_HANDSHAKE_TIMEOUT, connect_async(&ws_url))
-        .await
-        .with_context(|| format!("Timed out connecting to X chat WebSocket {ws_url}"))?
-        .with_context(|| format!("Could not connect to X chat WebSocket {ws_url}"))?;
 
-    ws.send(Message::Text(x_auth_frame(&access_token).into()))
-        .await
-        .context("Could not authenticate X chat WebSocket.")?;
-    ws.send(Message::Text(
-        x_subscribe_frame(&config.broadcast_id).into(),
-    ))
-    .await
-    .context("Could not subscribe to X chat room.")?;
-
-    // The private contract documents auth + subscribe writes but no server
-    // acknowledgement. Do not claim connected merely because those writes
-    // completed. Incoming chat is definitive; otherwise the socket must remain
-    // open for this bounded grace period before it is considered ready.
-    let ready_grace = sleep(Duration::from_millis(CONNECT_READY_GRACE_MS));
-    tokio::pin!(ready_grace);
-    let mut connected = false;
-
-    loop {
-        tokio::select! {
-            _ = &mut ready_grace, if !connected => {
-                mark_connected(
-                    state,
-                    session_id,
-                    session_generation,
-                    config.target_id.as_deref(),
-                    &mut connected,
-                    reached_ready,
-                )
-                .await?;
-            }
-            message = timeout(WEBSOCKET_IDLE_TIMEOUT, ws.next()) => {
-                ensure_active_session(state, session_id, session_generation).await?;
-                let message = message.context(
-                    "X live chat WebSocket exceeded the idle liveness deadline.",
-                )?;
-                let Some(message) = message else {
-                    anyhow::bail!("X live chat WebSocket closed.");
-                };
-                let message = message.context("X chat WebSocket read failed.")?;
-                match message {
-                    Message::Text(text) => {
-                        if let Some(chat_message) =
-                            parse_x_chat_message(&text, session_id, config.target_id.as_deref())
-                        {
-                            mark_connected(
-                                state,
-                                session_id,
-                                session_generation,
-                                config.target_id.as_deref(),
-                                &mut connected,
-                                reached_ready,
-                            )
-                            .await?;
-                            let mut persistence_backoff_ms = MIN_RECONNECT_BACKOFF_MS;
-                            let mut waited_for_storage = false;
-                            loop {
-                                match try_deliver_message(
-                                    state,
-                                    session_generation,
-                                    chat_message.clone(),
-                                )
-                                .await
-                                {
-                                    Ok(()) => break,
-                                    Err(error) if error.is_terminal() => {
-                                        return Err(error.into());
-                                    }
-                                    Err(error) => {
-                                        // Neither the live nor replay X socket promises
-                                        // redelivery for a frame already read. Preserve
-                                        // this exact normalized message locally and do
-                                        // not read a later frame until it is durable.
-                                        waited_for_storage = true;
-                                        set_provider_and_emit(
-                                            state,
-                                            session_id,
-                                            session_generation,
-                                            StreamPlatform::X,
-                                            config.target_id.as_deref(),
-                                            LiveChatProviderConnectionState::Waiting,
-                                            &format!(
-                                                "Waiting for comments storage before accepting more X messages: {error}"
-                                            ),
-                                        )
-                                        .await;
-                                        sleep(Duration::from_millis(persistence_backoff_ms)).await;
-                                        persistence_backoff_ms =
-                                            next_reconnect_backoff_ms(persistence_backoff_ms);
-                                        ensure_active_session(
-                                            state,
-                                            session_id,
-                                            session_generation,
-                                        )
-                                        .await?;
-                                    }
-                                }
-                            }
-                            if waited_for_storage {
-                                set_provider_and_emit(
-                                    state,
-                                    session_id,
-                                    session_generation,
-                                    StreamPlatform::X,
-                                    config.target_id.as_deref(),
-                                    LiveChatProviderConnectionState::Connected,
-                                    "X live chat connected; comments storage recovered (read-only).",
-                                )
-                                .await;
-                            }
-                        }
-                    }
-                    Message::Ping(payload) => {
-                        ws.send(Message::Pong(payload))
-                            .await
-                            .context("Could not answer X chat WebSocket ping.")?;
-                    }
-                    Message::Close(_) => anyhow::bail!("X live chat WebSocket closed."),
-                    Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
-                }
-            }
-        }
-    }
-}
-
-fn select_chat_access_pair(access: XChatAccessResponse) -> Result<(String, String)> {
-    if let (Some(endpoint), Some(access_token)) = (access.endpoint, access.access_token) {
-        return Ok((endpoint, access_token));
-    }
-    if let (Some(endpoint), Some(access_token)) =
-        (access.replay_endpoint, access.replay_access_token)
-    {
-        return Ok((endpoint, access_token));
-    }
-    anyhow::bail!(
-        "X chat access response did not include a matching live or replay endpoint/token pair."
+    crate::x_live::ensure_broadcast_chat_subscription(
+        &relay.http,
+        &credentials,
+        x_api_base_url,
+        &binding.webhook_id,
     )
-}
+    .await
+    .map_err(|error| {
+        if error.rejected {
+            terminal(format!(
+                "X refused the live chat subscription — re-authorize X Live. ({error})"
+            ))
+        } else {
+            anyhow::Error::new(error)
+        }
+    })?;
+    ensure_active_session(state, session_id, session_generation).await?;
 
-async fn mark_connected(
-    state: &AppState,
-    session_id: &str,
-    session_generation: u64,
-    target_id: Option<&str>,
-    connected: &mut bool,
-    reached_ready: &mut bool,
-) -> Result<()> {
-    if *connected {
-        return Ok(());
-    }
+    // The first read carries no cursor: the relay answers "from now" so a new
+    // stream never replays a previous broadcast's backlog.
+    let mut cursor = relay.read(None, &config.broadcast_id).await?.cursor;
     ensure_active_session(state, session_id, session_generation).await?;
     set_provider_and_emit(
         state,
         session_id,
         session_generation,
         StreamPlatform::X,
-        target_id,
+        config.target_id.as_deref(),
         LiveChatProviderConnectionState::Connected,
-        "X live chat authenticated and subscribed (read-only).",
+        "X live chat connected.",
     )
     .await;
-    *connected = true;
     *reached_ready = true;
+
+    loop {
+        let page = relay.read(Some(&cursor), &config.broadcast_id).await?;
+        ensure_active_session(state, session_id, session_generation).await?;
+        for event in page.events {
+            let Some(chat_message) =
+                relay_event_to_message(event, session_id, config.target_id.as_deref())
+            else {
+                continue;
+            };
+            deliver_durably(state, session_id, session_generation, config, chat_message).await?;
+        }
+        // Advance only after every message of the page is durable: a failure
+        // above re-reads the same page, and message ids de-duplicate it.
+        cursor = page.cursor;
+    }
+}
+
+async fn deliver_durably(
+    state: &AppState,
+    session_id: &str,
+    session_generation: u64,
+    config: &XChatConfig,
+    chat_message: LiveChatMessage,
+) -> Result<()> {
+    let mut persistence_backoff_ms = MIN_RECONNECT_BACKOFF_MS;
+    let mut waited_for_storage = false;
+    loop {
+        match try_deliver_message(state, session_generation, chat_message.clone()).await {
+            Ok(()) => break,
+            Err(error) if error.is_terminal() => return Err(error.into()),
+            Err(error) => {
+                // Hold this exact message and do not read further until it is
+                // durable, so comments are never stored out of order.
+                waited_for_storage = true;
+                set_provider_and_emit(
+                    state,
+                    session_id,
+                    session_generation,
+                    StreamPlatform::X,
+                    config.target_id.as_deref(),
+                    LiveChatProviderConnectionState::Waiting,
+                    &format!(
+                        "Waiting for comments storage before accepting more X messages: {error}"
+                    ),
+                )
+                .await;
+                sleep(Duration::from_millis(persistence_backoff_ms)).await;
+                persistence_backoff_ms = next_reconnect_backoff_ms(persistence_backoff_ms);
+                ensure_active_session(state, session_id, session_generation).await?;
+            }
+        }
+    }
+    if waited_for_storage {
+        set_provider_and_emit(
+            state,
+            session_id,
+            session_generation,
+            StreamPlatform::X,
+            config.target_id.as_deref(),
+            LiveChatProviderConnectionState::Connected,
+            "X live chat connected; comments storage recovered.",
+        )
+        .await;
+    }
     Ok(())
+}
+
+struct RelayClient {
+    base_url: String,
+    session_token: String,
+    http: reqwest::Client,
+}
+
+impl RelayClient {
+    fn new(config: &XChatConfig, session_token: String) -> Result<Self> {
+        Ok(Self {
+            base_url: config
+                .overrides
+                .relay_base_url
+                .clone()
+                .unwrap_or_else(default_relay_base_url)
+                .trim_end_matches('/')
+                .to_string(),
+            session_token,
+            http: reqwest::Client::builder()
+                .user_agent(concat!("Videorc-Desktop/", env!("CARGO_PKG_VERSION")))
+                .build()
+                .context("Could not build the X chat relay HTTP client.")?,
+        })
+    }
+
+    async fn bind(&self, echo_authorization: &str) -> Result<RelayBinding> {
+        let response = self
+            .http
+            .post(format!("{}{RELAY_BIND_PATH}", self.base_url))
+            .bearer_auth(&self.session_token)
+            .timeout(HTTP_REQUEST_TIMEOUT)
+            .json(&json!({ "authorization": echo_authorization }))
+            .send()
+            .await
+            .context("Could not reach the Videorc X chat relay.")?;
+        Self::parse(response).await
+    }
+
+    async fn read(&self, after: Option<&str>, broadcast_id: &str) -> Result<RelayPage> {
+        let mut query = vec![
+            ("broadcastId", broadcast_id.to_string()),
+            ("waitMs", RELAY_READ_WAIT_MS.to_string()),
+        ];
+        if let Some(after) = after {
+            query.push(("after", after.to_string()));
+        }
+        let response = self
+            .http
+            .get(format!("{}{RELAY_READ_PATH}", self.base_url))
+            .bearer_auth(&self.session_token)
+            .timeout(HTTP_REQUEST_TIMEOUT + Duration::from_millis(RELAY_READ_WAIT_MS))
+            .query(&query)
+            .send()
+            .await
+            .context("Could not read from the Videorc X chat relay.")?;
+        Self::parse(response).await
+    }
+
+    async fn unbind(&self) -> Result<()> {
+        let response = self
+            .http
+            .delete(format!("{}{RELAY_BIND_PATH}", self.base_url))
+            .bearer_auth(&self.session_token)
+            .timeout(HTTP_REQUEST_TIMEOUT)
+            .send()
+            .await
+            .context("Could not reach the Videorc X chat relay.")?;
+        if !response.status().is_success() {
+            anyhow::bail!("X chat relay unbind failed with HTTP {}", response.status());
+        }
+        Ok(())
+    }
+
+    async fn parse<T: serde::de::DeserializeOwned>(response: reqwest::Response) -> Result<T> {
+        let status = response.status();
+        if status.is_success() {
+            return response
+                .json::<T>()
+                .await
+                .context("Could not parse the X chat relay response.");
+        }
+        let (code, message) = crate::videorc_api::read_error_code_and_message(response).await;
+        match code.as_str() {
+            "unauthorized" => Err(terminal(
+                "Your Videorc sign-in expired — sign in again to receive X comments.",
+            )),
+            "x-chat-bind-rejected" => Err(terminal(
+                "X did not confirm this account — re-authorize X Live to receive X comments.",
+            )),
+            _ if status.as_u16() == 401 => Err(terminal(
+                "Your Videorc sign-in expired — sign in again to receive X comments.",
+            )),
+            // Everything else (relay not configured, binding lost, 5xx, rate
+            // limits) can heal without the user, so the connector retries.
+            _ => anyhow::bail!("X chat relay answered HTTP {status} ({code}): {message}"),
+        }
+    }
+}
+
+/// Best-effort cleanup when the user disconnects X: drop the XAA subscription
+/// and the relay binding so no chat keeps flowing for a disconnected account.
+/// `credentials` must be captured before the local token pair is deleted.
+pub async fn forget_x_chat_relay(state: AppState, credentials: XLivestreamCredentials) {
+    let client = reqwest::Client::new();
+    if let Err(error) = crate::x_live::delete_broadcast_chat_subscriptions(
+        &client,
+        &credentials,
+        crate::x_live::DEFAULT_API_BASE_URL,
+    )
+    .await
+    {
+        state.emit_log(
+            "warn",
+            format!("Could not remove the X live chat subscription: {error}"),
+        );
+    }
+    let Some(session_token) = crate::account::stored_session_token() else {
+        return;
+    };
+    let config = XChatConfig {
+        broadcast_id: String::new(),
+        target_id: None,
+        overrides: XChatOverrides::default(),
+    };
+    let unbind = match RelayClient::new(&config, session_token) {
+        Ok(relay) => relay.unbind().await,
+        Err(error) => Err(error),
+    };
+    if let Err(error) = unbind {
+        state.emit_log(
+            "warn",
+            format!("Could not remove the X chat relay binding: {error}"),
+        );
+    }
 }
 
 async fn ensure_active_session(
@@ -463,166 +598,29 @@ fn next_reconnect_backoff_ms(current_ms: u64) -> u64 {
         .clamp(MIN_RECONNECT_BACKOFF_MS, MAX_RECONNECT_BACKOFF_MS)
 }
 
-async fn fetch_chat_token_with_retry(
-    client: &reqwest::Client,
-    config: &XChatConfig,
-) -> Result<String> {
-    for attempt in 0..CHAT_TOKEN_ATTEMPTS {
-        if let Some(token) = fetch_chat_token(client, config).await? {
-            return Ok(token);
-        }
-
-        // A successful status response can legitimately precede token
-        // availability. Poll only that state here. Transport failures return
-        // to the connector's backoff loop so they never incur two retry sleeps.
-        if attempt + 1 < CHAT_TOKEN_ATTEMPTS {
-            sleep(Duration::from_millis(CHAT_TOKEN_RETRY_MS)).await;
-        }
-    }
-    anyhow::bail!("X chat token was not available after publishing.")
+fn non_empty(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
-async fn fetch_chat_token(
-    client: &reqwest::Client,
-    config: &XChatConfig,
-) -> Result<Option<String>> {
-    let base = config
-        .status_base_url
-        .as_deref()
-        .unwrap_or(CHAT_STATUS_BASE_URL)
-        .trim_end_matches('/');
-    let url = format!("{base}/1.1/live_video_stream/status/{}", config.media_key);
-    let body = timeout(HTTP_REQUEST_TIMEOUT, async {
-        let response = client
-            .get(url)
-            .header("x-periscope-user-agent", PERISCOPE_USER_AGENT)
-            .send()
-            .await
-            .context("Could not fetch X chat token.")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            anyhow::bail!("X chat token request failed with HTTP {status}");
-        }
-        response
-            .json::<XChatStatusResponse>()
-            .await
-            .context("Could not parse X chat token response.")
-    })
-    .await
-    .context("X chat token request timed out.")??;
-    Ok(body.chat_token.filter(|token| !token.trim().is_empty()))
-}
-
-async fn access_chat(
-    client: &reqwest::Client,
-    config: &XChatConfig,
-    chat_token: &str,
-) -> Result<XChatAccessResponse> {
-    timeout(HTTP_REQUEST_TIMEOUT, async {
-        let response = client
-            .post(config.access_url.as_deref().unwrap_or(CHAT_ACCESS_URL))
-            .header("content-type", "application/json")
-            .header("x-periscope-user-agent", PERISCOPE_USER_AGENT)
-            .header("x-idempotence", Uuid::new_v4().to_string())
-            .header("x-attempt", "1")
-            .json(&json!({ "chat_token": chat_token }))
-            .send()
-            .await
-            .context("Could not request X chat access.")?;
-        if !response.status().is_success() {
-            let status = response.status();
-            anyhow::bail!("X chat access request failed with HTTP {status}");
-        }
-        response
-            .json::<XChatAccessResponse>()
-            .await
-            .context("Could not parse X chat access response.")
-    })
-    .await
-    .context("X chat access request timed out.")?
-}
-
-fn chat_ws_url(endpoint: &str) -> Result<String> {
-    let url = reqwest::Url::parse(endpoint).context("X chat endpoint URL is invalid.")?;
-    let host = url
-        .host_str()
-        .context("X chat endpoint URL did not include a host.")?;
-    let scheme = match url.scheme() {
-        "http" | "ws" => "ws",
-        "https" | "wss" => "wss",
-        scheme => anyhow::bail!("X chat endpoint URL uses unsupported scheme {scheme}."),
-    };
-    let authority = match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
-    };
-    Ok(format!("{scheme}://{authority}/chatapi/v1/chatnow"))
-}
-
-fn x_auth_frame(access_token: &str) -> String {
-    json!({
-        "kind": 3,
-        "payload": json!({ "access_token": access_token }).to_string()
-    })
-    .to_string()
-}
-
-fn x_subscribe_frame(broadcast_id: &str) -> String {
-    json!({
-        "kind": 2,
-        "payload": json!({
-            "kind": 1,
-            "payload": json!({ "room": broadcast_id }).to_string()
-        }).to_string()
-    })
-    .to_string()
-}
-
-fn parse_x_chat_message(
-    text: &str,
+fn relay_event_to_message(
+    event: RelayEvent,
     session_id: &str,
     target_id: Option<&str>,
 ) -> Option<LiveChatMessage> {
-    let frame: XChatFrame = serde_json::from_str(text).ok()?;
-    if frame.kind != 1 {
+    let provider_message_id = non_empty(Some(event.message_id))?;
+    if event.text.trim().is_empty() {
         return None;
     }
-    let payload = frame.payload?;
-    let payload: Value = serde_json::from_str(&payload).ok()?;
-    let body = payload
-        .get("body")
-        .and_then(|body| body.as_str())
-        .and_then(|body| serde_json::from_str::<Value>(body).ok())
-        .unwrap_or(payload);
-    let text = body
-        .get("body")
-        .or_else(|| body.get("text"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let username = body
-        .get("username")
-        .or_else(|| body.get("displayName"))
-        .and_then(|value| value.as_str())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("X viewer");
-    let provider_message_id = body
-        .get("uuid")
-        .or_else(|| body.get("id"))
-        .and_then(|value| value.as_str())
-        .map(ToOwned::to_owned)
-        .unwrap_or_else(|| {
-            format!(
-                "{}:{}:{}",
-                username,
-                body.get("timestamp")
-                    .map(Value::to_string)
-                    .unwrap_or_default(),
-                text
-            )
-        });
+    let username = non_empty(event.author.username);
+    let author_name = non_empty(event.author.name)
+        .or_else(|| username.clone())
+        .unwrap_or_else(|| "X viewer".to_string());
+    // The XAA payload carries no timestamp; the relay's receive time is the
+    // closest thing to when the comment was posted.
     let now = chrono::Utc::now().to_rfc3339();
+    let published_at = non_empty(event.received_at).unwrap_or_else(|| now.clone());
     Some(LiveChatMessage {
         id: live_chat_message_id(
             session_id,
@@ -634,23 +632,24 @@ fn parse_x_chat_message(
         platform: StreamPlatform::X,
         target_id: target_id.map(ToOwned::to_owned),
         session_id: session_id.to_string(),
-        author_id: body
-            .get("user_id")
-            .or_else(|| body.get("userId"))
-            .and_then(|value| value.as_str())
-            .map(ToOwned::to_owned),
-        author_name: username.to_string(),
-        author_avatar_url: None,
+        author_id: non_empty(event.author.id),
+        author_name,
+        author_avatar_url: non_empty(event.author.avatar_url)
+            .filter(|url| url.starts_with("https://")),
         author_badges: Vec::new(),
-        author_roles: Vec::new(),
-        published_at: now.clone(),
+        author_roles: if event.is_subscriber {
+            vec!["member".to_string()]
+        } else {
+            Vec::new()
+        },
+        published_at,
         received_at: now,
-        message_text: text.to_string(),
+        message_text: event.text,
         fragments: Vec::new(),
         event_type: LiveChatEventType::Message,
         amount_text: None,
         is_deleted: false,
-        raw_provider_type: Some("x-chat".to_string()),
+        raw_provider_type: Some("x-broadcast-chat".to_string()),
     })
 }
 
@@ -660,214 +659,256 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use axum::extract::ws::{Message as AxumMessage, WebSocketUpgrade};
-    use axum::extract::{Path, State};
-    use axum::http::HeaderMap;
-    use axum::response::IntoResponse;
-    use axum::routing::{get, post};
+    use axum::extract::{Path, Query, State};
+    use axum::http::{HeaderMap, StatusCode};
+    use axum::routing::{delete, get, post};
     use axum::{Json, Router};
+    use serde_json::Value;
     use tokio::sync::{Mutex, Notify, broadcast, oneshot};
 
     use crate::live_chat::{
         CommentsReadState, CommentsWriteState, LiveChatProviderConnectionState,
-        LiveChatProviderState, current_diagnostics, current_status,
+        LiveChatProviderState, current_status,
     };
     use crate::storage::Database;
 
+    const SESSION_TOKEN: &str = "desktop-session-token";
+    const WEBHOOK_ID: &str = "2090847910112202752";
+    const X_USER_ID: &str = "742673143";
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MockSocketMode {
+    enum MockMode {
         Deliver,
-        DeliverOnce,
-        DropFirstThenDeliver,
-        HangHandshake,
+        /// Reads with a cursor answer 500 this many times, then deliver.
+        FailReads(usize),
+        BindRejected,
+        SignedOut,
+        SubscriptionRejected,
+        HangRead,
         WaitForRelease,
-        StayOpen,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum MockHttpMode {
-        Respond,
-        HangToken,
-        HangAccess,
-    }
-
-    #[derive(Debug, Clone, PartialEq, Eq)]
-    struct MockAccessCall {
-        chat_token: String,
-        periscope_user_agent: String,
-        idempotence: String,
-        attempt: String,
     }
 
     #[derive(Clone)]
-    struct MockXServerState {
-        endpoint: String,
-        mode: MockSocketMode,
-        http_mode: MockHttpMode,
-        token_calls: Arc<AtomicUsize>,
-        access_calls: Arc<Mutex<Vec<MockAccessCall>>>,
-        socket_connections: Arc<AtomicUsize>,
-        chat_messages_sent: Arc<AtomicUsize>,
-        socket_frames: Arc<Mutex<Vec<Value>>>,
-        release_message: Arc<Notify>,
+    struct MockState {
+        mode: MockMode,
+        bind_calls: Arc<AtomicUsize>,
+        bind_authorizations: Arc<Mutex<Vec<String>>>,
+        read_calls: Arc<AtomicUsize>,
+        read_queries: Arc<Mutex<Vec<std::collections::HashMap<String, String>>>>,
+        unbind_calls: Arc<AtomicUsize>,
+        subscriptions: Arc<Mutex<Vec<Value>>>,
+        created_subscriptions: Arc<Mutex<Vec<Value>>>,
+        deleted_subscriptions: Arc<Mutex<Vec<String>>>,
+        release: Arc<Notify>,
     }
 
-    struct MockXServer {
+    struct MockServer {
         base_url: String,
-        state: MockXServerState,
+        state: MockState,
         shutdown: oneshot::Sender<()>,
     }
 
-    async fn mock_chat_status(
-        State(state): State<MockXServerState>,
-        Path(media_key): Path<String>,
-        headers: HeaderMap,
-    ) -> Json<Value> {
-        assert_eq!(media_key, "media-key-1");
-        assert_eq!(
-            headers
-                .get("x-periscope-user-agent")
-                .and_then(|value| value.to_str().ok()),
-            Some(PERISCOPE_USER_AGENT)
-        );
-        let call = state.token_calls.fetch_add(1, Ordering::SeqCst) + 1;
-        if state.http_mode == MockHttpMode::HangToken {
-            std::future::pending::<()>().await;
-        }
-        Json(json!({ "chatToken": format!("chat-token-{call}") }))
+    fn relay_error(status: StatusCode, code: &str) -> (StatusCode, Json<Value>) {
+        (
+            status,
+            Json(json!({ "error": { "code": code, "message": code } })),
+        )
     }
 
-    async fn mock_access_chat(
-        State(state): State<MockXServerState>,
+    fn bearer_is_valid(headers: &HeaderMap) -> bool {
+        headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            == Some(&format!("Bearer {SESSION_TOKEN}"))
+    }
+
+    async fn mock_bind(
+        State(state): State<MockState>,
         headers: HeaderMap,
         Json(body): Json<Value>,
-    ) -> Json<Value> {
-        state.access_calls.lock().await.push(MockAccessCall {
-            chat_token: body["chat_token"].as_str().unwrap_or_default().to_string(),
-            periscope_user_agent: headers
-                .get("x-periscope-user-agent")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-                .to_string(),
-            idempotence: headers
-                .get("x-idempotence")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-                .to_string(),
-            attempt: headers
-                .get("x-attempt")
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default()
-                .to_string(),
-        });
-        if state.http_mode == MockHttpMode::HangAccess {
-            std::future::pending::<()>().await;
+    ) -> (StatusCode, Json<Value>) {
+        state.bind_calls.fetch_add(1, Ordering::SeqCst);
+        if !bearer_is_valid(&headers) || state.mode == MockMode::SignedOut {
+            return relay_error(StatusCode::UNAUTHORIZED, "unauthorized");
         }
-        Json(json!({
-            "endpoint": state.endpoint,
-            "access_token": "socket-access-token"
-        }))
+        state.bind_authorizations.lock().await.push(
+            body["authorization"]
+                .as_str()
+                .unwrap_or_default()
+                .to_string(),
+        );
+        if state.mode == MockMode::BindRejected {
+            return relay_error(StatusCode::FORBIDDEN, "x-chat-bind-rejected");
+        }
+        (
+            StatusCode::OK,
+            Json(json!({ "webhookId": WEBHOOK_ID, "xUserId": X_USER_ID, "xUsername": "orcdev" })),
+        )
     }
 
-    fn mock_chat_frame(message_id: &str) -> String {
-        let body = json!({
-            "body": "hello from mocked x",
-            "username": "x-viewer",
-            "uuid": message_id,
-            "user_id": "viewer-1"
-        });
+    async fn mock_unbind(State(state): State<MockState>) -> Json<Value> {
+        state.unbind_calls.fetch_add(1, Ordering::SeqCst);
+        Json(json!({ "ok": true }))
+    }
+
+    fn relay_event(id: &str) -> Value {
         json!({
-            "kind": 1,
-            "payload": json!({ "body": body.to_string() }).to_string()
+            "id": "42",
+            "broadcastId": "1NGarompkEqJj",
+            "messageId": id,
+            "text": "hello from mocked x",
+            "isSubscriber": true,
+            "receivedAt": "2026-09-19T20:00:00.000Z",
+            "author": {
+                "id": "1461047860854759434",
+                "username": "viewer",
+                "name": "Viewer Name",
+                "avatarUrl": "https://pbs.twimg.com/profile_images/1/a_normal.jpg",
+                "verifiedType": "blue"
+            }
         })
-        .to_string()
     }
 
-    async fn mock_chat_socket(
-        State(state): State<MockXServerState>,
-        ws: WebSocketUpgrade,
-    ) -> impl IntoResponse {
-        let connection = state.socket_connections.fetch_add(1, Ordering::SeqCst) + 1;
-        if state.mode == MockSocketMode::HangHandshake {
-            std::future::pending::<()>().await;
+    async fn mock_read(
+        State(state): State<MockState>,
+        headers: HeaderMap,
+        Query(query): Query<std::collections::HashMap<String, String>>,
+    ) -> (StatusCode, Json<Value>) {
+        if !bearer_is_valid(&headers) {
+            return relay_error(StatusCode::UNAUTHORIZED, "unauthorized");
         }
-        ws.on_upgrade(move |mut socket| async move {
-            for _ in 0..2 {
-                let Some(Ok(AxumMessage::Text(text))) = socket.recv().await else {
-                    return;
-                };
-                if let Ok(frame) = serde_json::from_str(text.as_str()) {
-                    state.socket_frames.lock().await.push(frame);
-                }
+        let after = query.get("after").cloned();
+        state.read_queries.lock().await.push(query);
+        let Some(after) = after else {
+            return (
+                StatusCode::OK,
+                Json(json!({ "cursor": "41", "events": [] })),
+            );
+        };
+        let call = state.read_calls.fetch_add(1, Ordering::SeqCst) + 1;
+        match state.mode {
+            MockMode::FailReads(failures) if call <= failures => {
+                return relay_error(StatusCode::INTERNAL_SERVER_ERROR, "internal-error");
             }
-
-            if state.mode == MockSocketMode::DropFirstThenDeliver && connection == 1 {
-                let _ = socket.send(AxumMessage::Close(None)).await;
-                return;
-            }
-
-            match state.mode {
-                MockSocketMode::Deliver | MockSocketMode::DropFirstThenDeliver => {
-                    state.chat_messages_sent.fetch_add(1, Ordering::SeqCst);
-                    let _ = socket
-                        .send(AxumMessage::Text(mock_chat_frame("message-1").into()))
-                        .await;
-                }
-                MockSocketMode::DeliverOnce => {
-                    if state
-                        .chat_messages_sent
-                        .compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst)
-                        .is_ok()
-                    {
-                        let _ = socket
-                            .send(AxumMessage::Text(mock_chat_frame("message-1").into()))
-                            .await;
-                    }
-                }
-                MockSocketMode::HangHandshake => unreachable!("handshake remains pending"),
-                MockSocketMode::WaitForRelease => {
-                    state.release_message.notified().await;
-                    let _ = socket
-                        .send(AxumMessage::Text(mock_chat_frame("late-message").into()))
-                        .await;
-                }
-                MockSocketMode::StayOpen => {}
-            }
-            sleep(Duration::from_secs(5)).await;
-        })
+            MockMode::HangRead => std::future::pending::<()>().await,
+            MockMode::WaitForRelease => state.release.notified().await,
+            _ => {}
+        }
+        if after == "41" {
+            return (
+                StatusCode::OK,
+                Json(json!({ "cursor": "42", "events": [relay_event("message-1")] })),
+            );
+        }
+        sleep(Duration::from_millis(10)).await;
+        (
+            StatusCode::OK,
+            Json(json!({ "cursor": after, "events": [] })),
+        )
     }
 
-    async fn spawn_mock_x_server(mode: MockSocketMode) -> MockXServer {
-        spawn_mock_x_server_with_http(mode, MockHttpMode::Respond).await
+    async fn mock_list_subscriptions(
+        State(state): State<MockState>,
+        headers: HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        let signed = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("OAuth "));
+        if !signed || state.mode == MockMode::SubscriptionRejected {
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "title": "Unauthorized", "detail": "Unauthorized" })),
+            );
+        }
+        let subscriptions = state.subscriptions.lock().await.clone();
+        (StatusCode::OK, Json(json!({ "data": subscriptions })))
     }
 
-    async fn spawn_mock_x_server_with_http(
-        mode: MockSocketMode,
-        http_mode: MockHttpMode,
-    ) -> MockXServer {
+    async fn mock_create_subscription(
+        State(state): State<MockState>,
+        Json(body): Json<Value>,
+    ) -> Json<Value> {
+        state.created_subscriptions.lock().await.push(body.clone());
+        let mut subscription = body;
+        subscription["subscription_id"] = json!("new-subscription");
+        state.subscriptions.lock().await.push(subscription.clone());
+        Json(json!({ "data": { "subscription": subscription } }))
+    }
+
+    async fn mock_app_token(headers: HeaderMap) -> (StatusCode, Json<Value>) {
+        let basic = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("Basic "));
+        if !basic {
+            return (StatusCode::FORBIDDEN, Json(json!({})));
+        }
+        (
+            StatusCode::OK,
+            Json(json!({ "token_type": "bearer", "access_token": "app-bearer" })),
+        )
+    }
+
+    // The live API answers 503 to a user-context DELETE; only the app bearer
+    // may delete a subscription.
+    async fn mock_delete_subscription(
+        State(state): State<MockState>,
+        Path(subscription_id): Path<String>,
+        headers: HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        if headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            != Some("Bearer app-bearer")
+        {
+            return (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "title": "Service Unavailable" })),
+            );
+        }
+        state
+            .subscriptions
+            .lock()
+            .await
+            .retain(|subscription| subscription["subscription_id"] != subscription_id.as_str());
+        state
+            .deleted_subscriptions
+            .lock()
+            .await
+            .push(subscription_id);
+        (StatusCode::OK, Json(json!({ "data": { "deleted": true } })))
+    }
+
+    async fn spawn_mock_server(mode: MockMode, subscriptions: Vec<Value>) -> MockServer {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
-            .expect("mock X listener");
-        let addr = listener.local_addr().expect("mock X address");
-        let base_url = format!("http://{addr}");
-        let state = MockXServerState {
-            endpoint: base_url.clone(),
+            .expect("mock listener");
+        let addr = listener.local_addr().expect("mock address");
+        let state = MockState {
             mode,
-            http_mode,
-            token_calls: Arc::new(AtomicUsize::new(0)),
-            access_calls: Arc::new(Mutex::new(Vec::new())),
-            socket_connections: Arc::new(AtomicUsize::new(0)),
-            chat_messages_sent: Arc::new(AtomicUsize::new(0)),
-            socket_frames: Arc::new(Mutex::new(Vec::new())),
-            release_message: Arc::new(Notify::new()),
+            bind_calls: Arc::new(AtomicUsize::new(0)),
+            bind_authorizations: Arc::new(Mutex::new(Vec::new())),
+            read_calls: Arc::new(AtomicUsize::new(0)),
+            read_queries: Arc::new(Mutex::new(Vec::new())),
+            unbind_calls: Arc::new(AtomicUsize::new(0)),
+            subscriptions: Arc::new(Mutex::new(subscriptions)),
+            created_subscriptions: Arc::new(Mutex::new(Vec::new())),
+            deleted_subscriptions: Arc::new(Mutex::new(Vec::new())),
+            release: Arc::new(Notify::new()),
         };
         let app = Router::new()
+            .route(RELAY_BIND_PATH, post(mock_bind).delete(mock_unbind))
+            .route(RELAY_READ_PATH, get(mock_read))
             .route(
-                "/1.1/live_video_stream/status/{media_key}",
-                get(mock_chat_status),
+                "/2/activity/subscriptions",
+                get(mock_list_subscriptions).post(mock_create_subscription),
             )
-            .route("/api/v2/accessChatPublic", post(mock_access_chat))
-            .route("/chatapi/v1/chatnow", get(mock_chat_socket))
+            .route("/oauth2/token", post(mock_app_token))
+            .route(
+                "/2/activity/subscriptions/{subscription_id}",
+                delete(mock_delete_subscription),
+            )
             .with_state(state.clone());
         let (shutdown_tx, shutdown_rx) = oneshot::channel();
         tokio::spawn(async move {
@@ -877,10 +918,35 @@ mod tests {
                 })
                 .await;
         });
-        MockXServer {
-            base_url,
+        MockServer {
+            base_url: format!("http://{addr}"),
             state,
             shutdown: shutdown_tx,
+        }
+    }
+
+    fn test_credentials() -> XLivestreamCredentials {
+        XLivestreamCredentials {
+            consumer_key: "consumer-key".to_string(),
+            consumer_secret: "consumer-secret".to_string(),
+            access_token: format!("{X_USER_ID}-access-token"),
+            access_token_secret: "access-token-secret".to_string(),
+            user_id: X_USER_ID.to_string(),
+            account_label: None,
+            credential_source: "test".to_string(),
+        }
+    }
+
+    fn mock_config(server: &MockServer) -> XChatConfig {
+        XChatConfig {
+            broadcast_id: "1NGarompkEqJj".to_string(),
+            target_id: Some("x-target".to_string()),
+            overrides: XChatOverrides {
+                relay_base_url: Some(server.base_url.clone()),
+                x_api_base_url: Some(server.base_url.clone()),
+                session_token: Some(SESSION_TOKEN.to_string()),
+                credentials: Some(test_credentials()),
+            },
         }
     }
 
@@ -921,21 +987,26 @@ mod tests {
         coordinator.session_generation()
     }
 
-    fn mock_config(server: &MockXServer) -> XChatConfig {
-        XChatConfig {
-            broadcast_id: "broadcast-1".to_string(),
-            media_key: "media-key-1".to_string(),
-            target_id: Some("x-target".to_string()),
-            status_base_url: Some(server.base_url.clone()),
-            access_url: Some(format!("{}/api/v2/accessChatPublic", server.base_url)),
+    async fn wait_until<F, Fut>(label: &str, mut condition: F)
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = bool>,
+    {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !condition().await {
+            assert!(
+                std::time::Instant::now() <= deadline,
+                "timed out waiting for {label}"
+            );
+            sleep(Duration::from_millis(10)).await;
         }
     }
 
     async fn wait_for_message(state: &AppState, provider_message_id: &str) -> LiveChatMessage {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let snapshot = current_status(state).await;
-            if let Some(message) = snapshot
+            if let Some(message) = current_status(state)
+                .await
                 .messages
                 .into_iter()
                 .find(|message| message.provider_message_id == provider_message_id)
@@ -950,96 +1021,21 @@ mod tests {
         }
     }
 
-    async fn wait_for_socket_frames(state: &MockXServerState, expected: usize) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if state.socket_frames.lock().await.len() >= expected {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "timed out waiting for {expected} X WebSocket frames"
-            );
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    async fn wait_for_count(counter: &AtomicUsize, expected: usize, label: &str) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if counter.load(Ordering::SeqCst) >= expected {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "timed out waiting for {expected} {label}"
-            );
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    async fn wait_for_access_calls(state: &MockXServerState, expected: usize) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if state.access_calls.lock().await.len() >= expected {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "timed out waiting for {expected} X chat access requests"
-            );
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    async fn wait_for_persistence_rejection(state: &AppState) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if state.recent_logs(16).iter().any(|entry| {
-                entry
-                    .message
-                    .contains("exact-message retry remains eligible")
-            }) {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "timed out waiting for forced X persistence rejection"
-            );
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
-    async fn wait_for_persisted_message(state: &AppState, provider_message_id: &str) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
-        loop {
-            if state
-                .database
-                .list_live_chat_messages_recent("session-1", 10)
-                .unwrap()
-                .iter()
-                .any(|message| message.provider_message_id == provider_message_id)
-            {
-                return;
-            }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "timed out waiting for durable X message {provider_message_id}"
-            );
-            sleep(Duration::from_millis(10)).await;
-        }
-    }
-
     async fn wait_for_provider_state(
         state: &AppState,
         expected: LiveChatProviderConnectionState,
     ) -> LiveChatProviderState {
-        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
         loop {
-            let snapshot = current_status(state).await;
-            if let Some(provider) = snapshot.providers.into_iter().find(|provider| {
-                provider.platform == StreamPlatform::X && provider.state == expected
-            }) {
+            if let Some(provider) =
+                current_status(state)
+                    .await
+                    .providers
+                    .into_iter()
+                    .find(|provider| {
+                        provider.platform == StreamPlatform::X && provider.state == expected
+                    })
+            {
                 return provider;
             }
             assert!(
@@ -1050,8 +1046,19 @@ mod tests {
         }
     }
 
+    fn failure_events(state: &AppState, session_id: &str) -> Vec<String> {
+        state
+            .database
+            .list_health_events(session_id)
+            .unwrap()
+            .into_iter()
+            .filter(|event| event.code == "x-live-chat-failed")
+            .map(|event| event.message)
+            .collect()
+    }
+
     #[test]
-    fn readiness_reports_available_read_only_path() {
+    fn readiness_reports_available_path() {
         let readiness = x_chat_readiness(true);
         assert!(readiness.available);
         assert!(readiness.message.contains("read"));
@@ -1059,163 +1066,84 @@ mod tests {
     }
 
     #[test]
-    fn websocket_url_uses_returned_host() {
-        assert_eq!(
-            chat_ws_url("https://prod-chat-ancillary-eu-central-1.pscp.tv").unwrap(),
-            "wss://prod-chat-ancillary-eu-central-1.pscp.tv/chatapi/v1/chatnow"
-        );
-        assert_eq!(
-            chat_ws_url("http://127.0.0.1:4321").unwrap(),
-            "ws://127.0.0.1:4321/chatapi/v1/chatnow"
-        );
-    }
-
-    #[test]
-    fn access_selection_keeps_endpoint_and_token_from_the_same_mode() {
-        let live = select_chat_access_pair(XChatAccessResponse {
-            endpoint: Some("https://live.example".to_string()),
-            access_token: Some("live-token".to_string()),
-            replay_endpoint: Some("https://replay.example".to_string()),
-            replay_access_token: Some("replay-token".to_string()),
-        })
-        .unwrap();
-        assert_eq!(
-            live,
-            ("https://live.example".to_string(), "live-token".to_string())
-        );
-
-        let replay = select_chat_access_pair(XChatAccessResponse {
-            endpoint: Some("https://incomplete-live.example".to_string()),
-            access_token: None,
-            replay_endpoint: Some("https://replay.example".to_string()),
-            replay_access_token: Some("replay-token".to_string()),
-        })
-        .unwrap();
-        assert_eq!(
-            replay,
-            (
-                "https://replay.example".to_string(),
-                "replay-token".to_string()
-            )
-        );
-
-        let error = select_chat_access_pair(XChatAccessResponse {
-            endpoint: Some("https://live.example".to_string()),
-            access_token: None,
-            replay_endpoint: None,
-            replay_access_token: Some("replay-token".to_string()),
-        })
-        .unwrap_err();
-        assert!(error.to_string().contains("matching"));
-    }
-
-    #[test]
     fn reconnect_backoff_is_exponential_and_bounded() {
         assert_eq!(
             next_reconnect_backoff_ms(MIN_RECONNECT_BACKOFF_MS),
-            (MIN_RECONNECT_BACKOFF_MS * 2).min(MAX_RECONNECT_BACKOFF_MS)
+            MIN_RECONNECT_BACKOFF_MS * 2
         );
         assert_eq!(
             next_reconnect_backoff_ms(MAX_RECONNECT_BACKOFF_MS),
             MAX_RECONNECT_BACKOFF_MS
         );
+        assert_eq!(next_reconnect_backoff_ms(0), MIN_RECONNECT_BACKOFF_MS);
+    }
+
+    #[test]
+    fn renderer_params_cannot_redirect_the_relay_or_x_api() {
+        // Older renderers still send the Periscope-era fields; they must be
+        // tolerated, and no wire field may reach the override seam.
+        let config: XChatConfig = serde_json::from_value(json!({
+            "broadcastId": "1NGarompkEqJj",
+            "mediaKey": "28_123",
+            "targetId": "x-target",
+            "statusBaseUrl": "https://evil.example",
+            "accessUrl": "https://evil.example",
+            "overrides": { "relayBaseUrl": "https://evil.example" },
+            "relayBaseUrl": "https://evil.example"
+        }))
+        .unwrap();
+        assert_eq!(config.broadcast_id, "1NGarompkEqJj");
+        assert!(config.overrides.relay_base_url.is_none());
+        assert!(config.overrides.x_api_base_url.is_none());
+        assert!(config.overrides.session_token.is_none());
+        assert!(config.overrides.credentials.is_none());
+    }
+
+    #[test]
+    fn relay_event_maps_to_a_comment_row() {
+        let event: RelayEvent = serde_json::from_value(relay_event("2090000000000000004")).unwrap();
+        let message = relay_event_to_message(event, "session-1", Some("x-target")).unwrap();
+        assert_eq!(message.provider_message_id, "2090000000000000004");
+        assert_eq!(message.platform, StreamPlatform::X);
+        assert_eq!(message.author_name, "Viewer Name");
+        assert_eq!(message.author_id.as_deref(), Some("1461047860854759434"));
         assert_eq!(
-            next_reconnect_backoff_ms(u64::MAX),
-            MAX_RECONNECT_BACKOFF_MS
+            message.author_avatar_url.as_deref(),
+            Some("https://pbs.twimg.com/profile_images/1/a_normal.jpg")
         );
-    }
-
-    #[test]
-    fn frames_double_encode_payloads() {
-        let auth = x_auth_frame("access");
-        assert!(auth.contains(r#""kind":3"#));
-        assert!(auth.contains(r#"access_token"#));
-
-        let subscribe = x_subscribe_frame("broadcast-1");
-        assert!(subscribe.contains(r#""kind":2"#));
-        assert!(subscribe.contains("broadcast-1"));
-    }
-
-    #[test]
-    fn parses_double_json_chat_message() {
-        let body = json!({
-            "body": "hello from x",
-            "username": "viewer",
-            "uuid": "message-1"
-        });
-        let frame = json!({
-            "kind": 1,
-            "payload": json!({ "body": body.to_string() }).to_string()
-        });
-
-        let message = parse_x_chat_message(&frame.to_string(), "session-1", Some("x"))
-            .expect("message parsed");
-
-        assert_eq!(message.platform, StreamPlatform::X);
-        assert_eq!(message.provider_message_id, "message-1");
-        assert_eq!(message.author_name, "viewer");
-        assert_eq!(message.message_text, "hello from x");
-        assert_eq!(message.target_id.as_deref(), Some("x"));
-    }
-
-    #[tokio::test]
-    async fn token_access_socket_flow_authenticates_subscribes_and_delivers() {
-        let server = spawn_mock_x_server(MockSocketMode::Deliver).await;
-        let state = test_state();
-        let session_generation = start_test_session(&state, "session-1").await;
-
-        let connector = tokio::spawn(run_x_chat_connector(
-            state.clone(),
-            "session-1".to_string(),
-            session_generation,
-            mock_config(&server),
-        ));
-        let message = wait_for_message(&state, "message-1").await;
-        connector.abort();
-        let _ = server.shutdown.send(());
-
-        assert_eq!(message.platform, StreamPlatform::X);
-        assert_eq!(message.session_id, "session-1");
-        assert_eq!(message.target_id.as_deref(), Some("x-target"));
-        assert_eq!(message.author_id.as_deref(), Some("viewer-1"));
-        assert_eq!(message.author_name, "x-viewer");
+        assert_eq!(message.author_roles, vec!["member".to_string()]);
+        assert_eq!(message.published_at, "2026-09-19T20:00:00.000Z");
         assert_eq!(message.message_text, "hello from mocked x");
-        let provider = current_status(&state)
-            .await
-            .providers
-            .into_iter()
-            .find(|provider| provider.platform == StreamPlatform::X)
-            .expect("X destination state");
-        assert_eq!(provider.state, LiveChatProviderConnectionState::Connected);
-        assert_eq!(provider.read, CommentsReadState::Ready);
-        assert_eq!(provider.write, CommentsWriteState::ReadOnly);
-        assert_eq!(server.state.token_calls.load(Ordering::SeqCst), 1);
 
-        let access_calls = server.state.access_calls.lock().await;
-        assert_eq!(access_calls.len(), 1);
-        assert_eq!(access_calls[0].chat_token, "chat-token-1");
-        assert_eq!(access_calls[0].periscope_user_agent, PERISCOPE_USER_AGENT);
-        assert_eq!(access_calls[0].attempt, "1");
-        assert!(!access_calls[0].idempotence.is_empty());
-        drop(access_calls);
+        let sparse: RelayEvent =
+            serde_json::from_value(json!({ "messageId": "m2", "text": "hi" })).unwrap();
+        let message = relay_event_to_message(sparse, "session-1", None).unwrap();
+        assert_eq!(message.author_name, "X viewer");
+        assert!(message.author_avatar_url.is_none());
+        assert!(message.author_roles.is_empty());
 
-        let frames = server.state.socket_frames.lock().await;
-        assert_eq!(frames.len(), 2);
-        assert_eq!(frames[0]["kind"], 3);
-        let auth_payload: Value =
-            serde_json::from_str(frames[0]["payload"].as_str().unwrap()).unwrap();
-        assert_eq!(auth_payload["access_token"], "socket-access-token");
-        assert_eq!(frames[1]["kind"], 2);
-        let subscribe_envelope: Value =
-            serde_json::from_str(frames[1]["payload"].as_str().unwrap()).unwrap();
-        let subscribe_payload: Value =
-            serde_json::from_str(subscribe_envelope["payload"].as_str().unwrap()).unwrap();
-        assert_eq!(subscribe_payload["room"], "broadcast-1");
+        let handle_only: RelayEvent = serde_json::from_value(json!({
+            "messageId": "m3",
+            "text": "hi",
+            "author": { "username": "viewer", "avatarUrl": "http://insecure/a.jpg" }
+        }))
+        .unwrap();
+        let message = relay_event_to_message(handle_only, "session-1", None).unwrap();
+        assert_eq!(message.author_name, "viewer");
+        assert!(message.author_avatar_url.is_none());
+
+        for blank in [
+            json!({ "messageId": "m4", "text": "   " }),
+            json!({ "messageId": " ", "text": "hi" }),
+        ] {
+            let event: RelayEvent = serde_json::from_value(blank).unwrap();
+            assert!(relay_event_to_message(event, "session-1", None).is_none());
+        }
     }
 
     #[tokio::test]
-    async fn socket_loss_reconnects_and_refreshes_chat_access() {
-        let server = spawn_mock_x_server(MockSocketMode::DropFirstThenDeliver).await;
+    async fn bind_subscribe_read_flow_delivers_a_comment() {
+        let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
         let state = test_state();
         let session_generation = start_test_session(&state, "session-1").await;
 
@@ -1226,29 +1154,259 @@ mod tests {
             mock_config(&server),
         ));
         let message = wait_for_message(&state, "message-1").await;
+        let provider =
+            wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
         connector.abort();
         let _ = server.shutdown.send(());
 
         assert_eq!(message.session_id, "session-1");
-        assert_eq!(server.state.token_calls.load(Ordering::SeqCst), 2);
-        assert_eq!(server.state.socket_connections.load(Ordering::SeqCst), 2);
-        let access_calls = server.state.access_calls.lock().await;
+        assert_eq!(message.author_name, "Viewer Name");
+        assert_eq!(provider.message, "X live chat connected.");
+
+        // Only a one-shot signed header is handed to the relay, never a token.
+        let authorizations = server.state.bind_authorizations.lock().await;
+        assert_eq!(authorizations.len(), 1);
+        assert!(authorizations[0].starts_with("OAuth "));
+        assert!(!authorizations[0].contains("access-token-secret"));
+        assert!(!authorizations[0].contains("consumer-secret"));
+
+        let created = server.state.created_subscriptions.lock().await;
         assert_eq!(
-            access_calls
-                .iter()
-                .map(|call| call.chat_token.as_str())
-                .collect::<Vec<_>>(),
-            vec!["chat-token-1", "chat-token-2"]
+            *created,
+            vec![json!({
+                "event_type": "broadcast.chat",
+                "filter": { "user_id": X_USER_ID },
+                "webhook_id": WEBHOOK_ID,
+                "tag": "videorc-live-chat",
+            })]
         );
-        drop(access_calls);
-        assert_eq!(server.state.socket_frames.lock().await.len(), 4);
-        assert_eq!(current_diagnostics(&state).await.reconnect_count, 1);
+
+        let queries = server.state.read_queries.lock().await;
+        assert!(!queries[0].contains_key("after"));
+        assert_eq!(queries[1].get("after").map(String::as_str), Some("41"));
+        assert!(
+            queries
+                .iter()
+                .all(|query| query.get("broadcastId").map(String::as_str) == Some("1NGarompkEqJj"))
+        );
+        assert!(failure_events(&state, "session-1").is_empty());
     }
 
     #[tokio::test]
-    async fn persistence_rejection_retries_retained_x_message_without_server_replay() {
-        let server = spawn_mock_x_server(MockSocketMode::DeliverOnce).await;
+    async fn matching_subscription_is_reused_and_stale_ones_are_replaced() {
+        let other_user = json!({
+            "subscription_id": "other-user",
+            "event_type": "broadcast.chat",
+            "filter": { "user_id": "999" },
+            "webhook_id": "old-webhook"
+        });
+        let other_event = json!({
+            "subscription_id": "other-event",
+            "event_type": "broadcast.start",
+            "filter": { "user_id": X_USER_ID }
+        });
+        let matching = json!({
+            "subscription_id": "matching",
+            "event_type": "broadcast.chat",
+            "filter": { "user_id": X_USER_ID },
+            "webhook_id": WEBHOOK_ID
+        });
+        let webhookless = json!({
+            "subscription_id": "webhookless",
+            "event_type": "broadcast.chat",
+            "filter": { "user_id": X_USER_ID }
+        });
+        let client = reqwest::Client::new();
+
+        let server = spawn_mock_server(
+            MockMode::Deliver,
+            vec![
+                other_user.clone(),
+                other_event.clone(),
+                webhookless.clone(),
+                matching,
+            ],
+        )
+        .await;
+        let kept = crate::x_live::ensure_broadcast_chat_subscription(
+            &client,
+            &test_credentials(),
+            &server.base_url,
+            WEBHOOK_ID,
+        )
+        .await
+        .unwrap();
+        assert_eq!(kept, "matching");
+        assert_eq!(
+            *server.state.deleted_subscriptions.lock().await,
+            vec!["webhookless".to_string()]
+        );
+        assert!(server.state.created_subscriptions.lock().await.is_empty());
+        let _ = server.shutdown.send(());
+
+        let server = spawn_mock_server(
+            MockMode::Deliver,
+            vec![other_user, other_event, webhookless],
+        )
+        .await;
+        let created = crate::x_live::ensure_broadcast_chat_subscription(
+            &client,
+            &test_credentials(),
+            &server.base_url,
+            WEBHOOK_ID,
+        )
+        .await
+        .unwrap();
+        assert_eq!(created, "new-subscription");
+        assert_eq!(
+            *server.state.deleted_subscriptions.lock().await,
+            vec!["webhookless".to_string()]
+        );
+
+        let removed = crate::x_live::delete_broadcast_chat_subscriptions(
+            &client,
+            &test_credentials(),
+            &server.base_url,
+        )
+        .await
+        .unwrap();
+        assert_eq!(removed, 1);
+        let remaining: Vec<String> = server
+            .state
+            .subscriptions
+            .lock()
+            .await
+            .iter()
+            .map(|subscription| {
+                subscription["subscription_id"]
+                    .as_str()
+                    .unwrap()
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(remaining, vec!["other-user", "other-event"]);
+        let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn flapping_relay_reads_heal_without_an_outage_report() {
+        let failures = FAILURE_REPORT_ATTEMPTS + 2;
+        let server = spawn_mock_server(MockMode::FailReads(failures), Vec::new()).await;
         let state = test_state();
+        let session_generation = start_test_session(&state, "session-1").await;
+
+        let connector = tokio::spawn(run_x_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            mock_config(&server),
+        ));
+        let message = wait_for_message(&state, "message-1").await;
+        wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
+        connector.abort();
+        let _ = server.shutdown.send(());
+
+        assert_eq!(message.provider_message_id, "message-1");
+        // Every attempt reached Connected before its read failed, so the
+        // consecutive-failure counter kept resetting: a flapping relay is
+        // not an outage report.
+        assert!(failure_events(&state, "session-1").is_empty());
+        assert!(server.state.bind_calls.load(Ordering::SeqCst) > failures);
+    }
+
+    #[tokio::test]
+    async fn unreachable_relay_reports_the_outage_once_and_keeps_retrying() {
+        let state = test_state();
+        let session_generation = start_test_session(&state, "session-1").await;
+        let mut config = mock_config(&spawn_mock_server(MockMode::Deliver, Vec::new()).await);
+        config.overrides.relay_base_url = Some("http://127.0.0.1:9".to_string());
+
+        let connector = tokio::spawn(run_x_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            config,
+        ));
+        wait_until("outage report", || async {
+            !failure_events(&state, "session-1").is_empty()
+        })
+        .await;
+        // Still retrying after the report, and it is not repeated.
+        sleep(Duration::from_millis(150)).await;
+        let provider =
+            wait_for_provider_state(&state, LiveChatProviderConnectionState::Reconnecting).await;
+        assert!(!connector.is_finished());
+        connector.abort();
+
+        let events = failure_events(&state, "session-1");
+        assert_eq!(events.len(), 1);
+        assert!(events[0].contains("keeps retrying"));
+        assert!(provider.message.starts_with("Reconnecting to X live chat"));
+    }
+
+    #[tokio::test]
+    async fn rejected_identity_proof_fails_terminally_without_retrying() {
+        for (mode, expected) in [
+            (MockMode::BindRejected, "re-authorize X Live"),
+            (MockMode::SignedOut, "sign in again"),
+            (MockMode::SubscriptionRejected, "re-authorize X Live"),
+        ] {
+            let server = spawn_mock_server(mode, Vec::new()).await;
+            let state = test_state();
+            let session_generation = start_test_session(&state, "session-1").await;
+
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                run_x_chat_connector(
+                    state.clone(),
+                    "session-1".to_string(),
+                    session_generation,
+                    mock_config(&server),
+                ),
+            )
+            .await
+            .expect("terminal failure stops the connector");
+            let _ = server.shutdown.send(());
+
+            let provider =
+                wait_for_provider_state(&state, LiveChatProviderConnectionState::Failed).await;
+            assert!(provider.message.contains(expected), "{}", provider.message);
+            assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 1);
+            assert_eq!(failure_events(&state, "session-1").len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_videorc_sign_in_is_a_truthful_terminal_state() {
+        let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
+        let state = test_state();
+        let session_generation = start_test_session(&state, "session-1").await;
+        let mut config = mock_config(&server);
+        config.overrides.session_token = Some("stale-token".to_string());
+
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            run_x_chat_connector(
+                state.clone(),
+                "session-1".to_string(),
+                session_generation,
+                config,
+            ),
+        )
+        .await
+        .expect("terminal failure stops the connector");
+        let _ = server.shutdown.send(());
+
+        let provider =
+            wait_for_provider_state(&state, LiveChatProviderConnectionState::Failed).await;
+        assert!(provider.message.contains("sign in again"));
+    }
+
+    #[tokio::test]
+    async fn persistence_rejection_retries_the_held_message_without_a_new_read() {
+        let server = spawn_mock_server(MockMode::Deliver, Vec::new()).await;
+        let state = test_state();
+        // No session row yet: storage rejects the message as retryable.
         let session_generation = {
             let mut coordinator = state.live_chat.lock().await;
             coordinator.start_session("session-1".to_string(), vec![x_provider_row()]);
@@ -1261,21 +1419,21 @@ mod tests {
             session_generation,
             mock_config(&server),
         ));
-        wait_for_persistence_rejection(&state).await;
+        wait_for_provider_state(&state, LiveChatProviderConnectionState::Waiting).await;
         assert!(current_status(&state).await.messages.is_empty());
+        let reads_while_waiting = server.state.read_calls.load(Ordering::SeqCst);
         state
             .database
             .ensure_fake_live_chat_session("session-1")
             .unwrap();
         let message = wait_for_message(&state, "message-1").await;
-        wait_for_persisted_message(&state, "message-1").await;
+        wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
         connector.abort();
         let _ = server.shutdown.send(());
 
-        assert_eq!(message.session_id, "session-1");
         assert_eq!(message.provider_message_id, "message-1");
-        assert_eq!(server.state.chat_messages_sent.load(Ordering::SeqCst), 1);
-        assert_eq!(server.state.socket_connections.load(Ordering::SeqCst), 1);
+        assert_eq!(reads_while_waiting, 1);
+        assert_eq!(server.state.bind_calls.load(Ordering::SeqCst), 1);
         assert_eq!(
             state
                 .database
@@ -1287,9 +1445,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hanging_token_http_reconnects_after_request_deadline() {
-        let server =
-            spawn_mock_x_server_with_http(MockSocketMode::StayOpen, MockHttpMode::HangToken).await;
+    async fn hanging_relay_read_reconnects_after_the_request_deadline() {
+        let server = spawn_mock_server(MockMode::HangRead, Vec::new()).await;
         let state = test_state();
         let session_generation = start_test_session(&state, "session-1").await;
 
@@ -1299,130 +1456,32 @@ mod tests {
             session_generation,
             mock_config(&server),
         ));
-        wait_for_count(&server.state.token_calls, 2, "X chat token requests").await;
-        let diagnostics = current_diagnostics(&state).await;
-        connector.abort();
-        let _ = server.shutdown.send(());
-
-        assert!(diagnostics.reconnect_count >= 1);
-    }
-
-    #[tokio::test]
-    async fn hanging_access_http_reconnects_after_request_deadline() {
-        let server =
-            spawn_mock_x_server_with_http(MockSocketMode::StayOpen, MockHttpMode::HangAccess).await;
-        let state = test_state();
-        let session_generation = start_test_session(&state, "session-1").await;
-
-        let connector = tokio::spawn(run_x_chat_connector(
-            state.clone(),
-            "session-1".to_string(),
-            session_generation,
-            mock_config(&server),
-        ));
-        wait_for_count(&server.state.token_calls, 2, "X chat token requests").await;
-        wait_for_access_calls(&server.state, 2).await;
-        let access_calls = server.state.access_calls.lock().await.len();
-        let diagnostics = current_diagnostics(&state).await;
-        connector.abort();
-        let _ = server.shutdown.send(());
-
-        assert_eq!(access_calls, 2);
-        assert!(diagnostics.reconnect_count >= 1);
-    }
-
-    #[tokio::test]
-    async fn hanging_websocket_handshake_reconnects_after_deadline() {
-        let server = spawn_mock_x_server(MockSocketMode::HangHandshake).await;
-        let state = test_state();
-        let session_generation = start_test_session(&state, "session-1").await;
-
-        let connector = tokio::spawn(run_x_chat_connector(
-            state.clone(),
-            "session-1".to_string(),
-            session_generation,
-            mock_config(&server),
-        ));
-        wait_for_count(
-            &server.state.socket_connections,
-            2,
-            "X WebSocket handshake attempts",
-        )
+        wait_until("second bind after a hung read", || async {
+            server.state.bind_calls.load(Ordering::SeqCst) >= 2
+        })
         .await;
-        let diagnostics = current_diagnostics(&state).await;
         connector.abort();
         let _ = server.shutdown.send(());
-
-        assert!(diagnostics.reconnect_count >= 1);
     }
 
     #[tokio::test]
-    async fn half_open_socket_reconnects_after_idle_deadline() {
-        let server = spawn_mock_x_server(MockSocketMode::StayOpen).await;
+    async fn late_relay_traffic_cannot_attach_to_a_different_session() {
+        let server = spawn_mock_server(MockMode::WaitForRelease, Vec::new()).await;
         let state = test_state();
         let session_generation = start_test_session(&state, "session-1").await;
-
         let connector = tokio::spawn(run_x_chat_connector(
             state.clone(),
             "session-1".to_string(),
             session_generation,
             mock_config(&server),
         ));
-        wait_for_count(
-            &server.state.socket_connections,
-            2,
-            "X WebSocket connections",
-        )
+        wait_until("held read", || async {
+            server.state.read_calls.load(Ordering::SeqCst) >= 1
+        })
         .await;
-        let diagnostics = current_diagnostics(&state).await;
-        connector.abort();
-        let _ = server.shutdown.send(());
-
-        assert!(diagnostics.reconnect_count >= 1);
-        assert!(server.state.token_calls.load(Ordering::SeqCst) >= 2);
-        assert!(server.state.access_calls.lock().await.len() >= 2);
-    }
-
-    #[tokio::test]
-    async fn open_socket_uses_bounded_grace_before_reporting_read_only_connected() {
-        let server = spawn_mock_x_server(MockSocketMode::StayOpen).await;
-        let state = test_state();
-        let session_generation = start_test_session(&state, "session-1").await;
-
-        let connector = tokio::spawn(run_x_chat_connector(
-            state.clone(),
-            "session-1".to_string(),
-            session_generation,
-            mock_config(&server),
-        ));
-        wait_for_socket_frames(&server.state, 2).await;
-        let provider =
-            wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
-        connector.abort();
-        let _ = server.shutdown.send(());
-
-        assert!(provider.message.contains("authenticated and subscribed"));
-        assert!(provider.message.contains("read-only"));
-        assert_eq!(provider.read, CommentsReadState::Ready);
-        assert_eq!(provider.write, CommentsWriteState::ReadOnly);
-        assert!(current_status(&state).await.messages.is_empty());
-    }
-
-    #[tokio::test]
-    async fn late_socket_traffic_cannot_attach_to_a_different_session() {
-        let server = spawn_mock_x_server(MockSocketMode::WaitForRelease).await;
-        let state = test_state();
-        let session_generation = start_test_session(&state, "session-1").await;
-        let connector = tokio::spawn(run_x_chat_connector(
-            state.clone(),
-            "session-1".to_string(),
-            session_generation,
-            mock_config(&server),
-        ));
-        wait_for_socket_frames(&server.state, 2).await;
 
         let _ = start_test_session(&state, "session-2").await;
-        server.state.release_message.notify_one();
+        server.state.release.notify_one();
         tokio::time::timeout(Duration::from_secs(1), connector)
             .await
             .expect("stale X connector stopped")

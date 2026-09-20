@@ -16,7 +16,9 @@ Commits: `1296ab04` (S1 glyphs+avatars) → `7743622a` (S2 highlight slot) →
   chatter (read scope, session-cached).
 - **S2** — the compositor gains a DEDICATED highlight overlay slot
   (`comments.highlight.set/clear`), independent from the captions bar:
-  highlight top, captions bottom, coexistence pixel-tested; cleared at
+  highlight top, captions bottom, coexistence pixel-tested (superseded
+  2026-09-20: the streamer picks one of four corners — see
+  `2026-09-20-chat-window-glass-and-highlight-corners.md`); cleared at
   `start_session`; burns on the stream leg per the leg-plan matrix
   (record-only sessions never burn it).
 - **S3** — clicking a comment (window or rail) renders a glass card (avatar,

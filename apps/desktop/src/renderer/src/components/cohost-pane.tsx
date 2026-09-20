@@ -21,10 +21,13 @@ import { Separator } from '@/components/ui/separator'
 import type { CohostFlag, CohostQuestion, CohostState } from '@/lib/backend'
 import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
 import {
+  activeCohostAlerts,
+  cohostAlertLabel,
   cohostErrorDetail,
   cohostErrorDetailText,
   cohostFlagRowKey,
   cohostHighlightMessageId,
+  cohostMoodScoresLabel,
   cohostPaneMode,
   cohostQuestionRowKey,
   cohostRowAt,
@@ -110,6 +113,10 @@ export function CohostPane({
   const activeKey = resolveCohostSelection(rows, selectedKey)
   const activeRow = cohostRowAt(rows, selectedKey)
   const questionIds = useMemo(() => cohostQuestionIds(state), [state])
+  // Viewers saying something is broken. A persistent chip, never a toast: it
+  // stays while the backend still counts two corroborating viewers.
+  const alerts = activeCohostAlerts(state, nowMs)
+  const alertCount = state?.alerts?.length ?? 0
   const presence = cohostPresenceView(state, nowMs, {
     starting,
     unread: open ? 0 : unread.count
@@ -131,13 +138,14 @@ export function CohostPane({
     setOpen(true)
   }, [questionIds.length, state?.sessionId])
 
-  // Ages are the only time-dependent copy in the pane; one slow tick keeps them
-  // honest without re-rendering the message list underneath.
+  // Ages and alert expiry are the only time-dependent copy in the pane; one
+  // slow tick keeps them honest without re-rendering the message list
+  // underneath.
   useEffect(() => {
-    if (rows.length === 0) return
+    if (rows.length === 0 && alertCount === 0) return
     const timer = setInterval(() => setNowMs(Date.now()), 30_000)
     return () => clearInterval(timer)
-  }, [rows.length])
+  }, [alertCount, rows.length])
 
   useEffect(() => {
     onOpenChange?.(open)
@@ -304,13 +312,29 @@ export function CohostPane({
             {presence.unreadBadge} new
           </Badge>
         ) : null}
+        {alerts.map((alert) => (
+          <Badge
+            key={alert.kind}
+            className="min-w-0 shrink"
+            data-slot="cohost-alert"
+            title="Several viewers said this in chat in the last two minutes."
+            variant="warning"
+          >
+            <span className="truncate">{cohostAlertLabel(alert)}</span>
+          </Badge>
+        ))}
         {state?.partial ? (
           <Badge title="Chat outran one AI pass; the newest messages were used." variant="outline">
             Partial
           </Badge>
         ) : null}
         {state?.mood ? (
-          <span className="shrink-0 text-[11px] text-subtle">{COHOST_MOOD_LABELS[state.mood]}</span>
+          <span
+            className="shrink-0 text-[11px] text-subtle"
+            title={cohostMoodScoresLabel(state.moodScores) ?? undefined}
+          >
+            {COHOST_MOOD_LABELS[state.mood]}
+          </span>
         ) : null}
       </CollapsibleTrigger>
 

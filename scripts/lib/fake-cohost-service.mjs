@@ -3,7 +3,8 @@ import { createServer } from 'node:http'
 /**
  * Local, credential-free stand-in for videorc-web's `POST /api/ai/cohost/tick`
  * used by `pnpm smoke:cohost-fake`. It implements the Live Co-host wire contract
- * v1 deterministically (no model): every message groups into a question by its
+ * deterministically (no model), serving both v1 and v2 keyed off the request's
+ * `promptVersion` like the real server (v2 = v1 plus the optional `rules`): every message groups into a question by its
  * normalized text, existing open-question ids echoed by the desktop are kept,
  * new questions mint `q_<n>` ids, a marker token flags a message, and the smoke
  * can queue scripted failures (429 + Retry-After, 403 premium-required, 503
@@ -16,7 +17,10 @@ import { createServer } from 'node:http'
  * per repeated message therefore yields one asker per destination.
  */
 
-export const COHOST_PROMPT_VERSION = 1
+export const COHOST_PROMPT_VERSION = 2
+export const COHOST_PROMPT_VERSIONS = Object.freeze([1, 2])
+export const COHOST_RULES_MAX = 10
+export const COHOST_RULE_MAX_CHARS = 120
 export const COHOST_TICK_PATH = '/api/ai/cohost/tick'
 export const COHOST_TICK_MESSAGE_CAP = 60
 export const COHOST_TICK_OPEN_QUESTIONS_CAP = 40
@@ -83,14 +87,34 @@ export function validateCohostTickRequest(body) {
       message: 'Chat processing consent is required.'
     }
   }
-  if (body.promptVersion !== COHOST_PROMPT_VERSION) {
+  if (!COHOST_PROMPT_VERSIONS.includes(body.promptVersion)) {
     return {
       status: 400,
       code: 'prompt-version-unsupported',
       message: `promptVersion ${String(body.promptVersion)} is not supported.`
     }
   }
-  const keys = Object.keys(body).sort()
+  // v2 adds the optional `rules`; a v1 body must not carry it.
+  const keys = Object.keys(body)
+    .filter((key) => !(key === 'rules' && body.promptVersion >= 2))
+    .sort()
+  if (body.rules !== undefined && body.promptVersion >= 2) {
+    const rulesOk =
+      Array.isArray(body.rules) &&
+      body.rules.length <= COHOST_RULES_MAX &&
+      body.rules.every(
+        (rule) =>
+          typeof rule === 'string' &&
+          rule === rule.trim() &&
+          rule.length >= 1 &&
+          rule.length <= COHOST_RULE_MAX_CHARS
+      )
+    if (!rulesOk) {
+      return invalid(
+        `rules must be at most ${COHOST_RULES_MAX} trimmed strings of 1-${COHOST_RULE_MAX_CHARS} characters.`
+      )
+    }
+  }
   const unexpected = keys.filter((key) => !COHOST_TICK_REQUEST_KEYS.includes(key))
   const missing = COHOST_TICK_REQUEST_KEYS.filter((key) => !(key in body))
   if (unexpected.length > 0 || missing.length > 0) {
@@ -242,7 +266,7 @@ export function planCohostTick(body, { mintId, flagMarker = null, memory = new M
 
   const messageCount = body.messages?.length ?? 0
   return {
-    promptVersion: COHOST_PROMPT_VERSION,
+    promptVersion: body.promptVersion ?? COHOST_PROMPT_VERSION,
     questions,
     resolved: [],
     flags,

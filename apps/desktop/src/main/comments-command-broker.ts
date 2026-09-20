@@ -76,15 +76,15 @@ export class CommentsCommandBroker {
 
   request<T>(requestId: string, dispatch: () => boolean, timeoutMs = this.timeoutMs): Promise<T> {
     if (!requestId || this.pending.has(requestId)) {
-      return Promise.reject(new Error('Duplicate or missing Comments request id.'))
+      return Promise.reject(new Error('Duplicate or missing Chat request id.'))
     }
     if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-      return Promise.reject(new Error('Comments command timeout must be a positive finite number.'))
+      return Promise.reject(new Error('Chat command timeout must be a positive finite number.'))
     }
     return new Promise<T>((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.pending.delete(requestId)
-        reject(new Error('Comments command timed out because the Studio renderer did not reply.'))
+        reject(new Error('Chat command timed out because the Studio renderer did not reply.'))
       }, timeoutMs)
       this.pending.set(requestId, {
         timeout,
@@ -97,7 +97,7 @@ export class CommentsCommandBroker {
       } catch (error) {
         clearTimeout(timeout)
         this.pending.delete(requestId)
-        reject(error instanceof Error ? error : new Error('Could not dispatch Comments command.'))
+        reject(error instanceof Error ? error : new Error('Could not dispatch Chat command.'))
         return
       }
       if (!dispatched) {
@@ -116,12 +116,12 @@ export class CommentsCommandBroker {
     if (resolution.ok) {
       pending.resolve(resolution.value)
     } else {
-      pending.reject(new Error(resolution.error || 'Comments command failed.'))
+      pending.reject(new Error(resolution.error || 'Chat command failed.'))
     }
     return true
   }
 
-  rejectAll(reason = 'Studio renderer closed before the Comments command completed.'): void {
+  rejectAll(reason = 'Studio renderer closed before the Chat command completed.'): void {
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout)
       pending.reject(new Error(reason))

@@ -262,7 +262,7 @@ async function commentsRailState(host) {
     host,
     `(() => {
       const rail = Array.from(document.querySelectorAll('aside'))
-        .find((candidate) => candidate.textContent?.includes('Comments'));
+        .find((candidate) => candidate.querySelector('[aria-label="Chat messages"]') || candidate.textContent?.includes('Chat'));
       const messageIds = rail
         ? Array.from(rail.querySelectorAll('[data-message-id]'))
             .map((row) => row.getAttribute('data-message-id'))

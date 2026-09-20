@@ -10,6 +10,10 @@ import { isNativePreviewCapability } from '../../../shared/native-preview-capabi
 /** Backend health-event codes for the recording startup barrier (recording.rs). */
 export const RECORDING_STARTUP_BARRIER_TIMEOUT_CODE = 'recording-startup-barrier-timeout'
 export const RECORDING_STARTUP_CADENCE_UNSTEADY_CODE = 'recording-startup-cadence-unsteady'
+/** Windows picked a smaller canvas than selected because this PC cannot record the requested one. */
+export const RECORDING_OUTPUT_STEPPED_DOWN_CODE = 'recording-output-stepped-down'
+/** The recording leg is producing far fewer frames than the selected fps (fires once per session). */
+export const RECORDING_DEGRADED_CODE = 'recording-degraded'
 /** Sonner key for the unsteady-start warning: one per start, never a stack. */
 export const RECORDING_STARTUP_UNSTEADY_TOAST_ID = 'recording-startup-cadence-unsteady'
 
@@ -34,6 +38,9 @@ export interface HealthEventToast {
  *   follows updates this toast in place (adding Retry) instead of stacking a
  *   second red toast for the same failure. Persistent.
  *
+ * - `recording-output-stepped-down` / `recording-degraded` (warn): the PC
+ *   cannot sustain the selected output. Keyed, so neither can stack.
+ *
  * Returns null for every other event; the caller keeps its own policies.
  */
 export function recordingStartupHealthToast(
@@ -46,6 +53,27 @@ export function recordingStartupHealthToast(
       title: 'Recording started on an unsteady compositor',
       description: event.message,
       duration: 15000
+    }
+  }
+  // Both of these were stored in the session record and shown nowhere: a
+  // low-end Windows tester recorded three unusable 1440p sessions without a
+  // single hint that the output size was the problem.
+  if (event.code === RECORDING_OUTPUT_STEPPED_DOWN_CODE) {
+    return {
+      variant: 'warning',
+      id: RECORDING_OUTPUT_STEPPED_DOWN_CODE,
+      title: 'Recording at a lower resolution',
+      description: event.message,
+      duration: 20000
+    }
+  }
+  if (event.code === RECORDING_DEGRADED_CODE) {
+    return {
+      variant: 'warning',
+      id: RECORDING_DEGRADED_CODE,
+      title: 'Recording is falling behind',
+      description: event.message,
+      duration: 20000
     }
   }
   if (event.code === RECORDING_STARTUP_BARRIER_TIMEOUT_CODE && event.level === 'error') {

@@ -227,7 +227,7 @@ export function GoLiveConfirmationDialog({
               <div className="flex flex-col gap-2 rounded-row border border-warning/35 bg-warning/10 p-3">
                 <div className="flex items-center gap-2 text-sm font-medium">
                   <AlertIcon className="size-4 text-warning" weight="fill" />
-                  Comments limitations
+                  Chat limitations
                 </div>
                 <ul className="grid gap-1.5 text-sm text-muted-foreground">
                   {warningIssues.map((issue, index) => (
@@ -418,7 +418,7 @@ export function GoLiveCommentsStatus({
 }): ReactElement {
   return (
     <div className="mt-2 flex flex-col gap-1.5">
-      <div aria-label="Comments read and send status" className="flex flex-wrap gap-1.5">
+      <div aria-label="Chat read and send status" className="flex flex-wrap gap-1.5">
         <Badge
           variant={
             read === 'ready'
@@ -468,7 +468,7 @@ export function GoLiveDestinationSummary({
   if (warningCount > 0) {
     return (
       <Badge variant="warning">
-        Ready · {warningCount} comment limitation{warningCount === 1 ? '' : 's'}
+        Ready · {warningCount} chat limitation{warningCount === 1 ? '' : 's'}
       </Badge>
     )
   }

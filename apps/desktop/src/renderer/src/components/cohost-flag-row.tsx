@@ -3,7 +3,13 @@ import type { ReactElement } from 'react'
 import { Badge } from '@/components/ui/badge'
 import { CommandItem, CommandShortcut } from '@/components/ui/command'
 import type { CohostFlag } from '@/lib/backend'
-import { cohostAgeLabel, cohostFlagRowKey, COHOST_FLAG_KIND_LABELS } from '@/lib/cohost-view'
+import {
+  cohostAgeLabel,
+  cohostFlagActionLabel,
+  cohostFlagChipLabel,
+  cohostFlagDetail,
+  cohostFlagRowKey
+} from '@/lib/cohost-view'
 import { cn } from '@/lib/utils'
 
 /**
@@ -25,6 +31,8 @@ export function CohostFlagRow({
   onJump: (flag: CohostFlag) => void
 }): ReactElement {
   const key = cohostFlagRowKey(flag.messageId)
+  const detail = cohostFlagDetail(flag)
+  const action = cohostFlagActionLabel(flag)
 
   return (
     <CommandItem
@@ -40,14 +48,23 @@ export function CohostFlagRow({
       onPointerDown={() => onSelect(key)}
     >
       <Badge
-        className={cn('shrink-0', flag.severity === 'high' ? 'text-destructive' : 'text-subtle')}
+        className={cn(
+          'max-w-[55%] shrink-0',
+          flag.severity === 'high' ? 'text-destructive' : 'text-subtle'
+        )}
         variant="outline"
       >
-        {COHOST_FLAG_KIND_LABELS[flag.kind]}
+        <span className="truncate">{cohostFlagChipLabel(flag)}</span>
       </Badge>
-      <span className="min-w-0 flex-1 truncate text-muted-foreground" title={flag.reason}>
+      <span className="min-w-0 flex-1 truncate text-muted-foreground" title={detail}>
         {flag.reason}
       </span>
+      {action ? (
+        // A suggestion label, not a control: the co-host never moderates.
+        <span className="shrink-0 text-[11px] text-subtle" data-slot="cohost-flag-action">
+          {action}
+        </span>
+      ) : null}
       <CommandShortcut className="tabular-nums">{cohostAgeLabel(flag.at, nowMs)}</CommandShortcut>
     </CommandItem>
   )

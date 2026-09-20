@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::sync::Mutex;
 
-use crate::captions::CaptionOverlayPosition;
+use crate::captions::{CaptionOverlayPosition, OverlayHorizontal, OverlayPlacement};
 use crate::live_chat::HighlightMessageEligibility;
 #[cfg(test)]
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
@@ -63,8 +63,42 @@ pub fn new_comment_highlight_slot() -> CommentHighlightSlot {
     Arc::new(Mutex::new(CommentHighlightState::default()))
 }
 
-fn default_highlight_position() -> CaptionOverlayPosition {
-    CaptionOverlayPosition::Top
+/// Which canvas corner the highlighted-comment card is anchored to. Wire enum
+/// (kebab-case). Deliberately separate from `CaptionOverlayPosition`: captions
+/// stay top/bottom centred and never gain corners.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CommentHighlightAnchor {
+    TopLeft,
+    TopRight,
+    /// Default (owner call 2026-09-20): off faces and off the usual top-right
+    /// camera bubble; a caption bar on the same edge steps above the card.
+    #[default]
+    BottomLeft,
+    BottomRight,
+}
+
+impl From<CommentHighlightAnchor> for OverlayPlacement {
+    fn from(anchor: CommentHighlightAnchor) -> Self {
+        let (vertical, horizontal) = match anchor {
+            CommentHighlightAnchor::TopLeft => {
+                (CaptionOverlayPosition::Top, OverlayHorizontal::Left)
+            }
+            CommentHighlightAnchor::TopRight => {
+                (CaptionOverlayPosition::Top, OverlayHorizontal::Right)
+            }
+            CommentHighlightAnchor::BottomLeft => {
+                (CaptionOverlayPosition::Bottom, OverlayHorizontal::Left)
+            }
+            CommentHighlightAnchor::BottomRight => {
+                (CaptionOverlayPosition::Bottom, OverlayHorizontal::Right)
+            }
+        };
+        Self {
+            vertical,
+            horizontal,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -73,8 +107,11 @@ pub struct SetCommentHighlightParams {
     pub session_id: String,
     pub message_id: String,
     pub png_base64: String,
-    #[serde(default = "default_highlight_position")]
-    pub position: CaptionOverlayPosition,
+    /// Corner anchor. Missing => `BottomLeft`. The struct intentionally does not
+    /// `deny_unknown_fields`: older clients still send the retired
+    /// `"position": "top"`, which is accepted and ignored.
+    #[serde(default)]
+    pub anchor: CommentHighlightAnchor,
     #[cfg(test)]
     #[serde(skip)]
     preparation_blocker: Option<CommentHighlightPreparationBlocker>,
@@ -359,7 +396,7 @@ fn install_validated_highlight(
     crate::captions::install_prepared_caption_overlay(
         &state.highlight_overlay,
         prepared,
-        params.position,
+        params.anchor,
     );
 
     let generation = next_generation(highlight.generation);
@@ -572,10 +609,115 @@ mod tests {
             session_id: "session-1".to_string(),
             message_id: "session-1:x:x-target:message-1".to_string(),
             png_base64: TEST_PNG.to_string(),
-            position: CaptionOverlayPosition::Top,
+            anchor: CommentHighlightAnchor::default(),
             preparation_blocker: None,
             commit_blocker: None,
         }
+    }
+
+    #[test]
+    fn set_params_anchor_defaults_to_bottom_left_and_parses_every_corner() {
+        let base = serde_json::json!({
+            "sessionId": "session-1",
+            "messageId": "message-1",
+            "pngBase64": TEST_PNG,
+        });
+        let missing: SetCommentHighlightParams = serde_json::from_value(base.clone()).unwrap();
+        assert_eq!(missing.anchor, CommentHighlightAnchor::BottomLeft);
+
+        for (wire, anchor) in [
+            ("top-left", CommentHighlightAnchor::TopLeft),
+            ("top-right", CommentHighlightAnchor::TopRight),
+            ("bottom-left", CommentHighlightAnchor::BottomLeft),
+            ("bottom-right", CommentHighlightAnchor::BottomRight),
+        ] {
+            let mut value = base.clone();
+            value["anchor"] = serde_json::json!(wire);
+            let parsed: SetCommentHighlightParams = serde_json::from_value(value).unwrap();
+            assert_eq!(parsed.anchor, anchor, "{wire}");
+            assert_eq!(
+                serde_json::to_value(anchor).unwrap(),
+                serde_json::json!(wire)
+            );
+        }
+
+        let mut unknown = base.clone();
+        unknown["anchor"] = serde_json::json!("center");
+        assert!(serde_json::from_value::<SetCommentHighlightParams>(unknown).is_err());
+    }
+
+    #[test]
+    fn set_params_accept_and_ignore_the_retired_position_field() {
+        for legacy in ["top", "bottom"] {
+            let parsed: SetCommentHighlightParams = serde_json::from_value(serde_json::json!({
+                "sessionId": "session-1",
+                "messageId": "message-1",
+                "pngBase64": TEST_PNG,
+                "position": legacy,
+            }))
+            .unwrap();
+            assert_eq!(
+                parsed.anchor,
+                CommentHighlightAnchor::BottomLeft,
+                "{legacy}"
+            );
+        }
+    }
+
+    #[test]
+    fn anchors_map_to_corner_placements() {
+        for (anchor, vertical, horizontal) in [
+            (
+                CommentHighlightAnchor::TopLeft,
+                CaptionOverlayPosition::Top,
+                OverlayHorizontal::Left,
+            ),
+            (
+                CommentHighlightAnchor::TopRight,
+                CaptionOverlayPosition::Top,
+                OverlayHorizontal::Right,
+            ),
+            (
+                CommentHighlightAnchor::BottomLeft,
+                CaptionOverlayPosition::Bottom,
+                OverlayHorizontal::Left,
+            ),
+            (
+                CommentHighlightAnchor::BottomRight,
+                CaptionOverlayPosition::Bottom,
+                OverlayHorizontal::Right,
+            ),
+        ] {
+            assert_eq!(
+                OverlayPlacement::from(anchor),
+                OverlayPlacement {
+                    vertical,
+                    horizontal
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn validated_install_carries_the_anchor_into_the_overlay_slot() {
+        let state = test_state();
+        let mut highlight = CommentHighlightState::default();
+        let mut params = params();
+        params.anchor = CommentHighlightAnchor::BottomRight;
+        let prepared = crate::captions::prepare_caption_overlay(TEST_PNG).unwrap();
+        let installed = install_validated_highlight(
+            &state,
+            &mut highlight,
+            params,
+            prepared,
+            Duration::from_secs(10),
+        );
+        assert_eq!(installed.phase, CommentHighlightPhase::Live);
+        let overlay = crate::captions::current_caption_overlay(&state.highlight_overlay).unwrap();
+        assert_eq!(
+            overlay.placement,
+            OverlayPlacement::from(CommentHighlightAnchor::BottomRight)
+        );
     }
 
     struct PreparationReleaseGuard(CommentHighlightPreparationBlocker);

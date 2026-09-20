@@ -26,7 +26,7 @@ import type {
   ViewerSample
 } from './backend'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
-import { LAYOUT_PRESET_VALUES } from './backend'
+import { COMMENT_HIGHLIGHT_ANCHORS, LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
   booleanSchema,
@@ -105,6 +105,7 @@ export const electronInvokeApiMethods = {
   'comments-window:toggle': 'toggleCommentsWindow',
   'comments-window:get-state': 'getCommentsWindowState',
   'comments-window:set-always-on-top': 'setCommentsWindowAlwaysOnTop',
+  'comments-window:set-highlight-anchor': 'setCommentsWindowHighlightAnchor',
   'comments-window:push-snapshot': 'pushCommentsSnapshot',
   'comments-window:push-delta': 'pushCommentsDelta',
   'comments-window:get-snapshot': 'getCommentsSnapshot',
@@ -880,6 +881,9 @@ const specificRuntimeInvokeContracts = {
     arraySchema(oauthCallbackEnvelopeSchema, { maxLength: 32 })
   ),
   'oauth:open-url': invokeContract(tupleSchema([boundedUrl])),
+  'comments-window:set-highlight-anchor': invokeContract(
+    tupleSchema([enumSchema(COMMENT_HIGHLIGHT_ANCHORS)])
+  ),
   'notes-window:get-document': invokeContract(noArgs, notesDocumentSchema),
   'notes-window:save-document': invokeContract(
     tupleSchema([notesPatchSchema]),

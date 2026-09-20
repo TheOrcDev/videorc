@@ -1242,6 +1242,292 @@ pub async fn send_broadcast_chat_message(
         .to_string())
 }
 
+pub const X_BROADCAST_CHAT_EVENT_TYPE: &str = "broadcast.chat";
+const X_VERIFY_CREDENTIALS_PATH: &str = "/2/users/me";
+
+/// An X Activity API call failed. `rejected` means X refused the credentials
+/// (401/403): retrying cannot help until the user re-authorizes X Live.
+#[derive(Debug)]
+pub struct XActivityApiError {
+    pub rejected: bool,
+    pub message: String,
+}
+
+impl std::fmt::Display for XActivityApiError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for XActivityApiError {}
+
+/// How an X Activity API call authenticates. Listing and creating a user's
+/// subscription take OAuth 1.0a user context; deleting one only works with the
+/// app bearer (user context answers HTTP 503 — verified against the live API
+/// 2026-09-20).
+enum XActivityAuth<'a> {
+    User(&'a XLivestreamCredentials),
+    App(&'a str),
+}
+
+async fn send_x_activity_request(
+    client: &reqwest::Client,
+    auth: XActivityAuth<'_>,
+    method: Method,
+    url: Url,
+    body: Option<serde_json::Value>,
+) -> Result<serde_json::Value, XActivityApiError> {
+    let transient = |message: String| XActivityApiError {
+        rejected: false,
+        message,
+    };
+    let authorization = match auth {
+        XActivityAuth::User(credentials) => oauth1_authorization_header(
+            method.as_str(),
+            url.as_str(),
+            credentials,
+            &oauth_nonce(),
+            oauth_timestamp(),
+        )
+        .map_err(|error| {
+            transient(format!(
+                "X Activity API request could not be signed: {error}"
+            ))
+        })?,
+        XActivityAuth::App(bearer) => format!("Bearer {bearer}"),
+    };
+    let mut request = client
+        .request(method, url)
+        .timeout(std::time::Duration::from_secs(15))
+        .header("Authorization", authorization);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    let response = request
+        .send()
+        .await
+        .map_err(|error| transient(format!("Could not reach the X Activity API: {error}")))?;
+    let status = response.status();
+    let text = response.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let detail = x_error_detail(&text).unwrap_or_else(|| "no error detail".to_string());
+        return Err(XActivityApiError {
+            rejected: matches!(status.as_u16(), 401 | 403),
+            message: format!("X Activity API request failed with HTTP {status}: {detail}"),
+        });
+    }
+    Ok(serde_json::from_str(&text).unwrap_or_default())
+}
+
+/// App-only bearer for the consumer pair this build already carries. Only used
+/// to delete this user's own chat subscriptions.
+async fn mint_x_app_bearer(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+) -> Result<String, XActivityApiError> {
+    let transient = |message: String| XActivityApiError {
+        rejected: false,
+        message,
+    };
+    let url = endpoint(base_url, "/oauth2/token")
+        .map_err(|error| transient(format!("X token endpoint could not be built: {error}")))?;
+    let response = client
+        .post(url)
+        .timeout(std::time::Duration::from_secs(15))
+        .basic_auth(
+            oauth_percent_encode(&credentials.consumer_key),
+            Some(oauth_percent_encode(&credentials.consumer_secret)),
+        )
+        .form(&[("grant_type", "client_credentials")])
+        .send()
+        .await
+        .map_err(|error| transient(format!("Could not reach X for an app token: {error}")))?;
+    let status = response.status();
+    let body: serde_json::Value = response.json().await.unwrap_or_default();
+    body.get("access_token")
+        .and_then(|value| value.as_str())
+        .filter(|_| status.is_success())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| XActivityApiError {
+            rejected: matches!(status.as_u16(), 401 | 403),
+            message: format!("X app token request failed with HTTP {status}"),
+        })
+}
+
+async fn delete_x_activity_subscriptions(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    subscription_ids: &[String],
+) -> Result<(), XActivityApiError> {
+    if subscription_ids.is_empty() {
+        return Ok(());
+    }
+    let bearer = mint_x_app_bearer(client, credentials, base_url).await?;
+    for subscription_id in subscription_ids {
+        let url = endpoint(
+            base_url,
+            &format!("/2/activity/subscriptions/{subscription_id}"),
+        )
+        .map_err(|error| XActivityApiError {
+            rejected: false,
+            message: format!("X Activity API endpoint could not be built: {error}"),
+        })?;
+        send_x_activity_request(
+            client,
+            XActivityAuth::App(&bearer),
+            Method::DELETE,
+            url,
+            None,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// The OAuth Echo proof for the Videorc chat relay: an Authorization header
+/// valid only for `GET /2/users/me`. The relay replays it against that fixed
+/// URL to learn which X user this install controls; the token itself never
+/// leaves the machine.
+pub fn x_identity_echo_authorization(
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+) -> Result<String> {
+    let url = endpoint(base_url, X_VERIFY_CREDENTIALS_PATH)?;
+    oauth1_authorization_header(
+        "GET",
+        url.as_str(),
+        credentials,
+        &oauth_nonce(),
+        oauth_timestamp(),
+    )
+}
+
+fn broadcast_chat_subscriptions(
+    list: &serde_json::Value,
+    user_id: &str,
+) -> Vec<(String, Option<String>)> {
+    list.get("data")
+        .and_then(|data| data.as_array())
+        .into_iter()
+        .flatten()
+        .filter(|subscription| {
+            subscription
+                .get("event_type")
+                .and_then(|value| value.as_str())
+                == Some(X_BROADCAST_CHAT_EVENT_TYPE)
+                && subscription
+                    .pointer("/filter/user_id")
+                    .and_then(|value| value.as_str())
+                    == Some(user_id)
+        })
+        .filter_map(|subscription| {
+            let id = subscription.get("subscription_id")?.as_str()?.to_string();
+            let webhook_id = subscription
+                .get("webhook_id")
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
+            Some((id, webhook_id))
+        })
+        .collect()
+}
+
+/// Make sure exactly one X Activity API `broadcast.chat` subscription delivers
+/// this user's broadcast chat to the Videorc relay webhook. One subscription
+/// covers every broadcast the user owns, so this is idempotent across
+/// sessions: a matching subscription is reused, and any pointing at another
+/// (or no) webhook is replaced. OAuth 1.0a user context is accepted here
+/// (verified against the live API 2026-09-19), so "Authorize X Live" is enough.
+pub async fn ensure_broadcast_chat_subscription(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    webhook_id: &str,
+) -> Result<String, XActivityApiError> {
+    let url = |path: &str| {
+        endpoint(base_url, path).map_err(|error| XActivityApiError {
+            rejected: false,
+            message: format!("X Activity API endpoint could not be built: {error}"),
+        })
+    };
+    let list = send_x_activity_request(
+        client,
+        XActivityAuth::User(credentials),
+        Method::GET,
+        url("/2/activity/subscriptions")?,
+        None,
+    )
+    .await?;
+
+    let mut kept = None;
+    let mut stale = Vec::new();
+    for (subscription_id, existing_webhook) in
+        broadcast_chat_subscriptions(&list, &credentials.user_id)
+    {
+        if kept.is_none() && existing_webhook.as_deref() == Some(webhook_id) {
+            kept = Some(subscription_id);
+        } else {
+            stale.push(subscription_id);
+        }
+    }
+    delete_x_activity_subscriptions(client, credentials, base_url, &stale).await?;
+    if let Some(subscription_id) = kept {
+        return Ok(subscription_id);
+    }
+
+    let created = send_x_activity_request(
+        client,
+        XActivityAuth::User(credentials),
+        Method::POST,
+        url("/2/activity/subscriptions")?,
+        Some(json!({
+            "event_type": X_BROADCAST_CHAT_EVENT_TYPE,
+            "filter": { "user_id": credentials.user_id },
+            "webhook_id": webhook_id,
+            "tag": "videorc-live-chat",
+        })),
+    )
+    .await?;
+    created
+        .pointer("/data/subscription/subscription_id")
+        .and_then(|value| value.as_str())
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| XActivityApiError {
+            rejected: false,
+            message: "X Activity API did not return a subscription id.".to_string(),
+        })
+}
+
+/// Remove this user's `broadcast.chat` subscriptions (X disconnect). Returns
+/// how many were deleted.
+pub async fn delete_broadcast_chat_subscriptions(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+) -> Result<usize, XActivityApiError> {
+    let url = |path: &str| {
+        endpoint(base_url, path).map_err(|error| XActivityApiError {
+            rejected: false,
+            message: format!("X Activity API endpoint could not be built: {error}"),
+        })
+    };
+    let list = send_x_activity_request(
+        client,
+        XActivityAuth::User(credentials),
+        Method::GET,
+        url("/2/activity/subscriptions")?,
+        None,
+    )
+    .await?;
+    let subscription_ids: Vec<String> = broadcast_chat_subscriptions(&list, &credentials.user_id)
+        .into_iter()
+        .map(|(subscription_id, _)| subscription_id)
+        .collect();
+    delete_x_activity_subscriptions(client, credentials, base_url, &subscription_ids).await?;
+    Ok(subscription_ids.len())
+}
+
 async fn end_broadcast(
     client: &reqwest::Client,
     credentials: &XLivestreamCredentials,

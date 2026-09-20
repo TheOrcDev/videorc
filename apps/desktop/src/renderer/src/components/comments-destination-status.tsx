@@ -198,7 +198,7 @@ export function CommentsDestinationStatus({
 
   return (
     <div
-      aria-label="Comments destination status"
+      aria-label="Chat destination status"
       className="flex flex-wrap items-center gap-1"
       data-slot="comments-destination-status"
     >

@@ -118,8 +118,26 @@ describe('fake co-host planner', () => {
       'consent-required'
     )
     assert.equal(
-      validateCohostTickRequest(tickBody({ promptVersion: 2 })).code,
+      validateCohostTickRequest(tickBody({ promptVersion: 3 })).code,
       'prompt-version-unsupported'
+    )
+    // v2 = v1 plus the optional, already-normalised `rules`.
+    assert.equal(validateCohostTickRequest(tickBody({ promptVersion: 2 })), null)
+    assert.equal(
+      validateCohostTickRequest(tickBody({ promptVersion: 2, rules: ['No spoilers'] })),
+      null
+    )
+    assert.equal(
+      validateCohostTickRequest(tickBody({ promptVersion: 2, rules: [' padded '] })).code,
+      'invalid-request'
+    )
+    assert.equal(
+      validateCohostTickRequest(tickBody({ promptVersion: 2, rules: Array(11).fill('r') })).code,
+      'invalid-request'
+    )
+    assert.equal(
+      validateCohostTickRequest(tickBody({ promptVersion: 1, rules: [] })).code,
+      'invalid-request'
     )
     assert.equal(validateCohostTickRequest(tickBody({ extra: 1 })).code, 'invalid-request')
     assert.equal(

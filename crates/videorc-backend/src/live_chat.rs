@@ -1220,13 +1220,8 @@ pub struct LiveChatDestinationStart {
 pub struct StartXLiveChatParams {
     pub session_id: String,
     pub broadcast_id: String,
-    pub media_key: String,
     #[serde(default)]
     pub target_id: Option<String>,
-    #[serde(default)]
-    pub status_base_url: Option<String>,
-    #[serde(default)]
-    pub access_url: Option<String>,
 }
 
 /// A deterministic, bounded fake chat source for tests / `smoke:live-chat-fake-providers`.
@@ -1566,10 +1561,8 @@ where
 
     let config = crate::x_chat::XChatConfig {
         broadcast_id: params.broadcast_id,
-        media_key: params.media_key,
         target_id: params.target_id,
-        status_base_url: params.status_base_url,
-        access_url: params.access_url,
+        overrides: crate::x_chat::XChatOverrides::default(),
     };
     // X viewer counts ride the same session lifecycle as the chat connector
     // (plan 028 specified them; they were never implemented — owner report,
@@ -3720,10 +3713,7 @@ mod tests {
                 StartXLiveChatParams {
                     session_id: "session-a".to_string(),
                     broadcast_id: "broadcast-a".to_string(),
-                    media_key: "media-key-a".to_string(),
                     target_id: Some("x-a".to_string()),
-                    status_base_url: Some("http://127.0.0.1:9".to_string()),
-                    access_url: Some("http://127.0.0.1:9".to_string()),
                 },
                 async move {
                     let _ = captured_tx.send(());

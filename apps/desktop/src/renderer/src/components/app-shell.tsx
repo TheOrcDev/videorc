@@ -430,7 +430,7 @@ export function AppShell(): ReactElement {
                   }
                 >
                   <ChatIcon data-icon="inline-start" />
-                  {commentsWindowOpen ? 'Close Comments' : 'Open Comments'}
+                  {commentsWindowOpen ? 'Close Chat' : 'Open Chat'}
                   <KbdGroup>
                     <Kbd>{modKey}</Kbd>
                     <Kbd>{shiftKey}</Kbd>

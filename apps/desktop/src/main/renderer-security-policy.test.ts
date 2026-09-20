@@ -271,6 +271,29 @@ describe('renderer security policy', () => {
     expect(AUXILIARY_API_KEYS.captions).not.toContain('cacheChatAvatar')
   })
 
+  it('shares the glass wallpaper feed with the Chat and Captions windows but not Notes', () => {
+    // Chat and Captions draw the same black-glass underlay as the main window.
+    // Notes is a main-built data-URL window and never asks for the wallpaper.
+    for (const role of ['main', 'comments', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'glass:wallpaper:get')).toBe(true)
+    }
+    expect(roleCanInvokeChannel('notes', 'glass:wallpaper:get')).toBe(false)
+    for (const role of ['comments', 'captions'] as const) {
+      expect(AUXILIARY_API_KEYS[role]).toEqual(
+        expect.arrayContaining(['getGlassWallpaper', 'onGlassWallpaper', 'onGlassGeometry'])
+      )
+    }
+    expect(AUXILIARY_API_KEYS.notes).not.toContain('getGlassWallpaper')
+  })
+
+  it('lets only main and the Chat window pick the highlight corner', () => {
+    expect(roleCanInvokeChannel('main', 'comments-window:set-highlight-anchor')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:set-highlight-anchor')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:set-highlight-anchor')).toBe(false)
+    expect(roleCanInvokeChannel('captions', 'comments-window:set-highlight-anchor')).toBe(false)
+    expect(AUXILIARY_API_KEYS.comments).toContain('setCommentsWindowHighlightAnchor')
+  })
+
   it('exposes an invoke to an auxiliary preload only when the channel policy admits that role', () => {
     const channelByApiMethod = new Map<string, string>(
       Object.entries(electronInvokeApiMethods).map(([channel, method]) => [method, channel])

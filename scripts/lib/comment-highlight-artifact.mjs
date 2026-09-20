@@ -8,7 +8,9 @@ export const COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS = Object.freeze({
   minMarkerPixelRatio: 0.025,
   minMarkerFrames: 2,
   minCardDarkPixelRatio: 0.1,
-  minCardTextPixelRatio: 0.04
+  minCardTextPixelRatio: 0.04,
+  // A 1080p card is ~6-8% of its corner region; a centred caption bar is 0.
+  minAnchorDarkAsymmetry: 0.03
 })
 
 export const COMMENT_HIGHLIGHT_MARKER_RGB = Object.freeze([255, 82, 45])
@@ -25,11 +27,73 @@ export function classifyCommentHighlightResult(result) {
   return 'unknown'
 }
 
+export const COMMENT_HIGHLIGHT_ANCHORS = Object.freeze([
+  'top-left',
+  'top-right',
+  'bottom-left',
+  'bottom-right'
+])
+export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR = 'bottom-left'
+
+/** The sampled-frame rectangle the highlight card must land in for `anchor`.
+ * The compositor insets corner overlays by a 4% safe margin and the raster
+ * adds transparent shadow padding before the glass plate, so the scan starts
+ * 8% in from the anchored edges and runs to 62% of each axis (a card is at
+ * most 60% of the canvas wide). The far side of the frame is deliberately NOT
+ * scanned: a card that ignored the anchor must fail this gate. */
+export function commentHighlightCardRegion(
+  anchor = DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
+  { width, height }
+) {
+  if (!COMMENT_HIGHLIGHT_ANCHORS.includes(anchor)) {
+    throw new Error(`Unknown comment highlight anchor: ${anchor}`)
+  }
+  const span = (size, fromStart) => {
+    const near = Math.round(size * 0.08)
+    const far = Math.round(size * 0.62)
+    const start = fromStart ? near : size - far
+    const end = fromStart ? far : size - near
+    return [Math.max(0, Math.min(size - 1, start)), Math.max(1, Math.min(size, end))]
+  }
+  const [yStart, yEnd] = span(height, anchor.startsWith('top-'))
+  const [xStart, xEnd] = span(width, anchor.endsWith('-left'))
+  return { xStart, xEnd, yStart, yEnd, top: anchor.startsWith('top-') }
+}
+
+/** The same corner on the other side of the frame. */
+export function mirrorCommentHighlightAnchor(anchor) {
+  return anchor.endsWith('-left')
+    ? anchor.replace('-left', '-right')
+    : anchor.replace('-right', '-left')
+}
+
+/** Frames whose dark-glass pixels lean toward the picked corner. The caption
+ * bar is dark glass too and shares the bottom edge with bottom anchors, so
+ * "dark pixels in the corner" alone cannot tell a card from a caption bar. A
+ * caption is centred and adds the same dark area to both sides; only the card
+ * tips the balance, which is what proves it sits in THIS corner. */
+export function countCommentHighlightAnchoredFrames(
+  metrics,
+  mirroredMetrics,
+  minDarkAsymmetry = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minAnchorDarkAsymmetry
+) {
+  const mirrored = new Map((mirroredMetrics?.frames ?? []).map((frame) => [frame.index, frame]))
+  return (metrics?.frames ?? []).filter((frame) => {
+    const other = mirrored.get(frame.index)
+    return (
+      other &&
+      (frame.highlightCardDarkPixelRatio ?? 0) - (other.highlightCardDarkPixelRatio ?? 0) >=
+        minDarkAsymmetry
+    )
+  }).length
+}
+
 export function measureCommentHighlightArtifactRgb(
   rgb,
   {
     width = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleWidth,
-    height = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleHeight
+    height = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleHeight,
+    anchor = DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
   } = {}
 ) {
   const frameBytes = width * height * 3
@@ -38,12 +102,10 @@ export function measureCommentHighlightArtifactRgb(
   const bottomStart = Math.min(height - 1, topEnd)
   const topPixels = width * topEnd
   const bottomPixels = width * (height - bottomStart)
-  // The compositor places top overlays at a 4% safe margin. The raster adds
-  // transparent shadow padding before the glass plate, so scan from 8% to
-  // include a correctly sized 1080p card without treating the top edge as UI.
-  const cardStart = Math.max(0, Math.min(height - 1, Math.round(height * 0.08)))
-  const cardEnd = Math.max(cardStart + 1, Math.min(height, Math.round(height * 0.62)))
-  const cardPixels = width * (cardEnd - cardStart)
+  const region = commentHighlightCardRegion(anchor, { width, height })
+  const cardPixels = (region.xEnd - region.xStart) * (region.yEnd - region.yStart)
+  // The deterministic highlight marker is judged in the anchor's vertical half.
+  const highlightMarkerPixelsTotal = region.top ? topPixels : bottomPixels
   const frames = []
 
   for (let frame = 0; frame < sampledFrames; frame += 1) {
@@ -60,13 +122,16 @@ export function measureCommentHighlightArtifactRgb(
         const red = rgb[offset]
         const green = rgb[offset + 1]
         const blue = rgb[offset + 2]
-        if (y < topEnd && isHighlightMarkerPixel(red, green, blue)) {
+        if (
+          (region.top ? y < topEnd : y >= bottomStart) &&
+          isHighlightMarkerPixel(red, green, blue)
+        ) {
           highlightMarkerPixels += 1
         }
         if (y >= bottomStart && isCaptionMarkerPixel(red, green, blue)) {
           captionMarkerPixels += 1
         }
-        if (y >= cardStart && y < cardEnd) {
+        if (y >= region.yStart && y < region.yEnd && x >= region.xStart && x < region.xEnd) {
           if (isHighlightCardDarkPixel(red, green, blue)) highlightCardDarkPixels += 1
           if (isHighlightCardTextPixel(red, green, blue)) highlightCardTextPixels += 1
         }
@@ -79,7 +144,8 @@ export function measureCommentHighlightArtifactRgb(
       captionMarkerPixels,
       highlightCardDarkPixels,
       highlightCardTextPixels,
-      highlightMarkerPixelRatio: topPixels > 0 ? highlightMarkerPixels / topPixels : 0,
+      highlightMarkerPixelRatio:
+        highlightMarkerPixelsTotal > 0 ? highlightMarkerPixels / highlightMarkerPixelsTotal : 0,
       captionMarkerPixelRatio: bottomPixels > 0 ? captionMarkerPixels / bottomPixels : 0,
       highlightCardDarkPixelRatio: cardPixels > 0 ? highlightCardDarkPixels / cardPixels : 0,
       highlightCardTextPixelRatio: cardPixels > 0 ? highlightCardTextPixels / cardPixels : 0
@@ -89,6 +155,8 @@ export function measureCommentHighlightArtifactRgb(
   return {
     sampleWidth: width,
     sampleHeight: height,
+    anchor,
+    cardRegion: region,
     sampledFrames,
     topPixels,
     bottomPixels,
@@ -205,6 +273,7 @@ export async function analyzeCommentHighlightArtifact(
     sampleWidth = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleWidth,
     sampleHeight = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleHeight,
     sampleFps = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.sampleFps,
+    anchor = DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
     minMarkerPixelRatio = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minMarkerPixelRatio,
     minMarkerFrames = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minMarkerFrames,
     minCardDarkPixelRatio = COMMENT_HIGHLIGHT_ARTIFACT_DEFAULTS.minCardDarkPixelRatio,
@@ -219,18 +288,39 @@ export async function analyzeCommentHighlightArtifact(
   })
   const metrics = measureCommentHighlightArtifactRgb(rgb, {
     width: sampleWidth,
-    height: sampleHeight
+    height: sampleHeight,
+    anchor
   })
+  const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
+    highlightDisposition,
+    allowHighlightUnavailable,
+    minMarkerPixelRatio,
+    minMarkerFrames,
+    minCardDarkPixelRatio,
+    minCardTextPixelRatio
+  })
+  // Corner proof: only meaningful when a card was actually rendered.
+  const anchoredFrames = countCommentHighlightAnchoredFrames(
+    metrics,
+    measureCommentHighlightArtifactRgb(rgb, {
+      width: sampleWidth,
+      height: sampleHeight,
+      anchor: mirrorCommentHighlightAnchor(anchor)
+    })
+  )
+  const failures = [...verdict.failures]
+  if (highlightDisposition === 'live' && anchoredFrames < minMarkerFrames) {
+    failures.push(
+      `comment-highlight: the card leaned toward the ${anchor} corner in ${anchoredFrames} frame(s), expected at least ${minMarkerFrames}`
+    )
+  }
   return {
     file: filePath,
-    ...evaluateCommentHighlightArtifactMetrics(metrics, {
-      highlightDisposition,
-      allowHighlightUnavailable,
-      minMarkerPixelRatio,
-      minMarkerFrames,
-      minCardDarkPixelRatio,
-      minCardTextPixelRatio
-    })
+    ...verdict,
+    anchor,
+    failures,
+    pass: failures.length === 0,
+    observations: { ...verdict.observations, anchoredFrames }
   }
 }
 
@@ -242,7 +332,8 @@ export function formatCommentHighlightArtifactSummary(report) {
     `disposition=${report?.disposition ?? 'unknown'} frames=${metrics.sampledFrames ?? 0} ` +
     `highlight=${observations.highlightFrames ?? 0} (card=${observations.renderedCardFrames ?? 0}, marker=${observations.markerHighlightFrames ?? 0}) ` +
     `captions=${observations.captionFrames ?? 0} ` +
-    `coexist=${observations.coexistFrames ?? 0}`
+    `coexist=${observations.coexistFrames ?? 0}` +
+    (report?.anchor ? ` anchor=${report.anchor} anchored=${observations.anchoredFrames ?? 0}` : '')
   )
 }
 

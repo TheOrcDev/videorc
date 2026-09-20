@@ -2,10 +2,12 @@ import { describe, expect, it } from 'vitest'
 
 import {
   appPlatform,
+  displayAccelerator,
   displayKeyGlyph,
   displayKeyGlyphs,
   isWindowsPlatform,
-  osSettingsName
+  osSettingsName,
+  revealInFileManagerLabel
 } from './platform'
 
 describe('appPlatform', () => {
@@ -52,5 +54,21 @@ describe('isWindowsPlatform', () => {
     expect(isWindowsPlatform('win32')).toBe(true)
     expect(isWindowsPlatform('darwin')).toBe(false)
     expect(isWindowsPlatform(undefined)).toBe(false)
+  })
+})
+
+describe('revealInFileManagerLabel', () => {
+  it('names the host file manager', () => {
+    expect(revealInFileManagerLabel('darwin')).toBe('Show in Finder')
+    expect(revealInFileManagerLabel('win32')).toBe('Show in Explorer')
+    expect(revealInFileManagerLabel('linux')).toBe('Show in folder')
+  })
+})
+
+describe('displayAccelerator', () => {
+  it('keeps mac accelerators on macOS and translates modifiers elsewhere', () => {
+    expect(displayAccelerator('Cmd+Shift+R', 'darwin')).toBe('Cmd+Shift+R')
+    expect(displayAccelerator('Cmd+Shift+R', 'win32')).toBe('Ctrl+Shift+R')
+    expect(displayAccelerator('Cmd+P', 'linux')).toBe('Ctrl+P')
   })
 })

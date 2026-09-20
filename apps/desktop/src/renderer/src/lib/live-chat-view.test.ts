@@ -516,6 +516,6 @@ describe('live-chat-view', () => {
           }
         ]
       })
-    ).toBe('No comments yet. Comments appear here once you go live.')
+    ).toBe('No messages yet. Chat appears here once you go live.')
   })
 })

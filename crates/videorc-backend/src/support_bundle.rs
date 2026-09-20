@@ -57,6 +57,9 @@ pub struct SupportBundleExportInput {
     pub diagnostics: DiagnosticStats,
     pub logs: Vec<BackendLogEvent>,
     pub sessions: Vec<SessionSummary>,
+    /// What this machine measured in the performance check. Secret- and
+    /// path-free by contract, so it is embedded without redaction.
+    pub performance_check: Option<crate::protocol::PerformanceCheckResult>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -75,6 +78,8 @@ pub struct SupportBundle {
     pub renderer_diagnostics: Option<Value>,
     pub logs: Value,
     pub sessions: Vec<SupportBundleSessionSummary>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub performance_check: Option<crate::protocol::PerformanceCheckResult>,
     pub redaction_summary: SupportBundleRedactionSummary,
 }
 
@@ -226,6 +231,7 @@ pub fn build_support_bundle(input: SupportBundleExportInput) -> Result<SupportBu
         renderer_diagnostics,
         logs,
         sessions,
+        performance_check: input.performance_check,
         redaction_summary,
     })
 }
@@ -428,6 +434,7 @@ fn included_sections() -> Vec<String> {
         "rendererDiagnostics",
         "logs",
         "sessions",
+        "performanceCheck",
     ]
     .iter()
     .map(|section| (*section).to_string())
@@ -781,6 +788,7 @@ mod tests {
                 timestamp: "2026-06-13T00:00:00Z".to_string(),
             }],
             sessions: vec![],
+            performance_check: None,
         };
 
         let result = export_support_bundle(input).unwrap();
@@ -861,6 +869,7 @@ mod tests {
             diagnostics: idle_diagnostics(),
             logs: vec![],
             sessions: vec![],
+            performance_check: None,
         }
     }
 }

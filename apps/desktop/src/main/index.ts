@@ -380,6 +380,7 @@ import type {
   CommentsSnapshotDelta,
   CommentsViewMode,
   CommentsViewSnapshot,
+  CommentHighlightAnchor,
   CommentsWindowState,
   CompositorSceneSourceStatus,
   CompositorStatus,
@@ -412,7 +413,7 @@ import type {
   VideorcAccountSnapshot,
   ViewerSample
 } from '../shared/backend'
-import { offCohostWindowState } from '../shared/backend'
+import { normalizeCommentHighlightAnchor, offCohostWindowState } from '../shared/backend'
 
 publishLaunchServicesSmokeOwnership()
 
@@ -525,6 +526,7 @@ let latestViewerSample: ViewerSample | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
+let commentsHighlightAnchorValue: CommentHighlightAnchor | undefined
 let commentsWindowClosing = false
 let commentsWindowContentProtected = false
 let latestCommentHighlightState: CommentHighlightState = { generation: 0, phase: 'idle' }
@@ -772,12 +774,25 @@ let glassWallpaperDataUrl: string | null = null
 let glassWallpaperSourcePath: string | null = null
 let glassGeometryTimer: ReturnType<typeof setTimeout> | null = null
 
-function glassGeometry(): { window: Electron.Rectangle; display: Electron.Rectangle } | null {
-  if (!mainWindow || mainWindow.isDestroyed()) {
+// The underlay is drawn per window (each one offsets the same wallpaper by its
+// own bounds), so geometry is always asked for a specific window.
+function glassGeometry(
+  target: BrowserWindow | null = mainWindow
+): { window: Electron.Rectangle; display: Electron.Rectangle } | null {
+  if (!target || target.isDestroyed()) {
     return null
   }
-  const bounds = mainWindow.getBounds()
+  const bounds = target.getBounds()
   return { window: bounds, display: screen.getDisplayMatching(bounds).bounds }
+}
+
+// Main plus the detached Chat and Captions windows: they share the black-glass
+// material, so they share the wallpaper underlay feed.
+function glassWindows(): BrowserWindow[] {
+  return [mainWindow, commentsWindow, captionsWindow].filter(
+    (window): window is BrowserWindow =>
+      Boolean(window) && !window!.isDestroyed() && !window!.webContents.isDestroyed()
+  )
 }
 
 function queueGlassGeometryBroadcast(): void {
@@ -786,10 +801,13 @@ function queueGlassGeometryBroadcast(): void {
   }
   glassGeometryTimer = setTimeout(() => {
     glassGeometryTimer = null
-    const geometry = glassGeometry()
-    if (geometry && glassWallpaperDataUrl) {
-      if (mainWindow) {
-        sendElectronEvent(mainWindow.webContents, 'glass:geometry', geometry)
+    if (!glassWallpaperDataUrl) {
+      return
+    }
+    for (const window of glassWindows()) {
+      const geometry = glassGeometry(window)
+      if (geometry) {
+        sendElectronEvent(window.webContents, 'glass:geometry', geometry)
       }
     }
   }, 40)
@@ -826,10 +844,10 @@ async function refreshGlassWallpaper(): Promise<void> {
     }
     glassWallpaperDataUrl = `data:image/jpeg;base64,${image.toJPEG(72).toString('base64')}`
     glassWallpaperSourcePath = wallpaperPath
-    const geometry = glassGeometry()
-    if (geometry) {
-      if (mainWindow) {
-        sendElectronEvent(mainWindow.webContents, 'glass:wallpaper', {
+    for (const window of glassWindows()) {
+      const geometry = glassGeometry(window)
+      if (geometry) {
+        sendElectronEvent(window.webContents, 'glass:wallpaper', {
           imageDataUrl: glassWallpaperDataUrl,
           ...geometry
         })
@@ -1631,6 +1649,41 @@ function platformWindowChromeOptions(): BrowserWindowConstructorOptions {
           trafficLightPosition: { x: 14, y: 13 }
         })
   }
+}
+
+// Detached Chat/Captions windows: same black-glass backing as the main window
+// on macOS (transparent + the renderer's wallpaper underlay), solid palette
+// base everywhere else and when glass is opted out. The traffic lights are
+// centred on the renderer's fixed 40px header from ONE constant so the title
+// row cannot drift off their centre line again.
+const AUX_WINDOW_HEADER_HEIGHT = 40
+const MAC_TRAFFIC_LIGHT_DIAMETER = 14
+
+function auxWindowChromeOptions(): Electron.BrowserWindowConstructorOptions {
+  const glass = isMac && glassVibrancyEnabled
+  return {
+    ...(isMac
+      ? {
+          titleBarStyle: 'hiddenInset' as const,
+          trafficLightPosition: {
+            x: 14,
+            y: Math.round((AUX_WINDOW_HEADER_HEIGHT - MAC_TRAFFIC_LIGHT_DIAMETER) / 2)
+          }
+        }
+      : {}),
+    ...(glass
+      ? { transparent: true, backgroundColor: '#00000000', visualEffectState: 'active' as const }
+      : { backgroundColor: DARK_WINDOW_PALETTE.base })
+  }
+}
+
+function watchAuxWindowGlass(window: BrowserWindow): void {
+  if (!glassWallpaperEnabled) {
+    return
+  }
+  window.on('move', queueGlassGeometryBroadcast)
+  window.on('resize', queueGlassGeometryBroadcast)
+  window.webContents.once('did-finish-load', () => void refreshGlassWallpaper())
 }
 
 function createWindow(): void {
@@ -2612,6 +2665,7 @@ function restoreNotesWindowOnLaunch(): void {
 type CommentsWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
+  highlightAnchor?: CommentHighlightAnchor
   alwaysOnTopPreferenceVersion?: number
   open?: boolean
 }
@@ -2646,6 +2700,24 @@ function commentsWindowAlwaysOnTopPreference(prefs: CommentsWindowPrefs): boolea
   return prefs.alwaysOnTopPreferenceVersion === 1 && prefs.alwaysOnTop === true
 }
 
+// The anchor is read with the window closed too (shortcut, deck and co-host
+// highlights all resolve through the Studio renderer), so it loads lazily from
+// prefs instead of at window open. Smoke runs never write prefs; the in-memory
+// value still carries a pick for the life of the process.
+function commentsHighlightAnchor(): CommentHighlightAnchor {
+  commentsHighlightAnchorValue ??= normalizeCommentHighlightAnchor(
+    loadCommentsWindowPrefs().highlightAnchor
+  )
+  return commentsHighlightAnchorValue
+}
+
+function setCommentsWindowHighlightAnchor(anchor: unknown): CommentsWindowState {
+  commentsHighlightAnchorValue = normalizeCommentHighlightAnchor(anchor)
+  saveCommentsWindowPrefs({ highlightAnchor: commentsHighlightAnchorValue })
+  emitCommentsWindowState()
+  return commentsWindowState()
+}
+
 function commentsWindowIsOpen(): boolean {
   return Boolean(commentsWindow && !commentsWindow.isDestroyed() && !commentsWindowClosing)
 }
@@ -2669,6 +2741,7 @@ function commentsWindowState(message?: string): CommentsWindowState {
     bounds: open ? window!.getBounds() : null,
     windowId: commentsWindowGlobalId(),
     alwaysOnTop: commentsWindowAlwaysOnTop,
+    highlightAnchor: commentsHighlightAnchor(),
     protected: open ? commentsWindowContentProtected : false,
     captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
     enabled: commentsWindowFeatureEnabled,
@@ -2676,7 +2749,7 @@ function commentsWindowState(message?: string): CommentsWindowState {
       message ??
       (commentsWindowFeatureEnabled
         ? undefined
-        : 'Comments window is disabled by VIDEORC_COMMENTS_WINDOW=0.')
+        : 'Chat window is disabled by VIDEORC_COMMENTS_WINDOW=0.')
   }
 }
 
@@ -2706,17 +2779,17 @@ function assertLiveCommentsCommandSession(sessionId: unknown): asserts sessionId
       commandSessionId: typeof sessionId === 'string' ? sessionId : undefined
     })
   ) {
-    throw new Error('Comments commands are available only for the selected live session.')
+    throw new Error('Chat commands are available only for the selected live session.')
   }
 }
 
 function commentsCommandRequestId(value: unknown): string {
   if (!value || typeof value !== 'object' || !('requestId' in value)) {
-    throw new Error('Comments command requires a request id.')
+    throw new Error('Chat command requires a request id.')
   }
   const requestId = value.requestId
   if (typeof requestId !== 'string' || !requestId.trim()) {
-    throw new Error('Comments command requires a request id.')
+    throw new Error('Chat command requires a request id.')
   }
   return requestId
 }
@@ -2861,7 +2934,7 @@ function smokeCommentsSendOperation(
         destinationId: 'comments-probe-x',
         platform: 'x',
         phase: 'read-only',
-        reason: 'X comments are receive-only.'
+        reason: 'X chat is receive-only.'
       }
     ],
     createdAt: now,
@@ -2958,11 +3031,13 @@ function dispatchSmokeCommentsSend(command: CommentsSendCommand): boolean {
 function commentsCaptureHeaderSignal(image: NativeImage): number {
   const size = image.getSize()
   const bitmap = image.toBitmap()
-  // "Comments" occupies this stable logical-pixel region. A stale partial
-  // texture can still contain bright comment-row text near the top, so scoring
-  // the whole header produces false positives; score the title itself.
-  const xStart = Math.max(0, Math.floor((68 / 420) * size.width))
-  const xEnd = Math.min(size.width, Math.ceil((154 / 420) * size.width))
+  // The "Chat" title and its Live/History/Idle badge occupy this stable
+  // logical-pixel region (the header is a fixed 40px strip starting at the
+  // 88px traffic-light gutter). A stale partial texture can still contain
+  // bright message-row text near the top, so scoring the whole header produces
+  // false positives; score the title strip itself.
+  const xStart = Math.max(0, Math.floor((80 / 420) * size.width))
+  const xEnd = Math.min(size.width, Math.ceil((166 / 420) * size.width))
   const yStart = Math.max(0, Math.floor((8 / 640) * size.height))
   const yEnd = Math.min(size.height, Math.ceil((29 / 640) * size.height))
   let signal = 0
@@ -2993,7 +3068,7 @@ function emitCommentsWindowState(message?: string): void {
         sendElectronEvent(window.webContents, 'comments-window:state', state)
       } catch (error) {
         if (!appIsQuitting) {
-          safeConsole.warn('Comments window state emit failed:', error)
+          safeConsole.warn('Chat window state emit failed:', error)
         }
       }
     }
@@ -3024,12 +3099,8 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 320,
     minHeight: 360,
-    title: 'Videorc Comments',
-    // Center the traffic lights in the 40px header so they align with the title.
-    ...(isMac
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
-      : {}),
-    backgroundColor: DARK_WINDOW_PALETTE.base,
+    title: 'Videorc Chat',
+    ...auxWindowChromeOptions(),
     show: false,
     ...appWindowIconOptions(),
     webPreferences: {
@@ -3039,12 +3110,13 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     }
   })
   registerRendererWindow(window, 'comments')
+  watchAuxWindowGlass(window)
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
   commentsWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'comments', {
     onFailure: (reason) =>
-      safeConsole.warn(`Comments window content protection could not be enabled: ${reason}`)
+      safeConsole.warn(`Chat window content protection could not be enabled: ${reason}`)
   }).protected
   installCaptureProtectionSmokeMarker(window, 'comments')
   commentsWindowAlwaysOnTop = commentsWindowAlwaysOnTopPreference(prefs)
@@ -3245,11 +3317,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     minWidth: 360,
     minHeight: 200,
     title: 'Videorc Captions',
-    // Center the traffic lights in the 40px header so they align with the title.
-    ...(isMac
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 14 } }
-      : {}),
-    backgroundColor: DARK_WINDOW_PALETTE.base,
+    ...auxWindowChromeOptions(),
     show: false,
     ...appWindowIconOptions(),
     webPreferences: {
@@ -3264,6 +3332,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
   })
   installCaptureProtectionSmokeMarker(window, 'captions')
   registerRendererWindow(window, 'captions')
+  watchAuxWindowGlass(window)
   captionsWindowClosing = false
   captionsWindow = window
   captionsWindowAlwaysOnTop = captionsWindowAlwaysOnTopPreference(prefs)
@@ -9745,10 +9814,16 @@ async function runSmokePreviewMotionCommand(
     return toggleCommentsWindow()
   }
 
+  if (command === 'comments-window-set-highlight-anchor') {
+    // Same path the Chat window's corner picker takes, so smokes prove the
+    // pick reaches the compositor rather than a test-only shortcut.
+    return setCommentsWindowHighlightAnchor(params.anchor)
+  }
+
   if (command === 'comments-window-set-bounds') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
-      return commentsWindowState('Comments window is not open.')
+      return commentsWindowState('Chat window is not open.')
     }
     const current = window.getBounds()
     window.setBounds({
@@ -9788,7 +9863,7 @@ async function runSmokePreviewMotionCommand(
   if (command === 'comments-window-set-view-mode') {
     const mode = params.mode as CommentsViewMode
     if (!mode || (mode.kind !== 'live' && mode.kind !== 'history')) {
-      throw new Error('Comments view mode must be live or history.')
+      throw new Error('Chat view mode must be live or history.')
     }
     if (await selectCommentsViewMode(mode)) {
       emitCommentsView()
@@ -9823,7 +9898,7 @@ async function runSmokePreviewMotionCommand(
       commentsSmokeCommandTrace = null
       return commentsSmokeCommandFixture
     }
-    throw new Error('Invalid Comments smoke command fixture.')
+    throw new Error('Invalid Chat smoke command fixture.')
   }
 
   if (command === 'comments-window-command-trace') {
@@ -9836,7 +9911,7 @@ async function runSmokePreviewMotionCommand(
   if (command === 'comments-window-route-send-result') {
     const operation = params.operation as CommentsSendOperation
     if (!operation || typeof operation.sessionId !== 'string') {
-      throw new Error('Comments send result requires a session id.')
+      throw new Error('Chat send result requires a session id.')
     }
     const routedTo = cacheCommentsSendResult(operation)
     emitCommentsView()
@@ -9851,7 +9926,7 @@ async function runSmokePreviewMotionCommand(
   if (command === 'comments-window-authority-probe') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
-      throw new Error('Comments window is not open.')
+      throw new Error('Chat window is not open.')
     }
     const before = {
       highlight: latestCommentHighlightState,
@@ -9914,7 +9989,7 @@ async function runSmokePreviewMotionCommand(
   if (command === 'comments-window-click-message') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
-      return { clicked: false, reason: 'Comments window is not open.' }
+      return { clicked: false, reason: 'Chat window is not open.' }
     }
     const messageId = typeof params.messageId === 'string' ? params.messageId : ''
     return window.webContents.executeJavaScript(
@@ -9934,18 +10009,18 @@ async function runSmokePreviewMotionCommand(
   if (command === 'comments-window-submit-message') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
-      return { submitted: false, reason: 'Comments window is not open.' }
+      return { submitted: false, reason: 'Chat window is not open.' }
     }
     const text = typeof params.text === 'string' ? params.text : ''
     return window.webContents.executeJavaScript(
       `(async () => {
-        const input = document.querySelector('input[aria-label="Send a comment to all writable destinations"]');
+        const input = document.querySelector('input[aria-label="Send a message to all writable destinations"]');
         if (!input) return { submitted: false, reason: 'Composer is not available.' };
         const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value')?.set;
         setter?.call(input, ${jsonForInlineScript(text)});
         input.dispatchEvent(new Event('input', { bubbles: true }));
         await new Promise((resolve) => requestAnimationFrame(() => resolve()));
-        const button = document.querySelector('button[aria-label="Send comment to all writable destinations"]');
+        const button = document.querySelector('button[aria-label="Send message to all writable destinations"]');
         if (!button || button.disabled) {
           return { submitted: false, reason: 'Send action is disabled.', value: input.value };
         }
@@ -9964,16 +10039,24 @@ async function runSmokePreviewMotionCommand(
     const rendered = await window.webContents.executeJavaScript(
       `(() => {
         const rows = Array.from(document.querySelectorAll('[data-message-id]'));
-        const composer = document.querySelector('input[aria-label="Send a comment to all writable destinations"]');
+        const composer = document.querySelector('input[aria-label="Send a message to all writable destinations"]');
         return {
           open: true,
           text: document.body.innerText,
           messageCount: rows.length,
           composerCount: composer ? 1 : 0,
           composerDisabled: composer?.disabled ?? null,
+          headerTitle: document.querySelector('header span')?.textContent ?? '',
+          highlightPositionControl:
+            document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('title') ?? null,
+          glassUnderlay: document.querySelector('[data-glass-underlay]')
+            ? 'wallpaper'
+            : document.querySelector('[data-glass-underlay-fallback]')
+              ? 'fallback'
+              : 'missing',
           highlightActionCount: document.querySelectorAll('button[aria-label^="Show "][aria-label$=" on the stream"]').length,
           destinationStatus: document.querySelector('[data-slot="comments-destination-status"]')?.textContent ?? '',
-          deliveryStatus: document.querySelector('[aria-label="Latest comment delivery"]')?.textContent ?? '',
+          deliveryStatus: document.querySelector('[aria-label="Latest message delivery"]')?.textContent ?? '',
           highlightPhases: Object.fromEntries(rows.map((row) => [
             row.getAttribute('data-message-id'),
             row.getAttribute('data-highlight-phase')
@@ -9992,7 +10075,7 @@ async function runSmokePreviewMotionCommand(
   if (command === 'comments-window-capture-page') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
-      throw new Error('Comments window is not open.')
+      throw new Error('Chat window is not open.')
     }
     const current = window.getBounds()
     if (current.width !== 420 || current.height !== 640) {
@@ -10014,7 +10097,7 @@ async function runSmokePreviewMotionCommand(
       }
     }
     if (!captured) {
-      throw new Error('Comments window capture did not produce an image.')
+      throw new Error('Chat window capture did not produce an image.')
     }
     const sourceSize = captured.getSize()
     const image =
@@ -12521,8 +12604,9 @@ app.whenReady().then(async () => {
       mainWindow?.setBackgroundColor(theme === 'light' ? '#F5F5F7' : '#1C1C1F')
     }
   })
-  secureIpcHandle('glass:wallpaper:get', () => {
-    const geometry = glassGeometry()
+  secureIpcHandle('glass:wallpaper:get', (event) => {
+    // Each glass window asks for ITS OWN offset into the shared wallpaper.
+    const geometry = glassGeometry(BrowserWindow.fromWebContents(event.sender))
     if (!glassWallpaperDataUrl || !geometry) {
       return null
     }
@@ -12591,6 +12675,9 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:set-always-on-top', (_event, alwaysOnTop: boolean) =>
     setCommentsWindowAlwaysOnTop(Boolean(alwaysOnTop))
   )
+  secureIpcHandle('comments-window:set-highlight-anchor', (_event, anchor: unknown) =>
+    setCommentsWindowHighlightAnchor(anchor)
+  )
   // Relay (C3): the main renderer owns the single WS client and pushes each
   // live-chat snapshot through here to the window; the window's Clear routes
   // back to the main renderer. Last snapshot is cached for the window's first paint.
@@ -12617,7 +12704,7 @@ app.whenReady().then(async () => {
   secureIpcHandle('comments-window:set-view-mode', async (event, value: unknown) => {
     const mode = parseCommentsViewMode(value)
     if (!mode) {
-      throw new Error('Comments view mode must be live or a complete history selection.')
+      throw new Error('Chat view mode must be live or a complete history selection.')
     }
     if (
       !commentsViewModeSenderAllowed({
@@ -12627,7 +12714,7 @@ app.whenReady().then(async () => {
         mode
       })
     ) {
-      throw new Error('This window cannot change the Comments view mode.')
+      throw new Error('This window cannot change the Chat view mode.')
     }
     if (await selectCommentsViewMode(mode)) {
       emitCommentsView()
@@ -12667,15 +12754,15 @@ app.whenReady().then(async () => {
   // client), and the resulting on-stream state relays back to the window.
   secureIpcHandle('comments-window:highlight', (event, value: unknown): Promise<unknown> => {
     if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-      return Promise.reject(new Error('Only the Comments window can request a highlight.'))
+      return Promise.reject(new Error('Only the Chat window can request a highlight.'))
     }
     const requestId = commentsCommandRequestId(value)
     if (!('sessionId' in (value as object)) || !('messageId' in (value as object))) {
-      return Promise.reject(new Error('Comments highlight requires a session and message id.'))
+      return Promise.reject(new Error('Chat highlight requires a session and message id.'))
     }
     const command = value as CommentHighlightCommand
     if (typeof command.messageId !== 'string' || !command.messageId.trim()) {
-      return Promise.reject(new Error('Comments highlight requires a message id.'))
+      return Promise.reject(new Error('Chat highlight requires a message id.'))
     }
     assertLiveCommentsCommandSession(command.sessionId)
     return commentsCommandBroker.request(
@@ -12734,7 +12821,7 @@ app.whenReady().then(async () => {
     'comments-window:cohost-action',
     (event, value: unknown): Promise<CohostState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Comments window can send co-host actions.'))
+        return Promise.reject(new Error('Only the Chat window can send co-host actions.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (
@@ -12778,7 +12865,7 @@ app.whenReady().then(async () => {
     'comments-window:cohost-enable',
     (event, value: unknown): Promise<CohostWindowState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Comments window can change co-host settings.'))
+        return Promise.reject(new Error('Only the Chat window can change co-host settings.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (!value || typeof value !== 'object' || !('enabled' in value)) {
@@ -12815,7 +12902,7 @@ app.whenReady().then(async () => {
     'comments-window:send',
     (event, value: unknown): Promise<CommentsSendOperation> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Comments window can send Comments commands.'))
+        return Promise.reject(new Error('Only the Chat window can send Chat commands.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (
@@ -12823,7 +12910,7 @@ app.whenReady().then(async () => {
         !('operationId' in (value as object)) ||
         !('text' in (value as object))
       ) {
-        return Promise.reject(new Error('Comments send requires an operation, session, and text.'))
+        return Promise.reject(new Error('Chat send requires an operation, session, and text.'))
       }
       const command = value as CommentsSendCommand
       if (
@@ -12831,7 +12918,7 @@ app.whenReady().then(async () => {
         !command.operationId.trim() ||
         typeof command.text !== 'string'
       ) {
-        return Promise.reject(new Error('Comments send requires an operation id and text.'))
+        return Promise.reject(new Error('Chat send requires an operation id and text.'))
       }
       assertLiveCommentsCommandSession(command.sessionId)
       return commentsCommandBroker.request(requestId, () => {
@@ -12855,11 +12942,11 @@ app.whenReady().then(async () => {
   )
   secureIpcHandle('comments-window:clear', (event, value: unknown): Promise<LiveChatSnapshot> => {
     if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-      return Promise.reject(new Error('Only the Comments window can clear Comments.'))
+      return Promise.reject(new Error('Only the Chat window can clear the chat view.'))
     }
     const requestId = commentsCommandRequestId(value)
     if (!('sessionId' in (value as object))) {
-      return Promise.reject(new Error('Comments clear requires a live session id.'))
+      return Promise.reject(new Error('Chat clear requires a live session id.'))
     }
     const command = value as CommentsClearCommand
     assertLiveCommentsCommandSession(command.sessionId)

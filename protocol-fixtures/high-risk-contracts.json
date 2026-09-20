@@ -252,13 +252,15 @@
       "enabled": true,
       "tone": "short",
       "notes": "Keyboard: Keychron Q1",
-      "autoHighlight": false
+      "autoHighlight": false,
+      "rules": ["No spoilers", "English only"]
     },
     "settings": {
       "enabled": true,
       "tone": "friendly",
       "notes": "",
-      "autoHighlight": false
+      "autoHighlight": false,
+      "rules": []
     },
     "state": {
       "sessionId": "session-fixture",
@@ -356,6 +358,66 @@
       "nextTickAt": null,
       "messagesSeen": 12,
       "questionsTotal": 3
+    },
+    "stateV2": {
+      "sessionId": "session-fixture",
+      "status": "listening",
+      "reason": null,
+      "detail": null,
+      "questions": [],
+      "flags": [
+        {
+          "messageId": "session-fixture:twitch:default:message-fixture",
+          "kind": "harassment",
+          "severity": "high",
+          "reason": "Insults the streamer.",
+          "at": "2026-08-22T10:00:20Z",
+          "confidence": 0.93,
+          "target": "streamer",
+          "action": "timeout",
+          "alsoKinds": ["scam"]
+        },
+        {
+          "messageId": "session-fixture:twitch:default:message-rule",
+          "kind": "rule",
+          "severity": "low",
+          "reason": "Breaks a chat rule.",
+          "at": "2026-08-22T10:00:20Z",
+          "rule": "No spoilers"
+        },
+        {
+          "messageId": "session-fixture:twitch:default:message-unknown",
+          "kind": "unknown",
+          "severity": "medium",
+          "reason": "A kind this build does not know.",
+          "at": "2026-08-22T10:00:20Z"
+        }
+      ],
+      "mood": "tense",
+      "lastTickAt": "2026-08-22T10:00:20Z",
+      "tickSeq": 3,
+      "partial": false,
+      "tickInFlight": false,
+      "pendingMessages": 0,
+      "nextTickAt": null,
+      "messagesSeen": 90,
+      "questionsTotal": 5,
+      "highlights": [
+        {
+          "messageId": "session-fixture:twitch:default:message-highlight",
+          "score": 0.81,
+          "type": "joke"
+        }
+      ],
+      "alerts": [
+        {
+          "kind": "audio",
+          "viewers": 3,
+          "lastSeenAt": "2026-08-22T10:00:20Z",
+          "active": true
+        }
+      ],
+      "moodScores": { "hype": 0.2, "tension": 0.7, "confusion": 0.1 }
     },
     "legacyState": {
       "sessionId": null,

@@ -17,6 +17,7 @@ import {
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import type {
   CohostFlag,
   CohostQuestion,
@@ -26,6 +27,7 @@ import type {
   LiveChatSnapshot,
   StreamPlatform
 } from '@/lib/backend'
+import { cohostCommentMarks, cohostStateForSensitivity } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import {
   LIVE_CHAT_PLATFORMS,
@@ -145,10 +147,19 @@ export function LiveChatPanel({
     viewport?.scrollTo({ top: viewport.scrollHeight, behavior: 'smooth' })
   }
 
+  // Sensitivity is a view filter over flag confidence: the pane and the rows
+  // read the same filtered state, so they cannot disagree about a flag.
+  const cohostSensitivity = useCohostSensitivity()
+  const shownCohostState = useMemo(
+    () => cohostStateForSensitivity(cohostState, cohostSensitivity),
+    [cohostSensitivity, cohostState]
+  )
+  const cohostMarks = useMemo(() => cohostCommentMarks(shownCohostState), [shownCohostState])
+
   const hasMessages = messages.length > 0
   const emptyMessage =
     activePlatforms.length > 0
-      ? 'No comments from the selected destinations.'
+      ? 'No messages from the selected destinations.'
       : liveChatEmptyMessage(snapshot)
 
   return (
@@ -162,7 +173,7 @@ export function LiveChatPanel({
           enabled={cohostEnabled}
           gate={cohostGate}
           highlightedMessageId={highlightedId}
-          state={cohostState}
+          state={shownCohostState}
           onAnswered={(question) => onCohostAnswered?.(question)}
           onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
           onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
@@ -185,7 +196,7 @@ export function LiveChatPanel({
             {filterablePlatforms.map((platform) => (
               <ToggleGroupItem
                 key={platform}
-                aria-label={`Filter ${CHAT_PLATFORM_LABELS[platform]} comments`}
+                aria-label={`Filter ${CHAT_PLATFORM_LABELS[platform]} chat`}
                 className="px-2 text-xs"
                 value={platform}
               >
@@ -216,10 +227,12 @@ export function LiveChatPanel({
       <div className="relative min-h-0 flex-1">
         <ScrollArea ref={scrollRootRef} className="h-full max-h-[28rem] min-h-[8rem]">
           {hasMessages ? (
-            <ol aria-label="Comments" className="flex flex-col gap-0.5 py-1">
+            <ol aria-label="Chat messages" className="flex flex-col gap-0.5 py-1">
               {visibleMessages(messages, MAX_RENDERED_LIVE_CHAT_MESSAGES).map((message) => (
                 <CommentRow
                   key={message.id}
+                  cohostFlag={cohostMarks.flags.get(message.id)}
+                  cohostSuggested={cohostMarks.suggested.has(message.id)}
                   highlight={commentHighlightPresentationForMessage({
                     messageId: message.id,
                     highlightedId,
@@ -238,7 +251,7 @@ export function LiveChatPanel({
                 <EmptyMedia variant="icon">
                   <ChatIcon weight="duotone" />
                 </EmptyMedia>
-                <EmptyTitle className="text-sm">No comments yet</EmptyTitle>
+                <EmptyTitle className="text-sm">No messages yet</EmptyTitle>
                 <EmptyDescription className="text-xs">{emptyMessage}</EmptyDescription>
               </EmptyHeader>
               {chatNeedsConnectionAction(snapshot.providers) ? (

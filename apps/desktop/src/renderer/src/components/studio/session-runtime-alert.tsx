@@ -1,6 +1,7 @@
 import { AlertIcon } from '@/components/icons'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
+import { revealInFileManagerLabel } from '@/lib/platform'
 import { sessionRuntimeNoticeTitle, type SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { ReactElement } from 'react'
 
@@ -40,7 +41,7 @@ export function SessionRuntimeAlert({
           notice.outputPath &&
           onRevealOutput ? (
             <Button size="xs" type="button" variant="ghost" onClick={onRevealOutput}>
-              Show in Finder
+              {revealInFileManagerLabel()}
             </Button>
           ) : null}
           <Button size="xs" type="button" variant="ghost" onClick={onDismiss}>

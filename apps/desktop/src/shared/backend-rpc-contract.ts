@@ -42,6 +42,9 @@ import type {
   SessionStopParams,
   SessionStorageTotals,
   StartSessionParams,
+  PerformanceCheckProgress,
+  PerformanceCheckRunParams,
+  PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
   StreamPlatform,
@@ -104,6 +107,9 @@ export interface BackendRpcMethodMap {
     StreamOutputTopologyProbeParams,
     StreamOutputTopologyProbeResult
   >
+  'performance.check.get': BackendRpcDefinition<undefined, PerformanceCheckState>
+  'performance.check.run': BackendRpcDefinition<PerformanceCheckRunParams, PerformanceCheckState>
+  'performance.check.cancel': BackendRpcDefinition<undefined, PerformanceCheckState>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
@@ -178,6 +184,8 @@ export interface BackendEventMap {
   'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
+  'performance.check.progress': PerformanceCheckProgress
+  'performance.check.completed': PerformanceCheckState
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -350,6 +358,7 @@ const recordingStatusSchema = objectSchema(
 const videoSettingsSchema = objectSchema(
   {
     preset: enumSchema([
+      'tutorial-720p30',
       'tutorial-1080p30',
       'tutorial-1440p30',
       'record-4k30',
@@ -402,6 +411,49 @@ const streamOutputTopologyProbeParamsFields = objectSchema(
   },
   { allowUnknown: false }
 )
+
+const performanceCheckDimension = numberSchema({ integer: true, min: 16, max: 8192 })
+const performanceCheckRunParamsSchema = objectSchema(
+  {
+    ceilingWidth: performanceCheckDimension,
+    ceilingHeight: performanceCheckDimension,
+    ceilingFps: numberSchema({ integer: true, min: 1, max: 240 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<PerformanceCheckRunParams>
+
+const performanceCheckRungSchema = objectSchema({
+  video: videoSettingsSchema,
+  verdict: enumSchema(['passed', 'failed', 'skipped']),
+  encodeBackend: optionalSchema(encodeBackendSchema),
+  compositorBackend: optionalSchema(enumSchema(['metal', 'd3d11', 'cpu', 'cpu-fallback'])),
+  encoderSpeed: optionalSchema(numberSchema({ min: 0 })),
+  deliveredFps: optionalSchema(numberSchema({ min: 0 })),
+  drainAfterStopMs: optionalSchema(nonNegativeInteger),
+  reasons: arraySchema(stringSchema({ maxLength: 64 }), { maxLength: 16 })
+})
+
+const performanceCheckStateSchema = objectSchema({
+  running: booleanSchema,
+  result: optionalSchema(
+    objectSchema({
+      capabilityKey: stringSchema({ maxLength: 128 }),
+      checkedAt: stringSchema({ maxLength: 64 }),
+      appVersion: stringSchema({ maxLength: 64 }),
+      durationMs: nonNegativeInteger,
+      recommended: videoSettingsSchema,
+      belowFloor: booleanSchema,
+      rungs: arraySchema(performanceCheckRungSchema, { maxLength: 16 })
+    })
+  ),
+  stale: booleanSchema
+}) as RuntimeSchema<PerformanceCheckState>
+
+const performanceCheckProgressSchema = objectSchema({
+  rungIndex: nonNegativeInteger,
+  rungCount: nonNegativeInteger,
+  video: videoSettingsSchema
+}) as RuntimeSchema<PerformanceCheckProgress>
 
 const streamOutputTopologyProbeParamsSchema = runtimeSchema<StreamOutputTopologyProbeParams>(
   'a secret-free stream output topology probe',
@@ -1525,12 +1577,15 @@ const oauthCallbackResultSchema = runtimeSchema<OAuthCallbackResult>(
 
 const cohostToneSchema = enumSchema(['friendly', 'short', 'professional'])
 const cohostNotesSchema = stringSchema({ maxLength: 4000 })
+// The backend normalises rules to these caps before it stores or sends them.
+const cohostRulesSchema = arraySchema(stringSchema({ maxLength: 120 }), { maxLength: 10 })
 const cohostSettingsSchema = objectSchema(
   {
     enabled: booleanSchema,
     tone: cohostToneSchema,
     notes: cohostNotesSchema,
-    autoHighlight: booleanSchema
+    autoHighlight: booleanSchema,
+    rules: cohostRulesSchema
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettings>
@@ -1539,7 +1594,9 @@ const cohostSettingsPatchSchema = objectSchema(
     enabled: optionalSchema(booleanSchema),
     tone: optionalSchema(cohostToneSchema),
     notes: optionalSchema(cohostNotesSchema),
-    autoHighlight: optionalSchema(booleanSchema)
+    autoHighlight: optionalSchema(booleanSchema),
+    // The patch is what the streamer typed; the backend trims and caps it.
+    rules: optionalSchema(arraySchema(stringSchema({ maxLength: 2000 }), { maxLength: 100 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostSettingsPatch>
@@ -1558,14 +1615,61 @@ const cohostQuestionSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// `unknown` is the backend's serde catch-all for a kind newer than this build;
+// it must validate, or one new server kind would drop the whole state event.
+const cohostFlagKindSchema = enumSchema([
+  'toxicity',
+  'spam',
+  'self-promo',
+  'personal-info',
+  'hate',
+  'harassment',
+  'threat',
+  'sexual',
+  'scam',
+  'self-harm',
+  'spoiler',
+  'impersonation',
+  'rule',
+  'unknown'
+])
+const unitInterval = numberSchema({ min: 0, max: 1 })
 const cohostFlagSchema = objectSchema(
   {
     messageId: boundedString,
-    kind: enumSchema(['toxicity', 'spam', 'self-promo', 'personal-info']),
+    kind: cohostFlagKindSchema,
     severity: enumSchema(['high', 'medium', 'low']),
     reason: stringSchema({ maxLength: 2000 }),
-    at: timestamp
+    at: timestamp,
+    // Wire v2 extras: absent when the server sent none — the backend never
+    // serializes them as null.
+    confidence: optionalSchema(unitInterval),
+    target: optionalSchema(enumSchema(['streamer', 'viewer', 'group'])),
+    action: optionalSchema(enumSchema(['hide', 'timeout', 'ban'])),
+    alsoKinds: optionalSchema(arraySchema(cohostFlagKindSchema, { maxLength: 16 })),
+    rule: optionalSchema(stringSchema({ maxLength: 120 }))
   },
+  { allowUnknown: false }
+)
+const cohostHighlightSchema = objectSchema(
+  {
+    messageId: boundedString,
+    score: unitInterval,
+    type: enumSchema(['question', 'joke', 'praise', 'insight', 'milestone', 'other'])
+  },
+  { allowUnknown: false }
+)
+const cohostAlertSchema = objectSchema(
+  {
+    kind: enumSchema(['audio', 'video', 'stream-health', 'game', 'other']),
+    viewers: nonNegativeInteger,
+    lastSeenAt: timestamp,
+    active: booleanSchema
+  },
+  { allowUnknown: false }
+)
+const cohostMoodScoresSchema = objectSchema(
+  { hype: unitInterval, tension: unitInterval, confusion: unitInterval },
   { allowUnknown: false }
 )
 const cohostErrorDetailSchema = objectSchema(
@@ -1606,7 +1710,11 @@ const cohostStateSchema = objectSchema(
     pendingMessages: optionalSchema(nonNegativeInteger),
     nextTickAt: optionalSchema(nullableSchema(timestamp)),
     messagesSeen: optionalSchema(nonNegativeInteger),
-    questionsTotal: optionalSchema(nonNegativeInteger)
+    questionsTotal: optionalSchema(nonNegativeInteger),
+    // Tick wire v2: omitted by the backend while empty.
+    highlights: optionalSchema(arraySchema(cohostHighlightSchema, { maxLength: 5 })),
+    alerts: optionalSchema(arraySchema(cohostAlertSchema, { maxLength: 8 })),
+    moodScores: optionalSchema(cohostMoodScoresSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>
@@ -1656,6 +1764,12 @@ const runtimeContracts = {
     params: streamOutputTopologyProbeParamsSchema,
     result: streamOutputTopologyProbeResultSchema
   },
+  'performance.check.get': { params: undefinedSchema, result: performanceCheckStateSchema },
+  'performance.check.run': {
+    params: performanceCheckRunParamsSchema,
+    result: performanceCheckStateSchema
+  },
+  'performance.check.cancel': { params: undefinedSchema, result: performanceCheckStateSchema },
   'stream.targets.snapshot': {
     params: undefinedSchema,
     result: streamTargetsSnapshotSchema
@@ -1843,7 +1957,9 @@ const runtimeEventSchemas = {
   'preview.screen.status': previewScreenStatusSchema,
   'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
-  'cohost.state': cohostStateSchema
+  'cohost.state': cohostStateSchema,
+  'performance.check.progress': performanceCheckProgressSchema,
+  'performance.check.completed': performanceCheckStateSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {

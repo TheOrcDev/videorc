@@ -615,6 +615,7 @@ export interface ActiveSceneState {
 
 export type RtmpPreset = 'youtube' | 'twitch' | 'x' | 'custom'
 export type VideoPreset =
+  | 'tutorial-720p30'
   | 'tutorial-1080p30'
   | 'tutorial-1440p30'
   | 'record-4k30'
@@ -959,10 +960,9 @@ export interface XEndParams {
 export interface XLiveChatStartParams {
   sessionId: string
   broadcastId: string
-  mediaKey: string
+  /** Unused since X chat moved to the X Activity API relay; still accepted. */
+  mediaKey?: string
   targetId?: string
-  statusBaseUrl?: string
-  accessUrl?: string
 }
 
 export interface XNativeLiveCapability {
@@ -1333,6 +1333,53 @@ export interface StreamOutputTopologyProbeResult {
 }
 
 export type CompositorBackend = 'metal' | 'd3d11' | 'cpu' | 'cpu-fallback'
+
+/**
+ * Performance check: the backend records short synthetic sessions through the
+ * real pipeline and walks down from this ceiling until one holds.
+ */
+export interface PerformanceCheckRunParams {
+  ceilingWidth: number
+  ceilingHeight: number
+  ceilingFps: number
+}
+
+export type PerformanceCheckRungVerdict = 'passed' | 'failed' | 'skipped'
+
+export interface PerformanceCheckRung {
+  video: VideoSettings
+  verdict: PerformanceCheckRungVerdict
+  encodeBackend?: EncodeBackend
+  compositorBackend?: CompositorBackend
+  encoderSpeed?: number
+  deliveredFps?: number
+  drainAfterStopMs?: number
+  reasons: string[]
+}
+
+export interface PerformanceCheckResult {
+  capabilityKey: string
+  checkedAt: string
+  appVersion: string
+  durationMs: number
+  recommended: VideoSettings
+  /** Nothing passed: the recommendation is the floor, unverified. */
+  belowFloor: boolean
+  rungs: PerformanceCheckRung[]
+}
+
+export interface PerformanceCheckState {
+  running: boolean
+  result?: PerformanceCheckResult
+  /** Measured on a different GPU, driver or app version. */
+  stale: boolean
+}
+
+export interface PerformanceCheckProgress {
+  rungIndex: number
+  rungCount: number
+  video: VideoSettings
+}
 
 export type WindowsD3d11MediaState =
   | 'unavailable'
@@ -3220,11 +3267,33 @@ export interface CommentHighlightState {
   reason?: string
 }
 
+/** Corner of the stream canvas the highlighted message is composited into.
+ * Mirrors Rust `CommentHighlightAnchor` (kebab-case). */
+export const COMMENT_HIGHLIGHT_ANCHORS = [
+  'top-left',
+  'top-right',
+  'bottom-left',
+  'bottom-right'
+] as const
+
+export type CommentHighlightAnchor = (typeof COMMENT_HIGHLIGHT_ANCHORS)[number]
+
+// Owner call 2026-09-20: bottom left keeps the card off faces and off the
+// usual top-right camera bubble; captions on the same edge step above it.
+export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR: CommentHighlightAnchor = 'bottom-left'
+
+/** Unknown or missing values (old prefs file, forged IPC) land on the default. */
+export function normalizeCommentHighlightAnchor(value: unknown): CommentHighlightAnchor {
+  return (COMMENT_HIGHLIGHT_ANCHORS as readonly unknown[]).includes(value)
+    ? (value as CommentHighlightAnchor)
+    : DEFAULT_COMMENT_HIGHLIGHT_ANCHOR
+}
+
 export interface SetCommentHighlightParams {
   sessionId: string
   messageId: string
   pngBase64: string
-  position: 'top' | 'bottom'
+  anchor: CommentHighlightAnchor
 }
 
 export interface CommentsCommandResolution<T> {
@@ -3325,6 +3394,10 @@ export interface CommentsWindowState {
   bounds: { x: number; y: number; width: number; height: number } | null
   windowId?: number
   alwaysOnTop: boolean
+  /** Where highlighted messages land on the stream. Owned by main so a
+   * highlight fired with the window closed (shortcut, deck, co-host) still
+   * honours the streamer's pick. */
+  highlightAnchor: CommentHighlightAnchor
   protected: boolean
   captureProtectionMarkerInstalled?: boolean
   enabled: boolean
@@ -3529,6 +3602,7 @@ export interface VideorcApi {
   toggleCommentsWindow: () => Promise<CommentsWindowState>
   getCommentsWindowState: () => Promise<CommentsWindowState>
   setCommentsWindowAlwaysOnTop: (alwaysOnTop: boolean) => Promise<CommentsWindowState>
+  setCommentsWindowHighlightAnchor: (anchor: CommentHighlightAnchor) => Promise<CommentsWindowState>
   onCommentsWindowState: (callback: (state: CommentsWindowState) => void) => () => void
   pushCommentsSnapshot: (view: CommentsViewSnapshot) => Promise<void>
   pushCommentsDelta: (delta: CommentsSnapshotDelta) => Promise<void>
@@ -3838,8 +3912,31 @@ export type CohostReason =
   | 'gateway-error'
 export type CohostPriority = 'high' | 'normal' | 'low'
 export type CohostMood = 'hype' | 'calm' | 'tense' | 'mixed'
-export type CohostFlagKind = 'toxicity' | 'spam' | 'self-promo' | 'personal-info'
+/**
+ * Tick wire v2 vocabulary. It WILL grow: a kind this build does not know
+ * arrives as `unknown` (the backend's serde catch-all) and renders generically.
+ */
+export type CohostFlagKind =
+  | 'toxicity'
+  | 'spam'
+  | 'self-promo'
+  | 'personal-info'
+  | 'hate'
+  | 'harassment'
+  | 'threat'
+  | 'sexual'
+  | 'scam'
+  | 'self-harm'
+  | 'spoiler'
+  | 'impersonation'
+  | 'rule'
+  | 'unknown'
 export type CohostFlagSeverity = 'high' | 'medium' | 'low'
+export type CohostFlagTarget = 'streamer' | 'viewer' | 'group'
+/** A SUGGESTED moderation action. The desktop only labels it. */
+export type CohostFlagAction = 'hide' | 'timeout' | 'ban'
+export type CohostHighlightType = 'question' | 'joke' | 'praise' | 'insight' | 'milestone' | 'other'
+export type CohostAlertKind = 'audio' | 'video' | 'stream-health' | 'game' | 'other'
 
 /** Persisted per-profile co-host settings (`cohost.settings.get/set`). */
 export interface CohostSettings {
@@ -3849,6 +3946,8 @@ export interface CohostSettings {
   notes: string
   /** "Show questions on stream automatically" (default off). */
   autoHighlight: boolean
+  /** Plain-language chat rules the co-host flags against; ≤ 10 × 120 chars. */
+  rules: string[]
 }
 
 /** `cohost.settings.set`: absent fields are unchanged. */
@@ -3857,6 +3956,8 @@ export interface CohostSettingsPatch {
   tone?: CohostTone
   notes?: string
   autoHighlight?: boolean
+  /** Replaces the whole list; the backend trims, drops empties and caps it. */
+  rules?: string[]
 }
 
 /** One open viewer question grouped across platforms and askers. */
@@ -3867,7 +3968,8 @@ export interface CohostQuestion {
   askers: string[]
   platforms: StreamPlatform[]
   priority: CohostPriority
-  /** Draft reply in the chat's language (≤ 200 chars); editable before send. */
+  /** Draft reply (≤ 200 chars); editable before send. The server pins it to
+   * English until a language setting exists — never to locale or geography. */
   suggestedReply: string
   fromNotes: boolean
   firstSeenAt: string
@@ -3880,6 +3982,38 @@ export interface CohostFlag {
   severity: CohostFlagSeverity
   reason: string
   at: string
+  /** Wire v2 extras: absent keys when the server did not send them, never null. */
+  /** 0..1; the Sensitivity control filters on it. Absent = always shown. */
+  confidence?: number
+  /** Who the message is aimed at; absent = nobody in particular. */
+  target?: CohostFlagTarget
+  action?: CohostFlagAction
+  alsoKinds?: CohostFlagKind[]
+  /** For `rule` flags: the text of the streamer rule the message broke. */
+  rule?: string
+}
+
+/** A comment the co-host suggests showing on stream. Never shown by itself. */
+export interface CohostHighlight {
+  messageId: string
+  score: number
+  type: CohostHighlightType
+}
+
+/** Viewers saying something is broken, aggregated per kind by the backend. */
+export interface CohostAlert {
+  kind: CohostAlertKind
+  /** Distinct authors who reported it in the last two minutes. */
+  viewers: number
+  lastSeenAt: string
+  /** At least two distinct authors reported it within 60 s of each other. */
+  active: boolean
+}
+
+export interface CohostMoodScores {
+  hype: number
+  tension: number
+  confusion: number
 }
 
 /**
@@ -3931,6 +4065,14 @@ export interface CohostState {
   messagesSeen?: number
   /** Distinct question ids surfaced this session — lifetime, not open count. */
   questionsTotal?: number
+  /**
+   * Tick wire v2. Omitted by the backend while empty (never null); absent
+   * means none.
+   */
+  /** Latest tick's suggested comments, best first, at most 5. */
+  highlights?: CohostHighlight[]
+  alerts?: CohostAlert[]
+  moodScores?: CohostMoodScores
 }
 
 /**

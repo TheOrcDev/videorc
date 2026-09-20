@@ -89,6 +89,14 @@ import {
   type WsStatus
 } from '@/lib/capture'
 import {
+  autoApplyPreset,
+  isShippedDefaultOutput,
+  outputLabel,
+  outputVerdict,
+  performanceCheckCeiling,
+  shouldRunPerformanceCheck
+} from '@/lib/performance-check'
+import {
   decideCancelGoLiveConfirmation,
   decideContinueGoLiveWithReadyDestinations,
   decideGoLivePreflight,
@@ -165,6 +173,7 @@ import type {
   CohostSettingsPatch,
   CohostState,
   CohostWindowState,
+  CommentHighlightAnchor,
   CommentHighlightCommand,
   CommentHighlightState,
   CommentsClearCommand,
@@ -217,6 +226,8 @@ import type {
   PreviewSupervisorState,
   PreviewWindowMode,
   PreviewWindowState,
+  PerformanceCheckProgress,
+  PerformanceCheckState,
   PreviewLiveStatus,
   PlatformAccount,
   PlatformAccountValidation,
@@ -275,9 +286,15 @@ import type {
   YouTubeBroadcastTransitionResult,
   YouTubeChannel,
   YouTubeStreamStatusResult,
+  SetCommentHighlightParams,
   ViewerSample
 } from '@/lib/backend'
-import { createEmptyLiveChatSnapshot, offCohostState } from '@/lib/backend'
+import {
+  createEmptyLiveChatSnapshot,
+  DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
+  normalizeCommentHighlightAnchor,
+  offCohostState
+} from '@/lib/backend'
 import {
   appendCaptionLine,
   captionDwellMs,
@@ -451,6 +468,24 @@ const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
 const SCENE_TRANSITION_MS = 320
 
 const SESSION_LIST_PAGE_LIMIT = 50
+// Long enough for first paint, preview warm-up and the bootstrap burst.
+const PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS = 8_000
+
+function outputChosenByUser(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.outputChosenByUser) !== null
+  } catch {
+    return true
+  }
+}
+
+function markOutputChosenByUser(): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.outputChosenByUser, '1')
+  } catch {
+    // Storage unavailable: the check then only ever suggests.
+  }
+}
 export const SESSION_DETAIL_BUFFER_LIMIT = 120
 const SESSION_DETAIL_CACHE_LIMIT = 8
 
@@ -1061,6 +1096,10 @@ export type StudioContextValue = {
   ) => Promise<void>
   patchVideo: (patch: Partial<VideoSettings>) => void
   applyVideoPreset: (preset: VideoPreset, options?: { kind?: 'recording' | 'streaming' }) => void
+  /** What this computer measured; undefined until the backend answered. */
+  performanceCheck: PerformanceCheckState | undefined
+  performanceCheckProgress: PerformanceCheckProgress | null
+  runPerformanceCheck: () => Promise<void>
   applyRtmpPreset: (preset: RtmpPreset) => void
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
   resolveGoLiveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => Promise<void>
@@ -1644,9 +1683,10 @@ const idleCommentsWindowState = (): CommentsWindowState => ({
   visible: false,
   bounds: null,
   alwaysOnTop: false,
+  highlightAnchor: DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   protected: false,
   enabled: false,
-  message: 'Comments window is disabled by VIDEORC_COMMENTS_WINDOW=0.'
+  message: 'Chat window is disabled by VIDEORC_COMMENTS_WINDOW=0.'
 })
 
 const idleCaptionsWindowState = (): CaptionsWindowState => ({
@@ -2087,7 +2127,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         continue
       }
       chatSetupWarnedRef.current.warned.add(warning.id)
-      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} comments are not connected`, {
+      toast.warning(`${CHAT_PLATFORM_LABELS[warning.platform]} chat is not connected`, {
         description: warning.message,
         action: {
           label: 'Open Livestream',
@@ -2250,24 +2290,42 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await openCaptionsWindow()
   }, [captionsWindow.open, closeCaptionsWindow, openCaptionsWindow])
   const [commentsWindow, setCommentsWindow] = useState<CommentsWindowState>(idleCommentsWindowState)
+  // The streamer's corner pick lives in main (it must survive the Chat window
+  // being closed). A ref, not state, feeds the highlight RPC so a pick applies
+  // to the very next highlight without re-creating the relay listeners.
+  const commentHighlightAnchorRef = useRef<CommentHighlightAnchor>(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR)
+  const moveLiveCommentHighlightRef = useRef<((anchor: CommentHighlightAnchor) => void) | null>(
+    null
+  )
   useEffect(() => {
     let cancelled = false
+    const noteHighlightAnchor = (state: CommentsWindowState, move: boolean): void => {
+      const anchor = normalizeCommentHighlightAnchor(state.highlightAnchor)
+      if (anchor === commentHighlightAnchorRef.current) return
+      commentHighlightAnchorRef.current = anchor
+      // A card already on the stream follows the pick immediately.
+      if (move) moveLiveCommentHighlightRef.current?.(anchor)
+    }
     const reconcile = async (): Promise<void> => {
       const fresh = await window.videorc?.getCommentsWindowState?.()
       if (!fresh || cancelled) {
         return
       }
+      noteHighlightAnchor(fresh, false)
       setCommentsWindow((current) =>
         JSON.stringify(current) === JSON.stringify(fresh) ? current : fresh
       )
     }
     void reconcile()
-    const offState = window.videorc?.onCommentsWindowState?.((state) => setCommentsWindow(state))
+    const offState = window.videorc?.onCommentsWindowState?.((state) => {
+      noteHighlightAnchor(state, true)
+      setCommentsWindow(state)
+    })
     const offClear = window.videorc?.onCommentsClearRequest?.((command: CommentsClearCommand) => {
       void (async () => {
         if (!client) throw new Error('Backend socket is not connected.')
         if (liveChatSnapshotRef.current.sessionId !== command.sessionId) {
-          throw new Error('That Comments view is no longer the active livestream.')
+          throw new Error('That chat view is no longer the active livestream.')
         }
         return client.request<LiveChatSnapshot>('liveChat.clearLocal')
       })()
@@ -2282,7 +2340,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           await window.videorc?.pushCommentsClearResult?.({
             requestId: command.requestId,
             ok: false,
-            error: error instanceof Error ? error.message : 'Could not clear Comments.'
+            error: error instanceof Error ? error.message : 'Could not clear the chat view.'
           })
         })
     })
@@ -2317,19 +2375,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       message: LiveChatMessage,
       expectedSessionId: string | undefined,
       intent: number,
-      // 'show' (phone remote) always sets — re-showing the live card restarts
-      // its lifetime instead of toggling it off.
-      mode: 'toggle' | 'show' = 'toggle'
+      // `alwaysSet` re-sends the message that is already live instead of reading
+      // the repeat as "un-pin": a corner move re-places the card, and a phone
+      // remote 'show' restarts its lifetime.
+      options?: { alwaysSet?: boolean }
     ): Promise<CommentHighlightState | null> => {
       if (!client) throw new Error('Backend socket is not connected.')
       const sessionId = expectedSessionId ?? liveChatSnapshot.sessionId
       if (!sessionId || message.sessionId !== sessionId) {
-        throw new Error('That comment does not belong to the active livestream.')
+        throw new Error('That message does not belong to the active livestream.')
       }
       setCommentHighlightApplyingId(message.id)
       try {
         if (
-          mode === 'toggle' &&
+          !options?.alwaysSet &&
           commentHighlightState.phase === 'live' &&
           commentHighlightState.messageId === message.id
         ) {
@@ -2368,7 +2427,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           canvasWidth: streamVideo.width,
           platform: message.platform
         })
-        if (!pngBase64) throw new Error('Could not render this comment for the stream.')
+        if (!pngBase64) throw new Error('Could not render this message for the stream.')
         if (commentHighlightIntentRef.current !== intent) return null
         let state: CommentHighlightState
         try {
@@ -2376,8 +2435,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             sessionId,
             messageId: message.id,
             pngBase64,
-            position: 'top'
-          })
+            anchor: commentHighlightAnchorRef.current
+          } satisfies SetCommentHighlightParams)
         } catch (error) {
           const failurePolicy = await loadCommandFailurePolicy()
           if (failurePolicy.failureCode(error) !== 'request-outcome-unknown') throw error
@@ -2438,6 +2497,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [applyCommentHighlight, client, publishCommentHighlightState]
   )
 
+  // Corner changed while a card is live: re-send the same message so it moves.
+  // The backend TTL restarts, which suits an adjustment the streamer is watching.
+  moveLiveCommentHighlightRef.current = () => {
+    if (commentHighlightState.phase !== 'live') return
+    const message = liveChatSnapshotRef.current.messages.find(
+      (candidate) =>
+        candidate.id === commentHighlightState.messageId &&
+        candidate.sessionId === commentHighlightState.sessionId
+    )
+    if (!message) return
+    const intent = ++commentHighlightIntentRef.current
+    void applyCommentHighlight(message, commentHighlightState.sessionId, intent, {
+      alwaysSet: true
+    })
+      .then((state) => {
+        if (state && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(state)
+        }
+      })
+      .catch(async () => {
+        // The card stays where the backend says it is; never guess.
+        const authoritative = await client
+          ?.request<CommentHighlightState>('comments.highlight.status')
+          .catch(() => null)
+        if (authoritative && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(authoritative)
+        }
+      })
+  }
+
   useEffect(() => {
     const off = window.videorc?.onCommentHighlightRequest?.((command: CommentHighlightCommand) => {
       const intent = ++commentHighlightIntentRef.current
@@ -2449,11 +2538,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void (
         message
           ? applyCommentHighlight(message, command.sessionId, intent)
-          : Promise.reject(new Error('The selected live comment is no longer available.'))
+          : Promise.reject(new Error('The selected live message is no longer available.'))
       )
         .then(async (state) => {
           if (!state) {
-            throw new Error('A newer comment highlight replaced this request.')
+            throw new Error('A newer highlight replaced this request.')
           }
           if (commentHighlightIntentRef.current === intent) {
             publishCommentHighlightState(state)
@@ -8052,9 +8141,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     void window.videorc?.closeCommentsWindow?.().then(() => {
-      toast.warning('Comments closed for this recording', {
+      toast.warning('Chat closed for this recording', {
         description:
-          'Comments window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
+          'Chat window protection is unavailable and recording overlay capture is disabled by VIDEORC_COMMENTS_RECORDING_OVERLAY=0.'
       })
     })
   }, [
@@ -10049,7 +10138,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               await client.request<LiveChatSnapshot>('liveChat.x.start', params)
             } catch (chatError) {
               const chatMessage = chatError instanceof Error ? chatError.message : String(chatError)
-              toast.warning(`X comments need review for ${target.label}.`, {
+              toast.warning(`X chat needs review for ${target.label}.`, {
                 description: chatMessage
               })
             }
@@ -11850,6 +11939,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const patchVideo = useCallback((patch: Partial<VideoSettings>) => {
+    markOutputChosenByUser()
     setCaptureConfig((current) => ({
       ...current,
       // The Studio mode owns the canvas orientation — a patch that would
@@ -11876,6 +11966,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
+      markOutputChosenByUser()
       setCaptureConfig((current) => ({
         ...current,
         video: coerceVideoToOrientation(video, layoutPresetOrientation(current.layout.layoutPreset))
@@ -11883,6 +11974,107 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [entitlements]
   )
+
+  // Performance check. The backend owns the measurement; this only decides
+  // when to ask for one and whether its verdict may move the output.
+  const [performanceCheck, setPerformanceCheck] = useState<PerformanceCheckState>()
+  const [performanceCheckProgress, setPerformanceCheckProgress] =
+    useState<PerformanceCheckProgress | null>(null)
+  const performanceCheckAutoRunRef = useRef(false)
+
+  const commitPerformanceCheck = useCallback((next: PerformanceCheckState) => {
+    setPerformanceCheck(next)
+    if (!next.running) {
+      setPerformanceCheckProgress(null)
+    }
+    // An install that never picked an output follows the measurement; anyone
+    // who chose one only ever gets the suggestion in Recording → Output.
+    if (next.running || next.stale || !next.result || outputChosenByUser()) {
+      return
+    }
+    const preset = autoApplyPreset(next.result)
+    if (!preset) {
+      return
+    }
+    setCaptureConfig((current) => {
+      if (!isShippedDefaultOutput(current.video)) {
+        return current
+      }
+      const video = coerceVideoToOrientation(
+        videoPresets[preset],
+        layoutPresetOrientation(current.layout.layoutPreset)
+      )
+      return current.video.width === video.width &&
+        current.video.height === video.height &&
+        current.video.fps === video.fps
+        ? current
+        : { ...current, video }
+    })
+  }, [])
+
+  const runPerformanceCheck = useCallback(async () => {
+    if (!client) {
+      return
+    }
+    const display = {
+      width: window.screen.width * window.devicePixelRatio,
+      height: window.screen.height * window.devicePixelRatio
+    }
+    setPerformanceCheck(
+      await client.requestTyped(
+        'performance.check.run',
+        performanceCheckCeiling(captureConfigRef.current.video, display)
+      )
+    )
+  }, [client])
+
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') {
+      return
+    }
+    const unsubscribers = [
+      client.on('performance.check.progress', setPerformanceCheckProgress),
+      client.on('performance.check.completed', (next) => {
+        commitPerformanceCheck(next)
+        // News the interface does not already show: a chosen output this
+        // computer measurably cannot hold. Said once per finished check.
+        const chosen = captureConfigRef.current.video
+        if (
+          next.result &&
+          !isShippedDefaultOutput(chosen) &&
+          outputVerdict(chosen, next.result) === 'too-heavy'
+        ) {
+          toast.warning(`${outputLabel(chosen)} is too heavy for this computer`, {
+            description: `Recordings will stutter. ${outputLabel(next.result.recommended)} held steady — switch in Recording → Output.`
+          })
+        }
+      })
+    ]
+    void client
+      .requestTyped('performance.check.get')
+      .then(commitPerformanceCheck)
+      // An older backend has no such method; the Output panel just stays quiet.
+      .catch(() => undefined)
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
+  }, [client, commitPerformanceCheck, wsStatus])
+
+  // Measure once per machine, after the app has settled. Packaged builds only:
+  // dev sessions and smokes start captures immediately and use the button.
+  useEffect(() => {
+    if (
+      performanceCheckAutoRunRef.current ||
+      !runtimeInfo?.isPackaged ||
+      recording.state !== 'idle' ||
+      !shouldRunPerformanceCheck(performanceCheck)
+    ) {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      performanceCheckAutoRunRef.current = true
+      void runPerformanceCheck().catch(() => undefined)
+    }, PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [performanceCheck, recording.state, runPerformanceCheck, runtimeInfo?.isPackaged])
 
   const applyRtmpPreset = useCallback((preset: RtmpPreset) => {
     setCaptureConfig((current) => ({
@@ -12380,7 +12572,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const highlightIntent = ++commentHighlightIntentRef.current
         setCommentHighlightFailure(null)
         try {
-          const state = await applyCommentHighlight(message, undefined, highlightIntent, 'show')
+          const state = await applyCommentHighlight(message, undefined, highlightIntent, {
+            alwaysSet: true
+          })
           if (!state) return { ok: false, message: 'A newer comment replaced this one.' }
           publishCommentHighlightState(state)
           return state.phase === 'live'
@@ -12770,6 +12964,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyLayoutPatch,
       patchVideo,
       applyVideoPreset,
+      performanceCheck,
+      performanceCheckProgress,
+      runPerformanceCheck,
       applyRtmpPreset,
       patchStreamingTarget,
       resolveGoLiveBlocker,
@@ -12970,6 +13167,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyLayoutPatch,
       patchVideo,
       applyVideoPreset,
+      performanceCheck,
+      performanceCheckProgress,
+      runPerformanceCheck,
       applyRtmpPreset,
       patchStreamingTarget,
       resolveGoLiveBlocker,

@@ -4,6 +4,11 @@ import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import type { BackendConnection, VideorcApi } from './backend'
 import {
+  COMMENT_HIGHLIGHT_ANCHORS,
+  DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
+  normalizeCommentHighlightAnchor
+} from './backend'
+import {
   MAX_NOTES_TEXT_LENGTH,
   boundedPassthroughElectronEventChannels,
   boundedPassthroughElectronInvokeChannels,
@@ -26,8 +31,8 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(102)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(102)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(103)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(103)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()
@@ -173,6 +178,27 @@ describe('Electron IPC contract', () => {
     expect(() =>
       validateElectronInvokeArgs('resource:trash-session-deletion', ['x'.repeat(1025)])
     ).toThrow('at most 1024')
+  })
+
+  it('accepts only the four highlight corners over IPC and normalises everything else', () => {
+    for (const anchor of COMMENT_HIGHLIGHT_ANCHORS) {
+      expect(validateElectronInvokeArgs('comments-window:set-highlight-anchor', [anchor])).toEqual([
+        anchor
+      ])
+      expect(normalizeCommentHighlightAnchor(anchor)).toBe(anchor)
+    }
+    // The old top/bottom vocabulary and free-form values never reach main.
+    for (const forged of ['top', 'bottom', 'center', '', 7, null]) {
+      expect(() =>
+        validateElectronInvokeArgs('comments-window:set-highlight-anchor', [forged])
+      ).toThrow()
+    }
+    expect(() => validateElectronInvokeArgs('comments-window:set-highlight-anchor', [])).toThrow()
+    // A prefs file written before the setting existed has no value at all.
+    expect(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR).toBe('bottom-left')
+    for (const stale of [undefined, null, 'top', 'TOP-LEFT', 3, {}]) {
+      expect(normalizeCommentHighlightAnchor(stale)).toBe(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR)
+    }
   })
 
   it('semantically validates native host, scene, and compositor IPC', () => {

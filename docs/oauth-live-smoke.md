@@ -263,7 +263,7 @@ If native X Livestream API access is available:
 8. Verify X reports `is_stream_active` before broadcast creation.
 9. Verify broadcast create and publish succeed, and the share URL opens.
 10. Verify video and audio arrive on X.
-11. Verify read-only X chat connects when chat is enabled and messages exist.
+11. Verify X chat connects (signed-in Videorc account required) and a viewer comment appears.
 12. Stop in Videorc and verify X receives a strict END request and reports ended.
 
 If native access is not available:

@@ -8,6 +8,8 @@ const MAIN_ONLY = ['main'] as const
 const MAIN_AND_NOTES = ['main', 'notes'] as const
 const MAIN_AND_COMMENTS = ['main', 'comments'] as const
 const MAIN_AND_CAPTIONS = ['main', 'captions'] as const
+// Windows that draw the black-glass wallpaper underlay.
+const GLASS_WINDOWS = ['main', 'comments', 'captions'] as const
 
 /**
  * The complete allowlist for renderer -> main invocations. Registration fails
@@ -52,7 +54,7 @@ export const IPC_INVOKE_ROLES = {
   'obs:discover': MAIN_ONLY,
   'obs:read': MAIN_ONLY,
   'obs:read-stream-key': MAIN_ONLY,
-  'glass:wallpaper:get': MAIN_ONLY,
+  'glass:wallpaper:get': GLASS_WINDOWS,
   'preview-window:open': MAIN_ONLY,
   'preview-window:close': MAIN_ONLY,
   'preview-window:toggle': MAIN_ONLY,
@@ -86,6 +88,7 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:toggle': MAIN_ONLY,
   'comments-window:get-state': MAIN_AND_COMMENTS,
   'comments-window:set-always-on-top': MAIN_AND_COMMENTS,
+  'comments-window:set-highlight-anchor': MAIN_AND_COMMENTS,
   'comments-window:push-snapshot': MAIN_ONLY,
   'comments-window:push-delta': MAIN_ONLY,
   'comments-window:get-snapshot': MAIN_AND_COMMENTS,

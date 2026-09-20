@@ -46,7 +46,7 @@ export function CaptionsReader({
   const readerAppearance = captionReaderAppearance(styleId)
 
   return (
-    <div className="flex h-screen flex-col bg-background text-foreground">
+    <div className="flex h-screen flex-col text-foreground">
       {/* The whole drag bar moves the window (hiddenInset titlebar); the
           controls opt back out of the drag region. */}
       <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-3 [-webkit-app-region:drag]">

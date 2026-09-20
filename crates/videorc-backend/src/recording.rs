@@ -2,7 +2,7 @@ use std::fs::File;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::thread::{self, JoinHandle};
 use std::time::Instant;
@@ -703,6 +703,12 @@ const MP4_STAGING_LOCK_RETRY_INITIAL_DELAY: Duration = Duration::from_millis(100
 const MP4_STAGING_LOCK_RETRY_MAX_DELAY: Duration = Duration::from_secs(1);
 const STOP_TERM_DELAY: Duration = Duration::from_secs(3);
 const STOP_KILL_DELAY: Duration = Duration::from_secs(3);
+// Upper bound on the record-only quit grace while FFmpeg keeps advancing its
+// output clock (a below-realtime encoder draining admitted frames). Together
+// with STOP_KILL_DELAY it stays inside STOP_FINALIZE_TIMEOUT, so the first Stop
+// click still resolves to a terminal status.
+const STOP_TERM_DRAIN_MAX: Duration = Duration::from_secs(18);
+const STOP_TERM_DRAIN_POLL: Duration = Duration::from_secs(1);
 // Sessions with a live RTMP leg get a longer quit grace: the tee/fifo leg
 // must drain its queue and close the connection so the platform sees an
 // RTMP-level goodbye instead of a dead socket. Every session before plan 031
@@ -839,6 +845,123 @@ const FFMPEG_LIVE_AUDIO_REPLY_SETTLE_TIMEOUT: Duration = Duration::from_millis(1
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FfmpegFilterCommandReply {
     return_code: i32,
+}
+
+/// Latest FFmpeg output media clock, shared between the stderr monitor and the
+/// stop ladder. A Stop on a machine whose encoder runs below realtime leaves
+/// FFmpeg flushing seconds of already-admitted frames; the ladder reads this
+/// to tell "still draining" from "hung" before it escalates to TERM.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct FfmpegProgressBeacon {
+    media_micros: Arc<AtomicU64>,
+    /// Set when Videorc itself sent TERM/KILL. The process monitor reads it so
+    /// our own forced stop is never reported as an encoder or FFmpeg crash.
+    stop_escalated: Arc<AtomicBool>,
+}
+
+impl FfmpegProgressBeacon {
+    fn observe_media_seconds(&self, seconds: f64) {
+        if !seconds.is_finite() || seconds <= 0.0 {
+            return;
+        }
+        let micros = (seconds * 1_000_000.0) as u64;
+        self.media_micros.fetch_max(micros, Ordering::Relaxed);
+    }
+
+    fn media_micros(&self) -> u64 {
+        self.media_micros.load(Ordering::Relaxed)
+    }
+
+    fn mark_stop_escalated(&self) {
+        self.stop_escalated.store(true, Ordering::Release);
+    }
+
+    fn stop_escalated(&self) -> bool {
+        self.stop_escalated.load(Ordering::Acquire)
+    }
+}
+
+const FFMPEG_STDERR_TAIL_LINES: usize = 5;
+const FFMPEG_STDERR_TAIL_LINE_CHARS: usize = 240;
+
+/// Last few non-progress FFmpeg stderr lines plus the first fatal category.
+/// The in-memory log ring dies with the process, and testers restart before
+/// exporting a bundle; this tail is written to the PERSISTED session log at
+/// terminal time so the reason FFmpeg gave survives.
+#[derive(Debug, Default)]
+struct FfmpegStderrTail {
+    lines: std::collections::VecDeque<String>,
+    first_fatal_category: Option<&'static str>,
+}
+
+impl FfmpegStderrTail {
+    fn observe(&mut self, line: &str) {
+        if self.first_fatal_category.is_none() {
+            self.first_fatal_category = classify_ffmpeg_fatal_line(line);
+        }
+        // FFmpeg quotes output URLs in its errors and an RTMP URL carries the
+        // stream key. Bundle redaction only matches whole-string URLs, so the
+        // persisted tail never keeps a URL token at all.
+        let scrubbed = line
+            .split_whitespace()
+            .map(|token| {
+                if token.contains("://") {
+                    "<url>"
+                } else {
+                    token
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let bounded: String = scrubbed
+            .chars()
+            .take(FFMPEG_STDERR_TAIL_LINE_CHARS)
+            .collect();
+        if self.lines.len() == FFMPEG_STDERR_TAIL_LINES {
+            self.lines.pop_front();
+        }
+        self.lines.push_back(bounded);
+    }
+
+    /// `None` when FFmpeg said nothing worth keeping.
+    fn summary(&self) -> Option<String> {
+        if self.lines.is_empty() && self.first_fatal_category.is_none() {
+            return None;
+        }
+        let lines = self
+            .lines
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" | ");
+        Some(format!(
+            "category={} tail={lines}",
+            self.first_fatal_category.unwrap_or("none")
+        ))
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum StopTermGraceDecision {
+    /// FFmpeg advanced its output clock during the last poll: keep waiting.
+    ExtendForDrain,
+    /// No output progress, or the drain budget is spent: escalate to TERM.
+    Terminate,
+}
+
+/// Record-only stop grace: `STOP_TERM_DELAY` stays the budget for a healthy
+/// encoder, but an FFmpeg that is still visibly flushing its backlog gets up
+/// to `STOP_TERM_DRAIN_MAX` before TERM truncates the file. On Windows TERM is
+/// TerminateProcess, so an early TERM always costs the user the recording.
+fn stop_term_grace_decision(
+    waited: Duration,
+    progressed_since_last_poll: bool,
+) -> StopTermGraceDecision {
+    if progressed_since_last_poll && waited < STOP_TERM_DRAIN_MAX {
+        StopTermGraceDecision::ExtendForDrain
+    } else {
+        StopTermGraceDecision::Terminate
+    }
 }
 
 #[derive(Debug)]
@@ -1594,6 +1717,9 @@ pub struct ActiveRecording {
     /// keeps the lossless-audio capture MKV next to the published MP4
     /// instead of removing it after commit.
     keep_original_media: bool,
+    /// Benchmark session owned by the performance check: hidden row, no
+    /// background export/poster/quality job, discarded by its owner.
+    performance_check: bool,
     /// True only when this session has a viewer-facing stream leg rendered by
     /// the compositor bridge. Legacy FFmpeg and record-only paths must reject
     /// comment highlights before touching the overlay slot.
@@ -1610,6 +1736,9 @@ pub struct ActiveRecording {
     /// it in place (instant-record P4.1). Released after bridge teardown so
     /// the preview returns to its own dimensions and fps.
     compositor_capture_lease: Option<CompositorCaptureLeaseGuard>,
+    /// FFmpeg output clock published by the stderr monitor; the stop ladder
+    /// extends its quit grace while this keeps advancing.
+    ffmpeg_progress: FfmpegProgressBeacon,
 }
 
 /// Owns a compositor capture lease for exactly one session. Every rejected
@@ -1702,11 +1831,13 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         })),
         captioned_copy_requested: false,
         keep_original_media: false,
+        performance_check: false,
         comment_highlight_available: false,
         _capture_permit: None,
         stop_intent_sender: None,
         stop_requested: false,
         compositor_capture_lease: None,
+        ffmpeg_progress: FfmpegProgressBeacon::default(),
     }
 }
 
@@ -2506,6 +2637,10 @@ async fn commit_recording_startup_scene_at_time(
 }
 
 pub async fn start_session(state: AppState, params: StartSessionParams) -> Result<RecordingStatus> {
+    if !params.purpose.is_performance_check() {
+        // The user's Record always wins over a background benchmark.
+        crate::performance_check::yield_to_capture(&state).await;
+    }
     // Latency timeline (instant-record plan): marks are first-wins and the
     // publish runs after the user-visible edge, so telemetry cannot delay or
     // fail the start.
@@ -2591,6 +2726,22 @@ async fn start_session_with_timeline(
     }
 
     let ffmpeg_path = resolve_ffmpeg_path(params.output.ffmpeg_path.clone());
+    // Must run before anything below sizes capture, compositor, bridge or
+    // encoder from `params.output.video`.
+    #[cfg(target_os = "windows")]
+    let recordable_video_notice = {
+        let requested_output_video = params.output.video.clone();
+        resolve_windows_recordable_video(&ffmpeg_path, &params)
+            .await
+            .and_then(|selected| {
+                let message =
+                    windows_recordable_video_health_message(&requested_output_video, &selected)?;
+                params.output.video = selected.video;
+                Some(message)
+            })
+    };
+    #[cfg(not(target_os = "windows"))]
+    let recordable_video_notice: Option<String> = None;
     let output_dir = resolve_output_directory(params.output.output_directory.as_deref())?;
 
     if params.output.record_enabled {
@@ -2665,9 +2816,15 @@ async fn start_session_with_timeline(
         layout: params.layout.clone(),
         output: params.output.clone(),
     })?;
-    state
-        .database
-        .save_setting("last_capture_session", &params)?;
+    if params.purpose.is_performance_check() {
+        // Benchmark rows never reach the Library and must not replace the
+        // user's remembered capture; the performance check deletes them.
+        state.database.mark_session_performance_check(&session_id)?;
+    } else {
+        state
+            .database
+            .save_setting("last_capture_session", &params)?;
+    }
     if !stream_targets.is_empty() {
         let redacted = stream_targets
             .iter()
@@ -2788,6 +2945,15 @@ async fn start_session_with_timeline(
         emit_health_event(&state, Some(&session_id), HealthLevel::Warn, code, message)?;
     }
     emit_audio_track_health_events(&state, &session_id, &params, &audio_tracks)?;
+    if let Some(message) = recordable_video_notice.as_deref() {
+        emit_health_event(
+            &state,
+            Some(&session_id),
+            HealthLevel::Warn,
+            "recording-output-stepped-down",
+            message,
+        )?;
+    }
     let active_screen = state.database.active_stream_screen()?;
     let use_encoder_bridge =
         should_use_compositor_encoder_bridge(&state, &params, active_screen.as_ref()).await?;
@@ -3980,6 +4146,7 @@ async fn start_session_with_timeline(
         (None, None)
     };
     let mut ffmpeg_stderr_events = spawn_ffmpeg_stderr_reader(stderr, ffmpeg_output_startup_sender);
+    let ffmpeg_progress = FfmpegProgressBeacon::default();
     #[cfg(target_os = "windows")]
     let windows_d3d11_primary_input = windows_d3d11_media
         .as_ref()
@@ -4318,11 +4485,13 @@ async fn start_session_with_timeline(
         stream_targets_snapshot: stream_targets_snapshot.clone(),
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
+        performance_check: params.purpose.is_performance_check(),
         comment_highlight_available: comment_highlight_available(&params, use_encoder_bridge),
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
         stop_requested: false,
         compositor_capture_lease: compositor_capture_lease.take(),
+        ffmpeg_progress: ffmpeg_progress.clone(),
     };
     // The fully-constructed pipeline is now committed to becoming an active
     // capture. Advance the caption epoch only here, after every fallible startup
@@ -4470,9 +4639,11 @@ async fn start_session_with_timeline(
         let target_fps = params.output.video.fps;
         let ffmpeg_audio_reply_sender = ffmpeg_audio_reply_sender;
         let ffmpeg_live_audio_session = ffmpeg_live_audio_stderr_session;
+        let progress_beacon = ffmpeg_progress.clone();
         Some(tokio::spawn(async move {
             let mut capture_media_clock_logged = false;
             let mut first_fatal_ffmpeg_line_logged = false;
+            let mut stderr_tail = FfmpegStderrTail::default();
             // This monitor owns exactly one FFmpeg process generation. A replacement
             // process creates a fresh monitor/accumulator, while the explicit generation
             // remains testable so future in-place restarts cannot inherit counters.
@@ -4500,6 +4671,10 @@ async fn start_session_with_timeline(
                 let trimmed = line.trim();
                 if trimmed.is_empty() {
                     continue;
+                }
+
+                if let Some(seconds) = parse_ffmpeg_progress_media_seconds(trimmed) {
+                    progress_beacon.observe_media_seconds(seconds);
                 }
 
                 if !capture_media_clock_logged
@@ -4566,6 +4741,7 @@ async fn start_session_with_timeline(
                 if is_ffmpeg_progress_noise(trimmed) {
                     tracing::debug!("{trimmed}");
                 } else {
+                    stderr_tail.observe(trimmed);
                     log_state.emit_log("warn", trimmed);
                 }
                 if let Some(delta) = parse_ffmpeg_stream_health(trimmed) {
@@ -4647,6 +4823,22 @@ async fn start_session_with_timeline(
                 &mut pending_stream_health,
             )
             .await;
+            // URL tokens are already scrubbed by the tail; paths and device
+            // ids are redacted at support-bundle export like every session log.
+            if let Some(summary) = stderr_tail.summary() {
+                let _ = emit_session_log(
+                    &log_state,
+                    &log_session_id,
+                    if stderr_tail.first_fatal_category.is_some() {
+                        HealthLevel::Error
+                    } else {
+                        HealthLevel::Info
+                    },
+                    "ffmpeg-stderr-tail",
+                    &summary,
+                    None,
+                );
+            }
             if stderr_reached_eof
                 && let Some(session) = ffmpeg_live_audio_session.as_ref()
                 && session.mark_terminal()
@@ -5068,6 +5260,7 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
 
     if force_stop_now {
         state.emit_log("warn", "Stop requested again; sending SIGTERM to FFmpeg.");
+        mark_ffmpeg_stop_escalated(&state, pid).await;
         let _ = send_process_signal(pid, "TERM").await;
         tokio::spawn(stop_kill_fallback(
             state.clone(),
@@ -5644,6 +5837,7 @@ pub async fn create_preview_snapshot(
         audio: Default::default(),
         streaming: None,
         simulcast: None,
+        purpose: Default::default(),
     };
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &session_params).await;
     capture.microphone = None;
@@ -6235,6 +6429,7 @@ fn live_preview_session_params(
         audio: Default::default(),
         streaming: None,
         simulcast: None,
+        purpose: Default::default(),
     }
 }
 
@@ -6753,12 +6948,57 @@ async fn stop_fallback(
         .await
         .as_ref()
         .is_some_and(|active| active.pid == pid && active.stream_url.is_some());
-    sleep(if streaming {
+    let progress = state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .filter(|active| active.pid == pid)
+        .map(|active| active.ffmpeg_progress.clone());
+    let mut last_media_micros = progress.as_ref().map(FfmpegProgressBeacon::media_micros);
+    let base_delay = if streaming {
         STOP_TERM_DELAY_STREAMING
     } else {
         STOP_TERM_DELAY
-    })
-    .await;
+    };
+    sleep(base_delay).await;
+
+    // A live RTMP leg keeps its own longer, fixed grace. A record-only FFmpeg
+    // that is still advancing its output clock is draining admitted frames
+    // (below-realtime software encode), not hung: TERM here truncates the
+    // file and used to surface as a fake encoder failure.
+    if !streaming && let Some(progress) = progress.as_ref() {
+        let mut waited = base_delay;
+        let mut drain_logged = false;
+        loop {
+            if !recording_matches(&state, pid, &session_id, &output_path).await {
+                return;
+            }
+            let media_micros = progress.media_micros();
+            let progressed = last_media_micros.is_some_and(|last| media_micros > last);
+            last_media_micros = Some(media_micros);
+            if stop_term_grace_decision(waited, progressed) == StopTermGraceDecision::Terminate {
+                break;
+            }
+            if !drain_logged {
+                drain_logged = true;
+                let _ = emit_session_log(
+                    &state,
+                    &session_id,
+                    HealthLevel::Warn,
+                    "recording-stop-draining-backlog",
+                    &format!(
+                        "FFmpeg is still writing already-captured frames {}ms after Stop; waiting up to {}ms for it to finish instead of cutting the file short.",
+                        waited.as_millis(),
+                        STOP_TERM_DRAIN_MAX.as_millis()
+                    ),
+                    None,
+                );
+            }
+            sleep(STOP_TERM_DRAIN_POLL).await;
+            waited += STOP_TERM_DRAIN_POLL;
+        }
+    }
 
     if !recording_matches(&state, pid, &session_id, &output_path).await {
         return;
@@ -6768,6 +7008,15 @@ async fn stop_fallback(
         "warn",
         "FFmpeg did not stop promptly after the graceful shutdown request; sending SIGTERM.",
     );
+    let _ = emit_session_log(
+        &state,
+        &session_id,
+        HealthLevel::Warn,
+        "recording-stop-escalated",
+        "signal=TERM reason=ffmpeg-did-not-exit-after-quit",
+        None,
+    );
+    mark_ffmpeg_stop_escalated(&state, pid).await;
     let _ = send_process_signal(pid, "TERM").await;
     stop_kill_fallback(state, pid, session_id, output_path, streaming).await;
 }
@@ -6794,7 +7043,16 @@ async fn stop_kill_fallback(
         "warn",
         "FFmpeg did not stop after SIGTERM; sending SIGKILL.",
     );
+    mark_ffmpeg_stop_escalated(&state, pid).await;
     let _ = send_process_signal(pid, "KILL").await;
+}
+
+async fn mark_ffmpeg_stop_escalated(state: &AppState, pid: u32) {
+    if let Some(active) = state.recording.lock().await.as_ref()
+        && active.pid == pid
+    {
+        active.ffmpeg_progress.mark_stop_escalated();
+    }
 }
 
 async fn recording_matches(
@@ -7321,6 +7579,7 @@ async fn monitor_session(
             });
             MonitoredRecording {
                 stop_intent_preceded_exit,
+                stop_escalated: active.ffmpeg_progress.stop_escalated(),
                 recording_bridge_terminal_failure: active.recording_bridge_terminal_failure(),
                 stream_bridge_terminal_failure: active.stream_bridge_terminal_failure(),
                 ffmpeg_path: active.ffmpeg_path.clone(),
@@ -7328,6 +7587,7 @@ async fn monitor_session(
                 pipeline: active.pipeline.clone(),
                 captioned_copy_requested: active.captioned_copy_requested,
                 keep_original_media: active.keep_original_media,
+                performance_check: active.performance_check,
                 native_audio_stats,
             }
         });
@@ -7661,6 +7921,7 @@ async fn monitor_session(
     // rest of finalization to a background job that is spawned only after the
     // terminal status is published.
     let mut pending_finalization_job: Option<PendingRecordingFinalizationJob> = None;
+    let performance_check_session = monitored_recording.performance_check;
     let terminal_status = match status {
         Ok(exit_status)
             if should_finalize_recording_session(
@@ -8071,23 +8332,12 @@ async fn monitor_session(
             // Only the RECORDING bridge condemns the session here — a stream
             // failure was already reported above and, with a clean exit,
             // finalizes in the arm before this one.
-            let (failed_stage, health_code, mut message) = if let Some(error) =
-                recording_bridge_terminal_failure.as_deref()
-            {
-                (
-                    RecordingPipelineStage::VideoEncoder,
-                    "encoder-bridge-failed",
-                    format!(
-                        "Encoder bridge stopped before capture finalization: {error} (FFmpeg exit: {exit_status})"
-                    ),
-                )
-            } else {
-                (
-                    RecordingPipelineStage::Muxer,
-                    "ffmpeg-exit",
-                    format!("FFmpeg exited with {exit_status}"),
-                )
-            };
+            let (failed_stage, health_code, mut message) = classify_failed_ffmpeg_exit(
+                monitored_recording.stop_intent_preceded_exit,
+                monitored_recording.stop_escalated,
+                recording_bridge_terminal_failure.as_deref(),
+                &exit_status.to_string(),
+            );
             monitored_recording
                 .pipeline
                 .mark_failed(failed_stage, &message);
@@ -8189,7 +8439,14 @@ async fn monitor_session(
     state.emit_event("recording.status", terminal_status);
     publish_stop_timeline(&state, &stop_timeline_session_id, terminal_outcome).await;
     if let Some(job) = pending_finalization_job.take() {
-        tokio::spawn(run_recording_finalization_job(state.clone(), job));
+        if performance_check_session {
+            // No MP4 export, poster, captions or quality job for a benchmark:
+            // release the registry entry and export permit immediately.
+            state.recording_finalization.finish(&job.request.session_id);
+            drop(job);
+        } else {
+            tokio::spawn(run_recording_finalization_job(state.clone(), job));
+        }
     }
     drop(finalizing_permit);
 
@@ -9557,6 +9814,7 @@ struct NativeAudioStats {
 #[derive(Debug)]
 struct MonitoredRecording {
     stop_intent_preceded_exit: bool,
+    stop_escalated: bool,
     recording_bridge_terminal_failure: Option<String>,
     stream_bridge_terminal_failure: Option<String>,
     ffmpeg_path: String,
@@ -9564,6 +9822,7 @@ struct MonitoredRecording {
     pipeline: RecordingPipeline,
     captioned_copy_requested: bool,
     keep_original_media: bool,
+    performance_check: bool,
     native_audio_stats: Option<NativeAudioStats>,
 }
 
@@ -9591,6 +9850,43 @@ fn should_finalize_recording_session(
     // multi-minute recordings because a stream latency failure was
     // indistinguishable from a recording failure here.
     stop_intent_preceded_exit || stream_bridge_terminal_failure.is_some()
+}
+
+/// Names the owner of a non-finalizable FFmpeg exit. Order matters: once the
+/// user asked to stop AND Videorc escalated to TERM/KILL, the non-zero exit and
+/// any bridge pipe error are consequences of our own forced stop (on Windows
+/// TERM is TerminateProcess → "exit code: 1", and the raw FIFO write then fails
+/// with os error 232). Reporting that as an encoder failure sent a tester and
+/// support hunting for an FFmpeg crash that never happened.
+fn classify_failed_ffmpeg_exit(
+    stop_intent_preceded_exit: bool,
+    stop_escalated: bool,
+    recording_bridge_terminal_failure: Option<&str>,
+    exit_status: &str,
+) -> (RecordingPipelineStage, &'static str, String) {
+    if stop_intent_preceded_exit && stop_escalated {
+        return (
+            RecordingPipelineStage::Muxer,
+            "recording-stop-forced",
+            format!(
+                "Videorc had to force FFmpeg to stop because it was still writing captured frames long after Stop — this PC could not encode at the selected output size in real time. The file was kept as recovery media and may be cut short. Lower the output resolution in Output settings. (FFmpeg exit: {exit_status})"
+            ),
+        );
+    }
+    if let Some(error) = recording_bridge_terminal_failure {
+        return (
+            RecordingPipelineStage::VideoEncoder,
+            "encoder-bridge-failed",
+            format!(
+                "Encoder bridge stopped before capture finalization: {error} (FFmpeg exit: {exit_status})"
+            ),
+        );
+    }
+    (
+        RecordingPipelineStage::Muxer,
+        "ffmpeg-exit",
+        format!("FFmpeg exited with {exit_status}"),
+    )
 }
 
 fn should_begin_captioned_copy_render(requested: bool, caption_chunk_count: usize) -> bool {
@@ -11949,7 +12245,7 @@ fn windows_graphics_adapter_driver_identity_material(
 /// deliberately non-cacheable: reusing a verdict under an unknown driver is
 /// less safe than probing again.
 #[cfg(target_os = "windows")]
-fn graphics_adapter_driver_identity() -> String {
+pub(crate) fn graphics_adapter_driver_identity() -> String {
     query_windows_graphics_adapter_driver_identity().unwrap_or_else(|reason| {
         format!(
             "windows-adapter-driver-unavailable:{reason}:{}",
@@ -11959,7 +12255,7 @@ fn graphics_adapter_driver_identity() -> String {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn graphics_adapter_driver_identity() -> String {
+pub(crate) fn graphics_adapter_driver_identity() -> String {
     format!(
         "platform={};windows-adapter-driver=not-applicable",
         std::env::consts::OS
@@ -12385,6 +12681,216 @@ fn select_windows_encoded_bridge_decision(
             bitrate_overrides: WindowsEncodedBridgeBitrateOverrides::default(),
         },
     }
+}
+
+/// Why a Windows record-only session is encoding at a different canvas than
+/// the one the user selected.
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowsRecordableVideoReason {
+    /// The GPU encoder rejected the requested size but accepted a smaller one.
+    HardwareStepDown,
+    /// No hardware encoder accepted any size; software OpenH264 is capped to
+    /// the envelope it can sustain in real time.
+    SoftwareCap,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct WindowsRecordableVideo {
+    video: VideoSettings,
+    reason: Option<WindowsRecordableVideoReason>,
+}
+
+// Long-edge/short-edge rungs below the requested canvas, with the bitrate the
+// matching shipping preset uses. Walked top-down; only rungs strictly smaller
+// than the request are tried.
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_RECORDABLE_SHORT_EDGE_RUNGS: [(u32, u32); 3] =
+    [(1440, 8_000), (1080, 6_000), (720, 4_000)];
+// OpenH264 was only ever proven at 1080p30 (#149, ~2.5x realtime on a mid
+// laptop). A 4-thread Gemini Lake ran 1440p30 at 0.28x and lost the recording
+// (support bundle 20260920-160103Z), so small CPUs get the 720p rung.
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_SOFTWARE_SHORT_EDGE_CAP: u32 = 1080;
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_SOFTWARE_SMALL_CPU_SHORT_EDGE_CAP: u32 = 720;
+#[cfg(any(test, target_os = "windows"))]
+const WINDOWS_SOFTWARE_SMALL_CPU_MAX_LOGICAL_CORES: usize = 4;
+
+/// Same aspect and orientation, short edge scaled to `short_edge`, even dims.
+#[cfg(any(test, target_os = "windows"))]
+fn scale_video_to_short_edge(
+    video: &VideoSettings,
+    short_edge: u32,
+    bitrate_kbps: u32,
+) -> VideoSettings {
+    let current_short = video.width.min(video.height).max(1);
+    let scale = |value: u32| -> u32 {
+        let scaled = (u64::from(value) * u64::from(short_edge) + u64::from(current_short) / 2)
+            / u64::from(current_short);
+        let scaled = u32::try_from(scaled).unwrap_or(u32::MAX).max(2);
+        scaled - (scaled % 2)
+    };
+    VideoSettings {
+        // Named presets have fixed values (`validate_named_video_profile`), and
+        // the effective profile is persisted as `last_capture_session`: keeping
+        // e.g. `record-4k30` on a 2560x1440 canvas would store a profile that a
+        // later replay rejects.
+        preset: VideoPreset::Custom,
+        width: scale(video.width),
+        height: scale(video.height),
+        fps: video.fps,
+        bitrate_kbps: video.bitrate_kbps.min(bitrate_kbps).max(1),
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_recordable_video_rungs(video: &VideoSettings) -> Vec<VideoSettings> {
+    let short_edge = video.width.min(video.height);
+    WINDOWS_RECORDABLE_SHORT_EDGE_RUNGS
+        .iter()
+        .filter(|(rung, _)| *rung < short_edge)
+        .map(|(rung, bitrate_kbps)| scale_video_to_short_edge(video, *rung, *bitrate_kbps))
+        .collect()
+}
+
+/// Picks the canvas a Windows record-only session can actually sustain.
+/// `hardware_accepts` is the real Media Foundation topology probe in
+/// production and a fake in tests. The requested size is tried first, so a
+/// healthy GPU pays exactly one probe and nothing changes.
+#[cfg(any(test, target_os = "windows"))]
+fn select_windows_recordable_video(
+    requested: &VideoSettings,
+    logical_cores: usize,
+    mut hardware_accepts: impl FnMut(&VideoSettings) -> bool,
+) -> WindowsRecordableVideo {
+    if hardware_accepts(requested) {
+        return WindowsRecordableVideo {
+            video: requested.clone(),
+            reason: None,
+        };
+    }
+    for rung in windows_recordable_video_rungs(requested) {
+        if hardware_accepts(&rung) {
+            return WindowsRecordableVideo {
+                video: rung,
+                reason: Some(WindowsRecordableVideoReason::HardwareStepDown),
+            };
+        }
+    }
+    let cap = if logical_cores <= WINDOWS_SOFTWARE_SMALL_CPU_MAX_LOGICAL_CORES {
+        WINDOWS_SOFTWARE_SMALL_CPU_SHORT_EDGE_CAP
+    } else {
+        WINDOWS_SOFTWARE_SHORT_EDGE_CAP
+    };
+    if requested.width.min(requested.height) <= cap {
+        return WindowsRecordableVideo {
+            video: requested.clone(),
+            reason: None,
+        };
+    }
+    let bitrate_kbps = WINDOWS_RECORDABLE_SHORT_EDGE_RUNGS
+        .iter()
+        .find(|(rung, _)| *rung == cap)
+        .map_or(requested.bitrate_kbps, |(_, bitrate_kbps)| *bitrate_kbps);
+    WindowsRecordableVideo {
+        video: scale_video_to_short_edge(requested, cap, bitrate_kbps),
+        reason: Some(WindowsRecordableVideoReason::SoftwareCap),
+    }
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn windows_recordable_video_health_message(
+    requested: &VideoSettings,
+    selected: &WindowsRecordableVideo,
+) -> Option<String> {
+    let reason = selected.reason?;
+    let from = format!("{}x{}", requested.width, requested.height);
+    let to = format!("{}x{}", selected.video.width, selected.video.height);
+    Some(match reason {
+        WindowsRecordableVideoReason::HardwareStepDown => format!(
+            "This PC's GPU video encoder can't record at {from}, so this recording is being made at {to} instead. Pick {to} in Output settings to skip this check next time."
+        ),
+        WindowsRecordableVideoReason::SoftwareCap => format!(
+            "This PC has no usable GPU video encoder, and its processor can't encode {from} in real time, so this recording is being made at {to} instead. Pick {to} or lower in Output settings."
+        ),
+    })
+}
+
+#[cfg(target_os = "windows")]
+type WindowsRecordableVideoCacheKey = (String, String, u32, u32, u32, u32);
+
+#[cfg(target_os = "windows")]
+static WINDOWS_RECORDABLE_VIDEO_CACHE: std::sync::OnceLock<
+    StdMutex<std::collections::HashMap<WindowsRecordableVideoCacheKey, WindowsRecordableVideo>>,
+> = std::sync::OnceLock::new();
+
+/// Record-only Windows sessions: resolve the canvas BEFORE anything is sized
+/// from `params.output.video`. One rejected hardware probe used to demote
+/// capture, compositor and encoder to the CPU together at the full requested
+/// size; on small machines that produced an unrecordable session the user could
+/// still start. Streaming sessions keep their provider-planned profile.
+#[cfg(target_os = "windows")]
+async fn resolve_windows_recordable_video(
+    ffmpeg_path: &str,
+    params: &StartSessionParams,
+) -> Option<WindowsRecordableVideo> {
+    if !params.output.record_enabled || params.output.stream_enabled {
+        return None;
+    }
+    if !matches!(
+        recording_encoder_bridge_video_output(true, false),
+        EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
+    ) {
+        return None;
+    }
+    let requested = params.output.video.clone();
+    let identity = graphics_adapter_driver_identity();
+    let key = (
+        identity.clone(),
+        ffmpeg_path.to_string(),
+        requested.width,
+        requested.height,
+        requested.fps,
+        requested.bitrate_kbps,
+    );
+    let cache = WINDOWS_RECORDABLE_VIDEO_CACHE
+        .get_or_init(|| StdMutex::new(std::collections::HashMap::new()));
+    if let Some(cached) = cache.lock().ok().and_then(|cache| cache.get(&key).cloned()) {
+        return Some(cached);
+    }
+
+    // The selector is synchronous; run the async topology probe per candidate
+    // up front in ladder order and stop at the first acceptance.
+    let mut verdicts: Vec<(VideoSettings, bool)> = Vec::new();
+    let mut candidates = vec![requested.clone()];
+    candidates.extend(windows_recordable_video_rungs(&requested));
+    for candidate in candidates {
+        let mut candidate_params = params.clone();
+        candidate_params.output.video = candidate.clone();
+        let accepted = match encoder_output_topology_plan_from_session(&candidate_params) {
+            Ok(plan) => matches!(
+                probe_windows_media_foundation_topology(ffmpeg_path, &plan, &identity).await,
+                MediaFoundationTopologyProbe::Passed { .. }
+            ),
+            Err(_) => false,
+        };
+        verdicts.push((candidate, accepted));
+        if accepted {
+            break;
+        }
+    }
+    let logical_cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    let selected = select_windows_recordable_video(&requested, logical_cores, |candidate| {
+        verdicts
+            .iter()
+            .any(|(probed, accepted)| *accepted && probed == candidate)
+    });
+    if let Ok(mut cache) = cache.lock() {
+        cache.insert(key, selected.clone());
+    }
+    Some(selected)
 }
 
 async fn resolve_windows_encoded_bridge_decision(
@@ -15618,6 +16124,12 @@ fn classify_ffmpeg_fatal_line(line: &str) -> Option<&'static str> {
         || line.contains("error while filtering")
     {
         Some("filter-graph-failed")
+    } else if line.contains("error while opening encoder")
+        || line.contains("could not open encoder")
+    {
+        Some("encoder-open-failed")
+    } else if line.contains("no space left on device") {
+        Some("disk-full")
     } else if line.contains("could not write header") {
         Some("output-open-failed")
     } else if line.contains("conversion failed") {
@@ -17634,6 +18146,13 @@ fn enabled_streaming_targets(params: &StartSessionParams) -> Vec<&StreamTargetSe
 
 fn video_preset_defaults(preset: VideoPreset) -> VideoSettings {
     match preset {
+        VideoPreset::Tutorial720p30 => VideoSettings {
+            preset,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+        },
         VideoPreset::Tutorial1080p30 => VideoSettings {
             preset,
             width: 1920,
@@ -21346,6 +21865,7 @@ mod tests {
             },
             streaming: None,
             simulcast: None,
+            purpose: Default::default(),
         }
     }
 
@@ -21992,11 +22512,13 @@ mod tests {
             stream_targets_snapshot: Arc::new(StdMutex::new(snapshot)),
             captioned_copy_requested: false,
             keep_original_media: false,
+            performance_check: false,
             comment_highlight_available: false,
             _capture_permit: None,
             stop_intent_sender: None,
             stop_requested: false,
             compositor_capture_lease: None,
+            ffmpeg_progress: FfmpegProgressBeacon::default(),
         }
     }
 
@@ -26865,6 +27387,16 @@ mod tests {
             Some("conversion-failed")
         );
         assert_eq!(
+            classify_ffmpeg_fatal_line(
+                "[vost#0:0/libopenh264 @ 000001] Error while opening encoder - maybe incorrect parameters such as bit_rate, rate, width or height."
+            ),
+            Some("encoder-open-failed")
+        );
+        assert_eq!(
+            classify_ffmpeg_fatal_line("av_interleaved_write_frame(): No space left on device"),
+            Some("disk-full")
+        );
+        assert_eq!(
             classify_ffmpeg_fatal_line("frame= 60 fps=30 speed=1x"),
             None
         );
@@ -27398,11 +27930,13 @@ mod tests {
             })),
             captioned_copy_requested: false,
             keep_original_media: false,
+            performance_check: false,
             comment_highlight_available: false,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),
             stop_requested: false,
             compositor_capture_lease: None,
+            ffmpeg_progress: FfmpegProgressBeacon::default(),
         });
 
         let update_state = state.clone();
@@ -31455,6 +31989,236 @@ mod tests {
         assert_eq!(
             super::post_recording_repair_timeout(None),
             Duration::from_secs(1800)
+        );
+    }
+}
+
+#[cfg(test)]
+mod low_end_windows_recording_tests {
+    //! Regression cover for support bundle 20260920-160103Z: Intel UHD 600,
+    //! 2560x1440 requested, Media Foundation rejected, OpenH264 at 0.28x, and
+    //! a Stop that TERMed FFmpeg after 3 s and called it an encoder failure.
+    use super::*;
+
+    fn video(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> VideoSettings {
+        video_with_preset(
+            VideoPreset::Tutorial1440p30,
+            width,
+            height,
+            fps,
+            bitrate_kbps,
+        )
+    }
+
+    fn custom(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> VideoSettings {
+        video_with_preset(VideoPreset::Custom, width, height, fps, bitrate_kbps)
+    }
+
+    fn video_with_preset(
+        preset: VideoPreset,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+    ) -> VideoSettings {
+        VideoSettings {
+            preset,
+            width,
+            height,
+            fps,
+            bitrate_kbps,
+        }
+    }
+
+    #[test]
+    fn forced_stop_is_never_reported_as_an_encoder_failure() {
+        let (stage, code, message) = classify_failed_ffmpeg_exit(
+            true,
+            true,
+            Some(
+                "recording raw-video encoder output stopped: The pipe is being closed. (os error 232)",
+            ),
+            "exit code: 1",
+        );
+        assert_eq!(stage, RecordingPipelineStage::Muxer);
+        assert_eq!(code, "recording-stop-forced");
+        assert!(!message.contains("Encoder bridge stopped"));
+        assert!(!message.contains("os error 232"));
+        assert!(message.contains("exit code: 1"));
+        assert!(message.contains("Output settings"));
+    }
+
+    #[test]
+    fn unsolicited_failures_keep_their_original_owner() {
+        // Bridge died on its own: no stop intent, no escalation.
+        let (stage, code, message) =
+            classify_failed_ffmpeg_exit(false, false, Some("FIFO timed out"), "exit code: 1");
+        assert_eq!(stage, RecordingPipelineStage::VideoEncoder);
+        assert_eq!(code, "encoder-bridge-failed");
+        assert!(message.contains("FIFO timed out"));
+        // Bridge failed first and the user then pressed Stop, but FFmpeg left
+        // by itself: still the bridge's failure, not a forced stop.
+        let (_, code, _) =
+            classify_failed_ffmpeg_exit(true, false, Some("FIFO timed out"), "exit code: 1");
+        assert_eq!(code, "encoder-bridge-failed");
+        // An escalation without a user stop cannot happen through the ladder;
+        // never let the flag alone relabel a crash.
+        let (_, code, _) = classify_failed_ffmpeg_exit(false, true, None, "exit code: 1");
+        assert_eq!(code, "ffmpeg-exit");
+        let (stage, code, _) = classify_failed_ffmpeg_exit(false, false, None, "exit code: 1");
+        assert_eq!(
+            (stage, code),
+            (RecordingPipelineStage::Muxer, "ffmpeg-exit")
+        );
+    }
+
+    #[test]
+    fn stop_grace_extends_only_while_ffmpeg_is_draining_and_stays_bounded() {
+        assert_eq!(
+            stop_term_grace_decision(STOP_TERM_DELAY, false),
+            StopTermGraceDecision::Terminate,
+            "a hung FFmpeg keeps the original 3 s budget"
+        );
+        assert_eq!(
+            stop_term_grace_decision(STOP_TERM_DELAY, true),
+            StopTermGraceDecision::ExtendForDrain
+        );
+        assert_eq!(
+            stop_term_grace_decision(STOP_TERM_DRAIN_MAX, true),
+            StopTermGraceDecision::Terminate,
+            "progress cannot hold the ladder open forever"
+        );
+        // TERM + KILL must still land inside the stop RPC's finalize window so
+        // the first Stop click reaches a terminal status.
+        assert!(STOP_TERM_DRAIN_MAX + STOP_KILL_DELAY < STOP_FINALIZE_TIMEOUT);
+    }
+
+    #[test]
+    fn progress_beacon_is_monotonic_and_ignores_garbage() {
+        let beacon = FfmpegProgressBeacon::default();
+        assert_eq!(beacon.media_micros(), 0);
+        beacon.observe_media_seconds(1.5);
+        beacon.observe_media_seconds(0.5);
+        beacon.observe_media_seconds(f64::NAN);
+        beacon.observe_media_seconds(-3.0);
+        assert_eq!(beacon.media_micros(), 1_500_000);
+        assert!(!beacon.stop_escalated());
+        beacon.clone().mark_stop_escalated();
+        assert!(beacon.stop_escalated(), "clones share one escalation flag");
+    }
+
+    #[test]
+    fn healthy_gpu_keeps_the_requested_canvas_with_one_probe() {
+        let requested = video(2560, 1440, 30, 8_000);
+        let mut probes = 0;
+        let selected = select_windows_recordable_video(&requested, 4, |_| {
+            probes += 1;
+            true
+        });
+        assert_eq!(selected.video, requested);
+        assert_eq!(selected.reason, None);
+        assert_eq!(probes, 1);
+        assert_eq!(
+            windows_recordable_video_health_message(&requested, &selected),
+            None
+        );
+    }
+
+    #[test]
+    fn rejected_1440p_steps_down_to_the_first_size_the_gpu_accepts() {
+        let requested = video(2560, 1440, 30, 8_000);
+        let selected =
+            select_windows_recordable_video(&requested, 4, |candidate| candidate.height <= 1080);
+        assert_eq!(selected.video, custom(1920, 1080, 30, 6_000));
+        assert_eq!(
+            selected.reason,
+            Some(WindowsRecordableVideoReason::HardwareStepDown)
+        );
+        let message = windows_recordable_video_health_message(&requested, &selected).unwrap();
+        assert!(message.contains("2560x1440") && message.contains("1920x1080"));
+    }
+
+    #[test]
+    fn no_hardware_at_any_size_caps_software_by_cpu_class() {
+        let requested = video(2560, 1440, 30, 8_000);
+        // The tester's 4-thread Gemini Lake.
+        let small = select_windows_recordable_video(&requested, 4, |_| false);
+        assert_eq!(small.video, custom(1280, 720, 30, 4_000));
+        assert_eq!(
+            small.reason,
+            Some(WindowsRecordableVideoReason::SoftwareCap)
+        );
+        let larger = select_windows_recordable_video(&requested, 8, |_| false);
+        assert_eq!(larger.video, custom(1920, 1080, 30, 6_000));
+        // Already inside the software envelope: untouched, no notice.
+        let modest = video(1280, 720, 30, 4_000);
+        let kept = select_windows_recordable_video(&modest, 2, |_| false);
+        assert_eq!(kept.video, modest);
+        assert_eq!(kept.reason, None);
+    }
+
+    #[test]
+    fn stepped_down_named_presets_stay_valid_when_persisted_and_replayed() {
+        let four_k = video_with_preset(VideoPreset::Record4k30, 3840, 2160, 30, 30_000);
+        validate_named_video_profile(&four_k).expect("the request itself is a valid preset");
+        let selected =
+            select_windows_recordable_video(&four_k, 8, |candidate| candidate.height <= 1440);
+        assert_eq!(selected.video, custom(2560, 1440, 30, 8_000));
+        validate_named_video_profile(&selected.video)
+            .expect("a stepped-down profile must not keep a fixed-value preset label");
+        // Untouched requests keep their preset.
+        let kept = select_windows_recordable_video(&four_k, 8, |_| true);
+        assert_eq!(kept.video.preset, VideoPreset::Record4k30);
+    }
+
+    #[test]
+    fn step_down_preserves_orientation_fps_and_never_raises_bitrate() {
+        let vertical = video(1440, 2560, 60, 5_000);
+        let rungs = windows_recordable_video_rungs(&vertical);
+        assert_eq!(
+            rungs
+                .iter()
+                .map(|rung| (rung.width, rung.height))
+                .collect::<Vec<_>>(),
+            vec![(1080, 1920), (720, 1280)]
+        );
+        assert!(rungs.iter().all(|rung| rung.fps == 60));
+        assert_eq!(
+            rungs[0].bitrate_kbps, 5_000,
+            "user bitrate below the rung wins"
+        );
+        assert_eq!(rungs[1].bitrate_kbps, 4_000);
+        assert!(windows_recordable_video_rungs(&video(1280, 720, 30, 4_000)).is_empty());
+        let four_k = windows_recordable_video_rungs(&video(3840, 2160, 30, 30_000));
+        assert_eq!((four_k[0].width, four_k[0].height), (2560, 1440));
+        assert!(
+            four_k
+                .iter()
+                .all(|rung| rung.width % 2 == 0 && rung.height % 2 == 0)
+        );
+    }
+
+    #[test]
+    fn stderr_tail_is_bounded_scrubs_urls_and_keeps_the_first_fatal_category() {
+        let mut tail = FfmpegStderrTail::default();
+        assert_eq!(tail.summary(), None);
+        for index in 0..20 {
+            tail.observe(&format!("noise line {index}"));
+        }
+        tail.observe("[flv @ 01] Failed to open rtmps://live.example/app/SECRET-STREAM-KEY now");
+        tail.observe("Error while opening encoder - maybe incorrect parameters");
+        tail.observe("Conversion failed!");
+        tail.observe(&"x".repeat(10_000));
+        let summary = tail.summary().unwrap();
+        assert!(summary.starts_with("category=encoder-open-failed "));
+        assert!(!summary.contains("SECRET-STREAM-KEY"));
+        assert!(summary.contains("<url>"));
+        assert!(!summary.contains("noise line 0"));
+        assert_eq!(tail.lines.len(), FFMPEG_STDERR_TAIL_LINES);
+        assert!(
+            tail.lines
+                .iter()
+                .all(|line| line.chars().count() <= FFMPEG_STDERR_TAIL_LINE_CHARS)
         );
     }
 }

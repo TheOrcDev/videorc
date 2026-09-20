@@ -150,7 +150,7 @@ async function main() {
     'idle: empty live cache renders without a composer',
     JSON.stringify(idle.last)
   )
-  await captureState('idle', 'idle Comments window')
+  await captureState('idle', 'idle Chat window')
 
   await smokeCommand('comments-window-push-snapshot', { snapshot: failedLiveSnapshot() })
   const failedLive = await waitFor(
@@ -191,7 +191,7 @@ async function main() {
     'live: unified YouTube/Twitch/X feed and honest composer destinations render',
     JSON.stringify(live.last)
   )
-  await captureState('live', 'unified live Comments window')
+  await captureState('live', 'unified live Chat window')
 
   const authority = await smokeCommand('comments-window-authority-probe')
   assertProbe(
@@ -205,6 +205,49 @@ async function main() {
       authority.after?.viewers?.total !== 999999,
     'authority: detached renderer cannot forge snapshot, viewers, or On stream state',
     JSON.stringify(authority)
+  )
+
+  // Chat chrome: renamed title, the corner picker, and the glass underlay (the
+  // wallpaper itself needs the Automation grant, so its solid fallback counts).
+  const chrome = await smokeCommand('comments-window-reader-state')
+  assertProbe(chrome.headerTitle === 'Chat', 'chrome: header title reads Chat', chrome.headerTitle)
+  assertProbe(
+    chrome.glassUnderlay === 'wallpaper' || chrome.glassUnderlay === 'fallback',
+    'chrome: glass underlay is mounted',
+    chrome.glassUnderlay
+  )
+  assertProbe(
+    chrome.highlightPositionControl === 'Highlight position: Bottom left',
+    'highlight corner: picker shows the default corner',
+    String(chrome.highlightPositionControl)
+  )
+  // The pick goes through the same main-process path the picker uses and must
+  // come back on window state and in the picker itself.
+  const anchored = await smokeCommand('comments-window-set-highlight-anchor', {
+    anchor: 'bottom-right'
+  })
+  assertProbe(
+    anchored.highlightAnchor === 'bottom-right',
+    'highlight corner: main reports the picked corner',
+    JSON.stringify(anchored)
+  )
+  const pickerFollowed = await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) => s.highlightPositionControl === 'Highlight position: Bottom right',
+    3000
+  )
+  assertProbe(
+    pickerFollowed.ok,
+    'highlight corner: picker follows the persisted pick',
+    String(pickerFollowed.last?.highlightPositionControl)
+  )
+  const normalised = await smokeCommand('comments-window-set-highlight-anchor', {
+    anchor: 'center'
+  })
+  assertProbe(
+    normalised.highlightAnchor === 'bottom-left',
+    'highlight corner: an unknown corner lands on the default',
+    JSON.stringify(normalised)
   )
 
   // Delayed success makes the applying state observable, then proves the
@@ -529,7 +572,7 @@ async function main() {
     JSON.stringify(reopenedReader.last)
   )
 
-  console.log('\n=== Comments window probe summary ===')
+  console.log('\n=== Chat window probe summary ===')
   if (failures.length === 0) {
     console.log(
       'PASS — layered send timeout, correlated send/highlight, terminal failure, live/history isolation, captures, toggle, and frame persistence.'

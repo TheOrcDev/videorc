@@ -10,22 +10,29 @@ const toastSpies = vi.hoisted(() => ({
   warning: vi.fn()
 }))
 vi.mock('sonner', () => ({ toast: toastSpies }))
+// The highlight card is painted on an OffscreenCanvas, which the node test
+// environment lacks. Only the painter is stubbed; layout stays real elsewhere.
+vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/lib/caption-overlay')>()),
+  renderCommentHighlightPng: async () => 'cG5n'
+}))
 
+import { revealInFileManagerLabel } from '@/lib/platform'
 import type {
   AccountCallbackEnvelope,
   AiArtifact,
+  AudioMeterResult,
+  BackendConnection,
+  CaptureRecoveryStatus,
   CohostSettings,
   CohostSettingsPatch,
   CohostState,
-  AudioMeterResult,
-  BackendConnection,
   CommentHighlightCommand,
   CommentHighlightState,
-  CompositorStatus,
-  CaptureRecoveryStatus,
   CommentsCommandResolution,
   CommentsSendCommand,
   CommentsSendOperation,
+  CompositorStatus,
   DeviceList,
   HealthEvent,
   LayoutSettings,
@@ -33,6 +40,7 @@ import type {
   LiveChatSnapshot,
   NoiseCleanupJob,
   OAuthCallbackEnvelope,
+  PerformanceCheckState,
   PlatformAccountValidation,
   PreviewSurfaceBounds,
   PreviewSurfaceStatus,
@@ -41,8 +49,8 @@ import type {
   Scene,
   SessionLogEntry,
   SessionSummary,
-  StreamScreen,
   StreamOutputTopologyProbeResult,
+  StreamScreen,
   VideorcAccountSnapshot,
   VideorcApi
 } from '../../../shared/backend'
@@ -67,7 +75,12 @@ import {
   type StudioRecordingContextValue
 } from './use-studio'
 import { DEFAULT_BASIC_ENTITLEMENTS, PREMIUM_STREAMING_LIMITS } from '../lib/entitlements'
-import { defaultCaptureConfig, videoPresets, type CaptureConfig } from '../lib/capture'
+import {
+  defaultCaptureConfig,
+  STORAGE_KEYS,
+  videoPresets,
+  type CaptureConfig
+} from '../lib/capture'
 import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
 import { SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY } from '../lib/screen-takeover-microphone'
 import type {
@@ -322,8 +335,13 @@ function compositorFor(scene: Scene, layout: LayoutSettings, revision: number): 
   }
 }
 
+// The horizontal output a fresh install records at; asserted by value so a
+// default change (1440p30 → 1080p30 with the performance check) stays one edit.
+const DEFAULT_OUTPUT = defaultCaptureConfig.video
+
 class StudioBackend {
   sockets: TestWebSocket[] = []
+  performanceCheck: PerformanceCheckState = { running: false, stale: false }
   commands: BackendCommand[] = []
   sentCommands: BackendCommand[] = []
   currentLayout = defaultCaptureConfig.layout
@@ -373,7 +391,8 @@ class StudioBackend {
     enabled: true,
     tone: 'friendly',
     notes: '',
-    autoHighlight: false
+    autoHighlight: false,
+    rules: []
   }
   cohostState: CohostState = {
     sessionId: null,
@@ -1082,6 +1101,9 @@ class StudioBackend {
           durationMs: 1_000,
           message: 'Saved.'
         }
+      case 'performance.check.get':
+        // Measured and current: the provider must not start a check on mount.
+        return this.performanceCheck
       default:
         return null
     }
@@ -1647,6 +1669,84 @@ describe('real StudioProvider lifecycle', () => {
     ).toHaveLength(1)
   })
 
+  it('sends the picked corner with a highlight and moves a live card when the pick changes', async () => {
+    const backend = new StudioBackend()
+    backend.liveChatSnapshot = {
+      sessionId: highlightMessage.sessionId,
+      providers: [],
+      messages: [highlightMessage],
+      unreadCount: 0,
+      updatedAt: now
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    let emitIpc: ((name: string, value: unknown) => void) | undefined
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (emit) => {
+        emitIpc = emit
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    // The provider has the live chat once it has asked the backend for it.
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        backend.commands.some((command) => command.method === 'liveChat.status')
+    )
+    const windowState = (highlightAnchor: string): Record<string, unknown> => ({
+      open: true,
+      visible: true,
+      bounds: null,
+      alwaysOnTop: false,
+      highlightAnchor,
+      protected: false,
+      enabled: true
+    })
+    const highlightSets = (): BackendCommand[] =>
+      backend.commands.filter((command) => command.method === 'comments.highlight.set')
+
+    // The pick arrives from main (the Chat window's corner menu persists there).
+    await act(async () => emitIpc?.('onCommentsWindowState', windowState('bottom-right')))
+    await act(async () => latest()!.core.toggleCommentHighlight(highlightMessage))
+    await waitForObservation(() => latest()?.core.commentHighlightState.phase === 'live')
+
+    expect(highlightSets()).toHaveLength(1)
+    expect(highlightSets()[0]!.params).toMatchObject({
+      messageId: highlightMessage.id,
+      anchor: 'bottom-right'
+    })
+    expect(highlightSets()[0]!.params).not.toHaveProperty('position')
+
+    // Changing the corner while the card is live re-sends the SAME message
+    // (a move), never the un-pin a repeated click would mean.
+    await act(async () => emitIpc?.('onCommentsWindowState', windowState('top-right')))
+    await waitForObservation(() => highlightSets().length === 2)
+    expect(highlightSets()[1]!.params).toMatchObject({
+      messageId: highlightMessage.id,
+      anchor: 'top-right'
+    })
+    expect(
+      backend.commands.filter((command) => command.method === 'comments.highlight.clear')
+    ).toHaveLength(0)
+    expect(latest()?.core.commentHighlightState.phase).toBe('live')
+
+    // An unknown value from an old prefs file lands on the default corner.
+    await act(async () => emitIpc?.('onCommentsWindowState', windowState('middle')))
+    await waitForObservation(() => highlightSets().length === 3)
+    expect(highlightSets()[2]!.params).toMatchObject({ anchor: 'bottom-left' })
+  })
+
   it('returns success to Main after reconciling an outcome-unknown detached highlight request', async () => {
     const backend = new StudioBackend()
     backend.liveChatSnapshot = {
@@ -1769,7 +1869,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(resolutions.find(({ requestId }) => requestId === first.requestId)).toEqual({
       requestId: first.requestId,
       ok: false,
-      error: 'A newer comment highlight replaced this request.'
+      error: 'A newer highlight replaced this request.'
     })
     expect(resolutions.find(({ requestId }) => requestId === second.requestId)).toEqual({
       requestId: second.requestId,
@@ -2036,7 +2136,7 @@ describe('real StudioProvider lifecycle', () => {
         description: failedStatus.message,
         duration: Infinity,
         action: expect.objectContaining({ label: 'Open Library' }),
-        cancel: expect.objectContaining({ label: 'Show in Finder' })
+        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
     expect(toastSpies.success).not.toHaveBeenCalled()
@@ -2251,7 +2351,7 @@ describe('real StudioProvider lifecycle', () => {
         description: failureEvent.message,
         duration: Infinity,
         action: expect.objectContaining({ label: 'Open Library' }),
-        cancel: expect.objectContaining({ label: 'Show in Finder' })
+        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
     expect(reconnectedBackend.commands).toContainEqual(
@@ -2340,7 +2440,7 @@ describe('real StudioProvider lifecycle', () => {
       'Recording stopped unexpectedly',
       expect.objectContaining({
         description: failedSnapshotEvent.message,
-        cancel: expect.objectContaining({ label: 'Show in Finder' })
+        cancel: expect.objectContaining({ label: revealInFileManagerLabel() })
       })
     )
   })
@@ -7695,7 +7795,7 @@ describe('real StudioProvider lifecycle', () => {
         }
       | undefined
     expect(completionToast?.action?.label).toBe('Play')
-    expect(completionToast?.cancel?.label).toBe('Show in Finder')
+    expect(completionToast?.cancel?.label).toBe(revealInFileManagerLabel())
     completionToast?.action?.onClick()
     completionToast?.cancel?.onClick()
     await act(async () => Promise.resolve())
@@ -7951,18 +8051,18 @@ describe('real StudioProvider lifecycle', () => {
       }
       return (
         params.layout?.layoutPreset === 'vertical-screen-camera' &&
-        params.video?.width === 2560 &&
-        params.video?.height === 1440
+        params.video?.width === DEFAULT_OUTPUT.width &&
+        params.video?.height === DEFAULT_OUTPUT.height
       )
     })
     expect(reverseMixedReloads).toEqual([])
     await waitForObservation(
       () =>
         latest()?.core.captureConfig.layout.layoutPreset === 'screen-camera' &&
-        latest()?.core.captureConfig.video.width === 2560 &&
-        latest()?.core.captureConfig.video.height === 1440
+        latest()?.core.captureConfig.video.width === DEFAULT_OUTPUT.width &&
+        latest()?.core.captureConfig.video.height === DEFAULT_OUTPUT.height
     )
-    expect(previewAspectCalls.at(-1)).toEqual([2560, 1440])
+    expect(previewAspectCalls.at(-1)).toEqual([DEFAULT_OUTPUT.width, DEFAULT_OUTPUT.height])
 
     await act(async () => {
       await latest()?.core.startSession()
@@ -7971,7 +8071,7 @@ describe('real StudioProvider lifecycle', () => {
       backend.commands.filter((command) => command.method === 'session.start').at(-1)?.params
     ).toMatchObject({
       layout: { layoutPreset: 'screen-camera' },
-      output: { video: { width: 2560, height: 1440 } }
+      output: { video: { width: DEFAULT_OUTPUT.width, height: DEFAULT_OUTPUT.height } }
     })
     await act(async () => {
       await latest()?.core.stopSession()
@@ -8197,6 +8297,75 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.account).toEqual(refreshedAccount)
     expect(backend.sentCommands.filter((command) => command.method === 'account.get').length).toBe(
       accountGetsBeforeRefresh
+    )
+  })
+
+  it.each([
+    { chosen: false, expectedHeight: 720, label: 'moves an untouched install to' },
+    {
+      chosen: true,
+      expectedHeight: DEFAULT_OUTPUT.height,
+      label: 'only suggests to a chosen output'
+    }
+  ])('$label the measured output', async ({ chosen, expectedHeight }) => {
+    const backend = new StudioBackend()
+    // The UHD 600 shape: the shipped default is too heavy, only 720p30 held.
+    backend.performanceCheck = {
+      running: false,
+      stale: false,
+      result: {
+        capabilityKey: 'performance-check-v1:test',
+        checkedAt: '2026-09-20T00:00:00Z',
+        appVersion: '0.9.96',
+        durationMs: 12_000,
+        recommended: videoPresets['tutorial-720p30'],
+        belowFloor: false,
+        rungs: [
+          { video: videoPresets['tutorial-1080p30'], verdict: 'failed', reasons: ['x'] },
+          { video: videoPresets['tutorial-720p30'], verdict: 'passed', reasons: [] }
+        ]
+      }
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    if (chosen) {
+      localStorage.setItem(STORAGE_KEYS.outputChosenByUser, '1')
+    }
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() => latest()?.core.performanceCheck?.result !== undefined)
+    await waitForObservation(() => latest()?.core.captureConfig.video.height === expectedHeight)
+    // Dev/test builds are not packaged: the provider never starts a check itself.
+    expect(backend.commands.some((command) => command.method === 'performance.check.run')).toBe(
+      false
     )
   })
 

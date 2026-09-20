@@ -7,7 +7,11 @@ import { describe, it } from 'node:test'
 
 import {
   CAPTION_MARKER_RGB,
+  COMMENT_HIGHLIGHT_ANCHORS,
   COMMENT_HIGHLIGHT_MARKER_RGB,
+  commentHighlightCardRegion,
+  countCommentHighlightAnchoredFrames,
+  mirrorCommentHighlightAnchor,
   captionStimulusPngBase64,
   analyzeCommentHighlightArtifact,
   classifyCommentHighlightResult,
@@ -27,7 +31,7 @@ describe('comment highlight artifact gate', () => {
       markerFrame({ highlight: true, caption: true }),
       markerFrame({ highlight: true, caption: true })
     ])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'live',
       minMarkerPixelRatio: 0.1,
@@ -48,7 +52,7 @@ describe('comment highlight artifact gate', () => {
       markerFrame({ highlight: true }),
       markerFrame({ caption: true })
     ])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'live',
       minMarkerPixelRatio: 0.1,
@@ -64,7 +68,7 @@ describe('comment highlight artifact gate', () => {
 
   it('accepts the real dark-glass card shape produced by the detached UI', () => {
     const rgb = Buffer.concat([renderedCardFrame(), renderedCardFrame()])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'live',
       minMarkerPixelRatio: 0.1,
@@ -80,32 +84,108 @@ describe('comment highlight artifact gate', () => {
     assert.equal(verdict.pass, true)
   })
 
-  it('detects a correctly sized 1080p card inside the compositor top margin', () => {
-    const sampleWidth = 160
-    const sampleHeight = 90
-    const frame = Buffer.alloc(sampleWidth * sampleHeight * 3)
-    fillRect(frame, sampleWidth, 0, 0, sampleWidth, sampleHeight, [80, 120, 160])
-    fillRect(frame, sampleWidth, 48, 6, 112, 25, [16, 16, 18])
-    fillRect(frame, sampleWidth, 48, 16, 112, 21, [235, 235, 238])
-    fillRect(frame, sampleWidth, 0, 45, sampleWidth, sampleHeight, CAPTION_MARKER_RGB)
+  for (const anchor of COMMENT_HIGHLIGHT_ANCHORS) {
+    it(`detects a correctly sized 1080p card anchored ${anchor}`, () => {
+      const frame = cornerCardFrame(anchor)
+      const metrics = measureCommentHighlightArtifactRgb(Buffer.concat([frame, frame]), {
+        width: CORNER_SAMPLE_WIDTH,
+        height: CORNER_SAMPLE_HEIGHT,
+        anchor
+      })
+      const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
+        highlightDisposition: 'live'
+      })
 
-    const metrics = measureCommentHighlightArtifactRgb(Buffer.concat([frame, frame]), {
-      width: sampleWidth,
-      height: sampleHeight
+      assert.equal(metrics.anchor, anchor)
+      assert.equal(verdict.observations.markerHighlightFrames, 0)
+      assert.equal(verdict.observations.renderedCardFrames, 2)
+      assert.equal(verdict.observations.coexistFrames, 2)
+      assert.equal(verdict.pass, true)
     })
-    const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
-      highlightDisposition: 'live'
-    })
+  }
 
-    assert.equal(verdict.observations.markerHighlightFrames, 0)
-    assert.equal(verdict.observations.renderedCardFrames, 2)
-    assert.equal(verdict.observations.coexistFrames, 2)
-    assert.equal(verdict.pass, true)
+  it('fails when the card is composited in a different corner than the one picked', () => {
+    const frame = cornerCardFrame('top-left')
+    for (const anchor of ['top-right', 'bottom-left', 'bottom-right']) {
+      const metrics = measureCommentHighlightArtifactRgb(Buffer.concat([frame, frame]), {
+        width: CORNER_SAMPLE_WIDTH,
+        height: CORNER_SAMPLE_HEIGHT,
+        anchor
+      })
+      const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
+        highlightDisposition: 'live'
+      })
+      assert.equal(verdict.observations.renderedCardFrames, 0, anchor)
+      assert.equal(verdict.pass, false, anchor)
+    }
+  })
+
+  it('tells a corner card from a centred caption bar by left/right dark asymmetry', () => {
+    const measure = (frame, anchor) =>
+      measureCommentHighlightArtifactRgb(Buffer.concat([frame, frame]), {
+        width: CORNER_SAMPLE_WIDTH,
+        height: CORNER_SAMPLE_HEIGHT,
+        anchor
+      })
+    for (const anchor of COMMENT_HIGHLIGHT_ANCHORS) {
+      const mirror = mirrorCommentHighlightAnchor(anchor)
+      assert.equal(mirrorCommentHighlightAnchor(mirror), anchor)
+      const card = cornerCardFrame(anchor)
+      assert.equal(
+        countCommentHighlightAnchoredFrames(measure(card, anchor), measure(card, mirror)),
+        2,
+        anchor
+      )
+      // Judged against the wrong side, the same frames never count.
+      assert.equal(
+        countCommentHighlightAnchoredFrames(measure(card, mirror), measure(card, anchor)),
+        0,
+        anchor
+      )
+    }
+    // A centred dark caption bar with no card leans toward neither corner.
+    const captionOnly = Buffer.alloc(CORNER_SAMPLE_WIDTH * CORNER_SAMPLE_HEIGHT * 3)
+    fillRect(
+      captionOnly,
+      CORNER_SAMPLE_WIDTH,
+      0,
+      0,
+      CORNER_SAMPLE_WIDTH,
+      CORNER_SAMPLE_HEIGHT,
+      [80, 120, 160]
+    )
+    fillRect(captionOnly, CORNER_SAMPLE_WIDTH, 10, 72, 150, 82, [16, 16, 18])
+    assert.equal(
+      countCommentHighlightAnchoredFrames(
+        measure(captionOnly, 'bottom-right'),
+        measure(captionOnly, 'bottom-left')
+      ),
+      0
+    )
+  })
+
+  it('maps every anchor to its own corner region and rejects unknown anchors', () => {
+    const size = { width: 100, height: 100 }
+    assert.deepEqual(commentHighlightCardRegion('top-left', size), {
+      xStart: 8,
+      xEnd: 62,
+      yStart: 8,
+      yEnd: 62,
+      top: true
+    })
+    assert.deepEqual(commentHighlightCardRegion('bottom-right', size), {
+      xStart: 38,
+      xEnd: 92,
+      yStart: 38,
+      yEnd: 92,
+      top: false
+    })
+    assert.throws(() => commentHighlightCardRegion('top', size), /Unknown comment highlight anchor/)
   })
 
   it('accepts explicit legacy unavailability when stream frames were decoded', () => {
     const rgb = Buffer.concat([markerFrame(), markerFrame()])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'highlight-unavailable',
       allowHighlightUnavailable: true,
@@ -121,7 +201,7 @@ describe('comment highlight artifact gate', () => {
 
   it('rejects highlight-unavailable on a modern output path', () => {
     const rgb = Buffer.concat([markerFrame({ caption: true }), markerFrame({ caption: true })])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'highlight-unavailable',
       allowHighlightUnavailable: false,
@@ -211,9 +291,11 @@ describe('comment highlight artifact gate', () => {
         )
         assert.equal(encoded.status, 0, encoded.stderr)
 
+        // The stimulus is overlaid at the top of the frame.
         const report = await analyzeCommentHighlightArtifact(videoPath, {
           ffmpegPath,
-          highlightDisposition: 'live'
+          highlightDisposition: 'live',
+          anchor: 'top-left'
         })
         assert.equal(report.pass, true, report.failures.join('\n'))
         assert.ok(report.observations.coexistFrames >= 2)
@@ -254,6 +336,38 @@ describe('comment highlight artifact gate', () => {
     }
   )
 })
+
+const CORNER_SAMPLE_WIDTH = 160
+const CORNER_SAMPLE_HEIGHT = 90
+
+/** A 1080p-proportioned card (64×19 sample px with a text band) sitting at the
+ * compositor's corner inset, over a frame whose bottom half carries captions. */
+function cornerCardFrame(anchor) {
+  const frame = Buffer.alloc(CORNER_SAMPLE_WIDTH * CORNER_SAMPLE_HEIGHT * 3)
+  fillRect(
+    frame,
+    CORNER_SAMPLE_WIDTH,
+    0,
+    0,
+    CORNER_SAMPLE_WIDTH,
+    CORNER_SAMPLE_HEIGHT,
+    [80, 120, 160]
+  )
+  fillRect(
+    frame,
+    CORNER_SAMPLE_WIDTH,
+    0,
+    45,
+    CORNER_SAMPLE_WIDTH,
+    CORNER_SAMPLE_HEIGHT,
+    CAPTION_MARKER_RGB
+  )
+  const left = anchor.endsWith('-left') ? 5 : CORNER_SAMPLE_WIDTH - 5 - 64
+  const top = anchor.startsWith('top-') ? 6 : CORNER_SAMPLE_HEIGHT - 6 - 19
+  fillRect(frame, CORNER_SAMPLE_WIDTH, left, top, left + 64, top + 19, [16, 16, 18])
+  fillRect(frame, CORNER_SAMPLE_WIDTH, left, top + 10, left + 64, top + 15, [235, 235, 238])
+  return frame
+}
 
 function markerFrame({ highlight = false, caption = false } = {}) {
   const rgb = Buffer.alloc(width * height * 3, 24)
