@@ -1729,7 +1729,7 @@ describe('real StudioProvider lifecycle', () => {
     // An unknown value from an old prefs file lands on the default corner.
     await act(async () => emitIpc?.('onCommentsWindowState', windowState('middle')))
     await waitForObservation(() => highlightSets().length === 3)
-    expect(highlightSets()[2]!.params).toMatchObject({ anchor: 'top-left' })
+    expect(highlightSets()[2]!.params).toMatchObject({ anchor: 'bottom-left' })
   })
 
   it('returns success to Main after reconciling an outcome-unknown detached highlight request', async () => {

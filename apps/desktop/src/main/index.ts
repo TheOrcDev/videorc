@@ -3033,11 +3033,11 @@ function commentsCaptureHeaderSignal(image: NativeImage): number {
   const bitmap = image.toBitmap()
   // The "Chat" title and its Live/History/Idle badge occupy this stable
   // logical-pixel region (the header is a fixed 40px strip starting at the
-  // 78px traffic-light gutter). A stale partial texture can still contain
+  // 88px traffic-light gutter). A stale partial texture can still contain
   // bright message-row text near the top, so scoring the whole header produces
   // false positives; score the title strip itself.
-  const xStart = Math.max(0, Math.floor((68 / 420) * size.width))
-  const xEnd = Math.min(size.width, Math.ceil((154 / 420) * size.width))
+  const xStart = Math.max(0, Math.floor((80 / 420) * size.width))
+  const xEnd = Math.min(size.width, Math.ceil((166 / 420) * size.width))
   const yStart = Math.max(0, Math.floor((8 / 640) * size.height))
   const yEnd = Math.min(size.height, Math.ceil((29 / 640) * size.height))
   let signal = 0

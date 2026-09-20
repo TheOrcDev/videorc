@@ -330,8 +330,10 @@ export function CommentsReader({
     <div className="relative flex h-screen flex-col text-foreground">
       {/* Fixed height, not min-height: the macOS traffic lights are centred on
           this exact strip from main (AUX_WINDOW_HEADER_HEIGHT), so a child that
-          grew the row would silently pull the title off their centre line. */}
-      <header className="flex h-10 shrink-0 items-center gap-2 overflow-hidden pl-[78px] pr-3 [-webkit-app-region:drag]">
+          grew the row would silently pull the title off their centre line.
+          Gutter: on current macOS the three 14px lights end 74px in (measured
+          on a real window), so 88px leaves the title a clear 14px of air. */}
+      <header className="flex h-10 shrink-0 items-center gap-2 overflow-hidden pl-[88px] pr-3 [-webkit-app-region:drag]">
         <span className="shrink-0 text-xs font-medium">Chat</span>
         <Badge
           className="h-4 shrink-0 px-1.5 text-[10px]"

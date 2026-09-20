@@ -12179,7 +12179,7 @@ mod tests {
 
     #[test]
     fn caption_and_highlight_overlays_coexist_top_and_bottom() {
-        // Comments upgrade S2: the highlight card (default top-left anchor)
+        // Comments upgrade S2: the highlight card (top-left anchor here)
         // and the captions bar (bottom) render in the SAME frame from their
         // independent slots.
         let (canvas_w, canvas_h) = (32_u32, 16_u32);
@@ -12196,7 +12196,7 @@ mod tests {
             8,
             4,
             [255, 0, 0, 255],
-            crate::comment_highlight::CommentHighlightAnchor::default(),
+            crate::comment_highlight::CommentHighlightAnchor::TopLeft,
         );
         let base_inputs = CompositorRenderInputs {
             sequence: 3,
@@ -12222,7 +12222,7 @@ mod tests {
             &mut with_both,
         );
         let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
-        // Highlight owns its anchor rect: default TopLeft, margin =
+        // Highlight owns its anchor rect: TopLeft, margin =
         // round(16*0.04) = 1 on both axes → rows 1..5, columns 1..9.
         let anchor_index = 2 * canvas_w as usize + 4;
         assert_eq!(with_both[anchor_index], red_y);

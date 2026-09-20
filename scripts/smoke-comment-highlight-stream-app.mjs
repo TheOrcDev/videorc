@@ -33,8 +33,9 @@ const streamSafe1080p30 = Object.freeze({
 const modernScenarios = [
   {
     label: 'stream-only',
-    // The default corner, as a fresh install ships it.
-    anchor: 'top-left',
+    // The default corner, as a fresh install ships it: same edge as the
+    // bottom caption bar, so this also proves captions step above the card.
+    anchor: 'bottom-left',
     recordEnabled: false,
     fps: 30,
     streamProfile: streamSafe1080p30,
@@ -42,9 +43,9 @@ const modernScenarios = [
   },
   {
     label: 'split-record-stream',
-    // Same edge as the bottom caption bar: proves the pick reaches the
-    // compositor and that captions and the card still coexist.
-    anchor: 'bottom-right',
+    // A non-default pick on the opposite edge and side: proves the pick
+    // reaches the compositor.
+    anchor: 'top-right',
     recordEnabled: true,
     fps: 30,
     streamProfile: streamSafe1080p30,
@@ -53,7 +54,7 @@ const modernScenarios = [
 ]
 const legacyScenario = {
   label: 'legacy-stream-only-60fps',
-  anchor: 'top-left',
+  anchor: 'bottom-left',
   recordEnabled: false,
   fps: 60,
   expectedStreamFps: 30,

@@ -69,9 +69,11 @@ pub fn new_comment_highlight_slot() -> CommentHighlightSlot {
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum CommentHighlightAnchor {
-    #[default]
     TopLeft,
     TopRight,
+    /// Default (owner call 2026-09-20): off faces and off the usual top-right
+    /// camera bubble; a caption bar on the same edge steps above the card.
+    #[default]
     BottomLeft,
     BottomRight,
 }
@@ -105,7 +107,7 @@ pub struct SetCommentHighlightParams {
     pub session_id: String,
     pub message_id: String,
     pub png_base64: String,
-    /// Corner anchor. Missing => `TopLeft`. The struct intentionally does not
+    /// Corner anchor. Missing => `BottomLeft`. The struct intentionally does not
     /// `deny_unknown_fields`: older clients still send the retired
     /// `"position": "top"`, which is accepted and ignored.
     #[serde(default)]
@@ -614,14 +616,14 @@ mod tests {
     }
 
     #[test]
-    fn set_params_anchor_defaults_to_top_left_and_parses_every_corner() {
+    fn set_params_anchor_defaults_to_bottom_left_and_parses_every_corner() {
         let base = serde_json::json!({
             "sessionId": "session-1",
             "messageId": "message-1",
             "pngBase64": TEST_PNG,
         });
         let missing: SetCommentHighlightParams = serde_json::from_value(base.clone()).unwrap();
-        assert_eq!(missing.anchor, CommentHighlightAnchor::TopLeft);
+        assert_eq!(missing.anchor, CommentHighlightAnchor::BottomLeft);
 
         for (wire, anchor) in [
             ("top-left", CommentHighlightAnchor::TopLeft),
@@ -654,7 +656,11 @@ mod tests {
                 "position": legacy,
             }))
             .unwrap();
-            assert_eq!(parsed.anchor, CommentHighlightAnchor::TopLeft, "{legacy}");
+            assert_eq!(
+                parsed.anchor,
+                CommentHighlightAnchor::BottomLeft,
+                "{legacy}"
+            );
         }
     }
 

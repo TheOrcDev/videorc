@@ -195,7 +195,7 @@ describe('Electron IPC contract', () => {
     }
     expect(() => validateElectronInvokeArgs('comments-window:set-highlight-anchor', [])).toThrow()
     // A prefs file written before the setting existed has no value at all.
-    expect(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR).toBe('top-left')
+    expect(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR).toBe('bottom-left')
     for (const stale of [undefined, null, 'top', 'TOP-LEFT', 3, {}]) {
       expect(normalizeCommentHighlightAnchor(stale)).toBe(DEFAULT_COMMENT_HIGHLIGHT_ANCHOR)
     }

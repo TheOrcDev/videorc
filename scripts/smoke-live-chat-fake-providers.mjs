@@ -325,7 +325,7 @@ try {
         sessionId,
         messageId: status.messages[0].id,
         pngBase64: onePixelPng,
-        anchor: 'top-left'
+        anchor: 'bottom-left'
       })
     } catch (error) {
       highlightError = error

@@ -31,7 +31,7 @@ describe('comment highlight artifact gate', () => {
       markerFrame({ highlight: true, caption: true }),
       markerFrame({ highlight: true, caption: true })
     ])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'live',
       minMarkerPixelRatio: 0.1,
@@ -52,7 +52,7 @@ describe('comment highlight artifact gate', () => {
       markerFrame({ highlight: true }),
       markerFrame({ caption: true })
     ])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'live',
       minMarkerPixelRatio: 0.1,
@@ -68,7 +68,7 @@ describe('comment highlight artifact gate', () => {
 
   it('accepts the real dark-glass card shape produced by the detached UI', () => {
     const rgb = Buffer.concat([renderedCardFrame(), renderedCardFrame()])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'live',
       minMarkerPixelRatio: 0.1,
@@ -185,7 +185,7 @@ describe('comment highlight artifact gate', () => {
 
   it('accepts explicit legacy unavailability when stream frames were decoded', () => {
     const rgb = Buffer.concat([markerFrame(), markerFrame()])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'highlight-unavailable',
       allowHighlightUnavailable: true,
@@ -201,7 +201,7 @@ describe('comment highlight artifact gate', () => {
 
   it('rejects highlight-unavailable on a modern output path', () => {
     const rgb = Buffer.concat([markerFrame({ caption: true }), markerFrame({ caption: true })])
-    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height })
+    const metrics = measureCommentHighlightArtifactRgb(rgb, { width, height, anchor: 'top-left' })
     const verdict = evaluateCommentHighlightArtifactMetrics(metrics, {
       highlightDisposition: 'highlight-unavailable',
       allowHighlightUnavailable: false,
@@ -291,9 +291,11 @@ describe('comment highlight artifact gate', () => {
         )
         assert.equal(encoded.status, 0, encoded.stderr)
 
+        // The stimulus is overlaid at the top of the frame.
         const report = await analyzeCommentHighlightArtifact(videoPath, {
           ffmpegPath,
-          highlightDisposition: 'live'
+          highlightDisposition: 'live',
+          anchor: 'top-left'
         })
         assert.equal(report.pass, true, report.failures.join('\n'))
         assert.ok(report.observations.coexistFrames >= 2)

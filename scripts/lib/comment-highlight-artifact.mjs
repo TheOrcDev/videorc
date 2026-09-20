@@ -33,7 +33,7 @@ export const COMMENT_HIGHLIGHT_ANCHORS = Object.freeze([
   'bottom-left',
   'bottom-right'
 ])
-export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR = 'top-left'
+export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR = 'bottom-left'
 
 /** The sampled-frame rectangle the highlight card must land in for `anchor`.
  * The compositor insets corner overlays by a 4% safe margin and the raster

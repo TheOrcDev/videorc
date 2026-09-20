@@ -24,9 +24,10 @@ Plan: vault `plans/planned/2026-09-20 - Videorc Chat Window Glass, Highlight Cor
   owned by main (`comments-window.json`, surfaced on `CommentsWindowState`), so
   highlights fired with the window closed (shortcut, deck, co-host) honour it.
   Changing the corner while a card is live moves the card (the same message is
-  re-sent; the 10 s TTL restarts). Default: `top-left`.
+  re-sent; the 10 s TTL restarts). Default: `bottom-left` (owner call after
+  the first by-eye pass).
 - **Compositor.** New wire enum `CommentHighlightAnchor` (kebab-case, default
-  `top-left`); captions keep `CaptionOverlayPosition` and gain no corners. One
+  `bottom-left`); captions keep `CaptionOverlayPosition` and gain no corners. One
   layout oracle (`caption_overlay_layout_with_inset`) still serves the CPU
   blit, the Metal source placement and the Windows D3D11 layer transform. Side
   margin equals the vertical margin (4 % of canvas height). Captions yield to
@@ -39,7 +40,11 @@ Plan: vault `plans/planned/2026-09-20 - Videorc Chat Window Glass, Highlight Cor
   solid palette base.
 - **Header alignment.** The header is a fixed 40 px strip and the traffic-light
   offset derives from one constant (`auxWindowChromeOptions`). The "Clear view
-  keeps Library history." hint moved into the Clear view tooltip.
+  keeps Library history." hint moved into the Clear view tooltip. Measured on
+  an owner screenshot of the real window: lights, "Chat" and the badge share
+  one centre line to within a fraction of a pixel, but the three 14 px lights
+  end 74 px in, leaving the old 78 px gutter only ~5 px of air. The gutter is
+  now 88 px (and the header title probe region moved with it).
 
 ## Evidence
 
@@ -56,9 +61,9 @@ Plan: vault `plans/planned/2026-09-20 - Videorc Chat Window Glass, Highlight Cor
 | `cargo build --release -p videorc-backend` | pass (23 warnings, none in touched code) |
 | `cargo xwin check --target x86_64-pc-windows-msvc --tests` | pass (type-check only; not executed on Windows) |
 | `pnpm probe:comments-window` | PASS, including the new checks: header reads `Chat`, glass underlay mounted, picker shows the default, main reports the pick, picker follows the pick, unknown corner normalises to the default |
-| `pnpm smoke:comment-highlight-stream` | PASS — `stream-only` at `top-left`, `split-record-stream` at `bottom-right`, legacy path |
+| `pnpm smoke:comment-highlight-stream` | PASS — run 1: `top-left` + `bottom-right`; run 2 (after the default changed): `bottom-left` default (30 of 32 frames lean to that corner, captions coexist in 14) + `top-right` pick (30 of 31), legacy path at `bottom-left` (31 of 32) |
 | `pnpm smoke:live-chat-fake-providers` | exit 0 (off-stream highlight with `anchor` is rejected explicitly) |
-| `pnpm smoke:recording-studio` | see PR description for the run result |
+| `pnpm smoke:recording-studio` | gates 1–17 pass; gate 18 (`smoke:live-layout-switch-recording`) died on a missing import that is also broken on `main` — fixed in this branch and passing; remaining gates run individually, results on the PR |
 
 Corner proof on the encoded stream files from the smoke run, re-judged against
 the right and the wrong corner:
@@ -81,10 +86,9 @@ card instead of overlapping it.
 
 ## Not verified
 
-- **Traffic-light alignment by eye.** `capturePage` does not include the OS
-  traffic lights, so the capture proves title, badge and controls share one
-  line, not that the lights sit on it. The offset assumes 14 px lights on this
-  macOS; needs an owner look on a real window.
+- **Traffic-light gutter after the 88 px change** needs one more owner look
+  (`capturePage` does not include the OS lights). Vertical alignment was
+  confirmed on the owner's screenshot.
 - **Glass with the real wallpaper.** The probe accepts the underlay or its
   solid fallback (the wallpaper needs the Automation grant). Needs an owner
   look next to the main window over the same wallpaper.

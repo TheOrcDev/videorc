@@ -3230,7 +3230,9 @@ export const COMMENT_HIGHLIGHT_ANCHORS = [
 
 export type CommentHighlightAnchor = (typeof COMMENT_HIGHLIGHT_ANCHORS)[number]
 
-export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR: CommentHighlightAnchor = 'top-left'
+// Owner call 2026-09-20: bottom left keeps the card off faces and off the
+// usual top-right camera bubble; captions on the same edge step above it.
+export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR: CommentHighlightAnchor = 'bottom-left'
 
 /** Unknown or missing values (old prefs file, forged IPC) land on the default. */
 export function normalizeCommentHighlightAnchor(value: unknown): CommentHighlightAnchor {

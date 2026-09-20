@@ -217,7 +217,7 @@ async function main() {
     chrome.glassUnderlay
   )
   assertProbe(
-    chrome.highlightPositionControl === 'Highlight position: Top left',
+    chrome.highlightPositionControl === 'Highlight position: Bottom left',
     'highlight corner: picker shows the default corner',
     String(chrome.highlightPositionControl)
   )
@@ -245,7 +245,7 @@ async function main() {
     anchor: 'center'
   })
   assertProbe(
-    normalised.highlightAnchor === 'top-left',
+    normalised.highlightAnchor === 'bottom-left',
     'highlight corner: an unknown corner lands on the default',
     JSON.stringify(normalised)
   )
