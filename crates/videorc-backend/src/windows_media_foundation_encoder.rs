@@ -3580,7 +3580,7 @@ fn mf_hresult_annotation(hresult: windows::core::HRESULT) -> Option<&'static str
         )
     } else if hresult.0 as u32 == 0x8000FFFF {
         Some(
-            "unexpected encoder failure (E_UNEXPECTED; Intel Quick Sync via WMF rejected this resolution / bitrate profile — a smaller output size or lower bitrate may be accepted)",
+            "unexpected encoder failure (E_UNEXPECTED; the hardware encoder rejected this resolution / bitrate profile, most often seen with Intel Quick Sync via WMF — a smaller output size or lower bitrate may be accepted)",
         )
     } else {
         None

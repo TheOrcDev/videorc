@@ -12706,7 +12706,11 @@ fn scale_video_to_short_edge(
         scaled - (scaled % 2)
     };
     VideoSettings {
-        preset: video.preset.clone(),
+        // Named presets have fixed values (`validate_named_video_profile`), and
+        // the effective profile is persisted as `last_capture_session`: keeping
+        // e.g. `record-4k30` on a 2560x1440 canvas would store a profile that a
+        // later replay rejects.
+        preset: VideoPreset::Custom,
         width: scale(video.width),
         height: scale(video.height),
         fps: video.fps,
@@ -31960,8 +31964,28 @@ mod low_end_windows_recording_tests {
     use super::*;
 
     fn video(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> VideoSettings {
+        video_with_preset(
+            VideoPreset::Tutorial1440p30,
+            width,
+            height,
+            fps,
+            bitrate_kbps,
+        )
+    }
+
+    fn custom(width: u32, height: u32, fps: u32, bitrate_kbps: u32) -> VideoSettings {
+        video_with_preset(VideoPreset::Custom, width, height, fps, bitrate_kbps)
+    }
+
+    fn video_with_preset(
+        preset: VideoPreset,
+        width: u32,
+        height: u32,
+        fps: u32,
+        bitrate_kbps: u32,
+    ) -> VideoSettings {
         VideoSettings {
-            preset: VideoPreset::Tutorial1440p30,
+            preset,
             width,
             height,
             fps,
@@ -32068,7 +32092,7 @@ mod low_end_windows_recording_tests {
         let requested = video(2560, 1440, 30, 8_000);
         let selected =
             select_windows_recordable_video(&requested, 4, |candidate| candidate.height <= 1080);
-        assert_eq!(selected.video, video(1920, 1080, 30, 6_000));
+        assert_eq!(selected.video, custom(1920, 1080, 30, 6_000));
         assert_eq!(
             selected.reason,
             Some(WindowsRecordableVideoReason::HardwareStepDown)
@@ -32082,18 +32106,32 @@ mod low_end_windows_recording_tests {
         let requested = video(2560, 1440, 30, 8_000);
         // The tester's 4-thread Gemini Lake.
         let small = select_windows_recordable_video(&requested, 4, |_| false);
-        assert_eq!(small.video, video(1280, 720, 30, 4_000));
+        assert_eq!(small.video, custom(1280, 720, 30, 4_000));
         assert_eq!(
             small.reason,
             Some(WindowsRecordableVideoReason::SoftwareCap)
         );
         let larger = select_windows_recordable_video(&requested, 8, |_| false);
-        assert_eq!(larger.video, video(1920, 1080, 30, 6_000));
+        assert_eq!(larger.video, custom(1920, 1080, 30, 6_000));
         // Already inside the software envelope: untouched, no notice.
         let modest = video(1280, 720, 30, 4_000);
         let kept = select_windows_recordable_video(&modest, 2, |_| false);
         assert_eq!(kept.video, modest);
         assert_eq!(kept.reason, None);
+    }
+
+    #[test]
+    fn stepped_down_named_presets_stay_valid_when_persisted_and_replayed() {
+        let four_k = video_with_preset(VideoPreset::Record4k30, 3840, 2160, 30, 30_000);
+        validate_named_video_profile(&four_k).expect("the request itself is a valid preset");
+        let selected =
+            select_windows_recordable_video(&four_k, 8, |candidate| candidate.height <= 1440);
+        assert_eq!(selected.video, custom(2560, 1440, 30, 8_000));
+        validate_named_video_profile(&selected.video)
+            .expect("a stepped-down profile must not keep a fixed-value preset label");
+        // Untouched requests keep their preset.
+        let kept = select_windows_recordable_video(&four_k, 8, |_| true);
+        assert_eq!(kept.video.preset, VideoPreset::Record4k30);
     }
 
     #[test]
