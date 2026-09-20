@@ -1594,6 +1594,9 @@ pub struct ActiveRecording {
     /// keeps the lossless-audio capture MKV next to the published MP4
     /// instead of removing it after commit.
     keep_original_media: bool,
+    /// Benchmark session owned by the performance check: hidden row, no
+    /// background export/poster/quality job, discarded by its owner.
+    performance_check: bool,
     /// True only when this session has a viewer-facing stream leg rendered by
     /// the compositor bridge. Legacy FFmpeg and record-only paths must reject
     /// comment highlights before touching the overlay slot.
@@ -1702,6 +1705,7 @@ pub(crate) fn test_active_recording_stub(session_id: &str) -> ActiveRecording {
         })),
         captioned_copy_requested: false,
         keep_original_media: false,
+        performance_check: false,
         comment_highlight_available: false,
         _capture_permit: None,
         stop_intent_sender: None,
@@ -2665,9 +2669,15 @@ async fn start_session_with_timeline(
         layout: params.layout.clone(),
         output: params.output.clone(),
     })?;
-    state
-        .database
-        .save_setting("last_capture_session", &params)?;
+    if params.purpose.is_performance_check() {
+        // Benchmark rows never reach the Library and must not replace the
+        // user's remembered capture; the performance check deletes them.
+        state.database.mark_session_performance_check(&session_id)?;
+    } else {
+        state
+            .database
+            .save_setting("last_capture_session", &params)?;
+    }
     if !stream_targets.is_empty() {
         let redacted = stream_targets
             .iter()
@@ -4318,6 +4328,7 @@ async fn start_session_with_timeline(
         stream_targets_snapshot: stream_targets_snapshot.clone(),
         captioned_copy_requested: session_caption_plan.captioned_copy,
         keep_original_media: params.output.keep_original_mkv,
+        performance_check: params.purpose.is_performance_check(),
         comment_highlight_available: comment_highlight_available(&params, use_encoder_bridge),
         _capture_permit: Some(capture_permit),
         stop_intent_sender: Some(stop_intent_sender),
@@ -5644,6 +5655,7 @@ pub async fn create_preview_snapshot(
         audio: Default::default(),
         streaming: None,
         simulcast: None,
+        purpose: Default::default(),
     };
     let mut capture = resolve_capture_inputs(&ffmpeg_path, &session_params).await;
     capture.microphone = None;
@@ -6235,6 +6247,7 @@ fn live_preview_session_params(
         audio: Default::default(),
         streaming: None,
         simulcast: None,
+        purpose: Default::default(),
     }
 }
 
@@ -7328,6 +7341,7 @@ async fn monitor_session(
                 pipeline: active.pipeline.clone(),
                 captioned_copy_requested: active.captioned_copy_requested,
                 keep_original_media: active.keep_original_media,
+                performance_check: active.performance_check,
                 native_audio_stats,
             }
         });
@@ -7661,6 +7675,7 @@ async fn monitor_session(
     // rest of finalization to a background job that is spawned only after the
     // terminal status is published.
     let mut pending_finalization_job: Option<PendingRecordingFinalizationJob> = None;
+    let performance_check_session = monitored_recording.performance_check;
     let terminal_status = match status {
         Ok(exit_status)
             if should_finalize_recording_session(
@@ -8189,7 +8204,14 @@ async fn monitor_session(
     state.emit_event("recording.status", terminal_status);
     publish_stop_timeline(&state, &stop_timeline_session_id, terminal_outcome).await;
     if let Some(job) = pending_finalization_job.take() {
-        tokio::spawn(run_recording_finalization_job(state.clone(), job));
+        if performance_check_session {
+            // No MP4 export, poster, captions or quality job for a benchmark:
+            // release the registry entry and export permit immediately.
+            state.recording_finalization.finish(&job.request.session_id);
+            drop(job);
+        } else {
+            tokio::spawn(run_recording_finalization_job(state.clone(), job));
+        }
     }
     drop(finalizing_permit);
 
@@ -9564,6 +9586,7 @@ struct MonitoredRecording {
     pipeline: RecordingPipeline,
     captioned_copy_requested: bool,
     keep_original_media: bool,
+    performance_check: bool,
     native_audio_stats: Option<NativeAudioStats>,
 }
 
@@ -11949,7 +11972,7 @@ fn windows_graphics_adapter_driver_identity_material(
 /// deliberately non-cacheable: reusing a verdict under an unknown driver is
 /// less safe than probing again.
 #[cfg(target_os = "windows")]
-fn graphics_adapter_driver_identity() -> String {
+pub(crate) fn graphics_adapter_driver_identity() -> String {
     query_windows_graphics_adapter_driver_identity().unwrap_or_else(|reason| {
         format!(
             "windows-adapter-driver-unavailable:{reason}:{}",
@@ -11959,7 +11982,7 @@ fn graphics_adapter_driver_identity() -> String {
 }
 
 #[cfg(not(target_os = "windows"))]
-fn graphics_adapter_driver_identity() -> String {
+pub(crate) fn graphics_adapter_driver_identity() -> String {
     format!(
         "platform={};windows-adapter-driver=not-applicable",
         std::env::consts::OS
@@ -17634,6 +17657,13 @@ fn enabled_streaming_targets(params: &StartSessionParams) -> Vec<&StreamTargetSe
 
 fn video_preset_defaults(preset: VideoPreset) -> VideoSettings {
     match preset {
+        VideoPreset::Tutorial720p30 => VideoSettings {
+            preset,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+        },
         VideoPreset::Tutorial1080p30 => VideoSettings {
             preset,
             width: 1920,
@@ -21346,6 +21376,7 @@ mod tests {
             },
             streaming: None,
             simulcast: None,
+            purpose: Default::default(),
         }
     }
 
@@ -21992,6 +22023,7 @@ mod tests {
             stream_targets_snapshot: Arc::new(StdMutex::new(snapshot)),
             captioned_copy_requested: false,
             keep_original_media: false,
+            performance_check: false,
             comment_highlight_available: false,
             _capture_permit: None,
             stop_intent_sender: None,
@@ -27398,6 +27430,7 @@ mod tests {
             })),
             captioned_copy_requested: false,
             keep_original_media: false,
+            performance_check: false,
             comment_highlight_available: false,
             _capture_permit: None,
             stop_intent_sender: Some(stop_intent_sender),

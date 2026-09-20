@@ -835,6 +835,8 @@ pub struct VideoSettings {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum VideoPreset {
+    #[serde(rename = "tutorial-720p30")]
+    Tutorial720p30,
     #[serde(rename = "tutorial-1080p30")]
     Tutorial1080p30,
     #[serde(rename = "tutorial-1440p30")]
@@ -902,6 +904,25 @@ pub struct StartSessionParams {
     /// only: never load-bearing for the start itself.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_at_ms: Option<u64>,
+    /// In-process only: never read from or written to the wire, so a client
+    /// cannot start a hidden session.
+    #[serde(skip)]
+    pub purpose: SessionPurpose,
+}
+
+/// Why a session exists. `PerformanceCheck` sessions are benchmark runs owned
+/// by `performance_check.rs`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum SessionPurpose {
+    #[default]
+    Capture,
+    PerformanceCheck,
+}
+
+impl SessionPurpose {
+    pub fn is_performance_check(self) -> bool {
+        self == Self::PerformanceCheck
+    }
 }
 
 /// The vertical leg of a dual-orientation session. The layout must be a
@@ -1371,6 +1392,83 @@ pub struct StreamOutputTopologyProbeResult {
     pub probe_state: StreamOutputTopologyProbeState,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback_reason: Option<String>,
+}
+
+/// `performance.check.run` params. The ceiling is the largest output worth
+/// testing on this machine (the renderer sends the larger of the selected
+/// output and the display's native size); the ladder walks down from there.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct PerformanceCheckRunParams {
+    pub ceiling_width: u32,
+    pub ceiling_height: u32,
+    pub ceiling_fps: u32,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PerformanceCheckRungVerdict {
+    Passed,
+    Failed,
+    /// Not run: a heavier rung failed so far below realtime that this one was
+    /// ruled out without spending the user's time on it.
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceCheckRung {
+    pub video: VideoSettings,
+    pub verdict: PerformanceCheckRungVerdict,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encode_backend: Option<EncodeBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compositor_backend: Option<CompositorBackend>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encoder_speed: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delivered_fps: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drain_after_stop_ms: Option<u64>,
+    /// Bounded reason codes; empty when the rung passed.
+    #[serde(default)]
+    pub reasons: Vec<String>,
+}
+
+/// A completed check. `capability_key` names the machine the verdict belongs
+/// to (OS, graphics adapter + driver, FFmpeg binary): when it no longer
+/// matches, the stored result is stale and the check runs again.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceCheckResult {
+    pub capability_key: String,
+    pub checked_at: String,
+    pub app_version: String,
+    pub duration_ms: u64,
+    pub recommended: VideoSettings,
+    /// True when nothing passed: the recommendation is the floor, unverified.
+    pub below_floor: bool,
+    pub rungs: Vec<PerformanceCheckRung>,
+}
+
+/// `performance.check.progress` event: which rung is being measured.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceCheckProgress {
+    pub rung_index: u32,
+    pub rung_count: u32,
+    pub video: VideoSettings,
+}
+
+/// `performance.check.get` result.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PerformanceCheckState {
+    pub running: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<PerformanceCheckResult>,
+    /// The stored result was measured on a different adapter/driver/FFmpeg.
+    pub stale: bool,
 }
 
 /// Which compositor rendered the active shared-compositor frame.
@@ -5054,6 +5152,64 @@ mod tests {
         assert!(legacy_wire.get("questionsTotal").is_none());
         let legacy: crate::cohost::CohostState = serde_json::from_value(legacy_wire).unwrap();
         assert_eq!(legacy, crate::cohost::CohostState::off());
+    }
+
+    #[test]
+    fn performance_check_contract_has_no_nulls_and_rejects_unknown_params() {
+        let video = VideoSettings {
+            preset: VideoPreset::Tutorial720p30,
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4000,
+        };
+        let result = PerformanceCheckResult {
+            capability_key: "performance-check-v1:abc".to_string(),
+            checked_at: "2026-09-20T00:00:00Z".to_string(),
+            app_version: "0.9.0".to_string(),
+            duration_ms: 6_000,
+            recommended: video.clone(),
+            below_floor: false,
+            rungs: vec![PerformanceCheckRung {
+                video,
+                verdict: PerformanceCheckRungVerdict::Passed,
+                encode_backend: None,
+                compositor_backend: None,
+                encoder_speed: Some(1.0),
+                delivered_fps: None,
+                drain_after_stop_ms: None,
+                reasons: Vec::new(),
+            }],
+        };
+        let state = PerformanceCheckState {
+            running: false,
+            result: Some(result.clone()),
+            stale: false,
+        };
+        let text = serde_json::to_string(&state).unwrap();
+        // serde null → contract trap: an Option without skip_serializing_if
+        // has taken the app down three times.
+        assert!(!text.contains("null"), "{text}");
+        assert!(text.contains("\"preset\":\"tutorial-720p30\""));
+        assert!(text.contains("\"verdict\":\"passed\""));
+        let decoded: PerformanceCheckState = serde_json::from_str(&text).unwrap();
+        assert_eq!(decoded.result, Some(result));
+        let idle = serde_json::to_string(&PerformanceCheckState {
+            running: true,
+            result: None,
+            stale: false,
+        })
+        .unwrap();
+        assert_eq!(idle, "{\"running\":true,\"stale\":false}");
+
+        assert!(
+            serde_json::from_value::<PerformanceCheckRunParams>(serde_json::json!({
+                "ceilingWidth": 1920, "ceilingHeight": 1080, "ceilingFps": 30,
+                "ffmpegPath": "/tmp/evil"
+            }))
+            .is_err(),
+            "unknown fields are rejected: the check never takes a client FFmpeg path"
+        );
     }
 
     #[test]

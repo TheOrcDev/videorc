@@ -5158,11 +5158,35 @@ fn missing_source_placeholder_bgra(
 /// encoder does real-content work.
 fn synthetic_hard_content_enabled() -> bool {
     static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT")
-            .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
-            .unwrap_or(false)
-    })
+    SYNTHETIC_HARD_CONTENT_OVERRIDE.load(std::sync::atomic::Ordering::Relaxed)
+        || *ENABLED.get_or_init(|| {
+            std::env::var("VIDEORC_SYNTHETIC_HARD_CONTENT")
+                .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
+                .unwrap_or(false)
+        })
+}
+
+/// Runtime switch for hard synthetic content. The performance check turns it
+/// on for the lifetime of its benchmark sessions: the cheap pattern encodes
+/// faster than realtime on any machine, so it would recommend 4K to a Celeron.
+/// Only one capture session exists at a time, so a process-wide flag is exact.
+static SYNTHETIC_HARD_CONTENT_OVERRIDE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Holds hard synthetic content on until dropped.
+pub(crate) struct SyntheticHardContentGuard(());
+
+impl SyntheticHardContentGuard {
+    pub(crate) fn engage() -> Self {
+        SYNTHETIC_HARD_CONTENT_OVERRIDE.store(true, std::sync::atomic::Ordering::Relaxed);
+        Self(())
+    }
+}
+
+impl Drop for SyntheticHardContentGuard {
+    fn drop(&mut self) {
+        SYNTHETIC_HARD_CONTENT_OVERRIDE.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 fn xorshift64(state: &mut u64) -> u64 {
@@ -8305,6 +8329,20 @@ mod tests {
                 .zip(first.bytes.chunks_exact(4).skip(1))
                 .any(|(left, right)| left != right),
             "pattern should have spatial contrast"
+        );
+
+        // Same test on purpose: the override is process-wide, so flipping it
+        // from a parallel test would race the size assertions above.
+        {
+            let _hard = SyntheticHardContentGuard::engage();
+            let hard = synthetic_test_pattern_bgra(7, 1920, 1080);
+            assert_eq!((hard.width, hard.height), (480, 270));
+            assert_ne!(hard.bytes, synthetic_test_pattern_bgra(8, 1920, 1080).bytes);
+        }
+        assert_eq!(
+            synthetic_test_pattern_bgra(7, 1920, 1080).width,
+            SYNTHETIC_TEST_PATTERN_WIDTH,
+            "dropping the guard restores the cheap pattern"
         );
     }
 

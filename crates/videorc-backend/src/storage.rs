@@ -62,6 +62,8 @@ pub struct SessionCloneFacts {
     pub mp4_path: Option<String>,
 }
 
+const PERFORMANCE_CHECK_PROCESSING_KIND: &str = "performance-check";
+
 #[derive(Debug, Clone)]
 pub struct NewSession {
     pub id: String,
@@ -1347,6 +1349,42 @@ impl Database {
             ],
         )?;
         Ok(())
+    }
+
+    /// Hides a benchmark session from every Library read (`library_hidden`)
+    /// and tags it so leftovers from a crash can be swept at the next check.
+    pub fn mark_session_performance_check(&self, session_id: &str) -> Result<()> {
+        let conn = self.lock()?;
+        conn.execute(
+            "UPDATE sessions
+                SET library_hidden = 1, processing_kind = ?2, title = 'Performance check'
+              WHERE id = ?1",
+            params![session_id, PERFORMANCE_CHECK_PROCESSING_KIND],
+        )?;
+        Ok(())
+    }
+
+    /// Output paths of every benchmark row, then deletes the rows (session
+    /// logs and health events cascade). The caller unlinks the files: they
+    /// live in the app's own PerformanceChecks directory, never user media.
+    pub fn take_performance_check_sessions(&self) -> Result<Vec<String>> {
+        let conn = self.lock()?;
+        let paths = {
+            let mut statement = conn.prepare(
+                "SELECT output_path FROM sessions
+                  WHERE processing_kind = ?1 AND output_path IS NOT NULL",
+            )?;
+            statement
+                .query_map(params![PERFORMANCE_CHECK_PROCESSING_KIND], |row| {
+                    row.get::<_, String>(0)
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        conn.execute(
+            "DELETE FROM sessions WHERE processing_kind = ?1",
+            params![PERFORMANCE_CHECK_PROCESSING_KIND],
+        )?;
+        Ok(paths)
     }
 
     /// Insert an imported session directly in its truthful terminal state.
@@ -6994,6 +7032,36 @@ mod tests {
                 Ok(())
             })
             .unwrap()
+    }
+
+    #[test]
+    fn performance_check_sessions_are_hidden_then_taken_without_touching_captures() {
+        let database = Database::open_in_memory_for_tests();
+        database.create_session(&sample_session("capture")).unwrap();
+        database
+            .create_session(&sample_session("benchmark"))
+            .unwrap();
+        database
+            .mark_session_performance_check("benchmark")
+            .unwrap();
+        database
+            .add_session_log("benchmark", HealthLevel::Info, "code", "message", None)
+            .unwrap();
+
+        let page = database.list_session_items_page(None, 20).unwrap();
+        let ids: Vec<_> = page.items.iter().map(|item| item.id.as_str()).collect();
+        assert_eq!(ids, vec!["capture"]);
+
+        let paths = database.take_performance_check_sessions().unwrap();
+        assert_eq!(paths, vec!["/tmp/videorc-test.mkv".to_string()]);
+        assert!(
+            database
+                .take_performance_check_sessions()
+                .unwrap()
+                .is_empty()
+        );
+        let page = database.list_session_items_page(None, 20).unwrap();
+        assert_eq!(page.items.len(), 1, "the user's capture must survive");
     }
 
     fn sample_session(id: &str) -> NewSession {

@@ -42,6 +42,7 @@ mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
 mod panic_hook;
+mod performance_check;
 mod pipeline;
 mod posters;
 mod preflight;
@@ -4631,9 +4632,11 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
             max_execution_age: WEBSOCKET_PROBE_MUTATION_MAX_EXECUTION_AGE,
         }),
 
-        COMMAND_LANE_SMOKE_BLOCK_METHOD | "noiseCleanup.start" | "noiseCleanup.cancel" => {
-            Some(DEFAULT_MUTATION_POLICY)
-        }
+        COMMAND_LANE_SMOKE_BLOCK_METHOD
+        | "noiseCleanup.start"
+        | "noiseCleanup.cancel"
+        | "performance.check.run"
+        | "performance.check.cancel" => Some(DEFAULT_MUTATION_POLICY),
 
         "session.start" | "session.stop" | "recording.stop" | "recording.start_test" => {
             Some(SessionLifecycle)
@@ -4668,6 +4671,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "audio.meter.probeNative"
         | "scene.get"
         | "stream.output.topology.probe"
+        | "performance.check.get"
         | "sessions.list"
         | "sessions.healthEvents.list"
         | "sessions.logs.list"
@@ -6549,6 +6553,11 @@ async fn relay_websocket_events(
 
         // A recovery frame is mandatory connection control, not an ordinary event a
         // renderer can exclude. Keep the pre-bounded-queue protocol behavior intact.
+        // Benchmark sessions are invisible to every client; see
+        // `performance_check::SUPPRESSED_EVENTS` for why this is the relay's job.
+        if !is_recovery && state.performance_check.suppresses_event(&event.event) {
+            continue;
+        }
         let allowed = is_recovery
             || event_filter
                 .lock()
@@ -8681,6 +8690,31 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        "performance.check.get" => {
+            ServerResponse::ok(command.id, performance_check::current_state(state).await)
+        }
+        "performance.check.run" => {
+            match serde_json::from_value::<protocol::PerformanceCheckRunParams>(command.params) {
+                Ok(params) => match performance_check::start(state.clone(), params).await {
+                    Ok(()) => ServerResponse::ok(
+                        command.id,
+                        performance_check::current_state(state).await,
+                    ),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "performance-check-refused",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "performance.check.cancel" => {
+            state.performance_check.request_cancel();
+            ServerResponse::ok(command.id, performance_check::current_state(state).await)
         }
         "session.start" => {
             let mut params_value = command.params;
