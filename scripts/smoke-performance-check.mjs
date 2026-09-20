@@ -88,7 +88,10 @@ try {
   const second = await rpc.expectError('performance.check.run', ceiling)
   assert.equal(second.code, 'performance-check-refused', 'a second run is refused, not queued')
 
-  const result = await withTimeout(completed, timeoutMs, 'performance.check.completed')
+  const completedState = await withTimeout(completed, timeoutMs, 'performance.check.completed')
+  assert.equal(completedState.running, false, 'completed is published after the run ended')
+  const result = completedState.result
+  assert.ok(result, 'a finished check carries its verdict')
   assert.ok(Array.isArray(result.rungs) && result.rungs.length > 0, 'completed carries the rungs')
   console.log(
     result.rungs
@@ -133,6 +136,27 @@ try {
   assert.equal(after.running, false)
   assert.equal(after.stale, false)
   assert.deepEqual(after.result, result, 'the verdict is persisted and served back verbatim')
+
+  // A cancelled check keeps the previous verdict and frees the capture slot.
+  running = true
+  const cancelledRun = new Promise((resolve) => {
+    socket.addEventListener('message', function onMessage(event) {
+      const message = JSON.parse(String(event.data))
+      if (message.event === 'performance.check.completed') {
+        socket.removeEventListener('message', onMessage)
+        resolve(message.payload)
+      }
+    })
+  })
+  await rpc('performance.check.run', ceiling)
+  await new Promise((resolve) => setTimeout(resolve, 1200))
+  const cancelStarted = Date.now()
+  await rpc('performance.check.cancel')
+  const cancelled = await withTimeout(cancelledRun, 15000, 'cancelled performance check')
+  running = false
+  console.log(`cancel settled in ${Date.now() - cancelStarted}ms`)
+  assert.deepEqual(cancelled.result, result, 'a cancelled run keeps the previous verdict')
+  assert.deepEqual(leaked, [], 'a cancelled benchmark stays invisible too')
 
   const sessions = (await rpc('sessions.list', { limit: 50 })).items
   assert.deepEqual(sessions, [], 'benchmark sessions never appear in the Library')

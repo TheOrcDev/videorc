@@ -14,18 +14,18 @@ vi.mock('sonner', () => ({ toast: toastSpies }))
 import type {
   AccountCallbackEnvelope,
   AiArtifact,
+  AudioMeterResult,
+  BackendConnection,
+  CaptureRecoveryStatus,
   CohostSettings,
   CohostSettingsPatch,
   CohostState,
-  AudioMeterResult,
-  BackendConnection,
   CommentHighlightCommand,
   CommentHighlightState,
-  CompositorStatus,
-  CaptureRecoveryStatus,
   CommentsCommandResolution,
   CommentsSendCommand,
   CommentsSendOperation,
+  CompositorStatus,
   DeviceList,
   HealthEvent,
   LayoutSettings,
@@ -33,6 +33,7 @@ import type {
   LiveChatSnapshot,
   NoiseCleanupJob,
   OAuthCallbackEnvelope,
+  PerformanceCheckState,
   PlatformAccountValidation,
   PreviewSurfaceBounds,
   PreviewSurfaceStatus,
@@ -41,8 +42,8 @@ import type {
   Scene,
   SessionLogEntry,
   SessionSummary,
-  StreamScreen,
   StreamOutputTopologyProbeResult,
+  StreamScreen,
   VideorcAccountSnapshot,
   VideorcApi
 } from '../../../shared/backend'
@@ -67,7 +68,12 @@ import {
   type StudioRecordingContextValue
 } from './use-studio'
 import { DEFAULT_BASIC_ENTITLEMENTS, PREMIUM_STREAMING_LIMITS } from '../lib/entitlements'
-import { defaultCaptureConfig, videoPresets, type CaptureConfig } from '../lib/capture'
+import {
+  defaultCaptureConfig,
+  STORAGE_KEYS,
+  videoPresets,
+  type CaptureConfig
+} from '../lib/capture'
 import { deriveNoiseCleanupView } from '../lib/noise-cleanup-view'
 import { SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY } from '../lib/screen-takeover-microphone'
 import type {
@@ -322,8 +328,13 @@ function compositorFor(scene: Scene, layout: LayoutSettings, revision: number): 
   }
 }
 
+// The horizontal output a fresh install records at; asserted by value so a
+// default change (1440p30 → 1080p30 with the performance check) stays one edit.
+const DEFAULT_OUTPUT = defaultCaptureConfig.video
+
 class StudioBackend {
   sockets: TestWebSocket[] = []
+  performanceCheck: PerformanceCheckState = { running: false, stale: false }
   commands: BackendCommand[] = []
   sentCommands: BackendCommand[] = []
   currentLayout = defaultCaptureConfig.layout
@@ -1083,6 +1094,9 @@ class StudioBackend {
           durationMs: 1_000,
           message: 'Saved.'
         }
+      case 'performance.check.get':
+        // Measured and current: the provider must not start a check on mount.
+        return this.performanceCheck
       default:
         return null
     }
@@ -7952,18 +7966,18 @@ describe('real StudioProvider lifecycle', () => {
       }
       return (
         params.layout?.layoutPreset === 'vertical-screen-camera' &&
-        params.video?.width === 2560 &&
-        params.video?.height === 1440
+        params.video?.width === DEFAULT_OUTPUT.width &&
+        params.video?.height === DEFAULT_OUTPUT.height
       )
     })
     expect(reverseMixedReloads).toEqual([])
     await waitForObservation(
       () =>
         latest()?.core.captureConfig.layout.layoutPreset === 'screen-camera' &&
-        latest()?.core.captureConfig.video.width === 2560 &&
-        latest()?.core.captureConfig.video.height === 1440
+        latest()?.core.captureConfig.video.width === DEFAULT_OUTPUT.width &&
+        latest()?.core.captureConfig.video.height === DEFAULT_OUTPUT.height
     )
-    expect(previewAspectCalls.at(-1)).toEqual([2560, 1440])
+    expect(previewAspectCalls.at(-1)).toEqual([DEFAULT_OUTPUT.width, DEFAULT_OUTPUT.height])
 
     await act(async () => {
       await latest()?.core.startSession()
@@ -7972,7 +7986,7 @@ describe('real StudioProvider lifecycle', () => {
       backend.commands.filter((command) => command.method === 'session.start').at(-1)?.params
     ).toMatchObject({
       layout: { layoutPreset: 'screen-camera' },
-      output: { video: { width: 2560, height: 1440 } }
+      output: { video: { width: DEFAULT_OUTPUT.width, height: DEFAULT_OUTPUT.height } }
     })
     await act(async () => {
       await latest()?.core.stopSession()
@@ -8198,6 +8212,75 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.account).toEqual(refreshedAccount)
     expect(backend.sentCommands.filter((command) => command.method === 'account.get').length).toBe(
       accountGetsBeforeRefresh
+    )
+  })
+
+  it.each([
+    { chosen: false, expectedHeight: 720, label: 'moves an untouched install to' },
+    {
+      chosen: true,
+      expectedHeight: DEFAULT_OUTPUT.height,
+      label: 'only suggests to a chosen output'
+    }
+  ])('$label the measured output', async ({ chosen, expectedHeight }) => {
+    const backend = new StudioBackend()
+    // The UHD 600 shape: the shipped default is too heavy, only 720p30 held.
+    backend.performanceCheck = {
+      running: false,
+      stale: false,
+      result: {
+        capabilityKey: 'performance-check-v1:test',
+        checkedAt: '2026-09-20T00:00:00Z',
+        appVersion: '0.9.96',
+        durationMs: 12_000,
+        recommended: videoPresets['tutorial-720p30'],
+        belowFloor: false,
+        rungs: [
+          { video: videoPresets['tutorial-1080p30'], verdict: 'failed', reasons: ['x'] },
+          { video: videoPresets['tutorial-720p30'], verdict: 'passed', reasons: [] }
+        ]
+      }
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    if (chosen) {
+      localStorage.setItem(STORAGE_KEYS.outputChosenByUser, '1')
+    }
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(() => latest()?.core.performanceCheck?.result !== undefined)
+    await waitForObservation(() => latest()?.core.captureConfig.video.height === expectedHeight)
+    // Dev/test builds are not packaged: the provider never starts a check itself.
+    expect(backend.commands.some((command) => command.method === 'performance.check.run')).toBe(
+      false
     )
   })
 

@@ -372,7 +372,10 @@ export const STORAGE_KEYS = {
   captureConfig: 'videorc.captureConfig',
   onboarding: 'videorc.onboardingComplete',
   theme: 'videorc.theme',
-  backgroundAssets: 'videorc.backgroundAssets'
+  backgroundAssets: 'videorc.backgroundAssets',
+  // Set once the user picks an output themselves; from then on a performance
+  // check only suggests, never applies.
+  outputChosenByUser: 'videorc.outputChosenByUser'
 } as const
 
 // Permissions onboarding: ANY stored value means "seen/dismissed" — the gate
@@ -513,6 +516,15 @@ export function defaultStreamingSettings(): StreamingSettings {
 }
 
 export const videoPresets: Record<VideoPreset, VideoSettings> = {
+  // Floor of the performance-check ladder: what a machine that cannot hold
+  // 1080p30 records at. Mirrors the backend's Tutorial720p30.
+  'tutorial-720p30': {
+    preset: 'tutorial-720p30',
+    width: 1280,
+    height: 720,
+    fps: 30,
+    bitrateKbps: 4000
+  },
   'tutorial-1080p30': {
     preset: 'tutorial-1080p30',
     width: 1920,
@@ -612,6 +624,7 @@ export const recordingVideoPresetOptions: VideoPresetOption[] = [
   { value: 'record-4k60-experimental', label: 'Record 4K60 experimental', tone: 'warning' },
   { value: 'tutorial-1440p30', label: 'Tutorial 1440p30' },
   { value: 'tutorial-1080p30', label: 'Tutorial 1080p30' },
+  { value: 'tutorial-720p30', label: 'Tutorial 720p30' },
   { value: 'vertical-1080x1920', label: 'Vertical 1080×1920 (9:16)' }
 ]
 
@@ -1116,7 +1129,9 @@ export const defaultCaptureConfig: CaptureConfig = {
     microphoneSyncOffsetMs: 0,
     microphoneSyncOffsetUserSet: false
   },
-  video: videoPresets['tutorial-1440p30'],
+  // 1080p30 until the performance check has measured this computer: the old
+  // 1440p default sent an Intel UHD 600 into a 0.28x software encode.
+  video: videoPresets['tutorial-1080p30'],
   recordEnabled: true,
   streamEnabled: false,
   rtmpPreset: 'youtube',

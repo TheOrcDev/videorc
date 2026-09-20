@@ -2510,6 +2510,10 @@ async fn commit_recording_startup_scene_at_time(
 }
 
 pub async fn start_session(state: AppState, params: StartSessionParams) -> Result<RecordingStatus> {
+    if !params.purpose.is_performance_check() {
+        // The user's Record always wins over a background benchmark.
+        crate::performance_check::yield_to_capture(&state).await;
+    }
     // Latency timeline (instant-record plan): marks are first-wins and the
     // publish runs after the user-visible edge, so telemetry cannot delay or
     // fail the start.

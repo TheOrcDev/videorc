@@ -3,7 +3,7 @@ import type { ReactElement } from 'react'
 import { Fragment } from 'react'
 
 import { SelectGroup, SelectItem, SelectLabel, SelectSeparator } from '@/components/ui/select'
-import type { EntitlementsSnapshot } from '@/lib/backend'
+import type { EntitlementsSnapshot, PerformanceCheckResult } from '@/lib/backend'
 import {
   customVideoPresetOption,
   legacyVideoPresetOptions,
@@ -14,6 +14,7 @@ import {
   type VideoPresetOption
 } from '@/lib/capture'
 import { videoProfileEntitlementGate } from '@/lib/entitlement-ui'
+import { outputVerdict } from '@/lib/performance-check'
 
 // When the select edits the CANVAS, the Studio mode owns the orientation —
 // only same-orientation presets are offered (Custom always stays). Stream-leg
@@ -26,11 +27,14 @@ function matchesOrientation(option: VideoPresetOption, orientation: LayoutOrient
 export function VideoPresetSelectItems({
   entitlements,
   kind,
-  orientation
+  orientation,
+  performanceResult
 }: {
   entitlements: EntitlementsSnapshot | null
   kind: 'recording' | 'streaming'
   orientation?: LayoutOrientation
+  /** When given, each preset shows what this computer measured for it. */
+  performanceResult?: PerformanceCheckResult
 }): ReactElement {
   const groups: { label: string; options: VideoPresetOption[] }[] = [
     { label: 'Recording', options: recordingVideoPresetOptions },
@@ -56,6 +60,7 @@ export function VideoPresetSelectItems({
               key={option.value}
               kind={kind}
               option={option}
+              performanceResult={performanceResult}
             />
           ))}
           <SelectSeparator />
@@ -69,17 +74,21 @@ export function VideoPresetSelectItems({
 function VideoPresetSelectItem({
   entitlements,
   kind,
-  option
+  option,
+  performanceResult
 }: {
   entitlements: EntitlementsSnapshot | null
   kind: 'recording' | 'streaming'
   option: VideoPresetOption
+  performanceResult?: PerformanceCheckResult
 }): ReactElement {
   const gate = videoProfileEntitlementGate({
     entitlements,
     kind,
     video: videoPresets[option.value]
   })
+
+  const verdict = outputVerdict(videoPresets[option.value], performanceResult)
 
   return (
     <SelectItem
@@ -93,6 +102,10 @@ function VideoPresetSelectItem({
         <span className="ml-auto inline-flex items-center gap-1 text-xs text-muted-foreground">
           <LockIcon className="size-3" weight="fill" />
           {gate.upgradeUrl ? 'Premium' : 'Locked'}
+        </span>
+      ) : verdict !== 'unknown' ? (
+        <span className="ml-auto text-xs text-muted-foreground">
+          {verdict === 'verified' ? 'Verified' : 'Too heavy'}
         </span>
       ) : null}
     </SelectItem>

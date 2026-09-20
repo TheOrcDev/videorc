@@ -89,6 +89,14 @@ import {
   type WsStatus
 } from '@/lib/capture'
 import {
+  autoApplyPreset,
+  isShippedDefaultOutput,
+  outputLabel,
+  outputVerdict,
+  performanceCheckCeiling,
+  shouldRunPerformanceCheck
+} from '@/lib/performance-check'
+import {
   decideCancelGoLiveConfirmation,
   decideContinueGoLiveWithReadyDestinations,
   decideGoLivePreflight,
@@ -217,6 +225,8 @@ import type {
   PreviewSupervisorState,
   PreviewWindowMode,
   PreviewWindowState,
+  PerformanceCheckProgress,
+  PerformanceCheckState,
   PreviewLiveStatus,
   PlatformAccount,
   PlatformAccountValidation,
@@ -449,6 +459,24 @@ const LIVE_CHAT_RECOVERY_RETRY_DELAY_MS = 250
 const SCENE_TRANSITION_MS = 320
 
 const SESSION_LIST_PAGE_LIMIT = 50
+// Long enough for first paint, preview warm-up and the bootstrap burst.
+const PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS = 8_000
+
+function outputChosenByUser(): boolean {
+  try {
+    return localStorage.getItem(STORAGE_KEYS.outputChosenByUser) !== null
+  } catch {
+    return true
+  }
+}
+
+function markOutputChosenByUser(): void {
+  try {
+    localStorage.setItem(STORAGE_KEYS.outputChosenByUser, '1')
+  } catch {
+    // Storage unavailable: the check then only ever suggests.
+  }
+}
 export const SESSION_DETAIL_BUFFER_LIMIT = 120
 const SESSION_DETAIL_CACHE_LIMIT = 8
 
@@ -1049,6 +1077,10 @@ export type StudioContextValue = {
   ) => Promise<void>
   patchVideo: (patch: Partial<VideoSettings>) => void
   applyVideoPreset: (preset: VideoPreset, options?: { kind?: 'recording' | 'streaming' }) => void
+  /** What this computer measured; undefined until the backend answered. */
+  performanceCheck: PerformanceCheckState | undefined
+  performanceCheckProgress: PerformanceCheckProgress | null
+  runPerformanceCheck: () => Promise<void>
   applyRtmpPreset: (preset: RtmpPreset) => void
   patchStreamingTarget: (targetId: string, patch: Partial<StreamTargetSettings>) => void
   resolveGoLiveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => Promise<void>
@@ -11820,6 +11852,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const patchVideo = useCallback((patch: Partial<VideoSettings>) => {
+    markOutputChosenByUser()
     setCaptureConfig((current) => ({
       ...current,
       // The Studio mode owns the canvas orientation — a patch that would
@@ -11846,6 +11879,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
+      markOutputChosenByUser()
       setCaptureConfig((current) => ({
         ...current,
         video: coerceVideoToOrientation(video, layoutPresetOrientation(current.layout.layoutPreset))
@@ -11853,6 +11887,107 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [entitlements]
   )
+
+  // Performance check. The backend owns the measurement; this only decides
+  // when to ask for one and whether its verdict may move the output.
+  const [performanceCheck, setPerformanceCheck] = useState<PerformanceCheckState>()
+  const [performanceCheckProgress, setPerformanceCheckProgress] =
+    useState<PerformanceCheckProgress | null>(null)
+  const performanceCheckAutoRunRef = useRef(false)
+
+  const commitPerformanceCheck = useCallback((next: PerformanceCheckState) => {
+    setPerformanceCheck(next)
+    if (!next.running) {
+      setPerformanceCheckProgress(null)
+    }
+    // An install that never picked an output follows the measurement; anyone
+    // who chose one only ever gets the suggestion in Recording → Output.
+    if (next.running || next.stale || !next.result || outputChosenByUser()) {
+      return
+    }
+    const preset = autoApplyPreset(next.result)
+    if (!preset) {
+      return
+    }
+    setCaptureConfig((current) => {
+      if (!isShippedDefaultOutput(current.video)) {
+        return current
+      }
+      const video = coerceVideoToOrientation(
+        videoPresets[preset],
+        layoutPresetOrientation(current.layout.layoutPreset)
+      )
+      return current.video.width === video.width &&
+        current.video.height === video.height &&
+        current.video.fps === video.fps
+        ? current
+        : { ...current, video }
+    })
+  }, [])
+
+  const runPerformanceCheck = useCallback(async () => {
+    if (!client) {
+      return
+    }
+    const display = {
+      width: window.screen.width * window.devicePixelRatio,
+      height: window.screen.height * window.devicePixelRatio
+    }
+    setPerformanceCheck(
+      await client.requestTyped(
+        'performance.check.run',
+        performanceCheckCeiling(captureConfigRef.current.video, display)
+      )
+    )
+  }, [client])
+
+  useEffect(() => {
+    if (!client || wsStatus !== 'connected') {
+      return
+    }
+    const unsubscribers = [
+      client.on('performance.check.progress', setPerformanceCheckProgress),
+      client.on('performance.check.completed', (next) => {
+        commitPerformanceCheck(next)
+        // News the interface does not already show: a chosen output this
+        // computer measurably cannot hold. Said once per finished check.
+        const chosen = captureConfigRef.current.video
+        if (
+          next.result &&
+          !isShippedDefaultOutput(chosen) &&
+          outputVerdict(chosen, next.result) === 'too-heavy'
+        ) {
+          toast.warning(`${outputLabel(chosen)} is too heavy for this computer`, {
+            description: `Recordings will stutter. ${outputLabel(next.result.recommended)} held steady — switch in Recording → Output.`
+          })
+        }
+      })
+    ]
+    void client
+      .requestTyped('performance.check.get')
+      .then(commitPerformanceCheck)
+      // An older backend has no such method; the Output panel just stays quiet.
+      .catch(() => undefined)
+    return () => unsubscribers.forEach((unsubscribe) => unsubscribe())
+  }, [client, commitPerformanceCheck, wsStatus])
+
+  // Measure once per machine, after the app has settled. Packaged builds only:
+  // dev sessions and smokes start captures immediately and use the button.
+  useEffect(() => {
+    if (
+      performanceCheckAutoRunRef.current ||
+      !runtimeInfo?.isPackaged ||
+      recording.state !== 'idle' ||
+      !shouldRunPerformanceCheck(performanceCheck)
+    ) {
+      return
+    }
+    const timer = window.setTimeout(() => {
+      performanceCheckAutoRunRef.current = true
+      void runPerformanceCheck().catch(() => undefined)
+    }, PERFORMANCE_CHECK_AUTO_RUN_DELAY_MS)
+    return () => window.clearTimeout(timer)
+  }, [performanceCheck, recording.state, runPerformanceCheck, runtimeInfo?.isPackaged])
 
   const applyRtmpPreset = useCallback((preset: RtmpPreset) => {
     setCaptureConfig((current) => ({
@@ -12660,6 +12795,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyLayoutPatch,
       patchVideo,
       applyVideoPreset,
+      performanceCheck,
+      performanceCheckProgress,
+      runPerformanceCheck,
       applyRtmpPreset,
       patchStreamingTarget,
       resolveGoLiveBlocker,
@@ -12860,6 +12998,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applyLayoutPatch,
       patchVideo,
       applyVideoPreset,
+      performanceCheck,
+      performanceCheckProgress,
+      runPerformanceCheck,
       applyRtmpPreset,
       patchStreamingTarget,
       resolveGoLiveBlocker,

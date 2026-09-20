@@ -615,6 +615,7 @@ export interface ActiveSceneState {
 
 export type RtmpPreset = 'youtube' | 'twitch' | 'x' | 'custom'
 export type VideoPreset =
+  | 'tutorial-720p30'
   | 'tutorial-1080p30'
   | 'tutorial-1440p30'
   | 'record-4k30'
@@ -1332,6 +1333,53 @@ export interface StreamOutputTopologyProbeResult {
 }
 
 export type CompositorBackend = 'metal' | 'd3d11' | 'cpu' | 'cpu-fallback'
+
+/**
+ * Performance check: the backend records short synthetic sessions through the
+ * real pipeline and walks down from this ceiling until one holds.
+ */
+export interface PerformanceCheckRunParams {
+  ceilingWidth: number
+  ceilingHeight: number
+  ceilingFps: number
+}
+
+export type PerformanceCheckRungVerdict = 'passed' | 'failed' | 'skipped'
+
+export interface PerformanceCheckRung {
+  video: VideoSettings
+  verdict: PerformanceCheckRungVerdict
+  encodeBackend?: EncodeBackend
+  compositorBackend?: CompositorBackend
+  encoderSpeed?: number
+  deliveredFps?: number
+  drainAfterStopMs?: number
+  reasons: string[]
+}
+
+export interface PerformanceCheckResult {
+  capabilityKey: string
+  checkedAt: string
+  appVersion: string
+  durationMs: number
+  recommended: VideoSettings
+  /** Nothing passed: the recommendation is the floor, unverified. */
+  belowFloor: boolean
+  rungs: PerformanceCheckRung[]
+}
+
+export interface PerformanceCheckState {
+  running: boolean
+  result?: PerformanceCheckResult
+  /** Measured on a different GPU, driver or app version. */
+  stale: boolean
+}
+
+export interface PerformanceCheckProgress {
+  rungIndex: number
+  rungCount: number
+  video: VideoSettings
+}
 
 export type WindowsD3d11MediaState =
   | 'unavailable'

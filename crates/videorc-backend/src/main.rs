@@ -10498,6 +10498,7 @@ async fn export_support_bundle_for_state(
         diagnostics: current_diagnostics_stats(state).await,
         logs: state.recent_logs(200),
         sessions,
+        performance_check: performance_check::current_state(state).await.result,
     })
 }
 

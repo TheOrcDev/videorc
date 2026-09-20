@@ -60,6 +60,15 @@ mkdirSync(outputDirectory, { recursive: true })
 // now serves. 4K60 must use its experimental preset at the EXACT pinned
 // values (validate_video_profile_policy rejects any deviation).
 const MATRIX = [
+  // Floor of the performance-check ladder (tutorial-720p30).
+  {
+    label: '720p30',
+    preset: 'tutorial-720p30',
+    width: 1280,
+    height: 720,
+    fps: 30,
+    bitrateKbps: 4000
+  },
   { label: '1080p30', width: 1920, height: 1080, fps: 30, bitrateKbps: 6000 },
   { label: '1080p60', width: 1920, height: 1080, fps: 60, bitrateKbps: 12000 },
   { label: '1440p30', width: 2560, height: 1440, fps: 30, bitrateKbps: 8000 },

@@ -195,6 +195,7 @@ const RUNG_START_TIMEOUT: Duration = Duration::from_secs(15);
 const CANCEL_POLL: Duration = Duration::from_millis(200);
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(500);
 const TOTAL_BUDGET: Duration = Duration::from_secs(45);
+const YIELD_TO_CAPTURE_TIMEOUT: Duration = Duration::from_secs(8);
 
 /// Events a benchmark session emits that must never reach a client: the
 /// renderer would flip to "Recording", toast health warnings and patch Library
@@ -261,6 +262,21 @@ fn benchmark_directory() -> PathBuf {
         .join("PerformanceChecks")
 }
 
+/// A real session start cancels a running check and waits for its benchmark
+/// session to leave the capture slot. Bounded: a wedged check must never hold
+/// a recording hostage — past the deadline the start proceeds and reports the
+/// conflict itself.
+pub async fn yield_to_capture(state: &AppState) {
+    if !state.performance_check.is_running() {
+        return;
+    }
+    state.performance_check.request_cancel();
+    let deadline = Instant::now() + YIELD_TO_CAPTURE_TIMEOUT;
+    while state.performance_check.is_running() && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
 pub async fn current_state(state: &AppState) -> PerformanceCheckState {
     let result = state
         .database
@@ -297,17 +313,15 @@ pub async fn start(state: AppState, params: PerformanceCheckRunParams) -> Result
             run_ladder(&state, &params).await
         };
         // Emitted after the guard dropped so `get` never reports running
-        // alongside a completed event.
-        match outcome {
-            Ok(result) => state.emit_event("performance.check.completed", result),
-            Err(error) => {
-                state.emit_log(
-                    "warn",
-                    format!("Performance check did not finish: {error:#}"),
-                );
-                state.emit_event("performance.check.completed", current_state(&state).await);
-            }
+        // alongside a completed event. The payload is always the `get` shape;
+        // a cancelled or failed run simply carries the previous verdict.
+        if let Err(error) = outcome {
+            state.emit_log(
+                "warn",
+                format!("Performance check did not finish: {error:#}"),
+            );
         }
+        state.emit_event("performance.check.completed", current_state(&state).await);
     });
     Ok(())
 }
@@ -535,6 +549,8 @@ async fn measure_rung(
     measurement.fifo_write_p95_ms = stats
         .encoder_bridge_raw_video_fifo_write_p95_ms
         .or(stats.encoder_bridge_encoded_fifo_write_p95_ms);
+    // Calibration aid: logs every populated timing/drop signal for the rung so
+    // a new machine class can be added to performance-check-calibration.md.
     if std::env::var("VIDEORC_PERFORMANCE_CHECK_DUMP").is_ok()
         && let Ok(serde_json::Value::Object(map)) = serde_json::to_value(&stats)
     {

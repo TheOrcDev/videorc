@@ -42,6 +42,9 @@ import type {
   SessionStopParams,
   SessionStorageTotals,
   StartSessionParams,
+  PerformanceCheckProgress,
+  PerformanceCheckRunParams,
+  PerformanceCheckState,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
   StreamPlatform,
@@ -104,6 +107,9 @@ export interface BackendRpcMethodMap {
     StreamOutputTopologyProbeParams,
     StreamOutputTopologyProbeResult
   >
+  'performance.check.get': BackendRpcDefinition<undefined, PerformanceCheckState>
+  'performance.check.run': BackendRpcDefinition<PerformanceCheckRunParams, PerformanceCheckState>
+  'performance.check.cancel': BackendRpcDefinition<undefined, PerformanceCheckState>
   'stream.targets.snapshot': BackendRpcDefinition<undefined, StreamTargetsSnapshot>
   'session.start': BackendRpcDefinition<StartSessionParams, RecordingStatus>
   'session.stop': BackendRpcDefinition<SessionStopParams | undefined, RecordingStatus>
@@ -178,6 +184,8 @@ export interface BackendEventMap {
   'capture.recovery.status': CaptureRecoveryStatus
   'diagnostics.stats': DiagnosticStats
   'cohost.state': CohostState
+  'performance.check.progress': PerformanceCheckProgress
+  'performance.check.completed': PerformanceCheckState
 }
 
 export type BackendEvent = keyof BackendEventMap
@@ -350,6 +358,7 @@ const recordingStatusSchema = objectSchema(
 const videoSettingsSchema = objectSchema(
   {
     preset: enumSchema([
+      'tutorial-720p30',
       'tutorial-1080p30',
       'tutorial-1440p30',
       'record-4k30',
@@ -402,6 +411,49 @@ const streamOutputTopologyProbeParamsFields = objectSchema(
   },
   { allowUnknown: false }
 )
+
+const performanceCheckDimension = numberSchema({ integer: true, min: 16, max: 8192 })
+const performanceCheckRunParamsSchema = objectSchema(
+  {
+    ceilingWidth: performanceCheckDimension,
+    ceilingHeight: performanceCheckDimension,
+    ceilingFps: numberSchema({ integer: true, min: 1, max: 240 })
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<PerformanceCheckRunParams>
+
+const performanceCheckRungSchema = objectSchema({
+  video: videoSettingsSchema,
+  verdict: enumSchema(['passed', 'failed', 'skipped']),
+  encodeBackend: optionalSchema(encodeBackendSchema),
+  compositorBackend: optionalSchema(enumSchema(['metal', 'd3d11', 'cpu', 'cpu-fallback'])),
+  encoderSpeed: optionalSchema(numberSchema({ min: 0 })),
+  deliveredFps: optionalSchema(numberSchema({ min: 0 })),
+  drainAfterStopMs: optionalSchema(nonNegativeInteger),
+  reasons: arraySchema(stringSchema({ maxLength: 64 }), { maxLength: 16 })
+})
+
+const performanceCheckStateSchema = objectSchema({
+  running: booleanSchema,
+  result: optionalSchema(
+    objectSchema({
+      capabilityKey: stringSchema({ maxLength: 128 }),
+      checkedAt: stringSchema({ maxLength: 64 }),
+      appVersion: stringSchema({ maxLength: 64 }),
+      durationMs: nonNegativeInteger,
+      recommended: videoSettingsSchema,
+      belowFloor: booleanSchema,
+      rungs: arraySchema(performanceCheckRungSchema, { maxLength: 16 })
+    })
+  ),
+  stale: booleanSchema
+}) as RuntimeSchema<PerformanceCheckState>
+
+const performanceCheckProgressSchema = objectSchema({
+  rungIndex: nonNegativeInteger,
+  rungCount: nonNegativeInteger,
+  video: videoSettingsSchema
+}) as RuntimeSchema<PerformanceCheckProgress>
 
 const streamOutputTopologyProbeParamsSchema = runtimeSchema<StreamOutputTopologyProbeParams>(
   'a secret-free stream output topology probe',
@@ -1712,6 +1764,12 @@ const runtimeContracts = {
     params: streamOutputTopologyProbeParamsSchema,
     result: streamOutputTopologyProbeResultSchema
   },
+  'performance.check.get': { params: undefinedSchema, result: performanceCheckStateSchema },
+  'performance.check.run': {
+    params: performanceCheckRunParamsSchema,
+    result: performanceCheckStateSchema
+  },
+  'performance.check.cancel': { params: undefinedSchema, result: performanceCheckStateSchema },
   'stream.targets.snapshot': {
     params: undefinedSchema,
     result: streamTargetsSnapshotSchema
@@ -1899,7 +1957,9 @@ const runtimeEventSchemas = {
   'preview.screen.status': previewScreenStatusSchema,
   'capture.recovery.status': captureRecoveryStatusSchema,
   'diagnostics.stats': diagnosticStatsSchema,
-  'cohost.state': cohostStateSchema
+  'cohost.state': cohostStateSchema,
+  'performance.check.progress': performanceCheckProgressSchema,
+  'performance.check.completed': performanceCheckStateSchema
 } satisfies Record<BackendEvent, RuntimeSchema<unknown>>
 
 export function validateBackendEventPayload(event: string, payload: unknown): unknown {
