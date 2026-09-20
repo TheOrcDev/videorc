@@ -234,6 +234,18 @@ Conditional private download storage secrets:
 - `VIDEORC_DOWNLOAD_S3_FORCE_PATH_STYLE`: usually true for path-style S3-compatible endpoints
 - `VIDEORC_DOWNLOAD_S3_SESSION_TOKEN`: required only for temporary credentials
 
+Optional second release storage origin (publication goes to every configured
+origin; see "Two storage origins" in
+[releases/release-runbook.md](releases/release-runbook.md)):
+
+- secrets `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID`,
+  `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY`
+- variables `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET`,
+  `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_REGION`,
+  `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ENDPOINT_URL`
+- variable `VIDEORC_DOWNLOAD_STORAGE_PRIMARY`: `r2` (default) or `hetzner`; must
+  match the videorc-web production environment
+
 Check the remote repository without printing secret values:
 
 ```sh

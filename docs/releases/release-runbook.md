@@ -81,6 +81,43 @@ check (default in packaged builds since 0.9.10; opt out via
   reports success. If your `.env` endpoint has the bucket suffix, fix it there or
   override per-run (Step 3 below).
 
+## Two storage origins
+
+Court-ordered IP blocks in Spain (LaLiga matchday evenings) intercept whole
+storage providers with a forged certificate. That used to stop the upload for
+hours, and it also stops every Spanish user's download and update, because the
+web routes redirect to a presigned storage URL. A release is therefore published
+to **two independent origins**. Measured provider differences are recorded in
+[storage-compat-2026-09.md](storage-compat-2026-09.md).
+
+| Origin    | Environment                                                                    | Notes                                                                                           |
+| --------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `r2`      | `VIDEORC_DOWNLOAD_S3_*` (or `VIDEORC_RELEASE_UPLOAD_S3_*`) from the web `.env` | Cloudflare R2. Bucket-less endpoint (below).                                                    |
+| `hetzner` | `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*` in `~/.videorc-release.env`              | Hetzner Object Storage, project `videorc`, `fsn1`, region `eu-central`. Host-only endpoint too. |
+
+- `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` (`r2` by default) must match the value in
+  the videorc-web production environment. It names the origin clients are
+  redirected to. Origins are published mirrors first, primary last.
+- `pnpm release:upload:preflight:macos` probes every origin with a signed
+  request through the TLS-issuer guard and reports which is primary.
+- **A blocked mirror does not stop the release.** The upload publishes to the
+  reachable origins, writes `dist/release-origin-pending/<platform>-<releaseId>-<origin>.json`
+  and warns. When the block ends, run `pnpm release:sync:origins -- --pending`.
+  The next release refuses to start while a pending record exists.
+- **A blocked primary stops the release** unless you set
+  `VIDEORC_RELEASE_ALLOW_MIRROR_ONLY=1`. Then also set
+  `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` to the reachable origin in the videorc-web
+  production environment and redeploy, or clients keep the previous release.
+  That same flip is the lever when the primary provider is being blocked for
+  users: every shipped install follows it.
+- `pnpm release:sync:origins -- --live --from <origin> --to <origin>` copies
+  everything clients can currently be redirected to (changelog, latest
+  manifests, update feeds and what they reference). Run it before making a new
+  or long-stale origin primary.
+- Never bypass TLS. A forged issuer is the block itself.
+- The one-time D3 exact promotion stays single-origin on `r2`: its receipt needs
+  the S3 checksum envelope, which Hetzner does not return.
+
 ## Cut a release
 
 ```sh
@@ -102,13 +139,16 @@ pnpm dist:desktop:release
 # 3. Validate the signed artifact (codesign / Gatekeeper / staple).
 pnpm release:validate:macos
 
-# 4. Load R2 creds and upload the download + feed.
+# 4. Load both origins' creds and upload the download + feed.
+#    (macOS ships Bash 3.2: run this under zsh, or write the filtered lines to a
+#    temp file and source that.)
 set -a; . <(grep -E '^[[:space:]]*VIDEORC_DOWNLOAD_S3_' ~/projects/videorcweb/.env); set +a
+set -a; . <(grep -E '^VIDEORC_RELEASE_UPLOAD_HETZNER_S3_' ~/.videorc-release.env); set +a
 # Force a bucket-less endpoint (skip if your .env endpoint is already host-only):
 export VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL="https://<account-id>.r2.cloudflarestorage.com"
 pnpm release:upload:preflight:macos
-pnpm release:upload:macos       # uploads dmg + sha + release.json + latest-mac.yml + zip + blockmap
-                                # + the compiled changelog -> changelog/changelog.json
+pnpm release:upload:macos       # to EVERY origin: dmg + sha + release.json + latest-mac.yml + zip
+                                # + blockmap + the compiled changelog -> changelog/changelog.json
 ```
 
 `release:upload:macos` fails closed if the feed files are missing,
@@ -131,7 +171,7 @@ credential and this repo is PUBLIC, so it is **never committed** — it lives in
 already sourced by the build); the script refuses to run without it and never
 echoes the URL.
 
-## Verify (always follow the redirect to R2)
+## Verify (always follow the redirect to storage)
 
 ```sh
 # Feed serves the NEW version:
@@ -141,6 +181,10 @@ curl -sL https://www.videorc.com/api/updates/latest-mac.yml | head
 curl -s -o /dev/null -w '%{http_code}\n' -L \
   https://www.videorc.com/api/updates/Videorc-0.9.1-mac-arm64.zip
 ```
+
+Repeat both checks on the mirror route, `https://www.videorc.com/api/updates/mirror/`,
+and confirm the final host differs from the primary's. Desktop builds from
+0.9.98 retry that route once when the primary fails in transport.
 
 The download page follows automatically: the upload also publishes the
 manifest to the STABLE key `releases/macos/latest/release.json`, which

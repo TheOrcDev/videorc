@@ -65,6 +65,11 @@ runbooks' detailed gates.
   keychain, or provide the documented `CSC_LINK` alternative.
 - Load `VIDEORC_DOWNLOAD_S3_*` from `~/projects/videorcweb/.env` and normalize
   the upload endpoint to the bucket-less R2 account host.
+- Load `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*` from `~/.videorc-release.env`. The
+  upload publishes to **both** storage origins, mirrors first. Read "Two storage
+  origins" in the release runbook: a blocked mirror degrades the release and
+  leaves a pending record to replay with `pnpm release:sync:origins -- --pending`;
+  a blocked primary stops it unless `VIDEORC_RELEASE_ALLOW_MIRROR_ONLY=1`.
 
 ### Windows
 
@@ -253,7 +258,11 @@ record.
 - Do not source process substitution under macOS Bash 3.2; write filtered env
   lines to a temporary file and source that file, or run the documented command
   under zsh.
-- Follow every web redirect to the final R2 response; a `302` alone is not proof.
+- Follow every web redirect to the final storage response; a `302` alone is not
+  proof. Verify the mirror route `/api/updates/mirror/` too, and that its final
+  host differs from the primary's.
+- A forged TLS issuer on a storage host is a network block (Spain, matchday
+  evenings), not an outage. Never bypass TLS; publish around it.
 - Keep presigned updater redirects short-lived; never restore immutable caching.
 - macOS updater order uses the numeric package version, not the Beta release ID.
 - Windows updater order also uses the numeric package version; this is why every

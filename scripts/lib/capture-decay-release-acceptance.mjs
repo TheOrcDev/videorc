@@ -151,6 +151,7 @@ export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
   'scripts/lib/recording-smoke-guards.mjs',
   'scripts/lib/repair-encoder-capabilities.mjs',
   'scripts/lib/release-upload-https-transport.mjs',
+  'scripts/lib/release-upload-origins.mjs',
   'scripts/lib/release-upload-s3.mjs',
   'scripts/lib/required-source-blockers.mjs',
   'scripts/lib/run-with-env.mjs',
