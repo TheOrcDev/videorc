@@ -52,7 +52,8 @@ deviation in the Hetzner column is a real provider difference, not a probe bug.
 
 ## Findings for Hetzner
 
-**Verdict: GO, with two per-origin adaptations in S1.** Neither hard no-go
+**Verdict: GO, with two per-origin adaptations** (both implemented in
+`releaseUploadOriginCapabilities`, `scripts/lib/release-upload-s3.mjs`). Neither hard no-go
 condition (1 or 2 failing) occurred: conditional creates and conditional
 pointer updates are both enforced.
 
@@ -60,15 +61,16 @@ pointer updates are both enforced.
    tag (`"9b2c…"`) but answers `412 PreconditionFailed` when that quoted value
    is sent back in `If-Match`. The same digest without quotes is honoured, and a
    stale bare ETag is still refused with the stored bytes unchanged.
-   `buildReleasePutCondition` passes `current.etag` through verbatim, so S1 adds
-   an origin capability `ifMatchEtagForm: 'quoted' | 'unquoted'`.
+   `buildReleasePutCondition` therefore takes the origin capability
+   `ifMatchEtagForm: 'quoted' | 'unquoted'`.
 2. **No S3 checksum headers.** The PUT is accepted with
    `x-amz-checksum-sha256`, but HEAD with `x-amz-checksum-mode: ENABLED` never
    returns it. The uploader's remote re-verification
    (`envelope.checksumSha256 === sha256Base64FromHex(...)`) cannot pass on this
-   origin. S1 adds `checksumHeaders: false`, which re-verifies with
-   `x-amz-meta-videorc-sha256` plus a full GET and a local SHA-256. That is
-   slower (one extra download of each artifact per publish) and still exact.
+   origin, so the capability `checksumHeaders: false` drops only that header
+   from the envelope check. Every object is still bound exactly: the uploader
+   always downloads the object and compares its SHA-256 and size, and
+   `x-amz-meta-videorc-sha256` must match.
    Upload integrity is unaffected: a body that does not match the signed
    `x-amz-content-sha256` is refused with `XAmzContentSHA256Mismatch`.
 3. **TLS.** The endpoint presents a Let's Encrypt certificate, so the built-in
@@ -82,3 +84,16 @@ pointer updates are both enforced.
 4. Presigned, ranged and content-disposition GETs behave exactly like R2, so
    the web redirect routes and electron-updater's differential download need no
    origin-specific handling beyond the region in the credential scope.
+
+## Proven against the live buckets (2026-09-21)
+
+- `pnpm release:sync:origins -- --live --from r2 --to hetzner` copied the live
+  set (16 objects, about 670 MB: changelog, macOS latest manifest and 0.9.97
+  release, macOS update feed, Windows pilot manifest, installer and feed), each
+  read back and hashed on Hetzner. A second run reported every object as already
+  identical.
+- A scratch pointer was created, overwritten and re-published on Hetzner through
+  `publishReleaseUploadArtifact` (`uploaded`, `uploaded`, `skipped`), which
+  exercises the unquoted `If-Match` path end to end.
+- `pnpm release:upload:preflight:macos` reports both origins reachable, with
+  `r2` as primary.
