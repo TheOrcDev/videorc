@@ -1,8 +1,9 @@
 import { CameraIcon, DisplayIcon, ExternalLinkIcon } from '@/components/icons'
-import { useEffect, useRef, useState, type ReactElement } from 'react'
+import { useEffect, useId, useRef, useState, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
-import type { CameraShape, Scene, SceneSource } from '@/lib/backend'
+import type { CameraShape, EffectiveSceneBackground, Scene, SceneSource } from '@/lib/backend'
+import { backgroundAssetDisplayUrl } from '@/lib/background-assets'
 import { cn } from '@/lib/utils'
 import {
   handleCursor,
@@ -61,7 +62,7 @@ type StageGhost = {
 export function SceneStage({
   scene,
   selectedSourceId,
-  hasBackground,
+  background = null,
   previewOpen,
   cameraShape = 'rectangle',
   cameraCornerRadiusPct = 12,
@@ -78,7 +79,8 @@ export function SceneStage({
 }: {
   scene: Scene | null
   selectedSourceId: string | null
-  hasBackground: boolean
+  /** The committed scene background, rendered on the canvas (WYSIWYG). */
+  background?: EffectiveSceneBackground | null
   previewOpen: boolean
   /** Camera bubble shape — the stage must not lie about rounded/circle corners. */
   cameraShape?: CameraShape
@@ -107,6 +109,14 @@ export function SceneStage({
   const sources = scene?.sources ?? []
   const stageH = stageHeight(outputAspect)
   const svgRef = useRef<SVGSVGElement | null>(null)
+  const gradientId = useId()
+  // A background whose managed file cannot render falls back to the glass
+  // gradient instead of a blank hole; a replaced asset gets a fresh try.
+  const [failedBackgroundAssetId, setFailedBackgroundAssetId] = useState<string | null>(null)
+  const backgroundUrl =
+    background && background.assetId !== failedBackgroundAssetId
+      ? backgroundAssetDisplayUrl(background.managedAssetPath)
+      : null
   const gestureRef = useRef<StageGesture | null>(null)
   // Live gesture ghost (normalized) — visual only until pointerup commits.
   const [ghost, setGhost] = useState<StageGhost | null>(null)
@@ -276,7 +286,7 @@ export function SceneStage({
     ghost && selectedSource && ghost.sourceId === selectedSource.id ? ghost.rect : null
 
   return (
-    <div className="relative overflow-hidden rounded-row border border-border bg-muted/20">
+    <div className="relative overflow-hidden rounded-panel border border-border bg-card/40 shadow-inner">
       <svg
         ref={svgRef}
         aria-label="Scene composition diagram"
@@ -284,13 +294,96 @@ export function SceneStage({
         role="img"
         viewBox={`0 0 ${STAGE_W} ${stageH}`}
       >
-        {/* Canvas */}
+        {/* Canvas backdrop: glass gradient (theme tokens), the committed
+            scene background image on top when one is set (WYSIWYG, plan
+            phase 5). All static; nothing repaints at rest (idle-perf law). */}
+        <defs>
+          <linearGradient
+            gradientUnits="objectBoundingBox"
+            id={`${gradientId}-base`}
+            x1="0"
+            x2="1"
+            y1="0"
+            y2="1"
+          >
+            <stop offset="0" style={{ stopColor: 'var(--muted)', stopOpacity: 0.6 }} />
+            <stop offset="0.55" style={{ stopColor: 'var(--background)', stopOpacity: 0.35 }} />
+            <stop offset="1" style={{ stopColor: 'var(--muted)', stopOpacity: 0.5 }} />
+          </linearGradient>
+          <radialGradient
+            gradientUnits="objectBoundingBox"
+            cx="0.22"
+            cy="0.16"
+            id={`${gradientId}-glow-a`}
+            r="0.6"
+          >
+            <stop offset="0" style={{ stopColor: 'var(--primary)', stopOpacity: 0.08 }} />
+            <stop offset="1" style={{ stopColor: 'var(--primary)', stopOpacity: 0 }} />
+          </radialGradient>
+          <radialGradient
+            gradientUnits="objectBoundingBox"
+            cx="0.8"
+            cy="0.86"
+            id={`${gradientId}-glow-b`}
+            r="0.65"
+          >
+            <stop offset="0" style={{ stopColor: 'var(--primary)', stopOpacity: 0.05 }} />
+            <stop offset="1" style={{ stopColor: 'var(--primary)', stopOpacity: 0 }} />
+          </radialGradient>
+          <linearGradient
+            gradientUnits="objectBoundingBox"
+            id={`${gradientId}-sheen`}
+            x1="0"
+            x2="1"
+            y1="0"
+            y2="0"
+          >
+            <stop offset="0.44" style={{ stopColor: 'var(--foreground)', stopOpacity: 0 }} />
+            <stop offset="0.5" style={{ stopColor: 'var(--foreground)', stopOpacity: 0.05 }} />
+            <stop offset="0.56" style={{ stopColor: 'var(--foreground)', stopOpacity: 0 }} />
+          </linearGradient>
+        </defs>
+        <rect fill={`url(#${gradientId}-base)`} height={stageH} width={STAGE_W} x={0} y={0} />
+        <rect fill={`url(#${gradientId}-glow-a)`} height={stageH} width={STAGE_W} x={0} y={0} />
+        <rect fill={`url(#${gradientId}-glow-b)`} height={stageH} width={STAGE_W} x={0} y={0} />
+        {backgroundUrl && background ? (
+          <>
+            <image
+              height={stageH}
+              href={backgroundUrl}
+              preserveAspectRatio={
+                background.fit === 'fill'
+                  ? 'xMidYMid slice'
+                  : background.fit === 'stretch'
+                    ? 'none'
+                    : 'xMidYMid meet'
+              }
+              width={STAGE_W}
+              x={0}
+              y={0}
+              onError={() => setFailedBackgroundAssetId(background.assetId)}
+            />
+            {/* Approximate the dim so the schematic boxes stay readable. */}
+            <rect
+              fill="black"
+              fillOpacity={Math.min(Math.max(background.dimPercent, 0), 100) / 100}
+              height={stageH}
+              width={STAGE_W}
+              x={0}
+              y={0}
+            />
+          </>
+        ) : (
+          <rect fill={`url(#${gradientId}-sheen)`} height={stageH} width={STAGE_W} x={0} y={0} />
+        )}
+        {/* Hairline ring marks the recorded canvas against the glass frame. */}
         <rect
-          className={cn(hasBackground ? 'fill-primary/10' : 'fill-transparent')}
-          height={stageH}
-          width={STAGE_W}
-          x={0}
-          y={0}
+          className="fill-transparent stroke-border"
+          height={stageH - 0.4}
+          strokeWidth={0.4}
+          width={STAGE_W - 0.4}
+          x={0.2}
+          y={0.2}
         />
         {sources.map((source) => (
           <StageSourceRect
@@ -495,9 +588,13 @@ function StageSourceRect({
       {width > 24 && height > 10 ? (
         cornerRadius >= Math.min(width, height) / 4 ? (
           <text
-            className={cn('select-none', camera ? 'fill-primary' : 'fill-muted-foreground')}
+            className={cn(
+              'select-none stroke-background/60 [paint-order:stroke]',
+              camera ? 'fill-primary' : 'fill-muted-foreground'
+            )}
             dominantBaseline="central"
             fontSize={4.2}
+            strokeWidth={0.7}
             textAnchor="middle"
             x={x + width / 2}
             y={y + height / 2}
@@ -506,8 +603,12 @@ function StageSourceRect({
           </text>
         ) : (
           <text
-            className={cn('select-none', camera ? 'fill-primary' : 'fill-muted-foreground')}
+            className={cn(
+              'select-none stroke-background/60 [paint-order:stroke]',
+              camera ? 'fill-primary' : 'fill-muted-foreground'
+            )}
             fontSize={4.2}
+            strokeWidth={0.7}
             x={x + 2.5}
             y={y + height - 2.5}
           >

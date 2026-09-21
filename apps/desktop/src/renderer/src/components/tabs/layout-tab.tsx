@@ -219,9 +219,9 @@ export function LayoutTab(): ReactElement {
             // camera_mask policy) — side-by-side and the vertical bands render
             // a plain rectangle, so the schematic must too.
             cameraShape={effectiveCameraMaskShape(layout)}
+            background={scene?.background ?? null}
             dragEnabled={(showOverlayControls || isFreeform) && !isSessionActive}
             freeform={isFreeform}
-            hasBackground={Boolean(scene?.background)}
             outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
             previewOpen={previewWindow.open}
             // Free resize: the backend honors custom camera width/height
