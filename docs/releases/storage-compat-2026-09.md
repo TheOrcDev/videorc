@@ -47,8 +47,11 @@ Run 2026-09-21 from Spain.
 | 6   | TLS peer                                              | Let's Encrypt     | Google Trust Services |
 | 7   | DELETE removes the scratch objects                    | PASS              | PASS                  |
 
-R2 passes all twelve checks. It is the control that proves the probe: every
-deviation in the Hetzner column is a real provider difference, not a probe bug.
+R2 passes all twelve checks. That is the baseline: it shows the probe drives a
+known-good origin correctly, so a Hetzner deviation is not explained by a broken
+request. It does not by itself prove the cause of each deviation, so the two
+findings below were each confirmed directly (the unquoted ETag by a second
+request in the same run, the pointer overwrite through the uploader itself).
 
 ## Findings for Hetzner
 
@@ -63,7 +66,8 @@ pointer updates are both enforced.
    stale bare ETag is still refused with the stored bytes unchanged.
    `buildReleasePutCondition` therefore takes the origin capability
    `ifMatchEtagForm: 'quoted' | 'unquoted'`.
-2. **No S3 checksum headers.** The PUT is accepted with
+2. **`x-amz-checksum-sha256` is not returned.** Only this header was tested. The
+   PUT is accepted with
    `x-amz-checksum-sha256`, but HEAD with `x-amz-checksum-mode: ENABLED` never
    returns it. The uploader's remote re-verification
    (`envelope.checksumSha256 === sha256Base64FromHex(...)`) cannot pass on this

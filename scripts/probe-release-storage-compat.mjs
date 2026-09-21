@@ -298,11 +298,15 @@ async function main() {
       })
       const text = (await readBody(response)).toString('utf8')
       if (response.ok) created.add(objectKey)
+      // Only an integrity rejection counts. An auth, precondition or endpoint
+      // error is also a 4xx and would prove nothing about the body check.
+      const code = s3ErrorCode(text)
+      const integrityRejection = ['XAmzContentSHA256Mismatch', 'BadDigest', 'InvalidDigest']
       record(
         '3b',
         'a body that does not match its signed hash is rejected',
-        response.status >= 400 && response.status < 500,
-        `status ${response.status} ${s3ErrorCode(text) ?? ''}`.trim()
+        response.status === 400 && integrityRejection.includes(code),
+        `status ${response.status} ${code ?? ''}`.trim()
       )
     })
 
