@@ -3,13 +3,12 @@ import {
   CaptionsIcon,
   ChevronDownIcon,
   DisplayIcon,
-  LayoutIcon,
   MicrophoneIcon,
   RecordIcon,
   SpeakerOffIcon,
   SpeakerOnIcon
 } from '@/components/icons'
-import { Suspense, lazy, type ReactElement, type ReactNode } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 
 import { SourceSelect } from '@/components/source-select'
 import { Button } from '@/components/ui/button'
@@ -21,12 +20,10 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
-import { Separator } from '@/components/ui/separator'
 import { Switch } from '@/components/ui/switch'
-import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
 import { recordingQuality } from '@/lib/studio-session-view'
-import type { CaptionsStatus, LayoutPreset } from '@/lib/backend'
+import type { CaptionsStatus } from '@/lib/backend'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import {
   buildCameraSources,
@@ -34,44 +31,9 @@ import {
   buildMicrophoneSources,
   capturePickerDevices,
   microphonePickerDevices,
-  layoutPresetNeedsCamera,
-  layoutPresetNeedsScreen,
   layoutPresetOrientation,
   resolutionOptionsForOrientation
 } from '@/lib/capture'
-
-// Lazy like the tab chunks (app-shell): the preview (and the live-waveform it
-// pulls in) loads on first popover open, keeping it out of the eager renderer
-// bundle (check:renderer-assets budget).
-const MicPickerPreview = lazy(async () => ({
-  default: (await import('@/components/studio/mic-picker-preview')).MicPickerPreview
-}))
-
-// Mode-scoped like the Scenes gallery: the picker offers only the current
-// orientation's scenes (the gallery's header toggle is the one home for
-// switching modes — one-home-per-control).
-const HORIZONTAL_QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
-  { id: 'screen-camera', label: 'Screen + Cam' },
-  { id: 'screen-only', label: 'Screen' },
-  { id: 'camera-only', label: 'Camera' },
-  { id: 'side-by-side', label: 'Side by side' }
-]
-
-const VERTICAL_QUICK_PRESETS: { id: LayoutPreset; label: string }[] = [
-  { id: 'vertical-camera-top', label: 'Camera top' },
-  { id: 'vertical-camera-bottom', label: 'Camera bottom' },
-  { id: 'vertical-split', label: 'Split' },
-  { id: 'vertical-screen-camera', label: 'Screen + Cam' },
-  { id: 'vertical-screen-only', label: 'Screen' },
-  { id: 'vertical-camera-only', label: 'Camera' }
-]
-
-function presetLabel(preset: LayoutPreset): string {
-  return (
-    [...HORIZONTAL_QUICK_PRESETS, ...VERTICAL_QUICK_PRESETS].find((entry) => entry.id === preset)
-      ?.label ?? preset
-  )
-}
 
 function resolutionKey(width: number, height: number): string {
   return `${width}x${height}`
@@ -109,11 +71,11 @@ const TRIGGER_CLASS =
 
 /**
  * Quick Settings (SD2): four compact cards mirroring the controls that own
- * their own pages — Source, Mic, Layout, Output. They edit the SAME
- * captureConfig via the shared builders / setters (one state) and deep-link to
- * the full editor. Device + preset edits are off-air (disabled mid-session, as
- * on Sources); the live-safe actions kept from the old session strip are the
- * Layout preset switch and mic mute. The live mic VU lands in SD4's mixer.
+ * their own pages: Source, Mic, Output, Captions. They edit the SAME
+ * captureConfig via the shared builders / setters (one state). Device + preset
+ * edits are off-air (disabled mid-session, as on Sources); mic mute is the
+ * live-safe action. Scene switching lives in the Scenes gallery below, and the
+ * live mic VU in the mixer.
  */
 export function QuickSettings(): ReactElement {
   const {
@@ -123,9 +85,7 @@ export function QuickSettings(): ReactElement {
     selectedCaptureDevice,
     selectedCamera,
     selectedMicrophone,
-    applyCameraPreset,
     patchVideo,
-    layoutSwitchPending,
     isSessionActive,
     entitlements,
     captionsStatus,
@@ -135,7 +95,6 @@ export function QuickSettings(): ReactElement {
   // Q6 (plan 022): before the backend reports devices, selects say "Finding
   // devices…" instead of rendering blank.
   const discoveryPending = wsStatus !== 'connected'
-  const { openStudioPanel } = useWorkspaceNav()
   const captionsGate = cloudAiUploadGate(entitlements)
   const captionsEnabled = captureConfig.captions.enabled
 
@@ -143,8 +102,6 @@ export function QuickSettings(): ReactElement {
   const cameras = deviceList.devices.filter((device) => device.kind === 'camera')
   const microphones = microphonePickerDevices(deviceList.devices)
   const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
-  const hasCamera = Boolean(captureConfig.sources.cameraId)
-  const hasScreen = Boolean(selectedCaptureId)
   const muted = captureConfig.audio.microphoneMuted
   const MuteIcon = muted ? SpeakerOffIcon : SpeakerOnIcon
   // Resolution options mirror the Output tab (recording-tab.tsx) and follow
@@ -170,7 +127,7 @@ export function QuickSettings(): ReactElement {
     [screenSummary, selectedCamera?.name].filter(Boolean).join(' · ') || 'No sources selected'
 
   return (
-    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+    <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
       {/* SOURCE — screen + camera, edited off-air; full picker on Sources. */}
       <QuickCard icon={DisplayIcon} label="Source">
         <Popover>
@@ -207,7 +164,6 @@ export function QuickSettings(): ReactElement {
                 }))
               }
             />
-            <ManageLink onClick={() => openStudioPanel('sources')}>Manage sources</ManageLink>
           </PopoverContent>
         </Popover>
       </QuickCard>
@@ -239,11 +195,6 @@ export function QuickSettings(): ReactElement {
                 }))
               }
             />
-            {/* See-before-you-pick: while mounted, this paints snapshots from
-                the workspace's single shared visual-mic pipeline. */}
-            <Suspense fallback={<div className="h-[38px] rounded-row border bg-muted/20" />}>
-              <MicPickerPreview deviceName={selectedMicrophone?.name} />
-            </Suspense>
             {selectedMicrophone ? (
               <Button
                 aria-pressed={muted}
@@ -260,44 +211,6 @@ export function QuickSettings(): ReactElement {
                 {muted ? 'Unmute microphone' : 'Mute microphone'}
               </Button>
             ) : null}
-            <ManageLink onClick={() => openStudioPanel('sources')}>Audio settings</ManageLink>
-          </PopoverContent>
-        </Popover>
-      </QuickCard>
-
-      {/* LAYOUT — live-safe preset switch (the deliberate two-home control). */}
-      <QuickCard icon={LayoutIcon} label="Layout">
-        <Popover>
-          <PopoverTrigger className={TRIGGER_CLASS}>
-            <span className="min-w-0 flex-1 truncate text-left font-medium">
-              {layoutSwitchPending ? 'Switching…' : presetLabel(captureConfig.layout.layoutPreset)}
-            </span>
-            <ChevronDownIcon className="size-3 shrink-0 text-muted-foreground" />
-          </PopoverTrigger>
-          <PopoverContent align="start" className="w-64 p-2">
-            <div className="grid grid-cols-2 gap-1.5">
-              {(layoutPresetOrientation(captureConfig.layout.layoutPreset) === 'vertical'
-                ? VERTICAL_QUICK_PRESETS
-                : HORIZONTAL_QUICK_PRESETS
-              ).map((preset) => (
-                <Button
-                  key={preset.id}
-                  disabled={
-                    (layoutPresetNeedsCamera(preset.id) && !hasCamera) ||
-                    (layoutPresetNeedsScreen(preset.id) && !hasScreen)
-                  }
-                  size="sm"
-                  variant={
-                    captureConfig.layout.layoutPreset === preset.id ? 'secondary' : 'outline'
-                  }
-                  onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
-                >
-                  {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
-                </Button>
-              ))}
-            </div>
-            <Separator className="my-2" />
-            <ManageLink onClick={() => openStudioPanel('layouts')}>Edit scene</ManageLink>
           </PopoverContent>
         </Popover>
       </QuickCard>
@@ -380,19 +293,5 @@ function QuickCard({
       </span>
       {children}
     </div>
-  )
-}
-
-function ManageLink({
-  onClick,
-  children
-}: {
-  onClick: () => void
-  children: ReactNode
-}): ReactElement {
-  return (
-    <Button className="w-full justify-start" size="sm" variant="ghost" onClick={onClick}>
-      {children}
-    </Button>
   )
 }
