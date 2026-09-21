@@ -1976,7 +1976,7 @@ mod tests {
         .await
         .expect_err("no leg matches the requested orientation");
         assert!(
-            error.to_string().contains("stop the session first"),
+            error.to_string().contains("Stop the session first"),
             "{error}"
         );
         // A refused transaction registers nothing either.

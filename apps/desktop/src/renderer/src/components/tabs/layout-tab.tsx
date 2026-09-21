@@ -184,7 +184,9 @@ export function LayoutTab(): ReactElement {
             hasBackground={Boolean(scene?.background)}
             outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
             previewOpen={previewWindow.open}
-            resizeEnabled={false}
+            // Free resize: the backend honors custom camera width/height
+            // (aspect law permitting) since plan phase 3.
+            resizeEnabled={showOverlayControls && !isSessionActive}
             scene={scene}
             selectedSourceId={selectedSceneSourceId}
             onCommitTransform={(sourceId, transform) =>

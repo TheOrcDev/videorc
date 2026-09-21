@@ -585,6 +585,11 @@ pub fn preset_camera_transform(
     }
 }
 
+/// Smallest canvas fraction a custom (free-resized) camera box may keep per
+/// axis. Mirrors the stage's MIN_SOURCE_FRACTION in
+/// `apps/desktop/src/renderer/src/components/scene/stage-transform.ts`.
+pub(crate) const MIN_CUSTOM_CAMERA_FRACTION: f64 = 0.05;
+
 pub fn resolved_camera_transform(
     layout: &LayoutSettings,
     output_width: u32,
@@ -594,10 +599,66 @@ pub fn resolved_camera_transform(
     if let (CameraTransformMode::Custom, Some(custom)) =
         (layout.camera_transform_mode, layout.camera_transform)
     {
+        // Free resize: a custom transform overrides the S/M/L preset box.
+        // The camera's aspect LAW still holds — circle boxes stay square and
+        // square/portrait aspects keep their pixel ratio — because every
+        // render path derives its mask/crop from this one box.
+        let (width, height) =
+            custom_camera_box_fractions(layout, custom, &transform, output_width, output_height);
+        transform.width = width;
+        transform.height = height;
         transform.x = finite_or_zero(custom.x).clamp(0.0, (1.0 - transform.width).max(0.0));
         transform.y = finite_or_zero(custom.y).clamp(0.0, (1.0 - transform.height).max(0.0));
     }
     transform
+}
+
+/// The normalized box a custom camera transform resolves to. Non-finite or
+/// non-positive sizes (legacy custom transforms carried position only in
+/// spirit; the wire always had width/height) fall back to the preset box.
+/// Shaped cameras (circle, forced square/portrait aspect) keep their pixel
+/// ratio: the requested width drives and the height follows, clamped so both
+/// axes stay within [5%, 100%] of the canvas.
+fn custom_camera_box_fractions(
+    layout: &LayoutSettings,
+    custom: crate::protocol::CameraTransform,
+    preset: &SceneTransform,
+    output_width: u32,
+    output_height: u32,
+) -> (f64, f64) {
+    let output_width = f64::from(output_width.max(1));
+    let output_height = f64::from(output_height.max(1));
+    let min = MIN_CUSTOM_CAMERA_FRACTION;
+    let requested_width = if custom.width.is_finite() && custom.width > 0.0 {
+        custom.width
+    } else {
+        preset.width
+    };
+    let requested_height = if custom.height.is_finite() && custom.height > 0.0 {
+        custom.height
+    } else {
+        preset.height
+    };
+
+    // Pixel width : height the mask law enforces, or None for a free box.
+    let forced_ratio = match (&layout.camera_shape, &layout.camera_aspect) {
+        (CameraShape::Circle, _) => Some(1.0),
+        (_, CameraAspect::Square) => Some(1.0),
+        (_, CameraAspect::Portrait) => Some(3.0 / 4.0),
+        (_, CameraAspect::Source) => None,
+    };
+    let Some(ratio) = forced_ratio else {
+        return (
+            requested_width.clamp(min, 1.0),
+            requested_height.clamp(min, 1.0),
+        );
+    };
+
+    let mut width_px = requested_width.clamp(min, 1.0) * output_width;
+    let min_width_px = (min * output_width).max(min * output_height * ratio);
+    let max_width_px = output_width.min(output_height * ratio);
+    width_px = width_px.clamp(min_width_px, max_width_px.max(min_width_px));
+    (width_px / output_width, (width_px / ratio) / output_height)
 }
 
 pub fn side_by_side_fractions(split: SideBySideSplit) -> (f64, f64) {

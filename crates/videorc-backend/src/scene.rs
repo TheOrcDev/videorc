@@ -357,8 +357,10 @@ fn camera_source(
     output_height: u32,
 ) -> SceneSource {
     let default_transform = preset_camera_transform(layout, output_width, output_height);
-    // A dragged camera (custom mode) overrides position only; size/crop and the
-    // default_transform stay tied to the corner/size preset so Reset restores it.
+    // A dragged or free-resized camera (custom mode) overrides position AND
+    // size (aspect law permitting); the crop and the default_transform stay
+    // tied to the layout so zoom/pan keep working and Reset restores the
+    // corner/size preset.
     let transform = resolved_camera_transform(layout, output_width, output_height);
     SceneSource {
         id: CAMERA_SOURCE_ID.to_string(),
@@ -1084,6 +1086,138 @@ mod tests {
         assert!(camera.default_transform.x > 0.6);
         assert!(camera.default_transform.y > 0.6);
         assert_ne!(camera.default_transform.x, camera.transform.x);
+    }
+
+    #[test]
+    fn custom_transform_resizes_camera_and_keeps_preset_default() {
+        // Free resize: a custom transform's width/height are honored for the
+        // free-aspect rectangle; Reset still restores the S/M/L preset box.
+        let mut params = base_params();
+        params.layout.camera_transform_mode = CameraTransformMode::Custom;
+        params.layout.camera_transform = Some(CameraTransform {
+            x: 0.1,
+            y: 0.1,
+            width: 0.5,
+            height: 0.45,
+        });
+
+        let scene = scene_from_capture_config(params);
+        let camera = scene
+            .sources
+            .iter()
+            .find(|source| source.kind == SceneSourceKind::Camera)
+            .expect("camera source present");
+
+        assert!((camera.transform.width - 0.5).abs() < 1e-9);
+        assert!((camera.transform.height - 0.45).abs() < 1e-9);
+        // The default stays the preset box so Reset works.
+        assert!(camera.default_transform.width < 0.4);
+        assert_ne!(camera.default_transform.width, camera.transform.width);
+    }
+
+    #[test]
+    fn custom_resize_keeps_circle_boxes_square_in_pixels() {
+        // The mask law owns shaped aspects: a circle's box stays square in
+        // PIXELS no matter what the custom transform asked for.
+        let mut params = base_params();
+        params.layout.camera_shape = CameraShape::Circle;
+        params.layout.camera_transform_mode = CameraTransformMode::Custom;
+        params.layout.camera_transform = Some(CameraTransform {
+            x: 0.1,
+            y: 0.1,
+            width: 0.5,
+            height: 0.2,
+        });
+
+        let scene = scene_from_capture_config(params);
+        let camera = &scene.sources[1];
+        // Preview output is 1280x720 for the default params.
+        let width_px = camera.transform.width * 1280.0;
+        let height_px = camera.transform.height * 720.0;
+        assert!(
+            (width_px - height_px).abs() < 1.0,
+            "{width_px} vs {height_px}"
+        );
+        assert!((camera.transform.width - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn custom_resize_keeps_forced_portrait_pixel_ratio() {
+        let mut params = base_params();
+        params.layout.camera_aspect = CameraAspect::Portrait;
+        params.layout.camera_transform_mode = CameraTransformMode::Custom;
+        params.layout.camera_transform = Some(CameraTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 0.3,
+            height: 0.9,
+        });
+
+        let scene = scene_from_capture_config(params);
+        let camera = &scene.sources[1];
+        let width_px = camera.transform.width * 1280.0;
+        let height_px = camera.transform.height * 720.0;
+        assert!(((width_px / height_px) - 0.75).abs() < 1e-6);
+        assert!((camera.transform.width - 0.3).abs() < 1e-9);
+    }
+
+    #[test]
+    fn custom_resize_clamps_to_minimum_and_canvas() {
+        let mut params = base_params();
+        params.layout.camera_transform_mode = CameraTransformMode::Custom;
+        params.layout.camera_transform = Some(CameraTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 0.001,
+            height: 4.0,
+        });
+
+        let scene = scene_from_capture_config(params);
+        let camera = &scene.sources[1];
+        assert!((camera.transform.width - 0.05).abs() < 1e-9);
+        assert!((camera.transform.height - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn custom_resize_reclamps_position_for_the_new_size() {
+        let mut params = base_params();
+        params.layout.camera_transform_mode = CameraTransformMode::Custom;
+        params.layout.camera_transform = Some(CameraTransform {
+            x: 0.9,
+            y: 0.95,
+            width: 0.4,
+            height: 0.4,
+        });
+
+        let scene = scene_from_capture_config(params);
+        let camera = &scene.sources[1];
+        assert!((camera.transform.x - 0.6).abs() < 1e-9);
+        assert!((camera.transform.y - 0.6).abs() < 1e-9);
+    }
+
+    #[test]
+    fn custom_resize_preserves_zoom_crop() {
+        // Zoom/pan derive a crop; a custom SIZE must not discard it (the crop
+        // fields ride the same transform in every render path).
+        let mut params = base_params();
+        params.layout.camera_zoom = 150;
+        params.layout.camera_offset_x = 20;
+        params.layout.camera_transform_mode = CameraTransformMode::Custom;
+        params.layout.camera_transform = Some(CameraTransform {
+            x: 0.2,
+            y: 0.2,
+            width: 0.5,
+            height: 0.4,
+        });
+
+        let scene = scene_from_capture_config(params);
+        let camera = &scene.sources[1];
+        assert!((camera.transform.width - 0.5).abs() < 1e-9);
+        assert!(
+            camera.transform.crop_left > 0.0 || camera.transform.crop_right > 0.0,
+            "custom size must keep the zoom crop, got {:?}",
+            camera.transform
+        );
     }
 
     #[test]
