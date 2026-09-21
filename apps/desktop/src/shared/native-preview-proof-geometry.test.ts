@@ -34,6 +34,7 @@ function layout(overrides: Partial<LayoutSettings> = {}): LayoutSettings {
     cameraOffsetY: 0,
     sideBySideSplit: '70-30',
     sideBySideCameraSide: 'right',
+    verticalScreenFraming: 'fill',
     ...overrides
   }
 }

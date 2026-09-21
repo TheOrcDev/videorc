@@ -581,7 +581,8 @@ const layoutSettingsSchema = objectSchema(
     cameraOffsetX: numberSchema(),
     cameraOffsetY: numberSchema(),
     sideBySideSplit: enumSchema(['50-50', '60-40', '70-30']),
-    sideBySideCameraSide: enumSchema(['left', 'right'])
+    sideBySideCameraSide: enumSchema(['left', 'right']),
+    verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit']))
   },
   { allowUnknown: false }
 )

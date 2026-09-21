@@ -372,6 +372,7 @@ export const LAYOUT_PRESET_VALUES = [
 ] as const satisfies readonly LayoutPreset[]
 export type CameraTransformMode = 'preset' | 'custom'
 export type SideBySideSplit = '50-50' | '60-40' | '70-30'
+export type VerticalScreenFraming = 'fill' | 'fit'
 export type SideBySideCameraSide = 'left' | 'right'
 
 export interface CameraTransform {
@@ -410,6 +411,13 @@ export interface LayoutSettings {
   cameraOffsetY: number
   sideBySideSplit: SideBySideSplit
   sideBySideCameraSide: SideBySideCameraSide
+  /**
+   * How the SCREEN is framed in vertical-mode scenes. 'fill' is the
+   * short-form law (bands filled, centre-cropped); 'fit' shows the WHOLE
+   * screen: stacked scenes size the screen band to the screen and the camera
+   * covers the rest. Horizontal scenes ignore it.
+   */
+  verticalScreenFraming: VerticalScreenFraming
 }
 
 export type SceneSourceKind = 'screen' | 'window' | 'camera' | 'test-pattern'

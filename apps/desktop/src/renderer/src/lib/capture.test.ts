@@ -630,7 +630,8 @@ describe('smokePreviewCompositorCaptureConfig', () => {
       cameraOffsetX: 0,
       cameraOffsetY: 0,
       sideBySideSplit: '70-30',
-      sideBySideCameraSide: 'right'
+      sideBySideCameraSide: 'right',
+      verticalScreenFraming: 'fill'
     },
     video: {
       preset: 'tutorial-1440p30',
@@ -715,7 +716,8 @@ describe('smokePreviewCompositorCaptureConfig', () => {
         cameraOffsetX: 0,
         cameraOffsetY: 0,
         sideBySideSplit: '70-30',
-        sideBySideCameraSide: 'right'
+        sideBySideCameraSide: 'right',
+        verticalScreenFraming: 'fill'
       },
       video: {
         preset: 'tutorial-1440p30',

@@ -2944,6 +2944,19 @@ pub async fn clear_compositor_simulcast_scene(state: &AppState) {
     compositor.simulcast_scene = None;
 }
 
+/// The layout the simulcast leg currently composes (test evidence that a
+/// vertical-leg transaction landed on the leg and nowhere else).
+#[cfg(test)]
+pub(crate) async fn test_compositor_simulcast_layout(state: &AppState) -> Option<LayoutSettings> {
+    state
+        .compositor
+        .lock()
+        .await
+        .simulcast_scene
+        .as_ref()
+        .map(|snapshot| snapshot.layout.clone())
+}
+
 /// Whether a simulcast scene is currently committed (live_layout uses this to
 /// route vertical-scene transactions to the vertical leg instead of bailing).
 pub async fn has_compositor_simulcast_scene(state: &AppState) -> bool {

@@ -5,7 +5,7 @@ import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { LayoutPreset } from '@/lib/backend'
+import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
 import {
   layoutPresetNeedsCamera,
   layoutPresetNeedsScreen,
@@ -30,7 +30,7 @@ const HORIZONTAL_SCENES: { id: LayoutPreset; label: string }[] = [
   { id: 'side-by-side', label: 'Side by side' }
 ]
 
-const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
+export const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
   { id: 'vertical-camera-top', label: 'Camera top' },
   { id: 'vertical-camera-bottom', label: 'Camera bottom' },
   { id: 'vertical-split', label: 'Split' },
@@ -137,7 +137,10 @@ export function ScenesGallery(): ReactElement {
               type="button"
               onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
             >
-              <LayoutThumb preset={preset.id} />
+              <LayoutThumb
+                framing={captureConfig.layout.verticalScreenFraming}
+                preset={preset.id}
+              />
               <span className="flex items-center justify-between gap-1.5">
                 <span className="truncate text-sm font-medium">
                   {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
@@ -150,14 +153,109 @@ export function ScenesGallery(): ReactElement {
           )
         })}
       </div>
+      {mode === 'vertical' ? (
+        <ScreenFramingControl
+          value={captureConfig.layout.verticalScreenFraming}
+          onChange={(verticalScreenFraming) => applyCameraPreset({ verticalScreenFraming })}
+        />
+      ) : null}
     </PanelSection>
+  )
+}
+
+/**
+ * Fill / Fit for the screen in vertical scenes. Fill is the short-form look
+ * (the screen fills its area and is cropped); Fit keeps the whole screen
+ * visible. Composed from Button for the same bundle reason as the mode toggle.
+ */
+export function ScreenFramingControl({
+  value,
+  onChange
+}: {
+  value: VerticalScreenFraming
+  onChange: (value: VerticalScreenFraming) => void
+}): ReactElement {
+  const options: { id: VerticalScreenFraming; label: string }[] = [
+    { id: 'fill', label: 'Fill' },
+    { id: 'fit', label: 'Fit' }
+  ]
+  return (
+    <div className="flex items-center justify-between gap-3" data-slot="screen-framing-control">
+      <div className="flex min-w-0 flex-col gap-0.5">
+        <span className="text-sm font-medium">Screen</span>
+        <span className="text-xs text-muted-foreground">
+          {value === 'fit'
+            ? 'Shows your whole screen. The camera takes the rest.'
+            : 'Fills the area and crops the sides of your screen.'}
+        </span>
+      </div>
+      <div
+        aria-label="Screen framing"
+        className="flex shrink-0 items-center overflow-hidden rounded-chip border"
+        role="group"
+      >
+        {options.map((option) => (
+          <Button
+            key={option.id}
+            aria-pressed={value === option.id}
+            className={cn(
+              'h-8 rounded-none px-3',
+              value === option.id ? 'bg-accent text-foreground' : 'text-muted-foreground'
+            )}
+            size="sm"
+            variant="ghost"
+            onClick={() => onChange(option.id)}
+          >
+            {option.label}
+          </Button>
+        ))}
+      </div>
+    </div>
   )
 }
 
 // A small diagram of each preset's arrangement — clearer (and more honest) than
 // a generic icon, and it never claims to be a live thumbnail of the program.
 // Vertical scenes draw on a portrait frame so the whole gallery reads 9:16.
-export function LayoutThumb({ preset }: { preset: LayoutPreset }): ReactElement {
+export function LayoutThumb({
+  preset,
+  framing = 'fill'
+}: {
+  preset: LayoutPreset
+  /** Vertical scenes only: draws the Fit geometry (geometry truth, like the
+   *  bands the backend composes: a 16:9 screen is ~32% of the 9:16 canvas). */
+  framing?: VerticalScreenFraming
+}): ReactElement {
+  if (layoutPresetOrientation(preset) === 'vertical' && framing === 'fit') {
+    return (
+      <div className="relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70">
+        {preset === 'vertical-camera-top' ? (
+          <>
+            <div className="absolute inset-x-1 top-1 h-[62%] rounded-[2px] bg-foreground/30" />
+            <div className="absolute inset-x-1 bottom-1 h-[30%] rounded-[2px] bg-foreground/10" />
+          </>
+        ) : null}
+        {preset === 'vertical-camera-bottom' || preset === 'vertical-split' ? (
+          <>
+            <div className="absolute inset-x-1 top-1 h-[30%] rounded-[2px] bg-foreground/10" />
+            <div className="absolute inset-x-1 bottom-1 h-[62%] rounded-[2px] bg-foreground/30" />
+          </>
+        ) : null}
+        {preset === 'vertical-screen-camera' ? (
+          <>
+            <div className="absolute inset-x-1 top-[35%] h-[30%] rounded-[2px] bg-foreground/10" />
+            <div className="absolute right-1.5 bottom-1.5 h-[13%] w-[38%] rounded-[2px] border border-background/60 bg-foreground/30" />
+          </>
+        ) : null}
+        {preset === 'vertical-screen-only' ? (
+          <div className="absolute inset-x-1 top-[35%] h-[30%] rounded-[2px] bg-foreground/10" />
+        ) : null}
+        {preset === 'vertical-camera-only' ? (
+          <div className="absolute inset-1 rounded-[2px] bg-foreground/30" />
+        ) : null}
+      </div>
+    )
+  }
   if (layoutPresetOrientation(preset) === 'vertical') {
     return (
       <div className="relative mx-auto aspect-[9/16] w-3/5 overflow-hidden rounded-chip border bg-gradient-to-br from-muted/40 to-muted/70">

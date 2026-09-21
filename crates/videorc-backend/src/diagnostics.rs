@@ -1177,8 +1177,44 @@ pub fn classify_recording_risk(stats: &DiagnosticStats) -> (bool, Vec<String>) {
             stats.duplicate_capture_sources.join(", ")
         ));
     }
+    if let Some(reason) = starved_stream_leg_reason(stats) {
+        reasons.push(reason);
+    }
 
     (!reasons.is_empty(), reasons)
+}
+
+/// Frames the recording leg must have encoded before the second leg is judged
+/// (10 s at 30 fps): startup skew between the two bridges is not starvation.
+const STREAM_LEG_STARVATION_MIN_FRAMES: u64 = 300;
+/// The second encoded leg (the vertical simulcast leg, or a profile-split
+/// stream leg) is fed by the same compositor tick as the recording leg, so
+/// its frame count tracks the recording's within a handful of frames.
+const STREAM_LEG_STARVATION_RATIO: f64 = 0.8;
+
+/// Names a second encoded leg that is falling behind the recording leg.
+/// Judged on FRAMES, never bitrate: the 2026-09-21 live session proved the
+/// vertical leg can sit at a sixth of its target bitrate on easy content
+/// (static screen) while encoding every frame (48,325 vs 48,329).
+fn starved_stream_leg_reason(stats: &DiagnosticStats) -> Option<String> {
+    if stats.encoder_bridge_active_encoded_output_encoders < 2 {
+        return None;
+    }
+    let recording = stats.encoder_bridge_recording_encoded_output_frames;
+    let stream = stats.encoder_bridge_stream_encoded_output_frames;
+    if recording < STREAM_LEG_STARVATION_MIN_FRAMES {
+        return None;
+    }
+    if (stream as f64) >= (recording as f64) * STREAM_LEG_STARVATION_RATIO {
+        return None;
+    }
+    Some(format!(
+        "second encoded leg{} is starved: {stream} frame(s) encoded against {recording} on the recording leg",
+        match (stats.stream_output_width, stats.stream_output_height) {
+            (Some(width), Some(height)) => format!(" ({width}x{height})"),
+            _ => String::new(),
+        }
+    ))
 }
 
 pub fn apply_duplicate_capture_sources(
@@ -2542,6 +2578,44 @@ mod tests {
                 .iter()
                 .any(|reason| reason.contains("microphone capture gap"))
         );
+    }
+
+    #[test]
+    fn recording_risk_flags_a_starved_second_leg_by_frames_not_bitrate() {
+        let mut stats = starting_diagnostics("s", 30, "record+stream");
+        stats.encoder_speed = Some(1.0);
+        stats.encoder_bridge_active_encoded_output_encoders = 2;
+        stats.stream_output_width = Some(1080);
+        stats.stream_output_height = Some(1920);
+        // The 2026-09-21 live session: a sixth of the bytes, every frame.
+        stats.encoder_bridge_recording_encoded_output_frames = 48_329;
+        stats.encoder_bridge_recording_encoded_output_bytes = 1_204_683_884;
+        stats.encoder_bridge_stream_encoded_output_frames = 48_325;
+        stats.encoder_bridge_stream_encoded_output_bytes = 218_636_672;
+        let (risk, reasons) = classify_recording_risk(&stats);
+        assert!(
+            !risk,
+            "a low-bitrate but fully fed leg is healthy: {reasons:?}"
+        );
+
+        stats.encoder_bridge_stream_encoded_output_frames = 30_000;
+        let (risk, reasons) = classify_recording_risk(&stats);
+        assert!(risk);
+        assert!(
+            reasons
+                .iter()
+                .any(|reason| reason.contains("second encoded leg (1080x1920) is starved")),
+            "{reasons:?}"
+        );
+
+        // Startup skew is never starvation, and a single-encode session has
+        // no second leg to judge.
+        stats.encoder_bridge_recording_encoded_output_frames = 120;
+        stats.encoder_bridge_stream_encoded_output_frames = 10;
+        assert!(!classify_recording_risk(&stats).0);
+        stats.encoder_bridge_recording_encoded_output_frames = 48_329;
+        stats.encoder_bridge_active_encoded_output_encoders = 1;
+        assert!(!classify_recording_risk(&stats).0);
     }
 
     #[test]

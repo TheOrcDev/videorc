@@ -10750,7 +10750,8 @@ function smokePreviewSceneParams(
     cameraOffsetX: 0,
     cameraOffsetY: 0,
     sideBySideSplit: '60-40',
-    sideBySideCameraSide: 'right'
+    sideBySideCameraSide: 'right',
+    verticalScreenFraming: 'fill'
   }
   const baseTransform = fullFrameTransform()
   const backgroundAsset = bundledBackgroundAssetsInternal()[0]

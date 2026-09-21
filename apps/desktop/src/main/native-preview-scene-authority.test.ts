@@ -153,7 +153,8 @@ function scene(
       cameraOffsetX: 0,
       cameraOffsetY: 0,
       sideBySideSplit: '70-30',
-      sideBySideCameraSide: 'right'
+      sideBySideCameraSide: 'right',
+      verticalScreenFraming: 'fill'
     },
     sources: [],
     updatedAt: 'now'

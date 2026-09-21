@@ -2851,6 +2851,18 @@ async fn start_session_with_timeline(
             None,
         );
     }
+    if let Some(message) = simulcast_leg_log_message(&params, &stream_targets) {
+        // The vertical leg was invisible to every log before 2026-09-21: its
+        // preset, framing and destinations now ride the session's own record.
+        tracing::info!("[simulcast-leg] {message}");
+        let _ = state.database.add_session_log(
+            &session_id,
+            HealthLevel::Info,
+            "simulcast-leg-configured",
+            &message,
+            None,
+        );
+    }
     let _ = state.database.add_session_log(
         &session_id,
         HealthLevel::Info,
@@ -18572,6 +18584,43 @@ fn stream_targets_from_streaming(streaming: &StreamingSettings) -> Result<Vec<St
     Ok(resolution.ready)
 }
 
+/// One line describing the vertical simulcast leg of a dual-orientation
+/// session, or None when no leg is armed. Labels only, never URLs or keys.
+fn simulcast_leg_log_message(
+    params: &StartSessionParams,
+    stream_targets: &[StreamTarget],
+) -> Option<String> {
+    let simulcast = params.simulcast.as_ref()?;
+    let destinations = stream_targets
+        .iter()
+        .filter(|target| {
+            target.output_orientation == crate::streaming::StreamOutputOrientation::Vertical
+        })
+        .map(|target| target.label.as_str())
+        .collect::<Vec<_>>();
+    let preset = serde_json::to_value(&simulcast.layout.layout_preset)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_string))
+        .unwrap_or_else(|| "unknown".to_string());
+    let framing = match simulcast.layout.vertical_screen_framing {
+        crate::protocol::VerticalScreenFraming::Fill => "fill",
+        crate::protocol::VerticalScreenFraming::Fit => "fit",
+    };
+    Some(format!(
+        "Vertical leg {}x{}@{}fps target {} kbps, scene {preset}, screen framing {framing}, {} destination(s): {}",
+        simulcast.video.width,
+        simulcast.video.height,
+        simulcast.video.fps,
+        simulcast.video.bitrate_kbps,
+        destinations.len(),
+        if destinations.is_empty() {
+            "none".to_string()
+        } else {
+            destinations.join(", ")
+        }
+    ))
+}
+
 /// Two destinations that resolve to the SAME ingest URL + key are never a
 /// valid fan-out: the provider sees two competing ingests on one stream
 /// (YouTube: "More than one ingestion is using the primary URL") and the
@@ -30698,6 +30747,29 @@ mod tests {
         params.simulcast = Some(simulcast_leg());
         let targets = stream_targets_from_streaming(&streaming).unwrap();
         (params, targets)
+    }
+
+    #[test]
+    fn simulcast_leg_log_names_the_scene_framing_and_destinations_without_keys() {
+        let (mut params, targets) = simulcast_split_params(true);
+        let message = simulcast_leg_log_message(&params, &targets).expect("leg is armed");
+        assert!(message.contains("1080x1920@30fps"), "{message}");
+        assert!(message.contains("target 6000 kbps"), "{message}");
+        assert!(message.contains("screen framing fill"), "{message}");
+        assert!(message.contains("1 destination(s)"), "{message}");
+        assert!(!message.contains("rtmp"), "no URLs or keys: {message}");
+
+        params
+            .simulcast
+            .as_mut()
+            .unwrap()
+            .layout
+            .vertical_screen_framing = crate::protocol::VerticalScreenFraming::Fit;
+        let message = simulcast_leg_log_message(&params, &targets).unwrap();
+        assert!(message.contains("screen framing fit"), "{message}");
+
+        params.simulcast = None;
+        assert!(simulcast_leg_log_message(&params, &targets).is_none());
     }
 
     #[test]

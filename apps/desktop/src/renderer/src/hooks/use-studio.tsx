@@ -72,6 +72,8 @@ import {
   resolveProviderStreamOutputPlan,
   rtmpDefaults,
   simulcastArmed,
+  simulcastLegLayout,
+  simulcastLegPreset,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
   layoutPresetMemoryPatch,
@@ -85,6 +87,7 @@ import {
   HORIZONTAL_LAYOUT_PRESETS,
   VERTICAL_LAYOUT_PRESETS,
   type CaptureConfig,
+  type SimulcastLegPatch,
   type SettingsState,
   type WsStatus
 } from '@/lib/capture'
@@ -1086,6 +1089,12 @@ export type StudioContextValue = {
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
   applyCameraPreset: (patch: Partial<LayoutSettings>) => void
+  /**
+   * Change the vertical simulcast leg (scene, screen framing, follow). Saved
+   * for the next session and, in a running dual-orientation session, applied
+   * to the leg live — the horizontal program is never touched.
+   */
+  applySimulcastLeg: (patch: SimulcastLegPatch) => void
   // The layout preset a live switch is currently starting sources for, if any
   // (drives the "Switching…" pending state; plan slice D2).
   layoutSwitchPending: LayoutPreset | null
@@ -7040,6 +7049,57 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     } satisfies LayoutTransactionSnapshot
   }, [client])
 
+  /**
+   * Commit the vertical simulcast leg's scene to a RUNNING dual-orientation
+   * session. The backend lands a vertical scene transaction on the leg only
+   * (no layout intent is registered, the horizontal program is untouched), so
+   * this deliberately bypasses the horizontal transaction pipeline: no intent
+   * bump, no proof wait, no React reconciliation to the returned scene. A
+   * no-op off-air — the next session start reads the same config.
+   */
+  const commitSimulcastLegLive = useCallback(
+    async (config: CaptureConfig, programPreset?: LayoutPreset): Promise<void> => {
+      if (
+        !client ||
+        wsStatus !== 'connected' ||
+        !isActiveRecordingState(recordingRef.current.state) ||
+        !simulcastArmed(config)
+      ) {
+        return
+      }
+      try {
+        await client.requestTyped('scene.layout.apply_live', {
+          // Echoed back, never registered: the leg must not supersede a
+          // horizontal intent that is still in flight.
+          intentId: Math.max(1, layoutIntentIdRef.current),
+          sources: config.sources,
+          layout: simulcastLegLayout(config, programPreset),
+          video: coerceVideoToOrientation(config.video, 'vertical'),
+          background: activeSceneBackground,
+          protectedOverlayWindowIds: await currentProtectedOverlayWindowIds()
+        })
+      } catch (error) {
+        reportError(
+          new Error(
+            `The vertical stream scene could not be changed live. ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          )
+        )
+      }
+    },
+    [activeSceneBackground, client, reportError, wsStatus]
+  )
+
+  const applySimulcastLeg = useCallback(
+    (patch: SimulcastLegPatch): void => {
+      const next = { ...captureConfigRef.current, ...patch }
+      setCaptureConfig((current) => ({ ...current, ...patch }))
+      void commitSimulcastLegLive(next)
+    },
+    [commitSimulcastLegLive]
+  )
+
   const requestLayoutTransaction = useCallback(
     (
       layout: LayoutSettings,
@@ -7135,6 +7195,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // reconciliation continue below, but a bounded deck ack must not
           // consume their additional preview/readback budget.
           settleCommitReceipt(true)
+          // Dual-orientation: when the vertical leg follows the program and
+          // this horizontal switch changes its paired scene (camera-only and
+          // screen-only have vertical twins), move the leg with it.
+          if (
+            sessionActive &&
+            simulcastLegPreset(requestedConfig) !==
+              simulcastLegPreset(requestedConfig, layout.layoutPreset)
+          ) {
+            void commitSimulcastLegLive(requestedConfig, layout.layoutPreset)
+          }
           // Intent freshness and backend commit freshness are separate. A may be
           // superseded by B after A commits; remember A before waiting for proof
           // so a failed B can reconcile the renderer to committed backend truth.
@@ -7253,6 +7323,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       activeSceneBackground,
       applyLayoutTransactionState,
       client,
+      commitSimulcastLegLive,
       readLayoutTransactionBackendTruth,
       recordAutomaticSourceFallbacks,
       rememberLayoutCommit,
@@ -13016,6 +13087,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneSourceTransform,
       commitCameraTransform,
       applyCameraPreset,
+      applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
       switchSourceDeviceLive,
@@ -13219,6 +13291,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneSourceTransform,
       commitCameraTransform,
       applyCameraPreset,
+      applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
       switchSourceDeviceLive,

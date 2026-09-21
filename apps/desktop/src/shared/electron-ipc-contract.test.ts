@@ -231,7 +231,8 @@ describe('Electron IPC contract', () => {
       cameraOffsetX: 0,
       cameraOffsetY: 0,
       sideBySideSplit: '50-50',
-      sideBySideCameraSide: 'right'
+      sideBySideCameraSide: 'right',
+      verticalScreenFraming: 'fill'
     }
     const compositor = {
       state: 'live',
