@@ -117,7 +117,11 @@ export function AudioMixer(): ReactElement {
   )
   const analyserDriven = micVisual.active && !muted
   const signalLive = audioMixerSignalLive(muted, micVisual.active, liveLevel)
-  const monitorLabel = audioMixerMonitorLabel({ sessionActive: isSessionActive, signalLive })
+  const monitorLabel = audioMixerMonitorLabel({
+    sessionActive: isSessionActive,
+    signalLive,
+    muted: muted && Boolean(selectedMicrophone)
+  })
   const fallbackLevels = fallbackBandLevels(
     muted || !selectedMicrophone ? 0 : level,
     MIXER_BAR_COUNT

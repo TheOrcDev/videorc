@@ -40,18 +40,23 @@ export function micVisualAnalyserEnabled(input: MicVisualGateInput): boolean {
   return true
 }
 
-export type AudioMixerMonitorLabel = 'Live' | 'Monitoring' | 'Idle'
+export type AudioMixerMonitorLabel = 'Live' | 'Monitoring' | 'Muted' | 'Idle'
 
 /**
  * Chip copy beside the bars. "Live" = a session is running and the signal
  * path is up; "Monitoring" = idle, the user asked for input monitoring, and
- * the analyser is actually delivering; "Idle" = muted, off, or unavailable —
- * the honest state when nothing is being read.
+ * the analyser is actually delivering; "Muted" = the microphone is muted, so
+ * flat bars are the mute and not a dead microphone; "Idle" = off or
+ * unavailable, the honest state when nothing is being read.
  */
 export function audioMixerMonitorLabel(input: {
   sessionActive: boolean
   signalLive: boolean
+  muted?: boolean
 }): AudioMixerMonitorLabel {
+  if (input.muted) {
+    return 'Muted'
+  }
   if (!input.signalLive) {
     return 'Idle'
   }
