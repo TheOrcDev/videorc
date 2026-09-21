@@ -120,7 +120,11 @@ export interface BackendRpcMethodMap {
     LayoutTransactionResult
   >
   'scene.layout.apply_live': BackendRpcDefinition<
-    SceneConfigParams & { intentId: number },
+    SceneConfigParams & {
+      intentId: number
+      /** Target the vertical simulcast leg only (refused when none runs). */
+      simulcastLeg?: boolean
+    },
     LayoutTransactionResult
   >
   'compositor.status': BackendRpcDefinition<undefined, CompositorStatus>
@@ -686,6 +690,21 @@ const layoutTransactionParamsSchema = runtimeSchema<unknown>(
     const { intentId, ...sceneConfig } = value as Record<string, unknown>
     numberSchema({ integer: true, min: 1 }).parse(intentId, `${path}.intentId`)
     sceneConfigSchema.parse(sceneConfig, path)
+    return value
+  }
+)
+
+// apply_live alone may target the vertical simulcast leg; apply_preview keeps
+// rejecting the key (there is no leg off-air).
+const liveLayoutTransactionParamsSchema = runtimeSchema<unknown>(
+  'a valid live layout transaction',
+  (value, path) => {
+    if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+      return layoutTransactionParamsSchema.parse(value, path)
+    }
+    const { simulcastLeg, ...transaction } = value as Record<string, unknown>
+    optionalSchema(booleanSchema).parse(simulcastLeg, `${path}.simulcastLeg`)
+    layoutTransactionParamsSchema.parse(transaction, path)
     return value
   }
 )
@@ -1787,7 +1806,7 @@ const runtimeContracts = {
     result: layoutTransactionResultSchema
   },
   'scene.layout.apply_live': {
-    params: layoutTransactionParamsSchema,
+    params: liveLayoutTransactionParamsSchema,
     result: layoutTransactionResultSchema
   },
   'compositor.status': { params: undefinedSchema, result: compositorStatusSchema },

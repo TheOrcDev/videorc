@@ -9,6 +9,7 @@ import type {
   LayoutPreset,
   LayoutSettings,
   RtmpPreset,
+  SceneConfigParams,
   SideBySideSplit,
   SimulcastParams,
   StreamOutputOrientation,
@@ -243,6 +244,24 @@ export function buildSimulcastParams(config: CaptureConfig): SimulcastParams | u
     layout: simulcastLegLayout(config),
     video: coerceVideoToOrientation(config.video, 'vertical')
   }
+}
+
+/**
+ * The live twin of buildSimulcastParams: the scene transaction that moves the
+ * vertical leg of a RUNNING dual-orientation session, or null when no leg is
+ * armed. Built exactly like the session-start leg (same sources, derived
+ * layout, portrait canvas, no background) so a live edit can never make the
+ * leg look different from how it went live. `simulcastLeg` makes the backend
+ * commit it to the leg only, and refuse it when no leg is running.
+ */
+export function simulcastLegLiveRequest(
+  config: CaptureConfig
+): (SceneConfigParams & { simulcastLeg: true }) | null {
+  const leg = buildSimulcastParams(config)
+  if (!leg) {
+    return null
+  }
+  return { simulcastLeg: true, sources: config.sources, layout: leg.layout, video: leg.video }
 }
 
 /**

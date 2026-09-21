@@ -707,6 +707,13 @@ describe('backend RPC contract', () => {
     expect(() =>
       validateBackendRpcParams('scene.layout.apply_live', { ...layoutParams, transitionMs: 0.5 })
     ).toThrow()
+    // Only a live transaction may target the vertical simulcast leg.
+    const legParams = { ...layoutParams, simulcastLeg: true }
+    expect(validateBackendRpcParams('scene.layout.apply_live', legParams)).toEqual(legParams)
+    expect(() =>
+      validateBackendRpcParams('scene.layout.apply_live', { ...layoutParams, simulcastLeg: 'yes' })
+    ).toThrow()
+    expect(() => validateBackendRpcParams('scene.layout.apply_preview', legParams)).toThrow()
   })
 
   it('accepts the optional record-latency click timestamps on session start and stop', () => {

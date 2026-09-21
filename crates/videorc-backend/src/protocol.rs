@@ -733,6 +733,12 @@ pub struct SceneConfigParams {
 pub struct SceneLayoutApplyParams {
     #[serde(default)]
     pub intent_id: Option<u64>,
+    /// Target the vertical SIMULCAST leg of a running dual-orientation
+    /// session explicitly. Such a request never falls through to a program
+    /// commit: one that arrives after the session stopped fails instead of
+    /// turning the idle program into the portrait leg scene.
+    #[serde(default)]
+    pub simulcast_leg: bool,
     #[serde(flatten)]
     pub config: SceneConfigParams,
 }

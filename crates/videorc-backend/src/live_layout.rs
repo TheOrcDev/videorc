@@ -399,6 +399,9 @@ pub async fn apply_layout_live(
     state: &AppState,
     request: SceneLayoutApplyParams,
 ) -> Result<LiveLayoutApplyStatus> {
+    if request.simulcast_leg {
+        return apply_simulcast_leg_request(state, request.config, request.intent_id).await;
+    }
     apply_scene_transaction(
         state,
         request.config,
@@ -592,6 +595,31 @@ async fn run_explicit_camera_configuration_transaction<T>(
     explicit_camera_mutation.finish();
     reconcile_explicit_camera_configuration_change(state).await;
     result
+}
+
+/// An explicit vertical-leg request (the Vertical stream card, and the leg
+/// re-derived after each program commit). Refused, never redirected, when
+/// there is no running leg to receive it: the renderer can send one just as
+/// the owner presses Stop, and the idle program must never become the
+/// portrait leg scene.
+async fn apply_simulcast_leg_request(
+    state: &AppState,
+    params: SceneConfigParams,
+    requested_intent_id: Option<u64>,
+) -> Result<LiveLayoutApplyStatus> {
+    if let Some(blocker) = preset_selection_blocker(&params) {
+        bail!(blocker);
+    }
+    if !params.layout.layout_preset.is_vertical() {
+        bail!("The vertical stream only takes vertical scenes.");
+    }
+    if state.recording.lock().await.is_none()
+        || !crate::compositor::has_compositor_simulcast_scene(state).await
+    {
+        bail!("The vertical stream is not live, so there is nothing to change.");
+    }
+    let scene = scene_from_capture_config(params.clone());
+    apply_simulcast_leg_scene(state, &params, scene, requested_intent_id).await
 }
 
 /// Commit a vertical scene to the SIMULCAST leg of a running dual-orientation
@@ -1812,6 +1840,7 @@ mod tests {
             &state,
             SceneLayoutApplyParams {
                 intent_id: Some(41),
+                simulcast_leg: false,
                 config: vertical,
             },
         )
@@ -1845,6 +1874,92 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn explicit_leg_request_lands_on_the_leg_and_never_on_the_program() {
+        use crate::protocol::VerticalScreenFraming;
+        let state = test_state();
+        let mut vertical = config(LayoutPreset::VerticalCameraBottom, true, true);
+        vertical.layout.vertical_screen_framing = VerticalScreenFraming::Fit;
+        let leg_request = |config: SceneConfigParams| SceneLayoutApplyParams {
+            intent_id: Some(12),
+            simulcast_leg: true,
+            config,
+        };
+        let program_before = {
+            let compositor = state.compositor.lock().await;
+            (
+                compositor.status.scene_layout.clone(),
+                compositor.status.scene_revision,
+            )
+        };
+
+        // 1. After Stop (no session): refused, and nothing is committed —
+        //    the idle program must never become the portrait leg scene.
+        let error = apply_layout_live(&state, leg_request(vertical.clone()))
+            .await
+            .expect_err("no session, no leg");
+        assert!(error.to_string().contains("not live"), "{error}");
+        {
+            let compositor = state.compositor.lock().await;
+            assert_eq!(compositor.status.scene_layout, program_before.0);
+            assert_eq!(compositor.status.scene_revision, program_before.1);
+        }
+        assert_eq!(state.layout_intents.lock().await.latest_intent_id, 0);
+
+        // 2. A session without a vertical leg: refused the same way.
+        *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
+            "horizontal-only",
+        ));
+        apply_layout_live(&state, leg_request(vertical.clone()))
+            .await
+            .expect_err("no leg is armed");
+        assert!(
+            crate::compositor::test_compositor_simulcast_layout(&state)
+                .await
+                .is_none()
+        );
+
+        // 3. A horizontal scene is never a leg scene.
+        crate::compositor::update_compositor_simulcast_scene(
+            &state,
+            crate::protocol::CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(scene_from_capture_config(vertical.clone())),
+                layout: vertical.layout.clone(),
+                active_screen: None,
+                transition_ms: None,
+            },
+        )
+        .await;
+        let error = apply_layout_live(
+            &state,
+            leg_request(config(LayoutPreset::ScreenCamera, true, true)),
+        )
+        .await
+        .expect_err("horizontal scene on the vertical leg");
+        assert!(
+            error.to_string().contains("only takes vertical scenes"),
+            "{error}"
+        );
+
+        // 4. With a running leg: lands on the leg, registers no intent.
+        let mut screen_only = config(LayoutPreset::VerticalScreenOnly, true, true);
+        screen_only.layout.vertical_screen_framing = VerticalScreenFraming::Fit;
+        let status = apply_layout_live(&state, leg_request(screen_only))
+            .await
+            .expect("leg commit");
+        assert_eq!(status.mode, "hot");
+        let leg = crate::compositor::test_compositor_simulcast_layout(&state)
+            .await
+            .expect("leg armed");
+        assert_eq!(leg.layout_preset, LayoutPreset::VerticalScreenOnly);
+        assert_eq!(leg.vertical_screen_framing, VerticalScreenFraming::Fit);
+        assert_eq!(state.layout_intents.lock().await.latest_intent_id, 0);
+        let compositor = state.compositor.lock().await;
+        assert_eq!(compositor.status.scene_layout, program_before.0);
+        assert_eq!(compositor.status.scene_revision, program_before.1);
+    }
+
+    #[tokio::test]
     async fn vertical_scene_without_a_simulcast_leg_is_still_refused_mid_session() {
         let state = test_state();
         *state.recording.lock().await = Some(crate::recording::test_active_recording_stub(
@@ -1854,6 +1969,7 @@ mod tests {
             &state,
             SceneLayoutApplyParams {
                 intent_id: Some(7),
+                simulcast_leg: false,
                 config: config(LayoutPreset::VerticalCameraBottom, true, true),
             },
         )

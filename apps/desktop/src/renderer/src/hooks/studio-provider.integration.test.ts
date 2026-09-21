@@ -360,6 +360,13 @@ class StudioBackend {
   noiseCleanupJobs: NoiseCleanupJob[] = []
   sourceMutationRevision = 4
   layoutResponseDelayMs = 0
+  // Layouts the vertical simulcast leg was asked to show (explicit leg
+  // requests never touch the program layout).
+  simulcastLegLayouts: LayoutSettings[] = []
+  // Opt-in live output proof: diagnostics report the committed revision as
+  // the active output revision, so live layout commits settle instead of
+  // waiting out the proof timeout.
+  reportsActiveSceneRevision = false
   layoutApplyFailure: 'definite' | 'request-outcome-unknown-after-commit' | null = null
   screenActivateFailure: 'definite' | null = null
   screenClearFailure: 'request-outcome-unknown-before-commit' | null = null
@@ -595,6 +602,7 @@ class StudioBackend {
         }
       case 'diagnostics.stats':
         return {
+          ...(this.reportsActiveSceneRevision ? { activeSceneRevision: this.revision } : {}),
           activeFfmpegProcesses: 0,
           activeFfprobeProcesses: 0,
           micDroppedFrames: 0,
@@ -754,6 +762,18 @@ class StudioBackend {
         }
       case 'scene.layout.apply_preview':
       case 'scene.layout.apply_live': {
+        if (params.simulcastLeg === true) {
+          this.simulcastLegLayouts.push(params.layout as LayoutSettings)
+          return {
+            applied: true,
+            mode: 'hot',
+            intentId: params.intentId,
+            sceneRevision: this.revision,
+            presentationProven: true,
+            scene: this.currentScene,
+            compositorStatus: compositorFor(this.currentScene, this.currentLayout, this.revision)
+          }
+        }
         if (this.layoutApplyFailure === 'definite') {
           throw Object.assign(new Error('The test backend rejected the layout change.'), {
             code: 'layout-preview-failed'
@@ -2971,6 +2991,121 @@ describe('real StudioProvider lifecycle', () => {
       sessionId: 'late-live-loss'
     })
   })
+
+  it('re-derives the vertical leg from each committed program scene, even on a fast double switch', async () => {
+    const backend = new StudioBackend()
+    backend.recordingState = 'recording'
+    backend.reportsActiveSceneRevision = true
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.recording.recording.state === 'recording' &&
+        latest()?.core.captureConfig.sources.screenId != null &&
+        latest()?.core.captureConfig.sources.cameraId != null
+    )
+
+    // A live horizontal program (Screen + Cam) with the YouTube Vertical leg
+    // armed on its own key, following the program, framed Fit.
+    const config = latest()!.core.captureConfig
+    await act(async () => {
+      latest()!.core.setCaptureConfig({
+        ...config,
+        streamEnabled: true,
+        layout: { ...config.layout, layoutPreset: 'screen-camera' },
+        lastVerticalPreset: 'vertical-camera-bottom',
+        simulcastFollowsProgram: true,
+        simulcastScreenFraming: 'fit',
+        streaming: {
+          ...config.streaming,
+          enabled: true,
+          enabledTargetIds: ['youtube', 'youtube-vertical'],
+          targets: config.streaming.targets.map((target) =>
+            target.id === 'youtube' || target.id === 'youtube-vertical'
+              ? { ...target, enabled: true, streamKey: `key-${target.id}`, streamKeyPresent: true }
+              : target
+          )
+        }
+      })
+    })
+    await waitForObservation(() => latest()?.core.captureConfig.streaming.enabled === true)
+
+    // The owner clicks Camera, then straight back to Screen + Cam before the
+    // first commit returns. The second transaction was captured before the
+    // first landed, so comparing snapshots would leave the leg on the camera
+    // twin; deriving from each committed layout must not.
+    backend.layoutResponseDelayMs = 150
+    await act(async () => {
+      latest()!.core.applyCameraPreset({ layoutPreset: 'camera-only' })
+      latest()!.core.applyCameraPreset({ layoutPreset: 'screen-camera' })
+    })
+    // Both program transactions settle (the second one is applied, the
+    // first is superseded) before anything is judged.
+    await waitForObservation(
+      () =>
+        latest()?.core.layoutSwitchPending == null &&
+        latest()?.core.captureConfig.layout.layoutPreset === 'screen-camera' &&
+        backend.simulcastLegLayouts.length >= 2
+    )
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+
+    expect(backend.simulcastLegLayouts.map((layout) => layout.layoutPreset)).toEqual([
+      'vertical-camera-only',
+      'vertical-camera-bottom'
+    ])
+    expect(backend.simulcastLegLayouts.at(-1)?.verticalScreenFraming).toBe('fit')
+    // Leg requests are explicit and never reach the program.
+    expect(backend.currentLayout.layoutPreset).toBe('screen-camera')
+    for (const command of backend.commands) {
+      if (command.method !== 'scene.layout.apply_live') continue
+      const params = command.params as { simulcastLeg?: boolean; layout: LayoutSettings }
+      expect(params.layout.layoutPreset.startsWith('vertical-')).toBe(params.simulcastLeg === true)
+    }
+    expect(toastSpies.error).not.toHaveBeenCalled()
+
+    // A leg edit sends only the leg, and the program stays put.
+    const programCommands = backend.commands.length
+    await act(async () => {
+      latest()!.core.applySimulcastLeg({ simulcastScreenFraming: 'fill' })
+    })
+    await waitForObservation(() => backend.simulcastLegLayouts.length >= 3)
+    expect(backend.simulcastLegLayouts.at(-1)).toMatchObject({
+      layoutPreset: 'vertical-camera-bottom',
+      verticalScreenFraming: 'fill'
+    })
+    expect(
+      backend.commands
+        .slice(programCommands)
+        .filter(
+          (command) =>
+            command.method === 'scene.layout.apply_live' &&
+            (command.params as { simulcastLeg?: boolean }).simulcastLeg !== true
+        )
+    ).toEqual([])
+    // Drain: every response lands before unmount, so nothing from this test
+    // can surface later, and the whole run stayed free of error toasts.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 400))
+    })
+    expect(toastSpies.error).not.toHaveBeenCalled()
+  }, 15_000)
 
   it('keeps a committed live source selection when output proof catches up late', async () => {
     const backend = new StudioBackend()

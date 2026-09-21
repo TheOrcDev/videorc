@@ -72,6 +72,7 @@ import {
   resolveProviderStreamOutputPlan,
   rtmpDefaults,
   simulcastArmed,
+  simulcastLegLiveRequest,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
   layoutPresetMemoryPatch,
@@ -7048,49 +7049,66 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   }, [client])
 
   /**
-   * Commit the vertical simulcast leg's scene to a RUNNING dual-orientation
-   * session. The backend lands a vertical scene transaction on the leg only
-   * (no layout intent is registered, the horizontal program is untouched), so
-   * this deliberately bypasses the horizontal transaction pipeline: no intent
-   * bump, no proof wait, no React reconciliation to the returned scene. A
-   * no-op off-air — the next session start reads the same config. The request
-   * builder is loaded on demand to stay out of the initial bundle.
+   * Send the vertical simulcast leg of a RUNNING dual-orientation session,
+   * re-derived from `config` (program layout + the leg's own settings) and
+   * built exactly like the session-start leg. It is an explicit leg request:
+   * the backend commits it to the leg only (no layout intent, the horizontal
+   * program is untouched) and refuses it, never redirects it, when no leg is
+   * running. Synchronous on purpose: requests go out in call order, so the
+   * latest derivation is the one the leg ends on. Returns the request key so
+   * a caller can skip sending an identical derivation twice.
    */
-  const commitSimulcastLegLive = useCallback(
-    async (config: CaptureConfig, afterProgramSwitchTo?: LayoutPreset): Promise<void> => {
+  const sendSimulcastLeg = useCallback(
+    (config: CaptureConfig, skipIfSameAs: string | null = null): string | null => {
       if (
         !client ||
         wsStatus !== 'connected' ||
         !isActiveRecordingState(recordingRef.current.state)
       ) {
-        return
+        return null
       }
-      try {
-        const { simulcastLegLiveRequest } = await import('@/lib/simulcast-leg-live')
-        const request = simulcastLegLiveRequest({
-          config,
-          intentId: layoutIntentIdRef.current,
-          background: activeSceneBackground,
-          protectedOverlayWindowIds: await currentProtectedOverlayWindowIds(),
-          afterProgramSwitchTo
+      const request = simulcastLegLiveRequest(config)
+      if (!request) {
+        return null
+      }
+      const key = JSON.stringify(request)
+      if (key === skipIfSameAs) {
+        return key
+      }
+      client
+        .requestTyped('scene.layout.apply_live', {
+          ...request,
+          // Echoed back, never registered: the leg must not supersede a
+          // horizontal intent that is still in flight.
+          intentId: Math.max(1, layoutIntentIdRef.current)
         })
-        if (request) {
-          await client.requestTyped('scene.layout.apply_live', request)
-        }
-      } catch (error) {
-        reportError(error)
-      }
+        .catch((error: unknown) => {
+          // A request that raced Stop is refused by design; only a failure
+          // while the session is still running is news.
+          if (isActiveRecordingState(recordingRef.current.state)) {
+            reportError(error)
+          }
+        })
+      return key
     },
-    [activeSceneBackground, client, reportError, wsStatus]
+    [client, reportError, wsStatus]
   )
 
   const applySimulcastLeg = useCallback(
     (patch: SimulcastLegPatch): void => {
+      // Written to the ref synchronously (and again in the updater) so a
+      // program commit landing before React re-renders re-derives the leg
+      // from THESE settings, not the ones they replace.
       const next = { ...captureConfigRef.current, ...patch }
-      setCaptureConfig((current) => ({ ...current, ...patch }))
-      void commitSimulcastLegLive(next)
+      captureConfigRef.current = next
+      setCaptureConfig((current) => {
+        const updated = { ...current, ...patch }
+        captureConfigRef.current = updated
+        return updated
+      })
+      sendSimulcastLeg(next)
     },
-    [commitSimulcastLegLive]
+    [sendSimulcastLeg]
   )
 
   const requestLayoutTransaction = useCallback(
@@ -7188,12 +7206,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // reconciliation continue below, but a bounded deck ack must not
           // consume their additional preview/readback budget.
           settleCommitReceipt(true)
-          // Dual-orientation: when the vertical leg follows the program and
-          // this horizontal switch changes its paired scene (camera-only and
-          // screen-only have vertical twins), move the leg with it.
-          if (sessionActive) {
-            void commitSimulcastLegLive(requestedConfig, layout.layoutPreset)
+          // Dual-orientation: the vertical leg is DERIVED from the program
+          // layout (its twin scene when following, the shared camera
+          // settings) plus the leg's own settings, so every committed program
+          // change re-derives it. Always from the committed layout, never by
+          // comparing against a pre-commit snapshot that a faster click may
+          // already have made stale. Idempotent on the backend.
+          const programAfterCommit = {
+            ...captureConfigRef.current,
+            sources: requestedSources,
+            layout: committedSnapshot.layout
           }
+          const legSentAtCommit = sessionActive ? sendSimulcastLeg(programAfterCommit) : null
           // Intent freshness and backend commit freshness are separate. A may be
           // superseded by B after A commits; remember A before waiting for proof
           // so a failed B can reconcile the renderer to committed backend truth.
@@ -7219,6 +7243,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // state, then surface the presentation fault; leaving the old selection
           // visible would create a third, false scene truth.
           applyLayoutTransactionState(committedSnapshot)
+          if (sessionActive) {
+            // A leg edit made while this commit waited for proof was derived
+            // from the pre-commit program; re-derive once, if anything moved.
+            sendSimulcastLeg(
+              {
+                ...captureConfigRef.current,
+                sources: requestedSources,
+                layout: committedSnapshot.layout
+              },
+              legSentAtCommit
+            )
+          }
           if (disposition === 'apply-unproven') {
             const detail =
               proofError instanceof Error ? proofError.message : 'Presentation proof timed out.'
@@ -7312,12 +7348,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       activeSceneBackground,
       applyLayoutTransactionState,
       client,
-      commitSimulcastLegLive,
       readLayoutTransactionBackendTruth,
       recordAutomaticSourceFallbacks,
       rememberLayoutCommit,
       rememberLayoutTransactionSnapshot,
       reportError,
+      sendSimulcastLeg,
       wsStatus
     ]
   )

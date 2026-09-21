@@ -6,6 +6,7 @@ import {
   defaultCaptureConfig,
   normalizeLayoutSettings,
   simulcastLegLayout,
+  simulcastLegLiveRequest,
   simulcastLegPreset
 } from './capture'
 
@@ -98,52 +99,50 @@ describe('verticalScreenFraming normalisation', () => {
   })
 })
 
-describe('simulcastLegLiveRequest (mid-stream vertical leg edits)', () => {
-  const base = {
-    intentId: 41,
-    background: undefined,
-    protectedOverlayWindowIds: [7]
-  }
-
-  it('sends the whole leg scene on the portrait canvas, echoing the intent', async () => {
-    const { simulcastLegLiveRequest } = await import('./simulcast-leg-live')
-    const request = simulcastLegLiveRequest({ ...base, config: dualOrientationConfig() })
-    expect(request).toMatchObject({
-      intentId: 41,
-      layout: { layoutPreset: 'vertical-camera-bottom', verticalScreenFraming: 'fit' },
-      video: { width: 1080, height: 1920 },
-      protectedOverlayWindowIds: [7]
+describe('simulcastLegLiveRequest (the leg of a running session)', () => {
+  it('is built exactly like the session-start leg, as an explicit leg request', () => {
+    const config = dualOrientationConfig()
+    const request = simulcastLegLiveRequest(config)
+    const start = buildSimulcastParams(config)
+    expect(request).toEqual({
+      simulcastLeg: true,
+      sources: config.sources,
+      layout: start?.layout,
+      video: start?.video
     })
-    // The echoed intent is never below the schema floor.
-    expect(
-      simulcastLegLiveRequest({ ...base, intentId: 0, config: dualOrientationConfig() })?.intentId
-    ).toBe(1)
+    // The session-start leg carries no background or overlay ids: a live
+    // edit must not make the vertical stream look different from how it
+    // went live.
+    expect(request).not.toHaveProperty('background')
+    expect(request).not.toHaveProperty('protectedOverlayWindowIds')
   })
 
-  it('sends nothing when no vertical leg is armed', async () => {
-    const { simulcastLegLiveRequest } = await import('./simulcast-leg-live')
-    expect(simulcastLegLiveRequest({ ...base, config: defaultCaptureConfig })).toBeNull()
+  it('sends nothing when no vertical leg is armed', () => {
+    expect(simulcastLegLiveRequest(defaultCaptureConfig)).toBeNull()
   })
 
-  it('follows a program switch only when the paired vertical scene changes', async () => {
-    const { simulcastLegLiveRequest } = await import('./simulcast-leg-live')
-    const config = dualOrientationConfig() // program: screen-camera
-    // screen-camera -> side-by-side keeps the remembered vertical scene.
+  it('re-derives from the program layout it is given', () => {
+    // After a committed program switch the hook passes the COMMITTED layout;
+    // the leg follows it, whatever the pre-commit snapshot said.
+    const config = dualOrientationConfig()
+    const cameraOnly = {
+      ...config,
+      layout: { ...config.layout, layoutPreset: 'camera-only' as const, cameraMirror: true }
+    }
+    const followed = simulcastLegLiveRequest(cameraOnly)
+    expect(followed?.layout.layoutPreset).toBe('vertical-camera-only')
+    // Shared camera settings travel with the program.
+    expect(followed?.layout.cameraMirror).toBe(true)
+    // Back to Screen + Cam: the remembered vertical scene, never a stale twin.
+    const back = simulcastLegLiveRequest({
+      ...config,
+      layout: { ...config.layout, layoutPreset: 'screen-camera' }
+    })
+    expect(back?.layout.layoutPreset).toBe('vertical-camera-bottom')
+    // Follow off pins the leg to the picked scene.
     expect(
-      simulcastLegLiveRequest({ ...base, config, afterProgramSwitchTo: 'side-by-side' })
-    ).toBeNull()
-    // screen-camera -> camera-only moves the leg to its vertical twin.
-    expect(
-      simulcastLegLiveRequest({ ...base, config, afterProgramSwitchTo: 'camera-only' })?.layout
+      simulcastLegLiveRequest({ ...cameraOnly, simulcastFollowsProgram: false })?.layout
         .layoutPreset
-    ).toBe('vertical-camera-only')
-    // Follow off: a program switch never moves the leg.
-    expect(
-      simulcastLegLiveRequest({
-        ...base,
-        config: dualOrientationConfig({ simulcastFollowsProgram: false }),
-        afterProgramSwitchTo: 'camera-only'
-      })
-    ).toBeNull()
+    ).toBe('vertical-camera-bottom')
   })
 })
