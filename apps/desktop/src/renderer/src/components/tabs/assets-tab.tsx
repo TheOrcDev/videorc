@@ -1,9 +1,7 @@
 import {
   AdjustIcon,
-  CloseIcon,
   DeleteIcon,
   EditIcon,
-  ExternalLinkIcon,
   ImageIcon,
   PreviewIcon,
   ResetIcon,
@@ -50,7 +48,6 @@ import {
   firstEmptySlotId
 } from '@/lib/background-assets'
 import { TakeoverScreensSection } from '@/components/takeover-screens-section'
-import { useStudioCore } from '@/hooks/use-studio'
 import { cn } from '@/lib/utils'
 
 type BadgeVariant = NonNullable<ComponentProps<typeof Badge>['variant']>
@@ -206,19 +203,13 @@ export function AssetsTab(): ReactElement {
                 setRegistry((current) => setAssetStyle(current, assetId, defaultBackgroundStyle()))
               }
               onRemove={() => setRegistry((current) => removeSlotAsset(current, slot.id))}
+              onStyle={(assetId, patch) =>
+                setRegistry((current) => setAssetStyle(current, assetId, patch))
+              }
             />
           ))}
         </Gallery>
       </PanelSection>
-
-      <ActiveBackgroundBar
-        registry={registry}
-        onMissing={markMissing}
-        onClear={() => setRegistry(clearActiveSlot)}
-        onStyle={(assetId, patch) =>
-          setRegistry((current) => setAssetStyle(current, assetId, patch))
-        }
-      />
 
       <TakeoverScreensSection />
     </div>
@@ -237,7 +228,8 @@ function PresetTile({
   onCancelRename,
   onReplace,
   onResetStyle,
-  onRemove
+  onRemove,
+  onStyle
 }: {
   slot: BackgroundAssetSlot
   registry: BackgroundAssetRegistry
@@ -251,6 +243,7 @@ function PresetTile({
   onReplace: () => void
   onResetStyle: (assetId: string) => void
   onRemove: () => void
+  onStyle: (assetId: string, patch: Parameters<typeof setAssetStyle>[2]) => void
 }): ReactElement {
   const asset = slotAsset(slot, registry)
   const status = slotDisplayStatus(slot, registry)
@@ -271,7 +264,13 @@ function PresetTile({
       <button
         type="button"
         aria-pressed={active}
-        title={status === 'empty' ? `Import into ${name}` : `Apply ${name} to the scene`}
+        title={
+          status === 'empty'
+            ? `Import into ${name}`
+            : active
+              ? `Remove ${name} from the scene`
+              : `Apply ${name} to the scene`
+        }
         className="absolute inset-0 cursor-pointer"
         onClick={onActivate}
         onDoubleClick={() => asset && onStartRename()}
@@ -304,7 +303,15 @@ function PresetTile({
       ) : null}
 
       {asset ? (
-        <div className="absolute right-1 top-1 z-10 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100">
+        <div
+          className={cn(
+            'absolute right-1 top-1 z-10 flex items-center gap-1 transition-opacity focus-within:opacity-100 group-hover:opacity-100',
+            // The active tile keeps its style control in view: it is the only
+            // home for fit and the style sliders.
+            active ? 'opacity-100' : 'opacity-0'
+          )}
+        >
+          {active ? <BackgroundStylePopover asset={asset} name={name} onStyle={onStyle} /> : null}
           <KebabMenu
             label={`Actions for ${name}`}
             className="bg-background/70 backdrop-blur-sm"
@@ -377,127 +384,64 @@ function PresetTile({
 }
 
 // The one place background style is edited (A1): fit + the style sliders act on
-// the ACTIVE background, next to their only visible consequence — with the
-// preview window one click away for ground truth.
-function ActiveBackgroundBar({
-  registry,
-  onMissing,
-  onClear,
+// the ACTIVE background, from its own tile. Changes show live in the preview.
+function BackgroundStylePopover({
+  asset,
+  name,
   onStyle
 }: {
-  registry: BackgroundAssetRegistry
-  onMissing: (slotId: string) => void
-  onClear: () => void
+  asset: BackgroundAsset
+  name: string
   onStyle: (assetId: string, patch: Parameters<typeof setAssetStyle>[2]) => void
 }): ReactElement {
-  const { openPreviewWindow } = useStudioCore()
-  const activeSlot = registry.slots.find((slot) => slot.id === registry.activeSlotId) ?? null
-  const asset = activeSlot ? slotAsset(activeSlot, registry) : null
-  const sceneSrc = asset ? imageSrcOf(asset) : undefined
-  const missing = activeSlot ? slotDisplayStatus(activeSlot, registry) === 'missing-file' : false
-  const style = asset?.styleDefaults
+  const style = asset.styleDefaults
   const defaults = defaultBackgroundStyle()
 
   return (
-    <PanelSection
-      title="Active background"
-      icon={ImageIcon}
-      action={
-        activeSlot ? (
-          <Button size="sm" variant="outline" onClick={onClear}>
-            <CloseIcon data-icon="inline-start" />
-            Remove from scene
-          </Button>
-        ) : undefined
-      }
-    >
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="grid aspect-[16/9] w-28 shrink-0 place-items-center overflow-hidden rounded-row border bg-muted/30">
-          {activeSlot && sceneSrc && !missing ? (
-            <img
-              alt=""
-              className="size-full object-cover"
-              src={imageUrl(sceneSrc)}
-              onError={() => onMissing(activeSlot.id)}
-            />
-          ) : (
-            <ImageIcon className="size-5 text-muted-foreground/40" weight="duotone" />
-          )}
+    <Popover>
+      <PopoverTrigger asChild>
+        <Button
+          aria-label={`Adjust style for ${name}`}
+          className="bg-background/70 backdrop-blur-sm"
+          size="icon-sm"
+          title="Adjust style"
+          variant="ghost"
+        >
+          <AdjustIcon />
+        </Button>
+      </PopoverTrigger>
+      <PopoverContent align="end" className="flex w-80 flex-col gap-3">
+        <div className="flex flex-col gap-1.5">
+          <Label>Fit</Label>
+          <ToggleGroup
+            className="w-full"
+            type="single"
+            value={style.fit}
+            variant="outline"
+            onValueChange={(value) => value && onStyle(asset.id, { fit: value as BackgroundFit })}
+          >
+            {FIT_OPTIONS.map((option) => (
+              <ToggleGroupItem key={option.value} className="flex-1" value={option.value}>
+                {option.label}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
         </div>
-        <div className="min-w-0 flex-1 text-sm">
-          {activeSlot && asset && !missing ? (
-            <>
-              <p className="truncate font-medium">{slotName(activeSlot, registry)}</p>
-              <p className="text-xs text-muted-foreground">
-                {FIT_OPTIONS.find((option) => option.value === style?.fit)?.label ?? 'Fill'}
-                {typeof style?.visibilityPercent === 'number'
-                  ? ` · ${style.visibilityPercent}% visible`
-                  : ''}{' '}
-                — changes show live in the preview window.
-              </p>
-            </>
-          ) : missing ? (
-            <p className="text-xs text-warning">
-              The selected background file is missing. Recording continues without a digital
-              background.
-            </p>
-          ) : (
-            <p className="text-xs text-muted-foreground">
-              No digital background. The recording fills the full canvas.
-            </p>
-          )}
-        </div>
-        {activeSlot && asset && !missing && style ? (
-          <div className="flex shrink-0 items-center gap-2">
-            <Popover>
-              <PopoverTrigger asChild>
-                <Button size="sm" variant="outline">
-                  <AdjustIcon data-icon="inline-start" />
-                  Adjust style
-                </Button>
-              </PopoverTrigger>
-              <PopoverContent align="end" className="flex w-80 flex-col gap-3">
-                <div className="flex flex-col gap-1.5">
-                  <Label>Fit</Label>
-                  <ToggleGroup
-                    className="w-full"
-                    type="single"
-                    value={style.fit}
-                    variant="outline"
-                    onValueChange={(value) =>
-                      value && onStyle(asset.id, { fit: value as BackgroundFit })
-                    }
-                  >
-                    {FIT_OPTIONS.map((option) => (
-                      <ToggleGroupItem key={option.value} className="flex-1" value={option.value}>
-                        {option.label}
-                      </ToggleGroupItem>
-                    ))}
-                  </ToggleGroup>
-                </div>
-                {BACKGROUND_STYLE_FIELDS.map((config) => (
-                  <PowerSlider
-                    key={config.key}
-                    label={config.label}
-                    value={style[config.key]}
-                    min={config.min}
-                    max={config.max}
-                    suffix={config.suffix}
-                    bipolar={config.bipolar}
-                    numericInput
-                    defaultValue={defaults[config.key]}
-                    onChange={(next) => onStyle(asset.id, { [config.key]: next })}
-                  />
-                ))}
-              </PopoverContent>
-            </Popover>
-            <Button size="sm" variant="outline" onClick={() => void openPreviewWindow()}>
-              <ExternalLinkIcon data-icon="inline-start" />
-              Open preview
-            </Button>
-          </div>
-        ) : null}
-      </div>
-    </PanelSection>
+        {BACKGROUND_STYLE_FIELDS.map((config) => (
+          <PowerSlider
+            key={config.key}
+            label={config.label}
+            value={style[config.key]}
+            min={config.min}
+            max={config.max}
+            suffix={config.suffix}
+            bipolar={config.bipolar}
+            numericInput
+            defaultValue={defaults[config.key]}
+            onChange={(next) => onStyle(asset.id, { [config.key]: next })}
+          />
+        ))}
+      </PopoverContent>
+    </Popover>
   )
 }
