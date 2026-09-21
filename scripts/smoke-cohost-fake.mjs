@@ -596,7 +596,7 @@ function collectCohostStates(ws) {
       for (const waiter of [...collection.waiters]) {
         waiter(parsed.payload)
       }
-    } else if (parsed.event === 'backend.log' && /\bseer\b/i.test(parsed.payload?.message ?? '')) {
+    } else if (parsed.event === 'backend.log' && /\borcle\b/i.test(parsed.payload?.message ?? '')) {
       console.log(`[backend] ${parsed.payload.level}: ${parsed.payload.message}`)
     }
   })

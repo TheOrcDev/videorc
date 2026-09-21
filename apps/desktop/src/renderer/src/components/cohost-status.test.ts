@@ -57,12 +57,12 @@ describe('CohostStatus', () => {
     const markup = renderStatus({ state: offCohostState(), enabled: false })
     expect(markup).toContain('data-slot="cohost-status"')
     expect(markup).toContain('data-state-kind="off"')
-    expect(markup).toContain('Seer off')
+    expect(markup).toContain('Orcle off')
     expect(markup).toContain('data-tone="muted"')
   })
 
   it('renders the same element for a null state — presence is unconditional', () => {
-    expect(renderStatus({ state: null, enabled: false })).toContain('Seer off')
+    expect(renderStatus({ state: null, enabled: false })).toContain('Orcle off')
   })
 
   it('earns the live dot only while listening', () => {
@@ -70,13 +70,13 @@ describe('CohostStatus', () => {
     expect(markup).toContain('data-state-kind="listening"')
     expect(markup).toContain('data-tone="live"')
     expect(markup).toContain('bg-success')
-    expect(markup).toContain('Seer · 1 q')
+    expect(markup).toContain('Orcle · 1 q')
     expect(markup).not.toContain('cohost-typing-dots')
   })
 
   it('shows the typing shimmer while reading queued chat', () => {
     const markup = renderStatus({ state: listening({ pendingMessages: 4 }) })
-    expect(markup).toContain('Seer · reading 4 new…')
+    expect(markup).toContain('Orcle · reading 4 new…')
     expect(markup).toContain('data-slot="cohost-typing-dots"')
     expect(markup).toContain('typing-dot')
     expect(markup).not.toContain('typing-dot-fast')
@@ -84,7 +84,7 @@ describe('CohostStatus', () => {
 
   it('runs the shimmer faster and pulses the dot while a tick is in flight', () => {
     const markup = renderStatus({ state: listening({ tickInFlight: true, pendingMessages: 4 }) })
-    expect(markup).toContain('Seer · thinking…')
+    expect(markup).toContain('Orcle · thinking…')
     expect(markup).toContain('typing-dot-fast')
     expect(markup).toContain('animate-pulse')
   })
@@ -99,7 +99,7 @@ describe('CohostStatus', () => {
     })
     expect(markup).toContain('data-state-kind="error"')
     expect(markup).toContain('data-tone="destructive"')
-    expect(markup).toContain('Seer error')
+    expect(markup).toContain('Orcle error')
     // The server's own words live in the tooltip, not in the label.
     expect(markup).toContain('ai-gateway-error (HTTP 502)')
   })
@@ -108,7 +108,7 @@ describe('CohostStatus', () => {
     const markup = renderStatus({
       state: listening({ status: 'paused', reason: 'quota-exhausted' })
     })
-    expect(markup).toContain('Seer paused · quota')
+    expect(markup).toContain('Orcle paused · quota')
     expect(markup).toContain('data-tone="muted"')
     expect(markup).not.toContain('bg-destructive')
   })
@@ -119,7 +119,7 @@ describe('CohostStatus', () => {
       state: listening({ questions: [question()] })
     })
     expect(markup).toContain('grouped 2 questions')
-    expect(markup).not.toContain('>Seer · 1 q<')
+    expect(markup).not.toContain('>Orcle · 1 q<')
   })
 
   it('carries the collapsed-pane unread count', () => {

@@ -29,7 +29,7 @@ function settingsColumns(): string[][] {
       /title="([^"]+)"|<(CohostSettingsSection|AboutAndUpdates)\b/g
     )) {
       if (match[1]) titles.push(match[1])
-      else if (match[2] === 'CohostSettingsSection') titles.push('Seer')
+      else if (match[2] === 'CohostSettingsSection') titles.push('Orcle')
       else titles.push('About & updates')
     }
     columns.push(titles)
@@ -55,7 +55,7 @@ describe('Settings layout', () => {
 
   it('splits the cards into two stacked, content-height columns', () => {
     expect(settingsColumns()).toEqual([
-      ['Recording & storage', 'System access', 'Seer', 'Global shortcuts', 'Remote control'],
+      ['Recording & storage', 'System access', 'Orcle', 'Global shortcuts', 'Remote control'],
       ['Appearance & behavior', 'Import', 'Support', 'About & updates', 'Shortcuts']
     ])
   })
@@ -71,7 +71,7 @@ describe('Settings layout', () => {
     expect(reading.slice(0, 5)).toEqual([
       'Recording & storage',
       'System access',
-      'Seer',
+      'Orcle',
       'Global shortcuts',
       'Remote control'
     ])

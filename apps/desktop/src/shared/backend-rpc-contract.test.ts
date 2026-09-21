@@ -1418,7 +1418,7 @@ describe('backend RPC contract', () => {
     // and closed: a bad code/status shape fails the event like any other.
     const detail = {
       code: 'ai-gateway-error',
-      message: 'The Seer tick failed on every configured model.',
+      message: 'The Orcle tick failed on every configured model.',
       status: 502
     }
     const errored = { ...state, status: 'error', reason: 'gateway-error', detail }

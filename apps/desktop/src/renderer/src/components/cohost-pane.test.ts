@@ -124,7 +124,7 @@ describe('CohostQuestionRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('Answered from your Seer notes')
+    expect(markup).toContain('Answered from your Orcle notes')
     expect(markup).toContain('On stream')
   })
 })
@@ -171,13 +171,13 @@ describe('CohostPane', () => {
       gate: {
         allowed: false,
         featureId: 'live-cohost',
-        reason: 'Seer requires Videorc Premium.',
+        reason: 'Orcle requires Videorc Premium.',
         upgradeUrl: 'https://www.videorc.com/premium'
       },
       onUpgrade: () => undefined
     })
     expect(markup).toContain('data-slot="cohost-notice"')
-    expect(markup).toContain('Seer requires Videorc Premium.')
+    expect(markup).toContain('Orcle requires Videorc Premium.')
     expect(markup).toContain('View Premium')
     expect(markup).not.toContain('data-slot="cohost-pane"')
   })
@@ -222,14 +222,14 @@ describe('CohostPane', () => {
   })
 
   it("names the failed tick in the server's words as the chip tooltip and a secondary line", () => {
-    const detail = 'ai-gateway-error (HTTP 502): The Seer tick failed on every configured model.'
+    const detail = 'ai-gateway-error (HTTP 502): The Orcle tick failed on every configured model.'
     const markup = renderPane({
       state: state({
         status: 'error',
         reason: 'gateway-error',
         detail: {
           code: 'ai-gateway-error',
-          message: 'The Seer tick failed on every configured model.',
+          message: 'The Orcle tick failed on every configured model.',
           status: 502
         }
       })
@@ -239,7 +239,7 @@ describe('CohostPane', () => {
     expect(markup).toContain('data-tone="destructive"')
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
-    expect(markup).toContain('once Seer is listening again')
+    expect(markup).toContain('once Orcle is listening again')
     expect(markup).not.toContain('Listening. Questions')
     // Monochrome: only the presence DOT carries the error accent; the label and
     // the detail line stay chrome.

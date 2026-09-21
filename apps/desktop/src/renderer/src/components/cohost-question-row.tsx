@@ -68,7 +68,7 @@ export function CohostQuestionRow({
       <span className="min-w-0 flex-1 truncate text-foreground">{question.text}</span>
       {question.fromNotes ? (
         <NoteIcon
-          aria-label="Answered from your Seer notes"
+          aria-label="Answered from your Orcle notes"
           className="size-3.5 shrink-0 text-muted-foreground"
           weight="duotone"
         />

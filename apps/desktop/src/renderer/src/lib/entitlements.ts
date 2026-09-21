@@ -61,7 +61,7 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
     {
       featureId: 'live-cohost',
       state: 'disabled',
-      reason: 'Seer requires Videorc Premium.'
+      reason: 'Orcle requires Videorc Premium.'
     }
   ],
   limits: {

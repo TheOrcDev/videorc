@@ -5142,7 +5142,7 @@ mod tests {
             errored.detail,
             Some(crate::cohost::CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The Seer tick failed on every configured model.".to_string(),
+                message: "The Orcle tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );

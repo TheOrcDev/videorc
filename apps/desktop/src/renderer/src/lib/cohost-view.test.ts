@@ -91,13 +91,13 @@ function state(overrides: Partial<CohostState> = {}): CohostState {
 /** The 2026-08-23 incident envelope: web answered 502 `ai-gateway-error`. */
 const GATEWAY_502: CohostErrorDetail = {
   code: 'ai-gateway-error',
-  message: 'The Seer tick failed on every configured model.',
+  message: 'The Orcle tick failed on every configured model.',
   status: 502
 }
 
 const TIMEOUT: CohostErrorDetail = {
   code: 'timeout',
-  message: 'Seer did not answer within 12 s.',
+  message: 'Orcle did not answer within 12 s.',
   status: null
 }
 
@@ -162,12 +162,12 @@ describe('cohostChipView', () => {
 
   it('is the only chip that earns the live accent while listening', () => {
     expect(cohostChipView(state({ questions: [question(), question({ id: 'q-2' })] }))).toEqual({
-      label: 'Seer: listening · 2 q',
+      label: 'Orcle: listening · 2 q',
       tone: 'live',
       detail: null
     })
     expect(cohostChipView(state({ questions: [] }))).toEqual({
-      label: 'Seer: listening',
+      label: 'Orcle: listening',
       tone: 'live',
       detail: null
     })
@@ -175,14 +175,14 @@ describe('cohostChipView', () => {
 
   it('names every paused reason in the destination strip vocabulary', () => {
     const cases: Array<[CohostReason, string]> = [
-      ['premium-required', 'Seer: paused · Premium'],
-      ['consent-required', 'Seer: paused · consent'],
-      ['quota-exhausted', 'Seer: paused · quota'],
-      ['session-expired', 'Seer: paused · session expired'],
-      ['signed-out', 'Seer: paused · signed out'],
-      ['server-unconfigured', 'Seer: paused · unavailable'],
-      ['network', 'Seer: paused · offline'],
-      ['gateway-error', 'Seer: paused · AI error']
+      ['premium-required', 'Orcle: paused · Premium'],
+      ['consent-required', 'Orcle: paused · consent'],
+      ['quota-exhausted', 'Orcle: paused · quota'],
+      ['session-expired', 'Orcle: paused · session expired'],
+      ['signed-out', 'Orcle: paused · signed out'],
+      ['server-unconfigured', 'Orcle: paused · unavailable'],
+      ['network', 'Orcle: paused · offline'],
+      ['gateway-error', 'Orcle: paused · AI error']
     ]
     for (const [reason, label] of cases) {
       expect(cohostChipView(state({ status: 'paused', reason }))).toEqual({
@@ -195,17 +195,17 @@ describe('cohostChipView', () => {
 
   it('stays monochrome for off and error', () => {
     expect(cohostChipView(state({ status: 'off', reason: null }))).toEqual({
-      label: 'Seer: off',
+      label: 'Orcle: off',
       tone: 'muted',
       detail: null
     })
     expect(cohostChipView(state({ status: 'error', reason: 'gateway-error' }))).toEqual({
-      label: 'Seer: error · AI error',
+      label: 'Orcle: error · AI error',
       tone: 'muted',
       detail: null
     })
     expect(cohostChipView(state({ status: 'error', reason: null }))).toEqual({
-      label: 'Seer: error',
+      label: 'Orcle: error',
       tone: 'muted',
       detail: null
     })
@@ -215,14 +215,14 @@ describe('cohostChipView', () => {
     expect(
       cohostChipView(state({ status: 'error', reason: 'gateway-error', detail: GATEWAY_502 }))
     ).toEqual({
-      label: 'Seer: error · AI error',
+      label: 'Orcle: error · AI error',
       tone: 'muted',
-      detail: 'ai-gateway-error (HTTP 502): The Seer tick failed on every configured model.'
+      detail: 'ai-gateway-error (HTTP 502): The Orcle tick failed on every configured model.'
     })
     // No HTTP status for a desktop-side failure.
     expect(
       cohostChipView(state({ status: 'error', reason: 'network', detail: TIMEOUT }))?.detail
-    ).toBe('timeout: Seer did not answer within 12 s.')
+    ).toBe('timeout: Orcle did not answer within 12 s.')
     // A server-side pause (quota) carries its detail too...
     expect(
       cohostChipView(
@@ -247,7 +247,7 @@ describe('cohostErrorDetailText', () => {
     expect(cohostErrorDetailText(null)).toBeNull()
     expect(cohostErrorDetailText(undefined)).toBeNull()
     expect(cohostErrorDetailText(GATEWAY_502)).toBe(
-      'ai-gateway-error (HTTP 502): The Seer tick failed on every configured model.'
+      'ai-gateway-error (HTTP 502): The Orcle tick failed on every configured model.'
     )
     expect(cohostErrorDetailText({ code: 'ai-gateway-error', message: '  ', status: 502 })).toBe(
       'ai-gateway-error (HTTP 502)'
@@ -263,7 +263,7 @@ describe('cohostPaneMode', () => {
   const locked = {
     allowed: false as const,
     featureId: 'live-cohost' as const,
-    reason: 'Seer requires Videorc Premium.',
+    reason: 'Orcle requires Videorc Premium.',
     upgradeUrl: 'https://www.videorc.com/premium'
   }
 
@@ -405,7 +405,7 @@ describe('cohostErrorToast', () => {
     expect(cohostErrorToast(state(), errored)).toEqual({
       reason: 'gateway-error',
       key: 'gateway-error:',
-      message: 'Seer stopped: Videorc AI returned an error.'
+      message: 'Orcle stopped: Videorc AI returned an error.'
     })
     expect(cohostErrorToast(errored, errored)).toBeNull()
   })
@@ -422,10 +422,10 @@ describe('cohostErrorToast', () => {
       reason: 'gateway-error',
       key: 'gateway-error:ai-gateway-error',
       message:
-        'Seer stopped: Videorc AI returned an error (ai-gateway-error: The Seer tick failed on every configured model).'
+        'Orcle stopped: Videorc AI returned an error (ai-gateway-error: The Orcle tick failed on every configured model).'
     })
     expect(cohostErrorToastMessage('network', TIMEOUT)).toBe(
-      'Seer stopped: no connection to Videorc AI (timeout: Seer did not answer within 12 s).'
+      'Orcle stopped: no connection to Videorc AI (timeout: Orcle did not answer within 12 s).'
     )
     // A code without a message still names itself; no detail keeps the base copy.
     expect(
@@ -434,12 +434,12 @@ describe('cohostErrorToast', () => {
         message: '',
         status: 502
       })
-    ).toBe('Seer stopped: Videorc AI returned an error (ai-gateway-error).')
+    ).toBe('Orcle stopped: Videorc AI returned an error (ai-gateway-error).')
     expect(cohostErrorToastMessage('gateway-error', null)).toBe(
-      'Seer stopped: Videorc AI returned an error.'
+      'Orcle stopped: Videorc AI returned an error.'
     )
     expect(cohostErrorToastMessage('gateway-error', undefined)).toBe(
-      'Seer stopped: Videorc AI returned an error.'
+      'Orcle stopped: Videorc AI returned an error.'
     )
   })
 
@@ -530,7 +530,7 @@ describe('cohostQuestionToast', () => {
       lastToastAtMs: null,
       nowMs: 1_000
     })
-    expect(raised?.message).toContain('Seer:')
+    expect(raised?.message).toContain('Orcle:')
     expect(raised?.message).toContain('⌘J')
     expect(raised?.atMs).toBe(1_000)
   })
@@ -608,9 +608,9 @@ describe('cohostQuestionToast', () => {
   it('names how many people are asking', () => {
     expect(
       cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }))
-    ).toBe('Seer: 5 people asking: What keyboard is that? · ⌘J')
+    ).toBe('Orcle: 5 people asking: What keyboard is that? · ⌘J')
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
-      'Seer: Ada is asking: What keyboard is that? · ⌘J'
+      'Orcle: Ada is asking: What keyboard is that? · ⌘J'
     )
   })
 })

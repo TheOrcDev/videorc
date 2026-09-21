@@ -194,7 +194,7 @@ export function CohostPane({
 
   if (mode.kind === 'consent') {
     return (
-      <CohostNotice label="Seer">
+      <CohostNotice label="Orcle">
         <span className="min-w-0 flex-1 truncate">{mode.reason}</span>
         {onEnableConsent ? (
           <Button size="xs" variant="ghost" onClick={onEnableConsent}>
@@ -288,7 +288,7 @@ export function CohostPane({
           className="size-4 shrink-0 text-muted-foreground"
           weight="duotone"
         />
-        <span className="shrink-0 text-xs font-medium text-foreground">Seer</span>
+        <span className="shrink-0 text-xs font-medium text-foreground">Orcle</span>
         <span className="shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
           alpha
         </span>
@@ -298,7 +298,7 @@ export function CohostPane({
           data-slot="cohost-pane-status"
           title={presence.tooltipLines.join('\n') || undefined}
         >
-          {flash ?? presence.label.replace(/^Seer\s*(·\s*)?/, '')}
+          {flash ?? presence.label.replace(/^Orcle\s*(·\s*)?/, '')}
         </span>
         {presence.dots ? <CohostTypingDots fast={presence.kind === 'thinking'} /> : null}
         <span className="flex-1" />
@@ -353,7 +353,7 @@ export function CohostPane({
         ) : null}
         <Command
           ref={rootRef}
-          aria-label="Seer questions and flags"
+          aria-label="Orcle questions and flags"
           className="bg-transparent outline-none"
           shouldFilter={false}
           tabIndex={0}

@@ -93,7 +93,7 @@ export function CohostStatus({
         <PopoverHeader>
           <PopoverTitle className="flex items-center gap-2 text-sm">
             <CohostIcon aria-hidden className="size-4 shrink-0" weight="duotone" />
-            Seer
+            Orcle
           </PopoverTitle>
           <PopoverDescription>
             Groups the questions your chat is repeating and drafts a reply for each. Nothing sends
@@ -119,7 +119,7 @@ export function CohostStatus({
         ) : !consented ? (
           <div className="flex flex-col gap-2">
             <p className="text-xs text-muted-foreground">
-              Seer reads live chat with Videorc cloud AI. Turn on cloud AI to use it.
+              Orcle reads live chat with Videorc cloud AI. Turn on cloud AI to use it.
             </p>
             {onEnableConsent ? (
               <Button

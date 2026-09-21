@@ -113,7 +113,7 @@ describe('co-host status chip', () => {
       createElement(CommentsDestinationStatus, { cohostState: cohost, providers })
     )
     expect(listening).toContain('data-slot="cohost-status-chip"')
-    expect(listening).toContain('Seer: listening')
+    expect(listening).toContain('Orcle: listening')
     expect(listening).toContain('data-variant="success"')
 
     const paused = renderToStaticMarkup(
@@ -122,7 +122,7 @@ describe('co-host status chip', () => {
         providers: []
       })
     )
-    expect(paused).toContain('Seer: paused · quota')
+    expect(paused).toContain('Orcle: paused · quota')
     expect(paused).not.toContain('data-variant="success"')
   })
 
