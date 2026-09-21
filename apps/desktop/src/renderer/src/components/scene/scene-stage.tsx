@@ -154,13 +154,15 @@ export function SceneStage({
   const sourceResizable = (source: SceneSource): boolean =>
     resizeEnabled && !source.locked && sourceEditableRect(source)
 
-  const normalizedDelta = (event: {
-    clientX: number
-    clientY: number
-  }): { dx: number; dy: number } | null => {
-    const gesture = gestureRef.current
+  // Takes the gesture explicitly: the old ref-reading version silently
+  // returned null from endDrag, which had ALREADY cleared the ref — the
+  // release commit never fired (latent since the original SC3 drag).
+  const normalizedDelta = (
+    gesture: StageGesture,
+    event: { clientX: number; clientY: number }
+  ): { dx: number; dy: number } | null => {
     const rect = svgRef.current?.getBoundingClientRect()
-    if (!gesture || !rect || rect.width <= 0 || rect.height <= 0) {
+    if (!rect || rect.width <= 0 || rect.height <= 0) {
       return null
     }
     return {
@@ -235,7 +237,7 @@ export function SceneStage({
     if (!gesture || event.pointerId !== gesture.pointerId) {
       return
     }
-    const delta = normalizedDelta(event)
+    const delta = normalizedDelta(gesture, event)
     if (!delta) {
       return
     }
@@ -248,8 +250,8 @@ export function SceneStage({
     if (!gesture || event.pointerId !== gesture.pointerId) {
       return
     }
+    const delta = normalizedDelta(gesture, event)
     gestureRef.current = null
-    const delta = normalizedDelta(event)
     setGhost(null)
     if (!gesture.moved || !delta) {
       return
