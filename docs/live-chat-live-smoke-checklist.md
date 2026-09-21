@@ -17,7 +17,7 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
       snapshots → event-stream reconnect → correlated/idempotent send persistence. The result
       matrix must include sent, failed, receive-only, and timed-out-unknown without claiming an
       X account is connected. No OAuth required.
-- [ ] `pnpm smoke:cohost-fake` — Live Co-host offline proof (no cloud, no account): launches
+- [ ] `pnpm smoke:cohost-fake` — Seer offline proof (no cloud, no account): launches
       the debug backend against an isolated profile and a local fake `POST /api/ai/cohost/tick`,
       scripts fake-connector lanes, and asserts the tick wire shape, one grouped question whose
       askers/messageIds grow across ticks, a flagged message, 429/403/503 → paused/paused/error
@@ -85,12 +85,12 @@ web side documented in `videorcweb/docs/x-chat.md`). Requires a signed-in Videor
 - [ ] Click a live comment and confirm `On stream` appears only after the card is visible on the
       viewer-facing output; historical comments must not expose the highlight action.
 
-## Live co-host (Premium, opt-in)
+## Seer (Premium, opt-in)
 
-Prerequisites: Premium account signed in, AI consent ON, Settings → Streaming → Co-host enabled,
+Prerequisites: Premium account signed in, AI consent ON, Settings → Streaming → Seer enabled,
 web has `VIDEORC_AI_COHOST_DISABLED` off. Offline proof: `pnpm smoke:cohost-fake`.
 
-- [ ] Go Live with Twitch + YouTube chat attached. Confirm the Co-host chip reads
+- [ ] Go Live with Twitch + YouTube chat attached. Confirm the Seer chip reads
       `listening` only after `cohost.start` succeeded; with consent OFF it must read
       `paused · consent` and no tick request leaves the machine.
 - [ ] Have viewers ask the same question three times in different words. Confirm ONE grouped

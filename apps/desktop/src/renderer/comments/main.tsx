@@ -254,7 +254,7 @@ function CommentsWindowApp(): ReactElement {
             {
               destinationId: 'cohost-command',
               platform: 'custom',
-              reason: error instanceof Error ? error.message : 'Co-host action failed.'
+              reason: error instanceof Error ? error.message : 'Seer action failed.'
             }
           ])
         )
@@ -269,10 +269,9 @@ function CommentsWindowApp(): ReactElement {
       ?.sendCohostEnable?.({ requestId: crypto.randomUUID(), enabled, grantConsent })
       .then((state) => state && setCohost(state))
       .catch((error) =>
-        toast.error(
-          error instanceof Error ? error.message : 'Could not change the co-host setting.',
-          { id: 'cohost-enable' }
-        )
+        toast.error(error instanceof Error ? error.message : 'Could not change the Seer setting.', {
+          id: 'cohost-enable'
+        })
       )
   }
 
@@ -291,7 +290,7 @@ function CommentsWindowApp(): ReactElement {
     : {
         allowed: false,
         featureId: 'live-cohost',
-        reason: cohost.entitlementReason ?? 'Live Co-host requires Videorc Premium.',
+        reason: cohost.entitlementReason ?? 'Seer requires Videorc Premium.',
         ...(cohost.upgradeUrl ? { upgradeUrl: cohost.upgradeUrl } : {})
       }
 

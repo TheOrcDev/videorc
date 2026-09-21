@@ -284,7 +284,7 @@ pub fn load_cohost_settings(database: &Database) -> CohostSettings {
         Ok(Some(settings)) => settings.normalized(),
         Ok(None) => CohostSettings::default(),
         Err(error) => {
-            tracing::warn!("Could not read co-host settings; using defaults: {error:#}");
+            tracing::warn!("Could not read Seer settings; using defaults: {error:#}");
             CohostSettings::default()
         }
     }
@@ -475,13 +475,13 @@ impl CohostState {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CohostError {
-    #[error("Co-host is turned off in Settings.")]
+    #[error("Seer is turned off in Settings.")]
     Disabled,
-    #[error("Co-host needs the active live chat session; sessionId did not match.")]
+    #[error("Seer needs the active live chat session; sessionId did not match.")]
     SessionMismatch,
     #[error("sessionId and the question or message id are required.")]
     InvalidParams,
-    #[error("Could not persist co-host settings: {0}")]
+    #[error("Could not persist Seer settings: {0}")]
     Storage(String),
 }
 
@@ -1446,7 +1446,7 @@ pub async fn set_cohost_settings(
     let snapshot = engine.snapshot();
     drop(engine);
     if stopped {
-        state.emit_log("info", "Co-host stopped: turned off in Settings.");
+        state.emit_log("info", "Seer stopped: turned off in Settings.");
         emit_state(state, &snapshot, &lifecycle_delivery);
     }
     Ok(next)
@@ -1520,10 +1520,7 @@ where
     let snapshot = engine.snapshot();
     drop(engine);
     before_state_emit.await;
-    state.emit_log(
-        "info",
-        format!("Co-host listening for session {session_id}."),
-    );
+    state.emit_log("info", format!("Seer listening for session {session_id}."));
     emit_state(state, &snapshot, &lifecycle_delivery);
     drop(lifecycle_delivery);
     Ok(snapshot)
@@ -1548,7 +1545,7 @@ where
     drop(engine);
     before_state_emit.await;
     if stopped {
-        state.emit_log("info", "Co-host stopped.");
+        state.emit_log("info", "Seer stopped.");
         emit_state(state, &snapshot, lifecycle_delivery);
     }
     snapshot
@@ -1600,7 +1597,7 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     drop(engine);
     before_state_emit.await;
     if stopped {
-        state.emit_log("info", "Co-host stopped.");
+        state.emit_log("info", "Seer stopped.");
         emit_state(state, &snapshot, lifecycle_delivery);
     }
 }
@@ -1749,7 +1746,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             state.emit_log(
                 "warn",
                 format!(
-                    "Co-host paused: {}.",
+                    "Seer paused: {}.",
                     serde_json::to_string(&reason).unwrap_or_default()
                 ),
             );
@@ -1774,7 +1771,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         Ok(response) => Some((
             "info",
             format!(
-                "Co-host tick {} merged: {} message(s), {} open question(s), {} flag(s).",
+                "Seer tick {} merged: {} message(s), {} open question(s), {} flag(s).",
                 prepared.request.tick_seq,
                 message_count,
                 response.questions.len(),
@@ -1788,7 +1785,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
             Some((
                 "info",
                 format!(
-                    "Co-host tick {}: the server does not speak tick contract v{}; using v{} for the rest of this session.",
+                    "Seer tick {}: the server does not speak tick contract v{}; using v{} for the rest of this session.",
                     prepared.request.tick_seq,
                     prepared.request.prompt_version,
                     COHOST_PROMPT_VERSION_FALLBACK
@@ -1798,7 +1795,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         Err(error) => Some((
             "warn",
             format!(
-                "Co-host tick {} failed ({}, {}{}): {}",
+                "Seer tick {} failed ({}, {}{}): {}",
                 prepared.request.tick_seq,
                 serde_json::to_string(&error.reason()).unwrap_or_default(),
                 error.detail.code,
@@ -1824,7 +1821,7 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         if !applied {
             state.emit_log(
                 "warn",
-                "Co-host tick response dropped: its session was replaced.",
+                "Seer tick response dropped: its session was replaced.",
             );
             return false;
         }
@@ -2972,7 +2969,7 @@ mod tests {
             Err(server_error(
                 502,
                 "ai-gateway-error",
-                "The co-host tick failed on every configured model."
+                "The Seer tick failed on every configured model."
             )),
             start + secs(2),
             "t1"
@@ -2984,7 +2981,7 @@ mod tests {
             snapshot.detail,
             Some(CohostErrorDetail {
                 code: "ai-gateway-error".to_string(),
-                message: "The co-host tick failed on every configured model.".to_string(),
+                message: "The Seer tick failed on every configured model.".to_string(),
                 status: Some(502),
             })
         );
@@ -3018,9 +3015,7 @@ mod tests {
         assert!(engine.apply_tick_result(
             generation,
             0,
-            Err(CohostApiError::timeout(
-                "The co-host service did not answer within 12 s."
-            )),
+            Err(CohostApiError::timeout("Seer did not answer within 12 s.")),
             start + secs(42),
             "t3"
         ));
@@ -3030,7 +3025,7 @@ mod tests {
             snapshot.detail,
             Some(CohostErrorDetail {
                 code: "timeout".to_string(),
-                message: "The co-host service did not answer within 12 s.".to_string(),
+                message: "Seer did not answer within 12 s.".to_string(),
                 status: None,
             })
         );

@@ -35,7 +35,7 @@ pub const STREAMING_MAX_DESTINATIONS: u32 = 5;
 const CLOUD_AI_DISABLED_REASON: &str =
     "Cloud AI is a Videorc Premium feature. Sign in with a Premium account to enable it.";
 const NOISE_CLEANUP_DISABLED_REASON: &str = "Noise Cleanup requires Videorc Premium.";
-const LIVE_COHOST_DISABLED_REASON: &str = "Live Co-host requires Videorc Premium.";
+const LIVE_COHOST_DISABLED_REASON: &str = "Seer requires Videorc Premium.";
 const DEV_BUILD_OVERRIDE_REASON: &str = "Enabled by Videorc debug/dev backend build.";
 
 // --- Account-hydrated Premium entitlement (cloud AI, co-host, stream quality) --

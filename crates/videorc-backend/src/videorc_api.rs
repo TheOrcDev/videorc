@@ -388,11 +388,11 @@ impl CohostApiError {
     pub(crate) fn from_transport(error: reqwest::Error) -> Self {
         if error.is_timeout() {
             Self::timeout(format!(
-                "The co-host service did not answer within {} s.",
+                "Seer did not answer within {} s.",
                 COHOST_TICK_TIMEOUT.as_secs()
             ))
         } else {
-            Self::network(format!("Could not reach the co-host service: {error}"))
+            Self::network(format!("Could not reach Seer: {error}"))
         }
     }
 }
@@ -658,7 +658,7 @@ impl VideorcApiClient {
             return response.json().await.map_err(|error| {
                 CohostApiError::malformed_response(
                     status.as_u16(),
-                    format!("Could not read the co-host response: {error}"),
+                    format!("Could not read Seer's response: {error}"),
                 )
             });
         }
@@ -1437,11 +1437,11 @@ mod tests {
         // answered 502 with this envelope; the desktop must carry both parts.
         assert_eq!(
             parse_error_envelope(
-                r#"{"error":{"code":"ai-gateway-error","message":"The co-host tick failed on every configured model."}}"#
+                r#"{"error":{"code":"ai-gateway-error","message":"The Seer tick failed on every configured model."}}"#
             ),
             (
                 "ai-gateway-error".to_string(),
-                "The co-host tick failed on every configured model.".to_string()
+                "The Seer tick failed on every configured model.".to_string()
             )
         );
         assert_eq!(
@@ -1475,24 +1475,21 @@ mod tests {
 
     #[test]
     fn cohost_desktop_side_failures_carry_their_own_detail_codes() {
-        let network = CohostApiError::network("Could not reach the co-host service: dns");
+        let network = CohostApiError::network("Could not reach Seer: dns");
         assert_eq!(network.kind, CohostApiErrorKind::Network);
         assert_eq!(network.reason(), CohostReason::Network);
         assert_eq!(network.detail.code, COHOST_DETAIL_CODE_NETWORK);
         assert_eq!(network.detail.status, None);
 
-        let timeout = CohostApiError::timeout("The co-host service did not answer within 12 s.");
+        let timeout = CohostApiError::timeout("Seer did not answer within 12 s.");
         assert_eq!(timeout.kind, CohostApiErrorKind::Network);
         assert_eq!(timeout.reason(), CohostReason::Network);
         assert_eq!(timeout.detail.code, COHOST_DETAIL_CODE_TIMEOUT);
         assert_eq!(timeout.detail.status, None);
-        assert_eq!(
-            timeout.message(),
-            "The co-host service did not answer within 12 s."
-        );
+        assert_eq!(timeout.message(), "Seer did not answer within 12 s.");
 
         let malformed =
-            CohostApiError::malformed_response(200, "Could not read the co-host response: EOF");
+            CohostApiError::malformed_response(200, "Could not read Seer's response: EOF");
         assert_eq!(malformed.kind, CohostApiErrorKind::MalformedResponse);
         assert_eq!(malformed.reason(), CohostReason::GatewayError);
         assert_eq!(malformed.detail.code, COHOST_DETAIL_CODE_MALFORMED_RESPONSE);

@@ -132,7 +132,7 @@ function CohostMarks({
   return (
     <Badge
       data-slot="cohost-comment-suggested"
-      title="Co-host suggests showing this message on the stream"
+      title="Seer suggests showing this message on the stream"
       variant="outline"
     >
       <SparkleIcon aria-hidden data-icon="inline-start" weight="fill" />
@@ -254,7 +254,7 @@ export function CommentRow({
             highlight.phase === 'live'
               ? `Remove ${message.authorName}'s message from the stream`
               : suggested
-                ? `Show ${message.authorName}'s message on the stream (co-host suggestion)`
+                ? `Show ${message.authorName}'s message on the stream (Seer suggestion)`
                 : `Show ${message.authorName}'s message on the stream`
           }
           aria-pressed={highlight.phase === 'live'}

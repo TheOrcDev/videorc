@@ -12822,7 +12822,7 @@ app.whenReady().then(async () => {
     'comments-window:cohost-action',
     (event, value: unknown): Promise<CohostState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can send co-host actions.'))
+        return Promise.reject(new Error('Only the Chat window can send Seer actions.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (
@@ -12832,7 +12832,7 @@ app.whenReady().then(async () => {
         !('kind' in value) ||
         !('targetId' in value)
       ) {
-        return Promise.reject(new Error('Co-host action requires a session, kind, and target.'))
+        return Promise.reject(new Error('Seer action requires a session, kind, and target.'))
       }
       const command = value as CohostActionCommand
       if (
@@ -12842,7 +12842,7 @@ app.whenReady().then(async () => {
         typeof command.targetId !== 'string' ||
         !command.targetId.trim()
       ) {
-        return Promise.reject(new Error('Co-host action requires a known kind and target id.'))
+        return Promise.reject(new Error('Seer action requires a known kind and target id.'))
       }
       assertLiveCommentsCommandSession(command.sessionId)
       return commentsCommandBroker.request(requestId, () => {
@@ -12866,18 +12866,18 @@ app.whenReady().then(async () => {
     'comments-window:cohost-enable',
     (event, value: unknown): Promise<CohostWindowState> => {
       if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
-        return Promise.reject(new Error('Only the Chat window can change co-host settings.'))
+        return Promise.reject(new Error('Only the Chat window can change Seer settings.'))
       }
       const requestId = commentsCommandRequestId(value)
       if (!value || typeof value !== 'object' || !('enabled' in value)) {
-        return Promise.reject(new Error('Co-host enable requires an enabled flag.'))
+        return Promise.reject(new Error('Seer enable requires an enabled flag.'))
       }
       const command = value as CohostEnableCommand
       if (typeof command.enabled !== 'boolean') {
-        return Promise.reject(new Error('Co-host enable requires a boolean enabled flag.'))
+        return Promise.reject(new Error('Seer enable requires a boolean enabled flag.'))
       }
       if (command.grantConsent !== undefined && typeof command.grantConsent !== 'boolean') {
-        return Promise.reject(new Error('Co-host consent grant must be a boolean.'))
+        return Promise.reject(new Error('Seer consent grant must be a boolean.'))
       }
       return commentsCommandBroker.request(requestId, () => {
         if (!mainWindow || mainWindow.webContents.isDestroyed()) return false

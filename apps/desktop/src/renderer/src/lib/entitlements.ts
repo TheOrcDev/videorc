@@ -61,7 +61,7 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
     {
       featureId: 'live-cohost',
       state: 'disabled',
-      reason: 'Live Co-host requires Videorc Premium.'
+      reason: 'Seer requires Videorc Premium.'
     }
   ],
   limits: {

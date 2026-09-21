@@ -235,12 +235,12 @@ function CohostSessionRow(): ReactElement {
   return (
     <SessionRow
       icon={CohostIcon}
-      label="Co-host"
+      label="Seer"
       title={view.tooltipLines.join('\n') || undefined}
       value={
         <span className="flex min-w-0 items-center gap-1.5">
           <CohostPresenceDot view={view} />
-          <span className="truncate">{view.label.replace(/^Co-host\s*(·\s*)?/, '')}</span>
+          <span className="truncate">{view.label.replace(/^Seer\s*(·\s*)?/, '')}</span>
         </span>
       }
       onNavigate={() => void openCommentsWindow()}

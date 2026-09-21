@@ -34,7 +34,7 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   // Co-host pane (Comments window). Plain (cmd)J toggles the Comments window
   // from the main window; inside the window it focuses the co-host pane, and
   // the single-key actions apply to the selected row.
-  { id: 'cohost-focus', keys: ['⌘', 'J'], label: 'Focus co-host', group: 'Chat' },
+  { id: 'cohost-focus', keys: ['⌘', 'J'], label: 'Focus Seer', group: 'Chat' },
   { id: 'cohost-move', keys: ['↑', '↓'], label: 'Move between questions', group: 'Chat' },
   { id: 'cohost-reply', keys: ['R'], label: 'Draft a reply', group: 'Chat' },
   { id: 'cohost-highlight', keys: ['H'], label: 'Show the question on stream', group: 'Chat' },

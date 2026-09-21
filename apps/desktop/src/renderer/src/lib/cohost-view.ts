@@ -79,7 +79,7 @@ export interface CohostChipView {
   tone: 'live' | 'muted'
   /**
    * What the failed tick actually said — "ai-gateway-error (HTTP 502): The
-   * co-host tick failed on every configured model." — for the chip's tooltip
+   * Seer tick failed on every configured model." — for the chip's tooltip
    * or a secondary line. Null while listening, off, or when the engine paused
    * itself locally (signed out, Basic, consent).
    */
@@ -135,24 +135,24 @@ export function cohostChipView(state: CohostState | null): CohostChipView | null
       : null
   switch (state.status) {
     case 'off':
-      return { label: 'Co-host: off', tone: 'muted', detail: null }
+      return { label: 'Seer: off', tone: 'muted', detail: null }
     case 'listening': {
       const count = state.questions.length
       return {
-        label: count > 0 ? `Co-host: listening · ${count} q` : 'Co-host: listening',
+        label: count > 0 ? `Seer: listening · ${count} q` : 'Seer: listening',
         tone: 'live',
         detail: null
       }
     }
     case 'paused':
       return {
-        label: reason ? `Co-host: paused · ${reason}` : 'Co-host: paused',
+        label: reason ? `Seer: paused · ${reason}` : 'Seer: paused',
         tone: 'muted',
         detail
       }
     case 'error':
       return {
-        label: reason ? `Co-host: error · ${reason}` : 'Co-host: error',
+        label: reason ? `Seer: error · ${reason}` : 'Seer: error',
         tone: 'muted',
         detail
       }
@@ -192,11 +192,11 @@ export function cohostPaneMode({
   if (!consented) {
     return {
       kind: 'consent',
-      reason: 'Co-host reads live chat with Videorc cloud AI. Turn on cloud AI to use it.'
+      reason: 'Seer reads live chat with Videorc cloud AI. Turn on cloud AI to use it.'
     }
   }
   if (!enabled) {
-    return { kind: 'disabled', reason: 'Co-host is off. Turn it on in Settings.' }
+    return { kind: 'disabled', reason: 'Seer is off. Turn it on in Settings.' }
   }
   return { kind: 'live' }
 }
@@ -528,20 +528,20 @@ export function cohostErrorToastKey(state: CohostState | null): string | null {
 }
 
 export const COHOST_ERROR_TOAST_MESSAGES: Record<CohostReason, string> = {
-  'premium-required': 'Co-host stopped: Videorc Premium is required.',
-  'consent-required': 'Co-host stopped: cloud AI consent is off.',
-  'session-expired': 'Co-host stopped: your Videorc sign-in expired.',
-  'signed-out': 'Co-host stopped: sign in to Videorc to use it.',
-  'quota-exhausted': 'Co-host paused: daily AI quota is used up.',
-  'server-unconfigured': 'Co-host stopped: Videorc AI is unavailable right now.',
-  network: 'Co-host stopped: no connection to Videorc AI.',
-  'gateway-error': 'Co-host stopped: Videorc AI returned an error.'
+  'premium-required': 'Seer stopped: Videorc Premium is required.',
+  'consent-required': 'Seer stopped: cloud AI consent is off.',
+  'session-expired': 'Seer stopped: your Videorc sign-in expired.',
+  'signed-out': 'Seer stopped: sign in to Videorc to use it.',
+  'quota-exhausted': 'Seer paused: daily AI quota is used up.',
+  'server-unconfigured': 'Seer stopped: Videorc AI is unavailable right now.',
+  network: 'Seer stopped: no connection to Videorc AI.',
+  'gateway-error': 'Seer stopped: Videorc AI returned an error.'
 }
 
 /**
  * Toast copy with the server's words attached:
- * "Co-host stopped: Videorc AI returned an error (ai-gateway-error: The
- * co-host tick failed on every configured model)." The HTTP status stays in
+ * "Seer stopped: Videorc AI returned an error (ai-gateway-error: The
+ * Seer tick failed on every configured model)." The HTTP status stays in
  * the chip tooltip — a toast is read in a second, not debugged.
  */
 export function cohostErrorToastMessage(
@@ -614,7 +614,7 @@ export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
 
 const COHOST_QUESTION_TOAST_TEXT_CAP = 64
 
-/** "Co-host: 5 people asking: What keyboard is that? · ⌘J" */
+/** "Seer: 5 people asking: What keyboard is that? · ⌘J" */
 export function cohostQuestionToastMessage(question: CohostQuestion): string {
   const askers = question.askers.length
   const who =
@@ -624,7 +624,7 @@ export function cohostQuestionToastMessage(question: CohostQuestion): string {
         ? `${question.askers[0]} is asking`
         : 'a new question'
   const text = trimDraftToCap(question.text, COHOST_QUESTION_TOAST_TEXT_CAP)
-  return text ? `Co-host: ${who}: ${text} · ⌘J` : `Co-host: ${who} · ⌘J`
+  return text ? `Seer: ${who}: ${text} · ⌘J` : `Seer: ${who} · ⌘J`
 }
 
 export interface CohostQuestionToast {

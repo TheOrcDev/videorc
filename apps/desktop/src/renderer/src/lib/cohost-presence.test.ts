@@ -46,12 +46,12 @@ describe('cohostPresenceView', () => {
   it('renders the off shape as a state, never as nothing', () => {
     const view = cohostPresenceView(offCohostState(), NOW)
     expect(view.kind).toBe('off')
-    expect(view.label).toBe('Co-host off')
+    expect(view.label).toBe('Seer off')
     expect(view.dotTone).toBe('muted')
     expect(view.dots).toBe(false)
     expect(view.pulse).toBe(false)
     expect(view.openCount).toBe(0)
-    expect(view.tooltipLines[0]).toContain('Co-host is off')
+    expect(view.tooltipLines[0]).toContain('Seer is off')
   })
 
   it('treats a null state exactly like the off shape', () => {
@@ -63,7 +63,7 @@ describe('cohostPresenceView', () => {
   it('reports starting when the caller asked the engine to come up', () => {
     const view = cohostPresenceView(offCohostState(), NOW, { starting: true })
     expect(view.kind).toBe('starting')
-    expect(view.label).toBe('Co-host starting')
+    expect(view.label).toBe('Seer starting')
     expect(view.dotTone).toBe('muted')
     expect(view.pulse).toBe(true)
   })
@@ -74,20 +74,20 @@ describe('cohostPresenceView', () => {
       NOW
     )
     expect(view.kind).toBe('listening')
-    expect(view.label).toBe('Co-host · 3 q')
+    expect(view.label).toBe('Seer · 3 q')
     expect(view.dotTone).toBe('live')
     expect(view.dots).toBe(false)
     expect(view.openCount).toBe(3)
   })
 
   it('says listening (not "0 q") when the chat has asked nothing yet', () => {
-    expect(cohostPresenceView(listening(), NOW).label).toBe('Co-host listening')
+    expect(cohostPresenceView(listening(), NOW).label).toBe('Seer listening')
   })
 
   it('counts the queued messages it has seen but not sent', () => {
     const view = cohostPresenceView(listening({ pendingMessages: 4 }), NOW)
     expect(view.kind).toBe('reading')
-    expect(view.label).toBe('Co-host · reading 4 new…')
+    expect(view.label).toBe('Seer · reading 4 new…')
     expect(view.dots).toBe(true)
     expect(view.pulse).toBe(false)
     expect(view.dotTone).toBe('live')
@@ -96,7 +96,7 @@ describe('cohostPresenceView', () => {
   it('lets thinking outrank reading — the tick already carries the backlog', () => {
     const view = cohostPresenceView(listening({ pendingMessages: 4, tickInFlight: true }), NOW)
     expect(view.kind).toBe('thinking')
-    expect(view.label).toBe('Co-host · thinking…')
+    expect(view.label).toBe('Seer · thinking…')
     expect(view.dots).toBe(true)
     expect(view.pulse).toBe(true)
   })
@@ -104,7 +104,7 @@ describe('cohostPresenceView', () => {
   it('names the pause reason and stays monochrome', () => {
     const view = cohostPresenceView(listening({ status: 'paused', reason: 'quota-exhausted' }), NOW)
     expect(view.kind).toBe('paused')
-    expect(view.label).toBe('Co-host paused · quota')
+    expect(view.label).toBe('Seer paused · quota')
     expect(view.dotTone).toBe('muted')
   })
 
@@ -118,7 +118,7 @@ describe('cohostPresenceView', () => {
       NOW
     )
     expect(view.kind).toBe('error')
-    expect(view.label).toBe('Co-host error')
+    expect(view.label).toBe('Seer error')
     expect(view.dotTone).toBe('destructive')
     expect(view.tooltipLines).toContain('ai-gateway-error (HTTP 502): Every model failed.')
   })
@@ -178,7 +178,7 @@ describe('cohostEmptyStateCopy', () => {
     )
     const off = offCohostState()
     expect(cohostEmptyStateCopy(cohostPresenceView(off, NOW), off)).toBe(
-      'Questions from chat will appear here once co-host is listening again.'
+      'Questions from chat will appear here once Seer is listening again.'
     )
   })
 })

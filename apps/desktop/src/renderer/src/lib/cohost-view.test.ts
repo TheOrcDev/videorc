@@ -91,13 +91,13 @@ function state(overrides: Partial<CohostState> = {}): CohostState {
 /** The 2026-08-23 incident envelope: web answered 502 `ai-gateway-error`. */
 const GATEWAY_502: CohostErrorDetail = {
   code: 'ai-gateway-error',
-  message: 'The co-host tick failed on every configured model.',
+  message: 'The Seer tick failed on every configured model.',
   status: 502
 }
 
 const TIMEOUT: CohostErrorDetail = {
   code: 'timeout',
-  message: 'The co-host service did not answer within 12 s.',
+  message: 'Seer did not answer within 12 s.',
   status: null
 }
 
@@ -162,12 +162,12 @@ describe('cohostChipView', () => {
 
   it('is the only chip that earns the live accent while listening', () => {
     expect(cohostChipView(state({ questions: [question(), question({ id: 'q-2' })] }))).toEqual({
-      label: 'Co-host: listening · 2 q',
+      label: 'Seer: listening · 2 q',
       tone: 'live',
       detail: null
     })
     expect(cohostChipView(state({ questions: [] }))).toEqual({
-      label: 'Co-host: listening',
+      label: 'Seer: listening',
       tone: 'live',
       detail: null
     })
@@ -175,14 +175,14 @@ describe('cohostChipView', () => {
 
   it('names every paused reason in the destination strip vocabulary', () => {
     const cases: Array<[CohostReason, string]> = [
-      ['premium-required', 'Co-host: paused · Premium'],
-      ['consent-required', 'Co-host: paused · consent'],
-      ['quota-exhausted', 'Co-host: paused · quota'],
-      ['session-expired', 'Co-host: paused · session expired'],
-      ['signed-out', 'Co-host: paused · signed out'],
-      ['server-unconfigured', 'Co-host: paused · unavailable'],
-      ['network', 'Co-host: paused · offline'],
-      ['gateway-error', 'Co-host: paused · AI error']
+      ['premium-required', 'Seer: paused · Premium'],
+      ['consent-required', 'Seer: paused · consent'],
+      ['quota-exhausted', 'Seer: paused · quota'],
+      ['session-expired', 'Seer: paused · session expired'],
+      ['signed-out', 'Seer: paused · signed out'],
+      ['server-unconfigured', 'Seer: paused · unavailable'],
+      ['network', 'Seer: paused · offline'],
+      ['gateway-error', 'Seer: paused · AI error']
     ]
     for (const [reason, label] of cases) {
       expect(cohostChipView(state({ status: 'paused', reason }))).toEqual({
@@ -195,17 +195,17 @@ describe('cohostChipView', () => {
 
   it('stays monochrome for off and error', () => {
     expect(cohostChipView(state({ status: 'off', reason: null }))).toEqual({
-      label: 'Co-host: off',
+      label: 'Seer: off',
       tone: 'muted',
       detail: null
     })
     expect(cohostChipView(state({ status: 'error', reason: 'gateway-error' }))).toEqual({
-      label: 'Co-host: error · AI error',
+      label: 'Seer: error · AI error',
       tone: 'muted',
       detail: null
     })
     expect(cohostChipView(state({ status: 'error', reason: null }))).toEqual({
-      label: 'Co-host: error',
+      label: 'Seer: error',
       tone: 'muted',
       detail: null
     })
@@ -215,14 +215,14 @@ describe('cohostChipView', () => {
     expect(
       cohostChipView(state({ status: 'error', reason: 'gateway-error', detail: GATEWAY_502 }))
     ).toEqual({
-      label: 'Co-host: error · AI error',
+      label: 'Seer: error · AI error',
       tone: 'muted',
-      detail: 'ai-gateway-error (HTTP 502): The co-host tick failed on every configured model.'
+      detail: 'ai-gateway-error (HTTP 502): The Seer tick failed on every configured model.'
     })
     // No HTTP status for a desktop-side failure.
     expect(
       cohostChipView(state({ status: 'error', reason: 'network', detail: TIMEOUT }))?.detail
-    ).toBe('timeout: The co-host service did not answer within 12 s.')
+    ).toBe('timeout: Seer did not answer within 12 s.')
     // A server-side pause (quota) carries its detail too...
     expect(
       cohostChipView(
@@ -247,7 +247,7 @@ describe('cohostErrorDetailText', () => {
     expect(cohostErrorDetailText(null)).toBeNull()
     expect(cohostErrorDetailText(undefined)).toBeNull()
     expect(cohostErrorDetailText(GATEWAY_502)).toBe(
-      'ai-gateway-error (HTTP 502): The co-host tick failed on every configured model.'
+      'ai-gateway-error (HTTP 502): The Seer tick failed on every configured model.'
     )
     expect(cohostErrorDetailText({ code: 'ai-gateway-error', message: '  ', status: 502 })).toBe(
       'ai-gateway-error (HTTP 502)'
@@ -263,7 +263,7 @@ describe('cohostPaneMode', () => {
   const locked = {
     allowed: false as const,
     featureId: 'live-cohost' as const,
-    reason: 'Live Co-host requires Videorc Premium.',
+    reason: 'Seer requires Videorc Premium.',
     upgradeUrl: 'https://www.videorc.com/premium'
   }
 
@@ -405,7 +405,7 @@ describe('cohostErrorToast', () => {
     expect(cohostErrorToast(state(), errored)).toEqual({
       reason: 'gateway-error',
       key: 'gateway-error:',
-      message: 'Co-host stopped: Videorc AI returned an error.'
+      message: 'Seer stopped: Videorc AI returned an error.'
     })
     expect(cohostErrorToast(errored, errored)).toBeNull()
   })
@@ -422,10 +422,10 @@ describe('cohostErrorToast', () => {
       reason: 'gateway-error',
       key: 'gateway-error:ai-gateway-error',
       message:
-        'Co-host stopped: Videorc AI returned an error (ai-gateway-error: The co-host tick failed on every configured model).'
+        'Seer stopped: Videorc AI returned an error (ai-gateway-error: The Seer tick failed on every configured model).'
     })
     expect(cohostErrorToastMessage('network', TIMEOUT)).toBe(
-      'Co-host stopped: no connection to Videorc AI (timeout: The co-host service did not answer within 12 s).'
+      'Seer stopped: no connection to Videorc AI (timeout: Seer did not answer within 12 s).'
     )
     // A code without a message still names itself; no detail keeps the base copy.
     expect(
@@ -434,12 +434,12 @@ describe('cohostErrorToast', () => {
         message: '',
         status: 502
       })
-    ).toBe('Co-host stopped: Videorc AI returned an error (ai-gateway-error).')
+    ).toBe('Seer stopped: Videorc AI returned an error (ai-gateway-error).')
     expect(cohostErrorToastMessage('gateway-error', null)).toBe(
-      'Co-host stopped: Videorc AI returned an error.'
+      'Seer stopped: Videorc AI returned an error.'
     )
     expect(cohostErrorToastMessage('gateway-error', undefined)).toBe(
-      'Co-host stopped: Videorc AI returned an error.'
+      'Seer stopped: Videorc AI returned an error.'
     )
   })
 
@@ -530,7 +530,7 @@ describe('cohostQuestionToast', () => {
       lastToastAtMs: null,
       nowMs: 1_000
     })
-    expect(raised?.message).toContain('Co-host:')
+    expect(raised?.message).toContain('Seer:')
     expect(raised?.message).toContain('⌘J')
     expect(raised?.atMs).toBe(1_000)
   })
@@ -608,9 +608,9 @@ describe('cohostQuestionToast', () => {
   it('names how many people are asking', () => {
     expect(
       cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }))
-    ).toBe('Co-host: 5 people asking: What keyboard is that? · ⌘J')
+    ).toBe('Seer: 5 people asking: What keyboard is that? · ⌘J')
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
-      'Co-host: Ada is asking: What keyboard is that? · ⌘J'
+      'Seer: Ada is asking: What keyboard is that? · ⌘J'
     )
   })
 })

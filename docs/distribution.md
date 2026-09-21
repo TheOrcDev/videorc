@@ -371,7 +371,7 @@ How the boundary is enforced (since 2026-07-05 there is no runtime unlock):
   the tier — `VIDEORC_PREMIUM_FEATURES` is downgrade-only: `=0`/`basic` forces
   Basic (for exercising the gates), every other value is ignored with a
   warning. The tier changes streaming quality, cloud AI, live captions,
-  co-host, and Noise Cleanup; the destination cap is the same shared number
+  Seer, and Noise Cleanup; the destination cap is the same shared number
   for every tier and is a pipeline limit, not a plan gate.
 - **The premium entitlement is a signed proof**, not a boolean: videorc.com
   mints an Ed25519-signed token (7-day expiry) that the backend verifies

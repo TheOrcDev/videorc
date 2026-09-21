@@ -240,12 +240,12 @@ describe('shared high-risk protocol fixture', () => {
     }
     expect(fixtures.cohost.errorState.detail).toStrictEqual({
       code: 'ai-gateway-error',
-      message: 'The co-host tick failed on every configured model.',
+      message: 'The Seer tick failed on every configured model.',
       status: 502
     })
     expect(fixtures.cohost.timeoutState.detail).toStrictEqual({
       code: 'timeout',
-      message: 'The co-host service did not answer within 12 s.',
+      message: 'Seer did not answer within 12 s.',
       status: null
     })
     expect('detail' in fixtures.cohost.legacyState).toBe(false)
