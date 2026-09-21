@@ -50,7 +50,16 @@ describe('audioMixerMonitorLabel', () => {
 
   it('says Idle whenever nothing is being read, armed or not', () => {
     expect(audioMixerMonitorLabel({ sessionActive: false, signalLive: false })).toBe('Idle')
-    // Muted mid-session: the path is not live, and the label must not claim it.
+    // No signal mid-session: the path is not live, and the label must not claim it.
     expect(audioMixerMonitorLabel({ sessionActive: true, signalLive: false })).toBe('Idle')
+  })
+
+  it('says Muted for a muted microphone, so flat bars never read as a dead one', () => {
+    expect(audioMixerMonitorLabel({ sessionActive: false, signalLive: false, muted: true })).toBe(
+      'Muted'
+    )
+    expect(audioMixerMonitorLabel({ sessionActive: true, signalLive: false, muted: true })).toBe(
+      'Muted'
+    )
   })
 })
