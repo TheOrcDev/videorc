@@ -2976,33 +2976,46 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ownership: takeoverMuteOwnershipRef.current
     })
     takeoverMuteOwnershipRef.current = transition.ownership
-    persistScreenTakeoverMuteOwnership(transition.ownership)
     setActiveScreen(screen)
-    if (captureConfigRef.current.audio.microphoneMuted === transition.microphoneMuted) {
-      return
-    }
-    captureConfigRef.current = {
-      ...captureConfigRef.current,
-      audio: {
-        ...captureConfigRef.current.audio,
-        microphoneMuted: transition.microphoneMuted
+    const muteChanges =
+      captureConfigRef.current.audio.microphoneMuted !== transition.microphoneMuted
+    if (muteChanges) {
+      captureConfigRef.current = {
+        ...captureConfigRef.current,
+        audio: {
+          ...captureConfigRef.current.audio,
+          microphoneMuted: transition.microphoneMuted
+        }
       }
     }
-    // Ownership was persisted above; persist the mute it explains in the same
-    // step. Left to the captureConfig effect, a quit between the two writes
-    // strands a muted microphone with no takeover to release it.
-    try {
-      localStorage.setItem(
-        STORAGE_KEYS.captureConfig,
-        JSON.stringify(persistableCaptureConfig(captureConfigRef.current))
-      )
-    } catch {
-      // Storage is best effort; the effect below writes the same value.
+    // Persist the mute in the same step as its ownership record; left to the
+    // captureConfig effect, a quit between the two writes strands a muted
+    // microphone with no takeover to release it. The record is what lets a
+    // later launch release the mute, so a stored takeover mute never goes
+    // without it: taking a mute writes the record first, releasing one writes
+    // the restored config first.
+    if (transition.ownership) {
+      persistScreenTakeoverMuteOwnership(transition.ownership)
     }
-    setCaptureConfig((current) => ({
-      ...current,
-      audio: { ...current.audio, microphoneMuted: transition.microphoneMuted }
-    }))
+    if (muteChanges) {
+      try {
+        localStorage.setItem(
+          STORAGE_KEYS.captureConfig,
+          JSON.stringify(persistableCaptureConfig(captureConfigRef.current))
+        )
+      } catch {
+        // Storage is best effort; the effect below writes the same value.
+      }
+    }
+    if (!transition.ownership) {
+      persistScreenTakeoverMuteOwnership(null)
+    }
+    if (muteChanges) {
+      setCaptureConfig((current) => ({
+        ...current,
+        audio: { ...current.audio, microphoneMuted: transition.microphoneMuted }
+      }))
+    }
   }, [])
   useEffect(
     () => () => {

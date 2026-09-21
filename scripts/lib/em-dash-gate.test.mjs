@@ -33,6 +33,14 @@ test('a // inside a string is not a comment, and a JSX apostrophe stays on its l
   assert.deepEqual(findEmDashLines(source, 'ts'), [1])
 })
 
+test('a URL in JSX text is not a comment', () => {
+  const source = [
+    `return <p>Visit https://example.test ${EM_DASH} then continue</p>`,
+    `const url = 'https://example.test' // a note ${EM_DASH} for developers`
+  ].join('\n')
+  assert.deepEqual(findEmDashLines(source, 'ts'), [1])
+})
+
 test('Rust: multi-line strings count, char literals and the test module do not', () => {
   const source = [
     `let quote = '"'; // ${EM_DASH} comment`,
@@ -45,6 +53,18 @@ test('Rust: multi-line strings count, char literals and the test module do not',
     '}'
   ].join('\n')
   assert.deepEqual(findEmDashLines(source, 'rust'), [3])
+})
+
+test('Rust: a raw string ending in a backslash does not flip the rest of the file', () => {
+  const source = [
+    'let unc = path.strip_prefix(r"\\\\?\\UNC\\");',
+    `// a comment ${EM_DASH} for developers`,
+    `let hashed = r#"raw ${EM_DASH} "quoted" text"#;`,
+    'let raw_ident = r#type;',
+    `/// doc ${EM_DASH} comment`,
+    `let bytes = br"\\d ${EM_DASH}";`
+  ].join('\n')
+  assert.deepEqual(findEmDashLines(source, 'rust'), [3, 6])
 })
 
 test('Rust: code after a mid-file test module is still scanned', () => {

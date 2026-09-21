@@ -46,13 +46,37 @@ function withoutRustTestModules(source) {
 }
 
 /**
+ * Index of the last character of a Rust raw string (`r"…"`, `r#"…"#`, `br"…"`)
+ * that starts at `index`, or null. A backslash is literal in a raw string, so
+ * `r"\\?\UNC\"` ends at its last quote; read as an escape, that quote would
+ * leave the rest of the file flipped inside out.
+ */
+function rustRawStringEnd(text, index) {
+  const before = text[index - 1] === 'b' ? text[index - 2] : text[index - 1]
+  if (before !== undefined && /\w/.test(before)) {
+    return null
+  }
+  let cursor = index + 1
+  while (text[cursor] === '#') {
+    cursor += 1
+  }
+  if (text[cursor] !== '"') {
+    return null
+  }
+  const closing = `"${'#'.repeat(cursor - index - 1)}`
+  const end = text.indexOf(closing, cursor + 1)
+  return end === -1 ? text.length - 1 : end + closing.length - 1
+}
+
+/**
  * Line numbers (1-based) of em dashes outside comments.
  *
  * A small comment-aware scanner, not a parser. Quotes only matter so that a
- * `//` inside a string (a URL) is not taken for a comment. In TS a quote state
- * resets at the end of the line, which keeps an apostrophe in JSX text from
- * hiding the rest of the file; Rust strings may span lines and `'` is a
- * lifetime or char there, so only `"` opens one.
+ * `//` inside a string (a URL) is not taken for a comment, and a `://` outside
+ * one is a URL in JSX text, never a comment. In TS a quote state resets at the
+ * end of the line, which keeps an apostrophe in JSX text from hiding the rest
+ * of the file; Rust strings may span lines and `'` is a lifetime or char there,
+ * so only `"` opens one.
  */
 export function findEmDashLines(source, language) {
   if (language === 'text') {
@@ -102,6 +126,20 @@ export function findEmDashLines(source, language) {
       }
       continue
     }
+    if (language === 'rust' && char === 'r') {
+      const end = rustRawStringEnd(text, index)
+      if (end !== null) {
+        for (; index <= end; index += 1) {
+          if (text[index] === '\n') {
+            line += 1
+          } else if (text[index] === EM_DASH) {
+            lines.add(line)
+          }
+        }
+        index = end
+        continue
+      }
+    }
     if (language === 'rust' && char === "'") {
       // A `'"'` or `'\\"'` char literal must not open a string.
       const close = next === '\\' ? index + 3 : index + 2
@@ -110,7 +148,7 @@ export function findEmDashLines(source, language) {
       }
       continue
     }
-    if (char === '/' && next === '/') {
+    if (char === '/' && next === '/' && text[index - 1] !== ':') {
       lineComment = true
       index += 1
     } else if (char === '/' && next === '*') {

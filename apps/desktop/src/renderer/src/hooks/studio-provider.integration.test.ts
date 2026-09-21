@@ -2081,6 +2081,27 @@ describe('real StudioProvider lifecycle', () => {
         audio: { ...defaultCaptureConfig.audio, microphoneMuted: true }
       })
     )
+    // Releasing stores the restored config before it drops the ownership
+    // record, so the stored mute is never left without the record that
+    // releases it.
+    const releaseWrites: string[] = []
+    const setItem = localStorage.setItem.bind(localStorage)
+    const removeItem = localStorage.removeItem.bind(localStorage)
+    vi.spyOn(localStorage, 'setItem').mockImplementation((key: string, value: string) => {
+      if (
+        key === STORAGE_KEYS.captureConfig &&
+        JSON.parse(value).audio?.microphoneMuted === false
+      ) {
+        releaseWrites.push('unmuted config')
+      }
+      setItem(key, value)
+    })
+    vi.spyOn(localStorage, 'removeItem').mockImplementation((key: string) => {
+      if (key === SCREEN_TAKEOVER_MUTE_OWNERSHIP_STORAGE_KEY) {
+        releaseWrites.push('ownership removed')
+      }
+      removeItem(key)
+    })
     const observations: StudioObservation[] = []
     const latest = (): StudioObservation | undefined => observations.at(-1)
     await act(async () => {
@@ -2111,6 +2132,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(
       JSON.parse(localStorage.getItem(STORAGE_KEYS.captureConfig) ?? '{}').audio.microphoneMuted
     ).toBe(false)
+    expect(releaseWrites.slice(0, 2)).toEqual(['unmuted config', 'ownership removed'])
   })
 
   it('shows one persistent recovery error when an active recording fails', async () => {

@@ -78,7 +78,7 @@ function imageSrcOf(asset: BackgroundAsset): string | undefined {
 // already applies it, so the column's Apply button was permanently disabled and
 // its style sliders acted on nothing visible. The gallery now uses the full
 // width; low-frequency per-slot actions live in each tile's ⋯ menu, and the
-// style controls moved to the Active background bar where they edit the one
+// style controls sit on the active tile (Adjust style), where they edit the one
 // background that has a visible consequence.
 export function AssetsTab(): ReactElement {
   const { registry, setRegistry } = useBackgroundAssets()
@@ -153,7 +153,7 @@ export function AssetsTab(): ReactElement {
         <h1 className="text-xl font-semibold tracking-tight">Assets</h1>
         <p className="max-w-2xl text-sm text-muted-foreground">
           Backgrounds for your scenes and takeover screens for the output. Click a preset to apply
-          it; tune the active one below.
+          it, then tune it with Adjust style on its tile.
         </p>
       </div>
 
