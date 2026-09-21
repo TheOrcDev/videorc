@@ -84,10 +84,12 @@ export class LatestRequestByKey<TKey> {
 export class SingleFlightGeneration {
   private generation = 0
   private inFlight: { generation: number; promise: Promise<void> } | null = null
+  private trailing: { generation: number; promise: Promise<void> } | null = null
 
   invalidate(): void {
     this.generation += 1
     this.inFlight = null
+    this.trailing = null
   }
 
   run(task: (isCurrent: GenerationIsCurrent) => Promise<void>): Promise<void> {
@@ -102,6 +104,34 @@ export class SingleFlightGeneration {
       }
     })
     this.inFlight = { generation, promise }
+    return promise
+  }
+
+  /**
+   * For an explicit user refresh. Work already in flight started before the
+   * click, so joining it can return an answer older than the click (a camera
+   * plugged in a moment ago). Queue exactly one run behind it instead; further
+   * clicks while that is queued share it.
+   */
+  runFresh(task: (isCurrent: GenerationIsCurrent) => Promise<void>): Promise<void> {
+    const generation = this.generation
+    const inFlight = this.inFlight
+    if (inFlight?.generation !== generation) {
+      return this.run(task)
+    }
+    if (this.trailing?.generation === generation) {
+      return this.trailing.promise
+    }
+
+    const promise: Promise<void> = inFlight.promise
+      .catch(() => undefined)
+      .then(() => {
+        if (this.trailing?.promise === promise) {
+          this.trailing = null
+        }
+        return this.generation === generation ? this.run(task) : undefined
+      })
+    this.trailing = { generation, promise }
     return promise
   }
 }

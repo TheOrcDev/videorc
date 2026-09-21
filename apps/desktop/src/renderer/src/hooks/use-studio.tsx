@@ -1116,7 +1116,8 @@ export type StudioContextValue = {
   lastError: string | null
   runtimeInfo: RuntimeInfo | null
   // actions
-  refreshBackend: () => Promise<void>
+  /** `fresh` is for an explicit user Refresh: it never joins older in-flight work. */
+  refreshBackend: (options?: { fresh?: boolean }) => Promise<void>
   loadMoreSessions: () => Promise<void>
   loadSessionDetails: (sessionId: string) => Promise<void>
   refreshEntitlements: () => Promise<void>
@@ -6496,106 +6497,109 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const refreshBackend = useCallback(
-    (): Promise<void> =>
-      focusRefreshCoordinatorRef.current.run(async (generationIsCurrent) => {
-        await refreshMediaAccess()
-        const activeClient = clientRef.current
-        // Multiple focus listeners intentionally share this one coordinator.
-        // During backend replacement, the connection generation invalidates
-        // this work before any response can commit into the new client state.
-        if (!activeClient || wsStatusRef.current !== 'connected' || !generationIsCurrent()) {
-          return
-        }
+    (options?: { fresh?: boolean }): Promise<void> =>
+      focusRefreshCoordinatorRef.current[options?.fresh ? 'runFresh' : 'run'](
+        async (generationIsCurrent) => {
+          await refreshMediaAccess()
+          const activeClient = clientRef.current
+          // Multiple focus listeners intentionally share this one coordinator.
+          // During backend replacement, the connection generation invalidates
+          // this work before any response can commit into the new client state.
+          if (!activeClient || wsStatusRef.current !== 'connected' || !generationIsCurrent()) {
+            return
+          }
 
-        const refreshIsCurrent = (): boolean =>
-          generationIsCurrent() && clientRef.current === activeClient
-        const sessionListRefreshRequests = sessionListRefreshRequestRef.current
-        const sessionListRequestToken = sessionListRefreshRequests.begin('first-page')
-        sessionListGenerationRef.current += 1
-        sessionListMoreSingleFlightRef.current.invalidate('next-page')
-        setSessionsLoadingMore(false)
-        try {
-          setLastError(null)
-          const [
-            nextHealth,
-            ,
-            nextDevices,
-            nextSessions,
-            nextSessionStorage,
-            nextDiagnostics,
-            nextScreens,
-            nextActiveScreen,
-            nextPlatformAccounts,
-            nextOauthProviderCredentials,
-            nextPlatformAccountValidations,
-            nextStreamMetadataDraft,
-            nextNoiseCleanupJobs
-          ] = await Promise.all([
-            activeClient.request<BackendHealth>('health.ping'),
-            refreshEntitlementsForClient(activeClient),
-            activeClient.request<DeviceList>('devices.list'),
-            activeClient.requestTyped('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
-            activeClient.request<SessionStorageTotals>('sessions.storage'),
-            activeClient.request<DiagnosticStats>('diagnostics.stats'),
-            activeClient.request<StreamScreen[]>('screens.list'),
-            activeClient.request<StreamScreen | null>('screens.active'),
-            activeClient.request<PlatformAccount[]>('platformAccounts.list'),
-            activeClient.request<OAuthProviderCredentialStatus[]>(
-              'platformAccounts.oauth.providerCredentials'
-            ),
-            activeClient.request<PlatformAccountValidation[]>('platformAccounts.validate'),
-            activeClient.request<StreamMetadataDraft>('streamTargets.metadata.get'),
-            activeClient.requestTyped('noiseCleanup.list', undefined)
-          ])
-          if (!refreshIsCurrent()) {
-            return
-          }
-          // Fetch identity after the maintenance batch and through the same
-          // Main-owned refresh path as the provider-focus listener. An early
-          // account.get snapshot must not land after a newer provider refresh.
-          const accountCommit = await refreshAccountSnapshotForClient(activeClient)
-          if (accountCommit) {
-            await refreshAiReadinessForClient(activeClient, accountCommit.snapshot, () =>
-              Boolean(refreshIsCurrent() && accountCommit.isCurrent())
+          const refreshIsCurrent = (): boolean =>
+            generationIsCurrent() && clientRef.current === activeClient
+          const sessionListRefreshRequests = sessionListRefreshRequestRef.current
+          const sessionListRequestToken = sessionListRefreshRequests.begin('first-page')
+          sessionListGenerationRef.current += 1
+          sessionListMoreSingleFlightRef.current.invalidate('next-page')
+          setSessionsLoadingMore(false)
+          try {
+            setLastError(null)
+            const [
+              nextHealth,
+              ,
+              nextDevices,
+              nextSessions,
+              nextSessionStorage,
+              nextDiagnostics,
+              nextScreens,
+              nextActiveScreen,
+              nextPlatformAccounts,
+              nextOauthProviderCredentials,
+              nextPlatformAccountValidations,
+              nextStreamMetadataDraft,
+              nextNoiseCleanupJobs
+            ] = await Promise.all([
+              activeClient.request<BackendHealth>('health.ping'),
+              refreshEntitlementsForClient(activeClient),
+              activeClient.request<DeviceList>('devices.list'),
+              activeClient.requestTyped('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
+              activeClient.request<SessionStorageTotals>('sessions.storage'),
+              activeClient.request<DiagnosticStats>('diagnostics.stats'),
+              activeClient.request<StreamScreen[]>('screens.list'),
+              activeClient.request<StreamScreen | null>('screens.active'),
+              activeClient.request<PlatformAccount[]>('platformAccounts.list'),
+              activeClient.request<OAuthProviderCredentialStatus[]>(
+                'platformAccounts.oauth.providerCredentials'
+              ),
+              activeClient.request<PlatformAccountValidation[]>('platformAccounts.validate'),
+              activeClient.request<StreamMetadataDraft>('streamTargets.metadata.get'),
+              activeClient.requestTyped('noiseCleanup.list', undefined)
+            ])
+            if (!refreshIsCurrent()) {
+              return
+            }
+            // Fetch identity after the maintenance batch and through the same
+            // Main-owned refresh path as the provider-focus listener. An early
+            // account.get snapshot must not land after a newer provider refresh.
+            const accountCommit = await refreshAccountSnapshotForClient(activeClient)
+            if (accountCommit) {
+              await refreshAiReadinessForClient(activeClient, accountCommit.snapshot, () =>
+                Boolean(refreshIsCurrent() && accountCommit.isCurrent())
+              )
+            }
+            if (!refreshIsCurrent()) {
+              return
+            }
+            const nextStreamMetadataValidation =
+              await activeClient.request<StreamMetadataValidation>(
+                'streamTargets.metadata.validate',
+                nextStreamMetadataDraft
+              )
+            if (!refreshIsCurrent()) {
+              return
+            }
+            setHealth(nextHealth)
+            setDeviceList(nextDevices)
+            if (sessionListRefreshRequests.isCurrent('first-page', sessionListRequestToken)) {
+              sessionListGenerationRef.current += 1
+              setSessions(nextSessions.items)
+              setSessionsNextCursor(nextSessions.nextCursor ?? null)
+              setSessionStorageTotals(nextSessionStorage)
+            }
+            setDiagnosticStats(nextDiagnostics)
+            setScreens(nextScreens)
+            commitActiveScreen(nextActiveScreen)
+            setPlatformAccounts(nextPlatformAccounts)
+            setOauthProviderCredentials(nextOauthProviderCredentials)
+            setPlatformAccountValidations(nextPlatformAccountValidations)
+            setStreamMetadataDraft(nextStreamMetadataDraft)
+            setStreamMetadataValidation(nextStreamMetadataValidation)
+            setNoiseCleanupJobs((current) =>
+              nextNoiseCleanupJobs.reduce((jobs, job) => upsertNoiseCleanupJob(jobs, job), current)
             )
+          } catch (error) {
+            if (refreshIsCurrent()) {
+              reportError(error)
+            }
+          } finally {
+            sessionListRefreshRequests.finish('first-page', sessionListRequestToken)
           }
-          if (!refreshIsCurrent()) {
-            return
-          }
-          const nextStreamMetadataValidation = await activeClient.request<StreamMetadataValidation>(
-            'streamTargets.metadata.validate',
-            nextStreamMetadataDraft
-          )
-          if (!refreshIsCurrent()) {
-            return
-          }
-          setHealth(nextHealth)
-          setDeviceList(nextDevices)
-          if (sessionListRefreshRequests.isCurrent('first-page', sessionListRequestToken)) {
-            sessionListGenerationRef.current += 1
-            setSessions(nextSessions.items)
-            setSessionsNextCursor(nextSessions.nextCursor ?? null)
-            setSessionStorageTotals(nextSessionStorage)
-          }
-          setDiagnosticStats(nextDiagnostics)
-          setScreens(nextScreens)
-          commitActiveScreen(nextActiveScreen)
-          setPlatformAccounts(nextPlatformAccounts)
-          setOauthProviderCredentials(nextOauthProviderCredentials)
-          setPlatformAccountValidations(nextPlatformAccountValidations)
-          setStreamMetadataDraft(nextStreamMetadataDraft)
-          setStreamMetadataValidation(nextStreamMetadataValidation)
-          setNoiseCleanupJobs((current) =>
-            nextNoiseCleanupJobs.reduce((jobs, job) => upsertNoiseCleanupJob(jobs, job), current)
-          )
-        } catch (error) {
-          if (refreshIsCurrent()) {
-            reportError(error)
-          }
-        } finally {
-          sessionListRefreshRequests.finish('first-page', sessionListRequestToken)
         }
-      }),
+      ),
     [
       commitActiveScreen,
       refreshAccountSnapshotForClient,

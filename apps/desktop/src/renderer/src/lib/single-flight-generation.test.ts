@@ -15,6 +15,48 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 }
 
 describe('SingleFlightGeneration', () => {
+  it('queues one fresh run behind in-flight work for an explicit user refresh', async () => {
+    const coordinator = new SingleFlightGeneration()
+    const gate = deferred()
+    const runs: string[] = []
+
+    const focus = coordinator.run(async () => {
+      runs.push('focus')
+      await gate.promise
+    })
+    const click = coordinator.runFresh(async () => {
+      runs.push('click')
+    })
+    const secondClick = coordinator.runFresh(async () => {
+      runs.push('second-click')
+    })
+
+    expect(secondClick).toBe(click)
+    expect(runs).toEqual(['focus'])
+    gate.resolve()
+    await Promise.all([focus, click])
+    expect(runs).toEqual(['focus', 'click'])
+  })
+
+  it('runs a fresh refresh at once when nothing is in flight, and drops it across generations', async () => {
+    const coordinator = new SingleFlightGeneration()
+    const runs: string[] = []
+    await coordinator.runFresh(async () => {
+      runs.push('idle-click')
+    })
+    expect(runs).toEqual(['idle-click'])
+
+    const gate = deferred()
+    const stale = coordinator.run(() => gate.promise)
+    const queued = coordinator.runFresh(async () => {
+      runs.push('stale-click')
+    })
+    coordinator.invalidate()
+    gate.resolve()
+    await Promise.all([stale, queued])
+    expect(runs).toEqual(['idle-click'])
+  })
+
   it('single-flights duplicate focus refreshes in the same client generation', async () => {
     const coordinator = new SingleFlightGeneration()
     const gate = deferred()
