@@ -171,6 +171,19 @@ jobs:
           VIDEORC_RELEASE_UPLOAD_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_REGION }}
           VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL }}
           VIDEORC_RELEASE_UPLOAD_S3_FORCE_PATH_STYLE: 'true'
+          # Second release storage origin. Publication goes to every configured
+          # origin, mirrors first. Unset values leave the single-origin
+          # behaviour. Private candidate storage above stays on one origin: it
+          # is read only by this workflow and the acceptance operator. Hetzner
+          # S3 keys are project-wide read/write, so this is a dedicated key in a
+          # project that holds nothing but release storage.
+          VIDEORC_DOWNLOAD_STORAGE_PRIMARY: ${{ vars.VIDEORC_DOWNLOAD_STORAGE_PRIMARY }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_FORCE_PATH_STYLE: 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'

@@ -506,6 +506,26 @@ function normalizeAdditionalSignedHeaders(headers) {
   return normalized
 }
 
+// S3-compatible origins implement the API unevenly. These are the measured
+// differences that change how the uploader talks to an origin; see
+// docs/releases/storage-compat-2026-09.md. They are derived from the endpoint
+// host and deliberately kept off the config object, which the D3 destination
+// binding hashes.
+//
+//   checksumHeaders  the origin stores and returns x-amz-checksum-sha256.
+//                    Without it the remote envelope cannot carry the checksum;
+//                    the downloaded body's SHA-256 and the videorc-sha256
+//                    metadata still bind every object exactly.
+//   ifMatchEtagForm  Ceph RGW answers 412 to the quoted entity tag it returned
+//                    and honours the bare digest.
+export function releaseUploadOriginCapabilities(config) {
+  const hostname = config?.endpointUrl ? new URL(config.endpointUrl).hostname.toLowerCase() : ''
+  if (hostname.endsWith('.your-objectstorage.com')) {
+    return { checksumHeaders: false, ifMatchEtagForm: 'unquoted' }
+  }
+  return { checksumHeaders: true, ifMatchEtagForm: 'quoted' }
+}
+
 export function createReleaseUploadS3Transport({ config }) {
   return createReleaseUploadHttpsTransport({
     tlsPolicy: normalizeReleaseUploadTlsPolicy(config?.tlsPolicy)
@@ -555,7 +575,11 @@ export async function inspectReleaseUploadArtifact({
       body.complete === true &&
       body.sizeBytes === artifact.sizeBytes &&
       body.sha256 === artifact.sha256
-    const envelopeMatches = responseEnvelopeMatchesArtifact(envelope, artifact)
+    const envelopeMatches = responseEnvelopeMatchesArtifact(
+      envelope,
+      artifact,
+      releaseUploadOriginCapabilities(config)
+    )
     return {
       ...envelope,
       sha256: body.sha256,
@@ -614,7 +638,11 @@ export async function publishReleaseUploadArtifact({
       throw immutableCollision(artifact, config)
     }
 
-    const condition = buildReleasePutCondition({ artifact, current })
+    const condition = buildReleasePutCondition({
+      artifact,
+      capabilities: releaseUploadOriginCapabilities(config),
+      current
+    })
     const response = await putReleaseUploadArtifact({
       artifact,
       condition,
@@ -905,7 +933,11 @@ export function buildMacosD3PublicationReservation({
   }
 }
 
-export function buildReleasePutCondition({ artifact, current }) {
+export function buildReleasePutCondition({
+  artifact,
+  capabilities = { ifMatchEtagForm: 'quoted' },
+  current
+}) {
   if (artifact?.immutable === true || current?.state === 'missing') {
     return { 'if-none-match': '*' }
   }
@@ -921,7 +953,12 @@ export function buildReleasePutCondition({ artifact, current }) {
       `Stable pointer ${artifact.objectKey} exists but did not provide the ETag required for a conditional update.`
     )
   }
-  return { 'if-match': current.etag }
+  return {
+    'if-match':
+      capabilities.ifMatchEtagForm === 'unquoted'
+        ? current.etag.replace(/^(?:W\/)?"(.*)"$/, '$1')
+        : current.etag
+  }
 }
 
 async function putReleaseUploadArtifact({ artifact, condition, config, transport }) {
@@ -1156,12 +1193,13 @@ function remoteResponseEnvelope(headers) {
   }
 }
 
-function responseEnvelopeMatchesArtifact(envelope, artifact) {
+function responseEnvelopeMatchesArtifact(envelope, artifact, capabilities) {
   return (
     envelope.contentType === normalizeRemoteContentType(artifact.contentType) &&
     envelope.contentLength === artifact.sizeBytes &&
     envelope.metadataSha256 === artifact.sha256 &&
-    envelope.checksumSha256 === sha256Base64FromHex(artifact.sha256)
+    (envelope.checksumSha256 === sha256Base64FromHex(artifact.sha256) ||
+      (envelope.checksumSha256 === null && !capabilities.checksumHeaders))
   )
 }
 
@@ -1422,6 +1460,10 @@ function releaseUploadTlsPolicy(endpointUrl, env) {
     const hostname = endpointUrl ? new URL(endpointUrl).hostname.toLowerCase() : null
     if (hostname?.endsWith('.r2.cloudflarestorage.com')) {
       allowedIssuerOrganizations = ['Google Trust Services']
+    } else if (hostname?.endsWith('.your-objectstorage.com')) {
+      // Let's Encrypt leaves rotate every 60-90 days, so only the issuer is
+      // pinned. The chain and hostname checks still apply.
+      allowedIssuerOrganizations = ["Let's Encrypt"]
     } else if (endpointUrl === null) {
       allowedIssuerOrganizations = ['Amazon']
     } else {

@@ -25,6 +25,11 @@ keys are separate and must remain unchanged.
 - Only the protected promotion workflow can move Windows download/update
   pointers. The candidate workflow never writes release or updater pointers.
 - Windows storage keys remain isolated from all macOS keys.
+- Pilot and public publication go to **every configured release storage
+  origin**, mirrors first (see "Two storage origins" in
+  [release-runbook.md](release-runbook.md)). Private candidate storage under
+  `candidates/windows/` stays on `r2` only: it is read by the promotion workflow
+  and the acceptance operator, never by end users.
 
 ## 1. Freeze the source
 
@@ -314,6 +319,17 @@ Before changing the web state, verify:
 
 Authorize the web `public` state only after the public promotion and production
 smoke pass. Publish held GitHub, Discord, email, and social drafts afterward.
+
+The protected promotion workflow reads the second origin from the
+`windows-alpha-release` environment: secrets
+`VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID` and
+`VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY`, variables
+`VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET`, `..._REGION`, `..._ENDPOINT_URL`
+and `VIDEORC_DOWNLOAD_STORAGE_PRIMARY`. Hetzner S3 keys are valid for every
+bucket in their project and cannot be scoped or made read-only, so this is a
+dedicated key in a project that holds nothing but release storage. With the
+values unset, publication is single-origin as before. If the primary is
+`hetzner` and its values are missing, publication fails closed.
 
 ## Rollback
 

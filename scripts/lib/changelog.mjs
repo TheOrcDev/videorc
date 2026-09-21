@@ -146,7 +146,42 @@ export function buildChangelogJson(entries, { generatedAt }) {
   }
 }
 
-export function mergeChangelogDocuments({ localEntries, remoteDocument = null, generatedAt }) {
+// A publication may only introduce entries for its own platform. An entry for
+// another platform joins the public changelog when that platform publishes it,
+// so a Windows Alpha entry committed for a private, not yet accepted candidate
+// never goes public through a macOS upload (and the reverse). Entries that are
+// already published are always kept and still checked against the repository.
+export function changelogEntriesWithheldFrom({
+  localEntries,
+  publishingPlatform,
+  remoteDocument = null
+}) {
+  if (!publishingPlatform) return []
+  const published = new Set(
+    (remoteDocument ? validatePublishedChangelogDocument(remoteDocument) : []).map(
+      (entry) => entry.version
+    )
+  )
+  return localEntries.filter(
+    (entry) =>
+      !(entry.platforms ?? ['macos']).includes(publishingPlatform) && !published.has(entry.version)
+  )
+}
+
+export function mergeChangelogDocuments({
+  localEntries: allLocalEntries,
+  remoteDocument = null,
+  generatedAt,
+  publishingPlatform = null
+}) {
+  const withheld = new Set(
+    changelogEntriesWithheldFrom({
+      localEntries: allLocalEntries,
+      publishingPlatform,
+      remoteDocument
+    }).map((entry) => entry.version)
+  )
+  const localEntries = allLocalEntries.filter((entry) => !withheld.has(entry.version))
   const merged = new Map()
   const remoteEntries = remoteDocument ? validatePublishedChangelogDocument(remoteDocument) : []
 

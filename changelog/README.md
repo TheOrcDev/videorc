@@ -66,6 +66,15 @@ dates/versions, invalid platform identifiers, empty highlights, or an empty
 body **fail validation** (`pnpm changelog:check`), and from the release gate
 onward a release cannot ship without a valid entry for its releaseId.
 
+## Who publishes an entry
+
+Each uploader only introduces entries for its own platform. A macOS upload
+publishes `macos` entries and withholds a `windows`-only entry until the Windows
+public promotion publishes it (and the reverse). Entries that are already public
+are always kept and still checked against this directory, so an edit to a
+published entry fails the upload. This is what lets a Windows Alpha entry for a
+private, not yet accepted candidate sit on `main` without being disclosed.
+
 ## Voice rules
 
 - Write for users, not engineers: lead with what they can now do (or what

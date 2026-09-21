@@ -8,6 +8,8 @@ import type { AcquireBackendInterruption } from './interruption-actions'
 import { safeConsole } from './safe-console'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import { installUpdateWithInterruptionLease } from './updater-install'
+import { shouldRetryUpdateOnMirror, UPDATE_FEED_URLS } from './updater-mirror'
+import type { UpdateFeedRoute } from './updater-mirror'
 import {
   BACKGROUND_RECHECK_INTERVAL_MS,
   isMissingUpdateFeedError,
@@ -38,6 +40,8 @@ let currentStatus: UpdateStatus = { phase: 'idle' }
 let getMainWindow: MainWindowGetter = () => null
 let listenersAttached = false
 let updaterConfigurationBlocked = false
+let feedRoute: UpdateFeedRoute = 'primary'
+let pilotFeedActive = false
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -59,6 +63,69 @@ function setStatus(next: UpdateStatus): void {
   const window = getMainWindow()
   if (window && !window.webContents.isDestroyed()) {
     sendElectronEvent(window.webContents, 'app:update-status', next)
+  }
+}
+
+// The feed baked into the build is the primary route, so it needs no
+// setFeedURL until the first fallback has moved the updater off it.
+function switchFeedRoute(route: UpdateFeedRoute): void {
+  if (pilotFeedActive || feedRoute === route) {
+    return
+  }
+  autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URLS[route] })
+  feedRoute = route
+}
+
+function retriesOnMirror(error: unknown): boolean {
+  return shouldRetryUpdateOnMirror({
+    message: errorMessage(error),
+    pilot: pilotFeedActive,
+    route: feedRoute
+  })
+}
+
+// Every check starts on the primary route and falls back to the mirror once
+// when the primary fails in transport (a blocked storage origin). If the
+// mirror fails too, the primary's error is the one worth reporting.
+async function checkForUpdatesWithMirrorFallback(): Promise<void> {
+  switchFeedRoute('primary')
+  try {
+    await autoUpdater.checkForUpdates()
+  } catch (error) {
+    if (!retriesOnMirror(error)) {
+      throw error
+    }
+    safeConsole.warn(`[auto-update] primary feed failed (${errorMessage(error)}), retrying mirror`)
+    switchFeedRoute('mirror')
+    try {
+      await autoUpdater.checkForUpdates()
+    } catch (mirrorError) {
+      safeConsole.warn(`[auto-update] mirror feed failed: ${errorMessage(mirrorError)}`)
+      throw error
+    }
+  }
+}
+
+// A download is bound to the update info of the route that was checked, so a
+// fallback re-checks on the mirror before downloading from it.
+async function downloadUpdateWithMirrorFallback(): Promise<void> {
+  try {
+    await autoUpdater.downloadUpdate()
+  } catch (error) {
+    if (!retriesOnMirror(error)) {
+      throw error
+    }
+    safeConsole.warn(
+      `[auto-update] primary download failed (${errorMessage(error)}), retrying mirror`
+    )
+    switchFeedRoute('mirror')
+    try {
+      await autoUpdater.checkForUpdates()
+      await autoUpdater.downloadUpdate()
+    } catch (mirrorError) {
+      safeConsole.warn(`[auto-update] mirror download failed: ${errorMessage(mirrorError)}`)
+      throw error
+    }
   }
 }
 
@@ -106,6 +173,11 @@ function attachUpdaterListeners(): void {
     const message = errorMessage(error)
     // Update failures are non-fatal.
     safeConsole.warn(`[auto-update] error: ${message}`)
+    // A primary transport failure is about to be retried on the mirror; the
+    // caller reports the outcome, so the UI never flashes an error in between.
+    if (retriesOnMirror(error)) {
+      return
+    }
     setStatusFromUpdaterError(message)
   })
 }
@@ -130,6 +202,7 @@ export function initAutoUpdater(): void {
     const pilot = startup.pilot
     if (pilot) {
       autoUpdater.setFeedURL({ provider: 'generic', url: pilot.url })
+      pilotFeedActive = true
       autoUpdater.requestHeaders = pilot.requestHeaders
       // Keep the operator bearer on the branded proxy. electron-updater's
       // differential downloader follows redirects without cross-origin header
@@ -151,14 +224,18 @@ export function initAutoUpdater(): void {
 
   // autoDownload is off, so kick the download ourselves when an update is found.
   autoUpdater.on('update-available', () => {
-    void autoUpdater.downloadUpdate().catch((error) => {
-      safeConsole.warn(`[auto-update] background download failed: ${errorMessage(error)}`)
+    void downloadUpdateWithMirrorFallback().catch((error) => {
+      const message = errorMessage(error)
+      safeConsole.warn(`[auto-update] background download failed: ${message}`)
+      setStatusFromUpdaterError(message)
     })
   })
 
   const backgroundCheck = (): void => {
-    void autoUpdater.checkForUpdates().catch((error) => {
-      safeConsole.warn(`[auto-update] check failed: ${errorMessage(error)}`)
+    void checkForUpdatesWithMirrorFallback().catch((error) => {
+      const message = errorMessage(error)
+      safeConsole.warn(`[auto-update] check failed: ${message}`)
+      setStatusFromUpdaterError(message)
     })
   }
 
@@ -202,12 +279,12 @@ export function registerUpdaterIpc(
     }
     try {
       setStatus(updateStatusFromEvent({ type: 'checking' }))
-      await autoUpdater.checkForUpdates()
+      await checkForUpdatesWithMirrorFallback()
       // The events above have set the truth by the time checkForUpdates resolves.
       // If an update is available, start downloading immediately for a one-click
       // feel; progress + downloaded states flow through the listeners.
       if (shouldAutoDownload(currentStatus)) {
-        void autoUpdater.downloadUpdate().catch((error) => {
+        void downloadUpdateWithMirrorFallback().catch((error) => {
           setStatus(updateStatusFromEvent({ type: 'error', message: errorMessage(error) }))
         })
       }
@@ -226,7 +303,7 @@ export function registerUpdaterIpc(
       return currentStatus
     }
     try {
-      await autoUpdater.downloadUpdate()
+      await downloadUpdateWithMirrorFallback()
       return currentStatus
     } catch (error) {
       const message = errorMessage(error)

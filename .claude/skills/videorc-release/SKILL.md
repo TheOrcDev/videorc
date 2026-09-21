@@ -49,9 +49,9 @@ runbooks' detailed gates.
 - Confirm GitHub access can dispatch and inspect Actions workflows.
 - Confirm R2 credentials are scoped to the documented platform prefixes. Never
   run the local macOS upload concurrently with Windows public promotion because
-  both may update the merged global changelog. After merging a pending Windows
-  Alpha changelog entry, do not run another macOS upload until that Windows
-  release is public or the release owner explicitly resolves the held entry.
+  both may update the merged global changelog. A pending Windows Alpha changelog
+  entry on `main` does not block macOS uploads: each uploader only introduces
+  entries for its own platform, and logs the ones it withholds.
 - Name release, Windows acceptance, support, and rollback owners before starting.
 
 ### macOS
@@ -65,6 +65,11 @@ runbooks' detailed gates.
   keychain, or provide the documented `CSC_LINK` alternative.
 - Load `VIDEORC_DOWNLOAD_S3_*` from `~/projects/videorcweb/.env` and normalize
   the upload endpoint to the bucket-less R2 account host.
+- Load `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*` from `~/.videorc-release.env`. The
+  upload publishes to **both** storage origins, mirrors first. Read "Two storage
+  origins" in the release runbook: a blocked mirror degrades the release and
+  leaves a pending record to replay with `pnpm release:sync:origins -- --pending`;
+  a blocked primary stops it unless `VIDEORC_RELEASE_ALLOW_MIRROR_ONLY=1`.
 
 ### Windows
 
@@ -89,10 +94,11 @@ runbooks' detailed gates.
 5. Run `pnpm changelog:check`, commit the version and macOS entry, push through a
    reviewed PR, and merge to protected `main`.
 
-Record the full lowercase 40-character macOS source commit. Do not add the
-Windows Alpha changelog entry yet: `release:upload:macos` publishes every
-committed changelog entry, so adding it now would disclose the held Windows
-release before physical acceptance.
+Record the full lowercase 40-character macOS source commit. The Windows Alpha
+changelog entry may be added before or after the macOS upload:
+`release:upload:macos` withholds Windows-only entries that are not public yet,
+so a held Windows release is never disclosed by a macOS upload. Confirm the
+`withholding <releaseId>` line in the upload log.
 
 ## 2. Publish and verify macOS Beta
 
@@ -146,9 +152,8 @@ After the macOS upload and verification succeed:
    `main` without changing the numeric package version.
 4. Record this new full lowercase 40-character Windows candidate source commit.
 
-Do not run another macOS upload while this unpromoted Windows entry is committed,
-because the macOS uploader would publish it in the global changelog. From the
-current protected-main Windows source commit, dispatch the exact release ID:
+From the current protected-main Windows source commit, dispatch the exact release
+ID:
 
 ```sh
 gh workflow run release-windows-alpha.yml --ref main \
@@ -253,7 +258,11 @@ record.
 - Do not source process substitution under macOS Bash 3.2; write filtered env
   lines to a temporary file and source that file, or run the documented command
   under zsh.
-- Follow every web redirect to the final R2 response; a `302` alone is not proof.
+- Follow every web redirect to the final storage response; a `302` alone is not
+  proof. Verify the mirror route `/api/updates/mirror/` too, and that its final
+  host differs from the primary's.
+- A forged TLS issuer on a storage host is a network block (Spain, matchday
+  evenings), not an outage. Never bypass TLS; publish around it.
 - Keep presigned updater redirects short-lived; never restore immutable caching.
 - macOS updater order uses the numeric package version, not the Beta release ID.
 - Windows updater order also uses the numeric package version; this is why every
