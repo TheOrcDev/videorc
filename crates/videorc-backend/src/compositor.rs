@@ -12921,6 +12921,160 @@ mod tests {
         assert_eq!(y_at(&bytes, 90, 87, 120), blue_y, "screen band right edge");
     }
 
+    /// 160x90 BGRA screen whose outer fifths are green (left) and white
+    /// (right) around a blue middle: the edges are exactly what a centre crop
+    /// throws away, so their survival is the proof of Fit framing.
+    fn edge_marked_screen_frame() -> crate::frame_store::FrameHandle<PreviewScreenPixelFormat> {
+        let mut bytes = Vec::with_capacity(160 * 90 * 4);
+        for _row in 0..90 {
+            for column in 0..160 {
+                let bgra: [u8; 4] = match column {
+                    0..=31 => [0, 255, 0, 255],
+                    128..=159 => [255, 255, 255, 255],
+                    _ => [255, 0, 0, 255],
+                };
+                bytes.extend_from_slice(&bgra);
+            }
+        }
+        crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+            storage: crate::frame_store::FrameStorage::untracked(),
+            sequence: 1,
+            width: 160,
+            height: 90,
+            pixel_format: PreviewScreenPixelFormat::Bgra8,
+            metadata: (),
+            bytes,
+            source_iosurface: None,
+            source_pixel_buffer: None,
+            source_d3d11_texture: None,
+            recycle_pool: None,
+            captured_at: Instant::now(),
+        })
+    }
+
+    fn render_vertical_camera_bottom(framing: crate::protocol::VerticalScreenFraming) -> Vec<u8> {
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.layout_preset = LayoutPreset::VerticalCameraBottom;
+        layout.vertical_screen_framing = framing;
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: Some("screen:screencapturekit:1".to_string()),
+                window_id: None,
+                camera_id: Some("camera:avfoundation:0".to_string()),
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: layout.clone(),
+            video: Some(VideoSettings {
+                preset: VideoPreset::Custom,
+                width: 90,
+                height: 160,
+                fps: 30,
+                bitrate_kbps: 2000,
+            }),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        let snapshot = CompositorSceneSnapshot {
+            revision: 1,
+            scene: Some(scene),
+            layout,
+            active_screen: None,
+        };
+        let camera_frame =
+            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
+                storage: crate::frame_store::FrameStorage::untracked(),
+                sequence: 1,
+                width: 160,
+                height: 90,
+                pixel_format: PreviewCameraPixelFormat::Bgra8,
+                metadata: (),
+                bytes: [0, 0, 255, 255].repeat(160 * 90),
+                source_iosurface: None,
+                source_pixel_buffer: None,
+                source_d3d11_texture: None,
+                recycle_pool: None,
+                captured_at: Instant::now(),
+            });
+        let screen_frame = edge_marked_screen_frame();
+        let mut bytes = vec![0; raw_yuv420p_len(90, 160)];
+        render_compositor_yuv420p_frame(
+            CompositorRenderInputs {
+                sequence: 1,
+                width: 90,
+                height: 160,
+                snapshot: Some(&snapshot),
+                active_image_source: None,
+                background_image_source: None,
+                camera_frame: Some(&camera_frame),
+                screen_frame: Some(&screen_frame),
+                caption_overlay: None,
+                highlight_overlay: None,
+            },
+            &mut bytes,
+        );
+        bytes
+    }
+
+    #[test]
+    fn vertical_fit_shows_the_whole_screen_above_a_covering_camera() {
+        // The 2026-09-21 owner report: vertical viewers saw only the centre of
+        // the shared screen. Under Fit the screen band is as tall as the whole
+        // 16:9 screen needs at full width (90 px wide → 50 rows), both screen
+        // EDGES reach the output, and the camera covers every remaining row —
+        // no crop and no letterbox.
+        let (green_y, _, _) = rgb_to_yuv(0, 255, 0);
+        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        let (blue_y, _, _) = rgb_to_yuv(0, 0, 255);
+        let (red_y, _, _) = rgb_to_yuv(255, 0, 0);
+
+        let fit = render_vertical_camera_bottom(crate::protocol::VerticalScreenFraming::Fit);
+        for row in [2, 25, 47] {
+            assert_eq!(
+                y_at(&fit, 90, 4, row),
+                green_y,
+                "fit: left screen edge, row {row}"
+            );
+            assert_eq!(
+                y_at(&fit, 90, 45, row),
+                blue_y,
+                "fit: screen middle, row {row}"
+            );
+            assert_eq!(
+                y_at(&fit, 90, 85, row),
+                white_y,
+                "fit: right screen edge, row {row}"
+            );
+        }
+        for row in [52, 100, 157] {
+            for column in [2, 45, 87] {
+                assert_eq!(
+                    y_at(&fit, 90, column, row),
+                    red_y,
+                    "fit: camera covers column {column}, row {row}"
+                );
+            }
+        }
+
+        // Fill stays the short-form law: the 60% screen band is covered, so
+        // the marked edges are cropped away and only the middle survives.
+        let fill = render_vertical_camera_bottom(crate::protocol::VerticalScreenFraming::Fill);
+        for column in [2, 45, 87] {
+            assert_eq!(
+                y_at(&fill, 90, column, 40),
+                blue_y,
+                "fill: cropped to the middle"
+            );
+        }
+        assert_eq!(
+            y_at(&fill, 90, 45, 94),
+            blue_y,
+            "fill: screen band reaches row 96"
+        );
+        assert_eq!(y_at(&fill, 90, 45, 100), red_y, "fill: camera band below");
+    }
+
     #[test]
     fn background_stage_margin_follows_visibility() {
         let background = |visibility: f64| EffectiveSceneBackground {

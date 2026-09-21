@@ -72,8 +72,6 @@ import {
   resolveProviderStreamOutputPlan,
   rtmpDefaults,
   simulcastArmed,
-  simulcastLegLayout,
-  simulcastLegPreset,
   smokePreviewCompositorCaptureConfig,
   sourceSelectionChangeEvents,
   layoutPresetMemoryPatch,
@@ -7055,37 +7053,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
    * (no layout intent is registered, the horizontal program is untouched), so
    * this deliberately bypasses the horizontal transaction pipeline: no intent
    * bump, no proof wait, no React reconciliation to the returned scene. A
-   * no-op off-air — the next session start reads the same config.
+   * no-op off-air — the next session start reads the same config. The request
+   * builder is loaded on demand to stay out of the initial bundle.
    */
   const commitSimulcastLegLive = useCallback(
-    async (config: CaptureConfig, programPreset?: LayoutPreset): Promise<void> => {
+    async (config: CaptureConfig, afterProgramSwitchTo?: LayoutPreset): Promise<void> => {
       if (
         !client ||
         wsStatus !== 'connected' ||
-        !isActiveRecordingState(recordingRef.current.state) ||
-        !simulcastArmed(config)
+        !isActiveRecordingState(recordingRef.current.state)
       ) {
         return
       }
       try {
-        await client.requestTyped('scene.layout.apply_live', {
-          // Echoed back, never registered: the leg must not supersede a
-          // horizontal intent that is still in flight.
-          intentId: Math.max(1, layoutIntentIdRef.current),
-          sources: config.sources,
-          layout: simulcastLegLayout(config, programPreset),
-          video: coerceVideoToOrientation(config.video, 'vertical'),
+        const { simulcastLegLiveRequest } = await import('@/lib/simulcast-leg-live')
+        const request = simulcastLegLiveRequest({
+          config,
+          intentId: layoutIntentIdRef.current,
           background: activeSceneBackground,
-          protectedOverlayWindowIds: await currentProtectedOverlayWindowIds()
+          protectedOverlayWindowIds: await currentProtectedOverlayWindowIds(),
+          afterProgramSwitchTo
         })
+        if (request) {
+          await client.requestTyped('scene.layout.apply_live', request)
+        }
       } catch (error) {
-        reportError(
-          new Error(
-            `The vertical stream scene could not be changed live. ${
-              error instanceof Error ? error.message : String(error)
-            }`
-          )
-        )
+        reportError(error)
       }
     },
     [activeSceneBackground, client, reportError, wsStatus]
@@ -7198,11 +7191,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // Dual-orientation: when the vertical leg follows the program and
           // this horizontal switch changes its paired scene (camera-only and
           // screen-only have vertical twins), move the leg with it.
-          if (
-            sessionActive &&
-            simulcastLegPreset(requestedConfig) !==
-              simulcastLegPreset(requestedConfig, layout.layoutPreset)
-          ) {
+          if (sessionActive) {
             void commitSimulcastLegLive(requestedConfig, layout.layoutPreset)
           }
           // Intent freshness and backend commit freshness are separate. A may be

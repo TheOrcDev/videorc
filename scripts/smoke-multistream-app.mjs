@@ -1,4 +1,4 @@
-import { spawn } from 'node:child_process'
+import { spawn, spawnSync } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
@@ -6,6 +6,7 @@ import { join, resolve } from 'node:path'
 import { launchDevApp } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 import { analyzeRecording } from './lib/recording-analyzer.mjs'
+import { assessVerticalLegStream } from './lib/vertical-leg-geometry.mjs'
 import { connectBackend, request } from './smoke-recording-session.mjs'
 
 // End-to-end proof of the multi-platform `tee` fan-out. Stands up one local
@@ -85,6 +86,37 @@ const badTarget = includeBadTarget
       }
     })()
   : null
+// Dual-orientation leg (opt-in: VIDEORC_SMOKE_VERTICAL_LEG=fit|fill). Adds ONE
+// vertical-bound destination with its own key and arms the simulcast leg with
+// that screen framing, then proves on the REAL pipeline that the vertical
+// destination receives the PORTRAIT leg (not the horizontal program — the
+// 2026-09-21 incident shape) and that it passes the same stream quality gates.
+// The fit/fill pixel geometry itself is a backend render test: this smoke's
+// test pattern is synthesised at the canvas size, so it has no 16:9 aspect to
+// contain or crop.
+const verticalLegFraming = ['fit', 'fill'].includes(process.env.VIDEORC_SMOKE_VERTICAL_LEG)
+  ? process.env.VIDEORC_SMOKE_VERTICAL_LEG
+  : null
+const verticalLegCanvas = { width: 360, height: 640 }
+const verticalTarget = verticalLegFraming
+  ? (() => {
+      const port = basePort + targetCount + 1
+      return {
+        id: 'youtube-vertical',
+        platform: 'youtube',
+        label: 'YouTube Vertical',
+        port,
+        streamKey: 'smoke-vertical',
+        serverUrl: `rtmp://127.0.0.1:${port}/live`,
+        listenUrl: `rtmp://127.0.0.1:${port}/live/smoke-vertical`,
+        recvPath: join(outputDirectory, `recv-${port}-vertical.flv`),
+        outputOrientation: 'vertical'
+      }
+    })()
+  : null
+if (verticalTarget) {
+  targets.push(verticalTarget)
+}
 const allTargets = badTarget ? [...targets, badTarget] : targets
 
 mkdirSync(outputDirectory, { recursive: true })
@@ -239,6 +271,30 @@ async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
     }
   }
 
+  if (verticalTarget) {
+    const verdict = assessVerticalLegStream({
+      canvas: verticalLegCanvas,
+      program: { width: 640, height: 360 },
+      received: probeVideoSize(verticalTarget.recvPath)
+    })
+    if (verdict.pass) {
+      console.log(
+        `  ✓ ${verticalTarget.label} received the ${verticalLegCanvas.width}x${verticalLegCanvas.height} vertical leg (screen framing: ${verticalLegFraming}), not the horizontal program`
+      )
+    } else {
+      for (const failure of verdict.failures) {
+        console.log(`  ✗ vertical leg: ${failure}`)
+      }
+      failures.push(`Vertical leg failed: ${verdict.failures.join('; ')}`)
+    }
+  }
+
+  // Background MP4 export (0.9.93) replaces the MKV as soon as it finishes; a
+  // fast export used to fail this check on a recording that finalized fine.
+  outputPath =
+    [outputPath, outputPath?.replace(/\.mkv$/i, '.mp4')].find(
+      (candidate) => candidate && existsSync(candidate) && statSync(candidate).size > 0
+    ) ?? outputPath
   const recordingSize = outputPath && existsSync(outputPath) ? statSync(outputPath).size : 0
   if (recordingSize > 0) {
     console.log(`  ✓ Local recording finalized: ${outputPath} (${recordingSize} bytes)`)
@@ -329,6 +385,45 @@ async function verifyResults(outputPath, targetSnapshots, diagnosticSamples) {
 
 function multistreamParams(outputDirectoryCapability) {
   const timestamp = '2026-01-01T00:00:00.000Z'
+  const params = multistreamBaseParams(outputDirectoryCapability, timestamp)
+  if (!verticalLegFraming) {
+    return params
+  }
+  return {
+    ...params,
+    // The vertical leg: its own portrait canvas and scene, framed per the env.
+    simulcast: {
+      layout: {
+        ...params.layout,
+        layoutPreset: 'vertical-camera-bottom',
+        verticalScreenFraming: verticalLegFraming
+      },
+      video: { ...params.output.video, ...verticalLegCanvas }
+    }
+  }
+}
+
+function probeVideoSize(path) {
+  const probe = spawnSync(
+    process.env.VIDEORC_SMOKE_FFPROBE_PATH ?? 'ffprobe',
+    [
+      '-v',
+      'error',
+      '-select_streams',
+      'v:0',
+      '-show_entries',
+      'stream=width,height',
+      '-of',
+      'csv=p=0:s=x',
+      path
+    ],
+    { encoding: 'utf8' }
+  )
+  const match = /^(\d+)x(\d+)/.exec(String(probe.stdout).trim())
+  return match ? { width: Number(match[1]), height: Number(match[2]) } : null
+}
+
+function multistreamBaseParams(outputDirectoryCapability, timestamp) {
   return {
     sources: { testPattern: true },
     layout: {
@@ -369,6 +464,7 @@ function multistreamParams(outputDirectoryCapability) {
         streamKey: target.streamKey,
         streamKeyPresent: true,
         authMode: 'manual-rtmp',
+        ...(target.outputOrientation ? { outputOrientation: target.outputOrientation } : {}),
         createdAt: timestamp,
         updatedAt: timestamp
       })),

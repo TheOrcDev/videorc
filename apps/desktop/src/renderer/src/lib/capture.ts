@@ -1300,10 +1300,9 @@ export function loadCaptureConfig(): CaptureConfig {
         : null,
     lastHorizontalPreset: normalizeRememberedPreset(loaded.lastHorizontalPreset, 'horizontal'),
     lastVerticalPreset: normalizeRememberedPreset(loaded.lastVerticalPreset, 'vertical'),
-    simulcastScreenFraming:
-      loaded.simulcastScreenFraming === 'fill' || loaded.simulcastScreenFraming === 'fit'
-        ? loaded.simulcastScreenFraming
-        : defaultCaptureConfig.simulcastScreenFraming,
+    simulcastScreenFraming: isVerticalScreenFraming(loaded.simulcastScreenFraming)
+      ? loaded.simulcastScreenFraming
+      : defaultCaptureConfig.simulcastScreenFraming,
     simulcastFollowsProgram:
       typeof loaded.simulcastFollowsProgram === 'boolean'
         ? loaded.simulcastFollowsProgram
@@ -1554,6 +1553,10 @@ function normalizeRememberedPreset(value: unknown, orientation: LayoutOrientatio
 
 const SIDE_BY_SIDE_SPLITS: readonly SideBySideSplit[] = ['50-50', '60-40', '70-30']
 
+function isVerticalScreenFraming(value: unknown): value is VerticalScreenFraming {
+  return value === 'fill' || value === 'fit'
+}
+
 function isSideBySideSplit(value: unknown): value is SideBySideSplit {
   return typeof value === 'string' && (SIDE_BY_SIDE_SPLITS as readonly string[]).includes(value)
 }
@@ -1678,10 +1681,9 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
       candidate.sideBySideCameraSide === 'left' || candidate.sideBySideCameraSide === 'right'
         ? candidate.sideBySideCameraSide
         : defaultCaptureConfig.layout.sideBySideCameraSide,
-    verticalScreenFraming:
-      candidate.verticalScreenFraming === 'fit' || candidate.verticalScreenFraming === 'fill'
-        ? candidate.verticalScreenFraming
-        : defaultCaptureConfig.layout.verticalScreenFraming
+    verticalScreenFraming: isVerticalScreenFraming(candidate.verticalScreenFraming)
+      ? candidate.verticalScreenFraming
+      : defaultCaptureConfig.layout.verticalScreenFraming
   }
 }
 

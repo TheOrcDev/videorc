@@ -234,15 +234,9 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
                 SceneFit::Contain
             }
         }
-        // The test pattern stands in for the screen (smokes), so it follows
-        // the screen's vertical framing; everywhere else it covers.
-        SceneSourceKind::TestPattern => {
-            if vertical_screen_fits(layout) {
-                SceneFit::Contain
-            } else {
-                SceneFit::Cover
-            }
-        }
+        // The test pattern is synthesised AT the canvas size, so it has no
+        // aspect of its own to contain — it covers under every framing.
+        SceneSourceKind::TestPattern => SceneFit::Cover,
     }
 }
 
@@ -672,11 +666,12 @@ mod tests {
             let mut layout = layout();
             layout.layout_preset = preset.clone();
             layout.vertical_screen_framing = VerticalScreenFraming::Fit;
-            for kind in [
-                SceneSourceKind::Screen,
-                SceneSourceKind::Window,
-                SceneSourceKind::TestPattern,
-            ] {
+            assert_eq!(
+                scene_source_fit(&SceneSourceKind::TestPattern, &layout),
+                SceneFit::Cover,
+                "the canvas-sized test pattern has nothing to contain"
+            );
+            for kind in [SceneSourceKind::Screen, SceneSourceKind::Window] {
                 assert_eq!(
                     scene_source_fit(&kind, &layout),
                     SceneFit::Contain,
