@@ -2826,9 +2826,18 @@ async fn start_session_with_timeline(
             .save_setting("last_capture_session", &params)?;
     }
     if !stream_targets.is_empty() {
+        // Label + composed leg per destination: a dual-orientation session
+        // must show WHICH encode each destination consumes (the 2026-09-21
+        // shared-key incident was only diagnosable from `ps`).
         let redacted = stream_targets
             .iter()
-            .map(|target| target.redacted_url.clone())
+            .map(|target| {
+                let leg = match target.output_orientation {
+                    crate::streaming::StreamOutputOrientation::Horizontal => "horizontal",
+                    crate::streaming::StreamOutputOrientation::Vertical => "vertical",
+                };
+                format!("{} [{leg}] {}", target.label, target.redacted_url)
+            })
             .collect::<Vec<_>>()
             .join(", ");
         let _ = state.database.add_session_log(
@@ -16631,6 +16640,10 @@ fn video_filter(
         params.layout.layout_preset,
         LayoutPreset::VerticalScreenCamera | LayoutPreset::VerticalScreenOnly
     );
+    // Fit framing keeps the whole screen: contain+pad like the horizontal
+    // twins instead of the short-form cover crop.
+    let vertical_full_frame =
+        vertical_full_frame && !crate::scene_geometry::vertical_screen_fits(&params.layout);
     let base_scale = if preview {
         "scale=w=960:h=-2".to_string()
     } else if vertical_full_frame {
@@ -16769,19 +16782,39 @@ fn vertical_video_filter(
     // is never lawful short-form output. (The no-screen collapse rides the
     // scene path; app sessions always attach a scene.)
     let Some(camera_index) = camera_input_index else {
-        let base_scale = cover_scale_filter(video);
+        // Fit framing keeps the whole screen even when it owns the canvas.
+        let base_scale = if crate::scene_geometry::vertical_screen_fits(&params.layout) {
+            output_scale_filter(video)
+        } else {
+            cover_scale_filter(video)
+        };
         return format!("[0:v]setpts=PTS-STARTPTS,{base_scale},fps={fps}{final_scale}[v]");
     };
 
-    let (camera_height, screen_height) = vertical_band_heights(video.height, bands.camera_fraction);
+    // Fit framing: the screen band is as tall as the whole screen needs at
+    // full width (the SAME function the compositor scene uses) and the screen
+    // is contained in it; Fill keeps the preset's fixed camera band + cover.
+    let screen_fits = crate::scene_geometry::vertical_screen_fits(&params.layout);
+    let camera_fraction = if screen_fits {
+        1.0 - crate::scene::vertical_fit_screen_band_fraction(video.width, video.height, None)
+    } else {
+        bands.camera_fraction
+    };
+    let (camera_height, screen_height) = vertical_band_heights(video.height, camera_fraction);
 
     // Short-form bands are FILLED (2026-07-13 fill-crop plan): the screen
     // covers its band (scale to fill + center crop, mirroring the compositor's
     // vertical fit) and the camera band always fills too — the user's Fit
     // preference must not letterbox a band (zoom/pan still frame the crop).
-    let screen = format!(
-        "[0:v]setpts=PTS-STARTPTS,scale={width}:{screen_height}:force_original_aspect_ratio=increase,crop={width}:{screen_height},fps={fps},format=yuv420p[vt_screen]"
-    );
+    let screen = if screen_fits {
+        format!(
+            "[0:v]setpts=PTS-STARTPTS,scale={width}:{screen_height}:force_original_aspect_ratio=decrease,pad={width}:{screen_height}:(ow-iw)/2:(oh-ih)/2,fps={fps},format=yuv420p[vt_screen]"
+        )
+    } else {
+        format!(
+            "[0:v]setpts=PTS-STARTPTS,scale={width}:{screen_height}:force_original_aspect_ratio=increase,crop={width}:{screen_height},fps={fps},format=yuv420p[vt_screen]"
+        )
+    };
     let mirror = if params.layout.camera_mirror {
         "hflip,"
     } else {
@@ -18535,7 +18568,34 @@ fn stream_targets_from_streaming(streaming: &StreamingSettings) -> Result<Vec<St
             .join("; ");
         bail!("No streaming destination is ready: {problems}");
     }
+    reject_duplicate_stream_ingests(&resolution.ready)?;
     Ok(resolution.ready)
+}
+
+/// Two destinations that resolve to the SAME ingest URL + key are never a
+/// valid fan-out: the provider sees two competing ingests on one stream
+/// (YouTube: "More than one ingestion is using the primary URL") and the
+/// destination the owner thinks is live receives nothing. Fail closed at
+/// start instead of going live into that state. Names only; never the URL.
+fn reject_duplicate_stream_ingests(targets: &[StreamTarget]) -> Result<()> {
+    for (index, target) in targets.iter().enumerate() {
+        if let Some(earlier) = targets[..index]
+            .iter()
+            .find(|earlier| earlier.url == target.url)
+        {
+            let fix = if target.platform == StreamPlatform::Youtube {
+                "In YouTube Studio create a second stream key for the second broadcast and paste it into that destination"
+            } else {
+                "Give each destination its own stream key"
+            };
+            bail!(
+                "{} and {} are using the same stream key, so both would go to one broadcast and the other would stay offline. {fix}, then go live again.",
+                earlier.label,
+                target.label
+            );
+        }
+    }
+    Ok(())
 }
 
 /// The slave index a recording leg occupies when the stream targets share the same
@@ -21839,6 +21899,7 @@ mod tests {
                 camera_offset_y: 0,
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
+                vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -23397,6 +23458,46 @@ mod tests {
         }
     }
 
+    fn dual_youtube_streaming(horizontal_key: &str, vertical_key: &str) -> StreamingSettings {
+        let mut streaming = streaming_for(&[]);
+        for (id, key) in [
+            ("youtube", horizontal_key),
+            ("youtube-vertical", vertical_key),
+        ] {
+            let target = streaming
+                .targets
+                .iter_mut()
+                .find(|target| target.id == id)
+                .expect("built-in YouTube destination");
+            target.enabled = true;
+            target.stream_key = key.to_string();
+            target.stream_key_present = true;
+            streaming.enabled_target_ids.push(id.to_string());
+        }
+        streaming.enabled = true;
+        streaming
+    }
+
+    #[test]
+    fn two_destinations_sharing_one_stream_key_refuse_to_start() {
+        // The 2026-09-21 live incident: the channel's one default key pasted
+        // into both YouTube cards sent both legs to a single broadcast.
+        let error = stream_targets_from_streaming(&dual_youtube_streaming("same-key", "same-key"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("same stream key"), "{error}");
+        assert!(error.contains("YouTube Vertical"), "{error}");
+        assert!(error.contains("second stream key"), "{error}");
+        assert!(
+            !error.contains("same-key"),
+            "the key must never leak: {error}"
+        );
+
+        let targets =
+            stream_targets_from_streaming(&dual_youtube_streaming("key-a", "key-b")).unwrap();
+        assert_eq!(targets.len(), 2);
+    }
+
     #[test]
     fn youtube_1080p_stream_presets_have_fixed_provider_rates() {
         let youtube_30 = video_preset_defaults(VideoPreset::StreamYoutube1080p30);
@@ -24698,6 +24799,57 @@ mod tests {
             "screen covers: {filter}"
         );
         assert!(!filter.contains("overlay"));
+    }
+
+    #[test]
+    fn vertical_fit_filter_contains_the_whole_screen_in_a_screen_sized_band() {
+        let mut params = base_params(true, false);
+        params.layout.layout_preset = LayoutPreset::VerticalCameraBottom;
+        params.layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::Fit;
+        params.output.video.width = 1080;
+        params.output.video.height = 1920;
+
+        let filter = video_filter(Some(1), &params, false);
+        // Same 608-row band the compositor scene uses; contained, not cropped.
+        assert!(
+            filter.contains(
+                "scale=1080:608:force_original_aspect_ratio=decrease,pad=1080:608:(ow-iw)/2:(oh-ih)/2"
+            ),
+            "screen contains: {filter}"
+        );
+        assert!(!filter.contains("crop=1080:608"), "{filter}");
+        // The camera covers the remaining 1312 rows.
+        assert!(
+            filter.contains("crop=w=1080:h=1312"),
+            "camera band: {filter}"
+        );
+        assert!(
+            filter.contains("[vt_screen][vt_camera]vstack=inputs=2"),
+            "stack order kept: {filter}"
+        );
+
+        // Camera on top keeps its order; the bands still follow the screen.
+        params.layout.layout_preset = LayoutPreset::VerticalCameraTop;
+        let top = video_filter(Some(1), &params, false);
+        assert!(
+            top.contains("[vt_camera][vt_screen]vstack=inputs=2"),
+            "{top}"
+        );
+        assert!(top.contains("pad=1080:608"), "{top}");
+
+        // Full-canvas screen presets and the camera-less collapse contain too.
+        params.layout.layout_preset = LayoutPreset::VerticalScreenOnly;
+        let full = video_filter(None, &params, false);
+        assert!(
+            full.contains("force_original_aspect_ratio=decrease,pad=1080:1920"),
+            "{full}"
+        );
+        params.layout.layout_preset = LayoutPreset::VerticalSplit;
+        let collapsed = video_filter(None, &params, false);
+        assert!(
+            collapsed.contains("force_original_aspect_ratio=decrease,pad=1080:1920"),
+            "{collapsed}"
+        );
     }
 
     #[test]

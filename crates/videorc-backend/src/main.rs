@@ -2429,11 +2429,13 @@ async fn prepare_youtube_stream_target(
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
     let video = params.video;
+    let target_id = params.target_id;
     let mut prepared = youtube::prepare_youtube_broadcast(
         YouTubePrepareRequest {
             access_token: fresh.access_token.clone(),
             account_id: fresh.account.account_id.clone(),
             account_label: fresh.account.account_label.clone(),
+            target_id: target_id.clone(),
             metadata: metadata.clone(),
             video: video.clone(),
             api_base_url: None,
@@ -2457,6 +2459,7 @@ async fn prepare_youtube_stream_target(
                 access_token: fresh.access_token.clone(),
                 account_id: fresh.account.account_id.clone(),
                 account_label: fresh.account.account_label.clone(),
+                target_id: target_id.clone(),
                 metadata,
                 video,
                 api_base_url: None,

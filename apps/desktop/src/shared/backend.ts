@@ -801,6 +801,12 @@ export interface StoreManualStreamKeyResult {
 
 export interface YouTubePrepareParams {
   accountId?: string
+  /**
+   * The destination being prepared. Scopes the stored stream key per
+   * destination so the horizontal and vertical YouTube broadcasts of one
+   * channel never share (and overwrite) a single key slot.
+   */
+  targetId?: string
   video: VideoSettings
 }
 

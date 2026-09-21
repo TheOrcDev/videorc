@@ -178,6 +178,17 @@ fn vertical_fill_preset(preset: &LayoutPreset) -> bool {
     )
 }
 
+/// True when a vertical-mode scene frames its screen with
+/// `VerticalScreenFraming::Fit` (whole screen visible) instead of the
+/// short-form fill law. Horizontal presets never consult the field.
+pub fn vertical_screen_fits(layout: &LayoutSettings) -> bool {
+    vertical_fill_preset(&layout.layout_preset)
+        && matches!(
+            layout.vertical_screen_framing,
+            crate::protocol::VerticalScreenFraming::Fit
+        )
+}
+
 /// The shared fit policy for source status, FFmpeg filters, CPU blits, and
 /// Metal placement. Side-by-side and ALL vertical presets cover their regions
 /// (short-form bands are filled, center-cropped — never letterboxed); the
@@ -210,7 +221,12 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
             }
         }
         SceneSourceKind::Screen | SceneSourceKind::Window => {
-            if matches!(layout.layout_preset, LayoutPreset::SideBySide)
+            if vertical_screen_fits(layout) {
+                // Fit framing: the whole screen is the content (live screen
+                // share). Stacked bands are sized to the screen, so contain
+                // only ever shows background when the source is not 16:9.
+                SceneFit::Contain
+            } else if matches!(layout.layout_preset, LayoutPreset::SideBySide)
                 || vertical_fill_preset(&layout.layout_preset)
             {
                 SceneFit::Cover
@@ -218,7 +234,15 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
                 SceneFit::Contain
             }
         }
-        SceneSourceKind::TestPattern => SceneFit::Cover,
+        // The test pattern stands in for the screen (smokes), so it follows
+        // the screen's vertical framing; everywhere else it covers.
+        SceneSourceKind::TestPattern => {
+            if vertical_screen_fits(layout) {
+                SceneFit::Contain
+            } else {
+                SceneFit::Cover
+            }
+        }
     }
 }
 
@@ -633,6 +657,64 @@ mod tests {
 
     fn layout() -> LayoutSettings {
         default_layout_settings()
+    }
+
+    #[test]
+    fn fit_framing_contains_the_screen_in_every_vertical_preset_only() {
+        use crate::protocol::VerticalScreenFraming;
+        for preset in [
+            LayoutPreset::VerticalCameraTop,
+            LayoutPreset::VerticalCameraBottom,
+            LayoutPreset::VerticalSplit,
+            LayoutPreset::VerticalScreenCamera,
+            LayoutPreset::VerticalScreenOnly,
+        ] {
+            let mut layout = layout();
+            layout.layout_preset = preset.clone();
+            layout.vertical_screen_framing = VerticalScreenFraming::Fit;
+            for kind in [
+                SceneSourceKind::Screen,
+                SceneSourceKind::Window,
+                SceneSourceKind::TestPattern,
+            ] {
+                assert_eq!(
+                    scene_source_fit(&kind, &layout),
+                    SceneFit::Contain,
+                    "{preset:?} {kind:?} must show the whole screen under fit"
+                );
+            }
+            // The default stays the short-form fill law.
+            layout.vertical_screen_framing = VerticalScreenFraming::Fill;
+            assert_eq!(
+                scene_source_fit(&SceneSourceKind::Screen, &layout),
+                SceneFit::Cover
+            );
+        }
+
+        // Band cameras keep covering under fit: the camera fills whatever the
+        // screen leaves, so the canvas never shows a dead band.
+        let mut stacked = layout();
+        stacked.layout_preset = LayoutPreset::VerticalCameraBottom;
+        stacked.vertical_screen_framing = VerticalScreenFraming::Fit;
+        stacked.camera_fit = CameraFit::Fit;
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::Camera, &stacked),
+            SceneFit::Cover
+        );
+
+        // Horizontal presets never consult the field.
+        let mut side_by_side = layout();
+        side_by_side.layout_preset = LayoutPreset::SideBySide;
+        side_by_side.vertical_screen_framing = VerticalScreenFraming::Fit;
+        assert!(!vertical_screen_fits(&side_by_side));
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::Screen, &side_by_side),
+            SceneFit::Cover
+        );
+        assert_eq!(
+            scene_source_fit(&SceneSourceKind::TestPattern, &side_by_side),
+            SceneFit::Cover
+        );
     }
 
     #[test]

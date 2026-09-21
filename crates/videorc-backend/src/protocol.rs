@@ -429,6 +429,28 @@ pub struct LayoutSettings {
     pub side_by_side_split: SideBySideSplit,
     #[serde(default = "default_side_by_side_camera_side")]
     pub side_by_side_camera_side: SideBySideCameraSide,
+    /// How the SCREEN is framed inside vertical-mode scenes. Non-optional with
+    /// a default on purpose (never a bare `Option`: a serialized `null` kills
+    /// the renderer contract — serde null trap).
+    #[serde(default)]
+    pub vertical_screen_framing: VerticalScreenFraming,
+}
+
+/// Screen framing for vertical-mode scenes.
+///
+/// `Fill` is the short-form law (2026-07-13 fill-crop plan): every band is
+/// filled and centre-cropped, never letterboxed — right for a recorded Short,
+/// wrong for a live screen share, where it throws away 37-68% of the screen.
+/// `Fit` shows the WHOLE screen: stacked presets size the screen band to the
+/// screen's aspect (so nothing is cropped AND nothing is letterboxed) and the
+/// camera covers the rest; full-canvas screen presets contain the screen over
+/// the scene background (vertical simulcast screen framing plan, 2026-09-21).
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum VerticalScreenFraming {
+    #[default]
+    Fill,
+    Fit,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -804,6 +826,7 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         camera_offset_y: 0,
         side_by_side_split: default_side_by_side_split(),
         side_by_side_camera_side: default_side_by_side_camera_side(),
+        vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
     }
 }
 
@@ -4732,6 +4755,7 @@ mod tests {
             camera_offset_y: 0,
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
+            vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use chrono::{Duration, Utc};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
@@ -17,6 +17,12 @@ const YOUTUBE_TRANSITION_CONFIRM_POLL_DELAY: StdDuration = StdDuration::from_sec
 pub struct YouTubePrepareParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub account_id: Option<String>,
+    /// The destination this broadcast is prepared for. Scopes the stored
+    /// stream key so two YouTube destinations on one channel (horizontal +
+    /// vertical simulcast) never overwrite each other's key. Older renderers
+    /// send none and keep the account-scoped slot.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_id: Option<String>,
     pub video: VideoSettings,
 }
 
@@ -25,6 +31,7 @@ pub struct YouTubePrepareRequest {
     pub access_token: String,
     pub account_id: String,
     pub account_label: String,
+    pub target_id: Option<String>,
     pub metadata: StreamMetadataDraft,
     pub video: VideoSettings,
     pub api_base_url: Option<String>,
@@ -345,7 +352,12 @@ pub async fn prepare_youtube_broadcast(
                 "cdn": {
                     "frameRate": youtube_frame_rate(request.video.fps),
                     "ingestionType": "rtmp",
-                    "resolution": youtube_resolution(request.video.height),
+                    // A portrait (vertical simulcast) profile is named by its
+                    // SHORT side like its landscape twin: 1080x1920 is "1080p",
+                    // not the "2160p" its height alone would select.
+                    "resolution": youtube_resolution(
+                        request.video.height.min(request.video.width),
+                    ),
                 },
                 "contentDetails": {
                     "isReusable": true,
@@ -405,7 +417,8 @@ pub async fn prepare_youtube_broadcast(
         }
     };
 
-    let stream_key_secret_ref = format!("platform:youtube:{}:stream-key", request.account_id);
+    let stream_key_secret_ref =
+        youtube_stream_key_secret_ref(&request.account_id, request.target_id.as_deref())?;
     put_secret(
         &stream_key_secret_ref,
         &live_stream.cdn.ingestion_info.stream_name,
@@ -911,6 +924,27 @@ fn youtube_frame_rate(fps: u32) -> &'static str {
     if fps > 30 { "60fps" } else { "30fps" }
 }
 
+/// The secret slot a prepared broadcast's stream key is stored in. Scoped per
+/// DESTINATION when the renderer names one: every prepare creates its own
+/// broadcast + liveStream, so an account-scoped slot let the last prepare win
+/// and both destinations of a dual-orientation session pushed to one key
+/// (YouTube: "More than one ingestion is using the primary URL"). Without a
+/// target id the legacy account-scoped slot is kept.
+pub fn youtube_stream_key_secret_ref(account_id: &str, target_id: Option<&str>) -> Result<String> {
+    let Some(target_id) = target_id.map(str::trim).filter(|id| !id.is_empty()) else {
+        return Ok(format!("platform:youtube:{account_id}:stream-key"));
+    };
+    if !target_id
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '-' || character == '_')
+    {
+        bail!("Stream target id is invalid.");
+    }
+    Ok(format!(
+        "platform:youtube:{account_id}:target:{target_id}:stream-key"
+    ))
+}
+
 fn youtube_resolution(height: u32) -> &'static str {
     match height {
         0..=240 => "240p",
@@ -1025,6 +1059,7 @@ mod tests {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
                 account_label: "Videorc Channel".to_string(),
+                target_id: None,
                 metadata,
                 video: VideoSettings {
                     preset: VideoPreset::Stream1080p60,
@@ -1060,6 +1095,42 @@ mod tests {
             "{}",
             delete.query
         );
+    }
+
+    #[test]
+    fn stream_key_secret_ref_is_scoped_per_destination() {
+        // Legacy renderers (no target id) keep the account-scoped slot.
+        assert_eq!(
+            youtube_stream_key_secret_ref("UC123", None).unwrap(),
+            "platform:youtube:UC123:stream-key"
+        );
+        assert_eq!(
+            youtube_stream_key_secret_ref("UC123", Some("  ")).unwrap(),
+            "platform:youtube:UC123:stream-key"
+        );
+        // Two destinations on ONE channel never share a slot: the 2026-09-21
+        // dual-orientation incident pushed both legs to a single key.
+        let horizontal = youtube_stream_key_secret_ref("UC123", Some("youtube")).unwrap();
+        let vertical = youtube_stream_key_secret_ref("UC123", Some("youtube-vertical")).unwrap();
+        assert_eq!(
+            horizontal,
+            "platform:youtube:UC123:target:youtube:stream-key"
+        );
+        assert_eq!(
+            vertical,
+            "platform:youtube:UC123:target:youtube-vertical:stream-key"
+        );
+        assert_ne!(horizontal, vertical);
+        assert!(youtube_stream_key_secret_ref("UC123", Some("../escape")).is_err());
+        assert!(youtube_stream_key_secret_ref("UC123", Some("a:b")).is_err());
+    }
+
+    #[test]
+    fn portrait_profiles_are_named_by_their_short_side() {
+        // 1080x1920 is a 1080p broadcast, not the 2160p its height selects.
+        assert_eq!(youtube_resolution(1920_u32.min(1080)), "1080p");
+        assert_eq!(youtube_resolution(1080_u32.min(1920)), "1080p");
+        assert_eq!(youtube_resolution(1280_u32.min(720)), "720p");
     }
 
     #[tokio::test]
@@ -1166,6 +1237,7 @@ mod tests {
                 access_token: "access-token".to_string(),
                 account_id: "UC123".to_string(),
                 account_label: "Videorc Channel".to_string(),
+                target_id: None,
                 metadata,
                 video: VideoSettings {
                     preset: VideoPreset::Stream1080p60,

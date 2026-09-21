@@ -420,6 +420,36 @@ fn region_transform(x: f64, width: f64) -> SceneTransform {
 /// cannot drift apart.
 pub(crate) const VERTICAL_CAMERA_BAND: f64 = 0.4;
 
+/// Aspect assumed for the screen when its real size is not known at scene
+/// build time. Displays and most shared windows are 16:9; a different source
+/// is CONTAINED inside the band (scene background beside it), never cropped.
+pub(crate) const VERTICAL_FIT_DEFAULT_SCREEN_ASPECT: f64 = 16.0 / 9.0;
+/// Clamp for the fit screen band (owner decision O3): an ultrawide must not
+/// shrink to a sliver and a tall window must not starve the camera.
+pub(crate) const VERTICAL_FIT_SCREEN_BAND_MIN: f64 = 0.20;
+pub(crate) const VERTICAL_FIT_SCREEN_BAND_MAX: f64 = 0.60;
+
+/// Screen band height, as a canvas fraction, for `VerticalScreenFraming::Fit`:
+/// the height a `source_aspect` screen needs at FULL canvas width, clamped,
+/// and snapped to an even pixel row so the compositor bands and the legacy
+/// FFmpeg vstack (yuv420p) agree to the pixel. 16:9 on 1080x1920 → 608 px.
+/// Shared with recording.rs so the render paths cannot drift apart.
+pub(crate) fn vertical_fit_screen_band_fraction(
+    canvas_width: u32,
+    canvas_height: u32,
+    source_aspect: Option<f64>,
+) -> f64 {
+    let canvas_width = f64::from(canvas_width.max(2));
+    let canvas_height = f64::from(canvas_height.max(2));
+    let aspect = source_aspect
+        .filter(|aspect| aspect.is_finite() && *aspect > 0.0)
+        .unwrap_or(VERTICAL_FIT_DEFAULT_SCREEN_ASPECT);
+    let fraction = ((canvas_width / aspect) / canvas_height)
+        .clamp(VERTICAL_FIT_SCREEN_BAND_MIN, VERTICAL_FIT_SCREEN_BAND_MAX);
+    let rows = ((fraction * canvas_height / 2.0).round() * 2.0).clamp(2.0, canvas_height - 2.0);
+    rows / canvas_height
+}
+
 /// Camera band geometry for a stacked vertical preset; the screen takes the
 /// complementary band.
 struct VerticalStackBands {
@@ -445,6 +475,27 @@ fn push_vertical_stack(
         scene.sources.push(source);
         return;
     }
+
+    // Fit framing: the SCREEN decides the split. Its band is exactly as tall
+    // as the whole screen needs at full width (no crop, no letterbox) and the
+    // camera covers everything else; the preset keeps only its stack ORDER.
+    let bands = if matches!(
+        params.layout.vertical_screen_framing,
+        crate::protocol::VerticalScreenFraming::Fit
+    ) {
+        let screen_height = vertical_fit_screen_band_fraction(output_width, output_height, None);
+        let camera_height = 1.0 - screen_height;
+        VerticalStackBands {
+            camera_y: if bands.camera_y == 0.0 {
+                0.0
+            } else {
+                screen_height
+            },
+            camera_height,
+        }
+    } else {
+        bands
+    };
 
     let (screen_y, screen_height) = if bands.camera_y == 0.0 {
         (bands.camera_height, 1.0 - bands.camera_height)
@@ -614,6 +665,7 @@ mod tests {
         CameraTransform, CameraTransformMode, EffectiveSceneBackground, LayoutPreset,
         LayoutSettings, SideBySideSplit, SourceSelection,
     };
+    use crate::scene_geometry::scene_source_rect_pixels;
 
     #[test]
     fn vertical_camera_top_stacks_camera_band_over_covered_screen() {
@@ -659,6 +711,118 @@ mod tests {
         assert_eq!(camera.transform.width, 1.0);
         assert_eq!(camera.transform.height, VERTICAL_CAMERA_BAND);
         assert_eq!(camera.default_transform, camera.transform);
+    }
+
+    fn portrait_fit_params(preset: LayoutPreset) -> SceneConfigParams {
+        let mut params = base_params();
+        params.layout.layout_preset = preset;
+        params.layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::Fit;
+        params.video = Some(crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Custom,
+            width: 1080,
+            height: 1920,
+            fps: 30,
+            bitrate_kbps: 6000,
+        });
+        params
+    }
+
+    #[test]
+    fn fit_screen_band_is_exactly_the_screen_at_full_width() {
+        // 16:9 at 1080 wide is 607.5 rows → the even 608, 31.7% of 1920.
+        let fraction = vertical_fit_screen_band_fraction(1080, 1920, None);
+        assert_eq!(fraction, 608.0 / 1920.0);
+        assert_eq!(
+            vertical_fit_screen_band_fraction(1080, 1920, Some(16.0 / 9.0)),
+            fraction
+        );
+        // Owner decision O3: clamp 20%-60%. Ultrawide 32:9 would be 15.8%.
+        assert_eq!(
+            vertical_fit_screen_band_fraction(1080, 1920, Some(32.0 / 9.0)),
+            VERTICAL_FIT_SCREEN_BAND_MIN
+        );
+        // A 3:4 portrait window would want 75%: the camera keeps 40%.
+        assert_eq!(
+            vertical_fit_screen_band_fraction(1080, 1920, Some(0.75)),
+            VERTICAL_FIT_SCREEN_BAND_MAX
+        );
+        // Garbage aspects fall back to 16:9 instead of poisoning the scene.
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                vertical_fit_screen_band_fraction(1080, 1920, Some(bad)),
+                fraction
+            );
+        }
+        // Every band is an even pixel row count (yuv420p vstack parity).
+        for (width, height) in [(1080, 1920), (720, 1280), (1440, 2560), (2160, 3840)] {
+            let rows = vertical_fit_screen_band_fraction(width, height, None) * f64::from(height);
+            assert_eq!(rows.fract(), 0.0, "{width}x{height}");
+            assert_eq!(rows as u32 % 2, 0, "{width}x{height}");
+        }
+    }
+
+    #[test]
+    fn fit_camera_bottom_shows_the_whole_screen_on_top_of_the_camera() {
+        // The owner's live layout (2026-09-21): screen on top, camera below,
+        // nothing on the shared screen cropped away.
+        let scene =
+            scene_from_capture_config(portrait_fit_params(LayoutPreset::VerticalCameraBottom));
+        assert_eq!(scene.sources.len(), 2);
+        let screen = scene_source_rect_pixels(&scene.sources[0].transform, 1080, 1920).unwrap();
+        let camera = scene_source_rect_pixels(&scene.sources[1].transform, 1080, 1920).unwrap();
+        assert_eq!(
+            (screen.x, screen.y, screen.width, screen.height),
+            (0, 0, 1080, 608)
+        );
+        assert_eq!(
+            (camera.x, camera.y, camera.width, camera.height),
+            (0, 608, 1080, 1312)
+        );
+        assert_eq!(
+            scene.sources[1].default_transform,
+            scene.sources[1].transform
+        );
+    }
+
+    #[test]
+    fn fit_keeps_each_stacked_presets_order_but_lets_the_screen_size_the_bands() {
+        let top = scene_from_capture_config(portrait_fit_params(LayoutPreset::VerticalCameraTop));
+        let screen = scene_source_rect_pixels(&top.sources[0].transform, 1080, 1920).unwrap();
+        let camera = scene_source_rect_pixels(&top.sources[1].transform, 1080, 1920).unwrap();
+        assert_eq!((camera.y, camera.height), (0, 1312));
+        assert_eq!((screen.y, screen.height), (1312, 608));
+
+        // Split under fit is screen-on-top like its fill twin; the band
+        // follows the screen instead of the 50/50 share.
+        let split = scene_from_capture_config(portrait_fit_params(LayoutPreset::VerticalSplit));
+        let screen = scene_source_rect_pixels(&split.sources[0].transform, 1080, 1920).unwrap();
+        let camera = scene_source_rect_pixels(&split.sources[1].transform, 1080, 1920).unwrap();
+        assert_eq!((screen.y, screen.height), (0, 608));
+        assert_eq!((camera.y, camera.height), (608, 1312));
+    }
+
+    #[test]
+    fn fill_framing_is_untouched_by_the_fit_field() {
+        // Default (Fill) output must stay byte-identical: the short-form law.
+        let mut params = portrait_fit_params(LayoutPreset::VerticalCameraBottom);
+        params.layout.vertical_screen_framing = crate::protocol::VerticalScreenFraming::Fill;
+        let scene = scene_from_capture_config(params);
+        assert_eq!(
+            scene.sources[0].transform.height,
+            1.0 - VERTICAL_CAMERA_BAND
+        );
+        assert_eq!(scene.sources[1].transform.y, 1.0 - VERTICAL_CAMERA_BAND);
+    }
+
+    #[test]
+    fn fit_still_collapses_to_one_full_canvas_source() {
+        // No camera: the screen owns the canvas (contained by the fit policy),
+        // never a dead camera band.
+        let mut params = portrait_fit_params(LayoutPreset::VerticalCameraBottom);
+        params.sources.camera_id = None;
+        let scene = scene_from_capture_config(params);
+        assert_eq!(scene.sources.len(), 1);
+        assert_eq!(scene.sources[0].transform.height, 1.0);
     }
 
     #[test]
@@ -856,6 +1020,7 @@ mod tests {
                 camera_offset_y: 0,
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
+                vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,

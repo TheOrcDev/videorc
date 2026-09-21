@@ -11049,6 +11049,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             'streamTargets.youtube.prepare',
             {
               accountId: target.accountId,
+              // Per-destination key slot: two YouTube destinations on one
+              // channel each keep the key of their OWN broadcast.
+              targetId: target.id,
               // The vertical-bound broadcast advertises the PORTRAIT profile —
               // the same transposition the simulcast leg composes at.
               video:
