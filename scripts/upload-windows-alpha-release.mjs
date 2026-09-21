@@ -136,6 +136,7 @@ async function prepareChangelog(releaseId, config) {
   })
   const remoteDocument = parseRemoteChangelog(remoteText)
   const document = mergeChangelogDocuments({
+    publishingPlatform: 'windows',
     generatedAt: new Date().toISOString(),
     localEntries: entries,
     remoteDocument

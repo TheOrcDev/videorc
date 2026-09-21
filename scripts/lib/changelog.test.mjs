@@ -10,6 +10,7 @@ import {
   findChangelogEntry,
   findChangelogEntryForPackageVersion,
   loadChangelogEntries,
+  changelogEntriesWithheldFrom,
   mergeChangelogDocuments,
   parseChangelogEntry,
   requireChangelogEntryForRelease,
@@ -292,6 +293,70 @@ describe('mergeChangelogDocuments', () => {
   )
   const remoteMac = parseChangelogEntry(validEntryMarkdown(), {
     filename: '0.9.2-beta.1.md'
+  })
+
+  it("withholds another platform's unpublished entry from a publication", () => {
+    const document = mergeChangelogDocuments({
+      generatedAt,
+      localEntries: [localWindows, remoteMac],
+      publishingPlatform: 'macos',
+      remoteDocument: buildChangelogJson([remoteMac], { generatedAt })
+    })
+    assert.deepEqual(
+      document.entries.map((entry) => entry.version),
+      ['0.9.2-beta.1']
+    )
+    assert.deepEqual(
+      changelogEntriesWithheldFrom({
+        localEntries: [localWindows, remoteMac],
+        publishingPlatform: 'macos',
+        remoteDocument: buildChangelogJson([remoteMac], { generatedAt })
+      }).map((entry) => entry.version),
+      ['0.10.0-alpha.1']
+    )
+  })
+
+  it('publishes the entry once its own platform publishes, and keeps it afterwards', () => {
+    const afterWindows = mergeChangelogDocuments({
+      generatedAt,
+      localEntries: [localWindows, remoteMac],
+      publishingPlatform: 'windows',
+      remoteDocument: buildChangelogJson([remoteMac], { generatedAt })
+    })
+    assert.deepEqual(afterWindows.entries.map((entry) => entry.version).sort(), [
+      '0.10.0-alpha.1',
+      '0.9.2-beta.1'
+    ])
+    // A later macOS upload keeps the now-public Windows entry and still checks
+    // it against the repository.
+    const afterMac = mergeChangelogDocuments({
+      generatedAt,
+      localEntries: [localWindows, remoteMac],
+      publishingPlatform: 'macos',
+      remoteDocument: afterWindows
+    })
+    assert.equal(afterMac.entries.length, 2)
+    assert.throws(
+      () =>
+        mergeChangelogDocuments({
+          generatedAt,
+          localEntries: [{ ...localWindows, title: 'Edited after publication' }, remoteMac],
+          publishingPlatform: 'macos',
+          remoteDocument: afterWindows
+        }),
+      /conflicts with the trusted repository entry/
+    )
+  })
+
+  it('an entry for both platforms is published by either', () => {
+    const both = { ...localWindows, platforms: ['macos', 'windows'] }
+    for (const publishingPlatform of ['macos', 'windows']) {
+      assert.equal(
+        mergeChangelogDocuments({ generatedAt, localEntries: [both], publishingPlatform }).entries
+          .length,
+        1
+      )
+    }
   })
 
   it('preserves remote-only releases while adding trusted local entries', () => {

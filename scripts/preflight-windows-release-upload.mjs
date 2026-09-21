@@ -64,6 +64,7 @@ async function main() {
       objectKey: 'changelog/changelog.json'
     })
     mergeChangelogDocuments({
+      publishingPlatform: 'windows',
       generatedAt: new Date().toISOString(),
       localEntries: entries,
       remoteDocument: parseRemoteChangelog(publishedChangelogText)

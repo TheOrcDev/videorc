@@ -5,6 +5,7 @@ import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import {
+  changelogEntriesWithheldFrom,
   loadChangelogEntries,
   mergeChangelogDocuments,
   requireChangelogEntryForRelease
@@ -309,10 +310,23 @@ async function prepareChangelogUpload(
     config,
     objectKey: 'changelog/changelog.json'
   })
+  const remoteDocument = parseRemoteChangelog(remoteText)
+  // A macOS upload never introduces another platform's entry: a Windows Alpha
+  // entry for a private candidate goes public with its own promotion.
+  for (const entry of changelogEntriesWithheldFrom({
+    localEntries: entries,
+    publishingPlatform: 'macos',
+    remoteDocument
+  })) {
+    console.log(
+      `macos-beta-release-upload: withholding ${entry.version} (${entry.platforms.join(', ')}) until its own platform publishes it`
+    )
+  }
   const document = mergeChangelogDocuments({
     generatedAt,
     localEntries: entries,
-    remoteDocument: parseRemoteChangelog(remoteText)
+    publishingPlatform: 'macos',
+    remoteDocument
   })
   await mkdir(dirname(outPath), { recursive: true })
   await writeFile(outPath, `${JSON.stringify(document, null, 2)}\n`)

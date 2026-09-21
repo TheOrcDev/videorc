@@ -95,7 +95,10 @@ to **two independent origins**. Measured provider differences are recorded in
 | `r2`      | `VIDEORC_DOWNLOAD_S3_*` (or `VIDEORC_RELEASE_UPLOAD_S3_*`) from the web `.env` | Cloudflare R2. Bucket-less endpoint (below).                                                    |
 | `hetzner` | `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*` in `~/.videorc-release.env`              | Hetzner Object Storage, project `videorc`, `fsn1`, region `eu-central`. Host-only endpoint too. |
 
-- `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` (`r2` by default) must match the value in
+- **Since 2026-09-21 the primary is `hetzner` and `r2` is the mirror**, in the
+  videorc-web production environment, in `~/.videorc-release.env` and in the
+  `windows-alpha-release` GitHub environment.
+- `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` (`r2` when unset) must match the value in
   the videorc-web production environment. It names the origin clients are
   redirected to. Origins are published mirrors first, primary last.
 - `pnpm release:upload:preflight:macos` probes every origin with a signed
@@ -143,7 +146,7 @@ pnpm release:validate:macos
 #    (macOS ships Bash 3.2: run this under zsh, or write the filtered lines to a
 #    temp file and source that.)
 set -a; . <(grep -E '^[[:space:]]*VIDEORC_DOWNLOAD_S3_' ~/projects/videorcweb/.env); set +a
-set -a; . <(grep -E '^VIDEORC_RELEASE_UPLOAD_HETZNER_S3_' ~/.videorc-release.env); set +a
+set -a; . <(grep -E '^(VIDEORC_RELEASE_UPLOAD_HETZNER_S3_|VIDEORC_DOWNLOAD_STORAGE_PRIMARY=)' ~/.videorc-release.env); set +a
 # Force a bucket-less endpoint (skip if your .env endpoint is already host-only):
 export VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL="https://<account-id>.r2.cloudflarestorage.com"
 pnpm release:upload:preflight:macos
