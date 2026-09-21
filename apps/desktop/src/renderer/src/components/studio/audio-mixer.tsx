@@ -1,8 +1,7 @@
-import { MicrophoneIcon, SpeakerOffIcon, SpeakerOnIcon, WaveformIcon } from '@/components/icons'
+import { MicrophoneIcon, SpeakerOffIcon, SpeakerOnIcon } from '@/components/icons'
 import { useEffect, useRef, useState, type ReactElement, type RefObject } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
-import { StatusBadge } from '@/components/status-badge'
 import { BarVisualizer, paintBarVisualizer } from '@/components/ui/bar-visualizer'
 import { Button } from '@/components/ui/button'
 import { useWorkspaceNav } from '@/components/workspace-nav'
@@ -54,8 +53,8 @@ export function audioMixerSignalLive(
  * is a question people ask BEFORE recording, and a meter pinned at the floor
  * cannot answer it. The OS microphone indicator is therefore lit while the
  * mixer is visible; the stream releases as soon as the page or the window is
- * hidden (idle-CPU discipline). System audio shows its honest
- * "unavailable — pending native adapter" state; real capture is Phase-2 (F3).
+ * hidden (idle-CPU discipline). System audio has no row here until capture
+ * exists (plans/017): a permanent "Unavailable" badge read as a broken app.
  */
 export function AudioMixer(): ReactElement {
   const {
@@ -87,7 +86,6 @@ export function AudioMixer(): ReactElement {
       : audioMeter && typeof audioMeter.peakDb === 'number'
         ? formatDb(audioMeter.peakDb)
         : formatDb(captureConfig.audio.microphoneGainDb)
-  const systemAudio = deviceList.devices.find((device) => device.kind === 'system-audio')
 
   // Explicit visual state map (plan S3) — every path states what drives it:
   // - live analyser: bars from the stream, chrome tone;
@@ -244,22 +242,6 @@ export function AudioMixer(): ReactElement {
           <span className="text-xs text-warning">{microphoneAccess?.detail}</span>
         ) : null}
       </div>
-
-      {/* System audio — honest unavailable state until the native adapter lands. */}
-      {systemAudio ? (
-        <div className="flex items-center justify-between gap-2 rounded-row border border-dashed bg-muted/10 p-3">
-          <span className="flex min-w-0 items-center gap-2">
-            <WaveformIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
-            <span className="flex min-w-0 flex-col">
-              <span className="truncate text-sm font-medium">{systemAudio.name}</span>
-              <span className="truncate text-xs text-muted-foreground">
-                Pending native system-audio adapter
-              </span>
-            </span>
-          </span>
-          <StatusBadge tone="neutral" value="Unavailable" />
-        </div>
-      ) : null}
     </PanelSection>
   )
 }
