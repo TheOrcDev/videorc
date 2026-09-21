@@ -280,6 +280,27 @@ query strings, other repositories, and other directories are rejected. The
 record commit must also be reachable from and an ancestor of current protected
 `main`.
 
+### Owner waiver instead of a PASS record
+
+The release owner may decide to publish a Windows Alpha without the physical
+acceptance pass, for example when the alpha is already in field use. That
+decision is recorded at the same path with its own kind,
+`videorc-windows-alpha-owner-waiver` (contract and template in
+[the public record contract](../acceptance/windows-alpha-acceptance-record.md)),
+never as a PASS:
+
+- It claims no gate and must state `physicalAcceptance.performed: false`.
+- It binds the exact candidate identity, installer hash, publisher and release
+  sequence like a PASS record, so nothing is rebuilt and no predecessor is
+  skipped. The next release names it as `previousReleaseId`.
+- Public promotion marks `release.json` `acceptanceStatus: "waived"`, and
+  videorc-web prints that status on the download surfaces.
+- **Only the release owner writes and commits the file.** A release agent must
+  not author it and must not substitute it for a test that was supposed to run.
+  The agent's part starts after the owner's commit is on protected `main`:
+  dispatch public promotion with the commit-pinned URL, then the production
+  smoke below.
+
 ## 6. Public promotion
 
 Dispatch **Promote Windows Alpha Candidate** again with the same release ID,
