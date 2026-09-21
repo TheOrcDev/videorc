@@ -236,26 +236,29 @@ export function assertWindowsAlphaReleaseManifest(manifest, { requireAccepted = 
   }
 
   const acceptanceStatus = requireString(manifest, 'acceptanceStatus')
-  if (!['pending', 'pass', 'failed'].includes(acceptanceStatus)) {
+  if (!['pending', 'pass', 'waived', 'failed'].includes(acceptanceStatus)) {
     throw new WindowsAlphaReleaseError(
       'invalid-acceptance-status',
-      'release.json acceptanceStatus must be pending, pass, or failed.'
+      'release.json acceptanceStatus must be pending, pass, waived, or failed.'
     )
   }
   const acceptanceRecordUrl = optionalString(manifest?.acceptanceRecordUrl)
   if (acceptanceRecordUrl) {
     parseHttpsUrl(acceptanceRecordUrl, 'acceptanceRecordUrl')
   }
-  if ((requireAccepted || acceptanceStatus === 'pass') && !acceptanceRecordUrl) {
+  // `waived` is the release owner's recorded decision to publish without the
+  // physical acceptance pass. It needs its public record exactly like `pass`.
+  const published = acceptanceStatus === 'pass' || acceptanceStatus === 'waived'
+  if ((requireAccepted || published) && !acceptanceRecordUrl) {
     throw new WindowsAlphaReleaseError(
       'missing-acceptance-record-url',
       'An accepted Windows release must include a dated HTTPS acceptanceRecordUrl.'
     )
   }
-  if (requireAccepted && acceptanceStatus !== 'pass') {
+  if (requireAccepted && !published) {
     throw new WindowsAlphaReleaseError(
       'release-not-accepted',
-      'Stable Windows promotion requires acceptanceStatus=pass.'
+      'Stable Windows promotion requires acceptanceStatus=pass or an owner waiver.'
     )
   }
 

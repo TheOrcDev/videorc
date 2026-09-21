@@ -83,6 +83,20 @@ describe('Windows alpha release manifest', () => {
     )
   })
 
+  it('accepts an owner-waived manifest for stable promotion only with its public record', () => {
+    const waived = {
+      ...buildManifest(),
+      acceptanceRecordUrl: 'https://www.videorc.com/releases/0.10.0-alpha.1/acceptance',
+      acceptanceStatus: 'waived'
+    }
+    assert.doesNotThrow(() => assertWindowsAlphaReleaseManifest(waived, { requireAccepted: true }))
+    assert.throws(
+      () => assertWindowsAlphaReleaseManifest({ ...waived, acceptanceRecordUrl: null }),
+      (error) =>
+        error instanceof WindowsAlphaReleaseError && error.code === 'missing-acceptance-record-url'
+    )
+  })
+
   it('refuses stable promotion for pending or unevidenced acceptance', () => {
     assert.throws(
       () => assertWindowsAlphaReleaseManifest(buildManifest(), { requireAccepted: true }),

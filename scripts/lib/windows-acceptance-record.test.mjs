@@ -8,6 +8,7 @@ import {
   REQUIRED_WINDOWS_ACCEPTANCE_GATES,
   REQUIRED_WINDOWS_D3D11_ACCEPTANCE_GATES,
   resolveWindowsAcceptanceRecord,
+  WINDOWS_OWNER_WAIVER_KIND,
   WindowsAcceptanceRecordError
 } from './windows-acceptance-record.mjs'
 import { windowsCandidateIdentity, windowsCandidatePrefix } from './windows-release-candidate.mjs'
@@ -55,6 +56,24 @@ function validRecord() {
     requiredGates: Object.fromEntries(
       REQUIRED_WINDOWS_ACCEPTANCE_GATES.map((gate) => [gate, { status: 'PASS' }])
     )
+  }
+}
+
+function validOwnerWaiver() {
+  return {
+    schemaVersion: 1,
+    kind: WINDOWS_OWNER_WAIVER_KIND,
+    status: 'OWNER_WAIVED',
+    releaseId,
+    sourceCommit,
+    candidateIdentity: windowsCandidateIdentity({ installerSha256, releaseId, sourceCommit }),
+    candidateStoragePrefix: windowsCandidatePrefix({ releaseId, sourceCommit }),
+    installer: { filename, sha256: installerSha256, publisherName },
+    decidedAt: '2026-07-18T12:00:00.000Z',
+    decidedBy: 'release-owner',
+    basis: 'field-use-by-alpha-testers',
+    physicalAcceptance: { performed: false },
+    releaseSequence: { kind: 'successor', previousReleaseId: '0.9.9-alpha.1' }
   }
 }
 
@@ -291,6 +310,58 @@ describe('Windows acceptance record contract', () => {
   })
 })
 
+describe('Windows owner waiver record', () => {
+  it("accepts the release owner's exact-candidate waiver and never reports it as PASS", () => {
+    assert.equal(
+      assertWindowsAcceptanceRecord(validOwnerWaiver(), expectations).status,
+      'OWNER_WAIVED'
+    )
+  })
+
+  it('may not claim the physical test it replaces, any gate, or an unknown basis', () => {
+    for (const mutate of [
+      (record) => (record.physicalAcceptance = { performed: true }),
+      (record) => (record.status = 'PASS'),
+      (record) => (record.decidedBy = 'release-agent'),
+      (record) => (record.basis = 'looks-fine'),
+      (record) => (record.requiredGates = { cleanInstall: { status: 'PASS' } }),
+      (record) => (record.testPlatform = { physicalHardware: true }),
+      (record) => (record.schemaVersion = 2)
+    ]) {
+      const record = validOwnerWaiver()
+      mutate(record)
+      assert.throws(
+        () => assertWindowsAcceptanceRecord(record, expectations),
+        WindowsAcceptanceRecordError
+      )
+    }
+  })
+
+  it('binds the exact candidate, the decision time and the release sequence like a PASS record', () => {
+    for (const mutate of [
+      (record) => (record.installer.sha256 = '0'.repeat(64)),
+      (record) => (record.sourceCommit = 'd'.repeat(40)),
+      (record) => (record.decidedAt = '2026-07-17T00:00:00.000Z'),
+      (record) => (record.decidedAt = '2026-07-20T00:00:00.000Z'),
+      (record) => (record.releaseSequence = { kind: 'first-public-alpha' }),
+      (record) => (record.releaseSequence.previousReleaseId = '0.9.8-alpha.1')
+    ]) {
+      const record = validOwnerWaiver()
+      mutate(record)
+      assert.throws(
+        () => assertWindowsAcceptanceRecord(record, expectations),
+        WindowsAcceptanceRecordError
+      )
+    }
+    const first = validOwnerWaiver()
+    first.releaseSequence = { kind: 'first-public-alpha' }
+    assert.equal(
+      assertWindowsAcceptanceRecord(first, { ...expectations, priorAcceptedReleaseIds: [] }).status,
+      'OWNER_WAIVED'
+    )
+  })
+})
+
 describe('accepted manifest mutation', () => {
   const manifest = {
     acceptanceRecordUrl: null,
@@ -328,5 +399,18 @@ describe('accepted manifest mutation', () => {
     assert.deepEqual(changed.sort(), ['acceptanceRecordUrl', 'acceptanceStatus'])
     assert.equal(accepted.acceptanceStatus, 'pass')
     assert.equal(accepted.acceptanceRecordUrl, blobUrl)
+  })
+
+  it('marks an owner-waived release as waived, never as pass', () => {
+    const accepted = applyWindowsAcceptanceRecord({
+      acceptanceRecordUrl: blobUrl,
+      manifest,
+      now: expectations.now,
+      priorAcceptedReleaseIds: expectations.priorAcceptedReleaseIds,
+      record: validOwnerWaiver()
+    })
+    const changed = Object.keys(accepted).filter((key) => accepted[key] !== manifest[key])
+    assert.deepEqual(changed.sort(), ['acceptanceRecordUrl', 'acceptanceStatus'])
+    assert.equal(accepted.acceptanceStatus, 'waived')
   })
 })

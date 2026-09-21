@@ -64,3 +64,36 @@ That command expects the exact pending candidate `release.json` in the release
 directory, fetches only the fixed GitHub raw host without redirects, enforces a
 64 KiB limit, verifies the complete contract, and changes only
 `acceptanceStatus` and `acceptanceRecordUrl` in the manifest.
+
+## Owner waiver
+
+The release owner may decide to publish a Windows Alpha without the physical
+acceptance pass, for example when the alpha is already in field use. That
+decision is recorded with its own kind, never as a PASS:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "videorc-windows-alpha-owner-waiver",
+  "status": "OWNER_WAIVED",
+  "releaseId": "<releaseId>",
+  "sourceCommit": "<40-character candidate source commit>",
+  "candidateIdentity": "windows:<releaseId>:<sourceCommit>:sha256:<installer sha256>",
+  "candidateStoragePrefix": "candidates/windows/<releaseId>/<sourceCommit>",
+  "installer": { "filename": "…", "sha256": "…", "publisherName": "…" },
+  "decidedAt": "<canonical UTC timestamp, not before the candidate's releasedAt>",
+  "decidedBy": "release-owner",
+  "basis": "field-use-by-alpha-testers",
+  "physicalAcceptance": { "performed": false },
+  "releaseSequence": { "kind": "first-public-alpha" }
+}
+```
+
+- It claims no gate. `physicalAcceptance.performed` must be `false`; a waiver
+  that claims the test it replaces is rejected.
+- It binds the exact candidate and the release sequence like a PASS record, so
+  nothing is rebuilt and no predecessor is skipped.
+- Promotion marks `release.json` `acceptanceStatus: "waived"`, not `"pass"`.
+  videorc-web must show that status before the Windows state goes `public`.
+- **Only the release owner writes and commits this file.** A release agent must
+  not author it: the file is the owner's decision, not evidence.

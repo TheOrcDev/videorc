@@ -101,12 +101,107 @@ export function parseWindowsAcceptanceRecordUrl(value) {
   }
 }
 
+export const WINDOWS_OWNER_WAIVER_KIND = 'videorc-windows-alpha-owner-waiver'
+export const WINDOWS_OWNER_WAIVER_BASES = Object.freeze(['field-use-by-alpha-testers'])
+
+// The release owner may publish a Windows Alpha without the physical acceptance
+// pass. That decision gets its own record kind so it can never be mistaken for
+// a PASS: it claims no gate, states that no physical acceptance was performed,
+// and marks the release manifest `waived`, which every surface shows as such.
+// It binds the exact candidate and the release sequence exactly like a PASS
+// record, so the no-rebuild and no-skipped-predecessor rules still hold.
+export function isWindowsOwnerWaiverRecord(record) {
+  return isObject(record) && record.kind === WINDOWS_OWNER_WAIVER_KIND
+}
+
+function assertWindowsOwnerWaiverRecord(record, expectations) {
+  assertExactKeys(
+    record,
+    [
+      'schemaVersion',
+      'kind',
+      'status',
+      'releaseId',
+      'sourceCommit',
+      'candidateIdentity',
+      'candidateStoragePrefix',
+      'installer',
+      'decidedAt',
+      'decidedBy',
+      'basis',
+      'physicalAcceptance',
+      'releaseSequence'
+    ],
+    'record'
+  )
+  requireEqual(record.schemaVersion, 1, 'schemaVersion')
+  requireEqual(record.status, 'OWNER_WAIVED', 'status')
+  requireEqual(record.releaseId, expectations.releaseId, 'releaseId')
+  requireEqual(record.sourceCommit, expectations.sourceCommit, 'sourceCommit')
+  requireEqual(
+    record.candidateIdentity,
+    windowsCandidateIdentity({
+      installerSha256: expectations.installerSha256,
+      releaseId: expectations.releaseId,
+      sourceCommit: expectations.sourceCommit
+    }),
+    'candidateIdentity'
+  )
+  requireEqual(
+    record.candidateStoragePrefix,
+    windowsCandidatePrefix(expectations),
+    'candidateStoragePrefix'
+  )
+  assertExactKeys(record.installer, ['filename', 'sha256', 'publisherName'], 'installer')
+  requireEqual(record.installer.filename, expectations.filename, 'installer.filename')
+  requireEqual(record.installer.sha256, expectations.installerSha256, 'installer.sha256')
+  requireEqual(
+    record.installer.publisherName,
+    expectations.publisherName,
+    'installer.publisherName'
+  )
+
+  const decidedAt = canonicalTimestamp(record.decidedAt, 'decidedAt')
+  if (
+    expectations.releasedAt &&
+    decidedAt < canonicalTimestamp(expectations.releasedAt, 'releasedAt')
+  ) {
+    throw new WindowsAcceptanceRecordError(
+      'waiver-before-candidate',
+      'Owner waiver decidedAt must not predate the candidate releasedAt timestamp.'
+    )
+  }
+  const now = expectations.now instanceof Date ? expectations.now : new Date()
+  if (decidedAt.getTime() > now.getTime() + 5 * 60 * 1000) {
+    throw new WindowsAcceptanceRecordError(
+      'waiver-in-future',
+      'Owner waiver decidedAt must not be in the future.'
+    )
+  }
+  requireEqual(record.decidedBy, 'release-owner', 'decidedBy')
+  if (!WINDOWS_OWNER_WAIVER_BASES.includes(record.basis)) {
+    throw new WindowsAcceptanceRecordError(
+      'acceptance-basis-mismatch',
+      `Owner waiver basis must be one of: ${WINDOWS_OWNER_WAIVER_BASES.join(', ')}.`
+    )
+  }
+  // A waiver may never claim the test it replaces.
+  assertExactKeys(record.physicalAcceptance, ['performed'], 'physicalAcceptance')
+  requireEqual(record.physicalAcceptance.performed, false, 'physicalAcceptance.performed')
+
+  assertReleaseSequence(record.releaseSequence, record.releaseId, expectations)
+  return record
+}
+
 export function assertWindowsAcceptanceRecord(record, expectations) {
   if (!isObject(record)) {
     throw new WindowsAcceptanceRecordError(
       'invalid-acceptance-record',
       'Windows acceptance record must be a JSON object.'
     )
+  }
+  if (isWindowsOwnerWaiverRecord(record)) {
+    return assertWindowsOwnerWaiverRecord(record, expectations)
   }
   const schemaVersion = record.schemaVersion
   const d3d11Record = schemaVersion === 3
@@ -479,7 +574,7 @@ export function applyWindowsAcceptanceRecord({
   })
   const accepted = {
     ...manifest,
-    acceptanceStatus: 'pass',
+    acceptanceStatus: isWindowsOwnerWaiverRecord(record) ? 'waived' : 'pass',
     acceptanceRecordUrl
   }
   assertWindowsAlphaReleaseManifest(accepted, { requireAccepted: true })
