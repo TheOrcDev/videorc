@@ -191,9 +191,9 @@ function DockedPreviewFrame({
   const slotRatio = previewSlotRatio(aspect)
 
   return (
-    // No border and no panel rounding here: the native surface is a separate
-    // window glued over the slot with square corners — CSS cannot clip it, so
-    // any rounded frame leaves a dark corner wedge peeking around the video.
+    // No border here. The native surface is a separate window glued over the
+    // slot; it clips itself to the panel radius, so the strip below rounds to
+    // the same radius. A square strip leaves a corner wedge behind the video.
     <div
       className={cn('flex w-full flex-col overflow-hidden', className)}
       data-videorc-preview-card
@@ -206,7 +206,7 @@ function DockedPreviewFrame({
           surface aspect always matches the slot, so it can never be
           squeezed or stretched. */}
       <div
-        className="flex w-full items-center justify-center bg-[#0D0D0F]"
+        className="flex w-full items-center justify-center overflow-hidden rounded-panel bg-[#0D0D0F]"
         data-videorc-dock-strip
         style={{ aspectRatio: footprintRatio }}
       >
