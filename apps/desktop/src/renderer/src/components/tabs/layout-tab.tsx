@@ -170,6 +170,10 @@ export function LayoutTab(): ReactElement {
               real normalized transforms (pure SVG, zero idle IPC). Live pixels
               stay in the detached preview window. */}
           <SceneStage
+            // The camera's box aspect is owned by the mask law (circle boxes
+            // are square by construction; square/portrait force the crop), so
+            // resize gestures must not free it.
+            cameraAspectLocked={layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'}
             cameraCornerRadiusPct={layout.cameraCornerRadiusPct}
             // WYSIWYG: only the inset scenes mask the camera bubble (backend
             // camera_mask policy) — side-by-side and the vertical bands render
@@ -179,10 +183,11 @@ export function LayoutTab(): ReactElement {
             hasBackground={Boolean(scene?.background)}
             outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
             previewOpen={previewWindow.open}
+            resizeEnabled={false}
             scene={scene}
             selectedSourceId={selectedSceneSourceId}
-            onCommitPosition={(sourceId, position) =>
-              void setSceneSourceTransform(sourceId, position)
+            onCommitTransform={(sourceId, transform) =>
+              void setSceneSourceTransform(sourceId, transform)
             }
             onSelectSource={(sourceId) => {
               setSelectedSceneSourceId(sourceId)
