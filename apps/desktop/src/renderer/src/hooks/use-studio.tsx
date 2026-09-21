@@ -208,6 +208,7 @@ import type {
   GateStatus,
   GoLivePreflight,
   HealthEvent,
+  CameraTransform,
   LayoutPreset,
   LayoutSettings,
   LiveLayoutApplyStatus,
@@ -6497,10 +6498,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     setCaptureConfig((current) => ({ ...current, layout: { ...current.layout, ...patch } }))
   }, [])
 
-  const syncCameraTransformToLayout = useCallback(
-    (nextScene: Scene) => {
+  // Persist committed transforms back into the layout so a scene rebuilt from
+  // capture config (or the next launch) re-derives them. Freeform writes the
+  // whole per-source override map; preset mode keeps the legacy camera-only
+  // custom transform (position + free-resize size).
+  const syncSourceTransformsToLayout = useCallback(
+    (nextScene: Scene, changedSourceId?: string) => {
+      if (captureConfigRef.current.layout.arrangementMode === 'freeform') {
+        const sourceTransformOverrides: Record<string, CameraTransform> = {}
+        for (const source of nextScene.sources) {
+          sourceTransformOverrides[source.id] = {
+            x: source.transform.x,
+            y: source.transform.y,
+            width: source.transform.width,
+            height: source.transform.height
+          }
+        }
+        patchLayout({ sourceTransformOverrides })
+        return
+      }
+
       const camera = nextScene.sources.find((source) => source.kind === 'camera')
-      if (!camera) {
+      if (!camera || (changedSourceId !== undefined && camera.id !== changedSourceId)) {
         return
       }
 
@@ -6787,14 +6806,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           sourceId
         })
         applyCommittedScene(status)
-        if (status.scene.sources.find((source) => source.id === sourceId)?.kind === 'camera') {
+        if (captureConfigRef.current.layout.arrangementMode === 'freeform') {
+          // Freeform: the reset value becomes the source's override.
+          syncSourceTransformsToLayout(status.scene)
+        } else if (
+          status.scene.sources.find((source) => source.id === sourceId)?.kind === 'camera'
+        ) {
           patchLayout({ cameraTransformMode: 'preset', cameraTransform: null })
         }
       } catch (error) {
         reportError(error)
       }
     },
-    [applyCommittedScene, client, patchLayout, reportError, selectedSceneSourceId]
+    [
+      applyCommittedScene,
+      client,
+      patchLayout,
+      reportError,
+      selectedSceneSourceId,
+      syncSourceTransformsToLayout
+    ]
   )
 
   const nudgeSceneSource = useCallback(
@@ -6811,14 +6842,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           large
         })
         applyCommittedScene(status)
-        if (status.scene.sources.find((source) => source.id === sourceId)?.kind === 'camera') {
-          syncCameraTransformToLayout(status.scene)
-        }
+        syncSourceTransformsToLayout(status.scene, sourceId)
       } catch (error) {
         reportError(error)
       }
     },
-    [applyCommittedScene, client, reportError, syncCameraTransformToLayout]
+    [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
   )
 
   // SC3: absolute transform write for stage drags (nudge is directional).
@@ -6837,14 +6866,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           transform: patch
         })
         applyCommittedScene(status)
-        if (status.scene.sources.find((source) => source.id === sourceId)?.kind === 'camera') {
-          syncCameraTransformToLayout(status.scene)
-        }
+        syncSourceTransformsToLayout(status.scene, sourceId)
       } catch (error) {
         reportError(error)
       }
     },
-    [applyCommittedScene, client, reportError, syncCameraTransformToLayout]
+    [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
   )
 
   const setSceneSourceVisible = useCallback(
@@ -6909,12 +6936,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           transform: { x, y }
         })
         applyCommittedScene(status)
-        syncCameraTransformToLayout(status.scene)
+        syncSourceTransformsToLayout(status.scene)
       } catch (error) {
         reportError(error)
       }
     },
-    [applyCommittedScene, client, reportError, syncCameraTransformToLayout]
+    [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
   )
 
   const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutPreset | null>(null)
@@ -7461,9 +7488,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       }
 
+      // Choosing a preset scene EXITS freeform (unless the patch says
+      // otherwise): the preset's fixed arrangement is what the user asked
+      // for, and stale overrides must not leak into a later freeform entry.
+      const arrangementPatch =
+        patch.layoutPreset !== undefined && patch.arrangementMode === undefined
+          ? { arrangementMode: 'preset' as const, sourceTransformOverrides: {} }
+          : {}
+
       return requestLayoutTransaction(
         {
           ...current.layout,
+          ...arrangementPatch,
           ...patch,
           cameraTransformMode: 'preset',
           cameraTransform: null

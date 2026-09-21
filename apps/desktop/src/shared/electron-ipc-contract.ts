@@ -35,6 +35,7 @@ import {
   numberSchema,
   objectSchema,
   optionalSchema,
+  recordSchema,
   runtimeSchema,
   stringSchema,
   tupleSchema,
@@ -582,7 +583,9 @@ const layoutSettingsSchema = objectSchema(
     cameraOffsetY: numberSchema(),
     sideBySideSplit: enumSchema(['50-50', '60-40', '70-30']),
     sideBySideCameraSide: enumSchema(['left', 'right']),
-    verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit']))
+    verticalScreenFraming: optionalSchema(enumSchema(['fill', 'fit'])),
+    arrangementMode: optionalSchema(enumSchema(['preset', 'freeform'])),
+    sourceTransformOverrides: optionalSchema(recordSchema(cameraTransformSchema, { maxKeys: 16 }))
   },
   { allowUnknown: false }
 )

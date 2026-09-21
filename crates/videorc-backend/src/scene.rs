@@ -1,10 +1,10 @@
 use std::path::Path;
 
 use crate::protocol::{
-    LayoutPreset, Scene, SceneConfigParams, SceneOutput, SceneOutputKind, SceneSource,
-    SceneSourceKind, SceneSourceOrderParams, SceneSourceParams, SceneSourceVisibilityParams,
-    SceneTransform, SceneTransformPatch, SceneTransformUpdateParams, SideBySideCameraSide,
-    SourceSelection,
+    ArrangementMode, LayoutPreset, Scene, SceneConfigParams, SceneOutput, SceneOutputKind,
+    SceneSource, SceneSourceKind, SceneSourceOrderParams, SceneSourceParams,
+    SceneSourceVisibilityParams, SceneTransform, SceneTransformPatch, SceneTransformUpdateParams,
+    SideBySideCameraSide, SourceSelection,
 };
 use crate::scene_geometry::{
     preset_camera_transform, resolved_camera_transform, side_by_side_fractions,
@@ -122,6 +122,15 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
         ],
         background: params.background.clone(),
     };
+
+    // Freeform bypasses the preset arms entirely: the screen + camera base
+    // composition with the user's per-source transform overrides on top. The
+    // preset id stays meaningful (orientation, the scene to return to), and
+    // default_transform keeps the preset-derived box so Reset stays sane.
+    if params.layout.arrangement_mode == ArrangementMode::Freeform {
+        push_freeform_sources(&mut scene, &params, output_width, output_height);
+        return scene;
+    }
 
     match params.layout.layout_preset {
         LayoutPreset::CameraOnly | LayoutPreset::VerticalCameraOnly => {
@@ -304,6 +313,49 @@ pub fn snap_transform(mut transform: SceneTransform) -> SceneTransform {
     transform.x = snap_position(transform.x, transform.width);
     transform.y = snap_position(transform.y, transform.height);
     transform
+}
+
+/// Freeform composition: every selected source participates (screen-side base
+/// exactly like the ScreenCamera arm, camera when selected), then the user's
+/// override moves/sizes each box. Crops (camera zoom/pan) ride the computed
+/// transform so the lens controls keep working; overrides are sanitized with
+/// the same clamps as a live transform update, WITHOUT the edge/center snap
+/// (an override IS a precise user value, like a nudge).
+fn push_freeform_sources(
+    scene: &mut Scene,
+    params: &SceneConfigParams,
+    output_width: u32,
+    output_height: u32,
+) {
+    let overrides = &params.layout.source_transform_overrides;
+    let mut base = base_source(&params.sources);
+    apply_transform_override(&mut base, overrides);
+    scene.sources.push(base);
+
+    if let Some(camera_id) = params.sources.camera_id.clone() {
+        let mut camera = camera_source(camera_id, &params.layout, output_width, output_height);
+        apply_transform_override(&mut camera, overrides);
+        scene.sources.push(camera);
+    }
+}
+
+fn apply_transform_override(
+    source: &mut SceneSource,
+    overrides: &std::collections::BTreeMap<String, crate::protocol::CameraTransform>,
+) {
+    let Some(value) = overrides.get(&source.id) else {
+        return;
+    };
+    source.transform = sanitize_transform_unsnapped(SceneTransform {
+        x: value.x,
+        y: value.y,
+        width: value.width,
+        height: value.height,
+        crop_left: source.transform.crop_left,
+        crop_top: source.transform.crop_top,
+        crop_right: source.transform.crop_right,
+        crop_bottom: source.transform.crop_bottom,
+    });
 }
 
 fn base_source(sources: &SourceSelection) -> SceneSource {
@@ -993,6 +1045,9 @@ mod tests {
 
         assert_eq!(layout.camera_corner_radius_pct, 12);
         assert_eq!(layout.camera_aspect, crate::protocol::CameraAspect::Source);
+        // Pre-freeform layouts must land in Preset with no overrides.
+        assert_eq!(layout.arrangement_mode, ArrangementMode::Preset);
+        assert!(layout.source_transform_overrides.is_empty());
     }
 
     fn base_params() -> SceneConfigParams {
@@ -1023,6 +1078,8 @@ mod tests {
                 side_by_side_split: SideBySideSplit::SeventyThirty,
                 side_by_side_camera_side: SideBySideCameraSide::Right,
                 vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+                arrangement_mode: crate::protocol::ArrangementMode::Preset,
+                source_transform_overrides: std::collections::BTreeMap::new(),
                 camera_chroma_key_enabled: false,
                 camera_chroma_key_color: "#00FF00".to_string(),
                 camera_chroma_key_similarity_pct: 40,
@@ -1086,6 +1143,106 @@ mod tests {
         assert!(camera.default_transform.x > 0.6);
         assert!(camera.default_transform.y > 0.6);
         assert_ne!(camera.default_transform.x, camera.transform.x);
+    }
+
+    #[test]
+    fn freeform_composes_base_sources_and_applies_overrides() {
+        let mut params = base_params();
+        params.layout.arrangement_mode = ArrangementMode::Freeform;
+        params.layout.source_transform_overrides = std::collections::BTreeMap::from([
+            (
+                "source:base".to_string(),
+                CameraTransform {
+                    x: 0.05,
+                    y: 0.1,
+                    width: 0.6,
+                    height: 0.6,
+                },
+            ),
+            (
+                "source:camera".to_string(),
+                CameraTransform {
+                    x: 0.7,
+                    y: 0.2,
+                    width: 0.25,
+                    height: 0.5,
+                },
+            ),
+        ]);
+
+        let scene = scene_from_capture_config(params);
+        assert_eq!(scene.sources.len(), 2);
+        let screen = &scene.sources[0];
+        let camera = &scene.sources[1];
+
+        assert_eq!(screen.kind, SceneSourceKind::Screen);
+        assert!((screen.transform.x - 0.05).abs() < 1e-9);
+        assert!((screen.transform.width - 0.6).abs() < 1e-9);
+        // Reset stays sane: default_transform keeps the preset-derived box.
+        assert_eq!(screen.default_transform, full_frame_transform());
+
+        assert_eq!(camera.kind, SceneSourceKind::Camera);
+        assert!((camera.transform.x - 0.7).abs() < 1e-9);
+        assert!((camera.transform.height - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn freeform_without_overrides_matches_the_screen_camera_base() {
+        let mut freeform = base_params();
+        freeform.layout.arrangement_mode = ArrangementMode::Freeform;
+        let mut preset = base_params();
+        preset.layout.layout_preset = LayoutPreset::ScreenCamera;
+
+        let freeform_scene = scene_from_capture_config(freeform);
+        let preset_scene = scene_from_capture_config(preset);
+        assert_eq!(freeform_scene.sources, preset_scene.sources);
+    }
+
+    #[test]
+    fn freeform_ignores_the_selected_preset_arrangement() {
+        // The preset id stays for orientation/memory; the composition is the
+        // freeform base, not the preset's fixed bands.
+        let mut params = base_params();
+        params.layout.layout_preset = LayoutPreset::SideBySide;
+        params.layout.arrangement_mode = ArrangementMode::Freeform;
+        params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
+            "source:base".to_string(),
+            CameraTransform {
+                x: 0.25,
+                y: 0.25,
+                width: 0.5,
+                height: 0.5,
+            },
+        )]);
+
+        let scene = scene_from_capture_config(params);
+        let screen = &scene.sources[0];
+        assert!((screen.transform.x - 0.25).abs() < 1e-9);
+        assert!((screen.transform.width - 0.5).abs() < 1e-9);
+    }
+
+    #[test]
+    fn freeform_overrides_keep_camera_crops_and_sanitize_values() {
+        let mut params = base_params();
+        params.layout.camera_zoom = 150;
+        params.layout.arrangement_mode = ArrangementMode::Freeform;
+        params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
+            "source:camera".to_string(),
+            CameraTransform {
+                x: f64::NAN,
+                y: 9.0,
+                width: 0.4,
+                height: 0.4,
+            },
+        )]);
+
+        let scene = scene_from_capture_config(params);
+        let camera = &scene.sources[1];
+        // Sanitized like a live transform update: NaN -> 0, position clamped.
+        assert_eq!(camera.transform.x, 0.0);
+        assert!(camera.transform.y <= 2.0);
+        // The zoom crop rides along.
+        assert!(camera.transform.crop_left > 0.0 || camera.transform.crop_right > 0.0);
     }
 
     #[test]

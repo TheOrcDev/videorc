@@ -373,6 +373,7 @@ export const LAYOUT_PRESET_VALUES = [
 export type CameraTransformMode = 'preset' | 'custom'
 export type SideBySideSplit = '50-50' | '60-40' | '70-30'
 export type VerticalScreenFraming = 'fill' | 'fit'
+export type ArrangementMode = 'preset' | 'freeform'
 export type SideBySideCameraSide = 'left' | 'right'
 
 export interface CameraTransform {
@@ -418,6 +419,18 @@ export interface LayoutSettings {
    * covers the rest. Horizontal scenes ignore it.
    */
   verticalScreenFraming: VerticalScreenFraming
+  /**
+   * 'preset' (default) composes the fixed layoutPreset arrangement.
+   * 'freeform' composes the screen + camera base and applies
+   * sourceTransformOverrides: the "arrange it yourself" mode. layoutPreset
+   * stays meaningful in freeform (orientation, the scene to return to).
+   */
+  arrangementMode: ArrangementMode
+  /**
+   * Per-source transforms for freeform, keyed by the stable scene source id
+   * ('source:base', 'source:camera'). Empty means the base arrangement.
+   */
+  sourceTransformOverrides: Record<string, CameraTransform>
 }
 
 export type SceneSourceKind = 'screen' | 'window' | 'camera' | 'test-pattern'

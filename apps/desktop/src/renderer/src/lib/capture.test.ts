@@ -43,6 +43,7 @@ import {
   preparedYouTubeCompletionTargets,
   previewDeviceRefreshSignature,
   persistableCaptureConfig,
+  simulcastLegLayout,
   reconcileSourceSelection,
   reconcileSourceSelectionForLayoutTransaction,
   resetAudioSyncCalibration,
@@ -631,7 +632,9 @@ describe('smokePreviewCompositorCaptureConfig', () => {
       cameraOffsetY: 0,
       sideBySideSplit: '70-30',
       sideBySideCameraSide: 'right',
-      verticalScreenFraming: 'fill'
+      verticalScreenFraming: 'fill',
+      arrangementMode: 'preset',
+      sourceTransformOverrides: {}
     },
     video: {
       preset: 'tutorial-1440p30',
@@ -717,7 +720,9 @@ describe('smokePreviewCompositorCaptureConfig', () => {
         cameraOffsetY: 0,
         sideBySideSplit: '70-30',
         sideBySideCameraSide: 'right',
-        verticalScreenFraming: 'fill'
+        verticalScreenFraming: 'fill',
+        arrangementMode: 'preset',
+        sourceTransformOverrides: {}
       },
       video: {
         preset: 'tutorial-1440p30',
@@ -1718,6 +1723,91 @@ describe('normalizeCaptionsCaptureSettings', () => {
       position: 'top',
       textSize: 's'
     })
+  })
+})
+
+describe('freeform arrangement (plan phase 4)', () => {
+  it('defaults legacy layouts to the preset arrangement with no overrides', () => {
+    const layout = normalizeLayoutSettings({
+      layoutPreset: 'screen-camera',
+      cameraCorner: 'bottom-right',
+      cameraSize: 'medium',
+      cameraShape: 'rectangle',
+      cameraMargin: 32
+    })
+
+    expect(layout.arrangementMode).toBe('preset')
+    expect(layout.sourceTransformOverrides).toEqual({})
+  })
+
+  it('keeps freeform and its well-formed overrides across a persistence round-trip', () => {
+    const persisted = persistableCaptureConfig({
+      ...defaultCaptureConfig,
+      layout: {
+        ...defaultCaptureConfig.layout,
+        arrangementMode: 'freeform',
+        sourceTransformOverrides: {
+          'source:base': { x: 0.05, y: 0.1, width: 0.6, height: 0.6 },
+          'source:camera': { x: 0.7, y: 0.2, width: 0.25, height: 0.5 }
+        }
+      }
+    })
+    // The exact localStorage round-trip: serialize, parse, normalize.
+    const layout = normalizeLayoutSettings(
+      (JSON.parse(JSON.stringify(persisted)) as CaptureConfig).layout
+    )
+
+    expect(layout.arrangementMode).toBe('freeform')
+    expect(layout.sourceTransformOverrides).toEqual({
+      'source:base': { x: 0.05, y: 0.1, width: 0.6, height: 0.6 },
+      'source:camera': { x: 0.7, y: 0.2, width: 0.25, height: 0.5 }
+    })
+  })
+
+  it('drops malformed overrides instead of poisoning the scene commit', () => {
+    const layout = normalizeLayoutSettings({
+      arrangementMode: 'freeform',
+      sourceTransformOverrides: {
+        'source:base': { x: 0.1, y: 0.1, width: 0.5, height: 0.5 },
+        'source:camera': { x: 'wide', y: 0.2, width: 0.25 },
+        '': { x: 0, y: 0, width: 1, height: 1 }
+      }
+    } as unknown as Partial<CaptureConfig['layout']>)
+
+    expect(layout.sourceTransformOverrides).toEqual({
+      'source:base': { x: 0.1, y: 0.1, width: 0.5, height: 0.5 }
+    })
+  })
+
+  it('rejects junk arrangement modes back to preset', () => {
+    expect(
+      normalizeLayoutSettings({ arrangementMode: 'chaotic' } as unknown as Partial<
+        CaptureConfig['layout']
+      >).arrangementMode
+    ).toBe('preset')
+    expect(
+      normalizeLayoutSettings({ sourceTransformOverrides: ['nope'] } as unknown as Partial<
+        CaptureConfig['layout']
+      >).sourceTransformOverrides
+    ).toEqual({})
+  })
+
+  it('the simulcast leg never inherits freeform from the program', () => {
+    const leg = simulcastLegLayout({
+      layout: {
+        ...defaultCaptureConfig.layout,
+        arrangementMode: 'freeform',
+        sourceTransformOverrides: {
+          'source:base': { x: 0.05, y: 0.1, width: 0.6, height: 0.6 }
+        }
+      },
+      lastVerticalPreset: 'vertical-camera-top',
+      simulcastFollowsProgram: false,
+      simulcastScreenFraming: 'fit'
+    })
+
+    expect(leg.arrangementMode).toBe('preset')
+    expect(leg.sourceTransformOverrides).toEqual({})
   })
 })
 

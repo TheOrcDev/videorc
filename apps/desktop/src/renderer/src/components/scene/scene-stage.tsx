@@ -68,11 +68,13 @@ export function SceneStage({
   dragEnabled = false,
   resizeEnabled = false,
   cameraAspectLocked = false,
+  freeform = false,
   outputAspect = 16 / 9,
   onSelectSource,
   onTogglePreview,
   onCommitTransform,
-  onSnapCorner
+  onSnapCorner,
+  onRequestFreeform
 }: {
   scene: Scene | null
   selectedSourceId: string | null
@@ -88,6 +90,8 @@ export function SceneStage({
   resizeEnabled?: boolean
   /** The camera's aspect is owned by the mask law (circle / square / portrait). */
   cameraAspectLocked?: boolean
+  /** Freeform arrangement: every source is editable, full-canvas included. */
+  freeform?: boolean
   /** Output canvas aspect (width / height); drives the stage shape. */
   outputAspect?: number
   onSelectSource: (sourceId: string) => void
@@ -97,6 +101,8 @@ export function SceneStage({
     transform: { x: number; y: number; width?: number; height?: number }
   ) => void
   onSnapCorner?: (corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right') => void
+  /** Offered when a fixed arrangement blocks a gesture ("Make freeform"). */
+  onRequestFreeform?: () => void
 }): ReactElement {
   const sources = scene?.sources ?? []
   const stageH = stageHeight(outputAspect)
@@ -104,6 +110,12 @@ export function SceneStage({
   const gestureRef = useRef<StageGesture | null>(null)
   // Live gesture ghost (normalized) — visual only until pointerup commits.
   const [ghost, setGhost] = useState<StageGhost | null>(null)
+  // One-line affordance when a gesture lands on a fixed arrangement.
+  const [showFreeformHint, setShowFreeformHint] = useState(false)
+
+  useEffect(() => {
+    setShowFreeformHint(false)
+  }, [freeform, dragEnabled])
 
   // Escape cancels an in-flight gesture without committing.
   useEffect(() => {
@@ -120,10 +132,17 @@ export function SceneStage({
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [ghost])
 
-  const sourceMoveable = (source: SceneSource): boolean =>
-    dragEnabled && !source.locked && (source.transform.width < 1 || source.transform.height < 1)
+  // Freeform lifts the full-canvas restriction: shrinking a 100% screen is
+  // exactly what the mode is for. Fixed presets keep it (a full-canvas box
+  // has nowhere to move).
+  const sourceEditableRect = (source: SceneSource): boolean =>
+    freeform || source.transform.width < 1 || source.transform.height < 1
 
-  const sourceResizable = (source: SceneSource): boolean => resizeEnabled && sourceMoveable(source)
+  const sourceMoveable = (source: SceneSource): boolean =>
+    dragEnabled && !source.locked && sourceEditableRect(source)
+
+  const sourceResizable = (source: SceneSource): boolean =>
+    resizeEnabled && !source.locked && sourceEditableRect(source)
 
   const normalizedDelta = (event: {
     clientX: number
@@ -178,6 +197,9 @@ export function SceneStage({
     event: React.PointerEvent<Element>
   ): void => {
     if (kind === 'move' ? !sourceMoveable(source) : !sourceResizable(source)) {
+      if (onRequestFreeform && !source.locked) {
+        setShowFreeformHint(true)
+      }
       return
     }
     gestureRef.current = {
@@ -364,6 +386,26 @@ export function SceneStage({
           </button>
         ))}
       </div>
+
+      {/* Fixed-arrangement affordance: offer Freeform instead of silently
+          mutating a preset (plan phase 4). */}
+      {showFreeformHint && onRequestFreeform ? (
+        <div className="pointer-events-none absolute inset-x-0 bottom-12 flex justify-center">
+          <div className="pointer-events-auto flex items-center gap-1.5 rounded-chip border border-border bg-background/80 py-0.5 pl-2 pr-0.5 text-[11px] text-muted-foreground backdrop-blur-sm">
+            <span>This scene has a fixed arrangement.</span>
+            <Button
+              size="xs"
+              variant="ghost"
+              onClick={() => {
+                setShowFreeformHint(false)
+                onRequestFreeform()
+              }}
+            >
+              Make freeform
+            </Button>
+          </div>
+        </div>
+      ) : null}
 
       {/* Ground truth lives in the detached preview window. */}
       <div className="absolute inset-x-0 bottom-2 flex justify-center">

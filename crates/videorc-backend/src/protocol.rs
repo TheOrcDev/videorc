@@ -434,6 +434,29 @@ pub struct LayoutSettings {
     /// the renderer contract — serde null trap).
     #[serde(default)]
     pub vertical_screen_framing: VerticalScreenFraming,
+    /// Preset (default) composes the fixed `layout_preset` arrangement.
+    /// Freeform composes the screen + camera base and applies
+    /// `source_transform_overrides` — the "arrange it yourself" mode.
+    /// `layout_preset` stays meaningful in Freeform (orientation and the
+    /// remembered preset to return to). Non-optional with a default on
+    /// purpose (serde null trap).
+    #[serde(default)]
+    pub arrangement_mode: ArrangementMode,
+    /// Per-source transforms for Freeform, keyed by the stable scene source id
+    /// ("source:base", "source:camera"). Empty means the base arrangement.
+    /// Non-optional with a default on purpose (serde null trap); serializes
+    /// as an empty object, never null.
+    #[serde(default)]
+    pub source_transform_overrides: std::collections::BTreeMap<String, CameraTransform>,
+}
+
+/// How the scene's source boxes are arranged on the canvas.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ArrangementMode {
+    #[default]
+    Preset,
+    Freeform,
 }
 
 /// Screen framing for vertical-mode scenes.
@@ -833,6 +856,8 @@ pub(crate) fn default_layout_settings() -> LayoutSettings {
         side_by_side_split: default_side_by_side_split(),
         side_by_side_camera_side: default_side_by_side_camera_side(),
         vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+        arrangement_mode: ArrangementMode::Preset,
+        source_transform_overrides: std::collections::BTreeMap::new(),
     }
 }
 
@@ -4762,6 +4787,8 @@ mod tests {
             side_by_side_split: SideBySideSplit::SixtyForty,
             side_by_side_camera_side: SideBySideCameraSide::Left,
             vertical_screen_framing: crate::protocol::VerticalScreenFraming::Fill,
+            arrangement_mode: crate::protocol::ArrangementMode::Preset,
+            source_transform_overrides: std::collections::BTreeMap::new(),
             camera_chroma_key_enabled: false,
             camera_chroma_key_color: "#00FF00".to_string(),
             camera_chroma_key_similarity_pct: 40,

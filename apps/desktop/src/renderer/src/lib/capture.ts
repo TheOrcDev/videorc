@@ -302,7 +302,11 @@ export function simulcastLegLayout(
     layoutPreset: simulcastLegPreset(config, programPreset),
     verticalScreenFraming: config.simulcastScreenFraming,
     cameraTransformMode: 'preset',
-    cameraTransform: null
+    cameraTransform: null,
+    // The leg streams its own vertical scene: a freeform horizontal program
+    // (and its overrides) must never leak onto the portrait canvas.
+    arrangementMode: 'preset',
+    sourceTransformOverrides: {}
   }
 }
 
@@ -1198,7 +1202,9 @@ export const defaultCaptureConfig: CaptureConfig = {
     cameraOffsetY: 0,
     sideBySideSplit: '70-30',
     sideBySideCameraSide: 'right',
-    verticalScreenFraming: 'fill'
+    verticalScreenFraming: 'fill',
+    arrangementMode: 'preset',
+    sourceTransformOverrides: {}
   },
   audio: {
     microphoneGainDb: 0,
@@ -1702,8 +1708,26 @@ export function normalizeLayoutSettings(layout: unknown): LayoutSettings {
         : defaultCaptureConfig.layout.sideBySideCameraSide,
     verticalScreenFraming: isVerticalScreenFraming(candidate.verticalScreenFraming)
       ? candidate.verticalScreenFraming
-      : defaultCaptureConfig.layout.verticalScreenFraming
+      : defaultCaptureConfig.layout.verticalScreenFraming,
+    arrangementMode: candidate.arrangementMode === 'freeform' ? 'freeform' : 'preset',
+    sourceTransformOverrides: normalizeSourceTransformOverrides(candidate.sourceTransformOverrides)
   }
+}
+
+/** Keep only well-formed override entries; anything else falls back to the
+ * base arrangement for that source instead of poisoning the scene commit. */
+function normalizeSourceTransformOverrides(overrides: unknown): Record<string, CameraTransform> {
+  if (!overrides || typeof overrides !== 'object' || Array.isArray(overrides)) {
+    return {}
+  }
+  const normalized: Record<string, CameraTransform> = {}
+  for (const [sourceId, value] of Object.entries(overrides as Record<string, unknown>)) {
+    const transform = normalizeCameraTransform(value)
+    if (sourceId && transform) {
+      normalized[sourceId] = transform
+    }
+  }
+  return normalized
 }
 
 export function normalizeVideoSettings(video: unknown): VideoSettings {
