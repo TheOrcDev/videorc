@@ -12,6 +12,7 @@ import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { SceneStage } from '@/components/scene/scene-stage'
+import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
@@ -430,6 +431,21 @@ export function LayoutTab(): ReactElement {
                     onChange={(cameraMargin) => patchLayout({ cameraMargin })}
                     onCommit={(cameraMargin) => applyLayoutPatch({ cameraMargin })}
                   />
+
+                  {/* The precise twin of the stage drag: numeric percent
+                      fields that commit through the same backend scene
+                      commit, so both paths always agree. */}
+                  <SourceTransformFields
+                    aspectForced={
+                      layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'
+                    }
+                    disabled={isSessionActive}
+                    disabledReason="Scene layout is locked while a session is live."
+                    outputHeight={captureConfig.video.height}
+                    outputWidth={captureConfig.video.width}
+                    source={selectedSource}
+                    onCommit={(patch) => void setSceneSourceTransform(selectedSource.id, patch)}
+                  />
                 </>
               ) : null}
 
@@ -666,12 +682,7 @@ export function LayoutTab(): ReactElement {
           ) : (
             <div className="grid gap-3">
               <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="truncate text-sm font-semibold">{selectedSource.name}</div>
-                  <div className="text-xs text-muted-foreground">
-                    {transformLabel(selectedSource)}
-                  </div>
-                </div>
+                <div className="min-w-0 truncate text-sm font-semibold">{selectedSource.name}</div>
                 <Button
                   disabled={isSessionActive}
                   size="sm"
@@ -681,6 +692,16 @@ export function LayoutTab(): ReactElement {
                   Reset
                 </Button>
               </div>
+              {/* Precise numeric twin of the stage gestures; commits ride the
+                  same backend scene commit and echo the sanitized result. */}
+              <SourceTransformFields
+                disabled={isSessionActive}
+                disabledReason="Scene layout is locked while a session is live."
+                outputHeight={captureConfig.video.height}
+                outputWidth={captureConfig.video.width}
+                source={selectedSource}
+                onCommit={(patch) => void setSceneSourceTransform(selectedSource.id, patch)}
+              />
               {/* w-fit + auto columns keep the arrows a tight d-pad cluster —
                   1fr side columns stretched, stranding ← at the panel edge
                   (external tester report, 2026-07-06). */}
@@ -776,14 +797,4 @@ function SourceVisibilityField({
 
 function sourceIsFullCanvas(source: SceneSource): boolean {
   return source.transform.width >= 1 && source.transform.height >= 1
-}
-
-function transformLabel(source: SceneSource): string {
-  const transform = source.transform
-  return [
-    `x ${Math.round(transform.x * 100)}%`,
-    `y ${Math.round(transform.y * 100)}%`,
-    `w ${Math.round(transform.width * 100)}%`,
-    `h ${Math.round(transform.height * 100)}%`
-  ].join(' · ')
 }
