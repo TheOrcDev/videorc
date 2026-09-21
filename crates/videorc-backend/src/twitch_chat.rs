@@ -137,10 +137,8 @@ pub async fn send_twitch_chat_message(
     // provider message parses successfully.
     let body = serde_json::from_slice::<Value>(&response_bytes).ok();
     Err(match status.as_u16() {
-        401 | 403 => {
-            "Twitch rejected the send — reconnect Twitch to grant the new chat permission."
-                .to_string()
-        }
+        401 | 403 => "Twitch rejected the send. Reconnect Twitch to grant the new chat permission."
+            .to_string(),
         429 => format!(
             "Twitch rate-limited the send{}.",
             retry_after
@@ -1240,7 +1238,7 @@ mod tests {
     #[tokio::test]
     async fn send_classifies_non_json_auth_and_rate_limit_errors_from_status() {
         for (status, expected) in [
-            (StatusCode::UNAUTHORIZED, "reconnect Twitch"),
+            (StatusCode::UNAUTHORIZED, "Reconnect Twitch"),
             (StatusCode::TOO_MANY_REQUESTS, "rate-limited"),
         ] {
             let base = spawn_raw_chat_send_server(status, "not-json").await;

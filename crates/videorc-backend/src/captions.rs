@@ -4234,7 +4234,7 @@ async fn run_caption_session(mut session: CaptionSession) {
                 &session.session_client_id,
             );
             status.reason_code = Some("realtime-fallback".to_string());
-            status.message = Some(format!("Captions on with higher delay — {reason}"));
+            status.message = Some(format!("Captions on with higher delay: {reason}"));
             publish_status(&session.state, status).await;
             run_chunked_caption_session(
                 &mut session,
@@ -4736,7 +4736,7 @@ async fn signal_reconnecting(session: &CaptionSession, reconnecting: &mut bool, 
         &session.session_client_id,
     );
     status.reason_code = Some("realtime-reconnecting".to_string());
-    status.message = Some(format!("Captions reconnecting — {message}"));
+    status.message = Some(format!("Captions reconnecting: {message}"));
     publish_status(&session.state, status).await;
 }
 
@@ -5414,7 +5414,7 @@ async fn run_chunked_caption_session(
                             );
                             status.provider_ready = provider_confirmed;
                             status.reason_code = Some("chunk-upload-retrying".to_string());
-                            status.message = Some(format!("Captions retrying — {message}"));
+                            status.message = Some(format!("Captions retrying: {message}"));
                             publish_status(&session.state, status).await;
                             degraded_reason = Some(message);
                         }

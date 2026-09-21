@@ -77,7 +77,7 @@ export function ScenesGallery(): ReactElement {
             role="group"
             title={
               isSessionActive
-                ? 'The canvas is fixed while a session is running — stop to switch orientation.'
+                ? 'The canvas is fixed while a session is running. Stop to switch orientation.'
                 : undefined
             }
           >

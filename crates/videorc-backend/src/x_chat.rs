@@ -348,7 +348,7 @@ async fn run_x_chat_session(
     .map_err(|error| {
         if error.rejected {
             terminal(format!(
-                "X refused the live chat subscription — re-authorize X Live. ({error})"
+                "X refused the live chat subscription. Re-authorize X Live. ({error})"
             ))
         } else {
             anyhow::Error::new(error)
@@ -522,13 +522,13 @@ impl RelayClient {
         let (code, message) = crate::videorc_api::read_error_code_and_message(response).await;
         match code.as_str() {
             "unauthorized" => Err(terminal(
-                "Your Videorc sign-in expired — sign in again to receive X comments.",
+                "Your Videorc sign-in expired. Sign in again to receive X comments.",
             )),
             "x-chat-bind-rejected" => Err(terminal(
-                "X did not confirm this account — re-authorize X Live to receive X comments.",
+                "X did not confirm this account. Re-authorize X Live to receive X comments.",
             )),
             _ if status.as_u16() == 401 => Err(terminal(
-                "Your Videorc sign-in expired — sign in again to receive X comments.",
+                "Your Videorc sign-in expired. Sign in again to receive X comments.",
             )),
             // Everything else (relay not configured, binding lost, 5xx, rate
             // limits) can heal without the user, so the connector retries.
@@ -1347,9 +1347,9 @@ mod tests {
     #[tokio::test]
     async fn rejected_identity_proof_fails_terminally_without_retrying() {
         for (mode, expected) in [
-            (MockMode::BindRejected, "re-authorize X Live"),
-            (MockMode::SignedOut, "sign in again"),
-            (MockMode::SubscriptionRejected, "re-authorize X Live"),
+            (MockMode::BindRejected, "Re-authorize X Live"),
+            (MockMode::SignedOut, "Sign in again"),
+            (MockMode::SubscriptionRejected, "Re-authorize X Live"),
         ] {
             let server = spawn_mock_server(mode, Vec::new()).await;
             let state = test_state();
@@ -1399,7 +1399,7 @@ mod tests {
 
         let provider =
             wait_for_provider_state(&state, LiveChatProviderConnectionState::Failed).await;
-        assert!(provider.message.contains("sign in again"));
+        assert!(provider.message.contains("Sign in again"));
     }
 
     #[tokio::test]

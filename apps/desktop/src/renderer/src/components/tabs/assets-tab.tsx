@@ -119,7 +119,7 @@ export function AssetsTab(): ReactElement {
     }
     const target = explicitSlotId ?? firstEmptySlotId(registry)
     if (!target) {
-      toast.error('All preset slots are full — replace one from its ⋯ menu.')
+      toast.error('All preset slots are full. Replace one from its ⋯ menu.')
       return
     }
 

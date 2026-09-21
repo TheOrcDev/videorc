@@ -174,7 +174,7 @@ describe('cohostEmptyStateCopy', () => {
     expect(cohostEmptyStateCopy(cohostPresenceView(one, NOW), one)).toBe('Reading 1 new message…')
     const idle = listening()
     expect(cohostEmptyStateCopy(cohostPresenceView(idle, NOW), idle)).toBe(
-      'Listening — questions from chat will appear here.'
+      'Listening. Questions from chat will appear here.'
     )
     const off = offCohostState()
     expect(cohostEmptyStateCopy(cohostPresenceView(off, NOW), off)).toBe(

@@ -83,7 +83,7 @@ export function PermissionsOnboardingDialog({
               <DialogDescription>
                 {isWindows
                   ? `Turn on camera and microphone access in ${settingsName}. You can change any of this later in Settings.`
-                  : 'macOS asks once per permission. Grant what you need — you can change any of this later in Settings.'}
+                  : 'macOS asks once per permission. Grant what you need. You can change any of this later in Settings.'}
               </DialogDescription>
             </div>
           </div>

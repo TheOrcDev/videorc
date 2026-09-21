@@ -43,7 +43,7 @@ export function TakeoverScreensSection(): ReactElement {
           {screenImportPending ? 'Importing' : 'Upload'}
         </Button>
       }
-      description="Full-frame images that cover the output — flip them on from the Studio session panel. Drag tiles to reorder. Management is locked while a session is live."
+      description="Full-frame images that cover the output. Flip them on from the Studio session panel. Drag tiles to reorder. Management is locked while a session is live."
       icon={ImageIcon}
       title="Takeover screens"
     >

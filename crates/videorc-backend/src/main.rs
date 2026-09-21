@@ -3579,7 +3579,7 @@ fn spawn_x_playback_watch(
                     session_id.as_deref(),
                     protocol::HealthLevel::Warn,
                     "x-playback-pending",
-                    "X is still provisioning playback — viewers may see a loading spinner. Keep streaming; this can take a few minutes.",
+                    "X is still provisioning playback. Viewers may see a loading spinner. Keep streaming; this can take a few minutes.",
                 );
                 emit_status("pending", Some(published_at.elapsed().as_millis() as u64));
             }
@@ -3606,7 +3606,7 @@ fn spawn_x_playback_watch(
             session_id.as_deref(),
             protocol::HealthLevel::Error,
             "x-playback-unavailable",
-            "X never produced playback for this broadcast — viewers saw a loading spinner. Your local recording is unaffected.",
+            "X never produced playback for this broadcast. Viewers saw a loading spinner. Your local recording is unaffected.",
         );
         emit_status(
             "unavailable",

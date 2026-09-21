@@ -220,7 +220,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'approximated',
           subject: source.name,
-          note: `display captures cannot be matched exactly — mapped to ${firstScreen.name}; re-pick in Sources if wrong`
+          note: `display captures cannot be matched exactly; mapped to ${firstScreen.name}; re-pick in Sources if wrong`
         })
       } else {
         report.push({
@@ -245,7 +245,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'approximated',
           subject: source.name,
-          note: `no open window matches "${hint}" right now — pick it in Sources`
+          note: `no open window matches "${hint}" right now; pick it in Sources`
         })
       }
     }
@@ -253,7 +253,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'approximated',
         subject: extra.name,
-        note: 'Videorc scenes hold one screen — kept the topmost'
+        note: 'Videorc scenes hold one screen; kept the topmost'
       })
     }
   }
@@ -271,7 +271,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'approximated',
         subject: source.name,
-        note: `no connected camera named "${source.deviceName ?? source.name}" — pick one in Sources`
+        note: `no connected camera named "${source.deviceName ?? source.name}"; pick one in Sources`
       })
     }
     const box = cameraBox(item, source, setup.canvasWidth, setup.canvasHeight)
@@ -287,7 +287,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'approximated',
           subject: `${source.name} position`,
-          note: 'camera size estimated from a 1080p feed — nudge it on the Scene stage if off'
+          note: 'camera size estimated from a 1080p feed; nudge it on the Scene stage if off'
         })
       }
     }
@@ -295,7 +295,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'approximated',
         subject: extra.name,
-        note: 'Videorc scenes hold one camera — kept the topmost'
+        note: 'Videorc scenes hold one camera; kept the topmost'
       })
     }
   }
@@ -320,7 +320,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       report.push({
         verdict: 'approximated',
         subject: micSource.name,
-        note: 'could not match the mic by name — pick it in Sources'
+        note: 'could not match the mic by name; pick it in Sources'
       })
     }
     if (typeof micSource.volume === 'number' && micSource.volume !== 1) {
@@ -391,7 +391,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
     report.push({
       verdict: 'skipped',
       subject: `Scene "${other.name}"`,
-      note: 'Videorc keeps one active scene — imported the current OBS scene; switch layouts in Studio'
+      note: 'Videorc keeps one active scene; imported the current OBS scene; switch layouts in Studio'
     })
   }
 
@@ -432,7 +432,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: 'set up YouTube Manual RTMP in Livestream — OBS did not include a server URL'
+          note: 'set up YouTube Manual RTMP in Livestream; OBS did not include a server URL'
         })
       } else {
         result.stream = {
@@ -443,7 +443,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: 'connect the account in Livestream instead — sign-in beats a pasted stream key'
+          note: 'connect the account in Livestream instead; sign-in beats a pasted stream key'
         })
       }
     }

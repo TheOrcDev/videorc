@@ -1224,7 +1224,7 @@ pub async fn send_broadcast_chat_message(
     }
     if status.as_u16() == 400 {
         return Err(
-            "X rejected the chat message — the broadcast may not be live yet or has ended."
+            "X rejected the chat message. The broadcast may not be live yet or has ended."
                 .to_string(),
         );
     }

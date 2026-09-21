@@ -548,7 +548,7 @@ function GoLiveSimulcastAdvisory(): ReactElement | null {
       <span className="text-sm font-medium">Streaming both orientations</span>
       <span className="text-xs text-muted-foreground">
         The horizontal scene streams to your landscape destinations while the saved vertical scene
-        streams to the vertical ones — about {mbps} Mbps upstream across all legs.
+        streams to the vertical ones, about {mbps} Mbps upstream across all legs.
       </span>
       {hasInstagram ? (
         <span className="text-xs text-muted-foreground">

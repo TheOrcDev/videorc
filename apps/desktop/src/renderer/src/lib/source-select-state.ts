@@ -10,7 +10,7 @@ export function sourceSelectPlaceholder(deviceCount: number, discoveryPending: b
     return 'Finding devices…'
   }
   if (deviceCount === 0) {
-    return 'No devices found — check System Access in Settings'
+    return 'No devices found. Check System Access in Settings'
   }
   return 'Select a device'
 }
@@ -32,5 +32,5 @@ export function missingSelection(
   if (!value || devices.some((device) => device.id === value)) {
     return null
   }
-  return { value, label: 'Saved device unavailable — pick another' }
+  return { value, label: 'Saved device unavailable. Pick another' }
 }

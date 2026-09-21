@@ -68,7 +68,7 @@ export function RecordingTab(): ReactElement {
       >
         {isSessionActive ? (
           <p className="text-sm text-muted-foreground">
-            Locked while live — output settings apply to the next session.
+            Locked while live. Output settings apply to the next session.
           </p>
         ) : null}
         <FieldGroup>

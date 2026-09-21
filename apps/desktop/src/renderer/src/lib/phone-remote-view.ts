@@ -4,7 +4,7 @@ import type { RemoteLanDevice, RemoteLanStatus } from '@/lib/backend'
 
 /** Phone remote is off by default; an empty card body reads as a render bug. */
 export const PHONE_REMOTE_OFF_HINT =
-  'Off — turn on to watch comments and run your stream from a phone on the same Wi-Fi.'
+  'Off. Turn on to watch comments and run your stream from a phone on the same Wi-Fi.'
 
 /** Nothing connected this long after a code is shown ⇒ explain why not. */
 export const PAIRING_TROUBLE_HINT_AFTER_MS = 30_000

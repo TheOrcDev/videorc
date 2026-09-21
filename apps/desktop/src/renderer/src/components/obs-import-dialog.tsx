@@ -185,7 +185,7 @@ export function ObsImportDialog({
         }
       }
       toast.success('OBS setup imported', {
-        description: 'Review Sources and the Scene stage — the report told you what changed.'
+        description: 'Review Sources and the Scene stage. The report told you what changed.'
       })
       onOpenChange(false)
     } finally {

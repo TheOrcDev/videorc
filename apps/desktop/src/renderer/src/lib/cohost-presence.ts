@@ -131,7 +131,7 @@ function presenceTooltip(
     lines.push('Co-host is off. It reads live chat, groups questions and drafts replies.')
   }
   if (kind === 'starting') {
-    lines.push('Co-host is starting — waiting for the first pass.')
+    lines.push('Co-host is starting. Waiting for the first pass.')
   }
 
   const lastPass = cohostAgoLabel(state?.lastTickAt ?? null, nowMs)
@@ -192,15 +192,15 @@ export function cohostPresenceView(
   }
 }
 
-/** The pane's empty-state copy: static "Listening —" upgrades to real work. */
+/** The pane's empty-state copy: static "Listening." upgrades to real work. */
 export function cohostEmptyStateCopy(view: CohostPresenceView, state: CohostState | null): string {
   if (view.kind === 'reading') {
     const pending = nonNegative(state?.pendingMessages)
     return `Reading ${pending} new ${plural(pending, 'message')}…`
   }
   if (view.kind === 'thinking') return 'Thinking about the last batch…'
-  if (view.kind === 'listening') return 'Listening — questions from chat will appear here.'
-  if (view.kind === 'starting') return 'Starting — questions from chat will appear here.'
+  if (view.kind === 'listening') return 'Listening. Questions from chat will appear here.'
+  if (view.kind === 'starting') return 'Starting. Questions from chat will appear here.'
   return 'Questions from chat will appear here once co-host is listening again.'
 }
 

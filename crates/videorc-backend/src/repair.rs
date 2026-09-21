@@ -1885,7 +1885,7 @@ fn describe_issue(issue: &QualityIssue) -> String {
             count,
             longest_seconds,
         } => format!(
-            "{count} low-motion segment(s), longest {longest_seconds:.1}s — no exact frame \
+            "{count} low-motion segment(s), longest {longest_seconds:.1}s, no exact frame \
              repeats, likely a still subject (not a pipeline freeze)"
         ),
         QualityIssue::RepeatedFrames { bursts, max_run } => {
@@ -1900,7 +1900,7 @@ fn describe_issue(issue: &QualityIssue) -> String {
 /// A plain-English one-liner for a repair outcome (for the markdown report).
 fn describe_outcome(outcome: &RepairOutcome) -> String {
     match outcome {
-        RepairOutcome::AlreadyClean { .. } => "already clean — no changes".to_string(),
+        RepairOutcome::AlreadyClean { .. } => "already clean, no changes".to_string(),
         RepairOutcome::Repaired {
             interpolated: true, ..
         } => "repaired (interpolated frames)".to_string(),

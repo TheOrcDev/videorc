@@ -63,7 +63,7 @@ function sourceRuntimeChip({
         return {
           label: `Stale ${Math.round(frameAgeMs / 1000)}s`,
           tone: 'warn',
-          hint: 'No fresh frames — re-select the source to restart it.'
+          hint: 'No fresh frames. Re-select the source to restart it.'
         }
       }
       return { label: 'Live', tone: 'good' }

@@ -63,7 +63,7 @@ export function deriveNoiseCleanupView({
     return view({
       menuAction: 'cancel',
       directLabel: `Cleaning ${Math.round(progress)}%`,
-      menuLabel: `Cancel cleanup — ${Math.round(progress)}%`,
+      menuLabel: `Cancel cleanup · ${Math.round(progress)}%`,
       detail: `Cleaning noise: ${Math.round(progress)}% complete.`,
       statusAnnouncement: `Cleaning noise, ${coarseProgress(progress)} percent.`,
       busy: true,
@@ -115,7 +115,7 @@ export function deriveNoiseCleanupView({
       directAction: 'upgrade',
       menuAction: 'upgrade',
       directLabel: 'Clean noise',
-      menuLabel: 'Clean noise — Premium',
+      menuLabel: 'Clean noise · Premium',
       detail: gate.reason,
       premiumLocked: true
     })

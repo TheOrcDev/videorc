@@ -45,7 +45,7 @@ describe('studioHealth', () => {
       stats({ compositorBackend: 'cpu-fallback', compositorFallbackReason: 'Metal disabled' }),
       true
     )
-    expect(result.detail).toBe('Preview may not match recording — Metal disabled')
+    expect(result.detail).toBe('Preview may not match recording: Metal disabled')
   })
 
   it('degrades when CPU fallback frames appear mid-recording even if the backend label is metal', () => {

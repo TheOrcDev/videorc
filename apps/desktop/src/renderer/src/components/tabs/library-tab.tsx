@@ -277,9 +277,7 @@ export function LibraryTab({
         <Button
           size="sm"
           title={
-            sort === 'newest'
-              ? 'Newest first — click for oldest'
-              : 'Oldest first — click for newest'
+            sort === 'newest' ? 'Newest first. Click for oldest' : 'Oldest first. Click for newest'
           }
           variant="outline"
           onClick={() => setSort((current) => (current === 'newest' ? 'oldest' : 'newest'))}
@@ -571,7 +569,7 @@ function LibraryRow({
         <LiveSessionDuration />
       ) : (
         <span className="text-xs text-muted-foreground tabular-nums">
-          {typeof session.durationMs === 'number' ? durationMsLabel(session.durationMs) : '—'}
+          {typeof session.durationMs === 'number' ? durationMsLabel(session.durationMs) : '-'}
         </span>
       )}
       <span className="text-xs text-muted-foreground tabular-nums">
@@ -609,7 +607,7 @@ function LiveSessionDuration(): ReactElement {
   const { recording } = useStudioRecording()
   return (
     <span className="text-xs text-muted-foreground tabular-nums">
-      {typeof recording.durationMs === 'number' ? durationMsLabel(recording.durationMs) : '—'}
+      {typeof recording.durationMs === 'number' ? durationMsLabel(recording.durationMs) : '-'}
     </span>
   )
 }
@@ -795,7 +793,7 @@ function RowActions({
       } else if (next.status === 'ready') {
         toast.success('Recording already passes every quality gate.')
       } else if (next.status === 'not-hundred-percent') {
-        toast.warning('Kept the original — it could not reach 100%.')
+        toast.warning('Kept the original. It could not reach 100%.')
       } else {
         toast.error('The quality check could not run.')
       }

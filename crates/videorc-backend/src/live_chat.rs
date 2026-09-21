@@ -348,7 +348,7 @@ pub fn chat_capability(
             account_id: None,
             account_label: None,
             message: format!(
-                "{} has no public comments API — watch chat in their app while you stream.",
+                "{} has no public comments API. Watch chat in their app while you stream.",
                 crate::streaming::stream_platform_label(platform)
             ),
         },
@@ -2007,7 +2007,7 @@ async fn send_to_destination(
         }
         ChatSenderConfig::YouTube {
             live_chat_id: None, ..
-        } => Err("YouTube live chat is not resolved yet — try again in a moment.".to_string()),
+        } => Err("YouTube live chat is not resolved yet. Try again in a moment.".to_string()),
         ChatSenderConfig::Twitch(config) => {
             crate::twitch_chat::send_twitch_chat_message(client, &config, text).await
         }
@@ -2017,7 +2017,7 @@ async fn send_to_destination(
             // partial-send phase already renders per-destination failures.
             if text.chars().count() > crate::x_live::X_CHAT_MESSAGE_MAX_CHARS {
                 return Err(format!(
-                    "X limits chat messages to {} characters — shorten the message to reach X.",
+                    "X limits chat messages to {} characters. Shorten the message to reach X.",
                     crate::x_live::X_CHAT_MESSAGE_MAX_CHARS
                 ));
             }
@@ -2025,7 +2025,7 @@ async fn send_to_destination(
                 .ok()
                 .flatten()
                 .ok_or_else(|| {
-                    "X Live authorization is missing — authorize X Live to send chat.".to_string()
+                    "X Live authorization is missing. Authorize X Live to send chat.".to_string()
                 })?;
             crate::x_live::send_broadcast_chat_message(
                 client,

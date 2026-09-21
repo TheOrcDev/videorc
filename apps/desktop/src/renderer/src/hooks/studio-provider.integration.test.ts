@@ -2605,7 +2605,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(toastSpies.warning).toHaveBeenCalledTimes(1)
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped — recording continues with silence',
+      'Microphone stopped: recording continues with silence',
       {
         id: 'microphone-input-lost',
         description: microphoneLost.message,
@@ -2840,7 +2840,7 @@ describe('real StudioProvider lifecycle', () => {
 
     expect(toastSpies.warning).toHaveBeenCalledTimes(1)
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped — recording continues with silence',
+      'Microphone stopped: recording continues with silence',
       {
         id: 'microphone-input-lost',
         description: microphoneLost.message,
@@ -2881,7 +2881,7 @@ describe('real StudioProvider lifecycle', () => {
     })
     expect(toastSpies.warning).toHaveBeenCalledTimes(2)
     expect(toastSpies.warning).toHaveBeenLastCalledWith(
-      'Microphone stopped — saved recording contains silence',
+      'Microphone stopped: saved recording contains silence',
       {
         id: 'microphone-input-lost',
         description: microphoneLost.message,
@@ -2941,7 +2941,7 @@ describe('real StudioProvider lifecycle', () => {
     })
 
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Microphone stopped — live session continues with silence',
+      'Microphone stopped: live session continues with silence',
       expect.objectContaining({ id: 'microphone-input-lost' })
     )
     expect(latest()?.core.sessionRuntimeNotice).toMatchObject({
@@ -3093,7 +3093,7 @@ describe('real StudioProvider lifecycle', () => {
     expect(latest()?.core.captureConfig.sources).toEqual(sources)
     expect(toastSpies.error).not.toHaveBeenCalled()
     expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Switch committed — output catching up.',
+      'Switch committed. Output catching up.',
       expect.objectContaining({ id: 'live-source-switch-output-catching-up' })
     )
   }, 10_000)

@@ -2480,7 +2480,7 @@ fn parse_provider_profile(
         StreamPlatform::X => parse_x_profile(value),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth profiles."),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
-            "{} livestreams use a manual stream key — there is no OAuth to connect.",
+            "{} livestreams use a manual stream key. There is no OAuth to connect.",
             crate::streaming::stream_platform_label(platform)
         ),
     }
@@ -2765,7 +2765,7 @@ impl OAuthTokenResponse {
 fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     match platform {
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
-            "{} livestreams use a manual stream key — there is no OAuth to connect.",
+            "{} livestreams use a manual stream key. There is no OAuth to connect.",
             crate::streaming::stream_platform_label(platform)
         ),
         StreamPlatform::Youtube => {

@@ -737,7 +737,7 @@ fn process_job_inner(
         return Err(CleanupFailure::new(ERROR_DESTINATION, error.to_string()));
     }
     let output_path = destination.display().to_string();
-    let output_title = format!("{} — Noise Cleaned", source.title.trim());
+    let output_title = format!("{} - Noise Cleaned", source.title.trim());
     let duration_ms = Some((duration * 1000.0) as i64);
     let size = match destination.metadata() {
         Ok(metadata) => metadata.len() as i64,
@@ -1458,9 +1458,9 @@ fn first_free_output_path_with(
         .unwrap_or("mp4");
     for attempt in 0..10_000 {
         let suffix = if attempt == 0 {
-            " — Noise Cleaned".to_string()
+            " - Noise Cleaned".to_string()
         } else {
-            format!(" — Noise Cleaned {}", attempt + 1)
+            format!(" - Noise Cleaned {}", attempt + 1)
         };
         let candidate = source.with_file_name(format!("{stem}{suffix}.{extension}"));
         if !candidate.exists() && !is_registered(&candidate) {
@@ -1724,12 +1724,12 @@ mod tests {
         let source = base.join("Recording.mp4");
         std::fs::write(&source, b"source").unwrap();
         let first = first_free_output_path(&source).unwrap();
-        assert_eq!(first.file_name().unwrap(), "Recording — Noise Cleaned.mp4");
+        assert_eq!(first.file_name().unwrap(), "Recording - Noise Cleaned.mp4");
         std::fs::write(&first, b"existing").unwrap();
         let second = first_free_output_path(&source).unwrap();
         assert_eq!(
             second.file_name().unwrap(),
-            "Recording — Noise Cleaned 2.mp4"
+            "Recording - Noise Cleaned 2.mp4"
         );
         std::fs::remove_file(&first).unwrap();
         let reserved =
@@ -1897,7 +1897,7 @@ mod tests {
                     &first.job.id,
                     "source",
                     "derivative",
-                    "Source title — Noise Cleaned",
+                    "Source title - Noise Cleaned",
                     "Source title",
                     published.to_str().unwrap(),
                     "mp4",
@@ -1954,7 +1954,7 @@ mod tests {
                 .clone_session_row(
                     "derivative",
                     "derivative-copy",
-                    "Source title — Noise Cleaned (copy)",
+                    "Source title - Noise Cleaned (copy)",
                     None,
                     Some(duplicate_path.to_str().unwrap()),
                     &Utc::now().to_rfc3339(),
@@ -2235,7 +2235,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&base).unwrap();
         let source_path = base.join("source.mp4");
-        let output_path = base.join("source — Noise Cleaned.mp4");
+        let output_path = base.join("source - Noise Cleaned.mp4");
         std::fs::write(&source_path, b"source bytes").unwrap();
         std::fs::write(&output_path, b"cleaned bytes").unwrap();
         let database = Database::open_in_memory_for_tests();
@@ -2273,7 +2273,7 @@ mod tests {
                     &job.job.id,
                     "source",
                     "derivative",
-                    "Source title — Noise Cleaned",
+                    "Source title - Noise Cleaned",
                     "Source title",
                     output_path.to_str().unwrap(),
                     "mp4",
@@ -2348,7 +2348,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&base).unwrap();
         let source_path = base.join("source.mp4");
-        let output_path = base.join("source — Noise Cleaned.mp4");
+        let output_path = base.join("source - Noise Cleaned.mp4");
         std::fs::write(&source_path, b"source bytes").unwrap();
         std::fs::write(&output_path, b"cleaned bytes").unwrap();
         let database = Database::open_in_memory_for_tests();
@@ -2382,7 +2382,7 @@ mod tests {
                 &job.job.id,
                 "source",
                 "derivative",
-                "Source title — Noise Cleaned",
+                "Source title - Noise Cleaned",
                 "Source title",
                 output_path.to_str().unwrap(),
                 "mp4",
@@ -2413,7 +2413,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&base).unwrap();
         let source_path = base.join("source.mp4");
-        let output_path = base.join("source — Noise Cleaned.mp4");
+        let output_path = base.join("source - Noise Cleaned.mp4");
         std::fs::write(&source_path, b"source bytes").unwrap();
         std::fs::write(&output_path, b"first cleaned bytes").unwrap();
         let database = Database::open_in_memory_for_tests();
@@ -2447,7 +2447,7 @@ mod tests {
                 &first.job.id,
                 "source",
                 "first-derivative",
-                "Source title — Noise Cleaned",
+                "Source title - Noise Cleaned",
                 "Source title",
                 output_path.to_str().unwrap(),
                 "mp4",
@@ -2483,7 +2483,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             second_path.file_name().unwrap(),
-            "source — Noise Cleaned 2.mp4"
+            "source - Noise Cleaned 2.mp4"
         );
         std::fs::write(&second_path, b"second cleaned bytes").unwrap();
         database
@@ -2491,7 +2491,7 @@ mod tests {
                 &retry.job.id,
                 "source",
                 "second-derivative",
-                "Source title — Noise Cleaned",
+                "Source title - Noise Cleaned",
                 "Source title",
                 second_path.to_str().unwrap(),
                 "mp4",
@@ -2514,7 +2514,7 @@ mod tests {
         assert!(derivatives.iter().any(|session| {
             session.id == "second-derivative" && session.mp4_path.as_deref() == second_path.to_str()
         }));
-        let stale_reserved_path = base.join("source — Noise Cleaned 3.mp4");
+        let stale_reserved_path = base.join("source - Noise Cleaned 3.mp4");
         database
             .clone_session_row(
                 "second-derivative",
@@ -2535,7 +2535,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             third_path.file_name().unwrap(),
-            "source — Noise Cleaned 4.mp4",
+            "source - Noise Cleaned 4.mp4",
             "missing paths owned by older derivative rows must remain reserved"
         );
 
@@ -2570,7 +2570,7 @@ mod tests {
         let displaced = base.join("displaced");
         std::fs::create_dir_all(&mounted).unwrap();
         let source_path = base.join("source.mp4");
-        let output_path = mounted.join("source — Noise Cleaned.mp4");
+        let output_path = mounted.join("source - Noise Cleaned.mp4");
         std::fs::write(&source_path, b"source bytes").unwrap();
         std::fs::write(&output_path, b"cleaned bytes").unwrap();
         let database = Database::open_in_memory_for_tests();
@@ -2604,7 +2604,7 @@ mod tests {
                 &job.job.id,
                 "source",
                 "derivative",
-                "Source title — Noise Cleaned",
+                "Source title - Noise Cleaned",
                 "Source title",
                 output_path.to_str().unwrap(),
                 "mp4",

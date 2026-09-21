@@ -212,7 +212,7 @@ export function showXPlaybackEvent(event: XPlaybackEvent): void {
   } else if (event.status === 'pending') {
     toast.warning('X is still provisioning playback.', {
       description:
-        'Viewers may see a loading spinner for a few minutes. Keep streaming — Videorc keeps checking.'
+        'Viewers may see a loading spinner for a few minutes. Keep streaming. Videorc keeps checking.'
     })
   } else {
     toast.error('X never produced playback for this broadcast.', {

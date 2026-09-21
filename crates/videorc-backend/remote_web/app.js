@@ -319,7 +319,7 @@ function renderDeck() {
       const on = state.activeTakeoverId === takeover.id
       return key({
         name: takeover.name,
-        hint: on ? 'Showing — tap to hide' : undefined,
+        hint: on ? 'Showing. Tap to hide' : undefined,
         on,
         onTap: () =>
           send(on ? { kind: 'takeoverHide' } : { kind: 'takeoverShow', assetId: takeover.id })

@@ -135,7 +135,7 @@ fn classify_youtube_send_error(
     };
 
     match status.as_u16() {
-        401 => "YouTube rejected the send — reconnect YouTube to refresh access.".to_string(),
+        401 => "YouTube rejected the send. Reconnect YouTube to refresh access.".to_string(),
         403 if normalized_code.contains("livechatdisabled")
             || normalized_message.contains("live chat is disabled") =>
         {
@@ -161,7 +161,7 @@ fn classify_youtube_send_error(
             "autherror" | "forbidden" | "insufficientpermissions"
         ) =>
         {
-            "YouTube rejected the send — reconnect YouTube to refresh access.".to_string()
+            "YouTube rejected the send. Reconnect YouTube to refresh access.".to_string()
         }
         403 => provider_reason
             .map(|reason| format!("YouTube send failed ({status}): {reason}"))
@@ -954,7 +954,7 @@ mod tests {
     #[tokio::test]
     async fn send_classifies_non_json_auth_and_rate_limit_errors_from_status() {
         for (status, expected) in [
-            (StatusCode::UNAUTHORIZED, "reconnect YouTube"),
+            (StatusCode::UNAUTHORIZED, "Reconnect YouTube"),
             (StatusCode::TOO_MANY_REQUESTS, "rate-limited"),
         ] {
             let base = spawn_raw_send_server(status, "not-json").await;
@@ -1015,14 +1015,14 @@ mod tests {
         });
         assert!(
             classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&auth), None)
-                .contains("reconnect YouTube")
+                .contains("Reconnect YouTube")
         );
 
         let unknown = json!({ "error": { "message": "Broadcast owner disabled posting." } });
         let unknown_error =
             classify_youtube_send_error(StatusCode::FORBIDDEN, Some(&unknown), None);
         assert!(unknown_error.contains("Broadcast owner disabled posting"));
-        assert!(!unknown_error.contains("reconnect YouTube"));
+        assert!(!unknown_error.contains("Reconnect YouTube"));
     }
 
     #[test]

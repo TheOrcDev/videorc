@@ -58,7 +58,7 @@ pub async fn run_ai_workflow(
         .find(|path| path.is_file());
     let Some(input_path) = input_path else {
         anyhow::bail!(
-            "The recording file for this session is missing on disk (looked for {}). It may have been moved or deleted — AI features need the original recording file.",
+            "The recording file for this session is missing on disk (looked for {}). It may have been moved or deleted. AI features need the original recording file.",
             candidates.join(", ")
         );
     };

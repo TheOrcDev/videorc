@@ -20,8 +20,8 @@ export const PUBLISH_PIPELINE: readonly PublishPipelineStep[] = [
   {
     kind: 'transcript',
     name: 'Transcript',
-    valueProp: 'Every word, timestamped — the foundation the rest builds on.',
-    example: '“Welcome back — today we’re building the whole thing from scratch…”'
+    valueProp: 'Every word, timestamped: the foundation the rest builds on.',
+    example: '“Welcome back, today we’re building the whole thing from scratch…”'
   },
   {
     kind: 'title-description',
@@ -32,7 +32,7 @@ export const PUBLISH_PIPELINE: readonly PublishPipelineStep[] = [
   {
     kind: 'summary',
     name: 'Summary',
-    valueProp: 'The whole recording in a few tight paragraphs — notes, docs, or show notes.',
+    valueProp: 'The whole recording in a few tight paragraphs: notes, docs, or show notes.',
     example: '“This session covers the three-step setup, the main pitfall with…”'
   },
   {
@@ -44,8 +44,8 @@ export const PUBLISH_PIPELINE: readonly PublishPipelineStep[] = [
   {
     kind: 'highlights',
     name: 'Highlights',
-    valueProp: 'The strongest moments, found for you — clip-worthy quotes and beats.',
-    example: '“12:40 — the demo actually works on the first try (great short candidate)”'
+    valueProp: 'The strongest moments, found for you: clip-worthy quotes and beats.',
+    example: '“12:40: the demo actually works on the first try (great short candidate)”'
   }
 ] as const
 

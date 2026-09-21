@@ -608,9 +608,9 @@ describe('cohostQuestionToast', () => {
   it('names how many people are asking', () => {
     expect(
       cohostQuestionToastMessage(question({ askers: ['Ada', 'Bo', 'Cy', 'Dee', 'Eve'] }))
-    ).toBe('Co-host: 5 people asking — What keyboard is that? — ⌘J')
+    ).toBe('Co-host: 5 people asking: What keyboard is that? · ⌘J')
     expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }))).toBe(
-      'Co-host: Ada is asking — What keyboard is that? — ⌘J'
+      'Co-host: Ada is asking: What keyboard is that? · ⌘J'
     )
   })
 })

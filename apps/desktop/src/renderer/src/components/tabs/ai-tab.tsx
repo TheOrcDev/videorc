@@ -169,7 +169,7 @@ export function AiTab({
                         : 'border-transparent hover:bg-accent/60') +
                       (failed ? ' opacity-50' : '')
                     }
-                    title={failed ? 'This session failed — nothing to publish.' : session.title}
+                    title={failed ? 'This session failed. Nothing to publish.' : session.title}
                     type="button"
                     onClick={() => setSelectedSessionId(session.id)}
                   >
@@ -209,7 +209,7 @@ export function AiTab({
 
           {/* D3: consent + quota as pipeline step 0 — one state-aware card with
               a single next action, instead of a two-alert wall. */}
-          <PanelSection icon={VerifiedIcon} title="Cloud AI — step 0">
+          <PanelSection icon={VerifiedIcon} title="Cloud AI: step 0">
             <div
               className={
                 'flex flex-col gap-2 rounded-row border p-3 ' +
@@ -234,7 +234,7 @@ export function AiTab({
               </div>
               <p className="text-xs text-muted-foreground">
                 {cloudAi.ready
-                  ? 'Recordings stay local. With consent, the live-captions transcript uploads as text — or, without captions, the extracted audio — and the generated pack lands back in your library.'
+                  ? 'Recordings stay local. With consent, the live-captions transcript uploads as text (or, without captions, the extracted audio), and the generated pack lands back in your library.'
                   : `${cloudAi.description} Transcripts from live captions always work locally without upload.`}
               </p>
               {cloudAi.state === 'premium-required' ? (
@@ -296,8 +296,8 @@ export function AiTab({
       <div className="flex flex-col gap-1">
         <h1 className="text-xl font-semibold tracking-tight">Publish</h1>
         <p className="max-w-2xl text-sm text-muted-foreground">
-          Turn a finished recording into a publishable upload — transcript, title, summary,
-          chapters, and highlights, bundled as a publish pack.
+          Turn a finished recording into a publishable upload: transcript, title, summary, chapters,
+          and highlights, bundled as a publish pack.
         </p>
       </div>
     )
@@ -342,7 +342,7 @@ export function AiTab({
                 case 'enable-consent':
                   setAiConsent(true)
                   toast.success('Cloud consent enabled.', {
-                    description: 'Run it again — generation now uses your transcript or audio.'
+                    description: 'Run it again. Generation now uses your transcript or audio.'
                   })
                   break
                 case 'sign-in':
@@ -550,7 +550,7 @@ function ArtifactView({
               {audioExtract.filePath ? (
                 <span className="text-muted-foreground">
                   {' '}
-                  — {audioExtract.filePath.split('/').at(-1)}
+                  · {audioExtract.filePath.split('/').at(-1)}
                 </span>
               ) : null}
             </span>
@@ -612,11 +612,11 @@ function ArtifactView({
                     <p className="text-xs text-muted-foreground">
                       {cloudReady
                         ? 'This step runs in the cloud. Flip “Allow cloud upload” in step 0, then run the pipeline again.'
-                        : 'This step runs in the cloud, which is unavailable right now — the Cloud AI card (step 0) says why. Your audio is already extracted; once cloud AI is reachable, allow upload and run again.'}
+                        : 'This step runs in the cloud, which is unavailable right now. The Cloud AI card (step 0) says why. Your audio is already extracted; once cloud AI is reachable, allow upload and run again.'}
                     </p>
                   ) : stepFailed ? (
                     <p className="text-xs text-muted-foreground">
-                      The last run failed for this step — see the alert above, then run again.
+                      The last run failed for this step. See the alert above, then run again.
                     </p>
                   ) : (
                     <>
@@ -720,7 +720,7 @@ function ArtifactView({
           </CollapsibleTrigger>
           <CollapsibleContent className="flex flex-col gap-2 px-3 pb-3">
             <p className="text-xs text-muted-foreground">
-              Suggestions only — nothing here edits your recording.
+              Suggestions only. Nothing here edits your recording.
             </p>
             {!labHasContent ? (
               <p className="text-xs text-muted-foreground/70">
@@ -921,7 +921,7 @@ function SocialPostsSection({
         </div>
       ) : (
         <p className="text-xs text-muted-foreground">
-          Announcement drafts written from the video — an X post, a thread, and a Twitch VOD title.
+          Announcement drafts written from the video: an X post, a thread, and a Twitch VOD title.
         </p>
       )}
       <div className="flex flex-wrap items-center gap-1.5">
@@ -1030,13 +1030,13 @@ function ClipsSection({
       {suggestion && suggestion.moments.length === 0 && timedHighlights.length === 0 ? (
         <p className="text-xs text-muted-foreground">
           {suggestion.chatMessageCount === 0
-            ? 'No chat history for this session — clips are ranked from audience reaction. Generate Highlights instead.'
-            : 'Chat stayed steady — no stand-out spike to clip. Generate Highlights for content-based moments.'}
+            ? 'No chat history for this session. Clips are ranked from audience reaction. Generate Highlights instead.'
+            : 'Chat stayed steady, with no stand-out spike to clip. Generate Highlights for content-based moments.'}
         </p>
       ) : null}
       {!suggestion && rows.length === 0 ? (
         <p className="text-xs text-muted-foreground">
-          The strongest moments as exportable files — ranked from chat activity spikes, snapped to
+          The strongest moments as exportable files, ranked from chat activity spikes, snapped to
           what you were saying.
         </p>
       ) : null}
@@ -1091,7 +1091,7 @@ function ArtifactProblem({ artifact }: { artifact: AiArtifact }): ReactElement {
     return (
       <Alert>
         <InfoIcon weight="fill" />
-        <AlertTitle>Audio extracted — cloud AI waiting for consent</AlertTitle>
+        <AlertTitle>Audio extracted, cloud AI waiting for consent</AlertTitle>
         <AlertDescription>{message}</AlertDescription>
       </Alert>
     )

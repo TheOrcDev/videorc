@@ -802,7 +802,7 @@ fn emit_unverified_frozen_recording_health(
         HealthLevel::Warn,
         "recording-quality-unverified",
         &format!(
-            "This recording likely contains frozen frames — the live pipeline reported held frames during capture, and the automated check could not verify the file: {reason}"
+            "This recording likely contains frozen frames. The live pipeline reported held frames during capture, and the automated check could not verify the file: {reason}"
         ),
     );
 }
@@ -5295,7 +5295,7 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
                 Some(&wait_session_id),
                 HealthLevel::Warn,
                 "recording-stop-finalize-overrun",
-                "Stopping is taking longer than expected — a stream endpoint is not responding. The session is being shut down in the background; Force stop ends it immediately.",
+                "Stopping is taking longer than expected. A stream endpoint is not responding. The session is being shut down in the background; Force stop ends it immediately.",
             );
             if let Some(error) = stop_io_error {
                 return Err(error
@@ -7204,10 +7204,10 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             silent_mic_reported = true;
             let message = match kind {
                 SilentMicKind::NoFrames => format!(
-                    "Microphone \"{device_name}\" has not produced any audio since this session started — check the input device in Settings."
+                    "Microphone \"{device_name}\" has not produced any audio since this session started. Check the input device in Settings."
                 ),
                 SilentMicKind::AllSilence => format!(
-                    "Microphone \"{device_name}\" is capturing only silence — if you just granted microphone access, quit and reopen Videorc."
+                    "Microphone \"{device_name}\" is capturing only silence. If you just granted microphone access, quit and reopen Videorc."
                 ),
             };
             let _ = emit_health_event(
@@ -7855,11 +7855,11 @@ async fn monitor_session(
         {
             let message = match kind {
                 SilentMicKind::NoFrames => format!(
-                    "Microphone \"{}\" captured no audio — this recording has a silent audio track. Check the input device in Settings.",
+                    "Microphone \"{}\" captured no audio. This recording has a silent audio track. Check the input device in Settings.",
                     native_audio_stats.device_name
                 ),
                 SilentMicKind::AllSilence => format!(
-                    "Microphone \"{}\" captured only silence — this recording has a silent audio track. If you just granted microphone access, quit and reopen Videorc.",
+                    "Microphone \"{}\" captured only silence. This recording has a silent audio track. If you just granted microphone access, quit and reopen Videorc.",
                     native_audio_stats.device_name
                 ),
             };
@@ -9869,7 +9869,7 @@ fn classify_failed_ffmpeg_exit(
             RecordingPipelineStage::Muxer,
             "recording-stop-forced",
             format!(
-                "Videorc had to force FFmpeg to stop because it was still writing captured frames long after Stop — this PC could not encode at the selected output size in real time. The file was kept as recovery media and may be cut short. Lower the output resolution in Output settings. (FFmpeg exit: {exit_status})"
+                "Videorc had to force FFmpeg to stop because it was still writing captured frames long after Stop. This PC could not encode at the selected output size in real time. The file was kept as recovery media and may be cut short. Lower the output resolution in Output settings. (FFmpeg exit: {exit_status})"
             ),
         );
     }
@@ -10605,7 +10605,7 @@ async fn await_recording_camera_cadence_ready(
                     HealthLevel::Warn,
                     "recording-camera-cadence-degraded",
                     &format!(
-                        "Camera frame delivery is unstable (sample PTS p95 {}, threshold {:.0}ms, callback p95 {}, frame age {}) — recording anyway; motion may stutter. A camera or HDMI re-plug usually clears this.",
+                        "Camera frame delivery is unstable (sample PTS p95 {}, threshold {:.0}ms, callback p95 {}, frame age {}). Recording anyway; motion may stutter. A camera or HDMI re-plug usually clears this.",
                         optional_ms(sample_pts_gap_p95_ms),
                         threshold_ms,
                         optional_ms(callback_gap_p95_ms),
@@ -10724,8 +10724,8 @@ fn camera_cadence_mismatch_warning(measured_fps: Option<f64>, target_fps: u32) -
         format!("~{per_second} camera frame(s) per second will be dropped")
     };
     Some(format!(
-        "Camera is delivering ~{measured:.2} fps but the session is set to {target_fps} fps — \
-         expect {effect}. Set the camera/HDMI output to {target_fps}p, or match the session \
+        "Camera is delivering ~{measured:.2} fps but the session is set to {target_fps} fps. \
+         Expect {effect}. Set the camera/HDMI output to {target_fps}p, or match the session \
          frame rate to the camera."
     ))
 }
@@ -17041,14 +17041,14 @@ fn validate_canvas_orientation(params: &StartSessionParams) -> Result<()> {
         && params.output.video.width > params.output.video.height
     {
         bail!(
-            "Vertical scenes record a portrait canvas — pick a portrait resolution or switch to horizontal mode."
+            "Vertical scenes record a portrait canvas. Pick a portrait resolution or switch to horizontal mode."
         );
     }
 
     if let Some(simulcast) = params.simulcast.as_ref() {
         if params.layout.layout_preset.is_vertical() {
             bail!(
-                "Dual-orientation streaming composes the vertical leg from the simulcast scene — switch the Studio to a horizontal scene to go live in both orientations."
+                "Dual-orientation streaming composes the vertical leg from the simulcast scene. Switch the Studio to a horizontal scene to go live in both orientations."
             );
         }
         if !simulcast.layout.layout_preset.is_vertical() {
@@ -17056,7 +17056,7 @@ fn validate_canvas_orientation(params: &StartSessionParams) -> Result<()> {
         }
         if simulcast.video.width > simulcast.video.height {
             bail!(
-                "The simulcast leg composes a portrait canvas — its resolution must be taller than wide."
+                "The simulcast leg composes a portrait canvas. Its resolution must be taller than wide."
             );
         }
     }
@@ -17092,7 +17092,7 @@ fn validate_simulcast_targets(params: &StartSessionParams) -> Result<()> {
     }
     if vertical_count == 0 && params.simulcast.is_some() && params.output.stream_enabled {
         bail!(
-            "The vertical simulcast leg has no enabled vertical destination — enable one or disarm vertical streaming."
+            "The vertical simulcast leg has no enabled vertical destination. Enable one or disarm vertical streaming."
         );
     }
     Ok(())

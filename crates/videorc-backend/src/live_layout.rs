@@ -521,7 +521,7 @@ async fn apply_scene_transaction(
                 return Ok(layout_apply_status(intent_id, "hot", scene, status, None));
             }
             bail!(
-                "Switching between horizontal and vertical scenes changes the canvas orientation — stop the session first."
+                "Switching between horizontal and vertical scenes changes the canvas orientation. Stop the session first."
             );
         }
     }

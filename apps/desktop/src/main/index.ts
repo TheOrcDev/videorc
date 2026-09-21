@@ -957,7 +957,7 @@ app.on('child-process-gone', (_event, details) => {
       writeGpuFallbackState(gpuFallbackFile, gpuFallbackState)
       logBackend(
         'warn',
-        'GPU process is unreliable on this machine — Videorc will use software rendering from the next launch. Retry hardware acceleration from Settings when ready.'
+        'GPU process is unreliable on this machine. Videorc will use software rendering from the next launch. Retry hardware acceleration from Settings when ready.'
       )
     }
   }
@@ -1454,7 +1454,7 @@ async function runFirstFrameWatchdogTick(watchdogRun: WatchdogRunToken): Promise
       case 'heal':
         setFirstFrameStatus('healing', assessment.reason)
         updatePreviewWindowWaitDetail(assessment.reason)
-        logBackend('info', `[first-frame] healing: ${assessment.action} — ${assessment.reason}`)
+        logBackend('info', `[first-frame] healing: ${assessment.action}: ${assessment.reason}`)
         runFirstFrameHealingAction(assessment.action, compositor)
         return
       case 'fallback':
@@ -1495,7 +1495,7 @@ function runPresentingWatchTick(snapshot: FirstFrameSnapshot): void {
     case 'heal':
       setFirstFrameStatus('healing', assessment.reason)
       updatePreviewWindowWaitDetail(assessment.reason)
-      logBackend('info', `[preview-watch] healing: ${assessment.action} — ${assessment.reason}`)
+      logBackend('info', `[preview-watch] healing: ${assessment.action}: ${assessment.reason}`)
       runFirstFrameHealingAction(assessment.action, null)
       return
     case 'stalled':
@@ -2286,7 +2286,7 @@ function notesWindowHtml(document: NotesDocument): string {
     body { display: flex; flex-direction: column; }
     /* Same scrollbar recipe as the app (styles.css): no track, a barely-there
        thumb inset inside its hit area. This window is a data-URL document, so
-       it cannot inherit the app stylesheet — keep the two in step by hand. */
+       it cannot inherit the app stylesheet; keep the two in step by hand. */
     ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
     ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
     ::-webkit-scrollbar-button { display: none; }
@@ -3684,7 +3684,7 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
      stays visible above the video as the obvious handle. Edge-resize is handled
      by the real window frame (hiddenInset) and is aspect-locked by main. */
   /* Glass tokens (videorc-design): the preview window frames video, so it
-     stays dark in both themes — charcoal surface, white-8% hairline,
+     stays dark in both themes: charcoal surface, white-8% hairline,
      tertiary-gray label. */
   html, body { margin: 0; height: 100%; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textSecondary};
     font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden;
@@ -12411,7 +12411,7 @@ if (!hasSingleInstanceLock) {
   console.error(
     'Videorc is already running (another instance holds the single-instance lock), ' +
       'so this instance is exiting and the running app was focused instead. ' +
-      'For `pnpm dev`, quit the installed Videorc app first — or isolate this run ' +
+      'For `pnpm dev`, quit the installed Videorc app first, or isolate this run ' +
       'with VIDEORC_USER_DATA_DIR=<dir> to use a separate profile.'
   )
   app.quit()

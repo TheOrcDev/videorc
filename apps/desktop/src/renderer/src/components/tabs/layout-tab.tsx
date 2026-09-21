@@ -151,7 +151,7 @@ export function LayoutTab(): ReactElement {
             </div>
             {isSessionActive ? (
               <p className="text-xs text-muted-foreground">
-                Switching applies live — recording and streaming keep running.
+                Switching applies live. Recording and streaming keep running.
               </p>
             ) : !hasScreen ? (
               <p className="text-xs text-muted-foreground">
@@ -249,22 +249,22 @@ export function LayoutTab(): ReactElement {
 
               {isCameraOnly ? (
                 <p className="text-sm text-muted-foreground">
-                  Camera only fills the frame as a rectangle. Corner, size, and shape do not apply —
-                  use fit, mirror, zoom, and pan.
+                  Camera only fills the frame as a rectangle. Corner, size, and shape do not apply.
+                  Use fit, mirror, zoom, and pan.
                 </p>
               ) : null}
 
               {isVerticalCameraOnly ? (
                 <p className="text-sm text-muted-foreground">
                   The camera fills the whole 9:16 canvas and crops to fit. Corner, size, and shape
-                  do not apply — use mirror, zoom, and pan to frame yourself.
+                  do not apply. Use mirror, zoom, and pan to frame yourself.
                 </p>
               ) : null}
 
               {isVerticalStack ? (
                 <p className="text-sm text-muted-foreground">
                   The stacked vertical scenes give the camera and the screen fixed bands of the 9:16
-                  canvas. Corner, size, and shape do not apply — use mirror, zoom, and pan.
+                  canvas. Corner, size, and shape do not apply. Use mirror, zoom, and pan.
                 </p>
               ) : null}
 
@@ -409,7 +409,7 @@ export function LayoutTab(): ReactElement {
                       </ToggleGroup>
                       {layout.cameraAspect !== 'source' ? (
                         <p className="text-xs text-muted-foreground">
-                          Crops the sides of the camera — frame yourself centered.
+                          Crops the sides of the camera. Frame yourself centered.
                         </p>
                       ) : null}
                     </Field>
@@ -649,7 +649,7 @@ export function LayoutTab(): ReactElement {
               <div className="min-w-0">
                 <div className="truncate text-sm font-semibold">{selectedSource.name}</div>
                 <div className="text-xs text-muted-foreground">
-                  Fills the whole canvas — position is fixed for this layout.
+                  Fills the whole canvas. Position is fixed for this layout.
                 </div>
               </div>
               <SourceVisibilityField

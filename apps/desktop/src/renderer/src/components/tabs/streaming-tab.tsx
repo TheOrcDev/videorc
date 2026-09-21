@@ -668,7 +668,7 @@ function DestinationCard({
                     placeholder={
                       fullUrl
                         ? target.streamKeyPresent
-                          ? `URL saved · ends ${target.streamKeyHint ?? '••••'} — paste to replace`
+                          ? `URL saved · ends ${target.streamKeyHint ?? '••••'}. Paste to replace`
                           : 'rtmp://server/app/key'
                         : 'rtmp://server/app'
                     }
@@ -720,7 +720,7 @@ function DestinationCard({
                       id={`${target.id}-key`}
                       placeholder={
                         target.streamKeyPresent
-                          ? `Key saved · ends ${target.streamKeyHint ?? '••••'} — paste to replace`
+                          ? `Key saved · ends ${target.streamKeyHint ?? '••••'}. Paste to replace`
                           : 'paste your stream key'
                       }
                       type="password"
@@ -747,7 +747,7 @@ function DestinationCard({
                   <FieldDescription>
                     {target.streamKeyPresent
                       ? `Key saved securely · ends ${target.streamKeyHint ?? '••••'}. Pasting a new one asks before replacing it.`
-                      : 'Saved securely per platform — switching platforms never overwrites another key.'}
+                      : 'Saved securely per platform. Switching platforms never overwrites another key.'}
                   </FieldDescription>
                 </Field>
               ) : null}
@@ -878,7 +878,7 @@ function manualKeyGuidance(
   switch (platform) {
     case 'tiktok':
       return {
-        copy: 'TikTok keys change every broadcast and need LIVE access on your account — paste a fresh server URL and key each time from',
+        copy: 'TikTok keys change every broadcast and need LIVE access on your account. Paste a fresh server URL and key each time from',
         url: 'https://livecenter.tiktok.com',
         linkLabel: 'TikTok LIVE Center'
       }
@@ -1398,8 +1398,8 @@ function MetadataEditor({
               </SelectContent>
             </Select>
             <FieldDescription>
-              Applies to YouTube. Twitch channels are always public; X broadcasts are always public
-              — use its Announce toggle below to control the announcement post.
+              Applies to YouTube. Twitch channels are always public; X broadcasts are always public.
+              Use the X Announce toggle below to control the announcement post.
             </FieldDescription>
           </Field>
 
@@ -1777,7 +1777,7 @@ function LiveOutputHealth({
       <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
         <OutputMetric
           label="Delivered FPS"
-          value={liveOutputActive ? formatLiveFps(currentStreamHealth?.fps) : '—'}
+          value={liveOutputActive ? formatLiveFps(currentStreamHealth?.fps) : '-'}
         />
         <OutputMetric
           label="Bitrate"
@@ -1786,7 +1786,7 @@ function LiveOutputHealth({
               ? formatLiveBitrate(
                   currentStreamHealth?.bitrateKbps ?? diagnosticStats.streamMeasuredBitrateKbps
                 )
-              : '—'
+              : '-'
           }
         />
         <OutputMetric
@@ -1794,7 +1794,7 @@ function LiveOutputHealth({
           value={
             liveOutputActive
               ? formatEncoderSpeed(currentStreamHealth?.speed ?? diagnosticStats.encoderSpeed)
-              : '—'
+              : '-'
           }
         />
         <OutputMetric
@@ -1804,7 +1804,7 @@ function LiveOutputHealth({
               ? formatFrameCount(
                   currentStreamHealth?.duplicatedFrames ?? diagnosticStats.streamDuplicatedFrames
                 )
-              : '—'
+              : '-'
           }
         />
         <OutputMetric
@@ -1814,12 +1814,12 @@ function LiveOutputHealth({
               ? formatFrameCount(
                   currentStreamHealth?.droppedFrames ?? diagnosticStats.droppedFrames
                 )
-              : '—'
+              : '-'
           }
         />
         <OutputMetric
           label="Coalesced"
-          value={liveOutputActive ? formatFrameCount(coalescedFrames) : '—'}
+          value={liveOutputActive ? formatFrameCount(coalescedFrames) : '-'}
         />
       </div>
 
@@ -1952,23 +1952,23 @@ function ExactOutputPath({ label, value }: { label: string; value?: string }): R
 }
 
 function formatLiveFps(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} fps` : '—'
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(1)} fps` : '-'
 }
 
 function formatLiveBitrate(value?: number): string {
   return typeof value === 'number' && Number.isFinite(value)
     ? `${Math.round(value).toLocaleString()} kbps`
-    : '—'
+    : '-'
 }
 
 function formatEncoderSpeed(value?: number): string {
-  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : '—'
+  return typeof value === 'number' && Number.isFinite(value) ? `${value.toFixed(2)}×` : '-'
 }
 
 function formatFrameCount(value?: number): string {
   return typeof value === 'number' && Number.isFinite(value)
     ? Math.max(0, Math.round(value)).toLocaleString()
-    : '—'
+    : '-'
 }
 
 function StreamingReadiness({
@@ -2062,7 +2062,7 @@ function StreamingReadiness({
         detail={
           enabled.length
             ? `~${uploadMbps} Mbps to ${enabled.length} destination${enabled.length > 1 ? 's' : ''}`
-            : '—'
+            : '-'
         }
         label="Estimated upload"
       />

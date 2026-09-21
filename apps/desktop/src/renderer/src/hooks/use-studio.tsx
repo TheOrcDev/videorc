@@ -2184,7 +2184,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // toast — a missing client and a non-live status used to revert the switch
       // silently.
       if (!client) {
-        throw new Error('Backend is not connected — try again in a moment.')
+        throw new Error('Backend is not connected. Try again in a moment.')
       }
       setCaptionLines([])
       let status: CaptionsStatus
@@ -4968,7 +4968,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return
     }
     xProducerReminderShownRef.current = true
-    toast.info('X feed is connected — now start the Broadcast on X.', {
+    toast.info('X feed is connected. Now start the Broadcast on X.', {
       description:
         'X does not go live from the RTMP feed alone: open Media Studio → Producer → Broadcasts, ' +
         'create a broadcast from your source, and press Broadcast.',
@@ -5942,13 +5942,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               ? {
                   state: 'warning' as const,
                   message:
-                    'X is still provisioning playback — viewers may see a loading spinner. Keep streaming; this can take a few minutes.',
+                    'X is still provisioning playback. Viewers may see a loading spinner. Keep streaming; this can take a few minutes.',
                   redactedUrl: event.shareUrl
                 }
               : {
                   state: 'warning' as const,
                   message:
-                    'X never produced playback for this broadcast — viewers saw a loading spinner. Your local recording is unaffected.',
+                    'X never produced playback for this broadcast. Viewers saw a loading spinner. Your local recording is unaffected.',
                   redactedUrl: event.shareUrl
                 }
         setCaptureConfig((current) => {
@@ -7080,7 +7080,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ): Promise<boolean> => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
       if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected — layout unchanged.')
+        toast.error('Backend socket is not connected. Layout unchanged.')
         return Promise.resolve(false)
       }
 
@@ -7388,7 +7388,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
 
       if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected — source unchanged.')
+        toast.error('Backend socket is not connected. Source unchanged.')
         return
       }
       if (sourceDeviceSwitchPending) {
@@ -7420,7 +7420,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           console.warn(
             `Source switch committed at revision ${status.sceneRevision}; output proof was not observed. ${detail}`
           )
-          toast.warning('Switch committed — output catching up.', {
+          toast.warning('Switch committed. Output catching up.', {
             id: 'live-source-switch-output-catching-up',
             description:
               'The source selection was applied. Videorc will reconcile the output status as it catches up.'
@@ -8418,7 +8418,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     if (!client) {
       // F-011: this used to be a silent no-op — the button appeared dead.
       toast.error('Microphone check', {
-        description: 'Backend is not connected — try again in a moment.'
+        description: 'Backend is not connected. Try again in a moment.'
       })
       return false
     }
@@ -11786,7 +11786,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (!client) {
         // F-023: this used to be a silent no-op — the button appeared dead.
         toast.error('AI workflow', {
-          description: 'Backend is not connected — try again in a moment.'
+          description: 'Backend is not connected. Try again in a moment.'
         })
         return
       }
@@ -11831,7 +11831,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ) {
           toast.success('Transcript ready from live captions.', {
             description:
-              'Enable cloud consent to generate the title, description, and the rest of the pack — the transcript uploads as text only.'
+              'Enable cloud consent to generate the title, description, and the rest of the pack. The transcript uploads as text only.'
           })
         } else {
           toast.success('Local audio extracted.', {
@@ -11890,7 +11890,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const suggestClips = useCallback(
     async (sessionId: string): Promise<ClipSuggestResult | null> => {
       if (!client) {
-        toast.error('Clips', { description: 'Backend is not connected — try again in a moment.' })
+        toast.error('Clips', { description: 'Backend is not connected. Try again in a moment.' })
         return null
       }
       try {
@@ -11906,7 +11906,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const exportClip = useCallback(
     async (sessionId: string, startMs: number, endMs: number): Promise<void> => {
       if (!client) {
-        toast.error('Clips', { description: 'Backend is not connected — try again in a moment.' })
+        toast.error('Clips', { description: 'Backend is not connected. Try again in a moment.' })
         return
       }
       try {
@@ -12074,7 +12074,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           outputVerdict(chosen, next.result) === 'too-heavy'
         ) {
           toast.warning(`${outputLabel(chosen)} is too heavy for this computer`, {
-            description: `Recordings will stutter. ${outputLabel(next.result.recommended)} held steady — switch in Recording → Output.`
+            description: `Recordings will stutter. ${outputLabel(next.result.recommended)} held steady. Switch in Recording → Output.`
           })
         }
       })
@@ -12229,7 +12229,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         } else {
           toast.success(
             result.previousStreamKeyPresent
-              ? `${label} stream key removed — the previous key is kept for restore.`
+              ? `${label} stream key removed. The previous key is kept for restore.`
               : `${label} stream key removed.`
           )
         }

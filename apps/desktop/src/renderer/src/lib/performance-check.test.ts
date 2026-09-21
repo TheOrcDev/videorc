@@ -152,7 +152,7 @@ describe('performanceCheckLine', () => {
     expect(line({ running: false, stale: false, result: weak }, 'tutorial-1440p30')).toEqual({
       tone: 'warning',
       busy: false,
-      text: '1440p 30 is too heavy for this computer — recordings will stutter. 720p 30 held steady.',
+      text: '1440p 30 is too heavy for this computer. Recordings will stutter. 720p 30 held steady.',
       checkLabel: 'Check again',
       applyPreset: 'tutorial-720p30',
       applyLabel: 'Use 720p 30'

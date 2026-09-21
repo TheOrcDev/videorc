@@ -162,7 +162,7 @@ describe('CohostFlagRow', () => {
 describe('CohostPane', () => {
   it('names the empty state instead of showing nothing', () => {
     const markup = renderPane({ state: state({ questions: [], flags: [] }) })
-    expect(markup).toContain('Listening — questions from chat will appear here.')
+    expect(markup).toContain('Listening. Questions from chat will appear here.')
     expect(markup).toContain('listening')
   })
 
@@ -240,14 +240,14 @@ describe('CohostPane', () => {
     expect(markup).toContain(`title="${detail}"`)
     expect(markup).toContain('data-slot="cohost-error-detail"')
     expect(markup).toContain('once co-host is listening again')
-    expect(markup).not.toContain('Listening — questions')
+    expect(markup).not.toContain('Listening. Questions')
     // Monochrome: only the presence DOT carries the error accent; the label and
     // the detail line stay chrome.
     expect(markup).not.toContain('text-destructive')
 
     const healthy = renderPane({ state: state() })
     expect(healthy).not.toContain('data-slot="cohost-error-detail"')
-    expect(healthy).toContain('Listening — questions from chat will appear here.')
+    expect(healthy).toContain('Listening. Questions from chat will appear here.')
   })
   it('mirrors the working shimmer in the segment header while chat is queued', () => {
     const reading = renderPane({ state: state({ pendingMessages: 4 }) })
@@ -255,7 +255,7 @@ describe('CohostPane', () => {
     expect(reading).toContain('>reading 4 new…<')
     // The empty state stops claiming "Listening —" while there is real work.
     expect(reading).toContain('Reading 4 new messages…')
-    expect(reading).not.toContain('Listening — questions')
+    expect(reading).not.toContain('Listening. Questions')
 
     const thinking = renderPane({ state: state({ tickInFlight: true, pendingMessages: 4 }) })
     expect(thinking).toContain('typing-dot-fast')

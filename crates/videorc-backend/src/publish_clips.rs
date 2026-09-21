@@ -173,7 +173,7 @@ pub fn rank_chat_spike_moments(
             ClipMoment {
                 start_ms,
                 end_ms,
-                reason: format!("Chat spiked — {count} messages in 30s"),
+                reason: format!("Chat spiked: {count} messages in 30s"),
                 excerpt,
             }
         })
@@ -193,7 +193,7 @@ pub async fn export_clip(state: AppState, params: ClipExportParams) -> Result<Cl
         .map(PathBuf::from)
         .find(|path| path.is_file())
         .context(
-            "The recording file for this session is missing on disk — clips need the original recording.",
+            "The recording file for this session is missing on disk. Clips need the original recording.",
         )?;
 
     let output_path = clip_output_path(&input_path, params.start_ms, params.end_ms);

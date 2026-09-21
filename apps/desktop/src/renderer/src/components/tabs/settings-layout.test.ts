@@ -85,7 +85,7 @@ describe('Settings layout', () => {
 
   it('gives Remote control a one-line body when it is off, so it is never header-only', () => {
     expect(REMOTE_CONTROL_OFF_HINT).toBe(
-      'Off — turn on to pair a Stream Deck or the Videorc remote.'
+      'Off. Turn on to pair a Stream Deck or the Videorc remote.'
     )
 
     const remoteCard = settingsTabBody.slice(settingsTabBody.indexOf('title="Remote control"'))

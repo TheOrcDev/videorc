@@ -64,7 +64,7 @@ struct FragParams {
     // model): chroma_key = (enabled, key_dir_cb, key_dir_cr, max_angle_rad);
     // chroma_key2 = (band_rad, spill, spill_is_blue, saturation_floor).
     // CbCr uses the SAME -43/-85/128 and 128/-107/-21 coefficient family as
-    // color.rs — if these drift, the CPU and GPU keyers disagree.
+    // color.rs. If these drift, the CPU and GPU keyers disagree.
     float4 chroma_key;
     float4 chroma_key2;
 };
@@ -84,7 +84,7 @@ fragment float4 f_main(VOut in [[stage_in]],
     // outside the circle so whatever was drawn underneath (e.g. the screen) shows through.
     // params.aspect is the destination quad's pixel aspect (width/height); normalizing by
     // the shorter side keeps the mask a true circle on a non-square quad instead of an
-    // ellipse — the camera bubble must stay round even when the preview drawable's aspect
+    // ellipse: the camera bubble must stay round even when the preview drawable's aspect
     // drifts from the output's.
     if (params.circle > 0.5) {
         float2 c = (uv - 0.5) * 2.0;

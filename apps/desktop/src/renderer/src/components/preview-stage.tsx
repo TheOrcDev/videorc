@@ -397,7 +397,7 @@ function DetachedPreviewCard({
             <div className="flex flex-col gap-1">
               <span className="text-sm font-medium">Preview lives in its own window</span>
               <span className="text-xs text-muted-foreground">
-                Open it to watch the program output — or stick it into this panel.
+                Open it to watch the program output, or stick it into this panel.
               </span>
             </div>
             <Button data-videorc-open-preview-window size="sm" onClick={onOpen}>

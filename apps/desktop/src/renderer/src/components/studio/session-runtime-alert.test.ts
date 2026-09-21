@@ -49,7 +49,7 @@ describe('SessionRuntimeAlert', () => {
       })
     )
 
-    expect(markup).toContain('Microphone stopped — recording continues with silence')
+    expect(markup).toContain('Microphone stopped: recording continues with silence')
     expect(markup).toContain('The selected microphone stopped providing audio.')
     expect(markup).toContain('Dismiss')
     expect(markup).not.toContain('Open Library')
@@ -83,7 +83,7 @@ describe('SessionRuntimeAlert', () => {
 
     expect(failureMarkup).toContain('Live session stopped unexpectedly')
     expect(failureMarkup).not.toContain('Recording stopped unexpectedly')
-    expect(microphoneMarkup).toContain('Microphone stopped — live session continues with silence')
+    expect(microphoneMarkup).toContain('Microphone stopped: live session continues with silence')
     expect(microphoneMarkup).not.toContain('recording continues')
     expect(failureMarkup).not.toContain('Open Library')
   })
@@ -102,7 +102,7 @@ describe('SessionRuntimeAlert', () => {
       })
     )
 
-    expect(markup).toContain('Microphone stopped — saved recording contains silence')
+    expect(markup).toContain('Microphone stopped: saved recording contains silence')
     expect(markup).not.toContain('recording continues')
   })
 
@@ -120,7 +120,7 @@ describe('SessionRuntimeAlert', () => {
       })
     )
 
-    expect(markup).toContain('Microphone stopped — finishing recording with silence')
+    expect(markup).toContain('Microphone stopped: finishing recording with silence')
     expect(markup).not.toContain('recording continues')
   })
 })

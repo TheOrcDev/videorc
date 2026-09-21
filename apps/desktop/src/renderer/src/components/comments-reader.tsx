@@ -638,7 +638,7 @@ function SendRow({
       </InputGroup>
       {replyToQuestionId ? (
         <p className="mt-1 text-[11px] text-subtle">
-          Replying to a co-host question — edit freely, nothing sends until you do.
+          Replying to a co-host question. Edit freely, nothing sends until you do.
         </p>
       ) : null}
       <div className="mt-1.5">

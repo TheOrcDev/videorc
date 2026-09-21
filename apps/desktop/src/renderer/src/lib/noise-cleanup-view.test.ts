@@ -75,7 +75,7 @@ describe('Noise Cleanup Library view', () => {
         directAction: 'upgrade',
         menuAction: 'upgrade',
         directLabel: 'Clean noise',
-        menuLabel: 'Clean noise — Premium',
+        menuLabel: 'Clean noise · Premium',
         premiumLocked: true,
         detail: 'Noise Cleanup requires Videorc Premium.'
       })
@@ -158,7 +158,7 @@ describe('Noise Cleanup Library view', () => {
     })
     expect(derive({ job: job({ status: 'processing', progressPercent: 42.4 }) })).toMatchObject({
       directLabel: 'Cleaning 42%',
-      menuLabel: 'Cancel cleanup — 42%',
+      menuLabel: 'Cancel cleanup · 42%',
       statusAnnouncement: 'Cleaning noise, 40 percent.'
     })
     expect(derive({ job: job({ status: 'validating', progressPercent: 100 }) })).toMatchObject({

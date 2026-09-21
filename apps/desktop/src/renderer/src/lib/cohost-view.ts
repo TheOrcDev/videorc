@@ -614,7 +614,7 @@ export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
 
 const COHOST_QUESTION_TOAST_TEXT_CAP = 64
 
-/** "Co-host: 5 people asking — What keyboard is that? — ⌘J" */
+/** "Co-host: 5 people asking: What keyboard is that? · ⌘J" */
 export function cohostQuestionToastMessage(question: CohostQuestion): string {
   const askers = question.askers.length
   const who =
@@ -624,7 +624,7 @@ export function cohostQuestionToastMessage(question: CohostQuestion): string {
         ? `${question.askers[0]} is asking`
         : 'a new question'
   const text = trimDraftToCap(question.text, COHOST_QUESTION_TOAST_TEXT_CAP)
-  return text ? `Co-host: ${who} — ${text} — ⌘J` : `Co-host: ${who} — ⌘J`
+  return text ? `Co-host: ${who}: ${text} · ⌘J` : `Co-host: ${who} · ⌘J`
 }
 
 export interface CohostQuestionToast {

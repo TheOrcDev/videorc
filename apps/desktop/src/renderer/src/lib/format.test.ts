@@ -27,10 +27,10 @@ describe('formatBytes', () => {
   })
 
   it('answers a calm dash for the unknowable', () => {
-    expect(formatBytes(undefined)).toBe('—')
-    expect(formatBytes(null)).toBe('—')
-    expect(formatBytes(-5)).toBe('—')
-    expect(formatBytes(Number.NaN)).toBe('—')
+    expect(formatBytes(undefined)).toBe('-')
+    expect(formatBytes(null)).toBe('-')
+    expect(formatBytes(-5)).toBe('-')
+    expect(formatBytes(Number.NaN)).toBe('-')
   })
 })
 

@@ -51,7 +51,7 @@ import { isUpdateInstallable } from '@/lib/update-ui'
  * Remote control is off by default, and an empty body made the card render as a
  * bare header. One muted line says what the switch is for instead.
  */
-export const REMOTE_CONTROL_OFF_HINT = 'Off — turn on to pair a Stream Deck or the Videorc remote.'
+export const REMOTE_CONTROL_OFF_HINT = 'Off. Turn on to pair a Stream Deck or the Videorc remote.'
 
 // ST1 (UX rework): Settings holds app-level facts and tools only. Session
 // capture settings have ONE home each (Output ⌘6, Livestream ⌘5) — the rows
@@ -206,12 +206,12 @@ export function SettingsTab({
                 ) : directoryFacts && !directoryFacts.exists ? (
                   <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
                     <WarningIcon className="size-3.5 shrink-0" weight="fill" />
-                    <span>This folder authorization expired — choose it again.</span>
+                    <span>This folder authorization expired. Choose it again.</span>
                   </div>
                 ) : directoryFacts && !directoryFacts.writable ? (
                   <p className="flex items-center gap-1.5 text-xs text-warning">
                     <WarningIcon className="size-3.5 shrink-0" weight="fill" />
-                    This folder is not writable — recordings will fail to save here.
+                    This folder is not writable. Recordings will fail to save here.
                   </p>
                 ) : directoryFacts ? (
                   <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
@@ -269,7 +269,7 @@ export function SettingsTab({
                   <div className="flex min-w-0 flex-col gap-0.5">
                     <FieldLabel htmlFor="animate-scene-changes">Animate scene changes</FieldLabel>
                     <p className="text-xs text-muted-foreground">
-                      Layout switches glide into place instead of cutting — visible live on stream
+                      Layout switches glide into place instead of cutting, visible live on stream
                       and in recordings.
                     </p>
                   </div>
@@ -433,7 +433,7 @@ export function SettingsTab({
               </Button>
               <p className="text-xs text-muted-foreground">
                 Grants live in {osSettingsName(runtimeInfo?.platform)}. After changing one, come
-                back here — rows refresh automatically.
+                back here. Rows refresh automatically.
               </p>
             </div>
           </PanelSection>
@@ -441,7 +441,7 @@ export function SettingsTab({
           <CohostSettingsSection />
 
           <PanelSection
-            description={`Work system-wide, even when Videorc is in the background — bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. ${displayAccelerator('Cmd+Shift+R', runtimeInfo?.platform)}.`}
+            description={`Work system-wide, even when Videorc is in the background. Bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. ${displayAccelerator('Cmd+Shift+R', runtimeInfo?.platform)}.`}
             icon={SettingsIcon}
             title="Global shortcuts"
           >
@@ -506,7 +506,7 @@ export function SettingsTab({
                     >
                       {remoteStatus.token
                         ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`
-                        : '—'}
+                        : '-'}
                     </div>
                     <Button
                       size="sm"
@@ -683,7 +683,7 @@ function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): Re
       <div className="flex flex-col gap-4">
         <div className="flex items-center justify-between gap-3">
           <span className="text-sm text-muted-foreground">Current version</span>
-          <span className="font-mono text-sm text-foreground">{runtimeInfo?.version ?? '—'}</span>
+          <span className="font-mono text-sm text-foreground">{runtimeInfo?.version ?? '-'}</span>
         </div>
         <UpdateControl
           captureActive={captureActive}
@@ -751,7 +751,7 @@ function UpdateControl({
       return (
         <div className="flex items-center gap-2 text-sm text-muted-foreground">
           <DownloadIcon className="size-4 shrink-0" />
-          <span>Version {status.version} available — starting download…</span>
+          <span>Version {status.version} available. Starting download…</span>
         </div>
       )
     case 'downloading':
@@ -790,7 +790,7 @@ function UpdateControl({
           </Button>
           <p className="text-xs text-muted-foreground">
             {captureActive
-              ? 'Finish your recording first — installing restarts Videorc.'
+              ? 'Finish your recording first. Installing restarts Videorc.'
               : 'Videorc will restart to finish updating.'}
           </p>
         </div>

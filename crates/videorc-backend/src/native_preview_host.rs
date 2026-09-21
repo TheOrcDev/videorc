@@ -475,7 +475,7 @@ mod macos {
             return;
         }
         eprintln!(
-            "[videorc-native-preview-sizing] non-finite window frame requested=({},{} {}x{}) — macOS will clamp",
+            "[videorc-native-preview-sizing] non-finite window frame requested=({},{} {}x{}): macOS will clamp",
             requested.origin.x, requested.origin.y, requested.size.width, requested.size.height,
         );
     }

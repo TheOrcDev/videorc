@@ -84,7 +84,7 @@ export function CohostSettingsSection(): ReactElement | null {
 
   return (
     <PanelSection
-      description="Alpha — expect rough edges. An AI producer reads your live chat, groups the questions people are actually asking, and drafts replies you approve. Nothing is ever sent without you."
+      description="Alpha: expect rough edges. An AI producer reads your live chat, groups the questions people are actually asking, and drafts replies you approve. Nothing is ever sent without you."
       icon={CohostIcon}
       title="Co-host (alpha)"
     >
@@ -165,7 +165,7 @@ export function CohostSettingsSection(): ReactElement | null {
             disabled={locked}
             id="cohost-notes"
             maxLength={COHOST_NOTES_MAX_CHARS}
-            placeholder="What people keep asking you — gear, schedule, links, prices…"
+            placeholder="What people keep asking you: gear, schedule, links, prices…"
             value={notesDraft}
             onBlur={() => {
               if (!notesDirty || notesOverLimit) return
@@ -184,7 +184,7 @@ export function CohostSettingsSection(): ReactElement | null {
               {notesDraft.length}/{COHOST_NOTES_MAX_CHARS}
             </span>
             {notesDirty ? (
-              <span className="text-xs text-muted-foreground">Unsaved — click away to save.</span>
+              <span className="text-xs text-muted-foreground">Unsaved. Click away to save.</span>
             ) : null}
             {notesError ? <span className="text-xs text-destructive">{notesError}</span> : null}
           </div>
@@ -298,8 +298,8 @@ export function CohostSettingsSection(): ReactElement | null {
                 Show questions on stream automatically
               </FieldLabel>
               <p className="text-xs text-muted-foreground">
-                Puts one new high-priority question on the stream by itself. Off by default — with
-                it off, you show a question with H.
+                Puts one new high-priority question on the stream by itself. Off by default. With it
+                off, you show a question with H.
               </p>
             </div>
             <Switch

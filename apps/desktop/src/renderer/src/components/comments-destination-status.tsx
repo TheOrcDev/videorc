@@ -72,7 +72,7 @@ function providerStatusLabel(provider: LiveChatProviderState): string {
 export function providerBadgeTitle(provider: LiveChatProviderState): string {
   const identity = provider.accountLabel ? `Reading chat as ${provider.accountLabel}.` : ''
   if (provider.message && identity) {
-    return `${provider.message} — ${identity}`
+    return `${provider.message} · ${identity}`
   }
   return provider.message || identity
 }

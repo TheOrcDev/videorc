@@ -466,7 +466,7 @@ export function oauthUnavailableReason(platform: StreamPlatform): string | null 
     return 'Custom RTMP does not support OAuth.'
   }
   if (platform === 'tiktok' || platform === 'instagram') {
-    return `${STREAM_PLATFORM_LABELS[platform]} livestreams use a manual stream key — there is no OAuth to connect.`
+    return `${STREAM_PLATFORM_LABELS[platform]} livestreams use a manual stream key. There is no OAuth to connect.`
   }
   return null
 }

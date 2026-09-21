@@ -105,7 +105,7 @@ describe('Library Noise Cleanup direct action', () => {
         directAction: null,
         menuAction: 'cancel',
         directLabel: 'Cleaning 42%',
-        menuLabel: 'Cancel cleanup — 42%',
+        menuLabel: 'Cancel cleanup · 42%',
         detail: 'Cleaning noise: 42% complete.',
         statusAnnouncement: 'Cleaning noise, 40 percent.',
         busy: true,

@@ -98,7 +98,7 @@ export function cameraFormatShortfallMessage(shortfall: CameraFormatShortfall): 
     return `This camera only offers ${selected}, so it can't reach ${shortfall.requestedFps} fps. If it's a capture device, set the connected HDMI source to a 60Hz/30Hz (NTSC) mode.`
   }
   if (shortfall.fpsUnmet) {
-    return `This camera's closest format is ${selected} — below the requested ${shortfall.requestedFps} fps. Recording will run at ${Math.round(shortfall.selectedMaxFps)} fps.`
+    return `This camera's closest format is ${selected}, below the requested ${shortfall.requestedFps} fps. Recording will run at ${Math.round(shortfall.selectedMaxFps)} fps.`
   }
   // Name the consequence, not just the mismatch: a resolution shortfall means
   // every frame is enlarged to fill the canvas, which is what the user

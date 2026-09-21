@@ -154,7 +154,7 @@ export function setupChecklist({
           ? 'Local backend is connected.'
           : wsStatus === 'waiting' || wsStatus === 'connecting'
             ? 'Connecting to the local backend…'
-            : 'Backend not connected — it restarts automatically; give it a moment.',
+            : 'Backend not connected. It restarts automatically; give it a moment.',
       tone: wsStatus === 'connected' ? 'good' : 'warn'
     },
     {
@@ -306,7 +306,7 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
 /** "742 MB" / "1.2 GB" — the Library's size column and storage footer. */
 export function formatBytes(bytes?: number | null): string {
   if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes < 0) {
-    return '—'
+    return '-'
   }
   if (bytes < 1024) {
     return `${Math.round(bytes)} B`

@@ -11,7 +11,7 @@ describe('source select state', () => {
     // Pending wins even if a stale count lingers.
     expect(sourceSelectPlaceholder(3, true)).toBe('Finding devices…')
     expect(sourceSelectPlaceholder(0, false)).toBe(
-      'No devices found — check System Access in Settings'
+      'No devices found. Check System Access in Settings'
     )
     expect(sourceSelectPlaceholder(2, false)).toBe('Select a device')
   })
@@ -22,11 +22,11 @@ describe('source select state', () => {
     expect(missingSelection(devices, undefined)).toBeNull()
     expect(missingSelection(devices, 'gone-id')).toEqual({
       value: 'gone-id',
-      label: 'Saved device unavailable — pick another'
+      label: 'Saved device unavailable. Pick another'
     })
     expect(missingSelection([], 'gone-id')).toEqual({
       value: 'gone-id',
-      label: 'Saved device unavailable — pick another'
+      label: 'Saved device unavailable. Pick another'
     })
   })
 })

@@ -292,7 +292,7 @@ try {
   )
   await waitForRendererRuntimeNotice(
     smoke,
-    'Microphone stopped — recording continues with silence',
+    'Microphone stopped: recording continues with silence',
     'persistent microphone-loss warning'
   )
 

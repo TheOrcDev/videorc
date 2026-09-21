@@ -293,7 +293,7 @@ function accessDetail(state: SystemAccessState, subject: string, os: AppPlatform
       // The packaged-app nuance from the 0.9.1 incident: a missing grant is
       // fixed in the OS Settings; a missing ENTITLEMENT can't be — but 0.9.2+
       // ships the entitlements, so Settings is the right pointer.
-      return `Your ${settings} is blocking ${subject} — grant access there.`
+      return `Your ${settings} is blocking ${subject}. Grant access there.`
     case 'first-use':
       return `${settings} reports this on first use.`
     case 'device-issue':

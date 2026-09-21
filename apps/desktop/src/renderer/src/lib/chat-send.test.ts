@@ -54,7 +54,7 @@ describe('chatSendFailures', () => {
           destinationId: 'twitch',
           platform: 'twitch',
           phase: 'failed',
-          reason: 'Twitch rejected the send — reconnect Twitch.'
+          reason: 'Twitch rejected the send. Reconnect Twitch.'
         }
       ])
     )
@@ -62,7 +62,7 @@ describe('chatSendFailures', () => {
       {
         destinationId: 'twitch',
         platform: 'twitch',
-        reason: 'Twitch rejected the send — reconnect Twitch.'
+        reason: 'Twitch rejected the send. Reconnect Twitch.'
       }
     ])
   })

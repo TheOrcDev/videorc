@@ -304,10 +304,10 @@ function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): React
               down when it wrapped). */}
           <span className="block min-h-8 text-xs text-muted-foreground">
             {disconnected
-              ? `Backend socket is ${wsStatus} — takeovers need the backend.`
+              ? `Backend socket is ${wsStatus}. Takeovers need the backend.`
               : activeScreen
-                ? `${activeScreen.name} is covering the output — click it to return.`
-                : 'Click a takeover to cover the output — works while live.'}
+                ? `${activeScreen.name} is covering the output. Click it to return.`
+                : 'Click a takeover to cover the output. Works while live.'}
           </span>
         </>
       )}

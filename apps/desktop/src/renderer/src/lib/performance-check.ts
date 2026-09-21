@@ -178,7 +178,7 @@ export function performanceCheckLine({
       return {
         tone: 'warning',
         busy: false,
-        text: `${outputLabel(video)} is too heavy for this computer — recordings will stutter. ${recommended} held steady.`,
+        text: `${outputLabel(video)} is too heavy for this computer. Recordings will stutter. ${recommended} held steady.`,
         checkLabel: 'Check again',
         ...offer
       }

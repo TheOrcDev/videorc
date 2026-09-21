@@ -87,8 +87,8 @@ export function CaptionsReader({
       >
         {recent.length === 0 ? (
           <p className="text-lg text-muted-foreground">
-            Waiting for captions — turn on Live captions, then record or go live. Captions
-            transcribe your microphone during a session.
+            Waiting for captions. Turn on Live captions, then record or go live. Captions transcribe
+            your microphone during a session.
           </p>
         ) : (
           recent.map((line, index) => {

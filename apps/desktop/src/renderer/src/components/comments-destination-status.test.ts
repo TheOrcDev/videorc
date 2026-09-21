@@ -67,7 +67,7 @@ describe('comments destination status', () => {
       providerBadgeTitle(
         provider('twitch', { message: 'twitch connected', accountLabel: 'OrcDev' })
       )
-    ).toBe('twitch connected — Reading chat as OrcDev.')
+    ).toBe('twitch connected · Reading chat as OrcDev.')
     expect(providerBadgeTitle(provider('twitch', { message: 'twitch connected' }))).toBe(
       'twitch connected'
     )

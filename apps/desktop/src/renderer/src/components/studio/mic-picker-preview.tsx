@@ -45,14 +45,14 @@ export function MicPickerPreview({
       </div>
       {enabled && lifecycle.status === 'unavailable' ? (
         <span className="text-xs text-muted-foreground">
-          Live preview unavailable — the mic may be in use or needs permission. Recording is
+          Live preview unavailable. The mic may be in use or needs permission. Recording is
           unaffected.
         </span>
       ) : muted ? (
         // The one honest reason the waveform is flat while the picker is open:
         // idle no longer silences it, so a mute is worth naming.
         <span className="text-xs text-muted-foreground">
-          Microphone is muted — unmute to see its level.
+          Microphone is muted. Unmute to see its level.
         </span>
       ) : null}
     </div>

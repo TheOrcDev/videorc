@@ -316,7 +316,7 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(captionsSource, /microphone-input-lost/)
     assert.match(captionsSource, /evaluateMicrophoneLossContinuity/)
     assert.match(captionsSource, /postLossAudio/)
-    assert.match(captionsSource, /Microphone stopped — recording continues with silence/)
+    assert.match(captionsSource, /Microphone stopped: recording continues with silence/)
     assert.match(captionsSource, /data-testid=\"session-runtime-notice\"/)
     assert.match(captionsSource, /notice\?\.getAttribute\('role'\) === 'alert'/)
   })

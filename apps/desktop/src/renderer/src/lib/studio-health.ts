@@ -157,8 +157,8 @@ export function studioHealth(
       tone: 'error',
       value: 'Degraded',
       detail: stats.compositorFallbackReason
-        ? `Preview may not match recording — ${stats.compositorFallbackReason}`
-        : 'Preview may not match recording — compositor is on CPU fallback'
+        ? `Preview may not match recording: ${stats.compositorFallbackReason}`
+        : 'Preview may not match recording: compositor is on CPU fallback'
     }
   }
 
@@ -191,7 +191,7 @@ export function studioHealth(
     return {
       tone: 'warn',
       value: 'Lagging',
-      detail: `Preview behind the live budget — present p95 ${Math.round(p95 ?? 0)}ms / p99 ${Math.round(
+      detail: `Preview behind the live budget: present p95 ${Math.round(p95 ?? 0)}ms / p99 ${Math.round(
         p99 ?? 0
       )}ms`
     }

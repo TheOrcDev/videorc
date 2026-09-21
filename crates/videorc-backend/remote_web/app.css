@@ -1,4 +1,4 @@
-/* Videorc Remote — the desktop's black-glass language (videorc-design) in
+/* Videorc Remote: the desktop's black-glass language (videorc-design) in
    plain CSS: monochrome chrome, hairlines, one LED-red accent that only ever
    means record / live / on stream. Light mode is the porcelain twin. */
 
@@ -244,7 +244,7 @@ main {
   font-weight: 600;
 }
 
-/* Platform colour is information (which chat this came from) — the only
+/* Platform colour is information (which chat this came from), the only
    saturated colour on the page besides red. */
 .glyph[data-platform='youtube'] {
   background: #e62117;
