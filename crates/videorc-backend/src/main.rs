@@ -341,6 +341,13 @@ async fn run_backend() -> Result<()> {
         Ok(_) => {}
         Err(error) => tracing::warn!("Could not reconcile recording finalizations: {error:#}"),
     }
+    match database.retire_active_stream_screen_at_launch() {
+        Ok(Some(screen_id)) => {
+            tracing::info!("Retired takeover {screen_id} left active by the previous run")
+        }
+        Ok(None) => {}
+        Err(error) => tracing::warn!("Could not retire the previous run's takeover: {error:#}"),
+    }
     match database.reconcile_session_deletions() {
         Ok(summary) if summary.completed > 0 || summary.pending > 0 => tracing::warn!(
             "Completed {} interrupted Library deletion(s); {} still require Trash retry: {:?}",

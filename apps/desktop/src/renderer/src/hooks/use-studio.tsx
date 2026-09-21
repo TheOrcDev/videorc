@@ -2987,6 +2987,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         microphoneMuted: transition.microphoneMuted
       }
     }
+    // Ownership was persisted above; persist the mute it explains in the same
+    // step. Left to the captureConfig effect, a quit between the two writes
+    // strands a muted microphone with no takeover to release it.
+    try {
+      localStorage.setItem(
+        STORAGE_KEYS.captureConfig,
+        JSON.stringify(persistableCaptureConfig(captureConfigRef.current))
+      )
+    } catch {
+      // Storage is best effort; the effect below writes the same value.
+    }
     setCaptureConfig((current) => ({
       ...current,
       audio: { ...current.audio, microphoneMuted: transition.microphoneMuted }
@@ -5999,6 +6010,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const accountBootstrapToken = accountSnapshotCoordinator.beginRefresh()
         const commentHighlightRevisionAtBootstrapStart = commentHighlightRevision
         const captionsStatusRevisionAtBootstrapStart = captionsStatusRevisionRef.current
+        // The takeover commit also releases the microphone mute a takeover
+        // owns, so it must not wait on the rest of the batch: one unrelated
+        // failed request used to skip it and strand a muted microphone with
+        // no takeover selected. A failed read stays unknown and commits
+        // nothing; it still fails the batch below so the error surfaces.
+        const activeScreenBootstrap = bootstrapRequest<StreamScreen | null>('screens.active')
+        void activeScreenBootstrap.then(
+          (nextActiveScreen) => {
+            if (
+              generationIsCurrent() &&
+              bootstrapGuard.isCurrent(bootstrapSnapshot, 'activeScreen')
+            ) {
+              commitActiveScreen(nextActiveScreen)
+            }
+          },
+          () => undefined
+        )
         const [
           nextHealth,
           nextEntitlements,
@@ -6016,7 +6044,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           nextPreviewScreen,
           nextScene,
           nextScreens,
-          nextActiveScreen,
+          ,
           nextStreamMetadataDraft,
           nextSessions,
           nextSessionStorage,
@@ -6038,7 +6066,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           bootstrapRequest<PreviewScreenStatus>('preview.screen.status'),
           bootstrapRequest<Scene>('scene.get'),
           bootstrapRequest<StreamScreen[]>('screens.list'),
-          bootstrapRequest<StreamScreen | null>('screens.active'),
+          activeScreenBootstrap,
           bootstrapRequest<StreamMetadataDraft>('streamTargets.metadata.get'),
           bootstrapRequest<SessionListPage>('sessions.list', { limit: SESSION_LIST_PAGE_LIMIT }),
           bootstrapRequest<SessionStorageTotals>('sessions.storage'),
@@ -6150,9 +6178,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'screenList')) {
           setScreens(nextScreens)
-        }
-        if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'activeScreen')) {
-          commitActiveScreen(nextActiveScreen)
         }
         if (bootstrapGuard.isCurrent(bootstrapSnapshot, 'streamMetadata')) {
           setStreamMetadataDraft(nextStreamMetadataDraft)

@@ -5351,6 +5351,19 @@ impl Database {
         self.save_setting_locked(&conn, "activeScreenId", &Option::<String>::None)
     }
 
+    /// A takeover never survives a relaunch. A fresh backend has no takeover
+    /// output, so a pointer left by the previous run is stale by definition;
+    /// left in place it would be composited into the next recording while the
+    /// Studio shows nothing selected. Returns the retired id, if any.
+    pub fn retire_active_stream_screen_at_launch(&self) -> Result<Option<String>> {
+        let conn = self.lock()?;
+        let Some(screen_id) = self.active_screen_id_locked(&conn)? else {
+            return Ok(None);
+        };
+        self.save_setting_locked(&conn, "activeScreenId", &Option::<String>::None)?;
+        Ok(Some(screen_id))
+    }
+
     fn stream_screen_by_id_locked(
         &self,
         conn: &Connection,
@@ -10648,6 +10661,29 @@ mod tests {
 
         database.clear_active_stream_screen().unwrap();
         assert!(database.active_stream_screen().unwrap().is_none());
+    }
+
+    #[test]
+    fn active_stream_screen_is_retired_at_launch() {
+        let database = test_database();
+        let screen = import_stub_screen(&database, "brb.png");
+
+        assert_eq!(
+            database.retire_active_stream_screen_at_launch().unwrap(),
+            None
+        );
+
+        database.activate_stream_screen(&screen.id).unwrap();
+        assert_eq!(
+            database.retire_active_stream_screen_at_launch().unwrap(),
+            Some(screen.id.clone())
+        );
+        assert!(database.active_stream_screen().unwrap().is_none());
+        // The image itself stays in the library.
+        assert_eq!(
+            database.stream_screen_by_id(&screen.id).unwrap().id,
+            screen.id
+        );
     }
 
     #[test]
