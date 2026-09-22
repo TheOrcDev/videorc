@@ -80,6 +80,7 @@ import {
   isNativeWindowSourceId,
   patchPreparedStreamTarget,
   patchStreamTargetForEdit,
+  streamOutputVideoForTarget,
   persistableCaptureConfig,
   previewDeviceRefreshSignature,
   oauthUnavailableReason,
@@ -3571,7 +3572,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const cohostStateRef = useRef<CohostState | null>(null)
   const cohostAutoHighlightedRef = useRef<Set<string>>(new Set())
   const streamTitleRef = useRef<string | null>(null)
-  streamTitleRef.current = streamMetadataDraft?.title?.trim() || null
+  streamTitleRef.current =
+    captureConfig.streaming.targets.find((target) => target.enabled && target.scheduledEventId)
+      ?.scheduledEventTitle ??
+    (streamMetadataDraft?.title?.trim() || null)
 
   const commitCohostState = useCallback((next: CohostState): void => {
     const previous = cohostStateRef.current
@@ -10532,7 +10536,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
 
           let lastStatus: YouTubeStreamStatusResult | null = null
-          for (let attempt = 0; attempt < 8; attempt += 1) {
+          for (let attempt = 0; !target.scheduledEventId && attempt < 8; attempt += 1) {
             if (platformLifecycleRun.current !== runId) {
               return
             }
@@ -10564,23 +10568,35 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             await delay(2000)
           }
 
-          if (!lastStatus?.active) {
+          if (!target.scheduledEventId && !lastStatus?.active) {
             throw new Error(lastStatus?.message ?? 'YouTube ingest did not become active yet.')
           }
           if (platformLifecycleRun.current !== runId) {
             return
           }
 
-          const transitionRequest = client
-            .request<YouTubeBroadcastTransitionResult>('streamTargets.youtube.transition', {
-              accountId: target.accountId,
-              broadcastId,
-              status: 'live'
-            })
-            .then((result) => {
-              assertYouTubeTransitionConfirmed(result, 'live')
-              return result
-            })
+          const transitionRequest = (
+            target.scheduledEventId
+              ? import('@/lib/scheduled-streams').then(({ scheduledTargetOperation }) =>
+                  scheduledTargetOperation<YouTubeBroadcastTransitionResult>(
+                    client,
+                    'activate',
+                    target.scheduledEventId!,
+                    { attemptId: target.scheduledAttemptId, sessionId }
+                  )
+                )
+              : client.request<YouTubeBroadcastTransitionResult>(
+                  'streamTargets.youtube.transition',
+                  {
+                    accountId: target.accountId,
+                    broadcastId,
+                    status: 'live'
+                  }
+                )
+          ).then((result) => {
+            assertYouTubeTransitionConfirmed(result, 'live')
+            return result
+          })
           const mutationEntry = sessionId
             ? {
                 sessionId,
@@ -11052,11 +11068,30 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               })
             })
           )
-          await completeYouTubeBroadcastOnce(target, broadcastId)
+          const scheduledResult = target.scheduledEventId
+            ? await (
+                await import('@/lib/scheduled-streams')
+              ).scheduledTargetOperation<YouTubeBroadcastTransitionResult>(
+                client,
+                'releasePreparation',
+                target.scheduledEventId,
+                {
+                  attemptId: target.scheduledAttemptId,
+                  sessionId:
+                    sessionId && !isPreparedPlatformLifecycleOwner(sessionId)
+                      ? sessionId
+                      : undefined
+                }
+              )
+            : await completeYouTubeBroadcastOnce(target, broadcastId)
+          const completionMessage =
+            target.scheduledEventId && scheduledResult.lifecycleStatus === 'ready'
+              ? 'Upcoming event preserved.'
+              : 'YouTube broadcast ended.'
           nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
             status: {
               state: 'stopped',
-              message: 'YouTube broadcast ended.'
+              message: completionMessage
             }
           })
           setCaptureConfig((current) =>
@@ -11065,7 +11100,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               streaming: patchPreparedStreamTarget(current.streaming, target.id, {
                 status: {
                   state: 'stopped',
-                  message: 'YouTube broadcast ended.'
+                  message: completionMessage
                 }
               })
             })
@@ -11648,174 +11683,213 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
   runStartSessionRef.current = runStartSession
 
-  const prepareOauthTargetsForGoLive = useCallback(async (): Promise<GoLivePartialSetup> => {
-    if (!client) {
-      throw new Error('Backend socket is not connected.')
-    }
-    if (!(await settlePreviousPlatformLifecycle())) {
-      throw new Error('The previous livestream providers still need cleanup before Go Live.')
-    }
+  const prepareOauthTargetsForGoLive = useCallback(
+    async (confirmedPreflight?: GoLivePreflight): Promise<GoLivePartialSetup> => {
+      if (!client) {
+        throw new Error('Backend socket is not connected.')
+      }
+      if (!(await settlePreviousPlatformLifecycle())) {
+        throw new Error('The previous livestream providers still need cleanup before Go Live.')
+      }
 
-    let nextStreaming = captureConfig.streaming
-    const failures: GoLiveSetupFailure[] = []
-    for (const target of captureConfig.streaming.targets.filter(
-      (target) => target.enabled && target.authMode === 'oauth'
-    )) {
-      try {
-        if (target.platform === 'youtube') {
-          const unavailable = oauthUnavailableReason(target.platform)
-          if (unavailable) {
-            // Known product state (feature-flagged off while Google review is
-            // pending), not a setup failure: keep it off the go-live failure
-            // toast and mark the destination inline instead.
+      let nextStreaming = captureConfig.streaming
+      const failures: GoLiveSetupFailure[] = []
+      for (const target of captureConfig.streaming.targets.filter(
+        (target) => target.enabled && target.authMode === 'oauth'
+      )) {
+        try {
+          if (target.platform === 'youtube') {
+            const unavailable = oauthUnavailableReason(target.platform)
+            if (unavailable) {
+              if (target.scheduledEventId) throw new Error(unavailable)
+              // Known product state (feature-flagged off while Google review is
+              // pending), not a setup failure: keep it off the go-live failure
+              // toast and mark the destination inline instead.
+              nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+                status: { state: 'warning', message: unavailable }
+              })
+              continue
+            }
+            const scheduledAttemptId = target.scheduledEventId ? crypto.randomUUID() : undefined
+            const prepared = target.scheduledEventId
+              ? await (
+                  await import('@/lib/scheduled-streams')
+                ).scheduledTargetOperation<PreparedYouTubeBroadcast>(
+                  client,
+                  'prepareForGoLive',
+                  target.scheduledEventId,
+                  {
+                    accountId: target.accountId,
+                    confirmationFingerprint: confirmedPreflight?.destinations.find(
+                      (destination) => destination.targetId === target.id
+                    )?.scheduled?.fingerprint,
+                    attemptId: scheduledAttemptId,
+                    targetId: target.id,
+                    video: coerceVideoToOrientation(
+                      streamOutputVideoForTarget(
+                        captureConfig.video,
+                        captureConfig.streaming,
+                        target
+                      ),
+                      target.outputOrientation ?? 'horizontal'
+                    )
+                  }
+                )
+              : await client.request<PreparedYouTubeBroadcast>('streamTargets.youtube.prepare', {
+                  accountId: target.accountId,
+                  // Per-destination key slot: two YouTube destinations on one
+                  // channel each keep the key of their OWN broadcast.
+                  targetId: target.id,
+                  // The vertical-bound broadcast advertises the PORTRAIT profile —
+                  // the same transposition the simulcast leg composes at.
+                  video:
+                    target.outputOrientation === 'vertical'
+                      ? coerceVideoToOrientation(captureConfig.video, 'vertical')
+                      : captureConfig.video
+                })
+            const completionKey = JSON.stringify([prepared.accountId, prepared.broadcastId])
+            youtubeCompletionInFlightByBroadcastRef.current.delete(completionKey)
+            youtubeCompletedBroadcastResultsRef.current.delete(completionKey)
             nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-              status: { state: 'warning', message: unavailable }
+              scheduledAttemptId,
+              ...(target.scheduledEventId
+                ? {
+                    scheduledEventTitle: prepared.title,
+                    scheduledPrivacy: prepared.privacy,
+                    scheduledStartUtc: prepared.scheduledStartTime
+                  }
+                : {}),
+              accountId: prepared.accountId,
+              accountLabel: prepared.accountLabel,
+              serverUrl: prepared.serverUrl,
+              streamKeySecretRef: prepared.streamKeySecretRef,
+              streamKeyPresent: true,
+              platformBroadcastId: prepared.broadcastId,
+              platformStreamId: prepared.streamId,
+              status: {
+                state: 'ready',
+                message: 'YouTube broadcast prepared.'
+              }
             })
-            continue
+          } else if (target.platform === 'twitch') {
+            const prepared = await client.request<PreparedTwitchBroadcast>(
+              'streamTargets.twitch.prepare',
+              {
+                accountId: target.accountId
+              }
+            )
+            nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+              accountId: prepared.accountId,
+              accountLabel: prepared.accountLabel,
+              serverUrl: prepared.serverUrl,
+              streamKeySecretRef: prepared.streamKeySecretRef,
+              streamKeyPresent: true,
+              platformBroadcastId: undefined,
+              platformStreamId: undefined,
+              status: {
+                state: 'ready',
+                message: 'Twitch channel prepared.'
+              }
+            })
+          } else if (target.platform === 'x') {
+            const prepared = await client.request<PreparedXStreamSource>(
+              'streamTargets.x.prepare',
+              {
+                accountId: target.accountId
+              }
+            )
+            nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+              accountId: prepared.accountId,
+              accountLabel: prepared.accountLabel,
+              serverUrl: prepared.serverUrl,
+              streamKeySecretRef: prepared.streamKeySecretRef,
+              streamKeyPresent: true,
+              platformBroadcastId: prepared.region,
+              platformStreamId: prepared.sourceId,
+              status: {
+                state: 'ready',
+                message: prepared.isStreamActive
+                  ? 'X source prepared; ingest is already active.'
+                  : 'X source prepared.'
+              }
+            })
           }
-          const prepared = await client.request<PreparedYouTubeBroadcast>(
-            'streamTargets.youtube.prepare',
-            {
-              accountId: target.accountId,
-              // Per-destination key slot: two YouTube destinations on one
-              // channel each keep the key of their OWN broadcast.
-              targetId: target.id,
-              // The vertical-bound broadcast advertises the PORTRAIT profile —
-              // the same transposition the simulcast leg composes at.
-              video:
-                target.outputOrientation === 'vertical'
-                  ? coerceVideoToOrientation(captureConfig.video, 'vertical')
-                  : captureConfig.video
-            }
-          )
-          const completionKey = JSON.stringify([prepared.accountId, prepared.broadcastId])
-          youtubeCompletionInFlightByBroadcastRef.current.delete(completionKey)
-          youtubeCompletedBroadcastResultsRef.current.delete(completionKey)
-          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-            accountId: prepared.accountId,
-            accountLabel: prepared.accountLabel,
-            serverUrl: prepared.serverUrl,
-            streamKeySecretRef: prepared.streamKeySecretRef,
-            streamKeyPresent: true,
-            platformBroadcastId: prepared.broadcastId,
-            platformStreamId: prepared.streamId,
-            status: {
-              state: 'ready',
-              message: 'YouTube broadcast prepared.'
-            }
-          })
-        } else if (target.platform === 'twitch') {
-          const prepared = await client.request<PreparedTwitchBroadcast>(
-            'streamTargets.twitch.prepare',
-            {
-              accountId: target.accountId
-            }
-          )
-          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-            accountId: prepared.accountId,
-            accountLabel: prepared.accountLabel,
-            serverUrl: prepared.serverUrl,
-            streamKeySecretRef: prepared.streamKeySecretRef,
-            streamKeyPresent: true,
-            platformBroadcastId: undefined,
-            platformStreamId: undefined,
-            status: {
-              state: 'ready',
-              message: 'Twitch channel prepared.'
-            }
-          })
-        } else if (target.platform === 'x') {
-          const prepared = await client.request<PreparedXStreamSource>('streamTargets.x.prepare', {
-            accountId: target.accountId
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          failures.push({
+            targetId: target.id,
+            platform: target.platform,
+            label: target.label,
+            message
           })
           nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-            accountId: prepared.accountId,
-            accountLabel: prepared.accountLabel,
-            serverUrl: prepared.serverUrl,
-            streamKeySecretRef: prepared.streamKeySecretRef,
-            streamKeyPresent: true,
-            platformBroadcastId: prepared.region,
-            platformStreamId: prepared.sourceId,
+            enabled: false,
             status: {
-              state: 'ready',
-              message: prepared.isStreamActive
-                ? 'X source prepared; ingest is already active.'
-                : 'X source prepared.'
+              state: 'failed',
+              message
             }
           })
         }
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        failures.push({
-          targetId: target.id,
-          platform: target.platform,
-          label: target.label,
-          message
-        })
-        nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-          enabled: false,
-          status: {
-            state: 'failed',
-            message
-          }
-        })
       }
-    }
 
-    // Manual-RTMP Twitch targets: the transport is a user-provided stream
-    // key, but Helix channel updates work regardless of ingest path — push
-    // title/category/language through the connected account. Best-effort:
-    // a metadata failure must not block going live over the key.
-    const twitchAccount = platformAccounts.find((item) => item.platform === 'twitch')
-    for (const target of captureConfig.streaming.targets.filter(
-      (target) => target.enabled && target.authMode !== 'oauth' && target.platform === 'twitch'
-    )) {
-      if (!twitchAccount) {
-        nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-          status: {
-            state: 'ready',
-            message: 'Streaming over stream key. Connect Twitch to push title and category.'
-          }
-        })
-        continue
+      // Manual-RTMP Twitch targets: the transport is a user-provided stream
+      // key, but Helix channel updates work regardless of ingest path — push
+      // title/category/language through the connected account. Best-effort:
+      // a metadata failure must not block going live over the key.
+      const twitchAccount = platformAccounts.find((item) => item.platform === 'twitch')
+      for (const target of captureConfig.streaming.targets.filter(
+        (target) => target.enabled && target.authMode !== 'oauth' && target.platform === 'twitch'
+      )) {
+        if (!twitchAccount) {
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'ready',
+              message: 'Streaming over stream key. Connect Twitch to push title and category.'
+            }
+          })
+          continue
+        }
+        try {
+          const applied = await client.request<TwitchAppliedMetadata>(
+            'streamTargets.twitch.applyMetadata',
+            { accountId: twitchAccount.accountId }
+          )
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'ready',
+              message: `Twitch channel metadata updated ("${applied.title}").`
+            }
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'ready',
+              message: `Streaming over stream key; channel metadata update failed: ${message}`
+            }
+          })
+        }
       }
-      try {
-        const applied = await client.request<TwitchAppliedMetadata>(
-          'streamTargets.twitch.applyMetadata',
-          { accountId: twitchAccount.accountId }
-        )
-        nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-          status: {
-            state: 'ready',
-            message: `Twitch channel metadata updated ("${applied.title}").`
-          }
-        })
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
-        nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-          status: {
-            state: 'ready',
-            message: `Streaming over stream key; channel metadata update failed: ${message}`
-          }
-        })
-      }
-    }
 
-    setCaptureConfig((current) => bridgeStreamingToLegacy({ ...current, streaming: nextStreaming }))
-    await refreshPlatformAccountsForClient(client)
-    return {
-      streaming: nextStreaming,
-      failures,
-      readyLabels: readyStreamTargetLabels(nextStreaming)
-    }
-  }, [
-    captureConfig.streaming,
-    captureConfig.video,
-    client,
-    platformAccounts,
-    refreshPlatformAccountsForClient,
-    settlePreviousPlatformLifecycle
-  ])
+      setCaptureConfig((current) =>
+        bridgeStreamingToLegacy({ ...current, streaming: nextStreaming })
+      )
+      await refreshPlatformAccountsForClient(client)
+      return {
+        streaming: nextStreaming,
+        failures,
+        readyLabels: readyStreamTargetLabels(nextStreaming)
+      }
+    },
+    [
+      captureConfig.streaming,
+      captureConfig.video,
+      client,
+      platformAccounts,
+      refreshPlatformAccountsForClient,
+      settlePreviousPlatformLifecycle
+    ]
+  )
 
   const openGoLiveConfirmation = useCallback(async () => {
     if (!client) {
@@ -11850,6 +11924,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
       const [preflight] = await Promise.all([
         client.request<GoLivePreflight>('streamTargets.confirmation.validate', {
+          scheduledEventIds: Object.fromEntries(
+            captureConfig.streaming.targets
+              .filter((t) => t.enabled && t.scheduledEventId)
+              .map((t) => [t.id, t.scheduledEventId])
+          ),
           streaming: captureConfig.streaming
         }),
         captureConfig.captions.enabled
@@ -11948,9 +12027,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const preflight = await client.request<GoLivePreflight>(
           'streamTargets.confirmation.validate',
           {
+            scheduledEventIds: Object.fromEntries(
+              captureConfig.streaming.targets
+                .filter((t) => t.enabled && t.scheduledEventId)
+                .map((t) => [t.id, t.scheduledEventId])
+            ),
             streaming: captureConfig.streaming
           }
         )
+        const changedScheduledEvent = preflight.destinations.some(
+          (destination) =>
+            destination.scheduled &&
+            goLivePreflight?.destinations.find(
+              (previous) => previous.targetId === destination.targetId
+            )?.scheduled?.fingerprint !== destination.scheduled.fingerprint
+        )
+        if (changedScheduledEvent) {
+          setGoLivePreflight(preflight)
+          toast.warning(
+            'The scheduled event changed. Review its updated visibility and details, then confirm again.'
+          )
+          return
+        }
         setGoLivePreflight(preflight)
         const preflightDecision = decideGoLivePreflight(preflight)
         if (preflightDecision.kind === 'blocked') {
@@ -11964,7 +12062,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           return
         }
-        const setup = await prepareOauthTargetsForGoLive()
+        const setup = await prepareOauthTargetsForGoLive(preflight)
         const setupDecision = decidePreparedGoLiveSetup(setup)
         if (setupDecision.kind === 'no-ready-destinations') {
           throw new Error('No livestream destinations are ready after platform setup.')
@@ -12001,6 +12099,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.streaming,
     client,
     goLiveConfirmationPending,
+    goLivePreflight,
     goLiveCaptionsReadiness,
     prepareOauthTargetsForGoLive,
     reportSessionStartFailure,
@@ -12749,7 +12848,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         const preflight = await client.request<GoLivePreflight>(
           'streamTargets.confirmation.validate',
-          { streaming: nextStreaming }
+          {
+            streaming: nextStreaming,
+            scheduledEventIds: Object.fromEntries(
+              nextStreaming.targets
+                .filter((t) => t.enabled && t.scheduledEventId)
+                .map((t) => [t.id, t.scheduledEventId])
+            )
+          }
         )
         setGoLivePreflight(preflight)
       } catch (error) {
@@ -13577,7 +13683,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       configure: (patch: Partial<CaptureConfig>) =>
         value.setCaptureConfig((current) => ({ ...current, ...patch })),
       start: value.startSession,
-      stop: value.stopSession
+      stop: value.stopSession,
+      confirmGoLive: value.confirmGoLive,
+      cancelGoLive: value.cancelGoLiveConfirmation,
+      setSettings: value.setSettings,
+      patchTarget: value.patchStreamingTarget,
+      streamingState: () => ({
+        canStart: value.canStart,
+        startBlockedReason: value.startBlockedReason,
+        lastError: value.lastError,
+        confirmationOpen: value.goLiveConfirmationOpen,
+        pending: value.goLiveConfirmationPending,
+        captureConfig: value.captureConfig,
+        recording: recording,
+        preflight: value.goLivePreflight
+      })
     }
     return () => {
       delete smokeWindow.__videorcSmokeScenePresets

@@ -721,6 +721,11 @@ export interface StreamTargetSettings {
   authMode: StreamAuthMode
   accountId?: string
   accountLabel?: string
+  scheduledEventId?: string
+  scheduledAttemptId?: string
+  scheduledEventTitle?: string
+  scheduledStartUtc?: string
+  scheduledPrivacy?: StreamPrivacy
   platformBroadcastId?: string
   platformStreamId?: string
   outputPreset?: VideoPreset
@@ -1073,6 +1078,13 @@ export interface GoLivePreflight {
 }
 
 export interface GoLiveDestinationPreflight {
+  scheduled?: {
+    eventId: string
+    fingerprint: string
+    title: string
+    privacy: string
+    startUtc: string
+  }
   targetId: string
   platform: StreamPlatform
   label: string
@@ -3550,6 +3562,7 @@ export interface VideorcApi {
   // Picks a PNG/JPG/WebP and copies it into app-support storage, returning the
   // managed asset (Assets Tab plan, slice A4).
   importBackgroundImage: () => Promise<BackgroundImportResult | null>
+  importScheduledThumbnail: () => Promise<ScheduledThumbnail | null>
   backgroundAssetExists: (assetId: string) => Promise<boolean>
   /** Fetch-and-cache a chat avatar from an allowlisted platform CDN; returns a
    * local videorc-asset:// URL or null (disallowed host / fetch failure). */
@@ -4378,4 +4391,90 @@ export interface ObsDiscovery {
   profiles: string[]
   currentCollection?: string
   currentProfile?: string
+}
+
+export interface ScheduledEventMetadata {
+  title: string
+  description: string
+  privacy: 'private' | 'unlisted' | 'public'
+  madeForKids: boolean
+  localStart: string
+  timeZone: string
+  offsetChoice: 'earlier' | 'later' | null
+  thumbnailAssetId: string | null
+}
+export interface ScheduledStreamEvent {
+  id: string
+  schemaVersion: number
+  revision: number
+  provider: 'youtube'
+  accountId: string
+  accountLabel: string
+  requested: ScheduledEventMetadata
+  startUtc: string
+  providerEventId: string | null
+  watchUrl: string | null
+  lifecycle:
+    | 'draft'
+    | 'scheduled'
+    | 'preparing'
+    | 'live'
+    | 'completed'
+    | 'canceled'
+    | 'missing'
+    | 'unknown'
+  operationState: 'idle' | 'pending' | 'needs-retry' | 'needs-reconciliation'
+  thumbnailState: 'none' | 'pending' | 'uploaded' | 'error'
+  error: { code: string; message: string } | null
+  lastSyncedAt: string | null
+  preparation: {
+    attemptId: string
+    targetId: string
+    phase: string
+    sessionId: string | null
+  } | null
+  createUncertain: boolean
+}
+export interface ScheduledStreamOperation {
+  id: string
+  eventId: string
+  action: string
+  state: 'pending' | 'complete' | 'needs-retry' | 'needs-reconciliation'
+  stage: string
+  error: { code: string; message: string } | null
+  result: unknown
+}
+export interface ScheduledStreamCapabilities {
+  available: boolean
+  reason: string | null
+  accounts: PlatformAccount[]
+  audienceEditable: false
+}
+export interface ScheduledThumbnail {
+  id: string
+  previewUrl: string
+  width: number
+  height: number
+}
+
+export interface ScheduledStreamMutation {
+  confirmationFingerprint?: string
+  operationId: string
+  eventId: string
+  expectedRevision: number
+  metadata?: ScheduledEventMetadata
+  accountId?: string
+  candidateId?: string
+  candidateKind?: 'broadcast' | 'ingest'
+  attemptId?: string
+  targetId?: string
+  video?: VideoSettings
+  sessionId?: string
+}
+
+export interface ScheduledStreamCandidate {
+  candidateKind: 'broadcast' | 'ingest'
+  id: string
+  snippet: { title: string; scheduledStartTime: string | null }
+  profile: { resolution: string | null; frameRate: string | null }
 }

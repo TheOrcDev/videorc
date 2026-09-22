@@ -20,7 +20,11 @@ import {
   XPlatformIcon,
   YoutubeIcon
 } from '@/components/icons'
-import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from 'react'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+const ScheduledStreams = lazy(() =>
+  import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
+)
 
 import { ListRow } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
@@ -104,6 +108,34 @@ const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
 }
 
 export function StreamingTab(): ReactElement {
+  const [view, setView] = useState(() =>
+    sessionStorage.getItem('videorc-scheduling-view') === 'upcoming' ? 'upcoming' : 'setup'
+  )
+  useEffect(() => {
+    const open = () => setView('upcoming')
+    window.addEventListener('videorc:upcoming', open)
+    sessionStorage.removeItem('videorc-scheduling-view')
+    return () => window.removeEventListener('videorc:upcoming', open)
+  }, [])
+  return (
+    <Tabs value={view} onValueChange={setView}>
+      <TabsList>
+        <TabsTrigger value="setup">Setup</TabsTrigger>
+        <TabsTrigger value="upcoming">Upcoming</TabsTrigger>
+      </TabsList>
+      <TabsContent value="setup">
+        <StreamingSetup />
+      </TabsContent>
+      <TabsContent value="upcoming">
+        <Suspense fallback={<p role="status">Loading upcoming streams…</p>}>
+          <ScheduledStreams />
+        </Suspense>
+      </TabsContent>
+    </Tabs>
+  )
+}
+
+function StreamingSetup(): ReactElement {
   const {
     captureConfig,
     connectPlatformAccount,
@@ -229,6 +261,33 @@ export function StreamingTab(): ReactElement {
             Destination credentials are locked while a session is live.
           </p>
         ) : null}
+        {streaming.targets
+          .filter((target) => target.scheduledEventId)
+          .map((target) => (
+            <div
+              key={`scheduled-${target.id}`}
+              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3"
+            >
+              <p className="min-w-0 truncate text-sm">
+                {target.label}: {target.scheduledEventTitle}
+              </p>
+              <Button
+                size="sm"
+                variant="ghost"
+                disabled={isSessionActive}
+                onClick={() =>
+                  patchStreamingTarget(target.id, {
+                    scheduledEventId: undefined,
+                    scheduledEventTitle: undefined,
+                    scheduledPrivacy: undefined,
+                    scheduledStartUtc: undefined
+                  })
+                }
+              >
+                Use instant broadcast
+              </Button>
+            </div>
+          ))}
         {streaming.targets.map((target) => (
           <DestinationCard
             account={accountByPlatform.get(target.platform)}

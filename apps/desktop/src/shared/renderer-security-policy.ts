@@ -42,6 +42,7 @@ export const IPC_INVOKE_ROLES = {
   'system:check-directory': MAIN_ONLY,
   'screens:pick-image': MAIN_ONLY,
   'backgrounds:import-image': MAIN_ONLY,
+  'scheduled-streams:import-thumbnail': MAIN_ONLY,
   'backgrounds:bundled-assets': MAIN_ONLY,
   'backgrounds:asset-exists': MAIN_ONLY,
   // The detached Comments window renders the same chat rows as Studio; without

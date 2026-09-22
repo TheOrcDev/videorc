@@ -35,6 +35,12 @@ function matches(text: string, pattern: RegExp): string[] {
 }
 
 describe('renderer security policy', () => {
+  it('keeps the thumbnail picker exclusive to the Studio renderer', () => {
+    expect(roleCanInvokeChannel('main', 'scheduled-streams:import-thumbnail')).toBe(true)
+    for (const role of ['notes', 'comments', 'captions'] as const) {
+      expect(roleCanInvokeChannel(role, 'scheduled-streams:import-thumbnail')).toBe(false)
+    }
+  })
   it('derives only known preload roles from main-owned process arguments', () => {
     expect(rendererRoleFromArguments(['electron', '--videorc-renderer-role=comments'])).toBe(
       'comments'

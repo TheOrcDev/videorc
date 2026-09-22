@@ -1,5 +1,10 @@
 import type {
   BackendHealth,
+  ScheduledStreamEvent,
+  ScheduledStreamOperation,
+  ScheduledStreamMutation,
+  ScheduledStreamCapabilities,
+  ScheduledStreamCandidate,
   CaptureRecoveryStatus,
   CohostFlagParams,
   CohostQuestionParams,
@@ -91,6 +96,64 @@ type LayoutTransactionResult = LiveLayoutApplyStatus & {
  * overload while they are migrated incrementally.
  */
 export interface BackendRpcMethodMap {
+  'scheduledStreams.resolveTime': BackendRpcDefinition<
+    { localStart: string; timeZone: string; offsetChoice?: string | null },
+    { startUtc: string }
+  >
+  'scheduledStreams.candidates': BackendRpcDefinition<
+    { eventId: string },
+    ScheduledStreamCandidate[]
+  >
+
+  'scheduledStreams.saveDraft': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.schedule': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.update': BackendRpcDefinition<ScheduledStreamMutation, ScheduledStreamOperation>
+  'scheduledStreams.cancel': BackendRpcDefinition<ScheduledStreamMutation, ScheduledStreamOperation>
+  'scheduledStreams.refresh': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.duplicate': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.recover': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.prepareForGoLive': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.releasePreparation': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.activate': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.complete': BackendRpcDefinition<
+    ScheduledStreamMutation,
+    ScheduledStreamOperation
+  >
+  'scheduledStreams.list': BackendRpcDefinition<Record<string, never>, ScheduledStreamEvent[]>
+  'scheduledStreams.get': BackendRpcDefinition<{ eventId: string }, ScheduledStreamEvent>
+  'scheduledStreams.operation': BackendRpcDefinition<
+    { operationId: string },
+    ScheduledStreamOperation | null
+  >
+  'scheduledStreams.capabilities': BackendRpcDefinition<
+    Record<string, never>,
+    ScheduledStreamCapabilities
+  >
+
   'health.ping': BackendRpcDefinition<{ ffmpegPath?: string } | undefined, BackendHealth>
   'entitlements.get': BackendRpcDefinition<undefined, EntitlementsSnapshot>
   'entitlements.refresh': BackendRpcDefinition<undefined, EntitlementsSnapshot>
@@ -173,6 +236,7 @@ export type BackendRpcResult<TMethod extends BackendRpcMethod> =
   BackendRpcMethodMap[TMethod]['result']
 
 export interface BackendEventMap {
+  'scheduledStreams.changed': ScheduledStreamEvent
   'devices.changed': DeviceList
   'entitlements.updated': EntitlementsSnapshot
   'noiseCleanup.status': NoiseCleanupJob
@@ -1760,7 +1824,119 @@ const cohostFlagParamsSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<CohostFlagParams>
 
+const scheduledMutationSchema = objectSchema(
+  {
+    confirmationFingerprint: optionalSchema(boundedString),
+    operationId: boundedString,
+    eventId: boundedString,
+    expectedRevision: numberSchema({ integer: true, min: 0 }),
+    metadata: optionalSchema(boundedBackendPayloadSchema),
+    accountId: optionalSchema(boundedString),
+    candidateId: optionalSchema(boundedString),
+    candidateKind: optionalSchema(enumSchema(['broadcast', 'ingest'])),
+    attemptId: optionalSchema(boundedString),
+    targetId: optionalSchema(boundedString),
+    video: optionalSchema(boundedBackendPayloadSchema),
+    sessionId: optionalSchema(boundedString)
+  },
+  { allowUnknown: false }
+)
+
 const runtimeContracts = {
+  'scheduledStreams.resolveTime': {
+    params: objectSchema(
+      {
+        localStart: boundedString,
+        timeZone: boundedString,
+        offsetChoice: optionalSchema(nullableSchema(enumSchema(['earlier', 'later'])))
+      },
+      { allowUnknown: false }
+    ),
+    result: objectSchema({ startUtc: timestamp }, { allowUnknown: false })
+  },
+  'scheduledStreams.candidates': {
+    params: objectSchema({ eventId: boundedString }, { allowUnknown: false }),
+    result: arraySchema(
+      objectSchema(
+        {
+          candidateKind: enumSchema(['broadcast', 'ingest']),
+          id: boundedString,
+          snippet: objectSchema(
+            { title: boundedString, scheduledStartTime: nullableSchema(boundedString) },
+            { allowUnknown: false }
+          ),
+          profile: objectSchema(
+            { resolution: nullableSchema(boundedString), frameRate: nullableSchema(boundedString) },
+            { allowUnknown: false }
+          )
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 1000 }
+    )
+  },
+
+  'scheduledStreams.saveDraft': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.schedule': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.update': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.cancel': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.refresh': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.duplicate': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.recover': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.prepareForGoLive': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.releasePreparation': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.activate': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.complete': {
+    params: scheduledMutationSchema,
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.list': {
+    params: objectSchema({}, { allowUnknown: false }),
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.get': {
+    params: objectSchema({ eventId: boundedString }, { allowUnknown: false }),
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.operation': {
+    params: objectSchema({ operationId: boundedString }, { allowUnknown: false }),
+    result: boundedBackendPayloadSchema
+  },
+  'scheduledStreams.capabilities': {
+    params: objectSchema({}, { allowUnknown: false }),
+    result: boundedBackendPayloadSchema
+  },
+
   'health.ping': { params: undefinedOrFfmpegPathSchema, result: backendHealthSchema },
   'entitlements.get': { params: undefinedSchema, result: entitlementsSchema },
   'entitlements.refresh': { params: undefinedSchema, result: entitlementsSchema },
@@ -1967,6 +2143,7 @@ export const runtimeValidatedBackendRpcMethods = Object.freeze(
 )
 
 const runtimeEventSchemas = {
+  'scheduledStreams.changed': boundedBackendPayloadSchema,
   'devices.changed': deviceListSchema,
   'entitlements.updated': entitlementsSchema,
   'noiseCleanup.status': noiseCleanupJobSchema,
