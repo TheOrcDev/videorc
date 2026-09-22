@@ -23,7 +23,8 @@ fn acquire(
     scene_revision: Option<u64>,
 ) -> Option<CompositorPreviewFrameLease> {
     if compositor.run_id.as_deref() != Some(run_id)
-        || compositor.status.scene_revision != scene_revision
+        || (compositor.status.scene_revision.is_some()
+            && compositor.status.scene_revision != scene_revision)
     {
         return None;
     }
@@ -103,7 +104,16 @@ mod tests {
         });
         assert!(acquire(&runtime, "old-run", Some(7)).is_none());
         assert!(acquire(&runtime, "preview-run", Some(6)).is_none());
+        runtime.status.scene_revision = Some(8);
+        assert!(acquire(&runtime, "preview-run", Some(7)).is_none());
+        // Reopening can reset the diagnostic scene revision while the retained
+        // scene still produces frames. The published frame remains authoritative;
+        // never substitute an unknown revision or accept a different one.
+        runtime.status.scene_revision = None;
+        assert!(acquire(&runtime, "preview-run", None).is_none());
+        assert!(acquire(&runtime, "preview-run", Some(6)).is_none());
         let lease = acquire(&runtime, "preview-run", Some(7)).unwrap();
+        assert_eq!(lease.frame.scene_revision, Some(7));
         assert!(
             acquire(&runtime, "preview-run", Some(7)).is_none(),
             "one outstanding lease globally"

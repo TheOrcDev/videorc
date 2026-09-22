@@ -6534,7 +6534,7 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
     const leased = await nativePreviewFrameLeases.withFrame(
       {
         runId: handoff.runId,
-        sceneRevision: status.sceneRevision ?? undefined
+        sceneRevision: status.sceneRevision ?? status.frameSceneRevision ?? undefined
       },
       async (frame) => {
         if (!nativePreviewPresentationAllowedForGeneration(generation)) return null
