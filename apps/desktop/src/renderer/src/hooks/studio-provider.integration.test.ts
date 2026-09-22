@@ -342,6 +342,13 @@ function compositorFor(scene: Scene, layout: LayoutSettings, revision: number): 
 const DEFAULT_OUTPUT = defaultCaptureConfig.video
 
 class StudioBackend {
+  scheduledConfirmation: {
+    eventId: string
+    fingerprint: string
+    title: string
+    privacy: string
+    startUtc: string
+  } | null = null
   sockets: TestWebSocket[] = []
   performanceCheck: PerformanceCheckState = { running: false, stale: false }
   commands: BackendCommand[] = []
@@ -880,7 +887,58 @@ class StudioBackend {
       case 'streamTargets.metadata.validate':
         return { valid: true, issues: [] }
       case 'streamTargets.confirmation.validate':
-        return { valid: true, destinations: [], issues: [] }
+        return {
+          valid: true,
+          destinations: this.scheduledConfirmation
+            ? [{ targetId: 'youtube', platform: 'youtube', scheduled: this.scheduledConfirmation }]
+            : [],
+          issues: []
+        }
+      case 'scheduledStreams.get':
+        return { id: params.eventId, revision: 1 }
+      case 'scheduledStreams.prepareForGoLive':
+        return {
+          id: params.operationId,
+          eventId: params.eventId,
+          action: 'prepareForGoLive',
+          state: 'complete',
+          stage: 'prepared',
+          error: null,
+          result: {
+            platform: 'youtube',
+            accountId: String(params.accountId ?? 'youtube-account-1'),
+            accountLabel: 'YouTube Test Channel',
+            broadcastId: 'advertised-scheduled-id',
+            streamId: 'scheduled-ingest-id',
+            serverUrl: 'rtmp://a.rtmp.youtube.com/live2',
+            streamKeySecretRef: `scheduled-event-key:${String(params.targetId)}`,
+            streamKeyPresent: true,
+            redactedUrl: 'rtmp://<ingest>/<key>',
+            title: 'Advertised scheduled title',
+            description: 'Saved description',
+            privacy: 'private',
+            madeForKids: false,
+            scheduledStartTime: '2035-01-01T12:00:00Z'
+          }
+        }
+      case 'scheduledStreams.activate':
+      case 'scheduledStreams.releasePreparation':
+        return {
+          id: params.operationId,
+          eventId: params.eventId,
+          action: command.method,
+          state: 'complete',
+          stage: 'confirmed',
+          error: null,
+          result: {
+            platform: 'youtube',
+            accountId: 'youtube-account-1',
+            broadcastId: 'advertised-scheduled-id',
+            requestedStatus: command.method.endsWith('activate') ? 'live' : 'complete',
+            lifecycleStatus: command.method.endsWith('activate') ? 'live' : 'ready',
+            message: 'Scheduled lifecycle confirmed.'
+          }
+        }
       case 'streamTargets.youtube.prepare': {
         const prepareSequence = ++this.youtubePrepareCount
         return {
@@ -7047,6 +7105,147 @@ describe('real StudioProvider lifecycle', () => {
     })
   })
 
+  it('requires another confirmation when a saved event becomes public before preparation', async () => {
+    const backend = new StudioBackend()
+    enableYouTubeOauthForTest(backend)
+    backend.scheduledConfirmation = {
+      eventId: '11111111-1111-4111-8111-111111111111',
+      fingerprint: 'private-v1',
+      title: 'Saved',
+      privacy: 'private',
+      startUtc: '2035-01-01T12:00:00Z'
+    }
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = () => observations.at(-1)
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+    )
+    await openYouTubeGoLiveConfirmation(latest)
+    await act(async () => {
+      latest()!.core.patchStreamingTarget('youtube', {
+        scheduledEventId: backend.scheduledConfirmation!.eventId
+      })
+    })
+    backend.scheduledConfirmation = {
+      ...backend.scheduledConfirmation,
+      fingerprint: 'public-v2',
+      privacy: 'public'
+    }
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    expect(
+      backend.sentCommands.filter(
+        (command) => command.method === 'scheduledStreams.prepareForGoLive'
+      )
+    ).toHaveLength(0)
+    expect(latest()!.core.goLiveConfirmationOpen).toBe(true)
+    await act(async () => {
+      await latest()!.core.confirmGoLive()
+    })
+    expect(
+      backend.sentCommands.filter(
+        (command) => command.method === 'scheduledStreams.prepareForGoLive'
+      )[0]?.params
+    ).toMatchObject({ confirmationFingerprint: 'public-v2' })
+    await act(async () => {
+      await latest()!.core.stopSession()
+    })
+  })
+
+  it.each([false, true])(
+    'uses the saved identity and preserves pre-live scheduled cleanup (start rejected: %s)',
+    async (rejectStart) => {
+      const backend = new StudioBackend()
+      enableYouTubeOauthForTest(backend)
+      if (rejectStart) backend.sessionStartError = 'The encoder rejected this start.'
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const api = createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+      const testDom = installProviderTestEnvironment(api)
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = (): StudioObservation | undefined => observations.at(-1)
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.wsStatus === 'connected' &&
+          latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+      )
+      await openYouTubeGoLiveConfirmation(latest)
+      await act(async () => {
+        latest()!.core.patchStreamingTarget('youtube', {
+          scheduledEventId: '11111111-1111-4111-8111-111111111111',
+          scheduledEventTitle: 'Saved title',
+          scheduledPrivacy: 'private'
+        })
+      })
+      await act(async () => {
+        await latest()!.core.confirmGoLive()
+      })
+      expect(backend.youtubePrepareCount).toBe(0)
+      expect(
+        backend.sentCommands.filter(
+          (command) => command.method === 'scheduledStreams.prepareForGoLive'
+        )
+      ).toHaveLength(1)
+      expect(
+        backend.sentCommands.filter(
+          (command) => command.method === 'streamTargets.youtube.transition'
+        )
+      ).toHaveLength(0)
+      if (rejectStart) {
+        expect(
+          backend.sentCommands.filter(
+            (command) => command.method === 'scheduledStreams.releasePreparation'
+          )
+        ).toHaveLength(1)
+        expect(
+          backend.sentCommands.filter((command) => command.method === 'scheduledStreams.activate')
+        ).toHaveLength(0)
+      } else {
+        expect(
+          backend.sentCommands.filter((command) => command.method === 'scheduledStreams.activate')
+        ).toHaveLength(1)
+        expect(
+          latest()?.core.captureConfig.streaming.targets.find((target) => target.id === 'youtube')
+            ?.platformBroadcastId
+        ).toBe('advertised-scheduled-id')
+        await act(async () => {
+          await latest()!.core.stopSession()
+        })
+        expect(
+          backend.sentCommands.filter(
+            (command) => command.method === 'scheduledStreams.releasePreparation'
+          )
+        ).toHaveLength(1)
+      }
+    }
+  )
+
   it('cleans up one prepared broadcast without activating it after a coalesced start ends early', async () => {
     const backend = new StudioBackend()
     enableYouTubeOauthForTest(backend)
@@ -8448,7 +8647,12 @@ describe('real StudioProvider lifecycle', () => {
   it('rejects a conflicting record start while a prepared livestream start is pending', async () => {
     const backend = new StudioBackend()
     enableYouTubeOauthForTest(backend)
-    backend.sessionStartResponseDelayMs = 100
+    const releaseStart = backend.deferResponse('session.start', {
+      state: 'recording',
+      sessionId: 'session-1',
+      startedAt: now,
+      message: 'Recording.'
+    })
     backend.authoritativeRecordingStatusBeforeStartResponse = 'stopping'
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -8486,6 +8690,7 @@ describe('real StudioProvider lifecycle', () => {
     let conflictingRecordResult: boolean | undefined
     await act(async () => {
       conflictingRecordResult = await recordStart()
+      releaseStart()
       await confirmationPromise
     })
 

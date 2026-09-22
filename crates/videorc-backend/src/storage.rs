@@ -5582,6 +5582,18 @@ impl Database {
         conn.execute_batch(
             "
             PRAGMA foreign_keys = ON;
+            CREATE TABLE IF NOT EXISTS scheduled_stream_events (
+                id TEXT PRIMARY KEY, provider TEXT NOT NULL, account_id TEXT NOT NULL,
+                provider_event_id TEXT, start_utc TEXT NOT NULL, revision INTEGER NOT NULL,
+                lifecycle TEXT NOT NULL, lease TEXT, payload TEXT NOT NULL
+            );
+            CREATE UNIQUE INDEX IF NOT EXISTS scheduled_stream_remote_identity
+                ON scheduled_stream_events(provider,account_id,provider_event_id) WHERE provider_event_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS scheduled_stream_account_start ON scheduled_stream_events(account_id,start_utc);
+            CREATE TABLE IF NOT EXISTS scheduled_stream_operations (
+                id TEXT PRIMARY KEY, event_id TEXT NOT NULL REFERENCES scheduled_stream_events(id),
+                state TEXT NOT NULL, payload TEXT NOT NULL
+            );
 
             CREATE TABLE IF NOT EXISTS sessions (
                 id TEXT PRIMARY KEY,
@@ -11204,5 +11216,193 @@ mod tests {
         let incomplete = database.incomplete_repair_jobs().unwrap();
         assert_eq!(incomplete.len(), 1);
         assert_eq!(incomplete[0].id, "job-running");
+    }
+}
+
+impl Database {
+    pub fn scheduled_events(&self) -> Result<Vec<crate::scheduled_streams::ScheduledStreamEvent>> {
+        let conn = self.lock()?;
+        let mut statement =
+            conn.prepare("SELECT payload FROM scheduled_stream_events ORDER BY start_utc, id")?;
+        let rows = statement.query_map([], |row| row.get::<_, String>(0))?;
+        rows.map(|row| Ok(serde_json::from_str(&row?)?)).collect()
+    }
+
+    pub fn scheduled_event(
+        &self,
+        id: &str,
+    ) -> Result<crate::scheduled_streams::ScheduledStreamEvent> {
+        let payload: String = self
+            .lock()?
+            .query_row(
+                "SELECT payload FROM scheduled_stream_events WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .context("Scheduled event was not found.")?;
+        Ok(serde_json::from_str(&payload)?)
+    }
+
+    pub fn scheduled_operation(
+        &self,
+        id: &str,
+    ) -> Result<Option<crate::scheduled_streams::ScheduleOperation>> {
+        let payload: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT payload FROM scheduled_stream_operations WHERE id=?1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        payload
+            .map(|json| Ok(serde_json::from_str(&json)?))
+            .transpose()
+    }
+
+    /// Reserve an intent atomically before provider I/O. The operation UUID also
+    /// deduplicates requests after a renderer timeout or process restart.
+    pub fn begin_scheduled_operation(
+        &self,
+        mut event: crate::scheduled_streams::ScheduledStreamEvent,
+        mutation: &crate::scheduled_streams::Mutation,
+        action: &str,
+    ) -> Result<(
+        crate::scheduled_streams::ScheduledStreamEvent,
+        crate::scheduled_streams::ScheduleOperation,
+        bool,
+    )> {
+        use crate::scheduled_streams::ScheduleOperation;
+        Uuid::parse_str(&mutation.operation_id).context("Invalid operation UUID.")?;
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let prior: Option<String> = tx
+            .query_row(
+                "SELECT payload FROM scheduled_stream_operations WHERE id=?1",
+                [&mutation.operation_id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(prior) = prior {
+            let operation: ScheduleOperation = serde_json::from_str(&prior)?;
+            if operation.event_id != event.id
+                || operation.action != action
+                || operation.fingerprint
+                    != crate::scheduled_streams::mutation_fingerprint(mutation)?
+            {
+                bail!("Operation UUID belongs to another intent.");
+            }
+            let current: String = tx.query_row(
+                "SELECT payload FROM scheduled_stream_events WHERE id=?1",
+                [&event.id],
+                |r| r.get(0),
+            )?;
+            return Ok((serde_json::from_str(&current)?, operation, false));
+        }
+        let current: Option<(u64, Option<String>, String)> = tx
+            .query_row(
+                "SELECT revision, lease, payload FROM scheduled_stream_events WHERE id=?1",
+                [&event.id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        match current {
+            Some((revision, lease, payload)) => {
+                if revision != mutation.expected_revision {
+                    bail!("Event changed. Reload before editing.");
+                }
+                if lease.is_some() {
+                    bail!("Another operation owns this event. Refresh its progress.");
+                }
+                let old: crate::scheduled_streams::ScheduledStreamEvent =
+                    serde_json::from_str(&payload)?;
+                if old.account_id != event.account_id {
+                    bail!("An event cannot move to another channel.");
+                }
+                if old.schema_version != 1 {
+                    bail!("This event uses a newer schema. Update Videorc.");
+                }
+            }
+            None if mutation.expected_revision == 0 && action == "saveDraft" => (),
+            None => bail!("Scheduled event was not found."),
+        }
+        event.revision = mutation.expected_revision + 1;
+        event.updated_at = Utc::now().to_rfc3339();
+        event.operation_state = "pending".into();
+        event.error = None;
+        let operation = ScheduleOperation {
+            id: mutation.operation_id.clone(),
+            event_id: event.id.clone(),
+            action: action.into(),
+            fingerprint: crate::scheduled_streams::mutation_fingerprint(mutation)?,
+            state: "pending".into(),
+            stage: "reserved".into(),
+            result: None,
+            error: None,
+            created_at: event.updated_at.clone(),
+        };
+        tx.execute("INSERT INTO scheduled_stream_events(id,provider,account_id,provider_event_id,start_utc,revision,lifecycle,lease,payload) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET provider_event_id=excluded.provider_event_id,start_utc=excluded.start_utc,revision=excluded.revision,lifecycle=excluded.lifecycle,lease=excluded.lease,payload=excluded.payload",
+            params![event.id,event.provider,event.account_id,event.provider_event_id,event.start_utc,event.revision,event.lifecycle,operation.id,serde_json::to_string(&event)?])?;
+        tx.execute("INSERT INTO scheduled_stream_operations(id,event_id,state,payload) VALUES(?1,?2,?3,?4)", params![operation.id,operation.event_id,operation.state,serde_json::to_string(&operation)?])?;
+        tx.commit()?;
+        Ok((event, operation, true))
+    }
+
+    /// Checkpoint each provider resource ID before the next request. A journal
+    /// lease is never a mutex held over network I/O.
+    pub fn checkpoint_scheduled_operation(
+        &self,
+        event: &crate::scheduled_streams::ScheduledStreamEvent,
+        operation: &crate::scheduled_streams::ScheduleOperation,
+        done: bool,
+    ) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let changed = tx.execute("UPDATE scheduled_stream_events SET provider_event_id=?1,start_utc=?2,revision=?3,lifecycle=?4,lease=?5,payload=?6 WHERE id=?7 AND lease=?8",
+            params![event.provider_event_id,event.start_utc,event.revision,event.lifecycle,if done {None} else {Some(&operation.id)},serde_json::to_string(event)?,event.id,operation.id])?;
+        if changed != 1 {
+            bail!("Event operation no longer owns its lease.");
+        }
+        tx.execute(
+            "UPDATE scheduled_stream_operations SET state=?1,payload=?2 WHERE id=?3",
+            params![
+                operation.state,
+                serde_json::to_string(operation)?,
+                operation.id
+            ],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    /// Called once during startup. Lost responses require reconciliation; never
+    /// replay a create just because the renderer disconnected.
+    pub fn recover_scheduled_operations_after_restart(&self) -> Result<()> {
+        let mut conn = self.lock()?;
+        let tx = conn.transaction()?;
+        let pending: Vec<(String, String, String)> = {
+            let mut statement = tx.prepare("SELECT e.payload,o.payload,o.id FROM scheduled_stream_events e JOIN scheduled_stream_operations o ON e.lease=o.id")?;
+            statement
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        for (payload, journal, id) in pending {
+            let mut event: crate::scheduled_streams::ScheduledStreamEvent =
+                serde_json::from_str(&payload)?;
+            let mut operation: crate::scheduled_streams::ScheduleOperation =
+                serde_json::from_str(&journal)?;
+            event.operation_state = "needs-reconciliation".into();
+            operation.state = "needs-reconciliation".into();
+            tx.execute(
+                "UPDATE scheduled_stream_events SET lease=NULL,payload=?1 WHERE id=?2",
+                params![serde_json::to_string(&event)?, event.id],
+            )?;
+            tx.execute(
+                "UPDATE scheduled_stream_operations SET state=?1,payload=?2 WHERE id=?3",
+                params![operation.state, serde_json::to_string(&operation)?, id],
+            )?;
+        }
+        tx.commit()?;
+        Ok(())
     }
 }

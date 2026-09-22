@@ -22,6 +22,10 @@ export async function compileCaptureModule(tempDir) {
       source: join(process.cwd(), 'apps/desktop/src/renderer/src/lib/capture.ts'),
       output: join(tempDir, 'apps/desktop/src/renderer/src/lib/capture.cjs')
     },
+    ...['layout-framing-memory', 'backend'].map((name) => ({
+      source: join(process.cwd(), `apps/desktop/src/renderer/src/lib/${name}.ts`),
+      output: join(tempDir, `apps/desktop/src/renderer/src/lib/${name}.js`)
+    })),
     {
       source: join(process.cwd(), 'apps/desktop/src/shared/backend.ts'),
       output: join(tempDir, 'apps/desktop/src/shared/backend.js')

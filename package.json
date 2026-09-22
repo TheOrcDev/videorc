@@ -224,7 +224,8 @@
     "backend:dev": "cargo run -p videorc-backend --bin videorc-backend",
     "backend:test": "cargo test",
     "backend:fmt": "cargo fmt --check",
-    "backend:clippy": "cargo clippy -- -D warnings"
+    "backend:clippy": "cargo clippy -- -D warnings",
+    "smoke:scheduled-streams": "node scripts/smoke-scheduled-streams-app.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

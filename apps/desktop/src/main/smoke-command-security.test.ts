@@ -293,6 +293,14 @@ describe('smoke command security', () => {
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('app-quit')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('authorize-smoke-resource')).toBe(false)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-background')).toBe(false)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('import-smoke-scheduled-thumbnail')).toBe(false)
+    expect(PACKAGED_SMOKE_COMMAND_NAMES.has('set-page-zoom')).toBe(false)
+    expect(
+      validateSmokeCommandPayload({
+        command: 'import-smoke-scheduled-thumbnail',
+        params: { path: '/tmp/fixture.png' }
+      })
+    ).not.toBeNull()
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('inspect-packaged-bundled-background')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('windows-live-audio-harness')).toBe(true)
     expect(PACKAGED_SMOKE_COMMAND_NAMES.has('notes-window-open')).toBe(true)

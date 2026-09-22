@@ -115,6 +115,18 @@ export function CommandPalette({
         <CommandSeparator />
 
         <CommandGroup heading="Setup">
+          <CommandItem
+            value="Schedule livestream · Upcoming events"
+            onSelect={() =>
+              run(() => {
+                sessionStorage.setItem('videorc-scheduling-view', 'upcoming')
+                openStudioPanel('live')
+                window.dispatchEvent(new Event('videorc:upcoming'))
+              })
+            }
+          >
+            Schedule livestream · Upcoming events
+          </CommandItem>
           {STUDIO_PANELS.map((panel) => {
             const digit = shortcutDigitFor(panel.id)
             return (

@@ -920,7 +920,7 @@ fn youtube_transition_status(status: YouTubeBroadcastTransitionStatus) -> &'stat
     }
 }
 
-fn youtube_frame_rate(fps: u32) -> &'static str {
+pub(crate) fn youtube_frame_rate(fps: u32) -> &'static str {
     if fps > 30 { "60fps" } else { "30fps" }
 }
 
@@ -945,7 +945,7 @@ pub fn youtube_stream_key_secret_ref(account_id: &str, target_id: Option<&str>) 
     ))
 }
 
-fn youtube_resolution(height: u32) -> &'static str {
+pub(crate) fn youtube_resolution(height: u32) -> &'static str {
     match height {
         0..=240 => "240p",
         241..=360 => "360p",

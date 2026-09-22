@@ -83,6 +83,30 @@ const idleCapturePressureDiagnostics = {
 } satisfies Pick<DiagnosticStats, (typeof requiredCapturePressureDiagnosticFields)[number]>
 
 describe('backend RPC contract', () => {
+  it('accepts redacted recovery candidates and rejects ingest credentials in renderer results', () => {
+    const candidate = {
+      candidateKind: 'ingest',
+      id: 'owned-stream',
+      snippet: { title: 'Owned stream', scheduledStartTime: null },
+      profile: { resolution: '1080p', frameRate: '30fps' }
+    }
+    expect(validateBackendRpcResult('scheduledStreams.candidates', [candidate])).toEqual([
+      candidate
+    ])
+    expect(() =>
+      validateBackendRpcResult('scheduledStreams.candidates', [
+        { ...candidate, cdn: { ingestionInfo: { streamName: 'secret' } } }
+      ])
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcParams('scheduledStreams.recover', {
+        operationId: '11111111-1111-4111-8111-111111111111',
+        eventId: '11111111-1111-4111-8111-111111111111',
+        expectedRevision: 1,
+        candidateKind: 'automatic'
+      })
+    ).toThrow()
+  })
   it('validates the generation-bound capture recovery status and retry surface', () => {
     const recovering = {
       revision: 4,

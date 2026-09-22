@@ -32,8 +32,8 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(103)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(103)
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(104)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(104)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

@@ -1775,6 +1775,16 @@ function normalizeStreamTarget(
       : typeof saved.outputBitrateKbps === 'number'
         ? clampNumber(saved.outputBitrateKbps, 6000, 1000, 50000)
         : undefined
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+  const scheduledEventId =
+    authMode === 'oauth' &&
+    base.platform === 'youtube' &&
+    typeof saved.accountId === 'string' &&
+    saved.accountId.length > 0 &&
+    typeof saved.scheduledEventId === 'string' &&
+    uuid.test(saved.scheduledEventId)
+      ? saved.scheduledEventId
+      : undefined
   return {
     // id, platform, status keep the built-in identity from base.
     ...base,
@@ -1791,6 +1801,28 @@ function normalizeStreamTarget(
     accountLabel:
       authMode === 'oauth' && typeof saved.accountLabel === 'string'
         ? saved.accountLabel
+        : undefined,
+    scheduledEventId,
+    scheduledEventTitle:
+      scheduledEventId && typeof saved.scheduledEventTitle === 'string'
+        ? saved.scheduledEventTitle
+        : undefined,
+    scheduledStartUtc:
+      scheduledEventId &&
+      typeof saved.scheduledStartUtc === 'string' &&
+      Number.isFinite(Date.parse(saved.scheduledStartUtc))
+        ? saved.scheduledStartUtc
+        : undefined,
+    scheduledPrivacy:
+      scheduledEventId && ['private', 'unlisted', 'public'].includes(saved.scheduledPrivacy ?? '')
+        ? saved.scheduledPrivacy
+        : undefined,
+    // A process restart must recover backend ownership before a new start.
+    scheduledAttemptId:
+      scheduledEventId &&
+      typeof saved.scheduledAttemptId === 'string' &&
+      uuid.test(saved.scheduledAttemptId)
+        ? saved.scheduledAttemptId
         : undefined,
     platformBroadcastId:
       authMode === 'oauth' && typeof saved.platformBroadcastId === 'string'
@@ -2047,6 +2079,11 @@ function removeUnavailableOAuthState(target: StreamTargetSettings): StreamTarget
     streamKeyPresent: false,
     accountId: undefined,
     accountLabel: undefined,
+    scheduledEventId: undefined,
+    scheduledAttemptId: undefined,
+    scheduledEventTitle: undefined,
+    scheduledStartUtc: undefined,
+    scheduledPrivacy: undefined,
     platformBroadcastId: undefined,
     platformStreamId: undefined,
     status: { state: 'not-configured' }
@@ -2089,6 +2126,27 @@ export function patchStreamTargetForEdit(
       next.accountId = undefined
       next.accountLabel = undefined
     }
+  }
+  if (
+    next.authMode !== 'oauth' ||
+    next.platform !== 'youtube' ||
+    next.accountId !== target.accountId
+  ) {
+    next.scheduledEventId = undefined
+    next.scheduledAttemptId = undefined
+    next.scheduledEventTitle = undefined
+    next.scheduledStartUtc = undefined
+    next.scheduledPrivacy = undefined
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(patch, 'scheduledEventId') &&
+    patch.scheduledEventId !== target.scheduledEventId
+  ) {
+    next.platformBroadcastId = undefined
+    next.platformStreamId = undefined
+    next.streamKeySecretRef = undefined
+    next.streamKeyPresent = false
+    next.scheduledAttemptId = undefined
   }
   if (patch.urlMode && patch.urlMode !== target.urlMode) {
     next.serverUrl =

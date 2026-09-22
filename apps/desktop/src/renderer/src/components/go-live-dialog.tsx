@@ -67,6 +67,10 @@ export function GoLiveConfirmationDialog({
   onContinueWithoutCaptions: () => void
   onResolveBlocker: (targetId: string, resolution: 'disable' | 'manual-rtmp') => void
 }): ReactElement {
+  const { captureConfig } = useStudioCore()
+  const scheduledTargets = captureConfig.streaming.targets.filter(
+    (target) => target.enabled && target.scheduledEventId
+  )
   const entitlementBlocker = entitlementGate.allowed ? null : entitlementGate
   const entitlementUpgradeUrl = entitlementBlocker?.upgradeUrl
   const errorIssues = preflight?.issues.filter((issue) => issue.severity === 'error') ?? []
@@ -82,6 +86,9 @@ export function GoLiveConfirmationDialog({
   // "Resolve before going live" means exactly that: error-severity issues keep
   // the confirm button locked until resolved (disable the destination, switch
   // it to Manual RTMP, or fix it in the Streaming tab).
+  const hasInstantTargets = captureConfig.streaming.targets.some(
+    (target) => target.enabled && !target.scheduledEventId
+  )
   const blocked =
     Boolean(entitlementBlocker) ||
     captionsReadiness.blocksStart ||
@@ -99,27 +106,57 @@ export function GoLiveConfirmationDialog({
 
         <ScrollArea className="max-h-[60vh] pr-3">
           <div className="flex flex-col gap-4">
-            <div className="grid gap-3 sm:grid-cols-2">
-              <Field>
-                <FieldLabel htmlFor="go-live-title">Title</FieldLabel>
-                <Input
-                  id="go-live-title"
-                  disabled={pending || !draft}
-                  value={draft?.title ?? ''}
-                  onChange={(event) => onPatchDraft({ title: event.target.value })}
-                />
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="go-live-description">Description</FieldLabel>
-                <Textarea
-                  className="min-h-20"
-                  disabled={pending || !draft}
-                  id="go-live-description"
-                  value={draft?.description ?? ''}
-                  onChange={(event) => onPatchDraft({ description: event.target.value })}
-                />
-              </Field>
-            </div>
+            {scheduledTargets.map((target) => (
+              <div key={target.id} className="rounded-lg border p-3">
+                <p className="font-medium">
+                  {target.label}:{' '}
+                  {preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
+                    ?.title ?? target.scheduledEventTitle}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  {target.accountLabel} ·{' '}
+                  {preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
+                    ?.privacy ?? target.scheduledPrivacy}{' '}
+                  ·{' '}
+                  {(preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
+                    ?.startUtc ?? target.scheduledStartUtc)
+                    ? new Date(
+                        preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
+                          ?.startUtc ?? target.scheduledStartUtc!
+                      ).toLocaleString()
+                    : ''}
+                </p>
+                <p className="text-sm">
+                  This starts the saved event now, even if its scheduled time is earlier or later.
+                  {hasInstantTargets &&
+                    'The instant-stream metadata below applies to other destinations.'}
+                </p>
+              </div>
+            ))}
+
+            {hasInstantTargets && (
+              <div className="grid gap-3 sm:grid-cols-2">
+                <Field>
+                  <FieldLabel htmlFor="go-live-title">Title</FieldLabel>
+                  <Input
+                    id="go-live-title"
+                    disabled={pending || !draft}
+                    value={draft?.title ?? ''}
+                    onChange={(event) => onPatchDraft({ title: event.target.value })}
+                  />
+                </Field>
+                <Field>
+                  <FieldLabel htmlFor="go-live-description">Description</FieldLabel>
+                  <Textarea
+                    className="min-h-20"
+                    disabled={pending || !draft}
+                    id="go-live-description"
+                    value={draft?.description ?? ''}
+                    onChange={(event) => onPatchDraft({ description: event.target.value })}
+                  />
+                </Field>
+              </div>
+            )}
 
             {captionsReadiness.kind !== 'disabled' ? (
               <GoLiveCaptionsStatus
@@ -129,34 +166,38 @@ export function GoLiveConfirmationDialog({
               />
             ) : null}
 
-            <Field>
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <FieldLabel>Default privacy</FieldLabel>
-                {draft?.defaultPrivacy && draft.defaultPrivacy !== 'public' ? (
-                  <Badge variant="warning">Not public</Badge>
-                ) : null}
-              </div>
-              <Select
-                disabled={pending || !draft}
-                value={draft?.defaultPrivacy ?? 'private'}
-                onValueChange={(value) => onPatchDraft({ defaultPrivacy: value as StreamPrivacy })}
-              >
-                <SelectTrigger className="w-full">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectItem value="private">Private</SelectItem>
-                  <SelectItem value="unlisted">Unlisted</SelectItem>
-                  <SelectItem value="public">Public</SelectItem>
-                </SelectContent>
-              </Select>
-              <FieldDescription>
-                {draft?.defaultPrivacy === 'public'
-                  ? 'YouTube will be discoverable from the channel while live. '
-                  : 'YouTube will not be discoverable from the channel while live. '}
-                Twitch and X broadcasts are always public.
-              </FieldDescription>
-            </Field>
+            {hasInstantTargets && (
+              <Field>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <FieldLabel>Default privacy</FieldLabel>
+                  {draft?.defaultPrivacy && draft.defaultPrivacy !== 'public' ? (
+                    <Badge variant="warning">Not public</Badge>
+                  ) : null}
+                </div>
+                <Select
+                  disabled={pending || !draft}
+                  value={draft?.defaultPrivacy ?? 'private'}
+                  onValueChange={(value) =>
+                    onPatchDraft({ defaultPrivacy: value as StreamPrivacy })
+                  }
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="private">Private</SelectItem>
+                    <SelectItem value="unlisted">Unlisted</SelectItem>
+                    <SelectItem value="public">Public</SelectItem>
+                  </SelectContent>
+                </Select>
+                <FieldDescription>
+                  {draft?.defaultPrivacy === 'public'
+                    ? 'YouTube will be discoverable from the channel while live. '
+                    : 'YouTube will not be discoverable from the channel while live. '}
+                  Twitch and X broadcasts are always public.
+                </FieldDescription>
+              </Field>
+            )}
 
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between gap-3">

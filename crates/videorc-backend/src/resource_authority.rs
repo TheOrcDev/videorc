@@ -33,11 +33,15 @@ pub enum ResourceCapabilityKind {
     RevealPath,
     TrashPath,
     BackgroundAsset,
+    ScheduledThumbnail,
 }
 
 impl ResourceCapabilityKind {
     fn requires_file(self) -> bool {
-        matches!(self, Self::InputFile | Self::BackgroundAsset)
+        matches!(
+            self,
+            Self::InputFile | Self::BackgroundAsset | Self::ScheduledThumbnail
+        )
     }
 
     fn requires_directory(self) -> bool {
@@ -78,6 +82,7 @@ struct ResourceCapability {
 pub struct ResourceAuthority {
     entries: Arc<Mutex<HashMap<String, ResourceCapability>>>,
     managed_backgrounds: Arc<Mutex<HashMap<String, PathBuf>>>,
+    managed_thumbnails: Arc<Mutex<HashMap<String, (PathBuf, SessionFileObjectIdentity)>>>,
 }
 
 impl ResourceAuthority {
@@ -226,6 +231,55 @@ impl ResourceAuthority {
         entries.len()
     }
 
+    pub fn register_managed_thumbnail(&self, asset_id: &str, raw_path: &str) -> Result<()> {
+        let roots: Vec<PathBuf> = std::env::var_os("VIDEORC_MANAGED_THUMBNAIL_ROOT")
+            .map(|p| vec![PathBuf::from(p)])
+            .unwrap_or_default();
+        self.register_thumbnail_in_roots(asset_id, raw_path, &roots)
+    }
+    fn register_thumbnail_in_roots(
+        &self,
+        asset_id: &str,
+        raw_path: &str,
+        roots: &[PathBuf],
+    ) -> Result<()> {
+        validate_asset_id(asset_id)?;
+        let path =
+            canonicalize_resource_path(raw_path, ResourceCapabilityKind::ScheduledThumbnail)?;
+        if roots.is_empty() || !canonical_path_is_within(&path, roots) {
+            bail!("Thumbnail must be inside the managed thumbnail root.");
+        }
+        validate_thumbnail_content(asset_id, &path)?;
+        let identity =
+            capture_resource_object_identity(&path, ResourceCapabilityKind::ScheduledThumbnail)?;
+        self.managed_thumbnails
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(asset_id.into(), (path, identity));
+        Ok(())
+    }
+
+    pub fn resolve_managed_thumbnail(&self, asset_id: &str) -> Result<PathBuf> {
+        validate_asset_id(asset_id)?;
+        let (path, identity) = self
+            .managed_thumbnails
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .get(asset_id)
+            .cloned()
+            .context("Thumbnail is unavailable. Pick it again.")?;
+        let canonical =
+            canonicalize_existing_resource_path(&path, ResourceCapabilityKind::ScheduledThumbnail)?;
+        if canonical != path
+            || capture_resource_object_identity(&path, ResourceCapabilityKind::ScheduledThumbnail)?
+                != identity
+        {
+            bail!("Managed thumbnail changed. Pick it again.");
+        }
+        validate_thumbnail_content(asset_id, &path)?;
+        Ok(path)
+    }
+
     pub fn register_managed_background(&self, asset_id: &str, raw_path: &str) -> Result<()> {
         validate_asset_id(asset_id)?;
         let canonical =
@@ -250,6 +304,21 @@ impl ResourceAuthority {
         validate_managed_background_path(&path)?;
         Ok(path)
     }
+}
+
+fn validate_thumbnail_content(asset_id: &str, path: &Path) -> Result<()> {
+    use sha2::{Digest, Sha256};
+    use std::io::Read;
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(2 * 1024 * 1024 + 1).read_to_end(&mut bytes)?;
+    crate::scheduled_youtube::validate_thumbnail(&bytes)?;
+    if format!("{:x}", Sha256::digest(&bytes)) != asset_id
+        || path.file_stem().and_then(|stem| stem.to_str()) != Some(asset_id)
+    {
+        bail!("Managed thumbnail content identity is invalid.");
+    }
+    Ok(())
 }
 
 pub fn validate_asset_id(asset_id: &str) -> Result<()> {
@@ -497,6 +566,75 @@ mod tests {
         }
     }
 
+    #[test]
+    fn scheduled_thumbnail_authority_checks_root_content_and_immutable_identity() {
+        use sha2::{Digest, Sha256};
+        let authority = ResourceAuthority::default();
+        let file = temp_file();
+        let root = file.parent().unwrap().to_path_buf();
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(4, 4)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = bytes.into_inner();
+        let id = format!("{:x}", Sha256::digest(&bytes));
+        let path = root.join(format!("{id}.png"));
+        std::fs::write(&path, &bytes).unwrap();
+        assert!(
+            authority
+                .register_thumbnail_in_roots(&id, path.to_str().unwrap(), &[])
+                .is_err()
+        );
+        assert!(
+            authority
+                .register_thumbnail_in_roots(
+                    "forged",
+                    path.to_str().unwrap(),
+                    std::slice::from_ref(&root)
+                )
+                .is_err()
+        );
+        authority
+            .register_thumbnail_in_roots(&id, path.to_str().unwrap(), std::slice::from_ref(&root))
+            .unwrap();
+        assert_eq!(
+            authority.resolve_managed_thumbnail(&id).unwrap(),
+            std::fs::canonicalize(&path).unwrap()
+        );
+        let capability = authority
+            .issue(issue_params(&path, ResourceCapabilityKind::InputFile))
+            .unwrap();
+        assert!(
+            authority
+                .consume(
+                    &capability.capability_id,
+                    ResourceCapabilityKind::ScheduledThumbnail
+                )
+                .is_err()
+        );
+        std::fs::write(&path, b"corrupt").unwrap();
+        assert!(authority.resolve_managed_thumbnail(&id).is_err());
+        assert!(
+            authority
+                .register_thumbnail_in_roots(
+                    &id,
+                    path.to_str().unwrap(),
+                    std::slice::from_ref(&root)
+                )
+                .is_err()
+        );
+        std::fs::write(&path, vec![0; 2 * 1024 * 1024 + 1]).unwrap();
+        assert!(
+            authority
+                .register_thumbnail_in_roots(
+                    &id,
+                    path.to_str().unwrap(),
+                    std::slice::from_ref(&root)
+                )
+                .is_err()
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
     #[test]
     fn capability_is_typed_one_shot_and_unforgeable() {
         let authority = ResourceAuthority::default();

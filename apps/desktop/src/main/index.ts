@@ -1,3 +1,4 @@
+import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
 import type { GlobalShortcutsConfig } from '../shared/backend'
 import {
@@ -8216,6 +8217,7 @@ function startBackendWithRegistryLock(): void {
         ? join(ffmpegBinDir, process.platform === 'win32' ? 'ffmpeg.exe' : 'ffmpeg')
         : '',
       VIDEORC_MANAGED_BACKGROUND_ROOTS: managedBackgroundRoots().join(delimiter),
+      VIDEORC_MANAGED_THUMBNAIL_ROOT: join(app.getPath('userData'), 'scheduled-thumbnails'),
       // Debug smoke/test RPCs are a second, explicit capability boundary in
       // addition to the admin backend credential. Release builds compile the
       // handlers out regardless of this value.
@@ -8556,6 +8558,7 @@ function connectBackendEventSocket(connection: BackendConnection): void {
 }
 
 const MAIN_BACKEND_ADMIN_METHODS = new Set([
+  'resource.capability.register_thumbnail',
   ...SMOKE_BACKEND_RPC_METHOD_NAMES,
   'health.ping',
   'account.auth.begin_intent',
@@ -8915,12 +8918,17 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
         connectBackendEventSocket(backendAdminConnection)
         const rendererConnection = backendConnection
         const adminConnection = backendAdminConnection
-        backendAuthorityReady = rehydrateManagedBackgroundAssets().catch(() => {
-          logBackend(
-            'warn',
-            'Managed background authority could not be fully restored; affected assets remain unavailable.'
-          )
-        })
+        backendAuthorityReady = Promise.all([
+          rehydrateManagedBackgroundAssets(),
+          rehydrateScheduledThumbnails()
+        ])
+          .then(() => undefined)
+          .catch(() => {
+            logBackend(
+              'warn',
+              'Managed background authority could not be fully restored; affected assets remain unavailable.'
+            )
+          })
         void backendAuthorityReady.then(() => {
           if (
             backendRuntimeOwner.isCurrent(runtime) &&
@@ -9087,6 +9095,22 @@ async function runSmokePreviewMotionCommand(
       process.env.VIDEORC_SMOKE_STATE_DIR
     )
     return issueResourceCapability(authorization.path, authorization.kind)
+  }
+
+  if (command === 'import-smoke-scheduled-thumbnail') {
+    if (app.isPackaged || !smokeCommandServerEnabled || Object.keys(params).length !== 1)
+      throw new Error('Thumbnail smoke import unavailable.')
+    const authorization = validateSmokeResourceAuthorization(
+      { kind: 'input-file', path: params.path },
+      process.env.VIDEORC_SMOKE_STATE_DIR
+    )
+    return importScheduledThumbnail(
+      authorization.path,
+      join(app.getPath('userData'), 'scheduled-thumbnails'),
+      (bytes) => nativeImage.createFromBuffer(bytes).getSize(),
+      (assetId, path) =>
+        requestBackendAdmin('resource.capability.register_thumbnail', { assetId, path })
+    )
   }
 
   if (command === 'import-smoke-background') {
@@ -10468,6 +10492,21 @@ async function runSmokePreviewMotionCommand(
       ),
       surfaceStatus: nativePreviewSurfaceStatus
     }
+  }
+
+  if (command === 'set-page-zoom') {
+    if (
+      app.isPackaged ||
+      !smokeCommandServerEnabled ||
+      Object.keys(params).length !== 1 ||
+      typeof params.factor !== 'number' ||
+      params.factor < 0.5 ||
+      params.factor > 2
+    ) {
+      throw new Error('Page zoom smoke command unavailable or invalid.')
+    }
+    mainWindow.webContents.setZoomFactor(params.factor)
+    return { factor: mainWindow.webContents.getZoomFactor() }
   }
 
   if (command === 'capture-page') {
@@ -12117,13 +12156,15 @@ function registerManagedAssetProtocol(): void {
         })
       }
       const resolved =
-        url.host === 'background'
-          ? resolveManagedBackgroundFile(fileName)
-          : url.host === 'avatar'
-            ? resolveManagedAvatarFile(fileName)
-            : url.host === 'screen'
-              ? resolveManagedScreenFile(fileName)
-              : null
+        url.host === 'scheduled-thumbnail'
+          ? resolveScheduledThumbnail(fileName)
+          : url.host === 'background'
+            ? resolveManagedBackgroundFile(fileName)
+            : url.host === 'avatar'
+              ? resolveManagedAvatarFile(fileName)
+              : url.host === 'screen'
+                ? resolveManagedScreenFile(fileName)
+                : null
       if (!resolved) {
         return new Response('Not found', { status: 404 })
       }
@@ -12153,6 +12194,50 @@ async function backgroundAssetFileExists(assetId: unknown): Promise<boolean> {
   } catch {
     return false
   }
+}
+
+function resolveScheduledThumbnail(fileName: string): string | null {
+  if (/^[a-f0-9]{64}$/.test(fileName))
+    return (
+      resolveScheduledThumbnail(`${fileName}.png`) ?? resolveScheduledThumbnail(`${fileName}.jpg`)
+    )
+  if (!/^[a-f0-9]{64}\.(png|jpg)$/.test(fileName)) return null
+  return resolveRegularFileInsideRoot(
+    join(app.getPath('userData'), 'scheduled-thumbnails'),
+    fileName
+  )
+}
+
+async function rehydrateScheduledThumbnails(): Promise<void> {
+  const root = join(app.getPath('userData'), 'scheduled-thumbnails')
+  if (!existsSync(root)) return
+  for (const file of readdirSync(root)) {
+    const path = resolveScheduledThumbnail(file)
+    if (path)
+      await requestBackendAdmin('resource.capability.register_thumbnail', {
+        assetId: file.split('.')[0],
+        path
+      }).catch(() => undefined)
+  }
+}
+
+async function pickScheduledThumbnail() {
+  const options: Electron.OpenDialogOptions = {
+    title: 'Choose livestream thumbnail',
+    properties: ['openFile'],
+    filters: [{ name: 'JPEG or PNG (up to 2 MB)', extensions: ['jpg', 'jpeg', 'png'] }]
+  }
+  const result = mainWindow
+    ? await dialog.showOpenDialog(mainWindow, options)
+    : await dialog.showOpenDialog(options)
+  if (result.canceled || !result.filePaths[0]) return null
+  return importScheduledThumbnail(
+    result.filePaths[0],
+    join(app.getPath('userData'), 'scheduled-thumbnails'),
+    (bytes) => nativeImage.createFromBuffer(bytes).getSize(),
+    (assetId, path) =>
+      requestBackendAdmin('resource.capability.register_thumbnail', { assetId, path })
+  )
 }
 
 async function importBackgroundImage(): Promise<BackgroundImportResult | null> {
@@ -12563,6 +12648,7 @@ app.whenReady().then(async () => {
     checkDirectoryFactsForCapability(capabilityId)
   )
   secureIpcHandle('backgrounds:import-image', () => importBackgroundImage())
+  secureIpcHandle('scheduled-streams:import-thumbnail', () => pickScheduledThumbnail())
   secureIpcHandle('backgrounds:bundled-assets', () => bundledBackgroundAssets())
   secureIpcHandle('backgrounds:asset-exists', (_event, assetId: unknown) =>
     backgroundAssetFileExists(assetId)

@@ -64,6 +64,9 @@ mod repair_service;
 mod resource_authority;
 mod scene;
 mod scene_geometry;
+mod scheduled_streams;
+mod scheduled_streams_service;
+mod scheduled_youtube;
 mod screen_capture;
 mod secrets;
 mod session_ops;
@@ -370,6 +373,23 @@ async fn run_backend() -> Result<()> {
     let token = Uuid::new_v4().to_string();
     let (events, _) = broadcast::channel(256);
     let database = Database::open_default()?;
+    database.recover_scheduled_operations_after_restart()?;
+    #[cfg(debug_assertions)]
+    if scheduled_streams_service::smoke_api_base()?.is_some() {
+        database.upsert_platform_account(UpsertPlatformAccount {
+            platform: StreamPlatform::Youtube,
+            account_id: "scheduled-smoke-channel".into(),
+            account_label: "Local scheduling fixture: a deliberately long YouTube channel name for layout review".into(),
+            account_handle: None,
+            avatar_url: None,
+            scopes: vec!["https://www.googleapis.com/auth/youtube.force-ssl".into()],
+            token_secret_ref: Some("scheduled-smoke-fixture-only".into()),
+            refresh_token_secret_ref: None,
+            stream_key_secret_ref: None,
+            expires_at: None,
+            status: PlatformAccountStatus::Connected,
+        })?;
+    }
     match database.reconcile_session_finalization_recoveries() {
         Ok(summary) if summary.recovered > 0 || summary.pending > 0 => tracing::warn!(
             "Replayed {} recording finalization recovery record(s); {} remain pending: {:?}",
@@ -2311,6 +2331,20 @@ async fn validate_platform_accounts(state: &AppState) -> Vec<PlatformAccountVali
 
     for credential in credentials {
         let mut account = credential.account.clone();
+        #[cfg(debug_assertions)]
+        if account.account_id == "scheduled-smoke-channel"
+            && scheduled_streams_service::smoke_api_base()
+                .ok()
+                .flatten()
+                .is_some()
+        {
+            validations.push(platform_validation(
+                &account,
+                PlatformAccountValidationState::Valid,
+                "Local scheduling fixture connected.",
+            ));
+            continue;
+        }
         let Some(access_ref) = credential.token_secret_ref.as_deref() else {
             account.status = PlatformAccountStatus::NeedsReconnect;
             changed |=
@@ -2544,6 +2578,14 @@ async fn transition_youtube_stream_target(
     state: &AppState,
     params: YouTubeBroadcastTransitionParams,
 ) -> anyhow::Result<YouTubeBroadcastTransitionResult> {
+    if state
+        .database
+        .scheduled_events()?
+        .iter()
+        .any(|event| event.provider_event_id.as_deref() == Some(params.broadcast_id.as_str()))
+    {
+        anyhow::bail!("Scheduled broadcasts must use their owned scheduling lifecycle.");
+    }
     if let Some(message) = oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube) {
         anyhow::bail!("{message}");
     }
@@ -2630,6 +2672,21 @@ async fn list_youtube_channels(
         anyhow::bail!("{message}");
     }
     let credential = youtube_account_credentials(state, params.account_id.as_deref())?;
+    #[cfg(debug_assertions)]
+    if credential.account.account_id == "scheduled-smoke-channel"
+        && scheduled_streams_service::smoke_api_base()?.is_some()
+    {
+        return Ok(YouTubeChannelListResult {
+            platform: StreamPlatform::Youtube,
+            account_id: credential.account.account_id.clone(),
+            channels: vec![youtube::YouTubeChannel {
+                channel_id: credential.account.account_id,
+                title: credential.account.account_label,
+                handle: None,
+                avatar_url: None,
+            }],
+        });
+    }
     let client = reqwest::Client::new();
     let mut fresh = fresh_platform_access_token(state, &credential, &client).await?;
     let mut channels = youtube::list_youtube_channels(
@@ -2750,6 +2807,18 @@ async fn youtube_chat_config(
 ) -> Result<youtube_chat::YouTubeChatConfig> {
     if let Some(message) = oauth::provider_oauth_unavailable_message(StreamPlatform::Youtube) {
         anyhow::bail!("{message}");
+    }
+    #[cfg(debug_assertions)]
+    if target.account_id.as_deref() == Some("scheduled-smoke-channel")
+        && let Some(base) = scheduled_streams_service::smoke_api_base()?
+    {
+        return Ok(youtube_chat::YouTubeChatConfig {
+            access_token: "local-fixture-only".into(),
+            live_chat_id: None,
+            broadcast_id: target.platform_broadcast_id.clone(),
+            target_id: Some(target.id.clone()),
+            api_base_url: Some(base),
+        });
     }
     let credential = youtube_account_credentials(state, target.account_id.as_deref())?;
     let client = reqwest::Client::new();
@@ -4568,6 +4637,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.capability.issue"
         | "resource.capability.revoke"
         | "resource.capability.register_background"
+        | "resource.capability.register_thumbnail"
         | "account.auth.begin_intent"
         | "account.sign_out"
         | "captions.start"
@@ -4632,6 +4702,17 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "liveChat.clearLocal"
         | "platformAccounts.oauth.providerCredentials"
         | "streamTargets.metadata.update"
+        | "scheduledStreams.saveDraft"
+        | "scheduledStreams.schedule"
+        | "scheduledStreams.update"
+        | "scheduledStreams.cancel"
+        | "scheduledStreams.refresh"
+        | "scheduledStreams.duplicate"
+        | "scheduledStreams.recover"
+        | "scheduledStreams.prepareForGoLive"
+        | "scheduledStreams.releasePreparation"
+        | "scheduledStreams.activate"
+        | "scheduledStreams.complete"
         | "streamTargets.manualKey.store"
         | "streamTargets.manualKey.restorePrevious"
         | "platformAccounts.youtube.selectChannel"
@@ -4708,6 +4789,12 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "resource.admin.resolve_screen_path"
         | "resource.admin.resolve_background_path"
         | "health.ping"
+        | "scheduledStreams.capabilities"
+        | "scheduledStreams.list"
+        | "scheduledStreams.get"
+        | "scheduledStreams.operation"
+        | "scheduledStreams.resolveTime"
+        | "scheduledStreams.candidates"
         | "account.get"
         | "entitlements.get"
         | "captions.status.get"
@@ -7588,6 +7675,18 @@ async fn handle_text_message_with_role(
                 }),
             )
         }
+        "resource.capability.register_thumbnail" => {
+            let result = state.resource_authority.register_managed_thumbnail(
+                command.params["assetId"].as_str().unwrap_or_default(),
+                command.params["path"].as_str().unwrap_or_default(),
+            );
+            match result {
+                Ok(()) => ServerResponse::ok(command.id, serde_json::json!({"registered":true})),
+                Err(error) => {
+                    ServerResponse::error(command.id, "thumbnail-rejected", error.to_string())
+                }
+            }
+        }
         "resource.capability.register_background" => {
             let asset_id = command
                 .params
@@ -9727,14 +9826,28 @@ async fn handle_text_message_with_role(
         }
         "streamTargets.confirmation.validate" => {
             match serde_json::from_value::<GoLivePreflightParams>(command.params) {
-                Ok(params) => match (
+                Ok(mut params) => match (
                     state.database.stream_metadata_draft(),
                     state.database.list_platform_accounts(),
                 ) {
-                    (Ok(metadata), Ok(accounts)) => ServerResponse::ok(
-                        command.id,
-                        preflight::validate_go_live_preflight(params, &metadata, &accounts),
-                    ),
+                    (Ok(metadata), Ok(accounts)) => {
+                        match scheduled_streams_service::resolve_preflight_metadata(
+                            state,
+                            &mut params,
+                        )
+                        .await
+                        {
+                            Ok(()) => ServerResponse::ok(
+                                command.id,
+                                preflight::validate_go_live_preflight(params, &metadata, &accounts),
+                            ),
+                            Err(error) => ServerResponse::error(
+                                command.id,
+                                "scheduled-preflight",
+                                error.to_string(),
+                            ),
+                        }
+                    }
                     (Err(error), _) => ServerResponse::error(
                         command.id,
                         "stream-metadata-get-failed",
@@ -9748,6 +9861,31 @@ async fn handle_text_message_with_role(
                 },
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "scheduledStreams.saveDraft"
+        | "scheduledStreams.schedule"
+        | "scheduledStreams.update"
+        | "scheduledStreams.cancel"
+        | "scheduledStreams.refresh"
+        | "scheduledStreams.duplicate"
+        | "scheduledStreams.recover"
+        | "scheduledStreams.prepareForGoLive"
+        | "scheduledStreams.releasePreparation"
+        | "scheduledStreams.activate"
+        | "scheduledStreams.complete"
+        | "scheduledStreams.capabilities"
+        | "scheduledStreams.list"
+        | "scheduledStreams.get"
+        | "scheduledStreams.operation"
+        | "scheduledStreams.resolveTime"
+        | "scheduledStreams.candidates" => {
+            match scheduled_streams_service::dispatch(state, &command.method, command.params).await
+            {
+                Ok(value) => ServerResponse::ok(command.id, value),
+                Err(error) => {
+                    ServerResponse::error(command.id, "scheduled-stream-error", error.to_string())
                 }
             }
         }

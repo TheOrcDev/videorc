@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 
@@ -13,6 +13,12 @@ use crate::{oauth, x_live};
 #[serde(rename_all = "camelCase")]
 pub struct GoLivePreflightParams {
     pub streaming: StreamingSettings,
+    #[serde(default)]
+    pub scheduled_event_ids: HashMap<String, String>,
+    #[serde(skip)]
+    pub scheduled_metadata: HashMap<String, StreamMetadataDraft>,
+    #[serde(skip)]
+    pub scheduled_confirmations: HashMap<String, crate::scheduled_streams::ScheduledConfirmation>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -30,6 +36,8 @@ pub struct GoLiveDestinationPreflight {
     pub platform: StreamPlatform,
     pub label: String,
     pub auth_mode: StreamAuthMode,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scheduled: Option<crate::scheduled_streams::ScheduledConfirmation>,
     pub ready: bool,
     pub title: String,
     pub description: String,
@@ -69,7 +77,16 @@ pub fn validate_go_live_preflight(
     accounts: &[PlatformAccount],
 ) -> GoLivePreflight {
     let mut issues = Vec::new();
-    if metadata.title.trim().is_empty() {
+    if metadata.title.trim().is_empty()
+        && params
+            .streaming
+            .targets
+            .iter()
+            .filter(|target| {
+                target.enabled || params.streaming.enabled_target_ids.contains(&target.id)
+            })
+            .any(|target| !params.scheduled_metadata.contains_key(&target.id))
+    {
         issues.push(GoLivePreflightIssue {
             target_id: None,
             platform: None,
@@ -84,18 +101,34 @@ pub fn validate_go_live_preflight(
         .iter()
         .cloned()
         .collect::<HashSet<_>>();
-    let destinations = if params.streaming.enabled {
+    let mut destinations: Vec<GoLiveDestinationPreflight> = if params.streaming.enabled {
         params
             .streaming
             .targets
             .iter()
             .filter(|target| target.enabled || enabled_ids.contains(&target.id))
-            .map(|target| destination_preflight(target, metadata, accounts, &mut issues))
+            .map(|target| {
+                destination_preflight(
+                    target,
+                    params
+                        .scheduled_metadata
+                        .get(&target.id)
+                        .unwrap_or(metadata),
+                    accounts,
+                    &mut issues,
+                )
+            })
             .collect()
     } else {
         Vec::new()
     };
 
+    for destination in &mut destinations {
+        destination.scheduled = params
+            .scheduled_confirmations
+            .get(&destination.target_id)
+            .cloned();
+    }
     if params.streaming.enabled && destinations.is_empty() {
         issues.push(GoLivePreflightIssue {
             target_id: None,
@@ -250,6 +283,7 @@ fn destination_preflight(
         ));
     }
     GoLiveDestinationPreflight {
+        scheduled: None,
         target_id: target.id.clone(),
         platform: target.platform,
         label: target.label.clone(),
@@ -407,6 +441,60 @@ mod tests {
     };
 
     #[test]
+    fn scheduled_metadata_is_per_destination_and_does_not_fill_instant_title() {
+        let mut targets = default_stream_targets();
+        for target in &mut targets {
+            target.enabled = matches!(target.id.as_str(), "youtube" | "youtube-vertical");
+            target.auth_mode = StreamAuthMode::Oauth;
+        }
+        let scheduled = StreamMetadataDraft {
+            title: "Advertised saved title".into(),
+            ..default_stream_metadata_draft("now".into())
+        };
+        let empty = default_stream_metadata_draft("now".into());
+        let streaming = StreamingSettings {
+            enabled: true,
+            mode: StreamMode::Multi,
+            targets,
+            selected_target_id: None,
+            default_output_preset: crate::protocol::VideoPreset::Stream1080p60,
+            default_bitrate_kbps: 6000,
+            enabled_target_ids: vec!["youtube".into(), "youtube-vertical".into()],
+        };
+        for both_scheduled in [false, true] {
+            let mut metadata = HashMap::from([("youtube".into(), scheduled.clone())]);
+            if both_scheduled {
+                metadata.insert("youtube-vertical".into(), scheduled.clone());
+            }
+            let result = validate_go_live_preflight(
+                GoLivePreflightParams {
+                    streaming: streaming.clone(),
+                    scheduled_event_ids: HashMap::new(),
+                    scheduled_metadata: metadata,
+                    scheduled_confirmations: HashMap::new(),
+                },
+                &empty,
+                &[],
+            );
+            assert_eq!(
+                result
+                    .issues
+                    .iter()
+                    .any(|issue| issue.message.contains("title")),
+                !both_scheduled
+            );
+            assert_eq!(
+                result
+                    .destinations
+                    .iter()
+                    .find(|d| d.target_id == "youtube")
+                    .unwrap()
+                    .title,
+                "Advertised saved title"
+            );
+        }
+    }
+    #[test]
     fn preflight_blocks_youtube_oauth_while_twitch_is_ready_and_x_is_blocked() {
         let mut targets = default_stream_targets();
         for target in &mut targets {
@@ -436,8 +524,16 @@ mod tests {
             account(StreamPlatform::X, "x", "X Account"),
         ];
 
-        let preflight =
-            validate_go_live_preflight(GoLivePreflightParams { streaming }, &metadata, &accounts);
+        let preflight = validate_go_live_preflight(
+            GoLivePreflightParams {
+                streaming,
+                scheduled_event_ids: HashMap::new(),
+                scheduled_metadata: HashMap::new(),
+                scheduled_confirmations: HashMap::new(),
+            },
+            &metadata,
+            &accounts,
+        );
 
         assert!(!preflight.valid);
         assert_eq!(preflight.destinations.len(), 3);
@@ -585,8 +681,16 @@ mod tests {
         let mut metadata = default_stream_metadata_draft("2026-06-03T00:00:00Z".to_string());
         metadata.title = "Launch stream".to_string();
 
-        let preflight =
-            validate_go_live_preflight(GoLivePreflightParams { streaming }, &metadata, &[]);
+        let preflight = validate_go_live_preflight(
+            GoLivePreflightParams {
+                streaming,
+                scheduled_event_ids: HashMap::new(),
+                scheduled_metadata: HashMap::new(),
+                scheduled_confirmations: HashMap::new(),
+            },
+            &metadata,
+            &[],
+        );
 
         assert!(!preflight.valid);
         assert_eq!(preflight.destinations.len(), 1);
@@ -621,8 +725,16 @@ mod tests {
             targets,
         };
 
-        let preflight =
-            validate_go_live_preflight(GoLivePreflightParams { streaming }, &metadata, &[]);
+        let preflight = validate_go_live_preflight(
+            GoLivePreflightParams {
+                streaming,
+                scheduled_event_ids: HashMap::new(),
+                scheduled_metadata: HashMap::new(),
+                scheduled_confirmations: HashMap::new(),
+            },
+            &metadata,
+            &[],
+        );
 
         assert!(preflight.valid, "{preflight:?}");
         assert_eq!(preflight.destinations.len(), 1);
@@ -675,7 +787,12 @@ mod tests {
         let mut twitch_account = account(StreamPlatform::Twitch, "tw", "Twitch Channel");
         twitch_account.scopes = scopes.iter().map(|scope| (*scope).to_string()).collect();
         validate_go_live_preflight(
-            GoLivePreflightParams { streaming },
+            GoLivePreflightParams {
+                streaming,
+                scheduled_event_ids: HashMap::new(),
+                scheduled_metadata: HashMap::new(),
+                scheduled_confirmations: HashMap::new(),
+            },
             &metadata,
             &[twitch_account],
         )

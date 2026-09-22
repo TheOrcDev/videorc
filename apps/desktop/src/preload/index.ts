@@ -41,6 +41,7 @@ const api: VideorcApi = {
   retryHardwareAcceleration: () => invoke('app:retry-hardware-acceleration'),
   pickScreenImage: () => invoke('screens:pick-image'),
   importBackgroundImage: () => invoke('backgrounds:import-image'),
+  importScheduledThumbnail: () => invoke('scheduled-streams:import-thumbnail'),
   backgroundAssetExists: (assetId) => invoke('backgrounds:asset-exists', assetId),
   cacheChatAvatar: (url) => invoke('avatars:cache', url),
   sendCommentHighlight: (command) => invoke('comments-window:highlight', command),
