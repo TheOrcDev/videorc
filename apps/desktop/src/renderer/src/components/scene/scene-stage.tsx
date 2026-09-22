@@ -74,6 +74,7 @@ export function SceneStage({
   onSelectSource,
   onTogglePreview,
   onCommitTransform,
+  onGestureActiveChange,
   onSnapCorner,
   onRequestFreeform
 }: {
@@ -96,6 +97,7 @@ export function SceneStage({
   freeform?: boolean
   /** Output canvas aspect (width / height); drives the stage shape. */
   outputAspect?: number
+  onGestureActiveChange?: (active: boolean) => void
   onSelectSource: (sourceId: string) => void
   onTogglePreview: () => void
   onCommitTransform?: (
@@ -135,12 +137,15 @@ export function SceneStage({
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.key === 'Escape') {
         gestureRef.current = null
+        onGestureActiveChange?.(false)
         setGhost(null)
       }
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [ghost])
+  }, [ghost, onGestureActiveChange])
+
+  useEffect(() => () => onGestureActiveChange?.(false), [onGestureActiveChange])
 
   // Freeform lifts the full-canvas restriction: shrinking a 100% screen is
   // exactly what the mode is for. Fixed presets keep it (a full-canvas box
@@ -214,6 +219,7 @@ export function SceneStage({
       }
       return
     }
+    onGestureActiveChange?.(true)
     gestureRef.current = {
       sourceId: source.id,
       pointerId: event.pointerId,
@@ -252,6 +258,7 @@ export function SceneStage({
     }
     const delta = normalizedDelta(gesture, event)
     gestureRef.current = null
+    onGestureActiveChange?.(false)
     setGhost(null)
     if (!gesture.moved || !delta) {
       return

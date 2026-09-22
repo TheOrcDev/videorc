@@ -1,10 +1,10 @@
+import { isGlobalShortcutAction, type GlobalShortcutAction } from '../../../shared/global-shortcuts'
+export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 import { toast } from 'sonner'
 
 import type { GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
 
 type RegisterFn = (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
-
-export type GlobalShortcutAction = 'record-toggle' | 'stream-toggle' | 'mic-toggle'
 
 export interface GlobalShortcutContext {
   sessionActive: boolean
@@ -12,12 +12,18 @@ export interface GlobalShortcutContext {
   startSession: () => Promise<unknown>
   stopSession: () => Promise<unknown>
   toggleMicrophoneMute: () => void
+  switchLayout?: (action: GlobalShortcutAction) => void
 }
 
 export function executeGlobalShortcut(
   action: GlobalShortcutAction,
   context: GlobalShortcutContext
 ): void {
+  if (!isGlobalShortcutAction(action)) return
+  if (action.startsWith('layout')) {
+    context.switchLayout?.(action)
+    return
+  }
   if (action === 'record-toggle') {
     void (context.sessionActive ? context.stopSession() : context.startSession())
     return
@@ -35,7 +41,7 @@ export function executeGlobalShortcut(
     }
     return
   }
-  context.toggleMicrophoneMute()
+  if (action === 'mic-toggle') context.toggleMicrophoneMute()
 }
 
 /**
@@ -96,8 +102,7 @@ export class GlobalShortcutsRegistrar {
         if (failed.length > 0) {
           toast.error('Some global shortcuts could not be registered', {
             id: 'global-shortcuts-conflict',
-            description:
-              'Another app may already use that key combination. Pick a different one in Settings.'
+            description: `${failed.join(', ')}: invalid, duplicate or already used by another app. Pick different bindings in Settings.`
           })
         }
       })

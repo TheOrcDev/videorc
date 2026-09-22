@@ -1,9 +1,9 @@
 packages:
   - apps/*
 overrides:
-  # electron-builder's toolchain pulls js-yaml transitively; 4.3.0 is affected by
-  # GHSA-5p4m-2wfm-xmqj (>=4.0.0 <4.3.1), so hold the whole tree at the patch.
-  js-yaml: 4.3.1
+  # Keep electron-builder/updater's YAML parser on the security patch for
+  # GHSA-2883-xcg3-v3hh (>=4.0.0 <4.3.2).
+  js-yaml: 4.3.2
 patchedDependencies:
   app-builder-lib@26.8.1: patches/app-builder-lib@26.8.1.patch
 allowBuilds:

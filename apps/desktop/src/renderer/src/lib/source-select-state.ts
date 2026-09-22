@@ -34,3 +34,16 @@ export function missingSelection(
   }
   return { value, label: 'Saved device unavailable. Pick another' }
 }
+
+/** Match visible source metadata, never opaque capture IDs. */
+export function sourceMatchesQuery(
+  device: Pick<Device, 'name' | 'kind' | 'detail'>,
+  query: string
+): boolean {
+  const text = [device.name, device.kind, device.detail ?? ''].join(' ').toLocaleLowerCase()
+  return query
+    .trim()
+    .toLocaleLowerCase()
+    .split(/\s+/)
+    .every((word) => text.includes(word))
+}

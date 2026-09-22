@@ -73,6 +73,7 @@ export type BackgroundAssetSlot = {
 }
 
 export type BackgroundAssetRegistry = {
+  version: 2
   slots: BackgroundAssetSlot[]
   assets: Record<string, BackgroundAsset>
   // The slot the user explicitly Applied; resolves to Scene.background (A5).
@@ -156,6 +157,7 @@ export function createDefaultRegistry(): BackgroundAssetRegistry {
     })
   )
   return {
+    version: 2,
     slots: createDefaultBackgroundSlots(),
     assets,
     activeSlotId: null,
@@ -288,7 +290,7 @@ export function applyBundledBackgroundAssets(
     const nextSlots = slots.map(
       (slot): BackgroundAssetSlot =>
         slot.id === def.id &&
-        (slot.assetId === null || slot.assetId === assetId) &&
+        slot.assetId === assetId &&
         (slot.assetId !== assetId || slot.status !== 'ready')
           ? { ...slot, assetId, status: 'ready' }
           : slot
@@ -392,33 +394,33 @@ export function setAssetStyle(
   }
 }
 
-// Remove an imported replacement and restore the app-owned bundled preset. The
-// ten bundled backgrounds should never disappear from local state.
+// Removing a library entry never deletes its managed file or saved-scene references.
 export function removeSlotAsset(
   registry: BackgroundAssetRegistry,
   slotId: string
 ): BackgroundAssetRegistry {
-  const slot = registry.slots.find((entry) => entry.id === slotId)
-  if (!slot) {
-    return registry
-  }
-  const builtinAsset = builtinAssetForSlot(slot.id)
-  if (!builtinAsset) {
-    return registry
-  }
-
-  const assets = { ...registry.assets }
-  if (slot.assetId && slot.assetId !== builtinAsset.id) {
-    delete assets[slot.assetId]
-  }
-  assets[builtinAsset.id] = assets[builtinAsset.id] ?? builtinAsset
-
+  if (!registry.slots.some((slot) => slot.id === slotId)) return registry
   return {
     ...registry,
-    assets,
-    slots: registry.slots.map(
-      (entry): BackgroundAssetSlot =>
-        entry.id === slotId ? { ...entry, assetId: builtinAsset.id, status: 'ready' } : entry
+    activeSlotId: registry.activeSlotId === slotId ? null : registry.activeSlotId,
+    slots: registry.slots.map((slot) =>
+      slot.id === slotId ? { ...slot, assetId: null, status: 'empty' } : slot
+    )
+  }
+}
+
+export function restoreSlotDefault(
+  registry: BackgroundAssetRegistry,
+  slotId: string
+): BackgroundAssetRegistry {
+  const slot = registry.slots.find((entry) => entry.id === slotId)
+  const builtin = builtinAssetForSlot(slotId)
+  if (!slot || slot.assetId !== null || !builtin) return registry
+  return {
+    ...registry,
+    assets: { ...registry.assets, [builtin.id]: registry.assets[builtin.id] ?? builtin },
+    slots: registry.slots.map((entry) =>
+      entry.id === slotId ? { ...entry, assetId: builtin.id, status: 'ready' } : entry
     )
   }
 }
@@ -559,6 +561,7 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
   }
 
   const data = loaded as {
+    version?: unknown
     slots?: unknown
     assets?: unknown
     activeSlotId?: unknown
@@ -590,7 +593,12 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
   }
   const slots = base.slots.map((slot): BackgroundAssetSlot => {
     const stored = storedAssetId.get(slot.id)
-    const assetId = typeof stored === 'string' && assets[stored] ? stored : slot.assetId
+    const assetId =
+      data.version === 2 && stored === null
+        ? null
+        : typeof stored === 'string' && assets[stored]
+          ? stored
+          : slot.assetId
     return assetId
       ? { ...slot, assetId, status: 'ready' }
       : { ...slot, assetId: null, status: 'empty' }
@@ -613,6 +621,7 @@ export function reconcileRegistry(loaded: unknown): BackgroundAssetRegistry {
   }
 
   return {
+    version: 2,
     slots,
     assets: prunedAssets,
     activeSlotId,

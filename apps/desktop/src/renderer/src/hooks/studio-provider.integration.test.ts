@@ -1,3 +1,4 @@
+import { SCENE_LIBRARY_KEY, WORKING_SCENE_KEY, sameSceneVisual } from '../lib/scene-presets'
 import { act, createElement, useEffect } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -360,6 +361,7 @@ class StudioBackend {
   noiseCleanupJobs: NoiseCleanupJob[] = []
   sourceMutationRevision = 4
   layoutResponseDelayMs = 0
+  latestLayoutIntentId = 0
   // Layouts the vertical simulcast leg was asked to show (explicit leg
   // requests never touch the program layout).
   simulcastLegLayouts: LayoutSettings[] = []
@@ -774,6 +776,9 @@ class StudioBackend {
             compositorStatus: compositorFor(this.currentScene, this.currentLayout, this.revision)
           }
         }
+        if (Number(params.intentId ?? 0) < this.latestLayoutIntentId)
+          throw Object.assign(new Error('superseded'), { code: 'layout-intent-superseded' })
+        this.latestLayoutIntentId = Number(params.intentId ?? 0)
         if (this.layoutApplyFailure === 'definite') {
           throw Object.assign(new Error('The test backend rejected the layout change.'), {
             code: 'layout-preview-failed'
@@ -781,6 +786,22 @@ class StudioBackend {
         }
         this.currentLayout = params.layout as LayoutSettings
         this.currentScene = sceneForLayout(this.currentLayout)
+        const visualSources = params.sources as CaptureConfig['sources']
+        this.currentScene = {
+          ...this.currentScene,
+          background: params.background as Scene['background'],
+          sources: this.currentScene.sources.map((source) =>
+            source.kind === 'camera'
+              ? { ...source, deviceId: visualSources.cameraId }
+              : source.kind === 'screen' || source.kind === 'window'
+                ? {
+                    ...source,
+                    kind: visualSources.windowId ? ('window' as const) : ('screen' as const),
+                    deviceId: visualSources.windowId ?? visualSources.screenId
+                  }
+                : source
+          )
+        }
         this.revision += 1
         if (this.layoutApplyFailure === 'request-outcome-unknown-after-commit') {
           const video = params.video as { width: number; height: number; fps: number }
@@ -3080,6 +3101,568 @@ describe('real StudioProvider lifecycle', () => {
       sessionId: 'late-live-loss'
     })
   })
+
+  it('saves complete visual scenes, applies one atomic target and preserves independent builtin framing', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 150, cameraOffsetX: 25 }))
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.cameraZoom === 150 && latest().layoutSwitchPending === null
+    )
+    await act(async () => {
+      expect(latest().saveScene('Presentation')).toBe(true)
+    })
+    const first = latest().savedScenes[0]
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'camera-only' }))
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.layoutPreset === 'camera-only' &&
+        latest().layoutSwitchPending === null
+    )
+    expect(latest().captureConfig.layout.cameraZoom).toBe(100)
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-camera' }))
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.layoutPreset === 'screen-camera' &&
+        latest().layoutSwitchPending === null
+    )
+    expect(latest().captureConfig.layout.cameraZoom).toBe(150)
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 175 }))
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.cameraZoom === 175 && latest().layoutSwitchPending === null
+    )
+    await act(async () => {
+      expect(latest().saveScene('Closeup')).toBe(true)
+    })
+    const start = backend.sentCommands.length
+    await act(async () => {
+      await latest().applySavedScene(first.id)
+    })
+    await waitForObservation(
+      () => latest().activeSavedSceneId === first.id && latest().layoutSwitchPending === null
+    )
+    expect(latest().captureConfig.layout.cameraZoom).toBe(150)
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .filter((command) => command.method.startsWith('scene.layout.apply'))
+    ).toHaveLength(1)
+    expect(latest().captureConfig.layoutFramingMemory.layouts['screen-camera'].cameraZoom).toBe(175)
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 160 }))
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.cameraZoom === 160 && latest().layoutSwitchPending === null
+    )
+    expect(latest().savedSceneModified).toBe(true)
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.layout.cameraZoom).toBe(160)
+    expect(
+      JSON.parse(localStorage.getItem(SCENE_LIBRARY_KEY)!).scenes[0].visual.layout.cameraZoom
+    ).toBe(150)
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-camera' }))
+    await waitForObservation(
+      () => latest().activeSavedSceneId === null && latest().layoutSwitchPending === null
+    )
+    expect(latest().captureConfig.layout.cameraZoom).toBe(175)
+  })
+
+  it('refuses missing saved sources without fallback and preserves storage on failed saves', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const testDom = installProviderTestEnvironment(
+      createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+    )
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => {
+      expect(latest().saveScene('Original')).toBe(true)
+    })
+    const saved = latest().savedScenes[0]
+    const start = backend.sentCommands.length
+    await act(async () => {
+      expect(
+        await latest().applySavedScene(saved.id, {
+          ...saved.visual,
+          sources: { ...saved.visual.sources, windowId: 'closed-window', screenId: undefined }
+        })
+      ).toBe(false)
+    })
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .filter((command) => command.method.startsWith('scene.layout.apply'))
+    ).toHaveLength(0)
+    expect(latest().captureConfig.sources.windowId).toBeUndefined()
+    expect(latest().activeSavedSceneId).toBe(saved.id)
+    expect(latest().captureConfig.layoutFramingMemory.layouts['screen-camera'].cameraZoom).toBe(100)
+    const storage = vi.spyOn(localStorage, 'setItem').mockImplementation(() => {
+      throw new Error('full')
+    })
+    await act(async () => {
+      expect(latest().saveScene('Cannot save')).toBe(false)
+    })
+    expect(latest().savedScenes).toHaveLength(1)
+    storage.mockRestore()
+  })
+
+  it('recovers complete same-layout saved targets with distinct sources and backgrounds after a lost response', async () => {
+    const backend = new StudioBackend()
+    backend.deviceList.devices.push(
+      { id: 'camera:2', name: 'Camera 2', kind: 'camera', status: 'available' },
+      { id: 'window:2', name: 'Presentation', kind: 'window', status: 'available' }
+    )
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    api.backgroundAssetExists = async () => true
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => latest().applyBackgroundSlot('bg-01'))
+    await waitForObservation(
+      () => latest().scene?.background?.assetId === 'builtin-bg-01' && latest().canSaveScene
+    )
+    await act(async () => latest().applyWorkingBackgroundStyle({ blurPx: 20, scale: 150 }))
+    await waitForObservation(
+      () => latest().scene?.background?.scale === 150 && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('A')).toBe(true)
+    })
+    const first = latest().savedScenes[0]
+    const alternate = {
+      ...first.visual,
+      layout: { ...first.visual.layout, cameraZoom: 175, cameraOffsetY: -25 },
+      sources: {
+        ...first.visual.sources,
+        cameraId: 'camera:2',
+        cameraName: 'Camera 2',
+        screenId: undefined,
+        screenName: undefined,
+        windowId: 'window:2',
+        windowName: 'Presentation'
+      },
+      background: { ...first.visual.background!, assetId: 'builtin-bg-02', blurPx: 5, scale: 100 }
+    }
+    await act(async () => {
+      expect(await latest().applySavedScene(first.id, alternate)).toBe(true)
+    })
+    await waitForObservation(
+      () => latest().captureConfig.sources.windowId === 'window:2' && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('B')).toBe(true)
+    })
+    const second = latest().savedScenes[1]
+    const memory = latest().captureConfig.layoutFramingMemory
+    backend.layoutApplyFailure = 'request-outcome-unknown-after-commit'
+    const start = backend.sentCommands.length
+    await act(async () => {
+      expect(await latest().applySavedScene(first.id)).toBe(true)
+    })
+    await waitForObservation(
+      () => latest().activeSavedSceneId === first.id && latest().canSaveScene
+    )
+    const applies = backend.sentCommands
+      .slice(start)
+      .filter((command) => command.method.startsWith('scene.layout.apply'))
+    expect(applies).toHaveLength(1)
+    expect(applies[0].params).toMatchObject({
+      layout: first.visual.layout,
+      sources: JSON.parse(JSON.stringify(first.visual.sources)),
+      background: { assetId: 'builtin-bg-01', blurPx: 20, scale: 150 }
+    })
+    expect(latest().captureConfig.sources.cameraId).toBe(first.visual.sources.cameraId)
+    expect(latest().captureConfig.sources.windowId).toBeUndefined()
+    expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
+    expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
+    expect(
+      sameSceneVisual(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual, first.visual)
+    ).toBe(true)
+    backend.layoutApplyFailure = 'definite'
+    await act(async () => {
+      expect(await latest().applySavedScene(second.id)).toBe(false)
+    })
+    expect(latest().activeSavedSceneId).toBe(first.id)
+    expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
+    expect(
+      sameSceneVisual(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual, first.visual)
+    ).toBe(true)
+    backend.layoutApplyFailure = null
+    await act(async () => latest().applyWorkingBackgroundStyle({ dimPercent: 35 }))
+    await waitForObservation(
+      () => latest().scene?.background?.dimPercent === 35 && latest().canSaveScene
+    )
+    expect(latest().scene?.background?.scale).toBe(150)
+    expect(latest().scene?.background?.blurPx).toBe(20)
+    expect(second.visual.background?.assetId).toBe('builtin-bg-02')
+    expect(first.visual.background?.dimPercent).toBe(0)
+    await act(async () => {
+      expect(latest().deleteSavedScene(first.id)).toBe(true)
+    })
+    const checkpoint = JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!)
+    expect(checkpoint.sceneId).toBeNull()
+    expect(checkpoint.origin).toBe('saved')
+    expect(checkpoint.visual.background.dimPercent).toBe(35)
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 165 }))
+    await waitForObservation(
+      () => latest().captureConfig.layout.cameraZoom === 165 && latest().canSaveScene
+    )
+    await act(async () => latest().applyCameraPreset({ layoutPreset: 'screen-camera' }))
+    await waitForObservation(
+      () =>
+        latest().captureConfig.layout.cameraZoom === memory.layouts['screen-camera'].cameraZoom &&
+        latest().canSaveScene
+    )
+  })
+
+  it('keeps the latest named identity through overlapping A to B to A and never saves an unresolved target', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    api.backgroundAssetExists = async () => true
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => latest().applyBackgroundSlot('bg-01'))
+    await waitForObservation(
+      () => latest().scene?.background?.assetId === 'builtin-bg-01' && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('A')).toBe(true)
+    })
+    const first = latest().savedScenes[0]
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 175 }))
+    await waitForObservation(
+      () => latest().captureConfig.layout.cameraZoom === 175 && latest().canSaveScene
+    )
+    await act(async () => latest().applyBackgroundSlot('bg-02'))
+    await waitForObservation(
+      () => latest().scene?.background?.assetId === 'builtin-bg-02' && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('B')).toBe(true)
+    })
+    const second = latest().savedScenes[1]
+    const release = backend.deferResponse('devices.list', backend.deviceList)
+    let stale: Promise<boolean> | undefined
+    await act(async () => {
+      stale = latest().applySavedScene(first.id)
+    })
+    await waitForObservation(() => latest().savedScenePendingId === first.id)
+    expect(latest().canSaveScene).toBe(false)
+    await act(async () => {
+      expect(latest().saveScene('Uncommitted')).toBe(false)
+    })
+    await act(async () => {
+      expect(await latest().applySavedScene(second.id)).toBe(true)
+    })
+    await waitForObservation(() => latest().canSaveScene)
+    await act(async () => {
+      expect(await latest().applySavedScene(first.id)).toBe(true)
+    })
+    await waitForObservation(
+      () => latest().canSaveScene && latest().activeSavedSceneId === first.id
+    )
+    await act(async () => {
+      release()
+      await stale
+    })
+    expect(latest().activeSavedSceneId).toBe(first.id)
+    expect(latest().captureConfig.layout.cameraZoom).toBe(first.visual.layout.cameraZoom)
+    expect(latest().savedScenes).toHaveLength(2)
+    expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.background.assetId).toBe(
+      'builtin-bg-01'
+    )
+    expect(backend.currentLayout.cameraZoom).toBe(first.visual.layout.cameraZoom)
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(first.id)
+  })
+
+  it('routes global layout shortcuts through confirmed transactions and coalesces repeat bursts', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let emit: (name: string, value: unknown) => void = () => {}
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      registerEmitter: (next) => {
+        emit = next
+      }
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => {
+      expect(latest().saveScene('Named shortcut target')).toBe(true)
+    })
+    const saved = latest().savedScenes[0]
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout:screen-camera')
+      await latest().applySavedScene(saved.id)
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    })
+    expect(latest().activeSavedSceneId).toBe(saved.id)
+    let start = backend.sentCommands.length
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout-next')
+      emit('onGlobalShortcut', 'layout-next')
+      emit('onGlobalShortcut', 'layout-next')
+    })
+    await waitForObservation(
+      () => latest().captureConfig.layout.layoutPreset === 'side-by-side' && latest().canSaveScene
+    )
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .filter((entry) => entry.method.startsWith('scene.layout.apply'))
+    ).toHaveLength(1)
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout-next')
+      latest().applyCameraPreset({ layoutPreset: 'screen-only' })
+    })
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    })
+    await waitForObservation(
+      () => latest().captureConfig.layout.layoutPreset === 'screen-only' && latest().canSaveScene
+    )
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout-previous')
+    })
+    await waitForObservation(
+      () => latest().captureConfig.layout.layoutPreset === 'screen-camera' && latest().canSaveScene
+    )
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout:camera-only')
+    })
+    await waitForObservation(
+      () => latest().captureConfig.layout.layoutPreset === 'camera-only' && latest().canSaveScene
+    )
+    backend.deviceList.devices = backend.deviceList.devices.filter(
+      (device) => device.kind !== 'camera'
+    )
+    await act(async () => latest().refreshBackend({ fresh: true }))
+    start = backend.sentCommands.length
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout:screen-camera')
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    })
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .filter((entry) => entry.method.startsWith('scene.layout.apply'))
+    ).toHaveLength(0)
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout-next')
+    })
+    await waitForObservation(
+      () => latest().captureConfig.layout.layoutPreset === 'screen-only' && latest().canSaveScene
+    )
+    await act(async () => latest().startSession())
+    await waitForObservation(() => observations.at(-1)?.recording.recording.state === 'recording')
+    start = backend.sentCommands.length
+    await act(async () => {
+      emit('onGlobalShortcut', 'layout:vertical-screen-only')
+      await new Promise((resolve) => setTimeout(resolve, 120))
+    })
+    expect(latest().captureConfig.layout.layoutPreset).toBe('screen-only')
+    expect(
+      backend.sentCommands
+        .slice(start)
+        .filter((entry) => entry.method.startsWith('scene.layout.apply'))
+    ).toHaveLength(0)
+  }, 15000)
+
+  it('restores a modified saved checkpoint and saveability across a renderer remount with synthetic preview mapping', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => []
+    })
+    const runtimeInfo = api.getRuntimeInfo
+    api.getRuntimeInfo = async () => ({ ...(await runtimeInfo()), previewSmokeMode: true })
+    api.backgroundAssetExists = async () => true
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(
+      () =>
+        observations.at(-1)?.core.wsStatus === 'connected' &&
+        latest().captureConfig.sources.cameraId != null
+    )
+    await act(async () =>
+      latest().applyCameraPreset({ layoutPreset: 'screen-only', cameraZoom: 125 })
+    )
+    await waitForObservation(
+      () => latest().captureConfig.layout.cameraZoom === 125 && latest().canSaveScene
+    )
+    await act(async () => latest().applyBackgroundSlot('bg-01'))
+    await waitForObservation(
+      () => latest().scene?.background?.assetId === 'builtin-bg-01' && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('Restart')).toBe(true)
+    })
+    const saved = latest().savedScenes[0]
+    await act(async () => latest().applyCameraPreset({ cameraZoom: 145 }))
+    await waitForObservation(
+      () => latest().captureConfig.layout.cameraZoom === 145 && latest().canSaveScene
+    )
+    const cameraId = latest().captureConfig.sources.cameraId
+    await act(async () => root!.unmount())
+    observations.length = 0
+    const start = backend.sentCommands.length
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() =>
+      backend.sentCommands
+        .slice(start)
+        .some((command) => command.method === 'scene.load_from_capture_config')
+    )
+    await act(async () => latest().refreshBackend({ fresh: true }))
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).visual.sources.cameraId).toBe(
+      cameraId
+    )
+    expect(latest().captureConfig.layout.cameraZoom).toBe(145)
+    expect(latest().activeSavedSceneId).toBe(saved.id)
+    expect(latest().savedSceneModified).toBe(true)
+    expect(latest().canSaveScene).toBe(true)
+    await act(async () => {
+      expect(latest().saveScene('After restart')).toBe(true)
+    })
+  })
+
+  it('keeps named metadata and the committed background when native presentation proof times out', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+    let showPreview = false
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      nativePreview: {
+        getWindowState: () =>
+          showPreview
+            ? previewWindowOpen({ x: 0, y: 0, width: 960, height: 540 })
+            : previewWindowClosed,
+        drainHostCommands: async () => nativePreviewStatus()
+      }
+    })
+    const runtimeInfo = api.getRuntimeInfo
+    api.getRuntimeInfo = async () => ({ ...(await runtimeInfo()), disableAutoPreview: true })
+    api.backgroundAssetExists = async () => true
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioCoreContextValue => observations.at(-1)!.core
+    root = await mountStudioProvider(testDom.container, (value) => {
+      observations.push(value)
+    })
+    await waitForObservation(() => observations.at(-1)?.core.canSaveScene === true)
+    await act(async () => latest().applyBackgroundSlot('bg-01'))
+    await waitForObservation(
+      () => latest().scene?.background?.assetId === 'builtin-bg-01' && latest().canSaveScene
+    )
+    await act(async () => {
+      expect(latest().saveScene('Native A')).toBe(true)
+    })
+    const saved = latest().savedScenes[0]
+    await act(async () => latest().applyBackgroundSlot('bg-02'))
+    await waitForObservation(
+      () => latest().scene?.background?.assetId === 'builtin-bg-02' && latest().canSaveScene
+    )
+    const memory = latest().captureConfig.layoutFramingMemory
+    showPreview = true
+    // A real stale native status exhausts the provider's bounded proof wait.
+    api.getNativePreviewSurfaceStatus = async () => nativePreviewStatus()
+    await act(async () => {
+      expect(await latest().applySavedScene(saved.id)).toBe(true)
+    })
+    await waitForObservation(
+      () => latest().canSaveScene && toastSpies.warning.mock.calls.length > 0
+    )
+    expect(latest().activeSavedSceneId).toBe(saved.id)
+    expect(latest().scene?.background?.assetId).toBe('builtin-bg-01')
+    expect(latest().captureConfig.layoutFramingMemory).toEqual(memory)
+    expect(JSON.parse(localStorage.getItem(WORKING_SCENE_KEY)!).sceneId).toBe(saved.id)
+    expect(toastSpies.warning).toHaveBeenCalled()
+    showPreview = false
+    api.getNativePreviewSurfaceStatus = async () => nativePreviewStatus()
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+    })
+  }, 10000)
 
   it('re-derives the vertical leg from each committed program scene, even on a fast double switch', async () => {
     const backend = new StudioBackend()

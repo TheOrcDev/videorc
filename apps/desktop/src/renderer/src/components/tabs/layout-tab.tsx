@@ -1,3 +1,4 @@
+import ScenePresetControls from '@/components/scene-presets'
 import {
   AdjustIcon,
   ArrowDownIcon,
@@ -71,6 +72,7 @@ export function LayoutTab(): ReactElement {
     togglePreviewWindow,
     scene,
     sceneEditMode,
+    setSceneGesturePending,
     selectedSceneSourceId,
     setSceneEditMode,
     setSelectedSceneSourceId,
@@ -209,7 +211,9 @@ export function LayoutTab(): ReactElement {
           {/* SC1: schematic stage — the committed composition rendered from the
               real normalized transforms (pure SVG, zero idle IPC). Live pixels
               stay in the detached preview window. */}
+          <ScenePresetControls toolbar />
           <SceneStage
+            onGestureActiveChange={setSceneGesturePending}
             // The camera's box aspect is owned by the mask law (circle boxes
             // are square by construction; square/portrait force the crop), so
             // resize gestures must not free it.

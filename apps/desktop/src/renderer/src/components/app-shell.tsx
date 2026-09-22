@@ -1,7 +1,9 @@
 import { ChatIcon } from '@/components/icons'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
-import { CommandPalette } from '@/components/command-palette'
+const CommandPalette = lazy(async () => ({
+  default: (await import('@/components/command-palette')).CommandPalette
+}))
 import { FooterActionBar, FooterActionDivider } from '@/components/footer-action-bar'
 import { Sidebar } from '@/components/sidebar'
 import { Button } from '@/components/ui/button'
@@ -442,7 +444,9 @@ export function AppShell(): ReactElement {
           </FooterActionBar>
         </main>
 
-        <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
+        <Suspense fallback={null}>
+          {commandOpen ? <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} /> : null}
+        </Suspense>
         <PermissionsOnboardingGate
           open={onboardingOpen}
           onOpen={openPermissionsSetup}

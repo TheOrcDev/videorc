@@ -1,3 +1,5 @@
+import type { GlobalShortcutsConfig } from '../../../shared/backend'
+import { normalizeLayoutFramingMemory, type LayoutFramingMemory } from './layout-framing-memory'
 import type {
   AudioSettings,
   CaptionStyleId,
@@ -47,11 +49,7 @@ export type SettingsState = {
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
    */
-  globalShortcuts?: {
-    recordToggle?: string
-    streamToggle?: string
-    micToggle?: string
-  }
+  globalShortcuts?: GlobalShortcutsConfig
   /**
    * Scene motion: layout changes glide (320ms ease) in the live output —
    * preview, stream, AND recording — instead of cutting. Default OFF while
@@ -99,6 +97,7 @@ export type CaptureConfig = {
    * on the scene the user left it in. Kept fresh at the layout-transaction
    * commit point via layoutPresetMemoryPatch.
    */
+  layoutFramingMemory: LayoutFramingMemory
   lastHorizontalPreset: LayoutPreset
   lastVerticalPreset: LayoutPreset
   /**
@@ -1176,6 +1175,7 @@ export function auxiliaryStreamOutputVideoSettings(
 export const defaultCaptureConfig: CaptureConfig = {
   sources: {},
   verticalRestoreVideo: null,
+  layoutFramingMemory: normalizeLayoutFramingMemory(null),
   lastHorizontalPreset: 'screen-camera',
   lastVerticalPreset: 'vertical-camera-top',
   simulcastScreenFraming: 'fit',
@@ -1323,6 +1323,7 @@ export function loadCaptureConfig(): CaptureConfig {
             'horizontal'
           )
         : null,
+    layoutFramingMemory: normalizeLayoutFramingMemory(loaded.layoutFramingMemory, layout),
     lastHorizontalPreset: normalizeRememberedPreset(loaded.lastHorizontalPreset, 'horizontal'),
     lastVerticalPreset: normalizeRememberedPreset(loaded.lastVerticalPreset, 'vertical'),
     simulcastScreenFraming: isVerticalScreenFraming(loaded.simulcastScreenFraming)

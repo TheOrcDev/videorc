@@ -42,6 +42,8 @@ export function CommandPalette({
   const { setActive, openStudioPanel } = useWorkspaceNav()
   const {
     runtimeInfo,
+    savedScenes,
+    applySavedScene,
     startSession,
     stopSession,
     commentsWindow,
@@ -68,6 +70,24 @@ export function CommandPalette({
       <CommandList>
         <CommandEmpty>No results found.</CommandEmpty>
 
+        {savedScenes.length ? (
+          <CommandGroup heading="Saved scenes">
+            {savedScenes.map((scene) => (
+              <CommandItem
+                key={scene.id}
+                value={`saved-scene-${scene.id}`}
+                keywords={[scene.name]}
+                onSelect={() =>
+                  run(async () => {
+                    await applySavedScene(scene.id)
+                  })
+                }
+              >
+                {scene.name}
+              </CommandItem>
+            ))}
+          </CommandGroup>
+        ) : null}
         <CommandGroup heading="Go to">
           {WORKSPACE_TABS.map((tab) => {
             const digit = shortcutDigitFor(tab.id)

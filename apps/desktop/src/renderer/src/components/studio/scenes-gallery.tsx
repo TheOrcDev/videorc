@@ -1,5 +1,9 @@
+import { sceneSourceProblems, visualSources } from '@/lib/scene-presets'
+import { displayAccelerator } from '@/lib/platform'
+import { Kbd } from '@/components/ui/kbd'
 import { CheckIcon, DisplayIcon, MobileIcon } from '@/components/icons'
-import type { ReactElement } from 'react'
+import { lazy, Suspense, type ReactElement } from 'react'
+const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
 
 import { PanelSection } from '@/components/panel-section'
 import { Button } from '@/components/ui/button'
@@ -7,19 +11,13 @@ import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioCore } from '@/hooks/use-studio'
 import type { LayoutPreset, VerticalScreenFraming } from '@/lib/backend'
 import {
-  layoutPresetNeedsCamera,
-  layoutPresetNeedsScreen,
   layoutPresetOrientation,
   studioModeTogglePreset,
   type LayoutOrientation
 } from '@/lib/capture'
 import { cn } from '@/lib/utils'
 
-// SD3 ships the REAL layout presets as the selectable "scenes" — not the
-// mockup's invented "Main Camera / Presentation / Interview" names (no saved
-// scenes exist yet). OBS-style named scenes are a Phase-2 backend feature (F2),
-// so "Add scene" is shown disabled rather than faked.
-//
+// Built-in layouts and named visual snapshots share the Scenes surface.
 // The gallery is MODE-SCOPED: horizontal and vertical are two disjoint scene
 // vocabularies, and the orientation toggle in the header is the only way to
 // cross between them (off-air only — the canvas flips with the mode).
@@ -40,10 +38,17 @@ export const VERTICAL_SCENES: { id: LayoutPreset; label: string }[] = [
 ]
 
 export function ScenesGallery(): ReactElement {
-  const { captureConfig, applyCameraPreset, layoutSwitchPending, isSessionActive } = useStudioCore()
+  const {
+    captureConfig,
+    applyCameraPreset,
+    layoutSwitchPending,
+    isSessionActive,
+    activeSavedSceneId,
+    deviceList,
+    settings,
+    runtimeInfo
+  } = useStudioCore()
   const { openStudioPanel } = useWorkspaceNav()
-  const hasCamera = Boolean(captureConfig.sources.cameraId)
-  const hasScreen = Boolean(captureConfig.sources.screenId ?? captureConfig.sources.windowId)
   const activePreset = captureConfig.layout.layoutPreset
   const mode = layoutPresetOrientation(activePreset)
   const scenes = mode === 'vertical' ? VERTICAL_SCENES : HORIZONTAL_SCENES
@@ -120,10 +125,20 @@ export function ScenesGallery(): ReactElement {
     >
       <div className="grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(104px,1fr))]">
         {scenes.map((preset) => {
-          const disabled =
-            (layoutPresetNeedsCamera(preset.id) && !hasCamera) ||
-            (layoutPresetNeedsScreen(preset.id) && !hasScreen)
-          const active = activePreset === preset.id
+          const problems = sceneSourceProblems(
+            {
+              layout: {
+                ...captureConfig.layout,
+                layoutPreset: preset.id,
+                arrangementMode: 'preset'
+              },
+              sources: visualSources(captureConfig.sources),
+              background: null
+            },
+            deviceList.devices
+          )
+          const disabled = problems.length > 0
+          const active = !activeSavedSceneId && activePreset === preset.id
           return (
             <button
               key={preset.id}
@@ -134,6 +149,7 @@ export function ScenesGallery(): ReactElement {
                 disabled && 'cursor-not-allowed opacity-50'
               )}
               disabled={disabled}
+              title={problems.length ? problems.join(' ') : undefined}
               type="button"
               onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
             >
@@ -144,6 +160,14 @@ export function ScenesGallery(): ReactElement {
               <span className="flex items-center justify-between gap-1.5">
                 <span className="truncate text-sm font-medium">
                   {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
+                  {settings.globalShortcuts?.layouts?.[preset.id] ? (
+                    <Kbd>
+                      {displayAccelerator(
+                        settings.globalShortcuts.layouts[preset.id]!,
+                        runtimeInfo?.platform
+                      )}
+                    </Kbd>
+                  ) : null}
                 </span>
                 {active ? (
                   <CheckIcon className="size-4 shrink-0 text-primary" weight="bold" />
@@ -159,6 +183,9 @@ export function ScenesGallery(): ReactElement {
           onChange={(verticalScreenFraming) => applyCameraPreset({ verticalScreenFraming })}
         />
       ) : null}
+      <Suspense fallback={null}>
+        <ScenePresetControls />
+      </Suspense>
     </PanelSection>
   )
 }

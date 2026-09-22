@@ -1,3 +1,19 @@
+import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
+import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
+import { useScenePresets } from '@/hooks/use-scene-presets'
+import {
+  hydrateWorkingScene,
+  WORKING_SCENE_KEY,
+  normalizeSceneVisual,
+  visualSources,
+  snapshotBackground,
+  resolveSavedBackground,
+  sameSceneVisual,
+  sceneSourceProblems,
+  type SceneVisual,
+  type SavedScene
+} from '@/lib/scene-presets'
+import { recalledLayoutFraming, rememberLayoutFraming } from '@/lib/layout-framing-memory'
 import {
   createContext,
   useCallback,
@@ -148,7 +164,6 @@ import {
   layoutTransactionFailureReconciliation,
   layoutTransactionProofDisposition,
   layoutTransactionUnprovenSeverity,
-  liveBackgroundCommitDecision,
   NativePreviewPresentationProofError,
   shouldReloadSceneFromCaptureConfig
 } from '@/lib/layout-transaction-policy'
@@ -375,7 +390,7 @@ import {
 } from '@/lib/session-start-failure'
 import type { SessionRuntimeActivity, SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import { assertYouTubeTransitionConfirmed } from '@/lib/youtube-transition'
-import { effectiveSceneBackground } from '@/lib/background-assets'
+import { effectiveSceneBackground, removeSlotAsset } from '@/lib/background-assets'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import { findDevice, isActiveRecordingState, mergeStreamHealth } from '@/lib/format'
 import {
@@ -849,6 +864,9 @@ type LayoutTransactionSnapshot = {
   layout: LayoutSettings
   compositorStatus: CompositorStatus
   captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
+  origin?: 'builtin' | 'saved'
+  sources?: SourceSelection
+  savedSceneId?: string | null
 }
 
 type LayoutTransactionSceneEvidence = {
@@ -1089,6 +1107,19 @@ export type StudioContextValue = {
   patchLayout: (patch: Partial<LayoutSettings>) => void
   applyLayoutPatch: (patch: Partial<LayoutSettings>) => void
   applyCameraPreset: (patch: Partial<LayoutSettings>) => void
+  savedScenes: SavedScene[]
+  activeSavedSceneId: string | null
+  savedScenePendingId: string | null
+  savedSceneModified: boolean
+  sceneLibraryError: string | null
+  canSaveScene: boolean
+  setSceneGesturePending: (pending: boolean) => void
+  saveScene: (name: string, updateId?: string) => boolean
+  renameSavedScene: (id: string, name: string) => boolean
+  deleteSavedScene: (id: string) => boolean
+  applySavedScene: (id: string, repaired?: SceneVisual) => Promise<boolean>
+  applyBackgroundSlot: (slotId: string | null) => void
+  applyWorkingBackgroundStyle: (patch: Partial<Scene['background']>) => void
   /**
    * Change the vertical simulcast leg (scene, screen framing, follow). Saved
    * for the next session and, in a running dual-orientation session, applied
@@ -2115,7 +2146,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const chatSetupWarnedRef = useRef<{ sessionId?: string; warned: Set<string> }>({
     warned: new Set()
   })
-  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(loadCaptureConfig)
+  const [captureConfig, setCaptureConfig] = useState<CaptureConfig>(() => {
+    const config = loadCaptureConfig()
+    const working = hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))
+    return working
+      ? {
+          ...config,
+          sources: { ...config.sources, ...working.visual.sources },
+          layout: working.visual.layout,
+          video: coerceVideoToOrientation(
+            config.video,
+            layoutPresetOrientation(working.visual.layout.layoutPreset)
+          )
+        }
+      : config
+  })
   useEffect(() => {
     const sessionId = liveChatSnapshot.sessionId
     if (!sessionId) {
@@ -2967,6 +3012,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     settledCount: 0,
     lastSettled: null
   })
+  const layoutShortcutTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(
+    () => () => {
+      if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
+    },
+    []
+  )
+  const latestRequestedLayoutRef = useRef<LayoutPreset | null>(null)
   const layoutIntentIdRef = useRef(Date.now())
   const layoutIntentAwaitingProofRef = useRef<number | null>(null)
   const latestLayoutTransactionCommitRef = useRef<LayoutTransactionSnapshot | null>(null)
@@ -3229,17 +3282,79 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
   }, [streamTargets])
 
-  const { registry: backgroundRegistry } = useBackgroundAssets()
-  const activeSceneBackground = useMemo(
-    () => effectiveSceneBackground(backgroundRegistry) ?? undefined,
+  const { registry: backgroundRegistry, setRegistry: setBackgroundRegistry } = useBackgroundAssets()
+  const sceneLibrary = useScenePresets()
+  const { save: saveSceneEntry, remove: removeSceneEntry } = sceneLibrary
+  const [activeSavedSceneId, setActiveSavedSceneId] = useState<string | null>(
+    () => hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.sceneId ?? null
+  )
+  const activeSavedSceneIdRef = useRef(activeSavedSceneId)
+  const workingOriginRef = useRef<'builtin' | 'saved'>(
+    hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))?.origin ??
+      (activeSavedSceneId ? 'saved' : 'builtin')
+  )
+  const [visualTransactionPending, setVisualTransactionPending] = useState(false)
+  const [sceneGesturePending, setSceneGesturePending] = useState(false)
+  const [sceneTransformPending, setSceneTransformPending] = useState(false)
+  const [savedScenePendingId, setSavedScenePendingId] = useState<string | null>(null)
+  const [workingBackground, setWorkingBackground] = useState(() => {
+    const working = hydrateWorkingScene(loadJson(WORKING_SCENE_KEY, null))
+    return working
+      ? resolveSavedBackground(working.visual.background)
+      : effectiveSceneBackground(backgroundRegistry)
+  })
+  const workingBackgroundRef = useRef(workingBackground)
+  const confirmedVisualRef = useRef<SceneVisual>(
+    normalizeSceneVisual({
+      layout: captureConfig.layout,
+      sources: visualSources(captureConfig.sources),
+      background: snapshotBackground(workingBackground)
+    })
+  )
+  const backgroundRegistryRef = useRef(backgroundRegistry)
+  backgroundRegistryRef.current = backgroundRegistry
+  const activeSceneBackground = workingBackground ?? undefined
+  const desiredLibraryBackground = useMemo(
+    () => effectiveSceneBackground(backgroundRegistry),
     [backgroundRegistry]
   )
-  // Overlay the active background from the shared registry onto the scene so both
-  // the session and the native preview carry it; the registry is the source of
-  // truth (A5). Resolves to no background when nothing usable is selected.
+  const libraryBackgroundFingerprintRef = useRef(
+    JSON.stringify(snapshotBackground(desiredLibraryBackground))
+  )
   const sceneWithBackground = useMemo<Scene | null>(
     () => (scene ? { ...scene, background: activeSceneBackground } : null),
     [scene, activeSceneBackground]
+  )
+  const persistWorkingVisual = useCallback(
+    (
+      layout: LayoutSettings,
+      sources: SourceSelection,
+      background: Scene['background'] | null,
+      savedSceneId: string | null
+    ) => {
+      const visual = normalizeSceneVisual({
+        layout,
+        sources: visualSources(sources),
+        background: snapshotBackground(background)
+      })
+      confirmedVisualRef.current = visual
+      try {
+        localStorage.setItem(
+          WORKING_SCENE_KEY,
+          JSON.stringify({
+            version: 1,
+            origin: workingOriginRef.current,
+            sceneId: savedSceneId,
+            visual
+          })
+        )
+      } catch {
+        toast.error('The working scene could not be saved for the next launch.', {
+          id: 'working-scene-storage'
+        })
+      }
+    },
+    []
   )
 
   const reportError = useCallback((error: unknown) => {
@@ -6459,7 +6574,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   ])
 
   const loadScene = useCallback(
-    async (config: Pick<CaptureConfig, 'sources' | 'layout' | 'video'>) => {
+    async (
+      config: Pick<CaptureConfig, 'sources' | 'layout' | 'video'>,
+      requestedSources = config.sources
+    ) => {
       if (!client || wsStatus !== 'connected') {
         return
       }
@@ -6473,8 +6591,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         params
       )
       applyCommittedScene(status)
+      persistWorkingVisual(
+        config.layout,
+        requestedSources,
+        status.scene.background ?? null,
+        activeSavedSceneIdRef.current
+      )
     },
-    [activeSceneBackground, applyCommittedScene, client, wsStatus]
+    [activeSceneBackground, applyCommittedScene, client, wsStatus, persistWorkingVisual]
   )
 
   const reloadSceneFromCaptureConfig = useCallback(async () => {
@@ -6484,7 +6608,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       video: captureConfig.video
     }
     await loadScene(
-      runtimeInfo?.previewSmokeMode ? smokePreviewCompositorCaptureConfig(config) : config
+      runtimeInfo?.previewSmokeMode ? smokePreviewCompositorCaptureConfig(config) : config,
+      config.sources
     )
   }, [
     captureConfig.layout,
@@ -6514,7 +6639,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             height: source.transform.height
           }
         }
+        const layout = { ...captureConfigRef.current.layout, sourceTransformOverrides }
         patchLayout({ sourceTransformOverrides })
+        persistWorkingVisual(
+          layout,
+          captureConfigRef.current.sources,
+          workingBackgroundRef.current,
+          activeSavedSceneIdRef.current
+        )
         return
       }
 
@@ -6523,17 +6655,24 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
-      patchLayout({
-        cameraTransformMode: 'custom',
+      const transformPatch = {
+        cameraTransformMode: 'custom' as const,
         cameraTransform: {
           x: camera.transform.x,
           y: camera.transform.y,
           width: camera.transform.width,
           height: camera.transform.height
         }
-      })
+      }
+      patchLayout(transformPatch)
+      persistWorkingVisual(
+        { ...captureConfigRef.current.layout, ...transformPatch },
+        captureConfigRef.current.sources,
+        workingBackgroundRef.current,
+        activeSavedSceneIdRef.current
+      )
     },
-    [patchLayout]
+    [patchLayout, persistWorkingVisual]
   )
 
   const refreshBackend = useCallback(
@@ -6860,6 +6999,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
 
+      setSceneTransformPending(true)
       try {
         const status = await client.request<SceneCommitStatus>('scene.source.transform.update', {
           sourceId,
@@ -6869,6 +7009,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         syncSourceTransformsToLayout(status.scene, sourceId)
       } catch (error) {
         reportError(error)
+      } finally {
+        setSceneTransformPending(false)
       }
     },
     [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
@@ -7052,6 +7194,32 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const applyLayoutTransactionState = useCallback(
     (snapshot: LayoutTransactionSnapshot) => {
       applyScene(snapshot.scene)
+      latestRequestedLayoutRef.current = snapshot.layout.layoutPreset
+      const background = snapshot.scene.background ?? null
+      workingBackgroundRef.current = background
+      setWorkingBackground(background)
+      const registry = backgroundRegistryRef.current
+      const activeSlotId = background
+        ? (registry.slots.find(
+            (slot) =>
+              slot.assetId === background.assetId &&
+              slot.status === 'ready' &&
+              JSON.stringify(
+                snapshotBackground(effectiveSceneBackground({ ...registry, activeSlotId: slot.id }))
+              ) === JSON.stringify(snapshotBackground(background))
+          )?.id ?? null)
+        : null
+      if (registry.activeSlotId !== activeSlotId) {
+        const nextRegistry = { ...registry, activeSlotId }
+        libraryBackgroundFingerprintRef.current = JSON.stringify(
+          snapshotBackground(effectiveSceneBackground(nextRegistry))
+        )
+        setBackgroundRegistry(nextRegistry)
+      }
+      workingOriginRef.current = snapshot.origin ?? 'builtin'
+      const savedId = snapshot.savedSceneId ?? null
+      activeSavedSceneIdRef.current = savedId
+      setActiveSavedSceneId(savedId)
       skipNextConfigSceneReloadRef.current = true
       setCaptureConfig((current) => {
         // Orientation and canvas are one committed program state. Derive the
@@ -7076,14 +7244,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         const next = {
           ...current,
           ...captureConfigPatch,
+          sources: snapshot.sources ?? current.sources,
           ...layoutPresetMemoryPatch(snapshot.layout.layoutPreset),
-          layout: snapshot.layout
+          layout: snapshot.layout,
+          layoutFramingMemory:
+            snapshot.origin === 'saved'
+              ? current.layoutFramingMemory
+              : rememberLayoutFraming(current.layoutFramingMemory, snapshot.layout)
         }
         captureConfigRef.current = next
+        persistWorkingVisual(next.layout, next.sources, background, savedId)
         return next
       })
     },
-    [applyScene]
+    [applyScene, persistWorkingVisual, setBackgroundRegistry]
   )
 
   const readLayoutTransactionBackendTruth = useCallback(async () => {
@@ -7109,7 +7283,45 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return null
     }
 
+    const sources = { ...captureConfigRef.current.sources }
+    for (const source of sceneAfter.sources) {
+      if (source.kind === 'camera') {
+        sources.cameraName =
+          sources.cameraId === source.deviceId ? (sources.cameraName ?? source.name) : source.name
+        sources.cameraId = source.deviceId
+      }
+      if (source.kind === 'screen') {
+        sources.screenName =
+          sources.screenId === source.deviceId ? (sources.screenName ?? source.name) : source.name
+        sources.screenId = source.deviceId
+        sources.windowId = undefined
+        sources.windowName = undefined
+        sources.testPattern = false
+      }
+      if (source.kind === 'window') {
+        sources.windowName =
+          sources.windowId === source.deviceId ? (sources.windowName ?? source.name) : source.name
+        sources.windowId = source.deviceId
+        sources.screenId = undefined
+        sources.screenName = undefined
+        sources.testPattern = false
+      }
+      if (source.kind === 'test-pattern') {
+        sources.screenId = undefined
+        sources.windowId = undefined
+        sources.testPattern = true
+      }
+    }
+    const visual = normalizeSceneVisual({
+      layout: compositorStatus.sceneLayout,
+      sources: visualSources(sources),
+      background: snapshotBackground(sceneAfter.background)
+    })
+    const matchesWorking = sameSceneVisual(visual, confirmedVisualRef.current)
     return {
+      sources,
+      savedSceneId: matchesWorking ? activeSavedSceneIdRef.current : null,
+      origin: matchesWorking ? workingOriginRef.current : ('saved' as const),
       sceneRevision: compositorStatus.sceneRevision,
       scene: sceneAfter,
       layout: compositorStatus.sceneLayout,
@@ -7187,17 +7399,36 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         pendingIndicator?: boolean
         videoOverride?: VideoSettings
         captureConfigPatch?: Pick<CaptureConfig, 'video' | 'verticalRestoreVideo'>
+        sourcesOverride?: SourceSelection
+        backgroundOverride?: Scene['background'] | null
+        strictSources?: boolean
+        savedSceneId?: string | null
+        origin?: 'builtin' | 'saved'
       }
     ): Promise<boolean> => {
       const sessionActive = isActiveRecordingState(recordingRef.current.state)
+      if (
+        sessionActive &&
+        layoutPresetOrientation(layout.layoutPreset) !==
+          layoutPresetOrientation(captureConfigRef.current.layout.layoutPreset)
+      ) {
+        toast.error('Stop the recording or stream before switching orientation.', {
+          id: 'scene-orientation-lock'
+        })
+        return Promise.resolve(false)
+      }
       if (!client || wsStatus !== 'connected') {
         toast.error('Backend socket is not connected. Layout unchanged.')
         return Promise.resolve(false)
       }
 
+      if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
+      latestRequestedLayoutRef.current = layout.layoutPreset
       const intentId = Math.max(layoutIntentIdRef.current + 1, Date.now())
       layoutIntentIdRef.current = intentId
       layoutIntentAwaitingProofRef.current = intentId
+      setVisualTransactionPending(true)
+      setSavedScenePendingId(options?.savedSceneId ?? null)
       // Background-only commits keep the same preset; flashing the layout
       // controls into "Switching…" for them reads as an unrelated change.
       if (options?.pendingIndicator !== false) {
@@ -7218,14 +7449,43 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       void (async () => {
         let requestedSceneEvidence: LayoutTransactionSceneEvidence | null = null
         let sceneRevisionBeforeRequest: number | undefined
+        let sceneRequestDispatched = false
         try {
           const protectedOverlayWindowIds = await currentProtectedOverlayWindowIds()
           const requestedConfig = captureConfigRef.current
-          const requestedSources = reconcileSourceSelectionForLayoutTransaction(
-            requestedConfig.sources,
-            deviceListRef.current.devices
-          )
-          if (JSON.stringify(requestedSources) !== JSON.stringify(requestedConfig.sources)) {
+          const requestedSources =
+            options?.sourcesOverride ??
+            reconcileSourceSelectionForLayoutTransaction(
+              requestedConfig.sources,
+              deviceListRef.current.devices
+            )
+          const requestedBackground =
+            options && 'backgroundOverride' in options
+              ? (options.backgroundOverride ?? undefined)
+              : (workingBackgroundRef.current ?? undefined)
+          if (options?.strictSources) {
+            const freshDevices = await client.request<DeviceList>('devices.list')
+            const issues = sceneSourceProblems(
+              {
+                layout,
+                sources: visualSources(requestedSources),
+                background: snapshotBackground(requestedBackground)
+              },
+              freshDevices.devices
+            )
+            if (issues.length) throw new Error(issues.join(' '))
+            if (
+              requestedBackground &&
+              !(await window.videorc?.backgroundAssetExists?.(requestedBackground.assetId))
+            )
+              throw new Error(
+                'Saved background unavailable. Resolve it or apply without background.'
+              )
+          }
+          if (
+            !options?.strictSources &&
+            JSON.stringify(requestedSources) !== JSON.stringify(requestedConfig.sources)
+          ) {
             recordAutomaticSourceFallbacks(requestedConfig.sources, requestedSources)
             setCaptureConfig((current) =>
               JSON.stringify(current.sources) === JSON.stringify(requestedConfig.sources)
@@ -7242,7 +7502,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             // Until then the ref intentionally remains on the previous program
             // state, so the transaction carries its target canvas explicitly.
             video: options?.videoOverride ?? requestedConfig.video,
-            background: activeSceneBackground,
+            background: requestedBackground,
             protectedOverlayWindowIds,
             // Scene motion (opt-in): the committed layout glides into place
             // (320ms ease) in preview, stream, and recording alike. Absent =
@@ -7259,6 +7519,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             typeof baselineCompositorStatus?.sceneRevision === 'number'
               ? baselineCompositorStatus.sceneRevision
               : undefined
+          sceneRequestDispatched = true
           const status: LayoutTransactionStatus = await client.requestTyped(
             method,
             requestedTransaction
@@ -7268,7 +7529,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             scene: status.scene,
             layout: status.compositorStatus.sceneLayout ?? layout,
             compositorStatus: status.compositorStatus,
-            captureConfigPatch: options?.captureConfigPatch
+            captureConfigPatch: options?.captureConfigPatch,
+            sources: requestedSources,
+            savedSceneId:
+              options && 'savedSceneId' in options
+                ? options.savedSceneId
+                : activeSavedSceneIdRef.current,
+            origin: options?.origin ?? workingOriginRef.current
           }
           // This is the remote-control acknowledgement edge: the backend has
           // returned an authoritative commit. Presentation proof and React
@@ -7352,6 +7619,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // already shows it (owner call, 2026-07-16: no green popups for
           // routine scene changes). Only lag/failure states surface above.
         } catch (error) {
+          if (!sceneRequestDispatched) {
+            if (layoutIntentIdRef.current === intentId) reportError(error)
+            settleCommitReceipt(false)
+            return
+          }
           // Superseded requests are expected and must not overwrite the newer
           // selection or flash an error. The latest request still reports exact
           // readiness/presentation failures.
@@ -7377,7 +7649,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             })
             const backendTruthForReconciliation =
               failureDisposition === 'requested-scene-applied' && backendTruth
-                ? { ...backendTruth, captureConfigPatch: options?.captureConfigPatch }
+                ? {
+                    ...backendTruth,
+                    captureConfigPatch: options?.captureConfigPatch,
+                    sources: options?.sourcesOverride ?? captureConfigRef.current.sources,
+                    savedSceneId:
+                      options && 'savedSceneId' in options
+                        ? options.savedSceneId
+                        : activeSavedSceneIdRef.current,
+                    origin: options?.origin ?? workingOriginRef.current
+                  }
                 : backendTruth
             const reconciliation = layoutTransactionFailureReconciliation({
               latestIntentId: layoutIntentIdRef.current,
@@ -7405,6 +7686,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           }
           if (layoutIntentIdRef.current === intentId) {
             setLayoutSwitchPending(null)
+            setSavedScenePendingId(null)
+            setVisualTransactionPending(false)
           }
         }
       })().catch((error) => {
@@ -7414,7 +7697,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return commitReceipt
     },
     [
-      activeSceneBackground,
       applyLayoutTransactionState,
       client,
       readLayoutTransactionBackendTruth,
@@ -7427,29 +7709,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     ]
   )
 
-  // Instant background apply while live (2026-07-10 report: clicking an asset
-  // only changed the local registry — the stream kept the old background until
-  // the next layout-preset change re-committed the scene). Idle stays with the
-  // debounced scene reload effect; an active session commits through the same
-  // layout-transaction machinery (scene revision, latest-wins, proof).
-  // Fingerprint by VALUE: the registry memo yields a new object on unrelated
-  // edits (rename, import into an inactive slot) which must not commit.
-  const liveBackgroundFingerprintRef = useRef<string | null>(null)
-  const activeSceneBackgroundFingerprint = useMemo(
-    () => JSON.stringify(activeSceneBackground ?? null),
-    [activeSceneBackground]
-  )
+  // Library edits request a new working background. Only the committed target
+  // drives preview/session parameters; applying a saved snapshot never edits the library.
   useEffect(() => {
-    const decision = liveBackgroundCommitDecision({
-      sessionActive: isActiveRecordingState(recording.state),
-      armedFingerprint: liveBackgroundFingerprintRef.current,
-      fingerprint: activeSceneBackgroundFingerprint
+    const fingerprint = JSON.stringify(snapshotBackground(desiredLibraryBackground))
+    if (fingerprint === libraryBackgroundFingerprintRef.current) return
+    libraryBackgroundFingerprintRef.current = fingerprint
+    void requestLayoutTransaction(captureConfigRef.current.layout, {
+      pendingIndicator: false,
+      backgroundOverride: desiredLibraryBackground
     })
-    liveBackgroundFingerprintRef.current = decision.next
-    if (decision.commit) {
-      void requestLayoutTransaction(captureConfigRef.current.layout, { pendingIndicator: false })
-    }
-  }, [activeSceneBackgroundFingerprint, recording.state, requestLayoutTransaction])
+  }, [desiredLibraryBackground, requestLayoutTransaction])
 
   const applyLayoutPatch = useCallback(
     (patch: Partial<LayoutSettings>) => {
@@ -7465,6 +7735,20 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     (patch: Partial<LayoutSettings>) => {
       const current = captureConfigRef.current
       const nextPreset = patch.layoutPreset ?? current.layout.layoutPreset
+      if (patch.layoutPreset !== undefined) {
+        const issues = sceneSourceProblems(
+          {
+            layout: { ...current.layout, layoutPreset: nextPreset, arrangementMode: 'preset' },
+            sources: visualSources(current.sources),
+            background: null
+          },
+          deviceListRef.current.devices
+        )
+        if (issues.length) {
+          toast.error(issues.join(' '), { id: 'layout-source-unavailable' })
+          return Promise.resolve(false)
+        }
+      }
 
       // Vertical scene ⇄ canvas orientation coupling, OFF-AIR ONLY: entering
       // vertical flips the canvas to 1080×1920 and remembers the landscape
@@ -7499,15 +7783,150 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return requestLayoutTransaction(
         {
           ...current.layout,
+          ...(patch.layoutPreset !== undefined && workingOriginRef.current === 'saved'
+            ? current.layoutFramingMemory.layouts[nextPreset]
+            : recalledLayoutFraming(
+                current.layoutFramingMemory,
+                current.layout.layoutPreset,
+                nextPreset
+              )),
           ...arrangementPatch,
           ...patch,
           cameraTransformMode: 'preset',
           cameraTransform: null
         },
-        videoOverride ? { videoOverride, captureConfigPatch } : undefined
+        {
+          videoOverride,
+          captureConfigPatch,
+          ...(patch.layoutPreset !== undefined
+            ? { savedSceneId: null, origin: 'builtin' as const }
+            : {})
+        }
       )
     },
     [requestLayoutTransaction]
+  )
+
+  const applyBackgroundSlot = useCallback(
+    (slotId: string | null): void => {
+      const registry = backgroundRegistryRef.current
+      const background = slotId
+        ? effectiveSceneBackground({ ...registry, activeSlotId: slotId })
+        : null
+      void requestLayoutTransaction(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        backgroundOverride: background
+      })
+    },
+    [requestLayoutTransaction]
+  )
+
+  const applyWorkingBackgroundStyle = useCallback(
+    (patch: Partial<Scene['background']>): void => {
+      const current = workingBackgroundRef.current
+      if (!current) return
+      const background = resolveSavedBackground({ ...snapshotBackground(current)!, ...patch })
+      void requestLayoutTransaction(captureConfigRef.current.layout, {
+        pendingIndicator: false,
+        backgroundOverride: background
+      })
+    },
+    [requestLayoutTransaction]
+  )
+
+  const workingVisual: SceneVisual = useMemo(
+    () =>
+      normalizeSceneVisual({
+        layout: captureConfig.layout,
+        sources: visualSources(captureConfig.sources),
+        background: snapshotBackground(workingBackground)
+      }),
+    [captureConfig.layout, captureConfig.sources, workingBackground]
+  )
+  const savedSceneModified = Boolean(
+    activeSavedSceneId &&
+    sceneLibrary.scenes.some(
+      (entry) => entry.id === activeSavedSceneId && !sameSceneVisual(entry.visual, workingVisual)
+    )
+  )
+  const canSaveScene =
+    !sceneLibrary.readOnly &&
+    !visualTransactionPending &&
+    layoutSwitchPending === null &&
+    savedScenePendingId === null &&
+    sourceDeviceSwitchPending === null &&
+    !sceneGesturePending &&
+    !sceneTransformPending &&
+    wsStatus === 'connected' &&
+    scene !== null &&
+    sameSceneVisual(workingVisual, confirmedVisualRef.current)
+  const saveScene = useCallback(
+    (name: string, updateId?: string): boolean => {
+      if (!canSaveScene || layoutIntentAwaitingProofRef.current !== null) return false
+      const id = saveSceneEntry(name, workingVisual, updateId)
+      if (!id) return false
+      activeSavedSceneIdRef.current = id
+      workingOriginRef.current = 'saved'
+      setActiveSavedSceneId(id)
+      persistWorkingVisual(
+        captureConfigRef.current.layout,
+        captureConfigRef.current.sources,
+        workingBackgroundRef.current,
+        id
+      )
+      return true
+    },
+    [canSaveScene, saveSceneEntry, workingVisual, persistWorkingVisual]
+  )
+  const deleteSavedScene = useCallback(
+    (id: string): boolean => {
+      if (!removeSceneEntry(id)) return false
+      if (activeSavedSceneIdRef.current === id) {
+        activeSavedSceneIdRef.current = null
+        setActiveSavedSceneId(null)
+        persistWorkingVisual(
+          captureConfigRef.current.layout,
+          captureConfigRef.current.sources,
+          workingBackgroundRef.current,
+          null
+        )
+      }
+      return true
+    },
+    [removeSceneEntry, persistWorkingVisual]
+  )
+  const applySavedScene = useCallback(
+    async (id: string, repaired?: SceneVisual): Promise<boolean> => {
+      const saved = sceneLibrary.scenes.find((entry) => entry.id === id)
+      if (!saved) return false
+      const visual = normalizeSceneVisual(repaired ?? saved.visual)
+      const current = captureConfigRef.current
+      const coupling = !isActiveRecordingState(recordingRef.current.state)
+        ? verticalOrientationVideoPatch(
+            current.layout.layoutPreset,
+            visual.layout.layoutPreset,
+            current.video,
+            current.verticalRestoreVideo
+          )
+        : null
+      return requestLayoutTransaction(visual.layout, {
+        sourcesOverride: { ...current.sources, ...visual.sources },
+        backgroundOverride: resolveSavedBackground(visual.background),
+        savedSceneId: id,
+        origin: 'saved',
+        strictSources: true,
+        ...(coupling
+          ? {
+              videoOverride: coupling.video,
+              captureConfigPatch: {
+                video: coupling.video,
+                verticalRestoreVideo: coupling.verticalRestoreVideo
+              }
+            }
+          : {})
+      })
+    },
+    [sceneLibrary.scenes, requestLayoutTransaction]
   )
 
   const applyCameraPreset = useCallback(
@@ -7560,6 +7979,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
         applyScene(status.scene)
         setCaptureConfig((current) => ({ ...current, sources }))
+        persistWorkingVisual(
+          captureConfigRef.current.layout,
+          sources,
+          status.scene.background ?? null,
+          activeSavedSceneIdRef.current
+        )
         if (proofFailed) {
           const detail = proofError instanceof Error ? proofError.message : String(proofError)
           console.warn(
@@ -7581,6 +8006,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     },
     [
       applyScene,
+      persistWorkingVisual,
       activeSceneBackground,
       captureConfig.layout,
       captureConfig.video,
@@ -12935,6 +13361,51 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   globalShortcutsRegistrarRef.current?.sync(settings.globalShortcuts ?? {})
   const handleGlobalShortcut = useEffectEvent((action: GlobalShortcutAction) => {
     const context: GlobalShortcutContext = {
+      switchLayout: (layoutAction) => {
+        const current = captureConfigRef.current
+        const direct = globalShortcutLayout(layoutAction)
+        const from = latestRequestedLayoutRef.current ?? current.layout.layoutPreset
+        const orientation = layoutPresetOrientation(from)
+        const eligible = BUILTIN_LAYOUTS.filter(
+          ({ id }) =>
+            layoutPresetOrientation(id) === orientation &&
+            sceneSourceProblems(
+              {
+                layout: { ...current.layout, layoutPreset: id, arrangementMode: 'preset' },
+                sources: visualSources(current.sources),
+                background: null
+              },
+              deviceListRef.current.devices
+            ).length === 0
+        )
+        const step = layoutAction === 'layout-previous' ? -1 : 1
+        const target =
+          direct ??
+          nextEligibleLayout(
+            from,
+            step,
+            eligible.map(({ id }) => id)
+          )
+        if (!target) {
+          toast.info('No other available layout.', { id: 'layout-shortcut-empty' })
+          return
+        }
+        if (
+          layoutIntentAwaitingProofRef.current !== null &&
+          latestRequestedLayoutRef.current === target
+        )
+          return
+        latestRequestedLayoutRef.current = target
+        if (layoutShortcutTimerRef.current) clearTimeout(layoutShortcutTimerRef.current)
+        // Coalesce repeat bursts while retaining their latest requested index.
+        layoutShortcutTimerRef.current = setTimeout(() => {
+          layoutShortcutTimerRef.current = null
+          void requestCameraPresetTransaction({ layoutPreset: target }).then((accepted) => {
+            if (!accepted && latestRequestedLayoutRef.current === target)
+              latestRequestedLayoutRef.current = captureConfigRef.current.layout.layoutPreset
+          })
+        }, 70)
+      },
       sessionActive: isActiveRecordingState(recordingRef.current.state),
       streamEnabled: captureConfigRef.current.streamEnabled,
       startSession,
@@ -12949,6 +13420,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }))
       }
     }
+    if (action.startsWith('layout')) return context.switchLayout?.(action)
     void import('@/lib/global-shortcuts')
       .then(({ executeGlobalShortcut }) => executeGlobalShortcut(action, context))
       .catch(reportError)
@@ -13032,6 +13504,50 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     () => ({ previewLiveStatus, previewCameraStatus, previewScreenStatus }),
     [previewCameraStatus, previewLiveStatus, previewScreenStatus]
   )
+
+  // Development smoke harness: delegates to the same public actions as the UI.
+  // No parallel apply implementation or production exposure.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return
+    const smokeWindow = window as Window & { __videorcSmokeScenePresets?: unknown }
+    smokeWindow.__videorcSmokeScenePresets = {
+      state: () => ({
+        canSave: value.canSaveScene,
+        scenes: value.savedScenes,
+        activeId: value.activeSavedSceneId,
+        pendingId: value.savedScenePendingId,
+        pendingLayout: value.layoutSwitchPending,
+        modified: value.savedSceneModified,
+        visual: workingVisual,
+        diagnostics: {
+          wsStatus,
+          hasScene: scene !== null,
+          visualTransactionPending,
+          sourceDeviceSwitchPending,
+          sceneGesturePending,
+          sceneTransformPending,
+          confirmedVisual: confirmedVisualRef.current
+        },
+        recording: recording.state,
+        backgroundSlots: backgroundRegistry.slots.map(({ id, assetId }) => ({ id, assetId }))
+      }),
+      save: value.saveScene,
+      apply: value.applySavedScene,
+      remove: value.deleteSavedScene,
+      background: value.applyBackgroundSlot,
+      backgroundStyle: value.applyWorkingBackgroundStyle,
+      removeBackground: (id: string) =>
+        setBackgroundRegistry((current) => removeSlotAsset(current, id)),
+      layout: value.applyCameraPreset,
+      configure: (patch: Partial<CaptureConfig>) =>
+        value.setCaptureConfig((current) => ({ ...current, ...patch })),
+      start: value.startSession,
+      stop: value.stopSession
+    }
+    return () => {
+      delete smokeWindow.__videorcSmokeScenePresets
+    }
+  })
 
   const value = useMemo<StudioCoreContextValue>(
     () => ({
@@ -13190,6 +13706,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneSourceTransform,
       commitCameraTransform,
       applyCameraPreset,
+      savedScenes: sceneLibrary.scenes,
+      activeSavedSceneId,
+      savedScenePendingId,
+      savedSceneModified,
+      sceneLibraryError: sceneLibrary.error,
+      canSaveScene,
+      setSceneGesturePending,
+      saveScene,
+      renameSavedScene: sceneLibrary.rename,
+      deleteSavedScene,
+      applySavedScene,
+      applyBackgroundSlot,
+      applyWorkingBackgroundStyle,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
@@ -13394,6 +13923,18 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setSceneSourceTransform,
       commitCameraTransform,
       applyCameraPreset,
+      sceneLibrary.scenes,
+      sceneLibrary.error,
+      sceneLibrary.rename,
+      activeSavedSceneId,
+      savedScenePendingId,
+      savedSceneModified,
+      canSaveScene,
+      saveScene,
+      deleteSavedScene,
+      applySavedScene,
+      applyBackgroundSlot,
+      applyWorkingBackgroundStyle,
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,

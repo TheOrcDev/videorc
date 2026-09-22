@@ -1,3 +1,4 @@
+import { GLOBAL_SHORTCUT_ACTIONS } from './global-shortcuts'
 import { readFileSync } from 'node:fs'
 
 import { describe, expect, expectTypeOf, it } from 'vitest'
@@ -457,5 +458,26 @@ describe('Electron IPC contract', () => {
         { text: 'x'.repeat(MAX_NOTES_TEXT_LENGTH + 1) }
       ])
     ).toThrow(`at most ${MAX_NOTES_TEXT_LENGTH} characters`)
+  })
+})
+
+describe('global layout shortcut IPC', () => {
+  it('accepts every canonical action and rejects unknown payloads', () => {
+    for (const action of GLOBAL_SHORTCUT_ACTIONS)
+      expect(validateElectronEventPayload('global-shortcuts:triggered', action)).toBe(action)
+    expect(() =>
+      validateElectronEventPayload('global-shortcuts:triggered', 'layout:unknown')
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('global-shortcuts:set', [{ layouts: { unknown: 'Control+1' } }])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('global-shortcuts:set', [{ layoutNext: 123 }])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('global-shortcuts:set', [
+        { layoutNext: 'Control+Alt+N', layouts: { 'camera-only': 'Control+Alt+C' } }
+      ])
+    ).not.toThrow()
   })
 })
