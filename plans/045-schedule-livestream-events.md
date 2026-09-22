@@ -7,6 +7,8 @@
 ## Status and decisions
 
 - Status: IMPLEMENTED — S1–S5 complete; S6 production acceptance BLOCKED by the existing YouTube approval gate and unavailable authorized real-channel macOS/Windows run. Draft PR requested; no merge or release.
+- Draft PR: https://github.com/TheOrcDev/videorc/pull/386
+- Implementation commit: `a6f5972c33232b0571d4b5182ad78ed1daadda14`.
 - Priority P1; effort L; risk MED–HIGH, principally provider lifecycle and recovery.
 - Planned 2026-09-22 against merged main commit `3b7a3529` (includes PR #383).
 - Plan storage: `/Users/orcdev/projects/videorc`, HEAD `15206746`, with unrelated
