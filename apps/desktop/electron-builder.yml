@@ -4,10 +4,11 @@ artifactName: ${productName}-${version}-${os}-${arch}.${ext}
 asar: true
 npmRebuild: false
 # Auto-update + download channel feed (baked into the app's app-update.yml).
-# Release artifacts (dmg/zip/latest-mac.yml/blockmap) are uploaded to Cloudflare
-# R2 and fronted by videorc-web; the app reads updates from this URL. The
-# videorc-web /api/updates/* route is LIVE and 302s to a presigned R2 object
-# (verified: it returns R2 NoSuchKey until the release feed is uploaded).
+# Release artifacts (dmg/zip/latest-mac.yml/blockmap) are uploaded to every
+# configured release storage origin (target: Neon Object Storage; see
+# docs/releases/release-runbook.md "Storage origins") and fronted by
+# videorc-web; the app reads updates from this URL. The videorc-web
+# /api/updates/* route 302s to a presigned object on the primary origin.
 #
 # BETA: point at the live Vercel host; videorc.com is only a teaser until launch.
 # Switch to the production domain when we ship.

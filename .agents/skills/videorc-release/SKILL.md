@@ -1,6 +1,6 @@
 ---
 name: videorc-release
-description: Cut and publish coordinated Videorc desktop releases for the signed and notarized macOS Beta and the signed Windows 11 x64 Alpha, including version/changelog preparation, protected Windows candidate and promotion workflows, R2 publication, updater verification, and release records. Use when the user asks to cut, ship, publish, deploy, or make a new Videorc desktop release or update. Target both macOS and Windows by default unless the user explicitly narrows the platform.
+description: Cut and publish coordinated Videorc desktop releases for the signed and notarized macOS Beta and the signed Windows 11 x64 Alpha, including version/changelog preparation, protected Windows candidate and promotion workflows, release storage publication (Neon target origin), updater verification, and release records. Use when the user asks to cut, ship, publish, deploy, or make a new Videorc desktop release or update. Target both macOS and Windows by default unless the user explicitly narrows the platform.
 ---
 
 # Videorc release
@@ -47,11 +47,12 @@ runbooks' detailed gates.
 
 - Use a clean checkout based on current protected `main`.
 - Confirm GitHub access can dispatch and inspect Actions workflows.
-- Confirm R2 credentials are scoped to the documented platform prefixes. Never
+- Confirm storage credentials are scoped as documented (R2 per platform
+  prefix; Neon and Hetzner per dedicated release-only project). Never
   run the local macOS upload concurrently with Windows public promotion because
-  both may update the merged global changelog. After merging a pending Windows
-  Alpha changelog entry, do not run another macOS upload until that Windows
-  release is public or the release owner explicitly resolves the held entry.
+  both may update the merged global changelog. A pending Windows Alpha changelog
+  entry on `main` does not block macOS uploads: each uploader only introduces
+  entries for its own platform, and logs the ones it withholds.
 - Name release, Windows acceptance, support, and rollback owners before starting.
 
 ### macOS
@@ -63,15 +64,27 @@ runbooks' detailed gates.
   unless the runbook explicitly restores that requirement.
 - Verify the Developer ID identity `Uros Miric (C2PA37RB58)` is available in the
   keychain, or provide the documented `CSC_LINK` alternative.
-- Load `VIDEORC_DOWNLOAD_S3_*` from `~/projects/videorcweb/.env` and normalize
-  the upload endpoint to the bucket-less R2 account host.
+- Load `VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*`
+  and `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` from `~/.videorc-release.env`
+  (whichever origins are still configured). The upload publishes to **every
+  configured** storage origin, mirrors first, primary last. Target: Neon is the
+  single origin; Hetzner and R2 stay read-only until the soak ends, and
+  `VIDEORC_DOWNLOAD_STORAGE_PRIMARY=hetzner` in videorc-web is the rollback.
+- Only while R2 is still an origin: load `VIDEORC_DOWNLOAD_S3_*` from
+  `~/projects/videorcweb/.env` and normalize the upload endpoint to the
+  bucket-less R2 account host. A Neon-only setup needs no R2 env.
+- Read "Storage origins" in the release runbook: a blocked mirror degrades the
+  release and leaves a pending record to replay with
+  `pnpm release:sync:origins -- --pending`; a blocked primary stops it unless
+  `VIDEORC_RELEASE_ALLOW_MIRROR_ONLY=1`.
 
 ### Windows
 
 - Verify the protected `windows-alpha-release` environment, required reviewers,
   protected-main deployment rule, GitHub OIDC federation, Azure Trusted Signing
-  publisher/profile values, and least-privilege candidate/promotion R2
-  credentials are configured.
+  publisher/profile values, and least-privilege candidate/promotion storage
+  credentials (including the `VIDEORC_RELEASE_UPLOAD_NEON_S3_*` origin) are
+  configured.
 - Verify a named operator has clean physical Windows 11 x64 hardware, private
   candidate-read access, a release secret channel, and the acceptance template.
 - Verify the web pilot bearer secret and the disabled/pilot/public release-state
@@ -89,16 +102,17 @@ runbooks' detailed gates.
 5. Run `pnpm changelog:check`, commit the version and macOS entry, push through a
    reviewed PR, and merge to protected `main`.
 
-Record the full lowercase 40-character macOS source commit. Do not add the
-Windows Alpha changelog entry yet: `release:upload:macos` publishes every
-committed changelog entry, so adding it now would disclose the held Windows
-release before physical acceptance.
+Record the full lowercase 40-character macOS source commit. The Windows Alpha
+changelog entry may be added before or after the macOS upload:
+`release:upload:macos` withholds Windows-only entries that are not public yet,
+so a held Windows release is never disclosed by a macOS upload. Confirm the
+`withholding <releaseId>` line in the upload log.
 
 ## 2. Publish and verify macOS Beta
 
 Follow `docs/releases/release-runbook.md`. For the established local keychain
 path, load release secrets, set `APPLE_TEAM_ID=C2PA37RB58`, set the exact Beta
-number, and normalize the R2 endpoint before running:
+number, and normalize every origin endpoint to its host-only form before running:
 
 ```sh
 pnpm package:backend:macos && pnpm ffmpeg:build:macos \
@@ -146,9 +160,8 @@ After the macOS upload and verification succeed:
    `main` without changing the numeric package version.
 4. Record this new full lowercase 40-character Windows candidate source commit.
 
-Do not run another macOS upload while this unpromoted Windows entry is committed,
-because the macOS uploader would publish it in the global changelog. From the
-current protected-main Windows source commit, dispatch the exact release ID:
+From the current protected-main Windows source commit, dispatch the exact release
+ID:
 
 ```sh
 gh workflow run release-windows-alpha.yml --ref main \
@@ -248,12 +261,18 @@ record.
 
 ## Hard-won rules
 
-- Use a bucket-less R2 endpoint. A bucket suffix causes doubled keys that upload
-  successfully and then 404.
+- Use a bucket-less (host-only) endpoint for every origin, R2 account host or
+  Neon `<branch-id>.storage.c-<N>.<region>.aws.neon.tech`. A bucket suffix
+  causes doubled keys that upload successfully and then 404.
 - Do not source process substitution under macOS Bash 3.2; write filtered env
   lines to a temporary file and source that file, or run the documented command
   under zsh.
-- Follow every web redirect to the final R2 response; a `302` alone is not proof.
+- Follow every web redirect to the final storage response; a `302` alone is not
+  proof. Verify the mirror route `/api/updates/mirror/` too: while a mirror is
+  configured its final host differs from the primary's; with Neon as the single
+  origin it serves the primary, never a 5xx.
+- A forged TLS issuer on a storage host is a network block (Spain, matchday
+  evenings), not an outage. Never bypass TLS; publish around it.
 - Keep presigned updater redirects short-lived; never restore immutable caching.
 - macOS updater order uses the numeric package version, not the Beta release ID.
 - Windows updater order also uses the numeric package version; this is why every

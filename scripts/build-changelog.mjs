@@ -5,9 +5,10 @@
 //   node scripts/build-changelog.mjs --check        # validate only, write nothing
 //   node scripts/build-changelog.mjs --out <path>   # custom output path
 //
-// The JSON is uploaded to R2 next to the update feed during the release flow
-// and consumed by videorc-web (/changelog, /releases/<version>) and the
-// desktop "What's new" panel. See changelog/README.md for the entry format.
+// The JSON is uploaded to every release storage origin next to the update feed
+// during the release flow and consumed by videorc-web (/changelog,
+// /releases/<version>) and the desktop "What's new" panel. See
+// changelog/README.md for the entry format.
 
 import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'

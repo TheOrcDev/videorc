@@ -6,8 +6,8 @@ repeatable per-release process. For one-time signing setup see
 [../distribution.md](../distribution.md).
 
 This runbook publishes the **macOS Beta only**. Windows is a separate,
-default-deny **Alpha** track. Do not rename these artifacts, reuse the macOS R2
-keys, or treat a Windows CI artifact as a release.
+default-deny **Alpha** track. Do not rename these artifacts, reuse the macOS
+storage keys, or treat a Windows CI artifact as a release.
 
 ## Windows Alpha Is A Separate Gated Track
 
@@ -36,10 +36,10 @@ candidate. Development setup and evidence handling are documented in
 
 ## What a macOS release is
 
-Two artifact sets in the same private R2 bucket (`videorc-releases`), fronted by
-videorc-web:
+Two artifact sets in the same private bucket (`videorc-releases`) on every
+storage origin (see [Storage origins](#storage-origins)), fronted by videorc-web:
 
-| Artifacts                                                     | R2 keys                                             | Web route                                             | Audience                     |
+| Artifacts                                                     | Object keys                                         | Web route                                             | Audience                     |
 | ------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------- | ---------------------------- |
 | **Download** (dmg + sha256 + release.json)                    | `releases/macos/<releaseId>/`                       | `/api/downloads/macos/latest` (auth-gated, presigned) | New users                    |
 | **Update feed** (`latest-mac.yml` + `.zip` + `.zip.blockmap`) | `updates/macos/` (stable, overwritten each release) | `/api/updates/*` (public, presigned)                  | Existing users auto-updating |
@@ -66,14 +66,18 @@ check (default in packaged builds since 0.9.10; opt out via
   keychain (or `CSC_LINK`). See [macos-signing.md](macos-signing.md).
   **Auto-update requires a signed build** — electron-updater refuses to apply an
   unsigned/ad-hoc update.
-- **R2 write creds** — the `VIDEORC_DOWNLOAD_S3_*` values (same bucket as
-  videorc-web), with an **Object Read & Write** token. They live in the web app's
-  `.env` (`~/projects/videorcweb/.env`).
+- **Storage write creds** — the Neon uploader key
+  (`VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `storage:write`) in
+  `~/.videorc-release.env`. While R2 is still an origin, also the
+  `VIDEORC_DOWNLOAD_S3_*` values (same bucket as videorc-web, **Object Read &
+  Write** token) from the web app's `.env` (`~/projects/videorcweb/.env`).
 - **YouTube OAuth paused** — do not require or bundle Google OAuth credentials
   while Videorc awaits Google approval. YouTube remains available through Manual
   RTMP, and `release:validate:macos` does not check for a bundled YouTube OAuth
   secret while this pause is active.
-- **⚠️ Bucket-less S3 endpoint** — `VIDEORC_DOWNLOAD_S3_ENDPOINT_URL` must be the
+- **⚠️ Bucket-less S3 endpoint** — every origin's endpoint must be host only
+  (Neon: `https://<branch-id>.storage.c-<N>.<region>.aws.neon.tech`). For R2,
+  `VIDEORC_DOWNLOAD_S3_ENDPOINT_URL` must be the
   ACCOUNT host only: `https://<account-id>.r2.cloudflarestorage.com` — **NOT**
   `.../videorc-releases`. The path-style client appends the bucket itself; an
   endpoint that already includes the bucket **doubles** it, so objects land at
@@ -81,23 +85,42 @@ check (default in packaged builds since 0.9.10; opt out via
   reports success. If your `.env` endpoint has the bucket suffix, fix it there or
   override per-run (Step 3 below).
 
-## Two storage origins
+## Storage origins
 
-Court-ordered IP blocks in Spain (LaLiga matchday evenings) intercept whole
-storage providers with a forged certificate. That used to stop the upload for
-hours, and it also stops every Spanish user's download and update, because the
-web routes redirect to a presigned storage URL. A release is therefore published
-to **two independent origins**. Measured provider differences are recorded in
+The uploader publishes a release to every configured storage origin, mirrors
+first and primary last. Measured provider differences are recorded in
 [storage-compat-2026-09.md](storage-compat-2026-09.md).
 
-| Origin    | Environment                                                                    | Notes                                                                                           |
-| --------- | ------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------- |
-| `r2`      | `VIDEORC_DOWNLOAD_S3_*` (or `VIDEORC_RELEASE_UPLOAD_S3_*`) from the web `.env` | Cloudflare R2. Bucket-less endpoint (below).                                                    |
-| `hetzner` | `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*` in `~/.videorc-release.env`              | Hetzner Object Storage, project `videorc`, `fsn1`, region `eu-central`. Host-only endpoint too. |
+**Target (owner decision 2026-09-22): Neon Object Storage is the single
+origin.** R2 and Hetzner are retired after a soak of at least two Neon-primary
+releases. Until then they stay populated and read-only, as the rollback. The
+multi-origin code stays in place with one origin configured, so a mirror comes
+back with an environment change only.
 
-- **Since 2026-09-21 the primary is `hetzner` and `r2` is the mirror**, in the
-  videorc-web production environment, in `~/.videorc-release.env` and in the
-  `windows-alpha-release` GitHub environment.
+| Origin    | Environment                                                                    | Notes                                                                                                                           |
+| --------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
+| `neon`    | `VIDEORC_RELEASE_UPLOAD_NEON_S3_*` in `~/.videorc-release.env`                 | Neon Object Storage, project `videorc-releases`, bucket `videorc-releases`, Frankfurt. Branch endpoint, path-style, TLS Amazon. |
+| `hetzner` | `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*` in `~/.videorc-release.env`              | Hetzner Object Storage, project `videorc`, `fsn1`, region `eu-central`. Retained read-only until the soak ends.                 |
+| `r2`      | `VIDEORC_DOWNLOAD_S3_*` (or `VIDEORC_RELEASE_UPLOAD_S3_*`) from the web `.env` | Cloudflare R2, the legacy slot. Bucket-less endpoint (below). Retained read-only until the soak ends; still the D3 destination. |
+
+- **Cutover state.** Since 2026-09-21 the primary is `hetzner` and `r2` is the
+  mirror. The Neon cutover (plan slice N5) flips
+  `VIDEORC_DOWNLOAD_STORAGE_PRIMARY=neon` in the videorc-web production
+  environment, in `~/.videorc-release.env` and in the GitHub environments, after
+  `pnpm release:sync:origins -- --live --from hetzner --to neon` has backfilled
+  Neon. After the first verified Neon-only release, remove the `hetzner` and
+  `r2` upload env so the uploader publishes to Neon alone.
+- **Neon alone is a complete setup.** With only `VIDEORC_RELEASE_UPLOAD_NEON_S3_*`
+  and `VIDEORC_DOWNLOAD_STORAGE_PRIMARY=neon` set, no R2 env is needed. An unset
+  primary means `r2`, and the uploader refuses to start when `r2` is not
+  configured instead of guessing.
+- **Rollback during the soak:** set `VIDEORC_DOWNLOAD_STORAGE_PRIMARY=hetzner`
+  in the videorc-web production environment and redeploy. Hetzner stays fully
+  populated until it is retired.
+- Neon endpoints look like `https://<branch-id>.storage.c-<N>.<region>.aws.neon.tech`
+  (host only, no bucket). Set `VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION` to the
+  short AWS form, e.g. `eu-central-1`. Neon keys are not bucket- or
+  prefix-scoped; isolation is the dedicated `videorc-releases` project.
 - `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` (`r2` when unset) must match the value in
   the videorc-web production environment. It names the origin clients are
   redirected to. Origins are published mirrors first, primary last.
@@ -112,14 +135,17 @@ to **two independent origins**. Measured provider differences are recorded in
   `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` to the reachable origin in the videorc-web
   production environment and redeploy, or clients keep the previous release.
   That same flip is the lever when the primary provider is being blocked for
-  users: every shipped install follows it.
+  users: every shipped install follows it. With Neon as the single origin there
+  is nothing to flip to after the soak; a matchday block then stops Spanish
+  downloads and updates (accepted risk).
 - `pnpm release:sync:origins -- --live --from <origin> --to <origin>` copies
   everything clients can currently be redirected to (changelog, latest
   manifests, update feeds and what they reference). Run it before making a new
   or long-stale origin primary.
 - Never bypass TLS. A forged issuer is the block itself.
-- The one-time D3 exact promotion stays single-origin on `r2`: its receipt needs
-  the S3 checksum envelope, which Hetzner does not return.
+- The one-time D3 exact promotion stays single-origin on the legacy `r2` slot:
+  its receipt needs the S3 checksum envelope, which Hetzner does not return.
+  Moving D3 to Neon is its own owner-gated slice (N8).
 
 ## Cut a release
 
@@ -142,11 +168,12 @@ pnpm dist:desktop:release
 # 3. Validate the signed artifact (codesign / Gatekeeper / staple).
 pnpm release:validate:macos
 
-# 4. Load both origins' creds and upload the download + feed.
+# 4. Load every configured origin's creds and upload the download + feed.
 #    (macOS ships Bash 3.2: run this under zsh, or write the filtered lines to a
 #    temp file and source that.)
+set -a; . <(grep -E '^(VIDEORC_RELEASE_UPLOAD_(NEON|HETZNER)_S3_|VIDEORC_DOWNLOAD_STORAGE_PRIMARY=)' ~/.videorc-release.env); set +a
+# Only while r2 is still an origin (skip once the upload env is Neon-only):
 set -a; . <(grep -E '^[[:space:]]*VIDEORC_DOWNLOAD_S3_' ~/projects/videorcweb/.env); set +a
-set -a; . <(grep -E '^(VIDEORC_RELEASE_UPLOAD_HETZNER_S3_|VIDEORC_DOWNLOAD_STORAGE_PRIMARY=)' ~/.videorc-release.env); set +a
 # Force a bucket-less endpoint (skip if your .env endpoint is already host-only):
 export VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL="https://<account-id>.r2.cloudflarestorage.com"
 pnpm release:upload:preflight:macos
@@ -673,7 +700,7 @@ release candidate:
 
 1. On launch — and on **Settings → About & updates → Check for updates** — the
    app GETs `latest-mac.yml` and compares `version` to its own.
-2. If the feed is higher it downloads the `.zip` (302 → presigned R2) with
+2. If the feed is higher it downloads the `.zip` (302 → presigned storage URL on the primary origin) with
    progress.
 3. It applies on the next quit (background path) or immediately via **Restart &
    install**, which is **blocked while a recording/stream is live**.
@@ -691,7 +718,7 @@ ever changes again, update `publish.url`, `videorc-web-links.ts`, and the Rust
 
 - **Bucket-less endpoint** (above) — the #1 silent failure: a doubled key uploads
   "successfully" but the feed/download then 404. Verify by _following the
-  redirect_ to R2, not just checking the route returns a 302.
+  redirect_ to the storage origin, not just checking the route returns a 302.
 - **Never cache the presigned redirect** — `/api/updates/*` 302s to a ~15-min
   presigned URL and is intentionally cached `max-age=60`. Do not restore a long /
   `immutable` cache, or the CDN serves an expired redirect (403). (videorc-web

@@ -101,3 +101,43 @@ pointer updates are both enforced.
   exercises the unquoted `If-Match` path end to end.
 - `pnpm release:upload:preflight:macos` reports both origins reachable, with
   `r2` as primary.
+
+## Neon (PENDING probe)
+
+Slice N0 of the vault plan "2026-09-22 - Videorc Object Storage to Neon Plan".
+Owner decision 2026-09-22: Neon Object Storage becomes the single release
+origin, and R2 and Hetzner are retired after a soak.
+
+```sh
+pnpm probe:release-storage-compat -- --origin neon
+```
+
+| Field    | Value                                                                                        |
+| -------- | -------------------------------------------------------------------------------------------- |
+| Endpoint | `https://<branch-id>.storage.c-<N>.<region>.aws.neon.tech` (per branch, host only)           |
+| Style    | Path-style only, SigV4 only                                                                  |
+| Region   | Short AWS form in the SigV4 scope, expected `eu-central-1` for Frankfurt (probe confirms)    |
+| Project  | `videorc-releases`, `main` branch only, bucket `videorc-releases`, `private`                 |
+| TLS peer | Issuer O=Amazon (CN Amazon RSA 2048 M01/M04), subject `*.storage.c-N.<region>.aws.neon.tech` |
+
+The TLS issuer was measured on 2026-09-22 and is built in: any host matching
+`<label>.storage.c-<N>.<region>.aws.neon.tech` (anchored, see
+`isNeonStorageHostname` in `scripts/lib/release-upload-s3.mjs`) gets
+`allowedIssuerOrganizations: ["Amazon"]`. Lookalike hosts still fail closed
+with `missing-tls-policy`.
+
+Neon keys are scoped `storage:read` or `storage:write` per branch lineage, not
+per bucket or prefix, so isolation is the dedicated project. `expires_at` is
+not enforced; revoke keys explicitly.
+
+Checks 1a to 7 above are **PENDING**: they run once the uploader key exists.
+Neon does not document conditional PUT (`If-None-Match` / `If-Match`) or
+`x-amz-checksum-sha256`, so until the probe says otherwise Neon runs on the S3
+default capabilities (`checksumHeaders: true`, `ifMatchEtagForm: 'quoted'`).
+Its entry in the capability rule table (`releaseUploadOriginCapabilities`) is
+the one line to amend with the result. Extra N0 checks: presign max
+`X-Amz-Expires`, a 150 MB single-part PUT, a soft-deleted key on HEAD and on an
+`If-None-Match: *` re-PUT, and 20 parallel GETs looking for `503 SlowDown`.
+
+GO needs 1b, 2a (any ETag form), 4 and 5a to 5c to pass. A missing checksum
+header is acceptable, as it is on Hetzner.

@@ -234,17 +234,31 @@ Conditional private download storage secrets:
 - `VIDEORC_DOWNLOAD_S3_FORCE_PATH_STYLE`: usually true for path-style S3-compatible endpoints
 - `VIDEORC_DOWNLOAD_S3_SESSION_TOKEN`: required only for temporary credentials
 
-Optional second release storage origin (publication goes to every configured
-origin; see "Two storage origins" in
-[releases/release-runbook.md](releases/release-runbook.md)):
+Further release storage origins (publication goes to every configured origin;
+see "Storage origins" in
+[releases/release-runbook.md](releases/release-runbook.md)). The target is Neon
+Object Storage as the single origin; Hetzner and R2 stay read-only until the
+soak ends, and `VIDEORC_DOWNLOAD_STORAGE_PRIMARY=hetzner` is the rollback:
 
-- secrets `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID`,
-  `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY`
-- variables `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET`,
+- `neon`: secrets `VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID`,
+  `VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY`; variables
+  `VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET`,
+  `VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION` (e.g. `eu-central-1`),
+  `VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL`
+  (`https://<branch-id>.storage.c-<N>.<region>.aws.neon.tech`, host only)
+- `hetzner`: secrets `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID`,
+  `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY`; variables
+  `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET`,
   `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_REGION`,
   `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ENDPOINT_URL`
-- variable `VIDEORC_DOWNLOAD_STORAGE_PRIMARY`: `r2` (default) or `hetzner`; must
-  match the videorc-web production environment
+- variable `VIDEORC_DOWNLOAD_STORAGE_PRIMARY`: `r2` (default), `hetzner` or
+  `neon`; must match the videorc-web production environment and must name a
+  configured origin (an unconfigured primary fails closed)
+
+With only the `neon` values and `VIDEORC_DOWNLOAD_STORAGE_PRIMARY=neon` set,
+publication needs no `VIDEORC_DOWNLOAD_S3_*` values. The `r2` names above stay
+required by `pnpm release:secrets:macos` while the D3 promotion still uses that
+slot.
 
 Check the remote repository without printing secret values:
 
