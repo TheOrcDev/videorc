@@ -163,7 +163,9 @@ try {
 
   const heldDatabaseRow = await readSessionRow(databasePath, sessionId)
   assert.ok(heldDatabaseRow, `Session ${sessionId} is missing while finalization is held.`)
-  assert.equal(heldDatabaseRow.status, 'running')
+  // Instant Stop commits the MKV before the protected background MP4 export.
+  assert.equal(heldDatabaseRow.status, 'completed')
+  assert.equal(heldDatabaseRow.finalization_state, 'finalizing')
   assert.equal(heldDatabaseRow.mp4_path, null)
 
   const heldForMs = await assertProcessesAliveWithoutReplacementFor({

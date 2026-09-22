@@ -458,3 +458,22 @@ export function reconcileLiveChatRecovery(
 export function visibleMessages(messages: LiveChatMessage[], max: number): LiveChatMessage[] {
   return messages.length > max ? messages.slice(messages.length - max) : messages
 }
+
+export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
+  youtube: 'YouTube',
+  twitch: 'Twitch',
+  x: 'X',
+  tiktok: 'TikTok',
+  instagram: 'Instagram',
+  custom: 'Custom'
+}
+
+export function commentCanHighlight(message: LiveChatMessage): boolean {
+  return (
+    !message.isDeleted &&
+    message.eventType !== 'deleted' &&
+    message.eventType !== 'system' &&
+    message.eventType !== 'moderation' &&
+    message.eventType !== 'membership'
+  )
+}

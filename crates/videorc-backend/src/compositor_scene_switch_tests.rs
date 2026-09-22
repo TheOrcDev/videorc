@@ -121,6 +121,35 @@ fn explicit_test_pattern_still_moves() {
     assert_ne!(first, next);
 }
 
+#[cfg(target_os = "macos")]
+#[test]
+fn empty_scene_clears_previous_frame_on_metal_without_cpu_fallback() {
+    let Some(mut gpu) = new_gpu_compositor(false) else {
+        eprintln!("SKIP: no Metal device; empty-scene output evidence unavailable");
+        return;
+    };
+    let populated = snapshot(SceneSourceKind::TestPattern);
+    let mut hidden = snapshot(SceneSourceKind::TestPattern);
+    hidden.scene.as_mut().unwrap().sources[0].visible = false;
+    let mut empty = snapshot(SceneSourceKind::TestPattern);
+    empty.scene.as_mut().unwrap().sources.clear();
+    let absent = CompositorSceneSnapshot {
+        scene: None,
+        ..snapshot(SceneSourceKind::TestPattern)
+    };
+    for scene in [None, Some(&absent), Some(&empty), Some(&hidden)] {
+        // Reuse a previously painted target, as startup and live scene switches do.
+        try_gpu_compose(Some(&mut gpu), &inputs(Some(&populated)), false).unwrap();
+        let frame = try_gpu_compose(Some(&mut gpu), &inputs(scene), false)
+            .expect("an empty scene must clear the Metal target without CPU fallback");
+        assert!(frame.pixel_format.has_metal_iosurface_target());
+        assert!(frame.yuv.is_empty());
+        assert_eq!(frame.timings.gpu_readbacks, 0);
+        let readable = try_gpu_compose(Some(&mut gpu), &inputs(scene), true).unwrap();
+        assert_black(&readable.yuv, 64, 36);
+    }
+}
+
 #[test]
 fn missing_screen_opaquely_covers_the_layer_below_on_cpu() {
     let mut scene = snapshot(SceneSourceKind::Screen);

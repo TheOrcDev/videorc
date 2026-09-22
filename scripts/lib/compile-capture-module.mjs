@@ -12,7 +12,7 @@ const compilerOptions = {
 }
 
 /**
- * Compile capture.ts and its runtime shared contract into a disposable tree.
+ * Compile capture.ts and its runtime dependencies into a disposable tree.
  * The preserved source layout matters: capture.ts intentionally imports the
  * canonical layout-preset arrays from shared/backend at runtime.
  */
@@ -25,6 +25,14 @@ export async function compileCaptureModule(tempDir) {
     {
       source: join(process.cwd(), 'apps/desktop/src/shared/backend.ts'),
       output: join(tempDir, 'apps/desktop/src/shared/backend.js')
+    },
+    {
+      source: join(process.cwd(), 'apps/desktop/src/renderer/src/lib/layout-framing-memory.ts'),
+      output: join(tempDir, 'apps/desktop/src/renderer/src/lib/layout-framing-memory.js')
+    },
+    {
+      source: join(process.cwd(), 'apps/desktop/src/renderer/src/lib/backend.ts'),
+      output: join(tempDir, 'apps/desktop/src/renderer/src/lib/backend.js')
     }
   ]
 

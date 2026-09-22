@@ -9,6 +9,9 @@ import {
 } from '@/components/icons'
 import type { ReactElement } from 'react'
 
+import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
+export { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
+
 import type { StreamPlatform } from '@/lib/backend'
 import { cn } from '@/lib/utils'
 
@@ -16,15 +19,6 @@ import { cn } from '@/lib/utils'
 // the platform's own glyph in its brand tint — source icons are the one place
 // saturated color is allowed (videorc-design). Tints match the streaming tab's
 // destination tiles so the platforms read consistently across the app.
-
-export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
-  youtube: 'YouTube',
-  twitch: 'Twitch',
-  x: 'X',
-  tiktok: 'TikTok',
-  instagram: 'Instagram',
-  custom: 'Custom'
-}
 
 const CHAT_PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
   youtube: YoutubeIcon,

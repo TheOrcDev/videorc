@@ -6713,6 +6713,90 @@ async fn websocket_session_with_handler(
     .await;
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreviewFrameAcquireParams {
+    lease_id: String,
+    run_id: String,
+    scene_revision: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct PreviewFrameReleaseParams {
+    lease_id: String,
+}
+
+// These controls are connection-owned, like the event filter. Never dispatch
+// them as detached work: disconnect must release the retained surface even if
+// the client disappears after acquiring it and before sending its release.
+async fn handle_preview_frame_lease_control(
+    state: &AppState,
+    role: BackendRole,
+    lease: &mut Option<(String, compositor::CompositorPreviewFrameLease)>,
+    text: &str,
+) -> Option<ServerResponse> {
+    if !text.contains("preview.surface.frame.") {
+        return None;
+    }
+    let command = serde_json::from_str::<ClientCommand>(text).ok()?;
+    if !matches!(
+        command.method.as_str(),
+        "preview.surface.frame.acquire" | "preview.surface.frame.release"
+    ) {
+        return None;
+    }
+    if role != BackendRole::Admin {
+        return Some(ServerResponse::error(
+            command.id,
+            "forbidden",
+            "Preview frame leases require the main-process credential.".to_string(),
+        ));
+    }
+    Some(if command.method == "preview.surface.frame.acquire" {
+        match serde_json::from_value::<PreviewFrameAcquireParams>(command.params) {
+            Ok(params) if Uuid::parse_str(&params.lease_id).is_ok() => {
+                if lease.is_some() {
+                    ServerResponse::error(
+                        command.id,
+                        "preview-frame-busy",
+                        "Release the outstanding preview frame first.".to_string(),
+                    )
+                } else if let Some(acquired) =
+                    compositor::acquire_preview_frame(state, &params.run_id, params.scene_revision)
+                        .await
+                {
+                    let response = ServerResponse::ok(command.id, &acquired.frame);
+                    *lease = Some((params.lease_id, acquired));
+                    response
+                } else {
+                    ServerResponse::ok(command.id, Option::<protocol::CompositorFrameReady>::None)
+                }
+            }
+            _ => ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "Invalid preview frame acquire parameters.".to_string(),
+            ),
+        }
+    } else {
+        match serde_json::from_value::<PreviewFrameReleaseParams>(command.params) {
+            Ok(params) => {
+                let matches = lease.as_ref().is_some_and(|(id, _)| *id == params.lease_id);
+                if matches {
+                    *lease = None;
+                }
+                ServerResponse::ok(command.id, matches)
+            }
+            Err(_) => ServerResponse::error(
+                command.id,
+                "invalid-params",
+                "Invalid preview frame release parameters.".to_string(),
+            ),
+        }
+    })
+}
+
 async fn websocket_session_with_handler_role_and_redaction(
     socket: WebSocket,
     state: AppState,
@@ -6862,6 +6946,7 @@ async fn websocket_session_with_handler_role_and_redaction(
         Some((session, cuts)) => (Some(session), Some(cuts)),
         None => (None, None),
     };
+    let mut preview_frame_lease = None;
 
     loop {
         let incoming = tokio::select! {
@@ -6954,6 +7039,27 @@ async fn websocket_session_with_handler_role_and_redaction(
                     continue;
                 }
 
+                if let Some(response) = handle_preview_frame_lease_control(
+                    &state,
+                    role,
+                    &mut preview_frame_lease,
+                    text.as_str(),
+                )
+                .await
+                {
+                    if !queue_websocket_response(
+                        &outgoing_tx,
+                        &reliable_metrics,
+                        &slow_pressure,
+                        response,
+                    )
+                    .await
+                    {
+                        break;
+                    }
+                    continue;
+                }
+
                 let accepted = accept_websocket_command(&state, text.to_string());
                 if !send_tracked_websocket_item(&command_tx, &command_metrics, accepted).await {
                     break;
@@ -6984,6 +7090,7 @@ async fn websocket_session_with_handler_role_and_redaction(
     // connection stops new intake, but the detached dispatcher drains the
     // accepted queue so native/source mutations are never canceled halfway.
     // (Remote client count is decremented by RemoteClientCountGuard's Drop.)
+    drop(preview_frame_lease);
     drop(command_tx);
     drop(command_dispatcher_task);
     event_task.abort();
@@ -16737,6 +16844,157 @@ mod tests {
                 .await
                 .unwrap();
         (socket, server, session_finished)
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn preview_frame_lease_is_admin_only_and_disconnect_releases_storage() {
+        if metal_compositor::MetalSceneCompositor::new().is_none() {
+            return;
+        }
+        let state = test_state();
+        let status = compositor::start_synthetic_compositor(
+            state.clone(),
+            compositor::CompositorStartParams {
+                target_fps: 60,
+                width: 64,
+                height: 36,
+                frame_consumer: compositor::CompositorFrameConsumer::NativePreview,
+                stream_output: None,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+            },
+        )
+        .await;
+        let run_id = status.run_id.unwrap();
+        timeout(Duration::from_secs(3), async {
+            loop {
+                if compositor::acquire_preview_frame(&state, &run_id, None)
+                    .await
+                    .is_some()
+                {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first Metal frame");
+        let request = json!({"id":"acquire", "method":"preview.surface.frame.acquire",
+            "params":{"leaseId":Uuid::new_v4().to_string(), "runId":run_id}});
+        for role in [BackendRole::Renderer, BackendRole::Remote] {
+            let response =
+                handle_preview_frame_lease_control(&state, role, &mut None, &request.to_string())
+                    .await
+                    .unwrap();
+            assert_eq!(response.error.unwrap().code, "forbidden");
+            assert!(response.payload.is_none());
+        }
+        let mut held = None;
+        let response = handle_preview_frame_lease_control(
+            &state,
+            BackendRole::Admin,
+            &mut held,
+            &request.to_string(),
+        )
+        .await
+        .unwrap();
+        assert!(response.ok && held.is_some());
+        let mut release = json!({"id":"release", "method":"preview.surface.frame.release",
+            "params":{"leaseId":Uuid::new_v4().to_string()}});
+        let response = handle_preview_frame_lease_control(
+            &state,
+            BackendRole::Admin,
+            &mut held,
+            &release.to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.payload, Some(json!(false)));
+        assert!(
+            held.is_some(),
+            "a stale release must not retire the current lease"
+        );
+        release["params"]["leaseId"] = request["params"]["leaseId"].clone();
+        let response = handle_preview_frame_lease_control(
+            &state,
+            BackendRole::Admin,
+            &mut held,
+            &release.to_string(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.payload, Some(json!(true)));
+        assert!(held.is_none());
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let finished = std::sync::Arc::new(tokio::sync::Semaphore::new(0));
+        let app = TestWebSocketState {
+            app: state.clone(),
+            command_handler: production_websocket_command_handler(BackendRole::Admin),
+            session_finished: finished.clone(),
+        };
+        let server = tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route("/ws", get(test_ws_handler))
+                    .with_state(app),
+            )
+            .await
+            .unwrap();
+        });
+        let (mut socket, _) =
+            tokio_tungstenite::connect_async(format!("ws://{address}/ws?token={}", state.token))
+                .await
+                .unwrap();
+        socket
+            .send(tokio_tungstenite::tungstenite::Message::Text(
+                request.to_string().into(),
+            ))
+            .await
+            .unwrap();
+        let response = timeout(Duration::from_secs(3), async {
+            loop {
+                let message = socket.next().await.unwrap().unwrap();
+                if let tokio_tungstenite::tungstenite::Message::Text(text) = message {
+                    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if value["id"] == "acquire" {
+                        break value;
+                    }
+                }
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(response["ok"], true);
+        assert!(
+            response["payload"]["metalTargetIosurfaceId"]
+                .as_u64()
+                .unwrap()
+                > 0
+        );
+        assert!(
+            compositor::acquire_preview_frame(&state, &run_id, None)
+                .await
+                .is_none()
+        );
+        socket.close(None).await.unwrap();
+        timeout(Duration::from_secs(3), finished.acquire())
+            .await
+            .unwrap()
+            .unwrap()
+            .forget();
+        assert!(
+            compositor::acquire_preview_frame(&state, &run_id, None)
+                .await
+                .is_some()
+        );
+        compositor::stop_compositor(&state).await;
+        server.abort();
+        let _ = server.await;
     }
 
     #[tokio::test]

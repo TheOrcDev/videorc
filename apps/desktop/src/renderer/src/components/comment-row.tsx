@@ -1,5 +1,8 @@
 import type { ReactElement } from 'react'
 
+import { commentCanHighlight } from '@/lib/live-chat-view'
+export { commentCanHighlight } from '@/lib/live-chat-view'
+
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { SparkleIcon } from '@/components/icons'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
@@ -57,16 +60,6 @@ export function formatCommentTime(iso: string): string {
   const date = new Date(iso)
   if (Number.isNaN(date.getTime())) return ''
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
-}
-
-export function commentCanHighlight(message: LiveChatMessage): boolean {
-  return (
-    !message.isDeleted &&
-    message.eventType !== 'deleted' &&
-    message.eventType !== 'system' &&
-    message.eventType !== 'moderation' &&
-    message.eventType !== 'membership'
-  )
 }
 
 function HighlightStatus({
