@@ -2820,7 +2820,7 @@ mod tests {
             .expect("preview surface lifecycle available");
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
     async fn superseded_bounds_reply_and_event_never_publish_captured_old_status() {
         let state = test_state_with_event_capacity(256);
         create_preview_surface(
@@ -2853,35 +2853,51 @@ mod tests {
                     let Some(entered_tx) = entered_tx.take() else {
                         return;
                     };
-                    let _ = entered_tx.send(());
-                    let (released, wake) = &*blocked_gate;
-                    let mut released = released.lock().unwrap();
-                    while !*released {
-                        released = wake.wait(released).unwrap();
-                    }
+                    // Hand the worker's queued tasks back to Tokio before blocking:
+                    // a plain Condvar wait can strand the compositor's resize work.
+                    tokio::task::block_in_place(|| {
+                        let _ = entered_tx.send(());
+                        let (released, wake) = &*blocked_gate;
+                        let (released, _) = wake
+                            .wait_timeout_while(
+                                released.lock().unwrap(),
+                                std::time::Duration::from_secs(10),
+                                |released| !*released,
+                            )
+                            .unwrap();
+                        assert!(*released, "old bounds resize gate was not released");
+                    });
                 },
             )
             .await
         });
-        entered_rx
+        tokio::time::timeout(std::time::Duration::from_secs(3), entered_rx)
             .await
+            .expect("old bounds update must reach its resize gate promptly")
             .expect("old bounds update reached its resize gate");
 
-        update_preview_surface_bounds(
-            &state,
-            PreviewSurfaceBoundsParams {
-                bounds: bounds(960.0, 540.0),
-            },
+        let latest = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            update_preview_surface_bounds(
+                &state,
+                PreviewSurfaceBoundsParams {
+                    bounds: bounds(960.0, 540.0),
+                },
+            ),
         )
-        .await
-        .expect("preview surface lifecycle available");
+        .await;
         let (released, wake) = &*gate;
         *released.lock().unwrap() = true;
         wake.notify_all();
-        let old_reply = old_update
+        let old_reply = tokio::time::timeout(std::time::Duration::from_secs(3), old_update)
             .await
+            .expect("released old bounds task must finish promptly")
             .expect("old bounds task joined")
             .expect("preview surface lifecycle available");
+        let latest = latest
+            .expect("new bounds must not wait behind old external work")
+            .expect("preview surface lifecycle available");
+        assert_eq!((latest.width, latest.height), (1920, 1080));
         assert_eq!((old_reply.width, old_reply.height), (1920, 1080));
 
         let mut surface_events = Vec::new();

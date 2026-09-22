@@ -57,6 +57,17 @@ jobs:
         # docs/windows-port-plan.md) — burn that down, then drop the allows.
         run: cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
 
+      - name: Preview bounds concurrency (25 stability passes)
+        shell: pwsh
+        run: |
+          for ($pass = 1; $pass -le 25; $pass++) {
+            Write-Host "Preview bounds concurrency pass $pass/25"
+            cargo test -p videorc-backend preview_surface::tests::superseded_bounds_reply_and_event_never_publish_captured_old_status -- --exact
+            if ($LASTEXITCODE -ne 0) {
+              exit $LASTEXITCODE
+            }
+          }
+
       - name: Test (3 stability passes)
         # Executes the Windows-only unit tests (named pipes, process Job
         # Objects, dshow input builders) that `pnpm check:windows` can only
