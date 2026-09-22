@@ -975,6 +975,8 @@ pub struct AppState {
     pub oauth_callback_port: Option<u16>,
     pub events: broadcast::Sender<ServerEvent>,
     pub recording: RecordingSlot,
+    pub live_source_switch:
+        Arc<tokio::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
     /// Serializes user Stop/Force-stop with the shutdown-only idempotent stop
     /// join so process shutdown can never reinterpret an in-flight graceful
     /// stop as a second force request.
@@ -1163,6 +1165,9 @@ impl AppState {
             oauth_callback_port: None,
             events,
             recording: Arc::new(tokio::sync::Mutex::new(None)),
+            live_source_switch: Arc::new(tokio::sync::Mutex::new(
+                crate::live_source_switch::SourceSwitchCoordinator::default(),
+            )),
             recording_stop_fence: Arc::new(tokio::sync::Mutex::new(())),
             capture_interruption: Arc::new(CaptureInterruptionCoordinator::default()),
             live_preview: Arc::new(tokio::sync::Mutex::new(initial_live_preview_state())),

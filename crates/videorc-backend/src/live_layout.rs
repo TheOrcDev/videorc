@@ -1745,6 +1745,22 @@ async fn commit_scene_with_layout_at_time_with_policy(
         },
     )
     .await;
+    {
+        let recording = state.recording.lock().await;
+        let session_id = recording
+            .as_ref()
+            .filter(|active| !active.stop_requested)
+            .map(|active| active.session_id.clone());
+        if let Some(session_id) = session_id
+            && let Some(sources) = state
+                .live_source_switch
+                .lock()
+                .await
+                .reconcile_scene(&session_id, scene)
+        {
+            state.emit_event("session.sources.changed", sources);
+        }
+    }
     state.emit_event("scene.changed", scene);
     let mode = if state.recording.lock().await.is_some() {
         "hot"

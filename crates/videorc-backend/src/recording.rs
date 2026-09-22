@@ -4544,6 +4544,24 @@ async fn start_session_with_timeline(
     // cancellation can leave neither an orphan FFmpeg child nor an active
     // recording without its reaper.
     let mut recording = state.recording.lock().await;
+    let mut confirmed_sources = params.sources.clone();
+    confirmed_sources.microphone_id = match capture.microphone.as_ref() {
+        Some(MicrophoneInput::CoreAudio { device_id, .. }) => {
+            Some(format!("microphone:coreaudio:{device_id}"))
+        }
+        Some(MicrophoneInput::AvFoundation { index }) => {
+            Some(format!("microphone:avfoundation:{index}"))
+        }
+        Some(MicrophoneInput::WindowsDshow { .. }) => params.sources.microphone_id.clone(),
+        None => None,
+    };
+    let sources_snapshot = {
+        let mut sources = state.live_source_switch.lock().await;
+        sources.start(session_id.clone(), confirmed_sources);
+        sources
+            .snapshot(&session_id)
+            .expect("new session source snapshot")
+    };
     let (child, session_start_admission) = uncommitted_capture_process.commit();
     let watchdog_pid = pending_active.pid;
     *recording = Some(pending_active);
@@ -4553,6 +4571,7 @@ async fn start_session_with_timeline(
     // path will then reject it instead of silently replacing the startup scene.
     drop(recording_startup_scene.take());
     timeline.mark(RecordingStartPhase::Running);
+    state.emit_event("session.sources.changed", sources_snapshot);
     state.emit_event("recording.status", running_status.clone());
     if let Some(receiver) = deferred_ffmpeg_output_startup.take() {
         spawn_ffmpeg_output_startup_watchdog(
@@ -5099,6 +5118,11 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
             let _ = stop_intent_sender.send(());
         }
         active.stop_requested = true;
+        state
+            .live_source_switch
+            .lock()
+            .await
+            .stop(&active.session_id);
     }
     #[cfg(target_os = "windows")]
     release_direct_d3d11_consumer(&state, active);
@@ -7616,6 +7640,9 @@ async fn monitor_session(
         .is_some()
         .then(|| guard.take())
         .flatten();
+    if monitored_recording.is_some() {
+        state.live_source_switch.lock().await.stop(&session_id);
+    }
     drop(guard);
 
     let Some(mut monitored_recording) = monitored_recording else {

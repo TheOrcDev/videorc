@@ -93,6 +93,17 @@ const LIVE_LAYOUT_REQUEST_TIMEOUT_MS = Object.values(LIVE_LAYOUT_REQUEST_TIMING_
   0
 )
 
+// Includes queue admission, two 30s video preparation/restoration attempts,
+// commit acknowledgement, and response delivery. Reconcile unknown outcomes
+// with session.sources.get; never infer rollback from a lost response.
+export const SOURCE_SWITCH_REQUEST_TIMING_CONTRACT = Object.freeze({
+  backendQueueMaxAgeMs: 5_000,
+  preparationMaxMs: 30_000,
+  restorationMaxMs: 30_000,
+  commitMaxMs: 1_000,
+  responseSlackMs: 10_000
+})
+
 const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   'preview.surface.present': 5_000,
   'preview.surface.status': 5_000,
@@ -105,6 +116,11 @@ const METHOD_REQUEST_TIMEOUT_MS: Readonly<Record<string, number>> = {
   'scene.layout.apply_live': LIVE_LAYOUT_REQUEST_TIMEOUT_MS,
   'scene.layout.apply_preview': LIVE_LAYOUT_REQUEST_TIMEOUT_MS,
   'scene.source.device.switch': LIVE_LAYOUT_REQUEST_TIMEOUT_MS,
+  'session.source.switch': Object.values(SOURCE_SWITCH_REQUEST_TIMING_CONTRACT).reduce(
+    (sum, ms) => sum + ms,
+    0
+  ),
+  'session.sources.get': 10_000,
   // Backend file mutations have a 30s outcome-unknown boundary. Leave 15s
   // for queue admission, response delivery, and authoritative error parsing.
   'screens.importImage': 45_000,
