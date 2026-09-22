@@ -22,6 +22,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend audio pipeline tests',
       'backend noise cleanup tests',
       'scene switch recording and stream pixel artifacts',
+      'freeform editor pointer continuity smoke',
       'live captions transport contract smoke',
       'live captions mute/gain and record+stream artifact smoke',
       'noise cleanup final-artifact smoke',
@@ -124,6 +125,7 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /test:scripts/)
     assert.match(report, /probe:live-audio-controls/)
     assert.match(report, /live_layout::tests::/)
+    assert.match(report, /smoke:freeform-editor/)
     assert.match(report, /smoke:captions-contract/)
     assert.match(report, /smoke:captions-live/)
     assert.match(report, /noise_cleanup::tests::/)
@@ -158,6 +160,10 @@ describe('buildRecordingStudioGateSteps', () => {
       readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
     )
 
+    assert.equal(
+      packageJson.scripts['smoke:freeform-editor'],
+      'node scripts/smoke-freeform-editor-app.mjs'
+    )
     assert.equal(
       packageJson.scripts['smoke:preview-interaction-stress'],
       'node scripts/smoke-preview-interaction-stress-app.mjs'

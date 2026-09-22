@@ -1,64 +1,55 @@
 import { CameraIcon, DisplayIcon, ExternalLinkIcon } from '@/components/icons'
-import { useEffect, useId, useRef, useState, type ReactElement } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useLayoutEffect,
+  useReducer,
+  useRef,
+  useState,
+  type ReactElement
+} from 'react'
 
 import { Button } from '@/components/ui/button'
+import { Kbd } from '@/components/ui/kbd'
+import { Separator } from '@/components/ui/separator'
+import { Toggle } from '@/components/ui/toggle'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { CameraShape, EffectiveSceneBackground, Scene, SceneSource } from '@/lib/backend'
 import { backgroundAssetDisplayUrl } from '@/lib/background-assets'
 import { cn } from '@/lib/utils'
 import {
+  StageEdits,
+  StageGesture,
+  sameStageRect,
+  stageHandleOffset,
+  visibleStageHandles,
+  type StageCommit
+} from './stage-gesture'
+import { stagePixelSize, stagePoint, type StageMapping } from './stage-viewport'
+import {
   handleCursor,
-  moveGhost,
-  resizeGhost,
-  roundRectForCommit,
   stageHandlePoints,
   stageSnapTargets,
-  type SnapGuide,
+  stageSourceShape,
+  type GhostResult,
   type StageHandleId,
   type StageRect
 } from './stage-transform'
 
-// SC1 (Scene rework): a pure-SVG schematic of the committed composition. The
-// Scene tab used to make you edit transforms BLIND — the live preview is a
-// detached window by design (idle-perf law: no always-on compositing in tabs),
-// so this diagram renders the real normalized transforms with zero IPC cost.
-// It is deliberately a diagram, not pixels; "Open preview" is the ground truth.
-//
-// Direct manipulation: drag moves a source, the selection frame's handles
-// resize it. Both render a LOCAL ghost during the gesture and commit ONCE on
-// release through the backend-owned scene commit (scene.source.transform.update
-// via onCommitTransform) — the stage never owns scene state. Gesture math
-// lives in stage-transform.ts (pure, unit-tested).
-
 const STAGE_W = 160
-
-/** Stage height follows the OUTPUT canvas aspect — a portrait (9:16) canvas
- * must not be drawn on a 16:9 stage or camera drag/snap positions lie
- * (vertical scene plan S4). Display height is capped in CSS; the viewBox only
- * carries the aspect. */
-function stageHeight(outputAspect: number): number {
-  const aspect = Number.isFinite(outputAspect) && outputAspect > 0 ? outputAspect : 16 / 9
-  return Math.round(STAGE_W / aspect)
-}
-
-type StageGesture = {
-  sourceId: string
-  pointerId: number
-  /** 'move' or the resize handle being pulled. */
-  kind: 'move' | StageHandleId
-  startClientX: number
-  startClientY: number
-  startRect: StageRect
-  /** The source's aspect is law (circle / forced camera aspect): Shift cannot free it. */
-  aspectForced: boolean
+const NO_COMMIT: StageCommit = async () => ({ ok: false })
+type ActiveGesture = {
+  motion: StageGesture
+  mapping: StageMapping
+  initial: StageRect
+  clientX: number
+  clientY: number
   moved: boolean
 }
+type StageGhost = GhostResult & { sourceId: string }
 
-type StageGhost = {
-  sourceId: string
-  rect: StageRect
-  guides: SnapGuide[]
-}
-
+/** A schematic editor only: pointer samples never start capture or cross IPC. */
 export function SceneStage({
   scene,
   selectedSourceId,
@@ -71,6 +62,9 @@ export function SceneStage({
   cameraAspectLocked = false,
   freeform = false,
   outputAspect = 16 / 9,
+  aspectLocked = true,
+  externalPending = false,
+  onBusyChange,
   onSelectSource,
   onTogglePreview,
   onCommitTransform,
@@ -79,432 +73,524 @@ export function SceneStage({
 }: {
   scene: Scene | null
   selectedSourceId: string | null
-  /** The committed scene background, rendered on the canvas (WYSIWYG). */
   background?: EffectiveSceneBackground | null
   previewOpen: boolean
-  /** Camera bubble shape — the stage must not lie about rounded/circle corners. */
   cameraShape?: CameraShape
-  /** Corner radius (% of the shorter side) when cameraShape is 'rounded'. */
   cameraCornerRadiusPct?: number
-  /** SC3: allow dragging source rects (disabled in fixed layouts + live sessions). */
   dragEnabled?: boolean
-  /** Show resize handles on the selected source and commit width/height changes. */
   resizeEnabled?: boolean
-  /** The camera's aspect is owned by the mask law (circle / square / portrait). */
   cameraAspectLocked?: boolean
-  /** Freeform arrangement: every source is editable, full-canvas included. */
   freeform?: boolean
-  /** Output canvas aspect (width / height); drives the stage shape. */
   outputAspect?: number
+  aspectLocked?: boolean
+  externalPending?: boolean
+  onBusyChange?: (busy: boolean) => void
   onSelectSource: (sourceId: string) => void
   onTogglePreview: () => void
-  onCommitTransform?: (
-    sourceId: string,
-    transform: { x: number; y: number; width?: number; height?: number }
-  ) => void
+  onCommitTransform?: StageCommit
   onSnapCorner?: (corner: 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right') => void
-  /** Offered when a fixed arrangement blocks a gesture ("Make freeform"). */
   onRequestFreeform?: () => void
 }): ReactElement {
   const sources = scene?.sources ?? []
-  const stageH = stageHeight(outputAspect)
+  const stageH =
+    STAGE_W / (Number.isFinite(outputAspect) && outputAspect > 0 ? outputAspect : 16 / 9)
   const svgRef = useRef<SVGSVGElement | null>(null)
-  const gradientId = useId()
-  // A background whose managed file cannot render falls back to the glass
-  // gradient instead of a blank hole; a replaced asset gets a fresh try.
+  const clipId = useId()
   const [failedBackgroundAssetId, setFailedBackgroundAssetId] = useState<string | null>(null)
   const backgroundUrl =
     background && background.assetId !== failedBackgroundAssetId
       ? backgroundAssetDisplayUrl(background.managedAssetPath)
       : null
-  const gestureRef = useRef<StageGesture | null>(null)
-  // Live gesture ghost (normalized) — visual only until pointerup commits.
-  const [ghost, setGhost] = useState<StageGhost | null>(null)
-  // One-line affordance when a gesture lands on a fixed arrangement.
+  const [snap, setSnap] = useState(false)
+  const effectiveSnap = freeform ? snap : true
   const [showFreeformHint, setShowFreeformHint] = useState(false)
-
-  useEffect(() => {
+  const [ghost, setGhost] = useState<StageGhost | null>(null)
+  const [pixelScale, setPixelScale] = useState(1)
+  const [, redraw] = useReducer((value: number) => value + 1, 0)
+  const gestureRef = useRef<ActiveGesture | null>(null)
+  const frameRef = useRef<number | null>(null)
+  const sampleRef = useRef<{
+    clientX: number
+    clientY: number
+    shiftKey: boolean
+    altKey: boolean
+  } | null>(null)
+  const mountedRef = useRef(true)
+  const editsRef = useRef<StageEdits | null>(null)
+  const cancelGesture = useCallback(() => {
+    const gesture = gestureRef.current
+    gestureRef.current = null
+    if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
+    frameRef.current = null
+    sampleRef.current = null
+    if (gesture && svgRef.current?.hasPointerCapture(gesture.motion.pointerId))
+      svgRef.current.releasePointerCapture(gesture.motion.pointerId)
+    if (mountedRef.current) setGhost(null)
+  }, [])
+  if (!editsRef.current)
+    editsRef.current = new StageEdits(
+      onCommitTransform ?? NO_COMMIT,
+      () => {
+        if (mountedRef.current) redraw()
+      },
+      cancelGesture
+    )
+  const edits = editsRef.current
+  edits.configure(onCommitTransform ?? NO_COMMIT)
+  useLayoutEffect(() => {
+    edits.observe(scene)
+  }, [edits, scene])
+  const phase = ghost ? 'dragging' : edits.draft || externalPending ? 'pending' : 'idle'
+  useLayoutEffect(() => {
+    onBusyChange?.(phase !== 'idle')
+  }, [onBusyChange, phase])
+  // Same scene revision updates are normal acknowledgements; replacement of its
+  // source identities/shape or disabling editing invalidates pointer ownership.
+  const sourceIdentity = sources
+    .map(
+      (source) =>
+        `${source.id}:${source.kind}:${source.deviceId}:${source.locked}:${source.visible}`
+    )
+    .join('|')
+  useLayoutEffect(() => {
+    cancelGesture()
+    edits.invalidate()
     setShowFreeformHint(false)
-  }, [freeform, dragEnabled])
-
-  // Escape cancels an in-flight gesture without committing.
+  }, [
+    cancelGesture,
+    edits,
+    scene?.id,
+    sourceIdentity,
+    dragEnabled,
+    resizeEnabled,
+    freeform,
+    outputAspect,
+    cameraShape,
+    cameraAspectLocked
+  ])
+  useLayoutEffect(() => {
+    if (gestureRef.current && gestureRef.current.motion.sourceId !== selectedSourceId)
+      cancelGesture()
+    if (edits.draft && edits.draft.sourceId !== selectedSourceId) edits.invalidate()
+  }, [cancelGesture, edits, selectedSourceId])
   useEffect(() => {
-    if (!ghost) {
-      return
+    mountedRef.current = true
+    const svg = svgRef.current
+    const measure = (): void => {
+      const matrix = svg?.getScreenCTM()
+      if (matrix) setPixelScale(Math.hypot(matrix.a, matrix.b) || 1)
+      cancelGesture()
     }
-    const onKeyDown = (event: KeyboardEvent): void => {
+    const observer = new ResizeObserver(measure)
+    if (svg) observer.observe(svg)
+    const key = (event: KeyboardEvent): void => {
+      if (!gestureRef.current) return
       if (event.key === 'Escape') {
-        gestureRef.current = null
-        setGhost(null)
+        event.preventDefault()
+        event.stopPropagation()
+        cancelGesture()
+      } else if (event.key.startsWith('Arrow')) {
+        event.preventDefault()
+        event.stopPropagation()
       }
     }
-    window.addEventListener('keydown', onKeyDown)
-    return () => window.removeEventListener('keydown', onKeyDown)
-  }, [ghost])
-
-  // Freeform lifts the full-canvas restriction: shrinking a 100% screen is
-  // exactly what the mode is for. Fixed presets keep it (a full-canvas box
-  // has nowhere to move).
-  const sourceEditableRect = (source: SceneSource): boolean =>
-    freeform || source.transform.width < 1 || source.transform.height < 1
-
-  const sourceMoveable = (source: SceneSource): boolean =>
-    dragEnabled && !source.locked && sourceEditableRect(source)
-
-  const sourceResizable = (source: SceneSource): boolean =>
-    resizeEnabled && !source.locked && sourceEditableRect(source)
-
-  // Takes the gesture explicitly: the old ref-reading version silently
-  // returned null from endDrag, which had ALREADY cleared the ref — the
-  // release commit never fired (latent since the original SC3 drag).
-  const normalizedDelta = (
-    gesture: StageGesture,
-    event: { clientX: number; clientY: number }
-  ): { dx: number; dy: number } | null => {
-    const rect = svgRef.current?.getBoundingClientRect()
-    if (!rect || rect.width <= 0 || rect.height <= 0) {
-      return null
+    window.addEventListener('keydown', key, true)
+    window.addEventListener('blur', cancelGesture)
+    window.addEventListener('resize', measure)
+    window.addEventListener('scroll', cancelGesture, true)
+    return () => {
+      mountedRef.current = false
+      cancelGesture()
+      edits.invalidate()
+      observer.disconnect()
+      onBusyChange?.(false)
+      window.removeEventListener('keydown', key, true)
+      window.removeEventListener('blur', cancelGesture)
+      window.removeEventListener('resize', measure)
+      window.removeEventListener('scroll', cancelGesture, true)
     }
-    return {
-      dx: (event.clientX - gesture.startClientX) / rect.width,
-      dy: (event.clientY - gesture.startClientY) / rect.height
-    }
-  }
+  }, [cancelGesture, edits, onBusyChange])
 
-  const ghostForGesture = (
-    gesture: StageGesture,
-    delta: { dx: number; dy: number },
-    modifiers: { shiftKey: boolean; altKey: boolean }
-  ): StageGhost => {
-    if (gesture.kind === 'move') {
-      const others = sources
-        .filter((candidate) => candidate.id !== gesture.sourceId)
-        .map((candidate) => candidate.transform)
-      const { rect, guides } = moveGhost({
-        start: gesture.startRect,
-        dx: delta.dx,
-        dy: delta.dy,
-        constrainAxis: modifiers.shiftKey,
-        disableSnap: modifiers.altKey,
-        targets: stageSnapTargets(others)
-      })
-      return { sourceId: gesture.sourceId, rect, guides }
-    }
-    const isCorner = gesture.kind.length === 2
-    const { rect, guides } = resizeGhost({
-      start: gesture.startRect,
-      handle: gesture.kind,
-      dx: delta.dx,
-      dy: delta.dy,
-      // Corner pulls keep the aspect by default; Shift frees a rectangle.
-      // Shaped sources (circle, forced camera aspect) stay locked always.
-      lockAspect: gesture.aspectForced || (isCorner && !modifiers.shiftKey)
-    })
-    return { sourceId: gesture.sourceId, rect, guides }
-  }
-
+  const editable = (source: SceneSource): boolean =>
+    !source.locked && (freeform || source.transform.width < 1 || source.transform.height < 1)
+  const displayed = (source: SceneSource): StageRect =>
+    ghost?.sourceId === source.id
+      ? ghost.rect
+      : edits.draft?.sourceId === source.id
+        ? edits.draft.rect
+        : source.transform
   const beginGesture = (
     source: SceneSource,
-    kind: StageGesture['kind'],
+    kind: 'move' | StageHandleId,
     event: React.PointerEvent<Element>
   ): void => {
-    if (kind === 'move' ? !sourceMoveable(source) : !sourceResizable(source)) {
-      if (onRequestFreeform && !source.locked) {
-        setShowFreeformHint(true)
-      }
+    if (event.button !== 0 || !event.isPrimary || gestureRef.current || externalPending) return
+    if (edits.draft && edits.draft.sourceId !== source.id) return
+    if (source.transform.width <= 0 || source.transform.height <= 0) return
+    onSelectSource(source.id)
+    if (!(kind === 'move' ? dragEnabled : resizeEnabled) || !editable(source)) {
+      if (onRequestFreeform && !source.locked) setShowFreeformHint(true)
       return
     }
-    gestureRef.current = {
-      sourceId: source.id,
-      pointerId: event.pointerId,
+    const svg = svgRef.current
+    const matrix = svg?.getScreenCTM()
+    if (!svg || !matrix) return
+    const mapping = {
+      a: matrix.a,
+      b: matrix.b,
+      c: matrix.c,
+      d: matrix.d,
+      e: matrix.e,
+      f: matrix.f,
+      width: STAGE_W,
+      height: stageH
+    }
+    const point = stagePoint(mapping, event.clientX, event.clientY)
+    if (!point) return
+    event.preventDefault()
+    onSelectSource(source.id)
+    const initial = { ...displayed(source) }
+    const motion = new StageGesture(
+      source.id,
+      event.pointerId,
       kind,
-      startClientX: event.clientX,
-      startClientY: event.clientY,
-      startRect: {
-        x: source.transform.x,
-        y: source.transform.y,
-        width: source.transform.width,
-        height: source.transform.height
-      },
-      aspectForced: source.kind === 'camera' && cameraAspectLocked,
+      initial,
+      point,
+      stagePixelSize(mapping),
+      stageSnapTargets(sources.filter((other) => other.id !== source.id).map(displayed)),
+      effectiveSnap,
+      aspectLocked,
+      source.kind === 'camera' && cameraAspectLocked
+    )
+    // Initial modifiers establish ownership without changing the grabbed point.
+    motion.sample(point, event)
+    gestureRef.current = {
+      motion,
+      mapping,
+      initial,
+      clientX: event.clientX,
+      clientY: event.clientY,
       moved: false
     }
-    ;(event.target as Element).setPointerCapture?.(event.pointerId)
+    svg.setPointerCapture(event.pointerId)
+    setGhost({ sourceId: source.id, rect: initial, guides: [] })
   }
-
-  const moveGesture = (event: React.PointerEvent<Element>): void => {
+  const flushSample = (sample: {
+    clientX: number
+    clientY: number
+    shiftKey: boolean
+    altKey: boolean
+  }): StageGhost | null => {
     const gesture = gestureRef.current
-    if (!gesture || event.pointerId !== gesture.pointerId) {
-      return
+    if (!gesture) return null
+    const point = stagePoint(gesture.mapping, sample.clientX, sample.clientY)
+    if (!point) {
+      cancelGesture()
+      return null
     }
-    const delta = normalizedDelta(gesture, event)
-    if (!delta) {
-      return
-    }
-    gesture.moved = true
-    setGhost(ghostForGesture(gesture, delta, event))
+    if (Math.hypot(sample.clientX - gesture.clientX, sample.clientY - gesture.clientY) >= 0.01)
+      gesture.moved = true
+    const next = { sourceId: gesture.motion.sourceId, ...gesture.motion.sample(point, sample) }
+    setGhost(next)
+    return next
   }
-
-  const endGesture = (event: React.PointerEvent<Element>): void => {
+  const moveGesture = (event: React.PointerEvent<SVGSVGElement>): void => {
+    if (gestureRef.current?.motion.pointerId !== event.pointerId) return
+    sampleRef.current = {
+      clientX: event.clientX,
+      clientY: event.clientY,
+      shiftKey: event.shiftKey,
+      altKey: event.altKey
+    }
+    if (frameRef.current !== null) return
+    frameRef.current = requestAnimationFrame(() => {
+      frameRef.current = null
+      if (sampleRef.current) flushSample(sampleRef.current)
+    })
+  }
+  const endGesture = (event: React.PointerEvent<SVGSVGElement>): void => {
     const gesture = gestureRef.current
-    if (!gesture || event.pointerId !== gesture.pointerId) {
-      return
-    }
-    const delta = normalizedDelta(gesture, event)
-    gestureRef.current = null
-    setGhost(null)
-    if (!gesture.moved || !delta) {
-      return
-    }
-    const { rect } = ghostForGesture(gesture, delta, event)
-    const committed = roundRectForCommit(rect)
-    if (gesture.kind === 'move') {
-      // Corner snap: releasing a camera near a canvas corner re-enters the
-      // corner preset instead of committing a nearby custom position.
-      const snap = 0.06
-      const nearLeft = committed.x <= snap
-      const nearRight = committed.x + committed.width >= 1 - snap
-      const nearTop = committed.y <= snap
-      const nearBottom = committed.y + committed.height >= 1 - snap
-      if (onSnapCorner && (nearLeft || nearRight) && (nearTop || nearBottom)) {
-        onSnapCorner(
-          `${nearTop ? 'top' : 'bottom'}-${nearLeft ? 'left' : 'right'}` as
-            | 'top-left'
-            | 'top-right'
-            | 'bottom-left'
-            | 'bottom-right'
-        )
+    if (!gesture || gesture.motion.pointerId !== event.pointerId) return
+    const final = flushSample(event)
+    cancelGesture()
+    if (!final || sameStageRect(final.rect, gesture.initial) || !gesture.moved) return
+    if (gesture.motion.kind === 'move' && onSnapCorner) {
+      const rect = final.rect
+      if (
+        (rect.x <= 0.06 || rect.x + rect.width >= 0.94) &&
+        (rect.y <= 0.06 || rect.y + rect.height >= 0.94)
+      ) {
+        onSnapCorner(`${rect.y <= 0.06 ? 'top' : 'bottom'}-${rect.x <= 0.06 ? 'left' : 'right'}`)
         return
       }
-      // A move never writes size — width/height stay whatever the layout owns.
-      onCommitTransform?.(gesture.sourceId, { x: committed.x, y: committed.y })
-      return
     }
-    onCommitTransform?.(gesture.sourceId, committed)
+    edits.submit(gesture.motion.sourceId, final.rect)
   }
-
-  const selectedSource = sources.find((source) => source.id === selectedSourceId) ?? null
-  const selectedGhostRect =
-    ghost && selectedSource && ghost.sourceId === selectedSource.id ? ghost.rect : null
-
+  const selectedSource = sources.find((source) => source.id === selectedSourceId)
+  const gutter = 28 / pixelScale
+  const activeMotion = gestureRef.current
+  const activeHandle =
+    activeMotion && activeMotion.motion.kind !== 'move'
+      ? {
+          id: activeMotion.motion.kind,
+          offset: stageHandleOffset(
+            activeMotion.initial.width * activeMotion.motion.pixels.width,
+            activeMotion.initial.height * activeMotion.motion.pixels.height
+          )
+        }
+      : undefined
   return (
-    <div className="relative overflow-hidden rounded-panel border border-border bg-card/40 shadow-inner">
-      <svg
-        ref={svgRef}
-        aria-label="Scene composition diagram"
-        className="mx-auto block max-h-[420px] w-full"
-        role="img"
-        viewBox={`0 0 ${STAGE_W} ${stageH}`}
+    <div
+      className="flex min-w-0 flex-col rounded-panel border border-border bg-card/40"
+      data-videorc-stage-phase={phase}
+    >
+      <div
+        className="flex flex-wrap items-center justify-between gap-2 p-2"
+        data-videorc-stage-toolbar
       >
-        {/* Canvas backdrop: glass gradient (theme tokens), the committed
-            scene background image on top when one is set (WYSIWYG, plan
-            phase 5). All static; nothing repaints at rest (idle-perf law). */}
-        <defs>
-          <linearGradient
-            gradientUnits="objectBoundingBox"
-            id={`${gradientId}-base`}
-            x1="0"
-            x2="1"
-            y1="0"
-            y2="1"
-          >
-            <stop offset="0" style={{ stopColor: 'var(--muted)', stopOpacity: 0.6 }} />
-            <stop offset="0.55" style={{ stopColor: 'var(--background)', stopOpacity: 0.35 }} />
-            <stop offset="1" style={{ stopColor: 'var(--muted)', stopOpacity: 0.5 }} />
-          </linearGradient>
-          <radialGradient
-            gradientUnits="objectBoundingBox"
-            cx="0.22"
-            cy="0.16"
-            id={`${gradientId}-glow-a`}
-            r="0.6"
-          >
-            <stop offset="0" style={{ stopColor: 'var(--primary)', stopOpacity: 0.08 }} />
-            <stop offset="1" style={{ stopColor: 'var(--primary)', stopOpacity: 0 }} />
-          </radialGradient>
-          <radialGradient
-            gradientUnits="objectBoundingBox"
-            cx="0.8"
-            cy="0.86"
-            id={`${gradientId}-glow-b`}
-            r="0.65"
-          >
-            <stop offset="0" style={{ stopColor: 'var(--primary)', stopOpacity: 0.05 }} />
-            <stop offset="1" style={{ stopColor: 'var(--primary)', stopOpacity: 0 }} />
-          </radialGradient>
-          <linearGradient
-            gradientUnits="objectBoundingBox"
-            id={`${gradientId}-sheen`}
-            x1="0"
-            x2="1"
-            y1="0"
-            y2="0"
-          >
-            <stop offset="0.44" style={{ stopColor: 'var(--foreground)', stopOpacity: 0 }} />
-            <stop offset="0.5" style={{ stopColor: 'var(--foreground)', stopOpacity: 0.05 }} />
-            <stop offset="0.56" style={{ stopColor: 'var(--foreground)', stopOpacity: 0 }} />
-          </linearGradient>
-        </defs>
-        <rect fill={`url(#${gradientId}-base)`} height={stageH} width={STAGE_W} x={0} y={0} />
-        <rect fill={`url(#${gradientId}-glow-a)`} height={stageH} width={STAGE_W} x={0} y={0} />
-        <rect fill={`url(#${gradientId}-glow-b)`} height={stageH} width={STAGE_W} x={0} y={0} />
-        {backgroundUrl && background ? (
-          <>
-            <image
-              height={stageH}
-              href={backgroundUrl}
-              preserveAspectRatio={
-                background.fit === 'fill'
-                  ? 'xMidYMid slice'
-                  : background.fit === 'stretch'
-                    ? 'none'
-                    : 'xMidYMid meet'
-              }
-              width={STAGE_W}
-              x={0}
-              y={0}
-              onError={() => setFailedBackgroundAssetId(background.assetId)}
-            />
-            {/* Approximate the dim so the schematic boxes stay readable. */}
-            <rect
-              fill="black"
-              fillOpacity={Math.min(Math.max(background.dimPercent, 0), 100) / 100}
-              height={stageH}
-              width={STAGE_W}
-              x={0}
-              y={0}
-            />
-          </>
-        ) : (
-          <rect fill={`url(#${gradientId}-sheen)`} height={stageH} width={STAGE_W} x={0} y={0} />
-        )}
-        {/* Hairline ring marks the recorded canvas against the glass frame. */}
-        <rect
-          className="fill-transparent stroke-border"
-          height={stageH - 0.4}
-          strokeWidth={0.4}
-          width={STAGE_W - 0.4}
-          x={0.2}
-          y={0.2}
-        />
-        {sources.map((source) => (
-          <StageSourceRect
-            key={source.id}
-            cameraCornerRadiusPct={cameraCornerRadiusPct}
-            cameraShape={cameraShape}
-            stageH={stageH}
-            draggable={sourceMoveable(source)}
-            ghostRect={ghost?.sourceId === source.id ? ghost.rect : null}
-            selected={source.id === selectedSourceId}
-            source={source}
-            onPointerDown={(event) => {
-              onSelectSource(source.id)
-              beginGesture(source, 'move', event)
-            }}
-            onPointerMove={moveGesture}
-            onPointerUp={endGesture}
-            onSelect={() => onSelectSource(source.id)}
-          />
-        ))}
-
-        {/* Snap guides while a drag is magnetized. */}
-        {ghost?.guides.map((guide) => (
-          <line
-            key={`${guide.axis}-${guide.position}`}
-            className="stroke-ring/80"
-            strokeDasharray="2 1.5"
-            strokeWidth={0.5}
-            x1={guide.axis === 'x' ? guide.position * STAGE_W : 0}
-            x2={guide.axis === 'x' ? guide.position * STAGE_W : STAGE_W}
-            y1={guide.axis === 'y' ? guide.position * stageH : 0}
-            y2={guide.axis === 'y' ? guide.position * stageH : stageH}
-          />
-        ))}
-
-        {/* Resize handles on the selected, editable source. */}
-        {selectedSource && sourceResizable(selectedSource) ? (
-          <StageSelectionHandles
-            rect={
-              selectedGhostRect ?? {
-                x: selectedSource.transform.x,
-                y: selectedSource.transform.y,
-                width: selectedSource.transform.width,
-                height: selectedSource.transform.height
-              }
+        <ToggleGroup
+          disabled={phase !== 'idle'}
+          aria-label="Scene sources"
+          className="min-w-0 flex-wrap"
+          size="sm"
+          type="single"
+          value={selectedSourceId ?? ''}
+          onValueChange={(value) => {
+            if (value) {
+              cancelGesture()
+              onSelectSource(value)
             }
-            stageH={stageH}
-            onHandlePointerDown={(handle, event) => beginGesture(selectedSource, handle, event)}
-            onPointerMove={moveGesture}
-            onPointerUp={endGesture}
-          />
-        ) : null}
-
-        {sources.length === 0 ? (
-          <text
-            className="fill-muted-foreground"
-            fontSize={5}
-            textAnchor="middle"
-            x={STAGE_W / 2}
-            y={stageH / 2}
-          >
-            No sources in the scene yet
-          </text>
-        ) : null}
-      </svg>
-
-      {/* Legend chips (HTML overlay, top-left) */}
-      {/* FX7: max-w-24 clipped "Screen capture Utility…" mid-word straight
-          into the next chip, reading as overlap. Wrap + a wider budget keeps
-          names legible; truncation stays as the last resort. */}
-      <div className="pointer-events-none absolute left-2 right-2 top-2 flex flex-wrap gap-1.5">
-        {sources.map((source) => (
-          <button
-            key={source.id}
-            aria-label={`Select ${source.name}`}
-            aria-pressed={source.id === selectedSourceId}
-            className={cn(
-              'pointer-events-auto flex items-center gap-1 rounded-chip border px-1.5 py-0.5 text-[11px] backdrop-blur-sm transition-colors',
-              source.id === selectedSourceId
-                ? 'border-ring bg-accent text-foreground'
-                : 'border-border bg-background/70 text-muted-foreground hover:text-foreground',
-              !source.visible && 'opacity-50'
-            )}
-            type="button"
-            onClick={() => onSelectSource(source.id)}
-          >
-            {source.kind === 'camera' ? (
-              <CameraIcon className="size-3" weight="duotone" />
-            ) : (
-              <DisplayIcon className="size-3" weight="duotone" />
-            )}
-            <span className="max-w-44 truncate">{source.name}</span>
-          </button>
-        ))}
-      </div>
-
-      {/* Fixed-arrangement affordance: offer Freeform instead of silently
-          mutating a preset (plan phase 4). */}
-      {showFreeformHint && onRequestFreeform ? (
-        <div className="pointer-events-none absolute inset-x-0 bottom-12 flex justify-center">
-          <div className="pointer-events-auto flex items-center gap-1.5 rounded-chip border border-border bg-background/80 py-0.5 pl-2 pr-0.5 text-[11px] text-muted-foreground backdrop-blur-sm">
-            <span>This scene has a fixed arrangement.</span>
-            <Button
-              size="xs"
-              variant="ghost"
-              onClick={() => {
-                setShowFreeformHint(false)
-                onRequestFreeform()
-              }}
+          }}
+        >
+          {sources.map((source) => (
+            <ToggleGroupItem
+              key={source.id}
+              aria-label={`Select ${source.name}`}
+              title={source.name}
+              value={source.id}
             >
-              Make freeform
-            </Button>
-          </div>
-        </div>
+              {source.kind === 'camera' ? (
+                <CameraIcon data-icon="inline-start" />
+              ) : (
+                <DisplayIcon data-icon="inline-start" />
+              )}
+              <span className="max-w-44 truncate">{source.name}</span>
+            </ToggleGroupItem>
+          ))}
+        </ToggleGroup>
+        {freeform ? (
+          <Toggle
+            aria-label="Snap"
+            disabled={!dragEnabled || phase === 'dragging'}
+            pressed={snap}
+            size="sm"
+            onPressedChange={setSnap}
+          >
+            Snap
+          </Toggle>
+        ) : null}
+      </div>
+      <Separator />
+      <div className="flex justify-center p-7">
+        <svg
+          ref={svgRef}
+          aria-label="Scene composition editor"
+          className="block w-full touch-none overflow-visible select-none"
+          role="group"
+          style={{ maxWidth: (420 * STAGE_W) / stageH, aspectRatio: `${STAGE_W} / ${stageH}` }}
+          viewBox={`0 0 ${STAGE_W} ${stageH}`}
+          onPointerMove={moveGesture}
+          onPointerUp={endGesture}
+          onPointerCancel={(event) => {
+            if (event.pointerId === gestureRef.current?.motion.pointerId) cancelGesture()
+          }}
+          onLostPointerCapture={(event) => {
+            if (event.pointerId === gestureRef.current?.motion.pointerId) cancelGesture()
+          }}
+        >
+          <defs>
+            <clipPath id={clipId}>
+              <rect x={0} y={0} width={STAGE_W} height={stageH} />
+            </clipPath>
+          </defs>
+          <rect
+            data-videorc-stage-canvas
+            className="fill-background/40 stroke-border"
+            x={0}
+            y={0}
+            width={STAGE_W}
+            height={stageH}
+            strokeWidth={1}
+            vectorEffect="non-scaling-stroke"
+          />
+          <g clipPath={`url(#${clipId})`}>
+            {backgroundUrl && background ? (
+              <>
+                <image
+                  href={backgroundUrl}
+                  x={0}
+                  y={0}
+                  width={STAGE_W}
+                  height={stageH}
+                  preserveAspectRatio={
+                    background.fit === 'fill'
+                      ? 'xMidYMid slice'
+                      : background.fit === 'stretch'
+                        ? 'none'
+                        : 'xMidYMid meet'
+                  }
+                  onError={() => setFailedBackgroundAssetId(background.assetId)}
+                />
+                <rect
+                  fill="black"
+                  fillOpacity={Math.min(Math.max(background.dimPercent, 0), 100) / 100}
+                  width={STAGE_W}
+                  height={stageH}
+                />
+              </>
+            ) : null}
+            {sources.map((source) => {
+              const rect = displayed(source),
+                width = rect.width * STAGE_W,
+                height = rect.height * stageH
+              const shape = stageSourceShape(
+                rect,
+                STAGE_W,
+                stageH,
+                source.kind === 'camera' ? cameraShape : 'rectangle',
+                cameraCornerRadiusPct
+              )
+              const paint = {
+                className: cn(
+                  source.kind === 'camera' ? 'fill-foreground/10' : 'fill-muted-foreground/5',
+                  'stroke-muted-foreground/40',
+                  !source.visible && 'opacity-40'
+                ),
+                strokeWidth: 1,
+                strokeDasharray: source.visible ? undefined : '4 3',
+                vectorEffect: 'non-scaling-stroke',
+                pointerEvents: 'none'
+              }
+              return (
+                <g
+                  key={source.id}
+                  data-videorc-stage-source={source.id}
+                  className={
+                    dragEnabled && editable(source)
+                      ? 'cursor-grab active:cursor-grabbing'
+                      : 'cursor-pointer'
+                  }
+                  onClick={(event) => {
+                    if (
+                      event.button === 0 &&
+                      !externalPending &&
+                      (!edits.draft || edits.draft.sourceId === source.id)
+                    )
+                      onSelectSource(source.id)
+                  }}
+                  onPointerDown={(event) => beginGesture(source, 'move', event)}
+                >
+                  {/* The transform owns picking and selection, including the
+                      empty corners around a circular camera mask. */}
+                  <rect
+                    data-videorc-stage-bounds
+                    x={rect.x * STAGE_W}
+                    y={rect.y * stageH}
+                    width={width}
+                    height={height}
+                    fill="transparent"
+                  />
+                  {shape.kind === 'circle' ? (
+                    <circle
+                      data-videorc-stage-painted-shape="circle"
+                      cx={shape.cx}
+                      cy={shape.cy}
+                      r={shape.r}
+                      {...paint}
+                    />
+                  ) : (
+                    <rect
+                      data-videorc-stage-painted-shape={
+                        source.kind === 'camera' ? cameraShape : 'rectangle'
+                      }
+                      x={shape.x}
+                      y={shape.y}
+                      width={shape.width}
+                      height={shape.height}
+                      rx={shape.rx}
+                      {...paint}
+                    />
+                  )}
+                </g>
+              )
+            })}
+            {ghost?.guides.map((guide) => (
+              <line
+                key={`${guide.axis}-${guide.position}`}
+                data-videorc-stage-guide={guide.axis}
+                className="stroke-ring"
+                strokeDasharray="4 3"
+                strokeWidth={1}
+                vectorEffect="non-scaling-stroke"
+                x1={guide.axis === 'x' ? guide.position * STAGE_W : 0}
+                x2={guide.axis === 'x' ? guide.position * STAGE_W : STAGE_W}
+                y1={guide.axis === 'y' ? guide.position * stageH : 0}
+                y2={guide.axis === 'y' ? guide.position * stageH : stageH}
+              />
+            ))}
+          </g>
+          {selectedSource ? (
+            <StageSelection
+              rect={displayed(selectedSource)}
+              activeHandle={activeHandle}
+              stageH={stageH}
+              scale={pixelScale}
+              enabled={resizeEnabled && editable(selectedSource)}
+              onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
+            />
+          ) : null}
+          {/* Keep the edge hit targets within a reserved, unobstructed gutter. */}
+          <rect
+            x={-gutter}
+            y={-gutter}
+            width={STAGE_W + gutter * 2}
+            height={stageH + gutter * 2}
+            fill="none"
+            pointerEvents="none"
+          />
+        </svg>
+      </div>
+      {!sources.length ? (
+        <p className="px-3 pb-3 text-center text-xs text-muted-foreground">
+          No sources in the scene yet
+        </p>
       ) : null}
-
-      {/* Ground truth lives in the detached preview window. */}
-      <div className="absolute inset-x-0 bottom-2 flex justify-center">
-        <Button size="sm" variant="secondary" onClick={onTogglePreview}>
+      <Separator />
+      <div
+        className="flex flex-wrap items-center justify-between gap-2 p-2"
+        data-videorc-stage-footer
+      >
+        {dragEnabled ? (
+          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
+            <span>
+              <Kbd>Shift</Kbd> constrain / aspect
+            </span>
+            {effectiveSnap ? (
+              <span>
+                <Kbd>Alt / ⌥</Kbd> no snap
+              </span>
+            ) : null}
+            <span>
+              <Kbd>Esc</Kbd> cancel
+            </span>
+          </div>
+        ) : null}
+        {showFreeformHint && onRequestFreeform ? (
+          <Button size="sm" variant="ghost" onClick={onRequestFreeform}>
+            Make freeform
+          </Button>
+        ) : null}
+        <Button size="sm" variant="ghost" onClick={onTogglePreview}>
           <ExternalLinkIcon data-icon="inline-start" />
           {previewOpen ? 'Close preview' : 'Open preview'}
         </Button>
@@ -513,165 +599,91 @@ export function SceneStage({
   )
 }
 
-function StageSourceRect({
-  source,
-  stageH,
-  selected,
-  draggable = false,
-  ghostRect,
-  cameraShape,
-  cameraCornerRadiusPct,
-  onSelect,
-  onPointerDown,
-  onPointerMove,
-  onPointerUp
-}: {
-  source: SceneSource
-  stageH: number
-  selected: boolean
-  draggable?: boolean
-  ghostRect: StageRect | null
-  cameraShape: CameraShape
-  cameraCornerRadiusPct: number
-  onSelect: () => void
-  onPointerDown?: (event: React.PointerEvent<SVGGElement>) => void
-  onPointerMove?: (event: React.PointerEvent<SVGGElement>) => void
-  onPointerUp?: (event: React.PointerEvent<SVGGElement>) => void
-}): ReactElement {
-  const x = (ghostRect?.x ?? source.transform.x) * STAGE_W
-  const y = (ghostRect?.y ?? source.transform.y) * stageH
-  const width = Math.max(2, (ghostRect?.width ?? source.transform.width) * STAGE_W)
-  const height = Math.max(2, (ghostRect?.height ?? source.transform.height) * stageH)
-  const camera = source.kind === 'camera'
-  // Mirror the compositors' mask geometry in schematic form: circle = fully
-  // rounded (its box is square by construction), rounded = pct% of the shorter
-  // side, rectangle = the hairline default.
-  const cornerRadius = !camera
-    ? 1.5
-    : cameraShape === 'circle'
-      ? Math.min(width, height) / 2
-      : cameraShape === 'rounded'
-        ? (Math.min(width, height) * Math.min(cameraCornerRadiusPct, 50)) / 100
-        : 1.5
-
-  return (
-    <g
-      className={draggable ? 'cursor-grab active:cursor-grabbing' : 'cursor-pointer'}
-      data-videorc-stage-source={source.id}
-      onClick={(event) => {
-        event.stopPropagation()
-        onSelect()
-      }}
-      onPointerDown={onPointerDown}
-      onPointerMove={onPointerMove}
-      onPointerUp={onPointerUp}
-    >
-      <rect
-        className={cn(
-          camera ? 'fill-primary/25' : 'fill-muted-foreground/15',
-          selected ? 'stroke-ring' : camera ? 'stroke-primary/60' : 'stroke-muted-foreground/50',
-          !source.visible && 'opacity-40'
-        )}
-        height={height}
-        rx={cornerRadius}
-        strokeDasharray={source.visible ? undefined : '2 1.5'}
-        strokeWidth={selected ? 1.2 : 0.6}
-        width={width}
-        x={x}
-        y={y}
-      />
-      {/* Label only when the rect is big enough to hold it. Shaped camera
-          bubbles (circle / strongly rounded) cut the rect's corners away, so
-          the bottom-left anchor would float OUTSIDE the visible shape —
-          center the label in those. Rectangles keep bottom-left: the HTML
-          legend chips overlay the stage's top-left, so a rect touching the
-          top edge (side-by-side's screen box) had its label buried under the
-          chips (plan 021 F4). */}
-      {width > 24 && height > 10 ? (
-        cornerRadius >= Math.min(width, height) / 4 ? (
-          <text
-            className={cn(
-              'select-none stroke-background/60 [paint-order:stroke]',
-              camera ? 'fill-primary' : 'fill-muted-foreground'
-            )}
-            dominantBaseline="central"
-            fontSize={4.2}
-            strokeWidth={0.7}
-            textAnchor="middle"
-            x={x + width / 2}
-            y={y + height / 2}
-          >
-            {source.name}
-          </text>
-        ) : (
-          <text
-            className={cn(
-              'select-none stroke-background/60 [paint-order:stroke]',
-              camera ? 'fill-primary' : 'fill-muted-foreground'
-            )}
-            fontSize={4.2}
-            strokeWidth={0.7}
-            x={x + 2.5}
-            y={y + height - 2.5}
-          >
-            {source.name}
-          </text>
-        )
-      ) : null}
-    </g>
-  )
-}
-
-/** Chip-tier resize handles (4 corners + 4 edge midpoints) with oversized,
- * invisible hit areas — the visible squares stay small and crisp. */
-function StageSelectionHandles({
+function StageSelection({
   rect,
   stageH,
-  onHandlePointerDown,
-  onPointerMove,
-  onPointerUp
+  scale,
+  enabled,
+  activeHandle,
+  onHandle
 }: {
   rect: StageRect
   stageH: number
-  onHandlePointerDown: (handle: StageHandleId, event: React.PointerEvent<Element>) => void
-  onPointerMove: (event: React.PointerEvent<Element>) => void
-  onPointerUp: (event: React.PointerEvent<Element>) => void
+  scale: number
+  enabled: boolean
+  activeHandle?: { id: StageHandleId; offset: number }
+  onHandle: (id: StageHandleId, event: React.PointerEvent<Element>) => void
 }): ReactElement {
-  const visible = 3
-  const hit = 6.5
+  const visible = 6 / scale,
+    hit = 24 / scale
+  const handles = activeHandle
+    ? [activeHandle.id]
+    : visibleStageHandles(rect.width * STAGE_W * scale, rect.height * stageH * scale)
+  const offset =
+    (activeHandle?.offset ??
+      stageHandleOffset(rect.width * STAGE_W * scale, rect.height * stageH * scale)) / scale
   return (
     <g data-videorc-stage-handles>
-      {stageHandlePoints(rect).map((point) => {
-        const cx = point.x * STAGE_W
-        const cy = point.y * stageH
-        return (
-          <g key={point.id} style={{ cursor: handleCursor(point.id) }}>
-            <rect
-              className="fill-foreground stroke-background/70"
-              height={visible}
-              rx={0.9}
-              strokeWidth={0.4}
-              width={visible}
-              x={cx - visible / 2}
-              y={cy - visible / 2}
-            />
-            <rect
-              data-videorc-stage-handle={point.id}
-              fill="transparent"
-              height={hit}
-              width={hit}
-              x={cx - hit / 2}
-              y={cy - hit / 2}
-              onPointerDown={(event) => {
-                event.stopPropagation()
-                onHandlePointerDown(point.id, event)
-              }}
-              onPointerMove={onPointerMove}
-              onPointerUp={onPointerUp}
-            />
-          </g>
-        )
-      })}
+      <rect
+        className="fill-none stroke-foreground/70"
+        pointerEvents="none"
+        x={rect.x * STAGE_W}
+        y={rect.y * stageH}
+        width={rect.width * STAGE_W}
+        height={rect.height * stageH}
+        strokeWidth={1}
+        vectorEffect="non-scaling-stroke"
+      />
+      {enabled
+        ? stageHandlePoints(rect)
+            .filter((point) => handles.includes(point.id))
+            .map((point) => {
+              const anchorX = point.x * STAGE_W,
+                anchorY = point.y * stageH
+              const x = anchorX + offset,
+                y = anchorY + offset
+              return (
+                <g key={point.id} style={{ cursor: handleCursor(point.id) }}>
+                  {offset > 0 ? (
+                    <line
+                      className="stroke-foreground/70"
+                      x1={anchorX}
+                      y1={anchorY}
+                      x2={x}
+                      y2={y}
+                      strokeWidth={1}
+                      vectorEffect="non-scaling-stroke"
+                      pointerEvents="none"
+                    />
+                  ) : null}
+                  <rect
+                    className="fill-background stroke-foreground/80"
+                    pointerEvents="none"
+                    x={x - visible / 2}
+                    y={y - visible / 2}
+                    width={visible}
+                    height={visible}
+                    rx={1 / scale}
+                    strokeWidth={1}
+                    vectorEffect="non-scaling-stroke"
+                  />
+                  <rect
+                    data-videorc-stage-handle={point.id}
+                    aria-label={`Resize ${point.id}`}
+                    x={x - hit / 2}
+                    y={y - hit / 2}
+                    width={hit}
+                    height={hit}
+                    fill="transparent"
+                    onPointerDown={(event) => {
+                      event.stopPropagation()
+                      onHandle(point.id, event)
+                    }}
+                  />
+                </g>
+              )
+            })
+        : null}
     </g>
   )
 }

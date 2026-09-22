@@ -3,8 +3,8 @@ use std::path::Path;
 use crate::protocol::{
     ArrangementMode, LayoutPreset, Scene, SceneConfigParams, SceneOutput, SceneOutputKind,
     SceneSource, SceneSourceKind, SceneSourceOrderParams, SceneSourceParams,
-    SceneSourceVisibilityParams, SceneTransform, SceneTransformPatch, SceneTransformUpdateParams,
-    SideBySideCameraSide, SourceSelection,
+    SceneSourceVisibilityParams, SceneTransform, SceneTransformPatch, SceneTransformSnap,
+    SceneTransformUpdateParams, SideBySideCameraSide, SourceSelection,
 };
 use crate::scene_geometry::{
     preset_camera_transform, resolved_camera_transform, side_by_side_fractions,
@@ -243,10 +243,11 @@ pub fn update_source_transform(
     params: SceneTransformUpdateParams,
 ) -> Result<Scene, String> {
     let source = find_source_mut(scene, &params.source_id)?;
-    source.transform = sanitize_transform(apply_transform_patch(
-        source.transform.clone(),
-        params.transform,
-    ));
+    let transform = apply_transform_patch(source.transform.clone(), params.transform);
+    source.transform = match params.snap {
+        SceneTransformSnap::None => sanitize_transform_unsnapped(transform),
+        SceneTransformSnap::Legacy => sanitize_transform(transform),
+    };
     Ok(scene.clone())
 }
 
@@ -649,7 +650,8 @@ fn sanitize_transform(transform: SceneTransform) -> SceneTransform {
 }
 
 // Clamp + clean without the edge/center snap — for precision operations
-// (arrow nudges) where the snap magnet must not undo the movement.
+// (numeric/gesture edits, saved overrides and arrow nudges) where the snap
+// magnet must not undo the movement.
 fn sanitize_transform_unsnapped(transform: SceneTransform) -> SceneTransform {
     let (crop_left, crop_right) = normalize_crop_pair(
         clean_number(transform.crop_left),
@@ -1661,6 +1663,7 @@ mod tests {
             &mut scene,
             SceneTransformUpdateParams {
                 source_id: CAMERA_SOURCE_ID.to_string(),
+                snap: SceneTransformSnap::Legacy,
                 transform: SceneTransformPatch {
                     x: Some(0.1),
                     y: Some(0.2),
@@ -1691,6 +1694,7 @@ mod tests {
             &mut scene,
             SceneTransformUpdateParams {
                 source_id: CAMERA_SOURCE_ID.to_string(),
+                snap: SceneTransformSnap::Legacy,
                 transform: SceneTransformPatch {
                     width: Some(0.0),
                     height: Some(0.0),
@@ -1706,6 +1710,113 @@ mod tests {
         assert_eq!(transform.width, 0.0);
         assert_eq!(transform.height, 0.0);
         assert!(transform.crop_left + transform.crop_right <= 0.95);
+    }
+
+    #[test]
+    fn transform_update_preserves_precision_only_when_requested() {
+        for (snap, expected) in [
+            (None, [0.0, 0.3]),
+            (Some("legacy"), [0.0, 0.3]),
+            (Some("none"), [0.012, 0.301]),
+        ] {
+            let mut scene = scene_from_capture_config(base_params());
+            let mut wire = serde_json::json!({
+                "sourceId": CAMERA_SOURCE_ID,
+                "transform": { "x": 0.012, "y": 0.301, "width": 0.4, "height": 0.4 }
+            });
+            if let Some(value) = snap {
+                wire["snap"] = serde_json::json!(value);
+            }
+            let committed =
+                update_source_transform(&mut scene, serde_json::from_value(wire).unwrap()).unwrap();
+            assert_eq!(committed, scene);
+            assert_eq!(scene.sources[1].transform.x, expected[0]);
+            assert_eq!(scene.sources[1].transform.y, expected[1]);
+        }
+    }
+
+    #[test]
+    fn precision_transform_update_still_sanitizes_every_numeric_field() {
+        let mut scene = scene_from_capture_config(base_params());
+        update_source_transform(
+            &mut scene,
+            SceneTransformUpdateParams {
+                source_id: CAMERA_SOURCE_ID.to_string(),
+                snap: SceneTransformSnap::None,
+                transform: SceneTransformPatch {
+                    x: Some(f64::NAN),
+                    y: Some(9.0),
+                    width: Some(-1.0),
+                    height: Some(3.0),
+                    crop_left: Some(0.8),
+                    crop_right: Some(0.8),
+                    crop_top: Some(f64::INFINITY),
+                    crop_bottom: Some(-1.0),
+                },
+            },
+        )
+        .unwrap();
+        let transform = &scene.sources[1].transform;
+        assert_eq!(transform.x, 0.0);
+        assert_eq!(transform.y, 2.0);
+        assert_eq!(transform.width, 0.0);
+        assert_eq!(transform.height, 2.0);
+        assert!((transform.crop_left - 0.475).abs() < 1e-12);
+        assert!((transform.crop_right - 0.475).abs() < 1e-12);
+        assert_eq!(transform.crop_top, 0.0);
+        assert_eq!(transform.crop_bottom, 0.0);
+    }
+
+    #[test]
+    fn precision_commits_survive_saved_freeform_overrides_without_resnapping() {
+        let mut config = base_params();
+        config.layout.arrangement_mode = ArrangementMode::Freeform;
+        config.layout.camera_zoom = 150;
+        let mut scene = scene_from_capture_config(config.clone());
+        // Exercise both source paths near each legacy snap magnet, including
+        // values around the old threshold that used to jump on release.
+        for x in [0.012, 0.0149, 0.0151, 0.301, 0.599] {
+            for source_id in [BASE_SOURCE_ID, CAMERA_SOURCE_ID] {
+                let committed = update_source_transform(
+                    &mut scene,
+                    SceneTransformUpdateParams {
+                        source_id: source_id.to_string(),
+                        snap: SceneTransformSnap::None,
+                        transform: SceneTransformPatch {
+                            x: Some(x),
+                            y: Some(0.012),
+                            width: Some(0.4),
+                            height: Some(0.4),
+                            ..SceneTransformPatch::default()
+                        },
+                    },
+                )
+                .unwrap();
+                for source in &committed.sources {
+                    let transform = &source.transform;
+                    config.layout.source_transform_overrides.insert(
+                        source.id.clone(),
+                        CameraTransform {
+                            x: transform.x,
+                            y: transform.y,
+                            width: transform.width,
+                            height: transform.height,
+                        },
+                    );
+                }
+                let rebuilt = scene_from_capture_config(config.clone());
+                for (accepted, restored) in committed.sources.iter().zip(&rebuilt.sources) {
+                    assert_eq!(accepted.transform, restored.transform);
+                }
+                let edited = committed
+                    .sources
+                    .iter()
+                    .find(|source| source.id == source_id)
+                    .unwrap();
+                assert_eq!(edited.transform.x, x);
+                assert_eq!(edited.transform.y, 0.012);
+            }
+        }
     }
 
     #[test]

@@ -30,11 +30,9 @@ export const STAGE_HANDLE_IDS: readonly StageHandleId[] = [
 ]
 
 /**
- * Mirror of the backend commit snap threshold — `SNAP_THRESHOLD` in
- * `crates/videorc-backend/src/scene.rs`. The renderer uses it only to draw
- * guides and pre-snap the ghost so what the user releases is what the backend
- * keeps; the backend's `snap_transform` remains the committing authority.
- * `stage-transform.test.ts` pins this value against drift.
+ * Legacy normalized snapping retained for preset callers and compatibility
+ * tests. Freeform uses CSS-pixel hysteresis in StageGesture and commits with
+ * snap: none, so backend normalization cannot override precision intent.
  */
 export const STAGE_SNAP_THRESHOLD = 0.015
 
@@ -68,7 +66,7 @@ export function stageSnapTargets(others: StageRect[]): SnapTargets {
     x.push(rect.x, rect.x + rect.width / 2, rect.x + rect.width)
     y.push(rect.y, rect.y + rect.height / 2, rect.y + rect.height)
   }
-  return { x, y }
+  return { x: [...new Set(x)], y: [...new Set(y)] }
 }
 
 export interface MoveInput {
@@ -78,7 +76,7 @@ export interface MoveInput {
   dy: number
   /** Shift: constrain the move to the dominant axis. */
   constrainAxis: boolean
-  /** Alt: suspend snapping (the backend may still snap a release inside its threshold). */
+  /** Bypass the legacy stateless snap calculation. */
   disableSnap: boolean
   targets: SnapTargets
 }
@@ -119,11 +117,13 @@ export interface ResizeInput {
   dx: number
   dy: number
   /**
-   * Keep the box's aspect. Corner handles default to locked (Shift frees a
-   * rectangle); shaped sources (circle, forced square/portrait camera aspect)
-   * stay locked always — the mask law owns their aspect.
+   * Keep the box's aspect. The stage shares the inspector's preference;
+   * shaped sources remain locked because the mask law owns their aspect.
    */
   lockAspect: boolean
+  /** Painted canvas size in CSS pixels; projection must respect screen-space aspect. */
+  canvasWidth?: number
+  canvasHeight?: number
   minFraction?: number
 }
 
@@ -148,18 +148,21 @@ export function resizeGhost(input: ResizeInput): GhostResult {
   const bottom = start.y + start.height
 
   if (input.lockAspect) {
-    // Scale around the anchor keeping width:height. The dominant axis of the
-    // pointer motion drives the scale so diagonal pulls feel 1:1.
+    // Project onto the fixed-aspect resize vector in CSS pixels. Unlike a
+    // dominant-axis switch, this stays continuous through diagonal reversals.
     const widthDelta = movesLeft ? -input.dx : movesRight ? input.dx : 0
     const heightDelta = movesTop ? -input.dy : movesBottom ? input.dy : 0
     const scaleFromWidth = start.width > 0 ? (start.width + widthDelta) / start.width : 1
     const scaleFromHeight = start.height > 0 ? (start.height + heightDelta) / start.height : 1
     let scale: number
     if (isCorner) {
+      const vx = start.width * (input.canvasWidth ?? 1)
+      const vy = start.height * (input.canvasHeight ?? 1)
+      const lengthSquared = vx * vx + vy * vy
       scale =
-        Math.abs(scaleFromWidth - 1) >= Math.abs(scaleFromHeight - 1)
-          ? scaleFromWidth
-          : scaleFromHeight
+        lengthSquared > 0
+          ? (scaleFromWidth * vx * vx + scaleFromHeight * vy * vy) / lengthSquared
+          : 1
     } else if (movesLeft || movesRight) {
       scale = scaleFromWidth
     } else {
@@ -315,4 +318,33 @@ function clampRect(rect: StageRect): StageRect {
 
 function clamp(value: number, low: number, high: number): number {
   return Math.min(Math.max(value, low), high)
+}
+
+/** Mirror the compositor mask in viewBox units without changing editing bounds. */
+export function stageSourceShape(
+  rect: StageRect,
+  canvasWidth: number,
+  canvasHeight: number,
+  shape: 'circle' | 'rounded' | 'rectangle',
+  cornerRadiusPct: number
+):
+  | { kind: 'circle'; cx: number; cy: number; r: number }
+  | { kind: 'rect'; x: number; y: number; width: number; height: number; rx: number } {
+  const x = rect.x * canvasWidth,
+    y = rect.y * canvasHeight
+  const width = rect.width * canvasWidth,
+    height = rect.height * canvasHeight
+  if (shape === 'circle')
+    return { kind: 'circle', cx: x + width / 2, cy: y + height / 2, r: Math.min(width, height) / 2 }
+  return {
+    kind: 'rect',
+    x,
+    y,
+    width,
+    height,
+    rx:
+      shape === 'rounded'
+        ? (Math.min(width, height) * Math.min(Math.max(cornerRadiusPct, 0), 50)) / 100
+        : 0
+  }
 }

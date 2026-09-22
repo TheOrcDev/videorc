@@ -766,11 +766,24 @@ pub struct SceneLayoutApplyParams {
     pub config: SceneConfigParams,
 }
 
+/// How to finish a transform edit after validating its numeric values.
+/// Older callers retain edge/center snapping; precision editors send `none`
+/// because their displayed geometry already includes the chosen snap policy.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub enum SceneTransformSnap {
+    None,
+    #[default]
+    Legacy,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneTransformUpdateParams {
     pub source_id: String,
     pub transform: SceneTransformPatch,
+    #[serde(default)]
+    pub snap: SceneTransformSnap,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -4459,6 +4472,46 @@ impl ServerEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scene_transform_snap_defaults_to_legacy_for_older_requests() {
+        for snap in [None, Some("legacy"), Some("none")] {
+            let mut wire = serde_json::json!({
+                "sourceId": "source:camera",
+                "transform": { "x": 0.012 }
+            });
+            if let Some(value) = snap {
+                wire["snap"] = serde_json::json!(value);
+            }
+            let params: super::SceneTransformUpdateParams = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                params.snap,
+                if snap == Some("none") {
+                    super::SceneTransformSnap::None
+                } else {
+                    super::SceneTransformSnap::Legacy
+                }
+            );
+            let serialized = serde_json::to_value(params).unwrap();
+            assert_eq!(serialized["snap"], snap.unwrap_or("legacy"));
+        }
+    }
+
+    #[test]
+    fn scene_transform_snap_rejects_invalid_policy() {
+        for snap in [
+            serde_json::json!("auto"),
+            serde_json::json!(false),
+            serde_json::Value::Null,
+        ] {
+            let wire = serde_json::json!({
+                "sourceId": "source:camera",
+                "transform": { "x": 0.012 },
+                "snap": snap
+            });
+            assert!(serde_json::from_value::<super::SceneTransformUpdateParams>(wire).is_err());
+        }
+    }
+
     #[test]
     fn capture_recovery_status_omits_unavailable_and_non_finite_fields() {
         let status = super::CaptureRecoveryStatus {

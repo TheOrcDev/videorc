@@ -1,8 +1,9 @@
 import { LockIcon } from '@/components/icons'
-import { useState, type ReactElement } from 'react'
+import { useRef, useState, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
-import { Input } from '@/components/ui/input'
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { InputGroup, InputGroupInput, InputGroupAddon } from '@/components/ui/input-group'
 import type { SceneSource } from '@/lib/backend'
 import { cn } from '@/lib/utils'
 import type { StageRect } from './stage-transform'
@@ -20,7 +21,7 @@ import {
  * The Inspector's precise twin of the stage gestures: numeric X/Y/W/H in
  * percent of the canvas. Every commit goes through the same backend-owned
  * scene commit as a drag (scene.source.transform.update), and the committed
- * (sanitized, possibly snapped) value echoes back into the fields, so the two
+ * (sanitized, unsnapped) value echoes back into the fields, so the two
  * paths can never disagree.
  */
 export function SourceTransformFields({
@@ -29,6 +30,8 @@ export function SourceTransformFields({
   disabledReason,
   sizeEditable = true,
   aspectForced = false,
+  aspectLocked: aspectLockedChoice = true,
+  onAspectLockedChange,
   outputWidth,
   outputHeight,
   onCommit
@@ -40,6 +43,8 @@ export function SourceTransformFields({
   sizeEditable?: boolean
   /** The source's aspect is law (circle / forced camera aspect): the lock cannot open. */
   aspectForced?: boolean
+  aspectLocked?: boolean
+  onAspectLockedChange?: (locked: boolean) => void
   outputWidth: number
   outputHeight: number
   onCommit: (patch: { x?: number; y?: number; width?: number; height?: number }) => void
@@ -51,13 +56,17 @@ export function SourceTransformFields({
     height: source.transform.height
   }
   const [drafts, setDrafts] = useState<Partial<Record<TransformFieldId, string>>>({})
-  const [aspectLockedChoice, setAspectLockedChoice] = useState(true)
+  const draftsRef = useRef(drafts)
+  const updateDraft = (field: TransformFieldId, value: string | undefined): void => {
+    draftsRef.current = { ...draftsRef.current, [field]: value }
+    setDrafts(draftsRef.current)
+  }
   const aspectLocked = aspectForced || aspectLockedChoice
 
   const commitField = (field: TransformFieldId): void => {
-    const draft = drafts[field]
-    setDrafts((current) => ({ ...current, [field]: undefined }))
-    if (draft === undefined) {
+    const draft = draftsRef.current[field]
+    updateDraft(field, undefined)
+    if (disabled || draft === undefined) {
       return
     }
     const parsed = parsePercentValue(draft)
@@ -87,59 +96,59 @@ export function SourceTransformFields({
                 : 'Aspect free. Width and height move alone.'
           }
           variant={aspectLocked ? 'secondary' : 'ghost'}
-          onClick={() => setAspectLockedChoice((locked) => !locked)}
+          onClick={() => onAspectLockedChange?.(!aspectLockedChoice)}
         >
           <LockIcon weight={aspectLocked ? 'fill' : 'regular'} />
         </Button>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
+      <FieldGroup className="grid grid-cols-2 gap-2 sm:grid-cols-4">
         {TRANSFORM_FIELD_IDS.map((field) => {
           const isSize = field === 'width' || field === 'height'
           const fieldDisabled = disabled || (isSize && !sizeEditable)
           const value = drafts[field] ?? formatPercentValue(committed[field])
           return (
-            <label key={field} className="flex min-w-0 flex-col gap-1">
-              <span className="text-[11px] leading-none text-muted-foreground">
+            <Field key={field} className="min-w-0 gap-1" data-disabled={fieldDisabled}>
+              <FieldLabel htmlFor={`${source.id}-${field}`}>
                 {TRANSFORM_FIELD_LABELS[field]}
-              </span>
-              <div className="relative">
-                <Input
+              </FieldLabel>
+              <InputGroup>
+                <InputGroupInput
+                  id={`${source.id}-${field}`}
                   aria-label={`${TRANSFORM_FIELD_LABELS[field]} percent of canvas`}
-                  className="h-7 pr-6 text-right font-mono text-xs tabular-nums"
+                  className="text-right tabular-nums"
                   data-videorc-transform-field={field}
                   disabled={fieldDisabled}
                   inputMode="decimal"
                   value={value}
                   onBlur={() => commitField(field)}
-                  onChange={(event) =>
-                    setDrafts((current) => ({ ...current, [field]: event.target.value }))
-                  }
+                  onChange={(event) => updateDraft(field, event.target.value)}
                   onFocus={() =>
-                    setDrafts((current) => ({
-                      ...current,
-                      [field]: current[field] ?? formatPercentValue(committed[field])
-                    }))
+                    updateDraft(
+                      field,
+                      draftsRef.current[field] ?? formatPercentValue(committed[field])
+                    )
                   }
                   onKeyDown={(event) => {
                     if (event.key === 'Enter') {
                       event.preventDefault()
                       commitField(field)
                     } else if (event.key === 'Escape') {
-                      setDrafts((current) => ({ ...current, [field]: undefined }))
+                      updateDraft(field, undefined)
                       event.currentTarget.blur()
                     }
                   }}
                 />
-                <span className="pointer-events-none absolute inset-y-0 right-2 flex items-center text-[10px] text-muted-foreground">
-                  %
-                </span>
-              </div>
-            </label>
+                <InputGroupAddon align="inline-end">%</InputGroupAddon>
+              </InputGroup>
+            </Field>
           )
         })}
-      </div>
+      </FieldGroup>
 
+      {aspectForced ? (
+        <p className="text-xs text-muted-foreground">Aspect locked by the camera shape.</p>
+      ) : null}
       <p className="text-xs text-muted-foreground">
         {pixelReadout(committed, outputWidth, outputHeight)}
       </p>

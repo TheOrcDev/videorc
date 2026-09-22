@@ -10,6 +10,7 @@ import {
   roundRectForCommit,
   stageHandlePoints,
   stageSnapTargets,
+  stageSourceShape,
   type StageRect
 } from './stage-transform'
 
@@ -235,8 +236,8 @@ describe('resizeGhost (aspect locked)', () => {
       lockAspect: true
     })
     expect(rect.width / rect.height).toBeCloseTo(2)
-    expect(rect.width).toBeCloseTo(0.6)
-    expect(rect.height).toBeCloseTo(0.3)
+    expect(rect.width).toBeCloseTo(0.56)
+    expect(rect.height).toBeCloseTo(0.28)
     expect(rect.x).toBeCloseTo(0.1)
     expect(rect.y).toBeCloseTo(0.1)
   })
@@ -312,5 +313,66 @@ describe('selection frame helpers', () => {
     expect(
       roundRectForCommit({ x: 0.123456, y: 0.6543219, width: 0.3333333, height: 0.1 })
     ).toEqual({ x: 0.1235, y: 0.6543, width: 0.3333, height: 0.1 })
+  })
+})
+
+// Plan 043: a diagonal reversal must not change which axis owns the resize.
+it('projects opposing corner deltas continuously', () => {
+  const sample = (dy: number) =>
+    resizeGhost({ start: box(0.3, 0.3), handle: 'se', dx: -0.1, dy, lockAspect: true }).rect.width
+  expect(Math.abs(sample(0.101) - sample(0.099))).toBeLessThan(0.002)
+})
+
+it.each(STAGE_HANDLE_IDS)(
+  'locked %s handle preserves its opposite anchor in portrait',
+  (handle) => {
+    const start = box(0.25, 0.25, 0.3, 0.3)
+    const { rect } = resizeGhost({
+      start,
+      handle,
+      dx: 0.035,
+      dy: -0.025,
+      lockAspect: true,
+      canvasWidth: 236.25,
+      canvasHeight: 420
+    })
+    expect(rect.width / rect.height).toBeCloseTo(start.width / start.height)
+    const anchor = (box: StageRect) => ({
+      x: handle.includes('w')
+        ? box.x + box.width
+        : handle.includes('e')
+          ? box.x
+          : box.x + box.width / 2,
+      y: handle.includes('n')
+        ? box.y + box.height
+        : handle.includes('s')
+          ? box.y
+          : box.y + box.height / 2
+    })
+    expect(anchor(rect).x).toBeCloseTo(anchor(start).x)
+    expect(anchor(rect).y).toBeCloseTo(anchor(start).y)
+  }
+)
+
+describe('compositor mask geometry', () => {
+  it.each([
+    { width: 160, height: 90 },
+    { width: 90, height: 160 }
+  ])('keeps a circle circular inside nonsquare saved Freeform bounds on %j', (canvas) => {
+    const rect = box(0.2, 0.3, 0.4, 0.2)
+    const shape = stageSourceShape(rect, canvas.width, canvas.height, 'circle', 12)
+    expect(shape.kind).toBe('circle')
+    if (shape.kind !== 'circle') throw new Error('A circle mask must use circle geometry')
+    expect(shape.cx).toBeCloseTo((rect.x + rect.width / 2) * canvas.width)
+    expect(shape.cy).toBeCloseTo((rect.y + rect.height / 2) * canvas.height)
+    expect(shape.r * 2).toBeCloseTo(
+      Math.min(rect.width * canvas.width, rect.height * canvas.height)
+    )
+    expect(shape.cx - shape.r).toBeGreaterThanOrEqual(rect.x * canvas.width)
+    expect(shape.cy - shape.r).toBeGreaterThanOrEqual(rect.y * canvas.height)
+  })
+  it('caps rounded corners at half the shorter side, matching the compositor', () => {
+    const shape = stageSourceShape(box(0.1, 0.2, 0.4, 0.2), 160, 90, 'rounded', 100)
+    expect(shape).toEqual({ kind: 'rect', x: 16, y: 18, width: 64, height: 18, rx: 9 })
   })
 })

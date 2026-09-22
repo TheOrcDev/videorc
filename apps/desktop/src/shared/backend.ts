@@ -540,6 +540,8 @@ export interface SceneConfigParams {
 export interface SceneTransformUpdateParams {
   sourceId: string
   transform: SceneTransformPatch
+  /** Omitted retains legacy snapping; precision editors commit their displayed geometry. */
+  snap?: 'none' | 'legacy'
 }
 
 export interface SceneSourceParams {

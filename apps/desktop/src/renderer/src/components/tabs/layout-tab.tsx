@@ -7,7 +7,7 @@ import {
   LayoutIcon,
   ResetIcon
 } from '@/components/icons'
-import { useEffect } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -16,7 +16,7 @@ import { SourceTransformFields } from '@/components/scene/source-transform-field
 import { PowerSlider } from '@/components/power-slider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
+import { Field, FieldContent, FieldLabel, FieldSet } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -82,6 +82,26 @@ export function LayoutTab(): ReactElement {
     isSessionActive,
     layoutSwitchPending
   } = useStudioCore()
+  const [stageBusy, setStageBusy] = useState(false)
+  const [preciseEditPending, setPreciseEditPending] = useState(false)
+  const preciseEditPendingRef = useRef(false)
+  const runPreciseEdit = (operation: () => Promise<unknown>): void => {
+    if (stageBusy || preciseEditPendingRef.current) return
+    preciseEditPendingRef.current = true
+    setPreciseEditPending(true)
+    void operation().finally(() => {
+      preciseEditPendingRef.current = false
+      setPreciseEditPending(false)
+    })
+  }
+  const [aspectPreferences, setAspectPreferences] = useState<Record<string, boolean>>({})
+  const aspectLocked = selectedSceneSourceId
+    ? (aspectPreferences[selectedSceneSourceId] ?? true)
+    : true
+  const setAspectLocked = (locked: boolean): void => {
+    if (selectedSceneSourceId)
+      setAspectPreferences((current) => ({ ...current, [selectedSceneSourceId]: locked }))
+  }
   const layout = captureConfig.layout
   const selectedSource = scene?.sources.find((source) => source.id === selectedSceneSourceId)
   // SC2: the inspector follows the stage selection; default to the camera
@@ -161,7 +181,7 @@ export function LayoutTab(): ReactElement {
                   <button
                     aria-pressed={layout.layoutPreset === preset.id && !isFreeform}
                     className="cursor-pointer rounded-row border border-border p-3 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
-                    disabled={disabled}
+                    disabled={disabled || stageBusy}
                     key={preset.id}
                     data-videorc-layout-preset={preset.id}
                     type="button"
@@ -182,7 +202,7 @@ export function LayoutTab(): ReactElement {
                 aria-pressed={isFreeform}
                 className="cursor-pointer rounded-row border border-border p-3 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
                 data-videorc-layout-preset="freeform"
-                disabled={!scene}
+                disabled={!scene || stageBusy}
                 type="button"
                 onClick={enterFreeform}
               >
@@ -210,6 +230,9 @@ export function LayoutTab(): ReactElement {
               real normalized transforms (pure SVG, zero idle IPC). Live pixels
               stay in the detached preview window. */}
           <SceneStage
+            aspectLocked={aspectLocked}
+            externalPending={preciseEditPending}
+            onBusyChange={setStageBusy}
             // The camera's box aspect is owned by the mask law (circle boxes
             // are square by construction; square/portrait force the crop), so
             // resize gestures must not free it.
@@ -220,18 +243,20 @@ export function LayoutTab(): ReactElement {
             // a plain rectangle, so the schematic must too.
             cameraShape={effectiveCameraMaskShape(layout)}
             background={scene?.background ?? null}
-            dragEnabled={(showOverlayControls || isFreeform) && !isSessionActive}
+            dragEnabled={
+              (showOverlayControls || isFreeform) && !isSessionActive && !preciseEditPending
+            }
             freeform={isFreeform}
             outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
             previewOpen={previewWindow.open}
             // Free resize: the backend honors custom camera width/height
             // (aspect law permitting) since plan phase 3.
-            resizeEnabled={(showOverlayControls || isFreeform) && !isSessionActive}
+            resizeEnabled={
+              (showOverlayControls || isFreeform) && !isSessionActive && !preciseEditPending
+            }
             scene={scene}
             selectedSourceId={selectedSceneSourceId}
-            onCommitTransform={(sourceId, transform) =>
-              void setSceneSourceTransform(sourceId, transform)
-            }
+            onCommitTransform={setSceneSourceTransform}
             onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
             onSelectSource={(sourceId) => {
               setSelectedSceneSourceId(sourceId)
@@ -253,576 +278,608 @@ export function LayoutTab(): ReactElement {
               and visibility now lives in the Inspector. */}
         </div>
 
-        <PanelSection
+        <FieldSet
           className="min-w-0"
-          icon={AdjustIcon}
-          title={selectedSource ? selectedSource.name : 'Inspector'}
+          disabled={stageBusy || preciseEditPending}
+          inert={stageBusy || preciseEditPending}
         >
-          {!selectedSource ? (
-            <p className="text-sm text-muted-foreground">Click a source on the stage to edit it.</p>
-          ) : selectedSource.kind === 'camera' ? (
-            <>
-              <span className="text-[12.5px] leading-none font-medium text-subtle">Placement</span>
-              {isFreeform ? (
-                <p className="text-sm text-muted-foreground">
-                  Freeform scene: drag and resize the camera on the stage, or set exact numbers
-                  below.
-                </p>
-              ) : null}
-              {isSideBySide && !isFreeform ? (
-                <>
+          <PanelSection
+            className="min-w-0"
+            icon={AdjustIcon}
+            title={selectedSource ? selectedSource.name : 'Inspector'}
+          >
+            {!selectedSource ? (
+              <p className="text-sm text-muted-foreground">
+                Click a source on the stage to edit it.
+              </p>
+            ) : selectedSource.kind === 'camera' ? (
+              <>
+                <span className="text-[12.5px] leading-none font-medium text-subtle">
+                  Placement
+                </span>
+                {isFreeform ? (
+                  <p className="text-sm text-muted-foreground">
+                    Freeform scene: drag and resize the camera on the stage, or set exact numbers
+                    below.
+                  </p>
+                ) : null}
+                {isSideBySide && !isFreeform ? (
+                  <>
+                    <Field>
+                      <FieldLabel>Split</FieldLabel>
+                      <ToggleGroup
+                        className="w-full"
+                        type="single"
+                        value={layout.sideBySideSplit}
+                        variant="outline"
+                        onValueChange={(value) =>
+                          value && applyCameraPreset({ sideBySideSplit: value as SideBySideSplit })
+                        }
+                      >
+                        <ToggleGroupItem value="50-50">50/50</ToggleGroupItem>
+                        <ToggleGroupItem value="60-40">60/40</ToggleGroupItem>
+                        <ToggleGroupItem value="70-30">70/30</ToggleGroupItem>
+                      </ToggleGroup>
+                    </Field>
+                    <Field>
+                      <FieldLabel>Camera side</FieldLabel>
+                      <ToggleGroup
+                        className="w-full"
+                        type="single"
+                        value={layout.sideBySideCameraSide}
+                        variant="outline"
+                        onValueChange={(value) =>
+                          value &&
+                          applyCameraPreset({ sideBySideCameraSide: value as SideBySideCameraSide })
+                        }
+                      >
+                        <ToggleGroupItem value="left">Camera left</ToggleGroupItem>
+                        <ToggleGroupItem value="right">Camera right</ToggleGroupItem>
+                      </ToggleGroup>
+                    </Field>
+                  </>
+                ) : null}
+
+                {isCameraOnly && !isFreeform ? (
+                  <p className="text-sm text-muted-foreground">
+                    Camera only fills the frame as a rectangle. Corner, size, and shape do not
+                    apply. Use fit, mirror, zoom, and pan.
+                  </p>
+                ) : null}
+
+                {isVerticalCameraOnly && !isFreeform ? (
+                  <p className="text-sm text-muted-foreground">
+                    The camera fills the whole 9:16 canvas and crops to fit. Corner, size, and shape
+                    do not apply. Use mirror, zoom, and pan to frame yourself.
+                  </p>
+                ) : null}
+
+                {isVerticalStack && !isFreeform ? (
+                  <p className="text-sm text-muted-foreground">
+                    The stacked vertical scenes give the camera and the screen fixed bands of the
+                    9:16 canvas. Corner, size, and shape do not apply. Use mirror, zoom, and pan.
+                  </p>
+                ) : null}
+
+                {showCameraCornerControls ? (
                   <Field>
-                    <FieldLabel>Split</FieldLabel>
+                    <FieldLabel>Corner</FieldLabel>
                     <ToggleGroup
                       className="w-full"
                       type="single"
-                      value={layout.sideBySideSplit}
+                      value={layout.cameraTransformMode === 'custom' ? '' : layout.cameraCorner}
                       variant="outline"
                       onValueChange={(value) =>
-                        value && applyCameraPreset({ sideBySideSplit: value as SideBySideSplit })
+                        value && applyCameraPreset({ cameraCorner: value as CameraCorner })
                       }
                     >
-                      <ToggleGroupItem value="50-50">50/50</ToggleGroupItem>
-                      <ToggleGroupItem value="60-40">60/40</ToggleGroupItem>
-                      <ToggleGroupItem value="70-30">70/30</ToggleGroupItem>
+                      <ToggleGroupItem value="top-left">Top L</ToggleGroupItem>
+                      <ToggleGroupItem value="top-right">Top R</ToggleGroupItem>
+                      <ToggleGroupItem value="bottom-left">Bot L</ToggleGroupItem>
+                      <ToggleGroupItem value="bottom-right">Bot R</ToggleGroupItem>
                     </ToggleGroup>
                   </Field>
-                  <Field>
-                    <FieldLabel>Camera side</FieldLabel>
-                    <ToggleGroup
-                      className="w-full"
-                      type="single"
-                      value={layout.sideBySideCameraSide}
-                      variant="outline"
-                      onValueChange={(value) =>
-                        value &&
-                        applyCameraPreset({ sideBySideCameraSide: value as SideBySideCameraSide })
-                      }
-                    >
-                      <ToggleGroupItem value="left">Camera left</ToggleGroupItem>
-                      <ToggleGroupItem value="right">Camera right</ToggleGroupItem>
-                    </ToggleGroup>
-                  </Field>
-                </>
-              ) : null}
+                ) : null}
 
-              {isCameraOnly && !isFreeform ? (
-                <p className="text-sm text-muted-foreground">
-                  Camera only fills the frame as a rectangle. Corner, size, and shape do not apply.
-                  Use fit, mirror, zoom, and pan.
-                </p>
-              ) : null}
-
-              {isVerticalCameraOnly && !isFreeform ? (
-                <p className="text-sm text-muted-foreground">
-                  The camera fills the whole 9:16 canvas and crops to fit. Corner, size, and shape
-                  do not apply. Use mirror, zoom, and pan to frame yourself.
-                </p>
-              ) : null}
-
-              {isVerticalStack && !isFreeform ? (
-                <p className="text-sm text-muted-foreground">
-                  The stacked vertical scenes give the camera and the screen fixed bands of the 9:16
-                  canvas. Corner, size, and shape do not apply. Use mirror, zoom, and pan.
-                </p>
-              ) : null}
-
-              {showCameraCornerControls ? (
-                <Field>
-                  <FieldLabel>Corner</FieldLabel>
-                  <ToggleGroup
-                    className="w-full"
-                    type="single"
-                    value={layout.cameraTransformMode === 'custom' ? '' : layout.cameraCorner}
-                    variant="outline"
-                    onValueChange={(value) =>
-                      value && applyCameraPreset({ cameraCorner: value as CameraCorner })
-                    }
-                  >
-                    <ToggleGroupItem value="top-left">Top L</ToggleGroupItem>
-                    <ToggleGroupItem value="top-right">Top R</ToggleGroupItem>
-                    <ToggleGroupItem value="bottom-left">Bot L</ToggleGroupItem>
-                    <ToggleGroupItem value="bottom-right">Bot R</ToggleGroupItem>
-                  </ToggleGroup>
-                </Field>
-              ) : null}
-
-              {showCameraBubbleControls ? (
-                <>
-                  <div className="grid min-w-0 grid-cols-2 gap-4">
-                    {!isFreeform ? (
+                {showCameraBubbleControls ? (
+                  <>
+                    <div className="grid min-w-0 grid-cols-2 gap-4">
+                      {!isFreeform ? (
+                        <Field className="min-w-0">
+                          <FieldLabel>Size</FieldLabel>
+                          <ToggleGroup
+                            className="w-full"
+                            spacing={0}
+                            type="single"
+                            value={layout.cameraSize}
+                            variant="outline"
+                            onValueChange={(value) =>
+                              value && applyCameraPreset({ cameraSize: value as CameraSize })
+                            }
+                          >
+                            <ToggleGroupItem className="flex-1" value="small">
+                              S
+                            </ToggleGroupItem>
+                            <ToggleGroupItem className="flex-1" value="medium">
+                              M
+                            </ToggleGroupItem>
+                            <ToggleGroupItem className="flex-1" value="large">
+                              L
+                            </ToggleGroupItem>
+                          </ToggleGroup>
+                        </Field>
+                      ) : null}
                       <Field className="min-w-0">
-                        <FieldLabel>Size</FieldLabel>
+                        <FieldLabel>Shape</FieldLabel>
                         <ToggleGroup
                           className="w-full"
                           spacing={0}
                           type="single"
-                          value={layout.cameraSize}
+                          value={layout.cameraShape}
                           variant="outline"
                           onValueChange={(value) =>
-                            value && applyCameraPreset({ cameraSize: value as CameraSize })
+                            value &&
+                            applyLayoutPatch(
+                              // Rounded means a rounded SQUARE by default (owner
+                              // decision 2026-07-06) — picking it snaps the aspect
+                              // to square in the same gesture; the Aspect toggle
+                              // below still allows wide/portrait afterwards.
+                              value === 'rounded'
+                                ? { cameraShape: 'rounded', cameraAspect: 'square' }
+                                : { cameraShape: value as CameraShape }
+                            )
                           }
                         >
-                          <ToggleGroupItem className="flex-1" value="small">
-                            S
+                          <ToggleGroupItem
+                            className="min-w-0 flex-1 px-1 text-xs"
+                            data-videorc-camera-shape="rectangle"
+                            value="rectangle"
+                          >
+                            Rect
                           </ToggleGroupItem>
-                          <ToggleGroupItem className="flex-1" value="medium">
-                            M
+                          <ToggleGroupItem
+                            className="min-w-0 flex-1 px-1 text-xs"
+                            data-videorc-camera-shape="rounded"
+                            value="rounded"
+                          >
+                            Round
                           </ToggleGroupItem>
-                          <ToggleGroupItem className="flex-1" value="large">
-                            L
+                          <ToggleGroupItem
+                            className="min-w-0 flex-1 px-1 text-xs"
+                            data-videorc-camera-shape="circle"
+                            value="circle"
+                          >
+                            Circle
                           </ToggleGroupItem>
                         </ToggleGroup>
                       </Field>
+                    </div>
+
+                    {layout.cameraShape === 'rounded' ? (
+                      <PowerSlider
+                        label="Corner radius"
+                        max={50}
+                        min={0}
+                        numericInput
+                        suffix="%"
+                        value={layout.cameraCornerRadiusPct}
+                        onChange={(cameraCornerRadiusPct) =>
+                          applyLayoutPatch({ cameraCornerRadiusPct })
+                        }
+                      />
                     ) : null}
-                    <Field className="min-w-0">
-                      <FieldLabel>Shape</FieldLabel>
-                      <ToggleGroup
-                        className="w-full"
-                        spacing={0}
-                        type="single"
-                        value={layout.cameraShape}
-                        variant="outline"
-                        onValueChange={(value) =>
-                          value &&
-                          applyLayoutPatch(
-                            // Rounded means a rounded SQUARE by default (owner
-                            // decision 2026-07-06) — picking it snaps the aspect
-                            // to square in the same gesture; the Aspect toggle
-                            // below still allows wide/portrait afterwards.
-                            value === 'rounded'
-                              ? { cameraShape: 'rounded', cameraAspect: 'square' }
-                              : { cameraShape: value as CameraShape }
-                          )
-                        }
-                      >
-                        <ToggleGroupItem
-                          className="min-w-0 flex-1 px-1 text-xs"
-                          data-videorc-camera-shape="rectangle"
-                          value="rectangle"
-                        >
-                          Rect
-                        </ToggleGroupItem>
-                        <ToggleGroupItem
-                          className="min-w-0 flex-1 px-1 text-xs"
-                          data-videorc-camera-shape="rounded"
-                          value="rounded"
-                        >
-                          Round
-                        </ToggleGroupItem>
-                        <ToggleGroupItem
-                          className="min-w-0 flex-1 px-1 text-xs"
-                          data-videorc-camera-shape="circle"
-                          value="circle"
-                        >
-                          Circle
-                        </ToggleGroupItem>
-                      </ToggleGroup>
-                    </Field>
-                  </div>
 
-                  {layout.cameraShape === 'rounded' ? (
-                    <PowerSlider
-                      label="Corner radius"
-                      max={50}
-                      min={0}
-                      numericInput
-                      suffix="%"
-                      value={layout.cameraCornerRadiusPct}
-                      onChange={(cameraCornerRadiusPct) =>
-                        applyLayoutPatch({ cameraCornerRadiusPct })
-                      }
-                    />
-                  ) : null}
-
-                  {layout.cameraShape !== 'circle' ? (
-                    <Field>
-                      <FieldLabel>Aspect</FieldLabel>
-                      <ToggleGroup
-                        className="w-full"
-                        spacing={0}
-                        type="single"
-                        value={layout.cameraAspect}
-                        variant="outline"
-                        onValueChange={(value) =>
-                          value && applyLayoutPatch({ cameraAspect: value as CameraAspect })
-                        }
-                      >
-                        <ToggleGroupItem
-                          className="min-w-0 flex-1 px-1 text-xs"
-                          data-videorc-camera-aspect="source"
-                          value="source"
+                    {layout.cameraShape !== 'circle' ? (
+                      <Field>
+                        <FieldLabel>Aspect</FieldLabel>
+                        <ToggleGroup
+                          className="w-full"
+                          spacing={0}
+                          type="single"
+                          value={layout.cameraAspect}
+                          variant="outline"
+                          onValueChange={(value) =>
+                            value && applyLayoutPatch({ cameraAspect: value as CameraAspect })
+                          }
                         >
-                          Wide
-                        </ToggleGroupItem>
-                        <ToggleGroupItem
-                          className="min-w-0 flex-1 px-1 text-xs"
-                          data-videorc-camera-aspect="square"
-                          value="square"
-                        >
-                          Square
-                        </ToggleGroupItem>
-                        <ToggleGroupItem
-                          className="min-w-0 flex-1 px-1 text-xs"
-                          data-videorc-camera-aspect="portrait"
-                          value="portrait"
-                        >
-                          Portrait
-                        </ToggleGroupItem>
-                      </ToggleGroup>
-                      {layout.cameraAspect !== 'source' ? (
-                        <p className="text-xs text-muted-foreground">
-                          Crops the sides of the camera. Frame yourself centered.
-                        </p>
-                      ) : null}
-                    </Field>
-                  ) : null}
+                          <ToggleGroupItem
+                            className="min-w-0 flex-1 px-1 text-xs"
+                            data-videorc-camera-aspect="source"
+                            value="source"
+                          >
+                            Wide
+                          </ToggleGroupItem>
+                          <ToggleGroupItem
+                            className="min-w-0 flex-1 px-1 text-xs"
+                            data-videorc-camera-aspect="square"
+                            value="square"
+                          >
+                            Square
+                          </ToggleGroupItem>
+                          <ToggleGroupItem
+                            className="min-w-0 flex-1 px-1 text-xs"
+                            data-videorc-camera-aspect="portrait"
+                            value="portrait"
+                          >
+                            Portrait
+                          </ToggleGroupItem>
+                        </ToggleGroup>
+                        {layout.cameraAspect !== 'source' ? (
+                          <p className="text-xs text-muted-foreground">
+                            Crops the sides of the camera. Frame yourself centered.
+                          </p>
+                        ) : null}
+                      </Field>
+                    ) : null}
 
-                  {!isFreeform ? (
-                    <PowerSlider
-                      label="Margin"
-                      max={96}
-                      min={0}
-                      numericInput
-                      suffix="px"
-                      value={layout.cameraMargin}
-                      onChange={(cameraMargin) => patchLayout({ cameraMargin })}
-                      onCommit={(cameraMargin) => applyLayoutPatch({ cameraMargin })}
-                    />
-                  ) : null}
+                    {!isFreeform ? (
+                      <PowerSlider
+                        label="Margin"
+                        max={96}
+                        min={0}
+                        numericInput
+                        suffix="px"
+                        value={layout.cameraMargin}
+                        onChange={(cameraMargin) => patchLayout({ cameraMargin })}
+                        onCommit={(cameraMargin) => applyLayoutPatch({ cameraMargin })}
+                      />
+                    ) : null}
 
-                  {/* The precise twin of the stage drag: numeric percent
+                    {/* The precise twin of the stage drag: numeric percent
                       fields that commit through the same backend scene
                       commit, so both paths always agree. */}
-                  <SourceTransformFields
-                    aspectForced={
-                      layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'
-                    }
-                    disabled={isSessionActive}
-                    disabledReason="Scene layout is locked while a session is live."
-                    outputHeight={captureConfig.video.height}
-                    outputWidth={captureConfig.video.width}
-                    source={selectedSource}
-                    onCommit={(patch) => void setSceneSourceTransform(selectedSource.id, patch)}
-                  />
-                </>
-              ) : null}
+                    <SourceTransformFields
+                      key={selectedSource.id}
+                      aspectLocked={aspectLocked}
+                      onAspectLockedChange={setAspectLocked}
+                      aspectForced={
+                        layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'
+                      }
+                      disabled={isSessionActive || stageBusy}
+                      disabledReason={
+                        isSessionActive
+                          ? 'Scene layout is locked while a session is live.'
+                          : undefined
+                      }
+                      outputHeight={captureConfig.video.height}
+                      outputWidth={captureConfig.video.width}
+                      source={selectedSource}
+                      onCommit={(patch) =>
+                        runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
+                      }
+                    />
+                  </>
+                ) : null}
 
-              <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">Lens</span>
-              {/* Vertical bands and the full-canvas vertical camera ALWAYS
+                <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">
+                  Lens
+                </span>
+                {/* Vertical bands and the full-canvas vertical camera ALWAYS
                   fill and crop — a "Fit frame" option would letterbox the
                   short-form frame (2026-07-13 fill-crop plan), so the toggle
                   is hidden and honest copy replaces it. Zoom and pan below
                   still frame the crop. */}
-              {isVerticalStack || isVerticalCameraOnly ? (
-                <p className="text-sm text-muted-foreground">
-                  {isVerticalCameraOnly
-                    ? 'The camera always fills the 9:16 canvas and crops. Use zoom and pan to frame yourself.'
-                    : 'The camera band always fills and crops. Use zoom and pan to frame yourself.'}
-                </p>
-              ) : (
-                <Field>
-                  <FieldLabel>Fit</FieldLabel>
-                  <ToggleGroup
-                    type="single"
-                    value={layout.cameraFit}
-                    variant="outline"
-                    onValueChange={(value) => {
-                      if (!value) return
-                      patchLayout({ cameraFit: value as CameraFit })
-                      applyLayoutPatch({ cameraFit: value as CameraFit })
-                    }}
-                  >
-                    <ToggleGroupItem value="fill">Fill crop</ToggleGroupItem>
-                    <ToggleGroupItem value="fit">Fit frame</ToggleGroupItem>
-                  </ToggleGroup>
-                </Field>
-              )}
-
-              <Field orientation="horizontal">
-                <FieldContent>
-                  <FieldLabel htmlFor="camera-mirror">Mirror camera</FieldLabel>
-                </FieldContent>
-                <Switch
-                  checked={layout.cameraMirror}
-                  id="camera-mirror"
-                  onCheckedChange={(checked) => {
-                    patchLayout({ cameraMirror: checked })
-                    applyLayoutPatch({ cameraMirror: checked })
-                  }}
-                />
-              </Field>
-
-              <PowerSlider
-                label="Zoom"
-                max={200}
-                min={100}
-                numericInput
-                step={5}
-                suffix="%"
-                value={layout.cameraZoom}
-                onChange={(cameraZoom) => patchLayout({ cameraZoom })}
-                onCommit={(cameraZoom) => applyLayoutPatch({ cameraZoom })}
-              />
-              <PowerSlider
-                bipolar
-                label="Pan X"
-                max={100}
-                min={-100}
-                numericInput
-                step={5}
-                value={layout.cameraOffsetX}
-                onChange={(cameraOffsetX) => patchLayout({ cameraOffsetX })}
-                onCommit={(cameraOffsetX) => applyLayoutPatch({ cameraOffsetX })}
-              />
-              <PowerSlider
-                bipolar
-                label="Pan Y"
-                max={100}
-                min={-100}
-                numericInput
-                step={5}
-                value={layout.cameraOffsetY}
-                onChange={(cameraOffsetY) => patchLayout({ cameraOffsetY })}
-                onCommit={(cameraOffsetY) => applyLayoutPatch({ cameraOffsetY })}
-              />
-
-              <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">
-                Green screen
-              </span>
-              <Field orientation="horizontal">
-                <FieldContent>
-                  <FieldLabel htmlFor="camera-chroma-key">Key out background</FieldLabel>
-                  <p className="text-xs text-muted-foreground">
-                    Needs an evenly lit green or blue screen behind you.
+                {isVerticalStack || isVerticalCameraOnly ? (
+                  <p className="text-sm text-muted-foreground">
+                    {isVerticalCameraOnly
+                      ? 'The camera always fills the 9:16 canvas and crops. Use zoom and pan to frame yourself.'
+                      : 'The camera band always fills and crops. Use zoom and pan to frame yourself.'}
                   </p>
-                </FieldContent>
-                <Switch
-                  checked={layout.cameraChromaKeyEnabled}
-                  id="camera-chroma-key"
-                  onCheckedChange={(cameraChromaKeyEnabled) =>
-                    applyLayoutPatch({ cameraChromaKeyEnabled })
-                  }
-                />
-              </Field>
-              {layout.cameraChromaKeyEnabled ? (
-                <>
+                ) : (
                   <Field>
-                    <FieldLabel>Key color</FieldLabel>
+                    <FieldLabel>Fit</FieldLabel>
                     <ToggleGroup
-                      className="w-full"
-                      spacing={0}
                       type="single"
-                      value={layout.cameraChromaKeyColor === CHROMA_KEY_BLUE ? 'blue' : 'green'}
+                      value={layout.cameraFit}
                       variant="outline"
-                      onValueChange={(value) =>
-                        value &&
-                        applyLayoutPatch({
-                          cameraChromaKeyColor:
-                            value === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
-                        })
-                      }
+                      onValueChange={(value) => {
+                        if (!value) return
+                        patchLayout({ cameraFit: value as CameraFit })
+                        applyLayoutPatch({ cameraFit: value as CameraFit })
+                      }}
                     >
-                      <ToggleGroupItem className="flex-1" value="green">
-                        Green
-                      </ToggleGroupItem>
-                      <ToggleGroupItem className="flex-1" value="blue">
-                        Blue
-                      </ToggleGroupItem>
+                      <ToggleGroupItem value="fill">Fill crop</ToggleGroupItem>
+                      <ToggleGroupItem value="fit">Fit frame</ToggleGroupItem>
                     </ToggleGroup>
                   </Field>
-                  <PowerSlider
-                    label="Similarity"
-                    max={100}
-                    min={0}
-                    numericInput
-                    step={1}
-                    suffix="%"
-                    value={layout.cameraChromaKeySimilarityPct}
-                    onChange={(cameraChromaKeySimilarityPct) =>
-                      patchLayout({ cameraChromaKeySimilarityPct })
-                    }
-                    onCommit={(cameraChromaKeySimilarityPct) =>
-                      applyLayoutPatch({ cameraChromaKeySimilarityPct })
-                    }
-                  />
-                  <PowerSlider
-                    label="Smoothness"
-                    max={100}
-                    min={0}
-                    numericInput
-                    step={1}
-                    suffix="%"
-                    value={layout.cameraChromaKeySmoothnessPct}
-                    onChange={(cameraChromaKeySmoothnessPct) =>
-                      patchLayout({ cameraChromaKeySmoothnessPct })
-                    }
-                    onCommit={(cameraChromaKeySmoothnessPct) =>
-                      applyLayoutPatch({ cameraChromaKeySmoothnessPct })
-                    }
-                  />
-                  <PowerSlider
-                    label="Spill removal"
-                    max={100}
-                    min={0}
-                    numericInput
-                    step={1}
-                    suffix="%"
-                    value={layout.cameraChromaKeySpillPct}
-                    onChange={(cameraChromaKeySpillPct) => patchLayout({ cameraChromaKeySpillPct })}
-                    onCommit={(cameraChromaKeySpillPct) =>
-                      applyLayoutPatch({ cameraChromaKeySpillPct })
-                    }
-                  />
-                </>
-              ) : null}
+                )}
 
-              {/* One committed patch back to the shipped camera defaults —
+                <Field orientation="horizontal">
+                  <FieldContent>
+                    <FieldLabel htmlFor="camera-mirror">Mirror camera</FieldLabel>
+                  </FieldContent>
+                  <Switch
+                    checked={layout.cameraMirror}
+                    id="camera-mirror"
+                    onCheckedChange={(checked) => {
+                      patchLayout({ cameraMirror: checked })
+                      applyLayoutPatch({ cameraMirror: checked })
+                    }}
+                  />
+                </Field>
+
+                <PowerSlider
+                  label="Zoom"
+                  max={200}
+                  min={100}
+                  numericInput
+                  step={5}
+                  suffix="%"
+                  value={layout.cameraZoom}
+                  onChange={(cameraZoom) => patchLayout({ cameraZoom })}
+                  onCommit={(cameraZoom) => applyLayoutPatch({ cameraZoom })}
+                />
+                <PowerSlider
+                  bipolar
+                  label="Pan X"
+                  max={100}
+                  min={-100}
+                  numericInput
+                  step={5}
+                  value={layout.cameraOffsetX}
+                  onChange={(cameraOffsetX) => patchLayout({ cameraOffsetX })}
+                  onCommit={(cameraOffsetX) => applyLayoutPatch({ cameraOffsetX })}
+                />
+                <PowerSlider
+                  bipolar
+                  label="Pan Y"
+                  max={100}
+                  min={-100}
+                  numericInput
+                  step={5}
+                  value={layout.cameraOffsetY}
+                  onChange={(cameraOffsetY) => patchLayout({ cameraOffsetY })}
+                  onCommit={(cameraOffsetY) => applyLayoutPatch({ cameraOffsetY })}
+                />
+
+                <span className="pt-2 text-[12.5px] leading-none font-medium text-subtle">
+                  Green screen
+                </span>
+                <Field orientation="horizontal">
+                  <FieldContent>
+                    <FieldLabel htmlFor="camera-chroma-key">Key out background</FieldLabel>
+                    <p className="text-xs text-muted-foreground">
+                      Needs an evenly lit green or blue screen behind you.
+                    </p>
+                  </FieldContent>
+                  <Switch
+                    checked={layout.cameraChromaKeyEnabled}
+                    id="camera-chroma-key"
+                    onCheckedChange={(cameraChromaKeyEnabled) =>
+                      applyLayoutPatch({ cameraChromaKeyEnabled })
+                    }
+                  />
+                </Field>
+                {layout.cameraChromaKeyEnabled ? (
+                  <>
+                    <Field>
+                      <FieldLabel>Key color</FieldLabel>
+                      <ToggleGroup
+                        className="w-full"
+                        spacing={0}
+                        type="single"
+                        value={layout.cameraChromaKeyColor === CHROMA_KEY_BLUE ? 'blue' : 'green'}
+                        variant="outline"
+                        onValueChange={(value) =>
+                          value &&
+                          applyLayoutPatch({
+                            cameraChromaKeyColor:
+                              value === 'blue' ? CHROMA_KEY_BLUE : CHROMA_KEY_GREEN
+                          })
+                        }
+                      >
+                        <ToggleGroupItem className="flex-1" value="green">
+                          Green
+                        </ToggleGroupItem>
+                        <ToggleGroupItem className="flex-1" value="blue">
+                          Blue
+                        </ToggleGroupItem>
+                      </ToggleGroup>
+                    </Field>
+                    <PowerSlider
+                      label="Similarity"
+                      max={100}
+                      min={0}
+                      numericInput
+                      step={1}
+                      suffix="%"
+                      value={layout.cameraChromaKeySimilarityPct}
+                      onChange={(cameraChromaKeySimilarityPct) =>
+                        patchLayout({ cameraChromaKeySimilarityPct })
+                      }
+                      onCommit={(cameraChromaKeySimilarityPct) =>
+                        applyLayoutPatch({ cameraChromaKeySimilarityPct })
+                      }
+                    />
+                    <PowerSlider
+                      label="Smoothness"
+                      max={100}
+                      min={0}
+                      numericInput
+                      step={1}
+                      suffix="%"
+                      value={layout.cameraChromaKeySmoothnessPct}
+                      onChange={(cameraChromaKeySmoothnessPct) =>
+                        patchLayout({ cameraChromaKeySmoothnessPct })
+                      }
+                      onCommit={(cameraChromaKeySmoothnessPct) =>
+                        applyLayoutPatch({ cameraChromaKeySmoothnessPct })
+                      }
+                    />
+                    <PowerSlider
+                      label="Spill removal"
+                      max={100}
+                      min={0}
+                      numericInput
+                      step={1}
+                      suffix="%"
+                      value={layout.cameraChromaKeySpillPct}
+                      onChange={(cameraChromaKeySpillPct) =>
+                        patchLayout({ cameraChromaKeySpillPct })
+                      }
+                      onCommit={(cameraChromaKeySpillPct) =>
+                        applyLayoutPatch({ cameraChromaKeySpillPct })
+                      }
+                    />
+                  </>
+                ) : null}
+
+                {/* One committed patch back to the shipped camera defaults —
                   placement, frame, lens, and chroma key. Never touches the
                   layout preset or the selected sources (owner request,
                   2026-08-19). */}
-              <Button
-                className="mt-2 w-fit"
-                size="xs"
-                variant="ghost"
-                onClick={() => {
-                  const defaults = {
-                    cameraTransformMode: 'preset',
-                    cameraTransform: null,
-                    cameraCorner: 'bottom-right',
-                    cameraSize: 'medium',
-                    cameraShape: 'rectangle',
-                    cameraCornerRadiusPct: 12,
-                    cameraAspect: 'source',
-                    cameraMargin: 32,
-                    cameraFit: 'fill',
-                    cameraMirror: false,
-                    cameraZoom: 100,
-                    cameraOffsetX: 0,
-                    cameraOffsetY: 0,
-                    cameraChromaKeyEnabled: false,
-                    cameraChromaKeyColor: '#00FF00',
-                    cameraChromaKeySimilarityPct: 40,
-                    cameraChromaKeySmoothnessPct: 8,
-                    cameraChromaKeySpillPct: 10
-                  } as const
-                  patchLayout(defaults)
-                  applyLayoutPatch(defaults)
-                }}
-              >
-                <ResetIcon data-icon="inline-start" />
-                Reset camera settings
-              </Button>
-
-              <SourceVisibilityField
-                disabled={isSessionActive}
-                source={selectedSource}
-                onVisibilityChange={setSceneSourceVisible}
-              />
-            </>
-          ) : sourceIsFullCanvas(selectedSource) && !isFreeform ? (
-            // Compact inspector for full-canvas sources: no dead controls — a
-            // source that fills the frame has no position to nudge and nothing
-            // to reset, so the arrow grid never renders (post-0.9.4 fix F3;
-            // the disabled-arrow grid read as a broken app).
-            <div className="grid gap-3">
-              <div className="min-w-0">
-                <div className="truncate text-sm font-semibold">{selectedSource.name}</div>
-                <div className="text-xs text-muted-foreground">
-                  Fills the whole canvas. Position is fixed for this layout.
-                </div>
-              </div>
-              <SourceVisibilityField
-                disabled={isSessionActive}
-                source={selectedSource}
-                onVisibilityChange={setSceneSourceVisible}
-              />
-            </div>
-          ) : (
-            <div className="grid gap-3">
-              <div className="flex items-center justify-between gap-3">
-                <div className="min-w-0 truncate text-sm font-semibold">{selectedSource.name}</div>
                 <Button
-                  disabled={isSessionActive}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void resetSceneSource(selectedSource.id)}
+                  className="mt-2 w-fit"
+                  size="xs"
+                  variant="ghost"
+                  onClick={() => {
+                    const defaults = {
+                      cameraTransformMode: 'preset',
+                      cameraTransform: null,
+                      cameraCorner: 'bottom-right',
+                      cameraSize: 'medium',
+                      cameraShape: 'rectangle',
+                      cameraCornerRadiusPct: 12,
+                      cameraAspect: 'source',
+                      cameraMargin: 32,
+                      cameraFit: 'fill',
+                      cameraMirror: false,
+                      cameraZoom: 100,
+                      cameraOffsetX: 0,
+                      cameraOffsetY: 0,
+                      cameraChromaKeyEnabled: false,
+                      cameraChromaKeyColor: '#00FF00',
+                      cameraChromaKeySimilarityPct: 40,
+                      cameraChromaKeySmoothnessPct: 8,
+                      cameraChromaKeySpillPct: 10
+                    } as const
+                    patchLayout(defaults)
+                    applyLayoutPatch(defaults)
+                  }}
                 >
-                  Reset
+                  <ResetIcon data-icon="inline-start" />
+                  Reset camera settings
                 </Button>
+
+                <SourceVisibilityField
+                  disabled={isSessionActive || stageBusy}
+                  source={selectedSource}
+                  onVisibilityChange={setSceneSourceVisible}
+                />
+              </>
+            ) : sourceIsFullCanvas(selectedSource) && !isFreeform ? (
+              // Compact inspector for full-canvas sources: no dead controls — a
+              // source that fills the frame has no position to nudge and nothing
+              // to reset, so the arrow grid never renders (post-0.9.4 fix F3;
+              // the disabled-arrow grid read as a broken app).
+              <div className="grid gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold">{selectedSource.name}</div>
+                  <div className="text-xs text-muted-foreground">
+                    Fills the whole canvas. Position is fixed for this layout.
+                  </div>
+                </div>
+                <SourceVisibilityField
+                  disabled={isSessionActive || stageBusy}
+                  source={selectedSource}
+                  onVisibilityChange={setSceneSourceVisible}
+                />
               </div>
-              {/* Precise numeric twin of the stage gestures; commits ride the
+            ) : (
+              <div className="grid gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div className="min-w-0 truncate text-sm font-semibold">
+                    {selectedSource.name}
+                  </div>
+                  <Button
+                    disabled={isSessionActive || stageBusy}
+                    size="sm"
+                    variant="outline"
+                    onClick={() => void resetSceneSource(selectedSource.id)}
+                  >
+                    Reset
+                  </Button>
+                </div>
+                {/* Precise numeric twin of the stage gestures; commits ride the
                   same backend scene commit and echo the sanitized result. */}
-              <SourceTransformFields
-                disabled={isSessionActive}
-                disabledReason="Scene layout is locked while a session is live."
-                outputHeight={captureConfig.video.height}
-                outputWidth={captureConfig.video.width}
-                source={selectedSource}
-                onCommit={(patch) => void setSceneSourceTransform(selectedSource.id, patch)}
-              />
-              {/* w-fit + auto columns keep the arrows a tight d-pad cluster —
+                <SourceTransformFields
+                  key={selectedSource.id}
+                  aspectLocked={aspectLocked}
+                  onAspectLockedChange={setAspectLocked}
+                  disabled={isSessionActive || stageBusy}
+                  disabledReason={
+                    isSessionActive ? 'Scene layout is locked while a session is live.' : undefined
+                  }
+                  outputHeight={captureConfig.video.height}
+                  outputWidth={captureConfig.video.width}
+                  source={selectedSource}
+                  onCommit={(patch) =>
+                    runPreciseEdit(() => setSceneSourceTransform(selectedSource.id, patch))
+                  }
+                />
+                {/* w-fit + auto columns keep the arrows a tight d-pad cluster —
                   1fr side columns stretched, stranding ← at the panel edge
                   (external tester report, 2026-07-06). */}
-              <div className="grid w-fit grid-cols-[repeat(3,auto)] items-center justify-items-center gap-2 self-start">
-                <span />
-                <Button
-                  aria-label="Nudge source up"
-                  disabled={!sceneEditMode || isSessionActive}
-                  size="icon"
-                  variant="outline"
-                  onClick={() => void nudgeSceneSource(selectedSource.id, 0, -1)}
-                >
-                  <ArrowUpIcon />
-                </Button>
-                <span />
-                <Button
-                  aria-label="Nudge source left"
-                  disabled={!sceneEditMode || isSessionActive}
-                  size="icon"
-                  variant="outline"
-                  onClick={() => void nudgeSceneSource(selectedSource.id, -1, 0)}
-                >
-                  <ArrowLeftIcon />
-                </Button>
-                <Button
-                  aria-label="Nudge source down"
-                  disabled={!sceneEditMode || isSessionActive}
-                  size="icon"
-                  variant="outline"
-                  onClick={() => void nudgeSceneSource(selectedSource.id, 0, 1)}
-                >
-                  <ArrowDownIcon />
-                </Button>
-                <Button
-                  aria-label="Nudge source right"
-                  disabled={!sceneEditMode || isSessionActive}
-                  size="icon"
-                  variant="outline"
-                  onClick={() => void nudgeSceneSource(selectedSource.id, 1, 0)}
-                >
-                  <ArrowRightIcon />
-                </Button>
-              </div>
-              {/* Disabled arrows must say why — silent dead controls read as
+                <div className="grid w-fit grid-cols-[repeat(3,auto)] items-center justify-items-center gap-2 self-start">
+                  <span />
+                  <Button
+                    aria-label="Nudge source up"
+                    disabled={!sceneEditMode || isSessionActive || stageBusy}
+                    size="icon"
+                    variant="outline"
+                    onClick={() => runPreciseEdit(() => nudgeSceneSource(selectedSource.id, 0, -1))}
+                  >
+                    <ArrowUpIcon />
+                  </Button>
+                  <span />
+                  <Button
+                    aria-label="Nudge source left"
+                    disabled={!sceneEditMode || isSessionActive || stageBusy}
+                    size="icon"
+                    variant="outline"
+                    onClick={() => runPreciseEdit(() => nudgeSceneSource(selectedSource.id, -1, 0))}
+                  >
+                    <ArrowLeftIcon />
+                  </Button>
+                  <Button
+                    aria-label="Nudge source down"
+                    disabled={!sceneEditMode || isSessionActive || stageBusy}
+                    size="icon"
+                    variant="outline"
+                    onClick={() => runPreciseEdit(() => nudgeSceneSource(selectedSource.id, 0, 1))}
+                  >
+                    <ArrowDownIcon />
+                  </Button>
+                  <Button
+                    aria-label="Nudge source right"
+                    disabled={!sceneEditMode || isSessionActive || stageBusy}
+                    size="icon"
+                    variant="outline"
+                    onClick={() => runPreciseEdit(() => nudgeSceneSource(selectedSource.id, 1, 0))}
+                  >
+                    <ArrowRightIcon />
+                  </Button>
+                </div>
+                {/* Disabled arrows must say why — silent dead controls read as
                   a broken app (2026-07-02 report on the full-canvas screen). */}
-              {!sceneEditMode ? (
-                <p className="text-xs text-muted-foreground">
-                  Click the source on the stage to start editing, then nudge with the arrows.
-                </p>
-              ) : isSessionActive ? (
-                <p className="text-xs text-muted-foreground">
-                  Scene layout is locked while a session is live.
-                </p>
-              ) : null}
-              <SourceVisibilityField
-                disabled={isSessionActive}
-                source={selectedSource}
-                onVisibilityChange={setSceneSourceVisible}
-              />
-            </div>
-          )}
-        </PanelSection>
+                {!sceneEditMode ? (
+                  <p className="text-xs text-muted-foreground">
+                    Click the source on the stage to start editing, then nudge with the arrows.
+                  </p>
+                ) : isSessionActive ? (
+                  <p className="text-xs text-muted-foreground">
+                    Scene layout is locked while a session is live.
+                  </p>
+                ) : null}
+                <SourceVisibilityField
+                  disabled={isSessionActive || stageBusy}
+                  source={selectedSource}
+                  onVisibilityChange={setSceneSourceVisible}
+                />
+              </div>
+            )}
+          </PanelSection>
+        </FieldSet>
       </div>
     </div>
   )

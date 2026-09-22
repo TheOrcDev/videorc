@@ -70,6 +70,11 @@ export function buildRecordingStudioGateSteps({
   if (includeAppSmoke) {
     steps.push(
       {
+        label: 'freeform editor pointer continuity smoke',
+        command: 'pnpm',
+        args: ['smoke:freeform-editor']
+      },
+      {
         label: 'live captions transport contract smoke',
         command: 'pnpm',
         args: ['smoke:captions-contract']
