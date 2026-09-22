@@ -1,6 +1,6 @@
 ---
 name: videorc-release
-description: Cut and publish coordinated Videorc desktop releases for the signed and notarized macOS Beta and the signed Windows 11 x64 Alpha, including version/changelog preparation, protected Windows candidate and promotion workflows, release storage publication (Neon target origin), updater verification, and release records. Use when the user asks to cut, ship, publish, deploy, or make a new Videorc desktop release or update. Target both macOS and Windows by default unless the user explicitly narrows the platform.
+description: Execute Videorc desktop releases when the user says "release new version", "ship an update", or asks to cut or publish a release. Coordinates signed macOS Beta and Windows Alpha builds, acceptance, storage publication, updater verification, and release records. Defaults to both platforms; supports explicitly scoped platform-only releases.
 ---
 
 # Videorc release
@@ -13,6 +13,36 @@ Ship one new numeric desktop version on both supported tracks:
 Target both platforms unless the user explicitly requests a platform-only
 release. Do not silently skip Windows because macOS can be released locally.
 
+## Start here: "release new version"
+
+This is an execution request, not just a request for a plan. Work through the
+checkpoints below until the requested platforms are live and verified, or an
+explicit human gate blocks further progress. A request to explain, review, or
+edit this process authorizes only that work: do not bump versions, load secrets,
+dispatch release workflows, publish, or announce a release for such a request.
+
+1. Read repository instructions and inspect the checkout before editing. Fetch
+   current `main`; use a clean release branch/worktree from it. Preserve unrelated
+   work. Never build a release from whichever feature branch happens to be open.
+2. Read the runbooks below. Check current package/changelog/release records,
+   selected platforms' public feeds, pending origin-sync records, and in-flight
+   release workflows. Do not treat an unreachable feed as proof of a first release.
+3. If a release is already prepared or partially published, reconcile its exact
+   identity and resume it using "Resume and handoff" below. If it is unclear
+   whether the user wants that release or a different one, ask before changing
+   versions or publishing a second candidate.
+4. For a genuinely new release with no requested version, increment the patch
+   component of the highest numeric version in current `main` or the selected
+   platforms' published releases. Default to `beta.1` and `alpha.1`. Honor an
+   explicit version/Beta number only if it satisfies the versioning rules. Do
+   not choose a major/minor bump from a guess about the intended product scope.
+5. Announce the proposed version, platforms, and release mode in a short update.
+   Verify the prerequisites and named owners below; ask only for missing choices,
+   access, or human actions that are actually needed. Never ask for secrets in chat.
+6. Check the candidate's required CI and local release evidence. A merge, a prior
+   version's passing tests, or a playable MP4 is not proof that this candidate
+   passed. Surface failed, missing, or skipped required gates before publication.
+
 Before acting, read both sources of truth in full:
 
 - `docs/releases/release-runbook.md` for macOS, shared versioning, and rollback;
@@ -20,7 +50,80 @@ Before acting, read both sources of truth in full:
   physical acceptance, pilot, public promotion, and rollback.
 
 Keep this skill as the executable coordinator. Do not weaken or duplicate the
-runbooks' detailed gates.
+runbooks' detailed gates. Commands below are templates: resolve every placeholder
+from verified release state before executing them. Use the maintained scripts,
+not hand-written signing, upload, manifest-edit, or promotion replacements.
+
+## Execution checkpoints
+
+Do not advance a platform past a checkpoint without its evidence. The numbered
+sections below contain the commands; the runbooks define their detailed gates.
+
+For macOS-only, run sections 1–2 and the macOS parts of section 5; skip Windows
+workflows, approvals, and prerequisites. For Windows-only, prepare the version
+and Alpha entry, then run sections 3–5 without a macOS build/upload or Beta entry.
+Do not block a platform-only request on the other platform's credentials.
+
+| Checkpoint              | AI action                                                               | Required result / human boundary                                                                                     |
+| ----------------------- | ----------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| Prepare                 | Select version, write accurate changelog, validate, open release PR     | Reviewed changes on protected `main`; exact source SHA recorded. Wait for required review, do not bypass protection. |
+| macOS build (§2)        | Run the local keychain build and artifact validation                    | Signed, notarized, stapled app plus validated download and updater artifacts.                                        |
+| macOS acceptance (§2)   | Run applicable release, installed-app, device, and provider gates       | Recorded PASS. Human supplies physical access and OS permission grants; synthetic checks do not replace them.        |
+| macOS publish (§2)      | Preflight storage, upload, follow download/update redirects             | Exact version/checksums verified in production; mirror result recorded.                                              |
+| Windows candidate (§3)  | Dispatch the protected-main candidate workflow and monitor both jobs    | Exact immutable signed candidate identity. Wait for protected-environment approval.                                  |
+| Windows acceptance (§4) | Coordinate physical acceptance, pilot update, and committed PASS record | Exact-candidate evidence, or the separately defined owner-written waiver route. Never fabricate either.              |
+| Windows publish (§4–5)  | Dispatch public promotion of the same bytes, then production checks     | Verified installer/feed/blockmap and visible acceptance status before enabling public web state.                     |
+| Finish (§5)             | Record both outcomes and announce only live platforms                   | Production evidence, remaining blockers, and next action; never describe a private candidate as shipped.             |
+
+For macOS, distinguish ordinary Beta publication from the one-time D3 exact
+promotion using the runbook's "Publication policy" section and current D3 state.
+Do not launch the D3 ceremony merely because the user asked for a release, or
+use the ordinary path to evade an `accepted` sealed-candidate state. The D3
+exception does not waive ordinary release/device/provider gates.
+
+## Stop and escalation rules
+
+- A failed required gate stops publication for the affected platform. Inspect
+  the error and preserve evidence; do not lower thresholds, ignore an audit,
+  enable changelog/acceptance skip switches, bypass TLS, or use an admin merge
+  to continue. If a fix requires product/dependency changes, report it and obtain
+  direction; accepted candidate bytes must not be patched in place.
+- Missing credentials, named owners, physical evidence, OS grants, or protected
+  approval are human gates. Report the exact missing input and the next command
+  that can run after it arrives. Continue an independently eligible platform;
+  do not silently drop the blocked one or claim overall completion.
+- For a transient transport error, retry read-only verification once. Retry an
+  upload/promotion only under the runbook's exact-identity/idempotency rules,
+  after inspecting remote state. A repeated failure or uncertain partial write
+  requires an owner handoff, not blind redispatch or deleting remote objects.
+- Check the actual configured storage origins and production primary. Neon is
+  the target, not proof that cutover has happened. Do not migrate storage, switch
+  the primary, or enable mirror-only emergency publication as part of a routine
+  release without the explicit owner decision required by the runbook.
+- Keep credential values, bearer/presigned URLs, raw recordings, and private
+  acceptance evidence out of tool output, Git, PRs, and the final response.
+
+## Resume and handoff
+
+Maintain the sanitized release note at `docs/releases/<version>.md` as checkpoints
+finish or block. Record requested platforms, release IDs, each source SHA,
+workflow run URLs, candidate hashes, acceptance record URL/status, completed
+gates, public verification, pending storage mirrors, announcement status, and
+the exact next action. Keep raw evidence in private release storage.
+Keep pending documentation edits separate from the frozen, clean artifact
+checkout. Do not advance protected `main` with checkpoint commits while a
+workflow or exact-promotion stage requires it to remain unchanged.
+
+On resume, read that record and reconcile it with workflow and remote artifact
+state before taking any write action. Reverify completed public steps instead
+of rebuilding, reuploading, redispatching, or reannouncing them. A receipt or a
+successful command alone does not replace production verification. Never move a
+mutable latest pointer backward to finish an older release after a newer one.
+
+Final response: one short line per platform with version, `live`, `candidate`,
+`blocked`, or `not requested`, plus acceptance status (`PASS` or `waived` for
+Windows), evidence link, and any remaining human action. Disclose pending mirror
+sync even when the primary is live. Use "complete" only under the contract below.
 
 ## Completion contract
 
@@ -33,8 +136,10 @@ runbooks' detailed gates.
 - Build Windows only from current protected `main`; never release a PR artifact,
   locally signed substitute, or rebuilt post-acceptance installer.
 - Call the coordinated release complete only after macOS is live and verified
-  and the exact Windows candidate has passed physical acceptance, pilot, public
-  promotion, and production smoke.
+  and the exact Windows candidate has completed the physical acceptance/pilot
+  route (or the runbook's owner-waiver route), public promotion, and production
+  smoke. Report a waiver as `waived`, never as a physical acceptance PASS. For
+  an explicitly platform-only request, complete only that requested track.
 - If an external Windows gate cannot be completed, preserve the candidate and
   report the release as partial with the exact missing gate. Never describe a
   private candidate or pilot pointer as a public Windows release.
@@ -87,8 +192,10 @@ runbooks' detailed gates.
   publisher/profile values, and least-privilege candidate/promotion storage
   credentials (including the `VIDEORC_RELEASE_UPLOAD_NEON_S3_*` origin) are
   configured.
-- Verify a named operator has clean physical Windows 11 x64 hardware, private
-  candidate-read access, a release secret channel, and the acceptance template.
+- For the physical acceptance route, verify a named operator has clean physical
+  Windows 11 x64 hardware, private candidate-read access, a release secret
+  channel, and the acceptance template. An owner-waiver route instead requires
+  the owner's committed exact-candidate record described in section 4.
 - Verify the web pilot bearer secret and the disabled/pilot/public release-state
   values are ready. Do not place Windows signing or storage credentials in a
   local release env file.
@@ -99,13 +206,16 @@ runbooks' detailed gates.
 2. Choose the macOS Beta number and derive `<version>-beta.<N>`.
 3. Derive the Windows release ID as exactly `<version>-alpha.1`. A correction
    requires another numeric version bump; never issue same-version `alpha.2`.
-4. Write `changelog/<version>-beta.<N>.md` with `channel: beta` and
-   `platforms: [macos]`.
-5. Run `pnpm changelog:check`, commit the version and macOS entry, push through a
-   reviewed PR, and merge to protected `main`.
+4. When macOS is requested, write `changelog/<version>-beta.<N>.md` with
+   `channel: beta` and `platforms: [macos]`. For Windows-only, write the Alpha
+   entry from section 3 instead.
+5. Run `pnpm changelog:check`, commit the version and requested platform entry,
+   push through a reviewed PR, and merge to protected `main`.
 
-Record the full lowercase 40-character macOS source commit. The Windows Alpha
-changelog entry may be added before or after the macOS upload:
+Record the full lowercase 40-character source commit for the requested platform.
+For a coordinated release, this is the macOS source; record the later Windows
+candidate source separately. The Windows Alpha changelog entry may be added
+before or after the macOS upload:
 `release:upload:macos` withholds Windows-only entries that are not public yet,
 so a held Windows release is never disclosed by a macOS upload. Confirm the
 `withholding <releaseId>` line in the upload log.
@@ -152,7 +262,9 @@ versioned object.
 
 ## 3. Build the private Windows Alpha candidate
 
-After the macOS upload and verification succeed:
+For a coordinated release, continue after macOS upload and verification succeed.
+For Windows-only, start here after version preparation; macOS is not a dependency.
+Reuse the already prepared version/Alpha entry rather than bumping twice:
 
 1. Add `changelog/<version>-alpha.1.md` with `channel: alpha` and
    `platforms: [windows]` on top of current `main`.
@@ -203,6 +315,18 @@ ad-hoc unvalidated object edit or the changelog skip escape as a purge mechanism
 
 Follow every command and evidence rule in
 `docs/releases/windows-alpha-runbook.md`:
+
+The default is the physical acceptance and pilot route below. The runbook also
+allows an owner-waiver route: read "Owner waiver instead of a PASS record" and
+`docs/acceptance/windows-alpha-acceptance-record.md` before using it. Only the
+release owner may write and commit that exact-candidate waiver. The AI must not
+author it, infer it from "release new version", or turn a failing test into a
+waiver. Once the owner's record is on protected `main`, verify its identity and
+commit-pinned URL, use the public-promotion command below, and run the production
+smoke. Preserve `acceptanceStatus: waived` on download surfaces and in reporting.
+The waiver does not bypass signing, hashes, protected approvals, or production
+verification. Without PASS evidence or an owner-committed waiver, stop Windows
+before public promotion and report the missing gate.
 
 1. Download and verify the exact private candidate on clean physical Windows 11
    x64 hardware.

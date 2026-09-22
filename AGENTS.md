@@ -2,6 +2,15 @@
 
 These rules are load-bearing for Videorc work. Read this before changing code.
 
+## Desktop Releases
+
+When the user says "release new version", "ship an update", or asks to publish
+Videorc, read `.agents/skills/videorc-release/SKILL.md` before taking release
+actions. It is the entrypoint for AI-operated releases, including defaults,
+ordered checkpoints, human gates, and resuming partial releases. Follow its
+linked runbooks; do not invent a shorter release path from package scripts.
+An explanation or edit of the release process is not permission to publish.
+
 ## Verification Gates
 
 Use the smallest gate that proves the change, then run the broader gate before handing off risky work.
