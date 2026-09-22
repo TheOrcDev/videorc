@@ -36,8 +36,9 @@ candidate. Development setup and evidence handling are documented in
 
 ## What a macOS release is
 
-Two artifact sets in the same private bucket (`videorc-releases`) on every
-storage origin (see [Storage origins](#storage-origins)), fronted by videorc-web:
+Two artifact sets in the private release bucket of every storage origin
+(`videorc-releases` on R2 and Hetzner, `releases` on Neon; see
+[Storage origins](#storage-origins)), fronted by videorc-web:
 
 | Artifacts                                                     | Object keys                                         | Web route                                             | Audience                     |
 | ------------------------------------------------------------- | --------------------------------------------------- | ----------------------------------------------------- | ---------------------------- |
@@ -67,7 +68,7 @@ check (default in packaged builds since 0.9.10; opt out via
   **Auto-update requires a signed build** — electron-updater refuses to apply an
   unsigned/ad-hoc update.
 - **Storage write creds** — the Neon uploader key
-  (`VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `storage:write`) in
+  (`VIDEORC_RELEASE_UPLOAD_NEON_S3_*`, `storage:read` + `storage:write`) in
   `~/.videorc-release.env`. While R2 is still an origin, also the
   `VIDEORC_DOWNLOAD_S3_*` values (same bucket as videorc-web, **Object Read &
   Write** token) from the web app's `.env` (`~/projects/videorcweb/.env`).
@@ -99,7 +100,7 @@ back with an environment change only.
 
 | Origin    | Environment                                                                    | Notes                                                                                                                           |
 | --------- | ------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------- |
-| `neon`    | `VIDEORC_RELEASE_UPLOAD_NEON_S3_*` in `~/.videorc-release.env`                 | Neon Object Storage, project `videorc-releases`, bucket `videorc-releases`, Frankfurt. Branch endpoint, path-style, TLS Amazon. |
+| `neon`    | `VIDEORC_RELEASE_UPLOAD_NEON_S3_*` in `~/.videorc-release.env`                 | Neon Object Storage, project `videorc-releases`, bucket `releases`, Frankfurt. Branch endpoint, path-style, TLS Amazon.         |
 | `hetzner` | `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*` in `~/.videorc-release.env`              | Hetzner Object Storage, project `videorc`, `fsn1`, region `eu-central`. Retained read-only until the soak ends.                 |
 | `r2`      | `VIDEORC_DOWNLOAD_S3_*` (or `VIDEORC_RELEASE_UPLOAD_S3_*`) from the web `.env` | Cloudflare R2, the legacy slot. Bucket-less endpoint (below). Retained read-only until the soak ends; still the D3 destination. |
 
@@ -119,8 +120,10 @@ back with an environment change only.
   populated until it is retired.
 - Neon endpoints look like `https://<branch-id>.storage.c-<N>.<region>.aws.neon.tech`
   (host only, no bucket). Set `VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION` to the
-  short AWS form, e.g. `eu-central-1`. Neon keys are not bucket- or
-  prefix-scoped; isolation is the dedicated `videorc-releases` project.
+  short AWS form, e.g. `eu-central-1`. Every Neon release credential needs
+  **both** `storage:read` and `storage:write`: a write-only key gets 403 on the
+  HEAD and GET the uploader makes around every PUT. Neon keys are not bucket-
+  or prefix-scoped; isolation is the dedicated `videorc-releases` project.
 - `VIDEORC_DOWNLOAD_STORAGE_PRIMARY` (`r2` when unset) must match the value in
   the videorc-web production environment. It names the origin clients are
   redirected to. Origins are published mirrors first, primary last.

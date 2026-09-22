@@ -102,7 +102,7 @@ pointer updates are both enforced.
 - `pnpm release:upload:preflight:macos` reports both origins reachable, with
   `r2` as primary.
 
-## Neon (PENDING probe)
+## Neon
 
 Slice N0 of the vault plan "2026-09-22 - Videorc Object Storage to Neon Plan".
 Owner decision 2026-09-22: Neon Object Storage becomes the single release
@@ -112,32 +112,66 @@ origin, and R2 and Hetzner are retired after a soak.
 pnpm probe:release-storage-compat -- --origin neon
 ```
 
-| Field    | Value                                                                                        |
-| -------- | -------------------------------------------------------------------------------------------- |
-| Endpoint | `https://<branch-id>.storage.c-<N>.<region>.aws.neon.tech` (per branch, host only)           |
-| Style    | Path-style only, SigV4 only                                                                  |
-| Region   | Short AWS form in the SigV4 scope, expected `eu-central-1` for Frankfurt (probe confirms)    |
-| Project  | `videorc-releases`, `main` branch only, bucket `videorc-releases`, `private`                 |
-| TLS peer | Issuer O=Amazon (CN Amazon RSA 2048 M01/M04), subject `*.storage.c-N.<region>.aws.neon.tech` |
+| Field    | Value                                                                                           |
+| -------- | ----------------------------------------------------------------------------------------------- |
+| Endpoint | `https://br-shiny-dust-b2da46yj.storage.c-6.eu-central-1.aws.neon.tech` (per branch, host only) |
+| Style    | Path-style only, SigV4 only                                                                     |
+| Region   | `eu-central-1` (short AWS form in the SigV4 scope)                                              |
+| Project  | `videorc-releases` (Frankfurt), bucket `releases`, `private` (see `neon.ts`)                    |
+| TLS peer | Issuer O=Amazon (CN Amazon RSA 2048 M01/M04), subject `*.storage.c-N.<region>.aws.neon.tech`    |
 
-The TLS issuer was measured on 2026-09-22 and is built in: any host matching
-`<label>.storage.c-<N>.<region>.aws.neon.tech` (anchored, see
-`isNeonStorageHostname` in `scripts/lib/release-upload-s3.mjs`) gets
-`allowedIssuerOrganizations: ["Amazon"]`. Lookalike hosts still fail closed
-with `missing-tls-policy`.
+### Results
 
-Neon keys are scoped `storage:read` or `storage:write` per branch lineage, not
-per bucket or prefix, so isolation is the dedicated project. `expires_at` is
-not enforced; revoke keys explicitly.
+Run 2026-09-22 with a credential carrying `storage:read` and `storage:write`.
 
-Checks 1a to 7 above are **PENDING**: they run once the uploader key exists.
-Neon does not document conditional PUT (`If-None-Match` / `If-Match`) or
-`x-amz-checksum-sha256`, so until the probe says otherwise Neon runs on the S3
-default capabilities (`checksumHeaders: true`, `ifMatchEtagForm: 'quoted'`).
-Its entry in the capability rule table (`releaseUploadOriginCapabilities`) is
-the one line to amend with the result. Extra N0 checks: presign max
-`X-Amz-Expires`, a 150 MB single-part PUT, a soft-deleted key on HEAD and on an
-`If-None-Match: *` re-PUT, and 20 parallel GETs looking for `503 SlowDown`.
+| #   | Check                                                 | neon                                                                                         |
+| --- | ----------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| 1a  | `If-None-Match: *` creates a missing object           | PASS                                                                                         |
+| 1b  | `If-None-Match: *` refuses an existing object (412)   | PASS (stored bytes unchanged)                                                                |
+| 2a  | `If-Match: <etag>` replaces a pointer                 | PASS (quoted)                                                                                |
+| 2b  | `If-Match: <stale etag>` is refused (412)             | PASS                                                                                         |
+| 3a  | `x-amz-checksum-sha256` round trips on HEAD           | PASS                                                                                         |
+| 3b  | A body that does not match its signed hash is refused | PASS (400 `BadDigest`)                                                                       |
+| 4   | `x-amz-meta-videorc-sha256` survives HEAD             | PASS                                                                                         |
+| 5a  | Presigned GET returns the exact bytes                 | PASS                                                                                         |
+| 5b  | Presigned GET honours `Range` (206)                   | PASS                                                                                         |
+| 5c  | Presigned GET honours `response-content-disposition`  | **FAIL** (header absent)                                                                     |
+| 6   | TLS peer                                              | Amazon, leaf SPKI SHA-256 `be20ccfc35a00221d84fd37972001dcb4f63ae2c69d449c6293e5a640921ff83` |
+| 7   | DELETE removes the scratch objects                    | PASS                                                                                         |
 
-GO needs 1b, 2a (any ETag form), 4 and 5a to 5c to pass. A missing checksum
-header is acceptable, as it is on Hetzner.
+### Findings for Neon
+
+**Verdict: GO, with one mitigation for 5c.**
+
+1. **Capabilities equal the S3 defaults** (`checksumHeaders: true`,
+   `ifMatchEtagForm: 'quoted'`). Neon has its own entry in the
+   `releaseUploadOriginCapabilities` rule table so a later difference is a
+   one-line change.
+2. **5c: presigned GETs ignore `response-content-disposition`.** The web
+   download routes ask for an attachment disposition through that query
+   parameter; on Neon it is dropped. Mitigation at write time: the uploader
+   stores `Content-Disposition: attachment; filename="<basename>"` (signed) on
+   every installer object (`.dmg`, `.exe`), on every origin, derived from the
+   object key (`releaseArtifactContentDisposition` in
+   `scripts/lib/release-upload-s3.mjs`). `release:sync:origins` publishes
+   through the same function, so copies get it too. Updater zips, blockmaps,
+   feeds and manifests never carry it. An installer object that already exists
+   on an origin is reused as is, so only objects written after this change
+   carry the header.
+3. **Credentials need both scopes.** A credential with only `storage:write`
+   gets 403 on HEAD and GET, contrary to Neon's docs that say write includes
+   read. The uploader always reads before and after it writes, so every
+   release credential (local uploader and GitHub Actions) must carry
+   `storage:read` and `storage:write`.
+4. **TLS.** The endpoint presents an Amazon-issued certificate. Any host
+   matching `<label>.storage.c-<N>.<region>.aws.neon.tech` (anchored, see
+   `isNeonStorageHostname`) gets `allowedIssuerOrganizations: ["Amazon"]`
+   built in. Lookalike hosts still fail closed with `missing-tls-policy`.
+   Amazon leaves rotate, so the SPKI above is a record, not a pin.
+5. Neon keys are scoped per branch lineage, not per bucket or prefix, so
+   isolation is the dedicated project. `expires_at` is not enforced; revoke
+   keys explicitly.
+
+Still to measure in N0: presign max `X-Amz-Expires`, a 150 MB single-part PUT,
+a soft-deleted key on HEAD and on an `If-None-Match: *` re-PUT, and 20
+parallel GETs looking for `503 SlowDown`.

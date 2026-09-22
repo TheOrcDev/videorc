@@ -73,6 +73,8 @@ runbooks' detailed gates.
 - Only while R2 is still an origin: load `VIDEORC_DOWNLOAD_S3_*` from
   `~/projects/videorcweb/.env` and normalize the upload endpoint to the
   bucket-less R2 account host. A Neon-only setup needs no R2 env.
+- Every Neon release credential needs both `storage:read` and `storage:write`;
+  a write-only key gets 403 on the uploader's HEAD/GET checks.
 - Read "Storage origins" in the release runbook: a blocked mirror degrades the
   release and leaves a pending record to replay with
   `pnpm release:sync:origins -- --pending`; a blocked primary stops it unless

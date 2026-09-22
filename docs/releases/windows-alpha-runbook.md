@@ -347,7 +347,7 @@ The protected promotion workflow reads the further origins from the
 
 - `neon`: secrets `VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID` and
   `VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY` (the Neon key named
-  "github-actions release", `storage:write`), variables
+  "github-actions release", `storage:read` + `storage:write`), variables
   `VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET`, `..._REGION`, `..._ENDPOINT_URL`.
 - `hetzner` (retained until the Neon soak ends): secrets
   `VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID` and
