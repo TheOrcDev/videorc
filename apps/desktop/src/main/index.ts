@@ -20,6 +20,7 @@ import {
   type NativeImage
 } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
+import { NativePreviewFrameLeaseClient } from './native-preview-frame-lease'
 import {
   copyFileSync,
   existsSync,
@@ -6450,7 +6451,7 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
   if (process.platform !== 'darwin') {
     return { kind: 'skipped', logKey: 'no-handoff:not-macos' }
   }
-  const handoff = compositorStatusMetalTargetHandoff(status, {
+  let handoff = compositorStatusMetalTargetHandoff(status, {
     maxAgeMs: DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS
   })
   if (!handoff) {
@@ -6529,15 +6530,33 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
   let driverStatus: PreviewSurfaceStatus | null
   const presentStartedAtMs = Date.now()
   try {
-    driverStatus = await driver.presentCompositorHandoff({
-      handoff,
-      bounds: nativePreviewSurfaceStatus.bounds,
-      scene: nativePreviewSurfaceScene,
-      suppressFramePolling:
-        nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true,
-      frameAgeMs: status.frameAgeMs ?? undefined,
-      compositorUpdatedAt: status.updatedAt
-    })
+    if (!handoff.runId) return { kind: 'skipped', logKey: 'lease:missing-run' }
+    const leased = await nativePreviewFrameLeases.withFrame(
+      {
+        runId: handoff.runId,
+        sceneRevision: status.sceneRevision ?? undefined
+      },
+      async (frame) => {
+        if (!nativePreviewPresentationAllowedForGeneration(generation)) return null
+        status = { ...status, ...frame }
+        const retainedHandoff = compositorStatusMetalTargetHandoff(status, {
+          maxAgeMs: DEFAULT_NATIVE_PREVIEW_MAX_HANDOFF_AGE_MS
+        })
+        if (!retainedHandoff) return null
+        handoff = retainedHandoff
+        return driver.presentCompositorHandoff({
+          handoff: retainedHandoff,
+          bounds: nativePreviewSurfaceStatus.bounds,
+          scene: nativePreviewSurfaceScene,
+          suppressFramePolling:
+            nativePreviewSurfaceFramePollingSuppressed || status.suppressFramePolling === true,
+          frameAgeMs: status.frameAgeMs ?? undefined,
+          compositorUpdatedAt: status.updatedAt
+        })
+      }
+    )
+    if (!leased) return { kind: 'skipped', logKey: 'lease:frame-not-ready' }
+    driverStatus = leased.result
   } catch (error) {
     nativePreviewRealSurfaceInvalidActivationCount = 0
     await disableNativePreviewRealSurfaceDriver(
@@ -8281,6 +8300,7 @@ function startBackendWithRegistryLock(): void {
 // keeps its pump as an automatic fallback whenever this socket is down.
 // ---------------------------------------------------------------------------
 let backendEventSocket: WebSocket | null = null
+const nativePreviewFrameLeases = new NativePreviewFrameLeaseClient(() => backendAdminConnection)
 let nativePreviewMainPumpActive = false
 let backendEventSocketRetryTimer: ReturnType<typeof setTimeout> | null = null
 let mainPresentReportLastSentAtMs = 0
@@ -10358,17 +10378,27 @@ async function runSmokePreviewMotionCommand(
     const forcePresent = async (label: string): Promise<void> => {
       revision += 1
       const beforeFrames = lastFrames
-      const liveCompositorStatus =
-        params.preserveScene === true ? await fetchFirstFrameCompositorStatus() : null
-      const compositorStatus =
-        liveCompositorStatus ??
-        smokeCompositorStatusFromSceneParams(
-          smokePreviewSceneParams(revision, 0.18 + (revision % 5) * 0.12)
+      const deadline = performance.now() + 1000
+      let status: PreviewSurfaceStatus
+      do {
+        const liveCompositorStatus =
+          params.preserveScene === true ? await fetchFirstFrameCompositorStatus() : null
+        const compositorStatus =
+          liveCompositorStatus ??
+          smokeCompositorStatusFromSceneParams(
+            smokePreviewSceneParams(revision, 0.18 + (revision % 5) * 0.12)
+          )
+        status = await updateNativePreviewSurfaceCompositor(
+          liveCompositorStatus ?? {
+            ...compositorStatus,
+            framesRendered: Math.max(compositorStatus.framesRendered, beforeFrames + 1)
+          }
         )
-      const status = await updateNativePreviewSurfaceCompositor({
-        ...compositorStatus,
-        framesRendered: Math.max(compositorStatus.framesRendered, beforeFrames + 1)
-      })
+        if (status.framesRendered > beforeFrames || status.state !== 'live') break
+        // Native presentation now uses the retained frame's actual sequence. Wait
+        // for capture progress instead of inventing a newer frame in the probe.
+        await delay(10)
+      } while (performance.now() < deadline)
       const step = {
         label,
         beforeFrames,

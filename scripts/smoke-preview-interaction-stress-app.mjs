@@ -528,6 +528,10 @@ async function runMovementPhase({
   const measurementPromise = smokeCommand(smoke, 'measure-native-preview-surface', {
     durationMs: measurementMs
   })
+  // These run concurrently with the bounds storm. Observe early rejections now;
+  // their original promises are still awaited and reported below. Otherwise
+  // Node can exit before evidence and owned app processes are cleaned up.
+  void measurementPromise.catch(() => undefined)
   await sleep(50)
 
   let clickFocusPromise = null
@@ -543,6 +547,7 @@ async function runMovementPhase({
         clickFocusPromise = smokeCommand(smoke, 'exercise-preview-click-focus', {
           preserveScene: deviceMode
         })
+        void clickFocusPromise.catch(() => undefined)
       }
     }
   })

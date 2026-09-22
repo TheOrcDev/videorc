@@ -20,6 +20,8 @@ use crate::capture_health::{
 };
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
 
+#[path = "compositor_preview_frame_lease.rs"]
+mod preview_frame_lease;
 #[cfg(test)]
 #[path = "compositor_scene_switch_tests.rs"]
 mod scene_switch_tests;
@@ -63,6 +65,7 @@ use crate::windows_d3d11_device::{
     DxgiAdapterLuid, WindowsD3d11MediaRole, WindowsD3d11TextureFormat,
     WindowsD3d11TextureLeaseTicket,
 };
+pub(crate) use preview_frame_lease::{CompositorPreviewFrameLease, acquire_preview_frame};
 
 #[cfg(test)]
 use crate::protocol::LayoutPreset;
@@ -320,6 +323,7 @@ pub struct CompositorRuntime {
     image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
+    preview_frame_lease_capacity: Arc<tokio::sync::Semaphore>,
     /// Recent frame evidence, oldest first (instant-record P3). The startup
     /// barrier seeds itself from this ring so a compositor that has been
     /// producing target-resolution frames passes without waiting for new ones.
@@ -1545,6 +1549,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         ),
         frame_store: Arc::new(StdMutex::new(FrameStore::new(2))),
         stream_frame_store: None,
+        preview_frame_lease_capacity: Arc::new(tokio::sync::Semaphore::new(1)),
         frame_evidence: VecDeque::new(),
         run_id: None,
         stop_tx: None,
