@@ -26,3 +26,4 @@ apps/desktop/dist/
 
 # Private per-machine agent routing config — never ship
 /CLAUDE.md
+.neon
