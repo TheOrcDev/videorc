@@ -155,6 +155,17 @@ describe('buildRecordingStudioGateSteps', () => {
     assert.match(report, /pnpm smoke:recording-native-preview/)
   })
 
+  it('resolves every package command in the complete local release gate', () => {
+    const { scripts } = JSON.parse(
+      readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
+    )
+    const commands = [...scripts['smoke:local-gates'].matchAll(/(?:^|&&)\s*pnpm\s+([a-z][\w:-]*)/g)]
+    assert.ok(commands.length > 0)
+    for (const [, command] of commands) {
+      assert.equal(typeof scripts[command], 'string', `Missing package script: ${command}`)
+    }
+  })
+
   it('keeps normal and device interaction-stress entrypoints available', () => {
     const packageJson = JSON.parse(
       readFileSync(new URL('../../package.json', import.meta.url), 'utf8')
