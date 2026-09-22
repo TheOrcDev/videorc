@@ -7,6 +7,14 @@ import {
 
 type Connection = Pick<BackendConnection, 'host' | 'port' | 'token'>
 
+/** A frame transport failure does not imply that the native presenter failed. */
+export class NativePreviewFrameLeaseError extends Error {
+  constructor(cause: unknown) {
+    super(cause instanceof Error ? cause.message : String(cause), { cause })
+    this.name = 'NativePreviewFrameLeaseError'
+  }
+}
+
 /** One connection, one retained frame, and no queued acquisitions. The backend
  * releases the frame on the matching release or when this connection closes. */
 export class NativePreviewFrameLeaseClient {
@@ -35,30 +43,51 @@ export class NativePreviewFrameLeaseClient {
     this.active = true
     const leaseId = randomUUID()
     let acquired = false
+    let presentationFailed = false
+    let result: { frame: CompositorFrameReady; result: T } | null = null
+    let failure: { error: unknown } | null = null
     try {
       await this.connect()
       const payload = await this.request('preview.surface.frame.acquire', { ...request, leaseId })
-      if (payload === null) return null
-      acquired = true
-      const frame = validateCompositorFrameReadyPayload(payload)
-      if (frame.runId !== request.runId || frame.frameSceneRevision !== request.sceneRevision) {
-        throw new Error('Preview frame lease returned a different run or scene.')
+      if (payload !== null) {
+        acquired = true
+        const frame = validateCompositorFrameReadyPayload(payload)
+        if (frame.runId !== request.runId || frame.frameSceneRevision !== request.sceneRevision) {
+          throw new Error('Preview frame lease returned a different run or scene.')
+        }
+        try {
+          result = { frame, result: await present(frame) }
+        } catch (error) {
+          presentationFailed = true
+          throw error
+        }
       }
-      return { frame, result: await present(frame) }
+    } catch (error) {
+      failure = { error: presentationFailed ? error : new NativePreviewFrameLeaseError(error) }
     } finally {
       try {
         if (acquired) await this.release(leaseId)
+      } catch (error) {
+        // Preserve a presenter failure even if releasing its frame also fails.
+        // The main process still needs to retire that failed presenter.
+        if (!presentationFailed) failure = { error: new NativePreviewFrameLeaseError(error) }
       } finally {
         this.active = false
       }
     }
+    if (failure) throw failure.error
+    return result
   }
 
   private async release(leaseId: string): Promise<void> {
-    if ((await this.request('preview.surface.frame.release', { leaseId })) !== true) {
-      const error = new Error('Preview frame release was not acknowledged.')
-      this.disconnect(error)
-      throw error
+    try {
+      if ((await this.request('preview.surface.frame.release', { leaseId })) !== true) {
+        throw new Error('Preview frame release was not acknowledged.')
+      }
+    } catch (error) {
+      const failure = new NativePreviewFrameLeaseError(error)
+      this.disconnect(failure)
+      throw failure
     }
   }
 

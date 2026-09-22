@@ -20,7 +20,10 @@ import {
   type NativeImage
 } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
-import { NativePreviewFrameLeaseClient } from './native-preview-frame-lease'
+import {
+  NativePreviewFrameLeaseClient,
+  NativePreviewFrameLeaseError
+} from './native-preview-frame-lease'
 import {
   copyFileSync,
   existsSync,
@@ -6558,6 +6561,13 @@ async function tryPresentNativePreviewRealSurfaceCompositor(
     if (!leased) return { kind: 'skipped', logKey: 'lease:frame-not-ready' }
     driverStatus = leased.result
   } catch (error) {
+    if (error instanceof NativePreviewFrameLeaseError) {
+      return {
+        kind: 'skipped',
+        reason: `Native preview waiting for a retained compositor frame: ${error.message}`,
+        logKey: 'lease:transport-error'
+      }
+    }
     nativePreviewRealSurfaceInvalidActivationCount = 0
     await disableNativePreviewRealSurfaceDriver(
       `Real CAMetalLayer IOSurface presenter failed while presenting compositor handoff: ${errorMessage(error)}`

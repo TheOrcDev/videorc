@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest'
 import { WebSocketServer } from 'ws'
-import { NativePreviewFrameLeaseClient } from './native-preview-frame-lease'
+import {
+  NativePreviewFrameLeaseClient,
+  NativePreviewFrameLeaseError
+} from './native-preview-frame-lease'
 
 const cleanups: Array<() => Promise<void>> = []
 afterEach(async () => {
@@ -105,11 +108,12 @@ describe('native preview frame lease', () => {
 
   it('releases when presentation fails', async () => {
     const { client, ownership } = await fixture()
+    const failure = new Error('present failed')
     await expect(
       client.withFrame({ runId: 'run', sceneRevision: 7 }, async () => {
-        throw new Error('present failed')
+        throw failure
       })
-    ).rejects.toThrow('present failed')
+    ).rejects.toBe(failure)
     expect(ownership).toMatchObject({ held: false, releases: 1 })
   })
 
@@ -119,25 +123,58 @@ describe('native preview frame lease', () => {
       client.withFrame({ runId: 'run', sceneRevision: 7 }, async () => {
         throw new Error('must not import')
       })
-    ).rejects.toThrow('different run or scene')
+    ).rejects.toMatchObject({
+      name: 'NativePreviewFrameLeaseError',
+      message: 'Preview frame lease returned a different run or scene.'
+    })
     expect(ownership).toMatchObject({ held: false, releases: 1 })
   })
 
   it('closes a timed-out acquire so an unobserved lease cannot leak', async () => {
-    const { client, ownership, disconnected } = await fixture({ ignoreAcquire: true })
+    const options = { ignoreAcquire: true }
+    const { client, ownership, disconnected } = await fixture(options)
     await expect(
       client.withFrame({ runId: 'run', sceneRevision: 7 }, async () => null)
-    ).rejects.toThrow('timed out')
+    ).rejects.toMatchObject({
+      name: 'NativePreviewFrameLeaseError',
+      message: 'Preview frame lease request timed out.'
+    })
     await disconnected
     expect(ownership).toMatchObject({ held: false, disconnected: true })
+    options.ignoreAcquire = false
+    expect(
+      (await client.withFrame({ runId: 'run', sceneRevision: 7 }, async () => 'presented'))?.result
+    ).toBe('presented')
+    expect(ownership).toMatchObject({ held: false, releases: 1 })
   })
 
   it('closes the connection when release is not acknowledged', async () => {
     const { client, ownership, disconnected } = await fixture({ rejectRelease: true })
     await expect(
       client.withFrame({ runId: 'run', sceneRevision: 7 }, async () => null)
-    ).rejects.toThrow('not acknowledged')
+    ).rejects.toBeInstanceOf(NativePreviewFrameLeaseError)
     await disconnected
     expect(ownership).toMatchObject({ held: false, disconnected: true })
+  })
+
+  it('preserves a presenter failure when releasing its frame also fails', async () => {
+    const { client, ownership, disconnected } = await fixture({ rejectRelease: true })
+    const failure = new Error('native presenter failed')
+    await expect(
+      client.withFrame({ runId: 'run', sceneRevision: 7 }, async () => {
+        throw failure
+      })
+    ).rejects.toBe(failure)
+    await disconnected
+    expect(ownership).toMatchObject({ held: false, releases: 1, disconnected: true })
+  })
+
+  it('classifies an unavailable admin connection as a lease failure', async () => {
+    const client = new NativePreviewFrameLeaseClient(() => null)
+    await expect(
+      client.withFrame({ runId: 'run', sceneRevision: 7 }, async () => {
+        throw new Error('must not present')
+      })
+    ).rejects.toBeInstanceOf(NativePreviewFrameLeaseError)
   })
 })
