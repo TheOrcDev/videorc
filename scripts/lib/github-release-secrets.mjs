@@ -52,6 +52,28 @@ export const CONDITIONAL_MACOS_RELEASE_GITHUB_SECRETS = [
     group: 'private download storage',
     name: 'VIDEORC_DOWNLOAD_S3_SESSION_TOKEN',
     detail: 'required only for temporary credentials'
+  },
+  // Further release origins (scripts/lib/release-upload-origins.mjs). Only the
+  // keys are secrets; bucket, region and endpoint are repository variables.
+  {
+    group: 'release origin neon',
+    name: 'VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID',
+    detail: 'required while neon is a release origin (storage:write key)'
+  },
+  {
+    group: 'release origin neon',
+    name: 'VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY',
+    detail: 'required while neon is a release origin (storage:write key)'
+  },
+  {
+    group: 'release origin hetzner',
+    name: 'VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID',
+    detail: 'required while hetzner is a release origin (retired after the Neon soak)'
+  },
+  {
+    group: 'release origin hetzner',
+    name: 'VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY',
+    detail: 'required while hetzner is a release origin (retired after the Neon soak)'
   }
 ]
 

@@ -39,6 +39,16 @@ const hetznerEnv = {
   VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY: 'hz-secret'
 }
 const bothEnv = { ...r2Env, ...hetznerEnv }
+const neonEnv = {
+  VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: 'NEONKEY',
+  VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET: 'videorc-releases',
+  VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL:
+    'https://br-quiet-lake-a1b2c3d4.storage.c-2.eu-central-1.aws.neon.tech',
+  VIDEORC_RELEASE_UPLOAD_NEON_S3_FORCE_PATH_STYLE: 'true',
+  VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION: 'eu-central-1',
+  VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: 'neon-secret'
+}
+const allEnv = { ...bothEnv, ...neonEnv }
 
 function sha256(bytes) {
   return createHash('sha256').update(bytes).digest('hex')
@@ -58,6 +68,20 @@ describe('release origin capabilities', () => {
       checksumHeaders: true,
       ifMatchEtagForm: 'quoted'
     })
+  })
+
+  it('keeps Neon on S3 defaults until the compat probe measures otherwise', () => {
+    const neon = resolveReleaseUploadOrigins({
+      ...neonEnv,
+      VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'neon'
+    }).origins[0].config
+    assert.deepEqual(releaseUploadOriginCapabilities(neon), {
+      checksumHeaders: true,
+      ifMatchEtagForm: 'quoted'
+    })
+    assert.deepEqual(neon.tlsPolicy.allowedIssuerOrganizations, ['Amazon'])
+    assert.equal(neon.forcePathStyle, true)
+    assert.equal(neon.region, 'eu-central-1')
   })
 
   it("pins Let's Encrypt for Hetzner and Google Trust Services for R2 without extra environment", () => {
@@ -140,6 +164,67 @@ describe('release origin resolution', () => {
         VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'hetzner'
       }).origins.map(({ name }) => name),
       ['r2', 'hetzner']
+    )
+  })
+
+  it('orders three origins mirrors first in a stable order and the primary last', () => {
+    const order = (primary) =>
+      resolveReleaseUploadOrigins({
+        ...allEnv,
+        ...(primary ? { VIDEORC_DOWNLOAD_STORAGE_PRIMARY: primary } : {})
+      }).origins.map(({ name }) => name)
+    assert.deepEqual(order(null), ['hetzner', 'neon', 'r2'])
+    assert.deepEqual(order('neon'), ['r2', 'hetzner', 'neon'])
+    assert.deepEqual(order(' NEON '), ['r2', 'hetzner', 'neon'])
+    assert.deepEqual(order('hetzner'), ['r2', 'neon', 'hetzner'])
+  })
+
+  it('publishes to neon alone with no r2 or hetzner environment', async () => {
+    const env = { ...neonEnv, VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'neon' }
+    const { origins, primaryName } = resolveReleaseUploadOrigins(env)
+    assert.equal(primaryName, 'neon')
+    assert.deepEqual(
+      origins.map(({ name }) => name),
+      ['neon']
+    )
+    const probed = []
+    const plan = await planReleaseUploadOrigins({
+      env,
+      probe: async ({ config }) => {
+        probed.push(config.endpointUrl)
+        return { reachable: true, reason: null }
+      }
+    })
+    assert.deepEqual(probed, [neonEnv.VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL + '/'])
+    assert.equal(plan.primaryName, 'neon')
+    assert.equal(plan.primaryBlocked, false)
+    assert.deepEqual(
+      plan.reachable.map(({ name }) => name),
+      ['neon']
+    )
+    assert.equal(plan.reachable.at(-1).config.bucket, 'videorc-releases')
+  })
+
+  it('never falls back to an unconfigured r2 when only neon is configured', () => {
+    assert.throws(
+      () => resolveReleaseUploadOrigins(neonEnv),
+      (error) =>
+        error instanceof ReleaseUploadConfigError &&
+        error.code === 'primary-origin-not-configured' &&
+        /VIDEORC_DOWNLOAD_STORAGE_PRIMARY is unset/.test(error.message) &&
+        /configured: neon/.test(error.message)
+    )
+    assert.throws(
+      () => resolveReleaseUploadOrigins({ ...neonEnv, VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'r2' }),
+      (error) =>
+        error instanceof ReleaseUploadConfigError &&
+        error.code === 'primary-origin-not-configured' &&
+        !/is unset/.test(error.message)
+    )
+    assert.throws(
+      () => resolveReleaseUploadOrigins({ ...r2Env, VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'neon' }),
+      (error) =>
+        error instanceof ReleaseUploadConfigError && error.code === 'primary-origin-not-configured'
     )
   })
 

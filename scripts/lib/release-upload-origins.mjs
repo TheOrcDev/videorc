@@ -9,7 +9,13 @@
 //   r2        the long-standing origin. It keeps the uploader's original
 //             environment names (VIDEORC_RELEASE_UPLOAD_S3_* with the
 //             VIDEORC_DOWNLOAD_S3_* fallback) so nothing existing changes.
-//   <name>    any further origin reads VIDEORC_RELEASE_UPLOAD_<NAME>_S3_*.
+//   hetzner   VIDEORC_RELEASE_UPLOAD_HETZNER_S3_*.
+//   neon      VIDEORC_RELEASE_UPLOAD_NEON_S3_* (Neon Object Storage, the
+//             target single origin).
+//
+// Only configured origins are published to, so a single origin (for example
+// neon alone, with no r2 environment at all) is a complete setup, and a
+// mirror is re-added by environment only.
 //
 // VIDEORC_DOWNLOAD_STORAGE_PRIMARY names the origin videorc-web redirects to
 // (default r2). Origins are always published mirrors first, primary last, so
@@ -26,7 +32,7 @@ import {
 } from './release-upload-s3.mjs'
 
 export const LEGACY_RELEASE_UPLOAD_ORIGIN = 'r2'
-export const ADDITIONAL_RELEASE_UPLOAD_ORIGINS = ['hetzner']
+export const ADDITIONAL_RELEASE_UPLOAD_ORIGINS = ['hetzner', 'neon']
 export const RELEASE_ORIGIN_PENDING_SCHEMA_VERSION = 1
 
 const ORIGIN_ENV_SUFFIXES = [
@@ -72,8 +78,8 @@ function originIsConfigured(name, env) {
 // uploader's historical behaviour.
 export function resolveReleaseUploadOrigins(env = process.env) {
   const known = [LEGACY_RELEASE_UPLOAD_ORIGIN, ...ADDITIONAL_RELEASE_UPLOAD_ORIGINS]
-  const primaryName =
-    env.VIDEORC_DOWNLOAD_STORAGE_PRIMARY?.trim().toLowerCase() || LEGACY_RELEASE_UPLOAD_ORIGIN
+  const explicitPrimary = env.VIDEORC_DOWNLOAD_STORAGE_PRIMARY?.trim().toLowerCase() || null
+  const primaryName = explicitPrimary ?? LEGACY_RELEASE_UPLOAD_ORIGIN
   if (!known.includes(primaryName)) {
     throw new ReleaseUploadConfigError(
       'unknown-primary-origin',
@@ -84,7 +90,10 @@ export function resolveReleaseUploadOrigins(env = process.env) {
   if (!configured.includes(primaryName)) {
     throw new ReleaseUploadConfigError(
       'primary-origin-not-configured',
-      `The primary release origin ${primaryName} has no credentials in this environment.`
+      `The primary release origin ${primaryName} has no credentials in this environment.` +
+        (explicitPrimary
+          ? ''
+          : ` VIDEORC_DOWNLOAD_STORAGE_PRIMARY is unset, so it defaults to ${LEGACY_RELEASE_UPLOAD_ORIGIN}; set it to the configured primary${configured.length ? ` (configured: ${configured.join(', ')})` : ''}.`)
     )
   }
   const origins = configured

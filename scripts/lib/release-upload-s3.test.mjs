@@ -20,6 +20,7 @@ import {
   exactMacosPromotionChangelogGeneratedAt,
   getReleaseUploadS3Config,
   inspectReleaseUploadArtifact,
+  isNeonStorageHostname,
   MACOS_D3_PROMOTION_WORKFLOW_PATH,
   MACOS_D3_PUBLICATION_RESERVATION_PROFILE,
   MACOS_RELEASE_REPOSITORY,
@@ -176,6 +177,47 @@ describe('release S3 upload config', () => {
           ...env,
           VIDEORC_DOWNLOAD_S3_TLS_ALLOWED_ISSUER_ORGANIZATIONS: ''
         }),
+      (error) => error instanceof ReleaseUploadConfigError && error.code === 'missing-tls-policy'
+    )
+  })
+
+  it('pins the Amazon issuer for Neon storage hosts and rejects lookalikes', () => {
+    const neonHost = (endpointUrl) =>
+      getReleaseUploadS3Config({
+        ...env,
+        VIDEORC_DOWNLOAD_S3_ENDPOINT_URL: endpointUrl,
+        VIDEORC_DOWNLOAD_S3_TLS_ALLOWED_ISSUER_ORGANIZATIONS: ''
+      })
+    for (const endpointUrl of [
+      'https://br-quiet-lake-a1b2c3d4.storage.c-2.eu-central-1.aws.neon.tech',
+      'https://br-x.storage.c-12.us-east-2.aws.neon.tech'
+    ]) {
+      assert.deepEqual(neonHost(endpointUrl).tlsPolicy, {
+        allowedIssuerOrganizations: ['Amazon'],
+        allowedSpkiSha256: []
+      })
+    }
+    assert.equal(isNeonStorageHostname('br-x.storage.c-2.eu-central-1.aws.neon.tech'), true)
+    for (const hostname of [
+      'x.aws.neon.tech.evil.com',
+      'br-x.storage.c-2.eu-central-1.aws.neon.tech.evil.com',
+      'br-x.storage.c-2.eu-central-1.aws.neon.tech.',
+      'aws.neon.tech',
+      'br-x.aws.neon.tech',
+      'br-x.storage.eu-central-1.aws.neon.tech',
+      'br-x.storage.c-2.eu-central-1.aws.neon.techevil.com',
+      'br-x.storage.c-x.eu-central-1.aws.neon.tech',
+      'br_x.storage.c-2.eu-central-1.aws.neon.tech',
+      '-br.storage.c-2.eu-central-1.aws.neon.tech',
+      'a.b.storage.c-2.eu-central-1.aws.neon.tech',
+      'br-x.storage.c-2.eu-central-1.aws.neon.tech.r2.cloudflarestorage.com',
+      'evil.com/br-x.storage.c-2.eu-central-1.aws.neon.tech',
+      ''
+    ]) {
+      assert.equal(isNeonStorageHostname(hostname), false, hostname)
+    }
+    assert.throws(
+      () => neonHost('https://x.aws.neon.tech.evil.com'),
       (error) => error instanceof ReleaseUploadConfigError && error.code === 'missing-tls-policy'
     )
   })

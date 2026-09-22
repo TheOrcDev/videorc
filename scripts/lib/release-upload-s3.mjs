@@ -518,12 +518,41 @@ function normalizeAdditionalSignedHeaders(headers) {
 //                    metadata still bind every object exactly.
 //   ifMatchEtagForm  Ceph RGW answers 412 to the quoted entity tag it returned
 //                    and honours the bare digest.
+const DEFAULT_ORIGIN_CAPABILITIES = Object.freeze({
+  checksumHeaders: true,
+  ifMatchEtagForm: 'quoted'
+})
+
+// First matching host rule wins; an endpoint no rule matches (R2, AWS) gets
+// the defaults. Amend a rule only with probe:release-storage-compat evidence.
+const ORIGIN_CAPABILITY_RULES = [
+  {
+    // Hetzner Object Storage (Ceph RGW), measured 2026-09.
+    capabilities: { checksumHeaders: false, ifMatchEtagForm: 'unquoted' },
+    matches: (hostname) => hostname.endsWith('.your-objectstorage.com')
+  },
+  {
+    // Neon Object Storage. Conditional PUT and x-amz-checksum-sha256 support
+    // are not measured yet: confirm with probe:release-storage-compat.
+    capabilities: DEFAULT_ORIGIN_CAPABILITIES,
+    matches: isNeonStorageHostname
+  }
+]
+
 export function releaseUploadOriginCapabilities(config) {
   const hostname = config?.endpointUrl ? new URL(config.endpointUrl).hostname.toLowerCase() : ''
-  if (hostname.endsWith('.your-objectstorage.com')) {
-    return { checksumHeaders: false, ifMatchEtagForm: 'unquoted' }
-  }
-  return { checksumHeaders: true, ifMatchEtagForm: 'quoted' }
+  const rule = hostname ? ORIGIN_CAPABILITY_RULES.find(({ matches }) => matches(hostname)) : null
+  return { ...(rule?.capabilities ?? DEFAULT_ORIGIN_CAPABILITIES) }
+}
+
+// Neon storage endpoints are per branch:
+// <branch-id>.storage.c-<N>.<region>.aws.neon.tech. Anchored on both ends so
+// a lookalike such as x.aws.neon.tech.evil.com never matches.
+const NEON_STORAGE_HOSTNAME =
+  /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.storage\.c-[0-9]{1,6}\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.aws\.neon\.tech$/
+
+export function isNeonStorageHostname(hostname) {
+  return typeof hostname === 'string' && NEON_STORAGE_HOSTNAME.test(hostname)
 }
 
 export function createReleaseUploadS3Transport({ config }) {
@@ -1464,6 +1493,10 @@ function releaseUploadTlsPolicy(endpointUrl, env) {
       // Let's Encrypt leaves rotate every 60-90 days, so only the issuer is
       // pinned. The chain and hostname checks still apply.
       allowedIssuerOrganizations = ["Let's Encrypt"]
+    } else if (isNeonStorageHostname(hostname)) {
+      // Neon serves its storage endpoints with an Amazon-issued certificate
+      // (Amazon RSA 2048 M0x), measured 2026-09-22.
+      allowedIssuerOrganizations = ['Amazon']
     } else if (endpointUrl === null) {
       allowedIssuerOrganizations = ['Amazon']
     } else {

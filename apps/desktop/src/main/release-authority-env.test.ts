@@ -11,11 +11,21 @@ describe('release authority environment scrubbing', () => {
       sanitizedChildProcessEnvironment({
         AZURE_CLIENT_SECRET: 'secret',
         VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: 'secret',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_DOWNLOAD_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_DOWNLOAD_NEON_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'neon',
         VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN: 'secret',
         VIDEORC_RELEASE_ID: '0.9.45-alpha.1',
         PATH: 'safe'
       })
-    ).toEqual({ VIDEORC_RELEASE_ID: '0.9.45-alpha.1', PATH: 'safe' })
+    ).toEqual({
+      VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'neon',
+      VIDEORC_RELEASE_ID: '0.9.45-alpha.1',
+      PATH: 'safe'
+    })
   })
 
   it('can preserve the pilot token only until the updater copies it', () => {

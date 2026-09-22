@@ -1,5 +1,5 @@
 const RELEASE_AUTHORITY_ENV =
-  /^(?:AZURE_|APPLE_|CSC_|WIN_CSC_|VIDEORC_(?:DOWNLOAD|RELEASE_UPLOAD)_S3_|VIDEORC_WINDOWS_(?:SIGNING_|PILOT_UPDATE_TOKEN$))/
+  /^(?:AZURE_|APPLE_|CSC_|WIN_CSC_|VIDEORC_(?:DOWNLOAD|RELEASE_UPLOAD)_(?:[A-Z0-9]+_)?S3_|VIDEORC_WINDOWS_(?:SIGNING_|PILOT_UPDATE_TOKEN$))/
 
 export function sanitizedChildProcessEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const sanitized = { ...env }

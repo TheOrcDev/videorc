@@ -93,6 +93,10 @@ describe('sanitizeWindowsLocalGateChildEnvironment', () => {
       sanitizeWindowsLocalGateChildEnvironment({
         AZURE_CLIENT_SECRET: 'secret',
         VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: 'secret',
+        VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: 'secret',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_DOWNLOAD_NEON_S3_SECRET_ACCESS_KEY: 'secret',
         VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN: 'secret',
         VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME: 'secret',
         VIDEORC_WINDOWS_ACCEPTANCE_EXPECTED_APP_SHA256: 'untrusted-app-digest',

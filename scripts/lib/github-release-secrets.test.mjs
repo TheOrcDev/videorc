@@ -63,4 +63,27 @@ describe('evaluateMacosReleaseGithubSecrets', () => {
     assert.equal(result.ok, true)
     assert.doesNotMatch(report, /not-a-secret-value/)
   })
+
+  it('lists the neon and hetzner origin keys as conditional, never required', () => {
+    const names = (list) => list.map((secret) => secret.name)
+    for (const name of [
+      'VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID',
+      'VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY',
+      'VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID',
+      'VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY'
+    ]) {
+      assert.ok(names(CONDITIONAL_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
+      assert.ok(!names(REQUIRED_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
+    }
+    const report = formatMacosReleaseGithubSecretsReport(
+      evaluateMacosReleaseGithubSecrets({
+        presentSecretNames: [
+          ...names(REQUIRED_MACOS_RELEASE_GITHUB_SECRETS),
+          'VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID',
+          'VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY'
+        ]
+      })
+    )
+    assert.match(report, /VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY/)
+  })
 })
