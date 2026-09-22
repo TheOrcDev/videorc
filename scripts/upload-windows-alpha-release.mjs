@@ -16,7 +16,10 @@ import {
   planReleaseUploadOrigins,
   writeReleaseOriginPending
 } from './lib/release-upload-origins.mjs'
-import { buildSignedS3Request } from './lib/release-upload-s3.mjs'
+import {
+  buildSignedS3Request,
+  releaseArtifactDispositionHeaders
+} from './lib/release-upload-s3.mjs'
 import { loadValidatedWindowsAcceptanceHistory } from './lib/windows-acceptance-history.mjs'
 import { buildWindowsReleaseUploadPlan } from './lib/windows-release-upload.mjs'
 import {
@@ -156,7 +159,14 @@ function parseRemoteChangelog(text) {
 }
 
 async function uploadArtifact({ artifact, config }) {
-  const signed = buildSignedS3Request({ config, method: 'PUT', objectKey: artifact.objectKey })
+  // Signed, stored attachment disposition for the installer (see
+  // releaseArtifactContentDisposition).
+  const signed = buildSignedS3Request({
+    additionalHeaders: releaseArtifactDispositionHeaders(artifact.objectKey),
+    config,
+    method: 'PUT',
+    objectKey: artifact.objectKey
+  })
   const response = await fetch(signed.url, {
     body: createReadStream(artifact.path),
     duplex: 'half',

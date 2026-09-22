@@ -28,6 +28,8 @@ import {
   partitionReleaseUploadArtifacts,
   publishReleaseUploadArtifact,
   publishReleaseUploadPhases,
+  releaseArtifactContentDisposition,
+  releaseArtifactDispositionHeaders,
   reverifyReleaseUploadPublication,
   ReleaseUploadConfigError,
   ReleaseUploadTransportError,
@@ -866,8 +868,60 @@ describe('conditional release publication', () => {
     assert.equal(put.headers['X-Amz-Checksum-Sha256'], sha256Base64FromHex(artifact.sha256))
     assert.match(
       put.headers.Authorization,
-      /SignedHeaders=host;if-none-match;x-amz-checksum-sha256;x-amz-content-sha256;x-amz-date;x-amz-meta-videorc-sha256/
+      /SignedHeaders=content-disposition;host;if-none-match;x-amz-checksum-sha256;x-amz-content-sha256;x-amz-date;x-amz-meta-videorc-sha256/
     )
+    assert.equal(put.headers['content-disposition'], 'attachment; filename="Videorc.dmg"')
+  })
+
+  it('stores an attachment disposition on installers only, derived from the object key', async () => {
+    assert.equal(
+      releaseArtifactContentDisposition(
+        'releases/macos/0.9.99-beta.1/Videorc-0.9.99-mac-arm64.dmg'
+      ),
+      'attachment; filename="Videorc-0.9.99-mac-arm64.dmg"'
+    )
+    assert.equal(
+      releaseArtifactContentDisposition('releases/windows/0.9.99-alpha.1/Videorc-Setup-0.9.99.exe'),
+      'attachment; filename="Videorc-Setup-0.9.99.exe"'
+    )
+    for (const objectKey of [
+      'updates/macos/Videorc-0.9.99-mac-arm64.zip',
+      'updates/macos/Videorc-0.9.99-mac-arm64.zip.blockmap',
+      'updates/macos/latest-mac.yml',
+      'updates/windows/latest.yml',
+      'releases/macos/0.9.99-beta.1/release.json',
+      'releases/macos/0.9.99-beta.1/Videorc-0.9.99-mac-arm64.dmg.sha256',
+      'changelog/changelog.json'
+    ]) {
+      assert.equal(releaseArtifactContentDisposition(objectKey), null, objectKey)
+      assert.deepEqual(releaseArtifactDispositionHeaders(objectKey), {}, objectKey)
+    }
+    assert.throws(
+      () => releaseArtifactContentDisposition('releases/macos/x/Videorc "evil".dmg'),
+      (error) =>
+        error instanceof ReleaseUploadConfigError && error.code === 'invalid-attachment-filename'
+    )
+
+    const artifact = inlineArtifact({
+      body: 'feed bytes',
+      immutable: true,
+      label: 'feed-zip',
+      objectKey: 'updates/macos/Videorc-0.9.99-mac-arm64.zip'
+    })
+    const calls = []
+    await publishReleaseUploadArtifact({
+      artifact,
+      config: getReleaseUploadS3Config(env),
+      transport: requestTransport(async (_url, init) => {
+        calls.push(init)
+        if (calls.length === 1) return response(null, 404)
+        if (calls.length === 2) return response(null, 200)
+        return response(artifact.body, 200, { etag: '"zip"' })
+      })
+    })
+    assert.equal(calls[1].method, 'PUT')
+    assert.equal(calls[1].headers['content-disposition'], undefined)
+    assert.doesNotMatch(calls[1].headers.Authorization, /content-disposition/)
   })
 
   it('reuses an existing immutable object only after exact size/hash verification', async () => {

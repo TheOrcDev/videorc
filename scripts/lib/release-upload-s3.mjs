@@ -532,8 +532,9 @@ const ORIGIN_CAPABILITY_RULES = [
     matches: (hostname) => hostname.endsWith('.your-objectstorage.com')
   },
   {
-    // Neon Object Storage. Conditional PUT and x-amz-checksum-sha256 support
-    // are not measured yet: confirm with probe:release-storage-compat.
+    // Neon Object Storage: conditional PUT with the quoted ETag and
+    // x-amz-checksum-sha256 round trips both work, measured 2026-09-22 by
+    // probe:release-storage-compat.
     capabilities: DEFAULT_ORIGIN_CAPABILITIES,
     matches: isNeonStorageHostname
   }
@@ -990,10 +991,40 @@ export function buildReleasePutCondition({
   }
 }
 
+// Installers are stored with an attachment disposition. Neon ignores
+// response-content-disposition on presigned GETs (storage-compat-2026-09.md,
+// check 5c), so the web download routes cannot rely on it there. Derived from
+// the object key alone, so every path that publishes through here (uploads and
+// release:sync:origins) sets it. Updater zips, blockmaps, feeds and manifests
+// never carry it.
+const ATTACHMENT_EXTENSIONS = ['.dmg', '.exe']
+
+export function releaseArtifactContentDisposition(objectKey) {
+  const name = String(objectKey ?? '')
+    .split('/')
+    .at(-1)
+  if (!ATTACHMENT_EXTENSIONS.some((extension) => name.toLowerCase().endsWith(extension))) {
+    return null
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(name)) {
+    throw new ReleaseUploadConfigError(
+      'invalid-attachment-filename',
+      `Installer object ${objectKey} has a filename that cannot be stored as an attachment disposition.`
+    )
+  }
+  return `attachment; filename="${name}"`
+}
+
+export function releaseArtifactDispositionHeaders(objectKey) {
+  const disposition = releaseArtifactContentDisposition(objectKey)
+  return disposition ? { 'content-disposition': disposition } : {}
+}
+
 async function putReleaseUploadArtifact({ artifact, condition, config, transport }) {
   const signed = buildSignedS3Request({
     additionalHeaders: {
       ...condition,
+      ...releaseArtifactDispositionHeaders(artifact.objectKey),
       'x-amz-meta-videorc-sha256': artifact.sha256
     },
     config,
