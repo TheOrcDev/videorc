@@ -1,4 +1,4 @@
-import { useId, type ReactElement, type ReactNode } from 'react'
+import { useId, lazy, Suspense, type ReactElement, type ReactNode } from 'react'
 
 import { Field, FieldDescription, FieldLabel } from '@/components/ui/field'
 import {
@@ -12,6 +12,7 @@ import {
 import type { Device } from '@/lib/backend'
 import { missingSelection, sourceSelectPlaceholder } from '@/lib/source-select-state'
 
+const SearchableSourceSelect = lazy(() => import('./source-select-searchable'))
 const NONE_VALUE = '__none__'
 
 export function SourceSelect({
@@ -23,7 +24,8 @@ export function SourceSelect({
   placeholder,
   discoveryPending = false,
   description,
-  disabled = false
+  disabled = false,
+  searchable = false
 }: {
   label: string
   devices: Device[]
@@ -35,12 +37,48 @@ export function SourceSelect({
   discoveryPending?: boolean
   description?: ReactNode
   disabled?: boolean
+  searchable?: boolean
 }): ReactElement {
   const id = useId()
   // Q6 (plan 022): the select must never render a blank surface. A saved id
   // with no matching device gets a synthetic disabled item (so the trigger
   // has words), and the placeholder names loading/none-found explicitly.
   const missing = missingSelection(devices, value)
+
+  if (searchable) {
+    return (
+      <Suspense
+        fallback={
+          <Field>
+            <FieldLabel htmlFor={id}>{label}</FieldLabel>
+            <Select disabled>
+              <SelectTrigger id={id} aria-label={label} className="w-full">
+                <SelectValue
+                  placeholder={
+                    devices.find((device) => device.id === value)?.name ??
+                    missing?.label ??
+                    'Loading source search…'
+                  }
+                />
+              </SelectTrigger>
+            </Select>
+          </Field>
+        }
+      >
+        <SearchableSourceSelect
+          label={label}
+          devices={devices}
+          value={value}
+          onChange={onChange}
+          allowNone={allowNone}
+          placeholder={placeholder}
+          discoveryPending={discoveryPending}
+          description={description}
+          disabled={disabled}
+        />
+      </Suspense>
+    )
+  }
 
   return (
     <Field>

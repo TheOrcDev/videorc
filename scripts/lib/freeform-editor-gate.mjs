@@ -6,6 +6,28 @@ export function evaluateFreeformGesture(gesture) {
   if (gesture.captured !== true) failures.push('pointer capture was not acquired')
   if (gesture.quickEdits && gesture.captureCount !== 2)
     failures.push('both rapid edits must acquire pointer capture')
+  if (gesture.pointerDowns || gesture.captureChecks) {
+    const expectedDowns = gesture.quickEdits ? 2 : 1
+    if (
+      gesture.pointerDowns?.length !== expectedDowns ||
+      gesture.captureChecks?.length !== expectedDowns
+    )
+      failures.push('missing pointerdown delivery or capture observation')
+    else
+      for (let index = 0; index < expectedDowns; index++) {
+        const down = gesture.pointerDowns[index],
+          check = gesture.captureChecks[index]
+        if (
+          !down.trusted ||
+          !Number.isFinite(down.at) ||
+          !Number.isFinite(check.at) ||
+          check.at < down.at ||
+          check.pointerId !== down.pointerId ||
+          !check.captured
+        )
+          failures.push('capture observation did not follow its trusted pointerdown')
+      }
+  }
   const expectedCommits = gesture.cancelled || gesture.noop ? 0 : gesture.quickEdits ? 2 : 1
   if (gesture.commits?.length !== expectedCommits) {
     failures.push(

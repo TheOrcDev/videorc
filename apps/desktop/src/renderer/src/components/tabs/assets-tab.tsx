@@ -1,3 +1,4 @@
+import { useStudioCore } from '@/hooks/use-studio'
 import {
   AdjustIcon,
   DeleteIcon,
@@ -19,6 +20,14 @@ import { PanelSection } from '@/components/panel-section'
 import { PowerSlider } from '@/components/power-slider'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogDescription,
+  DialogFooter
+} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -26,8 +35,6 @@ import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useBackgroundAssets } from '@/hooks/use-background-assets'
 import {
   BACKGROUND_STYLE_FIELDS,
-  applySlot,
-  clearActiveSlot,
   createImportedAsset,
   defaultBackgroundStyle,
   importIntoSlot,
@@ -35,6 +42,7 @@ import {
   markSlotMissingIfAssetMatches,
   markSlotStatus,
   removeSlotAsset,
+  restoreSlotDefault,
   renameAsset,
   setAssetStyle,
   slotAsset,
@@ -81,7 +89,9 @@ function imageSrcOf(asset: BackgroundAsset): string | undefined {
 // style controls sit on the active tile (Adjust style), where they edit the one
 // background that has a visible consequence.
 export function AssetsTab(): ReactElement {
+  const { applyBackgroundSlot, applyWorkingBackgroundStyle, scene } = useStudioCore()
   const { registry, setRegistry } = useBackgroundAssets()
+  const [removingSlotId, setRemovingSlotId] = useState<string | null>(null)
   const [importing, setImporting] = useState(false)
   const [renamingSlotId, setRenamingSlotId] = useState<string | null>(null)
 
@@ -186,10 +196,10 @@ export function AssetsTab(): ReactElement {
                 // toggle, matching its aria-pressed semantics (owner request,
                 // 2026-08-19).
                 if (status === 'active') {
-                  setRegistry(clearActiveSlot)
+                  applyBackgroundSlot(null)
                   return
                 }
-                setRegistry((current) => applySlot(current, slot.id))
+                applyBackgroundSlot(slot.id)
               }}
               onMissing={() => markMissing(slot.id)}
               onStartRename={() => setRenamingSlotId(slot.id)}
@@ -202,7 +212,15 @@ export function AssetsTab(): ReactElement {
               onResetStyle={(assetId) =>
                 setRegistry((current) => setAssetStyle(current, assetId, defaultBackgroundStyle()))
               }
-              onRemove={() => setRegistry((current) => removeSlotAsset(current, slot.id))}
+              onRemove={() => {
+                if (
+                  registry.activeSlotId === slot.id ||
+                  scene?.background?.assetId === slot.assetId
+                )
+                  setRemovingSlotId(slot.id)
+                else setRegistry((current) => removeSlotAsset(current, slot.id))
+              }}
+              onRestore={() => setRegistry((current) => restoreSlotDefault(current, slot.id))}
               onStyle={(assetId, patch) =>
                 setRegistry((current) => setAssetStyle(current, assetId, patch))
               }
@@ -211,6 +229,64 @@ export function AssetsTab(): ReactElement {
         </Gallery>
       </PanelSection>
 
+      <Dialog
+        open={removingSlotId !== null}
+        onOpenChange={(open) => {
+          if (!open) setRemovingSlotId(null)
+        }}
+      >
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>Remove applied background?</DialogTitle>
+            <DialogDescription>
+              This empties the library slot and removes the background from the current scene,
+              including a running recording or stream. Saved scenes keep their copy.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button variant="ghost" onClick={() => setRemovingSlotId(null)}>
+              Cancel
+            </Button>
+            <Button
+              variant="destructive"
+              onClick={() => {
+                if (removingSlotId) {
+                  const slot = registry.slots.find((entry) => entry.id === removingSlotId)
+                  if (
+                    slot?.assetId === scene?.background?.assetId &&
+                    registry.activeSlotId !== removingSlotId
+                  )
+                    applyBackgroundSlot(null)
+                  setRegistry((current) => removeSlotAsset(current, removingSlotId))
+                }
+                setRemovingSlotId(null)
+              }}
+            >
+              Remove background
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+      {scene?.background ? (
+        <div className="flex items-center gap-2">
+          <BackgroundStylePopover
+            name="Current scene background"
+            asset={{
+              id: scene.background.assetId,
+              name: 'Current scene background',
+              kind: 'imported',
+              status: 'ready',
+              createdAt: '',
+              updatedAt: '',
+              styleDefaults: scene.background
+            }}
+            onStyle={(_id, patch) => applyWorkingBackgroundStyle(patch)}
+          />
+          <Button variant="ghost" size="sm" onClick={() => applyBackgroundSlot(null)}>
+            Use no background
+          </Button>
+        </div>
+      ) : null}
       <TakeoverScreensSection />
     </div>
   )
@@ -229,6 +305,7 @@ function PresetTile({
   onReplace,
   onResetStyle,
   onRemove,
+  onRestore,
   onStyle
 }: {
   slot: BackgroundAssetSlot
@@ -243,6 +320,7 @@ function PresetTile({
   onReplace: () => void
   onResetStyle: (assetId: string) => void
   onRemove: () => void
+  onRestore: () => void
   onStyle: (assetId: string, patch: Parameters<typeof setAssetStyle>[2]) => void
 }): ReactElement {
   const asset = slotAsset(slot, registry)
@@ -302,6 +380,16 @@ function PresetTile({
         />
       ) : null}
 
+      {!asset ? (
+        <div className="absolute right-1 top-1 z-10 flex gap-1">
+          <Button size="sm" variant="ghost" onClick={onReplace}>
+            Add image
+          </Button>
+          <Button size="sm" variant="ghost" onClick={onRestore}>
+            Restore default
+          </Button>
+        </div>
+      ) : null}
       {asset ? (
         <div
           className={cn(

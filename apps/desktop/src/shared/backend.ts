@@ -1,3 +1,4 @@
+import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 export type { BackgroundImportResult } from './background-import'
 
@@ -3522,6 +3523,9 @@ export interface RemoteLanPairing {
 }
 
 export interface GlobalShortcutsConfig {
+  layoutNext?: string
+  layoutPrevious?: string
+  layouts?: Partial<Record<LayoutPreset, string>>
   recordToggle?: string
   streamToggle?: string
   micToggle?: string
@@ -3533,9 +3537,7 @@ export interface GlobalShortcutsResult {
 
 export interface VideorcApi {
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
-  onGlobalShortcut?: (
-    callback: (action: 'record-toggle' | 'stream-toggle' | 'mic-toggle') => void
-  ) => () => void
+  onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
   getBackendConnection: () => Promise<BackendConnection | null>
   getBackendLogs: () => Promise<BackendLogEvent[]>
   getRuntimeInfo: () => Promise<RuntimeInfo>

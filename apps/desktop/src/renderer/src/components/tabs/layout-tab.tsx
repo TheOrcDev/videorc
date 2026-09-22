@@ -1,3 +1,4 @@
+import ScenePresetControls from '@/components/scene-presets'
 import {
   AdjustIcon,
   ArrowDownIcon,
@@ -7,7 +8,7 @@ import {
   LayoutIcon,
   ResetIcon
 } from '@/components/icons'
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
@@ -71,6 +72,7 @@ export function LayoutTab(): ReactElement {
     togglePreviewWindow,
     scene,
     sceneEditMode,
+    setSceneGesturePending,
     selectedSceneSourceId,
     setSceneEditMode,
     setSelectedSceneSourceId,
@@ -80,13 +82,22 @@ export function LayoutTab(): ReactElement {
     applyCameraPreset,
     setSceneSourceVisible,
     isSessionActive,
-    layoutSwitchPending
+    layoutSwitchPending,
+    savedScenePendingId
   } = useStudioCore()
   const [stageBusy, setStageBusy] = useState(false)
+  const handleStageBusyChange = useCallback(
+    (busy: boolean) => {
+      setStageBusy(busy)
+      setSceneGesturePending(busy)
+    },
+    [setSceneGesturePending]
+  )
+  const sceneSwitchPending = layoutSwitchPending !== null || savedScenePendingId !== null
   const [preciseEditPending, setPreciseEditPending] = useState(false)
   const preciseEditPendingRef = useRef(false)
   const runPreciseEdit = (operation: () => Promise<unknown>): void => {
-    if (stageBusy || preciseEditPendingRef.current) return
+    if (stageBusy || preciseEditPendingRef.current || sceneSwitchPending) return
     preciseEditPendingRef.current = true
     setPreciseEditPending(true)
     void operation().finally(() => {
@@ -229,10 +240,11 @@ export function LayoutTab(): ReactElement {
           {/* SC1: schematic stage — the committed composition rendered from the
               real normalized transforms (pure SVG, zero idle IPC). Live pixels
               stay in the detached preview window. */}
+          <ScenePresetControls toolbar />
           <SceneStage
             aspectLocked={aspectLocked}
             externalPending={preciseEditPending}
-            onBusyChange={setStageBusy}
+            onBusyChange={handleStageBusyChange}
             // The camera's box aspect is owned by the mask law (circle boxes
             // are square by construction; square/portrait force the crop), so
             // resize gestures must not free it.
@@ -244,7 +256,10 @@ export function LayoutTab(): ReactElement {
             cameraShape={effectiveCameraMaskShape(layout)}
             background={scene?.background ?? null}
             dragEnabled={
-              (showOverlayControls || isFreeform) && !isSessionActive && !preciseEditPending
+              (showOverlayControls || isFreeform) &&
+              !isSessionActive &&
+              !preciseEditPending &&
+              !sceneSwitchPending
             }
             freeform={isFreeform}
             outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
@@ -252,7 +267,10 @@ export function LayoutTab(): ReactElement {
             // Free resize: the backend honors custom camera width/height
             // (aspect law permitting) since plan phase 3.
             resizeEnabled={
-              (showOverlayControls || isFreeform) && !isSessionActive && !preciseEditPending
+              (showOverlayControls || isFreeform) &&
+              !isSessionActive &&
+              !preciseEditPending &&
+              !sceneSwitchPending
             }
             scene={scene}
             selectedSourceId={selectedSceneSourceId}
@@ -280,8 +298,8 @@ export function LayoutTab(): ReactElement {
 
         <FieldSet
           className="min-w-0"
-          disabled={stageBusy || preciseEditPending}
-          inert={stageBusy || preciseEditPending}
+          disabled={stageBusy || preciseEditPending || sceneSwitchPending}
+          inert={stageBusy || preciseEditPending || sceneSwitchPending}
         >
           <PanelSection
             className="min-w-0"

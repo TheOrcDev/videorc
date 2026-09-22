@@ -1,3 +1,5 @@
+import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
+import type { GlobalShortcutsConfig } from '../shared/backend'
 import {
   app,
   BrowserWindow,
@@ -77,7 +79,10 @@ import {
 import { runBackendInterruptingAction } from './interruption-actions'
 import { AccountSignInTransactions } from './account-sign-in-transactions'
 import { ProviderOAuthCallbacks } from './provider-oauth-callbacks'
-import { unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
+import {
+  replaceGlobalShortcutBindings,
+  unregisterGlobalShortcutsWhenReady
+} from './global-shortcut-lifecycle'
 import {
   createSafeStoragePersistenceCodec,
   type SecurePersistenceCodec
@@ -467,48 +472,20 @@ let mainWindow: BrowserWindow | null = null
 // accelerators in Settings; every set call replaces the previous set.
 const registeredGlobalShortcuts = new Set<string>()
 
-function setGlobalShortcuts(shortcuts: {
-  recordToggle?: string
-  streamToggle?: string
-  micToggle?: string
-}): { registered: Record<string, boolean> } {
-  for (const accelerator of registeredGlobalShortcuts) {
-    try {
-      globalShortcut.unregister(accelerator)
-    } catch {
-      // Unregistering a stale accelerator must never block the update.
+function setGlobalShortcuts(shortcuts: GlobalShortcutsConfig): {
+  registered: Record<string, boolean>
+} {
+  return replaceGlobalShortcutBindings(
+    globalShortcut,
+    registeredGlobalShortcuts,
+    globalShortcutEntries(shortcuts),
+    (action) => {
+      const window = mainWindow
+      if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
+        sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
+      }
     }
-  }
-  registeredGlobalShortcuts.clear()
-  const requested: Array<['record-toggle' | 'stream-toggle' | 'mic-toggle', string | undefined]> = [
-    ['record-toggle', shortcuts.recordToggle],
-    ['stream-toggle', shortcuts.streamToggle],
-    ['mic-toggle', shortcuts.micToggle]
-  ]
-  const registered: Record<string, boolean> = {}
-  for (const [action, accelerator] of requested) {
-    const trimmed = accelerator?.trim()
-    if (!trimmed) {
-      continue
-    }
-    let ok: boolean
-    try {
-      ok = globalShortcut.register(trimmed, () => {
-        const window = mainWindow
-        if (window && !window.isDestroyed()) {
-          sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
-        }
-      })
-    } catch {
-      // An invalid accelerator string reports as not registered.
-      ok = false
-    }
-    registered[action] = ok
-    if (ok) {
-      registeredGlobalShortcuts.add(trimmed)
-    }
-  }
-  return { registered }
+  )
 }
 
 app.on('will-quit', () => {
@@ -12650,12 +12627,8 @@ app.whenReady().then(async () => {
     }
     return previewWindowState()
   })
-  secureIpcHandle(
-    'global-shortcuts:set',
-    (
-      _event,
-      shortcuts: { recordToggle?: string; streamToggle?: string; micToggle?: string } | undefined
-    ) => setGlobalShortcuts(shortcuts ?? {})
+  secureIpcHandle('global-shortcuts:set', (_event, shortcuts: GlobalShortcutsConfig | undefined) =>
+    setGlobalShortcuts(shortcuts ?? {})
   )
   secureIpcHandle('notes-window:open', () => openNotesWindow())
   secureIpcHandle('notes-window:close', () => closeNotesWindow())

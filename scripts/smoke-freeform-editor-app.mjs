@@ -360,6 +360,7 @@ async function gesture({
   )
   await mouse('mouseMoved', origin, modifiers)
   await mouse('mousePressed', origin, modifiers)
+  await waitForPointerDown(1)
   await frames(2)
   const captured = await cdp.eval('window.__freeformSmoke.checkCapture()')
   // Alternating direction leaves room for the entire 40-gesture matrix. The
@@ -440,6 +441,7 @@ async function gesture({
     const nextOrigin = await cdp.eval('window.__freeformSmoke.rebase()')
     await mouse('mouseMoved', nextOrigin)
     await mouse('mousePressed', nextOrigin)
+    await waitForPointerDown(2)
     await frames(2)
     assert.equal(
       await cdp.eval('window.__freeformSmoke.checkCapture()'),
@@ -645,6 +647,13 @@ function frames(count) {
     `new Promise(resolve=>{let n=${count};const tick=()=>--n<=0?resolve():requestAnimationFrame(tick);requestAnimationFrame(tick)})`
   )
 }
+async function waitForPointerDown(count) {
+  // CDP acknowledgement is not renderer event delivery. Wait for the trusted
+  // down itself before checking its pointer ID, then let React's handler finish.
+  await cdp.eval(
+    `new Promise((resolve,reject)=>{const end=performance.now()+1000;const tick=()=>{if(window.__freeformSmoke.pointerDowns.filter(event=>event.trusted).length===${count})resolve();else if(performance.now()>end)reject(Error('Trusted pointerdown was not delivered'));else requestAnimationFrame(tick)};tick()})`
+  )
+}
 async function waitUntil(expression) {
   await cdp.eval(
     `new Promise((resolve,reject)=>{const end=performance.now()+10000;const tick=()=>{if(${expression})resolve();else if(performance.now()>end)reject(Error('Timed out: '+${JSON.stringify(expression)}));else requestAnimationFrame(tick)};tick()})`
@@ -726,7 +735,16 @@ function installObserver() {
   document.addEventListener(
     'pointerdown',
     (event) => {
-      if (state.active) state.pointerId = event.pointerId
+      if (state.active) {
+        state.pointerId = event.pointerId
+        state.pointerDowns.push({
+          at: performance.now(),
+          pointerId: event.pointerId,
+          trusted: event.isTrusted,
+          target: event.target?.tagName,
+          focused: document.hasFocus()
+        })
+      }
     },
     true
   )
@@ -786,6 +804,9 @@ function installObserver() {
       captured: false,
       captureCount: 0,
       captureEvents: 0,
+      pointerId: null,
+      pointerDowns: [],
+      captureChecks: [],
       sampled: new Set(),
       lastPaintInputIndex: -1,
       releasedAt: null,
@@ -878,6 +899,8 @@ function installObserver() {
       frames: state.frames,
       events: state.events,
       captureCount: state.captureCount,
+      pointerDowns: state.pointerDowns,
+      captureChecks: state.captureChecks,
       commits: state.commits,
       longTasks: state.longTasks,
       finalRect: state.finalRect,
@@ -887,6 +910,13 @@ function installObserver() {
   state.checkCapture = () => {
     const owner = document.querySelector('[data-videorc-stage-canvas]')?.ownerSVGElement
     const captured = Boolean(owner?.hasPointerCapture(state.pointerId))
+    state.captureChecks.push({
+      at: performance.now(),
+      pointerId: state.pointerId,
+      captured,
+      focused: document.hasFocus(),
+      phase: document.querySelector('[data-videorc-stage-phase]')?.dataset.videorcStagePhase
+    })
     if (captured) {
       state.owner = owner
       state.captureCount++

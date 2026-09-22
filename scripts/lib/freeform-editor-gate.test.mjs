@@ -218,3 +218,18 @@ it('summarizes the population of samples rather than averaging gesture percentil
   assert.equal(timing.byOrientation.portrait.p95, 40)
   assert.equal(timing.byOrientation.landscape.samples, 20)
 })
+
+it('requires capture observations to follow the matching delivered trusted down', () => {
+  const gesture = successful()
+  gesture.pointerDowns = [{ at: 20, pointerId: 2, trusted: true }]
+  gesture.captureChecks = [{ at: 21, pointerId: 2, captured: true }]
+  assert.equal(evaluateFreeformGesture(gesture).ok, true)
+  gesture.captureChecks[0].at = 19
+  assert.equal(evaluateFreeformGesture(gesture).ok, false)
+  gesture.captureChecks[0].at = 21
+  gesture.captureChecks[0].pointerId = 1
+  assert.equal(evaluateFreeformGesture(gesture).ok, false)
+  gesture.captureChecks[0].pointerId = 2
+  gesture.pointerDowns[0].trusted = false
+  assert.equal(evaluateFreeformGesture(gesture).ok, false)
+})

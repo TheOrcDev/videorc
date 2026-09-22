@@ -17,6 +17,7 @@ import {
   markSlotMissingIfAssetMatches,
   reconcileRegistry,
   removeSlotAsset,
+  restoreSlotDefault,
   renameAsset,
   setAssetStyle,
   slotDisplayStatus,
@@ -201,11 +202,17 @@ describe('background asset model', () => {
     expect(slotDisplayStatus(slotById(applied, 'bg-03'), applied)).toBe('active')
   })
 
-  it('keeps bundled preset slots ready when remove is requested', () => {
+  it('clears bundled preset slots persistently when remove is requested', () => {
     const registry = removeSlotAsset(createDefaultRegistry(), 'bg-01')
-    expect(slotById(registry, 'bg-01').assetId).toBe('builtin-bg-01')
-    expect(slotById(registry, 'bg-01').status).toBe('ready')
-    expect(applySlot(registry, 'bg-01').activeSlotId).toBe('bg-01')
+    expect(slotById(registry, 'bg-01').assetId).toBeNull()
+    expect(slotById(registry, 'bg-01').status).toBe('empty')
+    expect(applySlot(registry, 'bg-01').activeSlotId).toBeNull()
+    const hydrated = applyBundledBackgroundAssets(
+      reconcileRegistry(JSON.parse(JSON.stringify(registry))),
+      []
+    )
+    expect(slotById(hydrated, 'bg-01').assetId).toBeNull()
+    expect(slotById(restoreSlotDefault(hydrated, 'bg-01'), 'bg-01').assetId).toBe('builtin-bg-01')
   })
 
   it('moves the active marker on re-apply and clears it on demand', () => {
@@ -306,17 +313,17 @@ describe('background asset import and editing', () => {
     expect(registry.assets.a1?.styleDefaults.scale).toBe(100)
   })
 
-  it('removes an imported slot asset and restores the bundled preset', () => {
+  it('removes an imported slot asset without deleting its descriptor or managed file', () => {
     let registry = importIntoSlot(createDefaultRegistry(), 'bg-02', importedAsset('a1', 'Sunset'))
     registry = applySlot(registry, 'bg-02')
     expect(registry.activeSlotId).toBe('bg-02')
 
     registry = removeSlotAsset(registry, 'bg-02')
-    expect(registry.assets.a1).toBeUndefined()
-    expect(registry.activeSlotId).toBe('bg-02')
+    expect(registry.assets.a1).toBeDefined()
+    expect(registry.activeSlotId).toBeNull()
     const slot = slotById(registry, 'bg-02')
-    expect(slot.assetId).toBe('builtin-bg-02')
-    expect(slot.status).toBe('ready')
+    expect(slot.assetId).toBeNull()
+    expect(slot.status).toBe('empty')
     expect(registry.assets['builtin-bg-02']?.kind).toBe('builtin')
   })
 

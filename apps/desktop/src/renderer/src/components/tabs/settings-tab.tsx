@@ -1,3 +1,5 @@
+import { globalShortcutEntries } from '../../../../shared/global-shortcuts'
+import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import {
   BugIcon,
   ChevronDownIcon,
@@ -450,7 +452,9 @@ export function SettingsTab({
                 [
                   ['recordToggle', 'Start / stop recording', 'Cmd+Shift+R'],
                   ['streamToggle', 'Go live / end stream', 'Cmd+Shift+L'],
-                  ['micToggle', 'Mute / unmute mic', 'Cmd+Shift+M']
+                  ['micToggle', 'Mute / unmute mic', 'Cmd+Shift+M'],
+                  ['layoutNext', 'Next layout', ''],
+                  ['layoutPrevious', 'Previous layout', '']
                 ] as const
               ).map(([key, label, placeholder]) => (
                 <Field key={key}>
@@ -473,6 +477,37 @@ export function SettingsTab({
                     />
                   </div>
                 </Field>
+              ))}
+              {(['horizontal', 'vertical'] as const).map((orientation) => (
+                <div key={orientation} className="flex flex-col gap-3">
+                  <span className="text-sm font-medium">
+                    {orientation === 'horizontal' ? 'Horizontal layouts' : 'Vertical layouts'}
+                  </span>
+                  {BUILTIN_LAYOUTS.filter(
+                    ({ id }) => id.startsWith('vertical-') === (orientation === 'vertical')
+                  ).map(({ id, label }) => (
+                    <Field key={id}>
+                      <FieldLabel htmlFor={`global-layout-${id}`}>{label}</FieldLabel>
+                      <Input
+                        id={`global-layout-${id}`}
+                        value={settings.globalShortcuts?.layouts?.[id] ?? ''}
+                        placeholder="Unassigned"
+                        onChange={(event) =>
+                          setSettings((current) => ({
+                            ...current,
+                            globalShortcuts: {
+                              ...current.globalShortcuts,
+                              layouts: {
+                                ...current.globalShortcuts?.layouts,
+                                [id]: event.target.value
+                              }
+                            }
+                          }))
+                        }
+                      />
+                    </Field>
+                  ))}
+                </div>
               ))}
               <p className="text-xs text-muted-foreground">
                 Leave a field empty to release the key combination.
@@ -640,6 +675,27 @@ export function SettingsTab({
             title="Shortcuts"
           >
             <div className="flex flex-col gap-3">
+              {globalShortcutEntries(settings.globalShortcuts ?? {})
+                .filter(([, key]) => key?.trim())
+                .map(([action, key]) => (
+                  <div key={action} className="flex items-center justify-between gap-3">
+                    <span className="text-sm text-muted-foreground">
+                      Global ·{' '}
+                      {action.startsWith('layout:')
+                        ? BUILTIN_LAYOUTS.find(({ id }) => id === action.slice(7))?.label
+                        : (
+                            {
+                              'layout-next': 'Next layout',
+                              'layout-previous': 'Previous layout',
+                              'record-toggle': 'Start / stop recording',
+                              'stream-toggle': 'Go live / end stream',
+                              'mic-toggle': 'Mute / unmute mic'
+                            } as Record<string, string>
+                          )[action]}
+                    </span>
+                    <Kbd>{displayAccelerator(key!, runtimeInfo?.platform)}</Kbd>
+                  </div>
+                ))}
               {[...shortcutsByGroup().entries()].map(([group, entries]) => (
                 <div key={group} className="flex flex-col gap-1">
                   <span className="text-[12.5px] leading-none font-medium text-subtle">

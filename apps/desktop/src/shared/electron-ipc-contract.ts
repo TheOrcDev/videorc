@@ -1,3 +1,4 @@
+import { GLOBAL_SHORTCUT_ACTIONS, type GlobalShortcutAction } from './global-shortcuts'
 import type {
   AccountCallbackEnvelope,
   BackendConnection,
@@ -17,6 +18,7 @@ import type {
   CommentsViewSnapshot,
   CommentsWindowState,
   GlassWallpaperState,
+  GlobalShortcutsConfig,
   NotesDocument,
   NotesWindowState,
   OAuthCallbackEnvelope,
@@ -172,7 +174,7 @@ export type ElectronInvokeResult<TChannel extends ElectronInvokeChannel> =
 
 /** OS-global shortcut actions (registered via globalShortcut, work with the
  * app unfocused — Stream Deck's native Hotkey action drives these). */
-export type GlobalShortcutAction = 'record-toggle' | 'stream-toggle' | 'mic-toggle'
+export type { GlobalShortcutAction } from './global-shortcuts'
 
 export interface ElectronIpcEventMap {
   'account:callback': AccountCallbackEnvelope
@@ -497,6 +499,35 @@ const accountAuthorizeUrl = runtimeSchema<string>('a desktop authorization URL',
   }
   return input
 })
+
+const globalShortcutsSchema = runtimeSchema<GlobalShortcutsConfig>(
+  'global shortcut bindings',
+  (value, path) => {
+    if (!value || typeof value !== 'object' || Array.isArray(value))
+      throw new RuntimeSchemaError(path, 'shortcut bindings')
+    const bindings = value as Record<string, unknown>
+    for (const [key, entry] of Object.entries(bindings)) {
+      if (key === 'layouts') {
+        if (!entry || typeof entry !== 'object' || Array.isArray(entry))
+          throw new RuntimeSchemaError(path, 'layout bindings')
+        for (const [id, accelerator] of Object.entries(entry)) {
+          if (!(LAYOUT_PRESET_VALUES as readonly string[]).includes(id))
+            throw new RuntimeSchemaError(path, 'a known layout ID')
+          stringSchema({ maxLength: 160 }).parse(accelerator, `${path}.layouts.${id}`)
+        }
+      } else {
+        if (
+          !['recordToggle', 'streamToggle', 'micToggle', 'layoutNext', 'layoutPrevious'].includes(
+            key
+          )
+        )
+          throw new RuntimeSchemaError(path, 'a known shortcut action')
+        optionalSchema(stringSchema({ maxLength: 160 })).parse(entry, `${path}.${key}`)
+      }
+    }
+    return value as GlobalShortcutsConfig
+  }
+)
 
 const notesPatchSchema = objectSchema(
   {
@@ -931,6 +962,7 @@ const specificRuntimeInvokeContracts = {
   'resource:trash-session-deletion': invokeContract(tupleSchema([boundedIdentifier])),
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
+  'global-shortcuts:set': invokeContract(tupleSchema([globalShortcutsSchema])),
   'updates:install': invokeContract(noArgs, undefinedSchema)
 } satisfies Partial<Record<ElectronInvokeChannel, IpcRuntimeContract>>
 
@@ -960,7 +992,6 @@ export const boundedPassthroughElectronInvokeChannels = [
   'preview-window:report-dock-slot',
   'preview-window:set-dock-overlay',
   'notes-window:open',
-  'global-shortcuts:set',
   'notes-window:close',
   'notes-window:get-state',
   'notes-window:set-always-on-top',
@@ -1084,7 +1115,7 @@ const specificRuntimeEventSchemas = {
   // Page Visibility API, so document.visibilityState reads 'visible' even when
   // the window is minimised or hidden.
   'window:visible': booleanSchema,
-  'global-shortcuts:triggered': enumSchema(['record-toggle', 'stream-toggle', 'mic-toggle']),
+  'global-shortcuts:triggered': enumSchema(GLOBAL_SHORTCUT_ACTIONS),
   'preview-surface:pump-mode': booleanSchema,
   'preview-surface:resync-scene': undefinedSchema,
   'captions-window:lines': runtimeSchema<unknown[]>('bounded caption lines', (value, path) => {

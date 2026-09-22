@@ -1,8 +1,9 @@
 # Plan 043: Make Freeform manipulation continuous and visually consistent
 
 Status: IMPLEMENTED — Freeform acceptance passed; draft PR with native recording
-acceptance open. Branch `fix/freeform-editor-continuity` rebased onto `origin/main`
-at `abb37658`. Execution authorized 2026-09-22.
+acceptance open. Branch `fix/freeform-editor-continuity` integrates `origin/main`
+at `3b7a3529`. Execution authorized 2026-09-22.
+PR: [#384](https://github.com/TheOrcDev/videorc/pull/384) (draft).
 Priority: P1. Effort: L (several bounded slices). Risk: MED.
 Category: correctness, interaction performance, design, regression coverage.
 Planned: 2026-09-22. No dependency on Plan 042; preserve its scene-switch animation decisions.
@@ -463,8 +464,8 @@ Verification results:
 | `pnpm lint` | PASS, final UI source |
 | `pnpm format:check` | PASS, final UI source |
 | `pnpm build` | PASS, final UI source |
-| `pnpm --filter @videorc/desktop test` | PASS: 180 files, 1,836 passed, one skipped |
-| `pnpm test:scripts` | PASS: 1,438 tests, post-integration full suite |
+| `pnpm --filter @videorc/desktop test` | PASS: 185 files, 1,868 passed, one skipped, after saved-scene integration |
+| `pnpm test:scripts` | PASS: 1,439 tests, final integrated full suite |
 | `cargo fmt --check --all` | PASS |
 | `cargo test -p videorc-backend` | PASS: 2,259 passed, nine ignored, post-integration |
 | `cargo clippy -p videorc-backend -- -D warnings` | PASS |
@@ -579,3 +580,51 @@ switching passed individually. The final source-complete native check failed twi
 No fully green device-inclusive aggregate is claimed. No release or merge was
 performed. Shadscan baseline and enforced floor are 41; all pre-commit audits
 retained 41 using `pnpm dlx @shadscan/cli@next --json` in `apps/desktop`.
+
+
+After PR #384 was opened, main advanced to `3b7a3529` (#383 saved scenes and
+Studio usability), creating editor/provider conflicts. Integration preserves the
+new scene-edit generations and saved-scene controls alongside Freeform draft
+ownership. Focused editor/provider and real-app saved-scene/Freeform gates are
+complete for this integration; no native source changed in #383.
+
+Main's Plan 044 independently records the same source-complete native gate
+failing with nine and six CPU fallback frames. This corroborates that the native
+acceptance gap is also present in the saved-scenes handoff; it does not replace
+a controlled clean-base reproduction. The unresolved gate remains explicit.
+
+
+Saved-scene integration resolves all conflicts while retaining the existing
+Freeform stage implementation. A shared busy callback blocks saved-scene actions
+during gestures and queued/numeric commits; stage and inspector refuse edits
+during saved-scene/layout replacement. Precision commits now also compare the
+monotonic layout-intent ID, with a regression covering newer saved-scene intent
+that otherwise has identical source/scene identity. Incoming transform-pending
+and working-scene persistence behavior is preserved.
+
+After integration: frozen-lockfile install, typecheck, lint, formatting, production
+build, 102 provider tests, 63 focused editor/control tests, and the full desktop
+suite (185 files, 1,868 passed, one skipped) passed. Native files are unchanged
+by this integration, so the prior Rust/native results remain applicable.
+
+
+The post-saved-scene Freeform run retained three failures: two early capture
+observations and a mid-resize window blur. Both early-observation gestures moved
+and committed correctly; the blurred gesture correctly cancelled without an RPC.
+The blur origin is undetermined. The smoke now awaits actual trusted pointerdown
+delivery before querying capture and records pointer ID, delivery/query timestamps
+and focus state. Analyzer coverage rejects stale or untrusted capture observations;
+31 focused gate tests pass. No capture requirement, timing budget or cancellation
+behavior was weakened. This failed run remains recorded rather than retried
+inside the smoke. The saved-scene real-app smoke passed atomic apply, exact-source
+refusal, working-state restart, live switching and encoded background pixels.
+
+
+Final saved-scene-integrated Freeform acceptance passed: 98 trusted gestures,
+20 screenshots and finalized recording checks; 443 timing samples, aggregate
+p95 11.0ms, maximum 18.1ms, landscape p95 12.2ms, portrait p95 10.8ms. Median rAF
+interval was 9.12ms. Evidence:
+`/var/folders/5b/08_snhzs2xb559qf1j6dth2r0000gn/T/videorc-freeform-editor-0m1vj2/`.
+The merged Freeform and saved-scene workflows are accepted together. The only
+remaining scoped handoff limitation is the separately documented source-complete
+native recording CPU fallback gate; PR #384 stays draft for that reason.

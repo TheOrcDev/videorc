@@ -308,6 +308,7 @@ export function SourcesTab(): ReactElement {
               discoveryPending={discoveryPending}
               disabled={isSessionActive && liveDeviceSwitchDisabled}
               label="Screen / window"
+              searchable
               value={selectedCaptureId}
               onChange={applyCaptureSource}
             />

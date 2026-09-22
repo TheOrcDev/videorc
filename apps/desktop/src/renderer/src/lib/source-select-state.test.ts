@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest'
 
-import { missingSelection, sourceSelectPlaceholder } from './source-select-state'
+import {
+  missingSelection,
+  sourceSelectPlaceholder,
+  sourceMatchesQuery
+} from './source-select-state'
 
 // Q6 (plan 022): fresh-profile QA showed source selects rendering as bare
 // chevrons. Every state must have words: loading, none found, and a saved id
@@ -28,5 +32,27 @@ describe('source select state', () => {
       value: 'gone-id',
       label: 'Saved device unavailable. Pick another'
     })
+  })
+})
+
+describe('source search', () => {
+  it('matches all trimmed words across visible fields, preserving accents and non-Latin text', () => {
+    const source = { name: 'Café 東京', kind: 'window' as const, detail: 'Safari presentation' }
+    expect(sourceMatchesQuery(source, '  SAFARI   café ')).toBe(true)
+    expect(sourceMatchesQuery(source, '東京 window')).toBe(true)
+    expect(sourceMatchesQuery(source, 'camera')).toBe(false)
+  })
+  it('filters a large list without collapsing duplicate labels or searching opaque IDs', () => {
+    const sources = Array.from({ length: 500 }, (_, index) => ({
+      id: `opaque-${index}`,
+      name: 'Window',
+      kind: 'window' as const,
+      detail: `App ${index}`
+    }))
+    expect(sources.filter((source) => sourceMatchesQuery(source, 'window'))).toHaveLength(500)
+    expect(sources.filter((source) => sourceMatchesQuery(source, 'opaque'))).toHaveLength(0)
+    expect(
+      sources.filter((source) => sourceMatchesQuery(source, 'app 499')).map((source) => source.id)
+    ).toEqual(['opaque-499'])
   })
 })
