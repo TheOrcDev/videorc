@@ -59,6 +59,11 @@ export function buildRecordingStudioGateSteps({
       label: 'backend noise cleanup tests',
       command: 'cargo',
       args: ['test', '-p', 'videorc-backend', 'noise_cleanup::tests::']
+    },
+    {
+      label: 'scene switch recording and stream pixel artifacts',
+      command: 'pnpm',
+      args: ['smoke:scene-switch-pixels']
     }
   ]
 

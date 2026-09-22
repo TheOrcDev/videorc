@@ -1389,7 +1389,9 @@ impl MetalSceneCompositor {
         out_height: usize,
         sources: &[GpuSource<'_>],
     ) -> Option<MetalYuvComposeOutput> {
-        let background = [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 1.0];
+        // The target is RGB; RGB zero converts to TV-range Y=16. Clearing
+        // RGB to 16/255 instead produced lifted gray (Y~30) on missing scenes.
+        let background = [0.0, 0.0, 0.0, 1.0];
         let output = self.compose_bgra_with_timings(out_width, out_height, background, sources)?;
         let mut timings = output.timings;
         timings.yuv_frames_converted = 1;

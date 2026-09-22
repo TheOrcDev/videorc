@@ -2771,6 +2771,30 @@ pub(crate) async fn test_install_live_screen_generation(
     });
 }
 
+/// Paint an installed fixture capture without a native producer. The frame's
+/// identity, generation and publication still use the real capture store.
+#[cfg(test)]
+pub(crate) async fn test_publish_screen_pixels(
+    state: &AppState,
+    sequence: u64,
+    pixel: [u8; 4],
+    captured_at: Instant,
+) {
+    let slot = state.preview_screen.lock().await;
+    let active = slot.active.as_ref().expect("installed screen fixture");
+    let mut shared = active.shared.lock().unwrap();
+    let width = active.video.width;
+    let height = active.video.height;
+    shared.frame_store.publish(
+        sequence,
+        width,
+        height,
+        PreviewScreenPixelFormat::Bgra8,
+        captured_at,
+        pixel.repeat((width * height) as usize),
+    );
+}
+
 #[cfg(test)]
 pub(crate) async fn test_install_starting_screen_generation(
     state: &AppState,

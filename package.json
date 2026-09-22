@@ -179,6 +179,7 @@
     "smoke:preview-performance:jpeg-fallback": "node scripts/smoke-preview-performance-app.mjs --gate",
     "smoke:recording-performance": "node scripts/smoke-recording-performance-app.mjs --gate",
     "smoke:recording-studio": "node scripts/smoke-recording-studio.mjs",
+    "smoke:scene-switch-pixels": "node scripts/smoke-scene-switch-pixels.mjs",
     "smoke:recording-studio:devices": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_RECORDING_STUDIO_DEVICE_SMOKE=1 -- node scripts/smoke-recording-studio.mjs",
     "smoke:screen-recording-real": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_BASELINE_RECORDING_MS=8000 VIDEORC_BASELINE_WARMUP_MS=2000 VIDEORC_BASELINE_PREVIEW_MEASUREMENT_MS=2000 VIDEORC_BASELINE_NO_CAMERA=1 VIDEORC_BASELINE_NO_MIC=1 VIDEORC_BASELINE_LAYOUT_PRESET=screen-only VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS=1 -- node scripts/real-source-baseline-app.mjs --screen-recording-gate",
     "smoke:notes-window-invisible": "node scripts/run-with-env.mjs --platform=darwin VIDEORC_NOTES_WINDOW=1 VIDEORC_BASELINE_NOTES_OVERLAY=1 VIDEORC_BASELINE_RECORDING_MS=8000 VIDEORC_BASELINE_WARMUP_MS=2000 VIDEORC_BASELINE_PREVIEW_MEASUREMENT_MS=2000 VIDEORC_BASELINE_NO_CAMERA=1 VIDEORC_BASELINE_NO_MIC=1 VIDEORC_BASELINE_LAYOUT_PRESET=screen-only VIDEORC_BASELINE_SCREEN_MOTION_STIMULUS=1 -- node scripts/real-source-baseline-app.mjs --notes-overlay-gate",

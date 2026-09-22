@@ -21,6 +21,7 @@ describe('buildRecordingStudioGateSteps', () => {
       'backend recording pipeline tests',
       'backend audio pipeline tests',
       'backend noise cleanup tests',
+      'scene switch recording and stream pixel artifacts',
       'live captions transport contract smoke',
       'live captions mute/gain and record+stream artifact smoke',
       'noise cleanup final-artifact smoke',

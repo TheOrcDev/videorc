@@ -3460,6 +3460,26 @@ pub(crate) async fn test_install_live_camera_for_layout(
     });
 }
 
+#[cfg(test)]
+pub(crate) async fn test_publish_camera_pixels(
+    state: &AppState,
+    sequence: u64,
+    pixel: [u8; 4],
+    captured_at: Instant,
+) {
+    let slot = state.preview_camera.lock().await;
+    let active = slot.active.as_ref().expect("installed camera fixture");
+    let mut shared = active.shared.lock().unwrap();
+    shared.frame_store.publish(
+        sequence,
+        active.video.width,
+        active.video.height,
+        PreviewCameraPixelFormat::Bgra8,
+        captured_at,
+        pixel.repeat((active.video.width * active.video.height) as usize),
+    );
+}
+
 /// Test-only: register a fully identified Starting generation without touching
 /// a physical camera. Cross-module race tests use the returned identity to
 /// exercise the same generation-and-key CAS as production timeout cleanup.

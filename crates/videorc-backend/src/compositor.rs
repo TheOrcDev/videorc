@@ -19,7 +19,10 @@ use crate::capture_health::{
     CaptureHealthTransition,
 };
 use crate::color::rgb_to_yuv_video_range_bt709 as rgb_to_yuv;
-use crate::compositor_synthetic::SyntheticMovingSource;
+
+#[cfg(test)]
+#[path = "compositor_scene_switch_tests.rs"]
+mod scene_switch_tests;
 use crate::diagnostics::{
     CompositorCpuFrameCounts, CompositorLiveSourceFetchStats, CompositorOutsideRenderTimingStats,
     CompositorSourceImportStats, apply_active_scene_revision, apply_capture_health,
@@ -45,7 +48,7 @@ use crate::protocol::{
     CompositorSourceKind, CompositorSourceStatus, CompositorState, CompositorStatus,
     DiagnosticStats, EffectiveSceneBackground, LayoutSettings, PreviewCameraState,
     PreviewScreenSourceKind, PreviewScreenState, PreviewSurfaceState, PreviewSurfaceStatus,
-    PreviewTransport, Scene, SceneSourceKind, SceneTransform, StreamScreen,
+    PreviewTransport, Scene, SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
     ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, background_stage_margin,
@@ -62,7 +65,7 @@ use crate::windows_d3d11_device::{
 };
 
 #[cfg(test)]
-use crate::protocol::{LayoutPreset, SceneSource};
+use crate::protocol::LayoutPreset;
 
 const COMPOSITOR_DIAGNOSTIC_WINDOW: Duration = Duration::from_secs(2);
 const COMPOSITOR_LIVE_SOURCE_REFRESH_INTERVAL: Duration = Duration::from_millis(250);
@@ -70,8 +73,8 @@ const COMPOSITOR_LIVE_SOURCE_STALE_RECOVERY_AFTER: Duration = Duration::from_sec
 const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_AFTER: Duration = Duration::from_millis(67);
 const COMPOSITOR_LIVE_SOURCE_CONTENDED_RECOVERY_MISSES: u32 = 1;
 const COMPOSITOR_MISSING_SOURCE_PLACEHOLDER_AFTER: Duration = Duration::from_secs(2);
-const MISSING_SOURCE_PLACEHOLDER_WIDTH: usize = 16;
-const MISSING_SOURCE_PLACEHOLDER_HEIGHT: usize = 9;
+const MISSING_SOURCE_PLACEHOLDER_WIDTH: usize = 2;
+const MISSING_SOURCE_PLACEHOLDER_HEIGHT: usize = 2;
 const COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES: usize = 256 * 1024 * 1024;
 const COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET: usize = 256;
 const COMPOSITOR_IMAGE_CACHE_MAX_PINNED_ENTRIES: usize = 2;
@@ -601,6 +604,11 @@ struct CompositorLiveSources {
     last_screen_frame: Option<FrameHandle<PreviewScreenPixelFormat>>,
     camera_fetch: LiveSourceFetchState,
     screen_fetch: LiveSourceFetchState,
+    adopted_scene_revisions: Option<(Option<u64>, Option<u64>)>,
+    camera_binding_verified: bool,
+    screen_binding_verified: bool,
+    pending_camera_change: Option<CompositorCameraSourceChange>,
+    pending_screen_change: Option<CompositorScreenSourceChange>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -779,6 +787,7 @@ impl CompositorLiveSources {
         let mut camera_change = None;
         let mut screen_change = None;
         if let Ok(camera) = try_preview_camera_frame_source(state) {
+            self.camera_binding_verified = true;
             if !same_camera_source(self.camera.as_ref(), camera.as_ref()) {
                 let previous_camera_present = self.camera.is_some();
                 self.last_camera_frame = None;
@@ -800,6 +809,7 @@ impl CompositorLiveSources {
             self.camera = camera;
         }
         if let Ok(screen) = try_preview_screen_frame_source(state) {
+            self.screen_binding_verified = true;
             if !same_screen_source(self.screen.as_ref(), screen.as_ref()) {
                 let previous_screen_present = self.screen.is_some();
                 self.last_screen_frame = None;
@@ -821,6 +831,59 @@ impl CompositorLiveSources {
             self.screen = screen;
         }
         (self, camera_change, screen_change)
+    }
+
+    /// Scene commits and capture-handle polling used to run on independent
+    /// clocks. Adopt ready handles at the render boundary of either output's
+    /// new revision. A contended registry is retried next frame, never waited
+    /// on and never allowed to prove the old binding belongs to the new scene.
+    fn adopt_for_scene(&mut self, state: &AppState, cache: &CompositorRenderCache) {
+        let revisions = (
+            cache.snapshot.as_ref().map(|s| s.revision),
+            cache.simulcast_snapshot.as_ref().map(|s| s.revision),
+        );
+        let missing_binding = [&cache.snapshot, &cache.simulcast_snapshot]
+            .into_iter()
+            .flatten()
+            .filter_map(|s| s.scene.as_ref())
+            .flat_map(|s| &s.sources)
+            .filter(|s| s.visible)
+            .any(|source| match source.kind {
+                SceneSourceKind::Camera => !source_matches_key(
+                    source,
+                    self.camera
+                        .as_ref()
+                        .and_then(PreviewCameraFrameSource::source_key),
+                ),
+                SceneSourceKind::Screen | SceneSourceKind::Window => !source_matches_key(
+                    source,
+                    self.screen
+                        .as_ref()
+                        .and_then(PreviewScreenFrameSource::source_key),
+                ),
+                SceneSourceKind::TestPattern => false,
+            });
+        if self.adopted_scene_revisions == Some(revisions)
+            && self.camera_binding_verified
+            && self.screen_binding_verified
+            && !missing_binding
+        {
+            return;
+        }
+        if self.adopted_scene_revisions != Some(revisions) {
+            self.camera_binding_verified = false;
+            self.screen_binding_verified = false;
+        }
+        let (mut refreshed, camera_change, screen_change) =
+            std::mem::take(self).refresh_sources_nonblocking(state);
+        if camera_change.is_some() {
+            refreshed.pending_camera_change = camera_change;
+        }
+        if screen_change.is_some() {
+            refreshed.pending_screen_change = screen_change;
+        }
+        refreshed.adopted_scene_revisions = Some(revisions);
+        *self = refreshed;
     }
 
     fn fetch_stats(&self) -> CompositorLiveSourceFetchStats {
@@ -845,7 +908,7 @@ impl CompositorLiveSources {
             return self.last_camera_frame.clone();
         };
         if self.last_camera_frame.is_none() {
-            if let Some(frame) = source.latest_frame_blocking() {
+            if let Ok(Some(frame)) = source.try_latest_frame_result() {
                 self.last_camera_frame = Some(frame);
             }
             return self.last_camera_frame.clone();
@@ -887,7 +950,7 @@ impl CompositorLiveSources {
             return self.last_screen_frame.clone();
         };
         if self.last_screen_frame.is_none() {
-            if let Some(frame) = source.latest_frame_blocking() {
+            if let Ok(Some(frame)) = source.try_latest_frame_result() {
                 self.last_screen_frame = Some(frame);
             }
             return self.last_screen_frame.clone();
@@ -1014,6 +1077,40 @@ fn same_screen_source(
         == next.and_then(PreviewScreenFrameSource::source_key)
         && previous.map(PreviewScreenFrameSource::generation)
             == next.map(PreviewScreenFrameSource::generation)
+}
+
+fn source_matches_key(source: &SceneSource, key: Option<&SourceKey>) -> bool {
+    let Some(key) = key else {
+        return false;
+    };
+    let kind_matches = matches!(
+        (&source.kind, &key.kind),
+        (
+            SceneSourceKind::Camera,
+            crate::source_registry::SourceKind::Camera
+        ) | (
+            SceneSourceKind::Screen,
+            crate::source_registry::SourceKind::Screen
+        ) | (
+            SceneSourceKind::Window,
+            crate::source_registry::SourceKind::Window
+        )
+    );
+    kind_matches && source.device_id.as_deref() == Some(key.id.as_str())
+}
+
+fn scene_accepts_source(
+    snapshot: Option<&CompositorSceneSnapshot>,
+    key: Option<&SourceKey>,
+) -> bool {
+    snapshot
+        .and_then(|s| s.scene.as_ref())
+        .is_some_and(|scene| {
+            scene
+                .sources
+                .iter()
+                .any(|source| source.visible && source_matches_key(source, key))
+        })
 }
 
 fn screen_source_matches_health_epoch(
@@ -3581,6 +3678,18 @@ async fn run_synthetic_compositor_loop(
                         highlight_overlay_on_aux,
                     )
                         .await;
+                // Adoption at the publish boundary uses the same recovery/
+                // health acknowledgements as the periodic maintenance path.
+                if let Some(change) = live_sources.pending_camera_change.take()
+                    && acknowledge_compositor_camera_source_change_if_current(
+                        &state, &run_id, &mut capture_health, change).await.is_none() {
+                    break;
+                }
+                if let Some(change) = live_sources.pending_screen_change.take()
+                    && acknowledge_compositor_screen_source_change_if_current(
+                        &state, &run_id, &mut capture_health, change).await.is_none() {
+                    break;
+                }
                 health_heartbeat.fetch_add(1, Ordering::Release);
                 let delivery_stats = live_sources.fetch_stats();
                 let delivery_source = live_sources.camera.as_ref().and_then(|source| {
@@ -4519,7 +4628,13 @@ fn try_gpu_compose(
         }
     })?;
     let prepare_started_at = Instant::now();
-    let snapshot = inputs.snapshot.ok_or("compositor scene unavailable")?;
+    let empty_snapshot = CompositorSceneSnapshot {
+        revision: 0,
+        scene: None,
+        layout: crate::protocol::default_layout_settings(),
+        active_screen: None,
+    };
+    let snapshot = inputs.snapshot.unwrap_or(&empty_snapshot);
     let scene = snapshot.scene.as_ref();
     let layout = &snapshot.layout;
     let mut prepared_sources = Vec::new();
@@ -4671,16 +4786,12 @@ fn try_gpu_compose(
         return Ok(gpu_compositor_frame(gpu, output, prepare_ms));
     }
     if inputs.active_image_source.is_some() {
-        let placeholder =
-            missing_source_placeholder_bgra(&SceneSourceKind::Screen, inputs.sequence);
+        let placeholder = missing_source_black_bgra();
         let (dest, crop) = gpu_source_placement(
             placeholder.width as u32,
             placeholder.height as u32,
             scene_content_rect_pixels(stage_margin, inputs.width, inputs.height),
-            matches!(
-                compositor_scene_source_fit(&SceneSourceKind::Screen, layout),
-                CompositorSceneSourceFit::Contain
-            ),
+            false,
             SceneCrop::none(),
             (0.0, 0.0),
             inputs.width,
@@ -4744,8 +4855,11 @@ fn try_gpu_compose(
         return Ok(gpu_compositor_frame(gpu, output, prepare_ms));
     }
 
-    let scene = scene.ok_or("compositor scene unavailable")?;
-    for source in scene.sources.iter().filter(|source| source.visible) {
+    for source in scene
+        .into_iter()
+        .flat_map(|scene| &scene.sources)
+        .filter(|source| source.visible)
+    {
         let transform =
             scene_source_render_transform(&source.transform, &source.kind, stage_margin);
         let rect = scene_source_rect_pixels(&transform, inputs.width, inputs.height)
@@ -4799,18 +4913,14 @@ fn try_gpu_compose(
                             .and_then(scene_chroma_key_into_metal),
                     });
                 } else {
-                    let placeholder =
-                        missing_source_placeholder_bgra(&source.kind, inputs.sequence);
+                    let placeholder = missing_source_black_bgra();
                     let (dest, crop) = gpu_source_placement(
                         placeholder.width as u32,
                         placeholder.height as u32,
                         rect,
-                        matches!(
-                            scene_source_fit(&SceneSourceKind::Camera, layout),
-                            SceneFit::Contain
-                        ),
-                        source_crop,
-                        source_cover_pan(&SceneSourceKind::Camera, layout),
+                        false,
+                        SceneCrop::none(),
+                        (0.0, 0.0),
                         inputs.width,
                         inputs.height,
                     )
@@ -4885,15 +4995,14 @@ fn try_gpu_compose(
                         chroma_key: None,
                     });
                 } else {
-                    let placeholder =
-                        missing_source_placeholder_bgra(&source.kind, inputs.sequence);
+                    let placeholder = missing_source_black_bgra();
                     let (dest, crop) = gpu_source_placement(
                         placeholder.width as u32,
                         placeholder.height as u32,
                         rect,
-                        screen_contain,
-                        source_crop,
-                        source_cover_pan(&source.kind, layout),
+                        false,
+                        SceneCrop::none(),
+                        (0.0, 0.0),
                         inputs.width,
                         inputs.height,
                     )
@@ -5074,7 +5183,7 @@ fn compose_gpu_sources(
                 },
             })
     } else {
-        let background = [16.0 / 255.0, 16.0 / 255.0, 16.0 / 255.0, 1.0];
+        let background = [0.0, 0.0, 0.0, 1.0];
         let timings =
             gpu.compose_target_with_timings(width as usize, height as usize, background, sources)?;
         Some(GpuComposeOutput {
@@ -5132,32 +5241,11 @@ fn evidence_fingerprint(
     }
 }
 
-fn missing_source_placeholder_bgra(
-    source_kind: &SceneSourceKind,
-    sequence: u64,
-) -> MissingSourcePlaceholderBgra {
+fn missing_source_black_bgra() -> MissingSourcePlaceholderBgra {
     let width = MISSING_SOURCE_PLACEHOLDER_WIDTH;
     let height = MISSING_SOURCE_PLACEHOLDER_HEIGHT;
-    let mut bytes = vec![0u8; width * height * 4];
-    let accent = match source_kind {
-        SceneSourceKind::Camera => [255, 0, 255, 255],
-        SceneSourceKind::Screen | SceneSourceKind::Window => [0, 160, 255, 255],
-        SceneSourceKind::TestPattern => [255, 255, 255, 255],
-    };
-    let phase = (sequence as usize) % width;
-    for y in 0..height {
-        for x in 0..width {
-            let i = (y * width + x) * 4;
-            let border = x == 0 || y == 0 || x + 1 == width || y + 1 == height;
-            let diagonal = x == (y + phase) % width;
-            let pixel = if border || diagonal {
-                accent
-            } else {
-                [24, 24, 24, 255]
-            };
-            bytes[i..i + 4].copy_from_slice(&pixel);
-        }
-    }
+    // Diagnostics belong in status, never in preview or encoded program pixels.
+    let bytes = [0, 0, 0, 255].repeat(width * height);
     MissingSourcePlaceholderBgra {
         bytes,
         width,
@@ -5630,6 +5718,7 @@ async fn publish_compositor_frame(
     let source_fetch_started_at = Instant::now();
     let scene_snapshot_started_at = Instant::now();
     render_cache.refresh_nonblocking(state);
+    live_sources.adopt_for_scene(state, render_cache);
     let frame_store = render_cache.frame_store.clone();
     let stream_frame_store = render_cache.stream_frame_store.clone();
     let snapshot = snapshot_with_transition(
@@ -5651,7 +5740,10 @@ async fn publish_compositor_frame(
         {
             let camera_fetch_started_at = Instant::now();
             (
-                live_sources.latest_camera_frame(),
+                live_sources
+                    .camera_binding_verified
+                    .then(|| live_sources.latest_camera_frame())
+                    .flatten(),
                 camera_fetch_started_at.elapsed().as_secs_f64() * 1000.0,
             )
         } else {
@@ -5663,7 +5755,10 @@ async fn publish_compositor_frame(
         {
             let screen_fetch_started_at = Instant::now();
             (
-                live_sources.latest_screen_frame(),
+                live_sources
+                    .screen_binding_verified
+                    .then(|| live_sources.latest_screen_frame())
+                    .flatten(),
                 screen_fetch_started_at.elapsed().as_secs_f64() * 1000.0,
             )
         } else {
@@ -5679,18 +5774,29 @@ async fn publish_compositor_frame(
     let has_image_source = active_image_source
         .as_ref()
         .is_some_and(|source| source.rgba.is_some() || source.bgra.is_some());
+    let camera_key = live_sources
+        .camera
+        .as_ref()
+        .and_then(PreviewCameraFrameSource::source_key);
+    let screen_key = live_sources
+        .screen
+        .as_ref()
+        .and_then(PreviewScreenFrameSource::source_key);
+    let primary_camera_frame = camera_frame
+        .as_ref()
+        .filter(|_| scene_accepts_source(snapshot.as_ref(), camera_key))
+        .map(|(frame, _)| frame);
+    let primary_screen_frame = screen_frame
+        .as_ref()
+        .filter(|_| scene_accepts_source(snapshot.as_ref(), screen_key));
     let fingerprint = evidence_fingerprint(
-        camera_frame
-            .as_ref()
-            .map(|(frame, _layout)| (frame.sequence, frame.captured_at)),
-        screen_frame
-            .as_ref()
-            .map(|frame| (frame.sequence, frame.captured_at)),
+        primary_camera_frame.map(|frame| (frame.sequence, frame.captured_at)),
+        primary_screen_frame.map(|frame| (frame.sequence, frame.captured_at)),
     );
     let published_at = Instant::now();
     let captured_at = compositor_frame_content_captured_at(
-        camera_frame.as_ref().map(|(frame, _layout)| frame),
-        screen_frame.as_ref(),
+        primary_camera_frame,
+        primary_screen_frame,
         published_at,
     );
     // Default to the platform-appropriate CPU state: on macOS, not reaching
@@ -5720,8 +5826,8 @@ async fn publish_compositor_frame(
             snapshot: snapshot.as_ref(),
             active_image_source: active_image_source.as_ref(),
             background_image_source: background_image_source.as_ref(),
-            camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
-            screen_frame: screen_frame.as_ref(),
+            camera_frame: primary_camera_frame,
+            screen_frame: primary_screen_frame,
             caption_overlay: caption_overlay_for_output(
                 &caption_overlays,
                 crate::captions::CaptionOverlayTarget::Primary,
@@ -5807,8 +5913,13 @@ async fn publish_compositor_frame(
             snapshot: aux_snapshot,
             active_image_source: active_image_source.as_ref(),
             background_image_source: background_image_source.as_ref(),
-            camera_frame: camera_frame.as_ref().map(|(frame, _layout)| frame),
-            screen_frame: screen_frame.as_ref(),
+            camera_frame: camera_frame
+                .as_ref()
+                .filter(|_| scene_accepts_source(aux_snapshot, camera_key))
+                .map(|(frame, _)| frame),
+            screen_frame: screen_frame
+                .as_ref()
+                .filter(|_| scene_accepts_source(aux_snapshot, screen_key)),
             // The auxiliary (stream) leg carries the bar per the leg plan.
             caption_overlay: if stream_output.composes_simulcast_scene {
                 None
@@ -5992,13 +6103,10 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
     fill_yuv420p(bytes, width, height, 16, 128, 128);
 
     let Some(snapshot) = snapshot else {
-        render_synthetic_yuv420p_frame(sequence, width, height, bytes);
         return;
     };
-    let Some(scene) = snapshot.scene.as_ref() else {
-        render_synthetic_yuv420p_frame(sequence, width, height, bytes);
-        return;
-    };
+    let empty_scene = crate::scene::default_scene();
+    let scene = snapshot.scene.as_ref().unwrap_or(&empty_scene);
     let background_active = render_scene_background(
         scene.background.as_ref(),
         background_image_source,
@@ -6044,7 +6152,17 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         return;
     }
 
-    let mut rendered_sources = 0_u32;
+    if active_image_source.is_some() {
+        render_unavailable_source_rect(
+            bytes,
+            width,
+            height,
+            scene_content_rect_pixels(stage_margin, width, height),
+            SceneMask::None,
+        );
+        return;
+    }
+
     for source in scene.sources.iter().filter(|source| source.visible) {
         let transform =
             scene_source_render_transform(&source.transform, &source.kind, stage_margin);
@@ -6111,40 +6229,77 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
                     false
                 }
             }
-            SceneSourceKind::Camera => camera_frame.is_some_and(|frame| {
-                blit_rgba_to_yuv420p(
-                    &RgbaSource {
-                        bytes: &frame.bytes,
-                        width: frame.width,
-                        height: frame.height,
-                        format: SourcePixelFormat::Bgra,
-                    },
-                    bytes,
-                    width,
-                    height,
-                    rect,
-                    SourceRenderOptions {
-                        crop: scene_crop_from_transform(&transform),
-                        pan: source_cover_pan(&SceneSourceKind::Camera, &snapshot.layout),
-                        contain: matches!(
-                            scene_source_fit(&SceneSourceKind::Camera, &snapshot.layout),
-                            SceneFit::Contain
-                        ),
-                        mirror_x: snapshot.layout.camera_mirror,
-                        mask: camera_mask(&snapshot.layout),
-                        chroma_key: camera_chroma_key(&snapshot.layout),
-                    },
-                )
-            }),
+            SceneSourceKind::Camera => camera_frame
+                .filter(|frame| !source_frame_is_too_stale(frame.captured_at))
+                .is_some_and(|frame| {
+                    blit_rgba_to_yuv420p(
+                        &RgbaSource {
+                            bytes: &frame.bytes,
+                            width: frame.width,
+                            height: frame.height,
+                            format: SourcePixelFormat::Bgra,
+                        },
+                        bytes,
+                        width,
+                        height,
+                        rect,
+                        SourceRenderOptions {
+                            crop: scene_crop_from_transform(&transform),
+                            pan: source_cover_pan(&SceneSourceKind::Camera, &snapshot.layout),
+                            contain: matches!(
+                                scene_source_fit(&SceneSourceKind::Camera, &snapshot.layout),
+                                SceneFit::Contain
+                            ),
+                            mirror_x: snapshot.layout.camera_mirror,
+                            mask: camera_mask(&snapshot.layout),
+                            chroma_key: camera_chroma_key(&snapshot.layout),
+                        },
+                    )
+                }),
         };
-        if rendered {
-            rendered_sources = rendered_sources.saturating_add(1);
+        if !rendered {
+            render_unavailable_source_rect(
+                bytes,
+                width,
+                height,
+                rect,
+                if matches!(source.kind, SceneSourceKind::Camera) {
+                    camera_mask(&snapshot.layout)
+                } else {
+                    SceneMask::None
+                },
+            );
         }
     }
+}
 
-    if rendered_sources == 0 && !background_active {
-        render_synthetic_yuv420p_frame(sequence, width, height, bytes);
-    }
+fn render_unavailable_source_rect(
+    bytes: &mut [u8],
+    width: u32,
+    height: u32,
+    rect: PixelRect,
+    mask: SceneMask,
+) {
+    blit_rgba_to_yuv420p(
+        &RgbaSource {
+            bytes: &[0, 0, 0, 255].repeat(4),
+            width: 2,
+            height: 2,
+            format: SourcePixelFormat::Bgra,
+        },
+        bytes,
+        width,
+        height,
+        rect,
+        SourceRenderOptions {
+            crop: SceneCrop::none(),
+            pan: (0.0, 0.0),
+            contain: false,
+            mirror_x: false,
+            mask,
+            chroma_key: None,
+        },
+    );
 }
 
 fn try_update_preview_surface_frames(
@@ -6526,46 +6681,6 @@ fn fill_yuv420p(bytes: &mut [u8], width: u32, height: u32, y_value: u8, u_value:
     bytes[..y_len].fill(y_value);
     bytes[y_len..y_len + uv_len].fill(u_value);
     bytes[y_len + uv_len..].fill(v_value);
-}
-
-fn render_synthetic_yuv420p_frame(sequence: u64, width: u32, height: u32, bytes: &mut [u8]) {
-    let width = width.max(1) as usize;
-    let height = height.max(1) as usize;
-    let y_len = width * height;
-    let uv_width = width.div_ceil(2);
-    let uv_height = height.div_ceil(2);
-    let u_start = y_len;
-    let v_start = y_len + uv_width * uv_height;
-    let source = SyntheticMovingSource;
-    let frame = source.render(sequence, width as u32, height as u32);
-    let marker_size = (width.min(height) / 10).clamp(8, 48);
-    let marker_x = (frame.marker_x as usize).min(width.saturating_sub(1));
-    let marker_y = (frame.marker_y as usize).min(height.saturating_sub(1));
-    let marker_left = marker_x.saturating_sub(marker_size);
-    let marker_top = marker_y.saturating_sub(marker_size);
-    let marker_right = marker_x.saturating_add(marker_size).min(width);
-    let marker_bottom = marker_y.saturating_add(marker_size).min(height);
-
-    bytes[..y_len].fill(48_u8.saturating_add((sequence % 96) as u8));
-    bytes[u_start..v_start].fill(128);
-    bytes[v_start..].fill(128);
-
-    for y in marker_top..marker_bottom {
-        let row_start = y * width + marker_left;
-        let row_end = y * width + marker_right;
-        bytes[row_start..row_end].fill(235);
-    }
-
-    let uv_left = marker_left / 2;
-    let uv_top = marker_top / 2;
-    let uv_right = marker_right.div_ceil(2).min(uv_width);
-    let uv_bottom = marker_bottom.div_ceil(2).min(uv_height);
-    for y in uv_top..uv_bottom {
-        let row_start = y * uv_width + uv_left;
-        let row_end = y * uv_width + uv_right;
-        bytes[u_start + row_start..u_start + row_end].fill(60);
-        bytes[v_start + row_start..v_start + row_end].fill(190);
-    }
 }
 
 fn render_synthetic_source_rect(
@@ -13418,25 +13533,27 @@ mod tests {
         let camera_captured_at = Instant::now()
             .checked_sub(Duration::from_millis(77))
             .unwrap_or_else(Instant::now);
-        let camera_frame =
-            crate::frame_store::FrameHandle::pin_for_test(crate::frame_store::StoredFrame {
-                storage: crate::frame_store::FrameStorage::untracked(),
-                sequence: 7,
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:avfoundation:0",
+            &layout,
+            &VideoSettings {
+                preset: VideoPreset::Custom,
                 width: 4,
                 height: 4,
-                pixel_format: PreviewCameraPixelFormat::Bgra8,
-                metadata: (),
-                bytes: [0, 0, 255, 255].repeat(16),
-                source_iosurface: None,
-                source_pixel_buffer: None,
-                source_d3d11_texture: None,
-                recycle_pool: None,
-                captured_at: camera_captured_at,
-            });
-        let mut live_sources = CompositorLiveSources {
-            last_camera_frame: Some((camera_frame, layout)),
-            ..CompositorLiveSources::default()
-        };
+                fps: 30,
+                bitrate_kbps: 2000,
+            },
+        )
+        .await;
+        crate::preview_camera::test_publish_camera_pixels(
+            &state,
+            7,
+            [0, 0, 255, 255],
+            camera_captured_at,
+        )
+        .await;
+        let mut live_sources = CompositorLiveSources::default();
         let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
 
         let result = publish_compositor_frame(
