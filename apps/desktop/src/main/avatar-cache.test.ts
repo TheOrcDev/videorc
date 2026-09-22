@@ -65,6 +65,10 @@ describe('avatarHostAllowed', () => {
     )
     expect(avatarHostAllowed('https://blob.vercel-storage.com.attacker.dev/u.png')).toBe(false)
     expect(avatarHostAllowed('https://notblob.vercel-storage.com/u.png')).toBe(false)
+    expect(avatarHostAllowed('https://www.videorc.com/api/account/avatar/u1/a.png')).toBe(true)
+    expect(avatarHostAllowed('https://videorc.com/api/account/avatar/u1/a.png')).toBe(true)
+    expect(avatarHostAllowed('https://videorc.com.attacker.dev/u.png')).toBe(false)
+    expect(avatarHostAllowed('https://notvideorc.com/u.png')).toBe(false)
   })
 
   it('rejects lookalike hosts, other origins, and garbage', () => {

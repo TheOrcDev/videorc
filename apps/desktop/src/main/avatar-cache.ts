@@ -21,7 +21,10 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
   // Videorc account avatars uploaded on videorc.com (Vercel Blob storage).
   // Any store subdomain, matching the web's own isAccountAvatarBlobUrl check;
   // Google account photos are covered by googleusercontent.com above.
-  'blob.vercel-storage.com'
+  'blob.vercel-storage.com',
+  // Videorc account avatars stored in Neon Object Storage, served by the
+  // web's /api/account/avatar route (a 302 to a short-lived presigned URL).
+  'videorc.com'
 ]
 
 /** Keep the cache bounded; oldest files (by mtime) are pruned past this. */
