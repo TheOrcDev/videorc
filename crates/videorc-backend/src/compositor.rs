@@ -5056,9 +5056,9 @@ fn try_gpu_compose(
             }
         }
     }
-    if prepared_sources.is_empty() {
-        return Err("no visible compositor sources".to_string());
-    }
+    // Startup and all-hidden scenes still need a fresh black target. Metal's
+    // render pass clears it even with no sources; rejecting the empty list
+    // incorrectly degraded those frames to CPU and left native preview stale.
     if let Some(overlay) = inputs.caption_overlay {
         let safe_inset = caption_overlay_safe_inset(
             inputs.caption_overlay,

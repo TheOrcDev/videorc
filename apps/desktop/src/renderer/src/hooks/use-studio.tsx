@@ -347,7 +347,7 @@ import {
   videoProfileEntitlementGate,
   type EntitlementUiGate
 } from '@/lib/entitlement-ui'
-import { commentCanHighlight } from '@/components/comment-row'
+import { commentCanHighlight, CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import {
   applyCohostState,
   cohostErrorToast,
@@ -371,7 +371,6 @@ import {
   type LiveChatSendOperationsQueryResult,
   type LiveChatBootstrapEvent
 } from '@/lib/live-chat-view'
-import { CHAT_PLATFORM_LABELS } from '@/components/chat-platform-icon'
 import {
   buildNativePreviewCompositorUpdateParams,
   compositorStatusHasRenderedSceneRevision,

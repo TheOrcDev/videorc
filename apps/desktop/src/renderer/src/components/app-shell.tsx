@@ -19,7 +19,6 @@ import {
   type StudioPanel,
   type WorkspaceTab
 } from '@/components/workspace-nav'
-import { WhatsNewDialog } from '@/components/whats-new-dialog'
 import { useStudioAudio, useStudioCore, useStudioShell } from '@/hooks/use-studio'
 import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
@@ -66,6 +65,9 @@ const StreamingTab = lazy(async () => ({
 }))
 const PermissionsOnboardingDialog = lazy(async () => ({
   default: (await import('@/components/permissions-onboarding-dialog')).PermissionsOnboardingDialog
+}))
+const WhatsNewDialog = lazy(async () => ({
+  default: (await import('@/components/whats-new-dialog')).WhatsNewDialog
 }))
 
 function WorkspaceTabFallback(): ReactElement {
@@ -454,11 +456,11 @@ export function AppShell(): ReactElement {
         />
         {/* Post-update highlights; suppressed behind onboarding on first run
             (first run initializes the last-seen version silently). */}
-        <WhatsNewDialog
-          entry={whatsNew.entry}
-          open={whatsNew.open && !onboardingOpen}
-          onClose={whatsNew.dismiss}
-        />
+        <Suspense fallback={null}>
+          {whatsNew.open && !onboardingOpen ? (
+            <WhatsNewDialog entry={whatsNew.entry} open onClose={whatsNew.dismiss} />
+          ) : null}
+        </Suspense>
       </div>
     </WorkspaceNavContext.Provider>
   )

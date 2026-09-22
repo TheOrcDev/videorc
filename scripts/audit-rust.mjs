@@ -10,7 +10,13 @@ export function rustAuditCommands({ databasePath, databaseExists }) {
   const refresh = databaseExists
     ? ['git', ['-C', databasePath, 'pull', '--ff-only', '--quiet']]
     : ['git', ['clone', '--quiet', advisoryDatabaseUrl, databasePath]]
-  return [refresh, ['cargo', ['audit', '--db', databasePath, '--no-fetch', '--deny', 'warnings']]]
+  // --no-fetch also prevents cargo-audit from populating the crates.io index.
+  // Hydrate every locked target first so fresh CI runners can check yanked crates.
+  return [
+    refresh,
+    ['cargo', ['fetch', '--locked']],
+    ['cargo', ['audit', '--db', databasePath, '--no-fetch', '--deny', 'warnings']]
+  ]
 }
 
 export function auditRustDependencies({
