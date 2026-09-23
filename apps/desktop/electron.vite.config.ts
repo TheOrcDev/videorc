@@ -58,7 +58,8 @@ export default defineConfig({
         input: {
           index: resolve('src/renderer/index.html'),
           comments: resolve('src/renderer/comments.html'),
-          captions: resolve('src/renderer/captions.html')
+          captions: resolve('src/renderer/captions.html'),
+          notes: resolve('src/renderer/notes.html')
         }
       }
     }

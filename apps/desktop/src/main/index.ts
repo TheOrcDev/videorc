@@ -314,7 +314,6 @@ import {
 } from './release-authority-env'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import {
-  MAX_NOTES_TEXT_LENGTH,
   type ElectronEventChannel,
   type ElectronIpcEventMap
 } from '../shared/electron-ipc-contract'
@@ -326,7 +325,6 @@ import {
   trustRendererDocument
 } from './web-contents-security'
 import {
-  inlineRendererDocumentCsp,
   nativePreviewSurfaceDocumentCsp,
   trustedRendererDevServerUrl
 } from '../shared/renderer-security-policy'
@@ -2254,200 +2252,6 @@ function saveNotesDocument(patch: Partial<NotesDocument>): NotesDocument {
   return next
 }
 
-function notesWindowHtml(document: NotesDocument): string {
-  const scriptNonce = randomBytes(24).toString('base64url')
-  const contentSecurityPolicy = inlineRendererDocumentCsp(scriptNonce)
-  const initialDocumentJson = jsonForInlineScript(document)
-  const initialAlwaysOnTopJson = jsonForInlineScript(notesWindowAlwaysOnTop)
-  const smokeMarkerCss = notesWindowSmokeMarkerEnabled
-    ? `
-    body[data-smoke-marker="true"], body[data-smoke-marker="true"] textarea {
-      background: #ff0000; color: #ffffff;
-    }
-    body[data-smoke-marker="true"] .drag-bar,
-    body[data-smoke-marker="true"] .footer {
-      background: #ff0000; color: #ffffff; border-color: #ff0000;
-    }
-    body[data-smoke-marker="true"] .title,
-    body[data-smoke-marker="true"] .footer {
-      color: #ffffff;
-    }
-    body[data-smoke-marker="true"] button {
-      background: #ff0000; color: #ffffff; border-color: #ff0000;
-    }
-    body[data-smoke-marker="true"] textarea {
-      font-size: 64px !important; line-height: 1.05; font-weight: 900;
-      letter-spacing: 0; text-transform: uppercase;
-    }`
-    : ''
-  return `<!doctype html><html><head><meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy}">
-    <style>
-    html, body { margin: 0; height: 100%; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textPrimary};
-      font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      overflow: hidden; user-select: none; -webkit-user-select: none; }
-    body { display: flex; flex-direction: column; }
-    /* Same scrollbar recipe as the app (styles.css): no track, a barely-there
-       thumb inset inside its hit area. This window is a data-URL document, so
-       it cannot inherit the app stylesheet; keep the two in step by hand. */
-    ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
-    ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
-    ::-webkit-scrollbar-button { display: none; }
-    ::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.12); border: 3px solid transparent;
-      background-clip: content-box; border-radius: 999px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
-    ::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.22); }
-    .drag-bar { height: 34px; display: flex; align-items: center; gap: 10px;
-      padding: 0 12px 0 78px; box-sizing: border-box; background: ${DARK_WINDOW_PALETTE.panel};
-      border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline}; -webkit-app-region: drag; }
-    .title { color: ${DARK_WINDOW_PALETTE.textSecondary}; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
-    .spacer { flex: 1; }
-    button { -webkit-app-region: no-drag; border: 1px solid ${DARK_WINDOW_PALETTE.controlBorder};
-      border-radius: 6px; background: ${DARK_WINDOW_PALETTE.controlBg}; color: ${DARK_WINDOW_PALETTE.textPrimary};
-      height: 22px; padding: 0 8px; font: inherit; font-size: 11px; cursor: default; }
-    button[aria-pressed="true"] { background: ${DARK_WINDOW_PALETTE.chromeFill}; color: ${DARK_WINDOW_PALETTE.chromeFillText}; border-color: ${DARK_WINDOW_PALETTE.chromeFill}; }
-    .icon-button { width: 24px; padding: 0; display: inline-flex; align-items: center;
-      justify-content: center; }
-    .icon-button svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 2;
-      fill: none; stroke-linecap: round; stroke-linejoin: round; }
-    textarea { flex: 1; resize: none; border: 0; outline: none; padding: 20px 22px;
-      box-sizing: border-box; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textPrimary}; caret-color: ${DARK_WINDOW_PALETTE.textPrimary};
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.45; -webkit-app-region: no-drag;
-      /* Keep the arrow cursor: the window is capture-protected but the OS
-         composites the pointer separately, so an I-beam over "empty" space
-         would betray the hidden notes to viewers. */
-      cursor: default; }
-    body[data-font-scale="sm"] textarea { font-size: 18px; }
-    body[data-font-scale="md"] textarea { font-size: 24px; }
-    body[data-font-scale="lg"] textarea { font-size: 32px; }
-    textarea::placeholder { color: ${DARK_WINDOW_PALETTE.textTertiary}; }
-    .footer { height: 28px; display: flex; align-items: center; gap: 12px; padding: 0 12px;
-      border-top: 1px solid ${DARK_WINDOW_PALETTE.hairline}; color: ${DARK_WINDOW_PALETTE.textTertiary}; font-size: 11px; }
-    ${smokeMarkerCss}
-  </style></head><body data-smoke-marker="${notesWindowSmokeMarkerEnabled ? 'true' : 'false'}">
-    <div class="drag-bar"><span class="title">Videorc Notes</span><span class="spacer"></span>
-      <button type="button" class="icon-button" data-sticky aria-label="Keep notes in front of all apps" title="Keep notes in front of all apps" aria-pressed="false">
-        <svg aria-hidden="true" viewBox="0 0 24 24">
-          <path d="M12 17v5"></path>
-          <path d="M5 17h14"></path>
-          <path d="M17 9.5V5.7a2 2 0 0 0-.59-1.41l-.7-.7A2 2 0 0 0 14.3 3H9.7a2 2 0 0 0-1.41.59l-.7.7A2 2 0 0 0 7 5.7v3.8L5 12v2h14v-2z"></path>
-        </svg>
-      </button>
-      <button type="button" data-scale="sm">Sm</button>
-      <button type="button" data-scale="md">Md</button>
-      <button type="button" data-scale="lg">Lg</button>
-    </div>
-    <textarea maxlength="${MAX_NOTES_TEXT_LENGTH}" spellcheck="false" placeholder="Notes for this recording..."></textarea>
-    <div class="footer"><span id="word-count">0 words</span><span id="save-state">Saved</span></div>
-    <script nonce="${scriptNonce}">
-      (() => {
-        const initialDocument = ${initialDocumentJson};
-        const initialAlwaysOnTop = ${initialAlwaysOnTopJson};
-        const textarea = document.querySelector('textarea');
-        const saveState = document.getElementById('save-state');
-        const wordCount = document.getElementById('word-count');
-        const buttons = Array.from(document.querySelectorAll('button[data-scale]'));
-        const stickyButton = document.querySelector('button[data-sticky]');
-        let fontScale = initialDocument.fontScale || 'md';
-        let alwaysOnTop = Boolean(initialAlwaysOnTop);
-        let saveTimer = null;
-
-        textarea.value = initialDocument.text || '';
-        document.body.dataset.fontScale = fontScale;
-
-        function words(text) {
-          const trimmed = text.trim();
-          return trimmed ? trimmed.split(/\\s+/).length : 0;
-        }
-
-        function render() {
-          wordCount.textContent = words(textarea.value) + ' words';
-          for (const button of buttons) {
-            button.setAttribute('aria-pressed', button.dataset.scale === fontScale ? 'true' : 'false');
-          }
-          if (stickyButton) {
-            const title = alwaysOnTop ? 'Allow notes behind other apps' : 'Keep notes in front of all apps';
-            stickyButton.setAttribute('aria-pressed', alwaysOnTop ? 'true' : 'false');
-            stickyButton.setAttribute('aria-label', title);
-            stickyButton.setAttribute('title', title);
-          }
-        }
-
-        function applyNotesWindowState(state) {
-          if (state && typeof state.alwaysOnTop === 'boolean') {
-            alwaysOnTop = state.alwaysOnTop;
-            render();
-          }
-        }
-
-        async function save() {
-          window.clearTimeout(saveTimer);
-          saveTimer = null;
-          saveState.textContent = 'Saving';
-          try {
-            await window.videorc?.saveNotesDocument?.({ text: textarea.value, fontScale });
-            saveState.textContent = 'Saved';
-          } catch {
-            saveState.textContent = 'Save failed';
-          }
-        }
-
-        function queueSave() {
-          saveState.textContent = 'Unsaved';
-          window.clearTimeout(saveTimer);
-          saveTimer = window.setTimeout(save, 120);
-        }
-
-        textarea.addEventListener('input', () => {
-          render();
-          queueSave();
-        });
-        textarea.addEventListener('blur', save);
-        textarea.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape') textarea.blur();
-        });
-        stickyButton?.addEventListener('click', () => {
-          if (!window.videorc?.setNotesWindowAlwaysOnTop) {
-            saveState.textContent = 'Pin unavailable';
-            return;
-          }
-          const next = !alwaysOnTop;
-          alwaysOnTop = next;
-          render();
-          window.videorc.setNotesWindowAlwaysOnTop(next)
-            .then(applyNotesWindowState)
-            .catch(() => {
-              alwaysOnTop = !next;
-              render();
-              saveState.textContent = 'Pin failed';
-            });
-          textarea.focus();
-        });
-        for (const button of buttons) {
-          button.addEventListener('click', () => {
-            fontScale = button.dataset.scale || 'md';
-            document.body.dataset.fontScale = fontScale;
-            render();
-            queueSave();
-            textarea.focus();
-          });
-        }
-        const unsubscribeNotesWindowState = window.videorc?.onNotesWindowState?.(applyNotesWindowState);
-        const unsubscribeNotesFlushRequest = window.videorc?.onNotesFlushRequest?.(() => {
-          void save();
-        });
-        window.videorc?.getNotesWindowState?.().then(applyNotesWindowState).catch(() => {});
-        window.addEventListener('beforeunload', () => {
-          unsubscribeNotesWindowState?.();
-          unsubscribeNotesFlushRequest?.();
-        });
-        render();
-        textarea.focus();
-      })();
-    </script>
-  </body></html>`
-}
-
 // FX6: app shortcuts died while an aux window (Notes/Comments) held key focus
 // — the forwarding above only listens on the main window. Aux windows forward
 // the exact same chords: ⌘1–9/⌘, focus main and navigate; ⌘⇧N/⌘⇧J/⌘⇧C toggle
@@ -2519,6 +2323,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   const prefs = loadNotesWindowPrefs()
   const rememberedFrame = notesWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const chrome = glassWindowChrome('notes')
   const window = new BrowserWindow({
     width: frame?.width ?? 640,
     height: frame?.height ?? 420,
@@ -2526,11 +2331,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     minWidth: 360,
     minHeight: 240,
     title: 'Videorc Notes',
-    // Center the traffic lights in the 34px drag bar so they align with the title.
-    ...(isMac
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 11 } }
-      : {}),
-    backgroundColor: DARK_WINDOW_PALETTE.base,
+    ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
     webPreferences: {
@@ -2540,6 +2341,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     }
   })
   registerRendererWindow(window, 'notes')
+  finishGlassWindow(window, 'notes', chrome.mode)
   notesWindowClosing = false
   notesWindowCloseFlushReady = false
   notesWindow = window
@@ -2600,11 +2402,22 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     }
   })
 
-  const notesDocumentUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
-    notesWindowHtml(defaultNotesDocument(prefs))
-  )}`
-  trustRendererDocument(window, notesDocumentUrl)
-  await window.loadURL(notesDocumentUrl)
+  // A bundled renderer like Chat and Captions (plan 050 S4). The smoke marker
+  // rides in the URL: the sandboxed renderer cannot read env.
+  const smokeMarkerQuery = notesWindowSmokeMarkerEnabled ? { smokeMarker: '1' } : undefined
+  const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
+  if (rendererUrl) {
+    const notesUrl = new URL('notes.html', rendererUrl)
+    if (smokeMarkerQuery) {
+      notesUrl.search = new URLSearchParams(smokeMarkerQuery).toString()
+    }
+    trustRendererDocument(window, notesUrl.toString())
+    await window.loadURL(notesUrl.toString())
+  } else {
+    const notesPath = join(__dirname, '../renderer/notes.html')
+    trustRendererDocument(window, pathToFileURL(notesPath).toString())
+    await window.loadFile(notesPath, smokeMarkerQuery ? { query: smokeMarkerQuery } : undefined)
+  }
   window.show()
   window.focus()
   emitNotesWindowState()

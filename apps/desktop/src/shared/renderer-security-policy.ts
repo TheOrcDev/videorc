@@ -82,7 +82,7 @@ export const IPC_INVOKE_ROLES = {
   'notes-window:close': MAIN_ONLY,
   'notes-window:get-state': MAIN_AND_NOTES,
   'notes-window:set-always-on-top': MAIN_AND_NOTES,
-  'notes-window:get-document': MAIN_ONLY,
+  'notes-window:get-document': MAIN_AND_NOTES,
   'notes-window:save-document': MAIN_AND_NOTES,
   'comments-window:open': MAIN_ONLY,
   'comments-window:close': MAIN_ONLY,
@@ -286,21 +286,6 @@ export function rendererDocumentCspWithScriptHash(
     "script-src 'self'",
     `script-src 'self' 'sha256-${scriptHash}'${evaluationSource}`
   )
-}
-
-export function inlineRendererDocumentCsp(nonce: string): string {
-  if (!/^[A-Za-z0-9_-]{16,128}$/.test(nonce)) {
-    throw new Error('Renderer CSP nonce is invalid.')
-  }
-  return [
-    "default-src 'none'",
-    `script-src 'nonce-${nonce}'`,
-    "style-src 'unsafe-inline'",
-    'img-src data:',
-    "object-src 'none'",
-    "base-uri 'none'",
-    "form-action 'none'"
-  ].join('; ')
 }
 
 export function nativePreviewSurfaceDocumentCsp(nonce: string): string {
