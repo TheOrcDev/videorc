@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { ViewerSample } from '@/lib/backend'
 import {
   formatViewerCount,
+  viewerChipCount,
   viewerChipDetail,
   viewerChipLabel,
   viewerSampleStale
@@ -30,6 +31,18 @@ describe('viewer count view', () => {
     expect(formatViewerCount(1000)).toBe('1k')
     expect(formatViewerCount(1234)).toBe('1.2k')
     expect(formatViewerCount(2_500_000)).toBe('2.5m')
+  })
+
+  it('promotes to the next unit on the rounded value', () => {
+    expect(formatViewerCount(999_949)).toBe('999.9k')
+    expect(formatViewerCount(999_999)).toBe('1m')
+    expect(formatViewerCount(1_000_000)).toBe('1m')
+    expect(formatViewerCount(1_500_000)).toBe('1.5m')
+  })
+
+  it('keeps the bare count for the narrow header', () => {
+    expect(viewerChipCount(sample())).toBe('1.3k')
+    expect(viewerChipCount(sample({ total: 999 }))).toBe('999')
   })
 
   it('labels with "watching" — never "subs"', () => {
