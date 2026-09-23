@@ -205,6 +205,27 @@ describe('CohostPane', () => {
     expect(markup).toContain('Nothing sends without you.')
   })
 
+  it('fits a narrow window: key chips and hint fold, actions stay named and wrap', () => {
+    const markup = renderPane({
+      onShowOnStream: () => undefined,
+      state: state({ questions: [question()] })
+    })
+    expect(markup).toContain('@container/cohost-pane')
+    expect(markup).toMatch(/<div class="[^"]*flex-wrap[^"]*" data-slot="cohost-actions"/)
+    for (const title of ['Reply (R)', 'Show on stream (H)', 'Answered (A)', 'Dismiss (⌫)']) {
+      expect(markup).toContain(`title="${title}"`)
+    }
+    // Every key chip carries the narrow-tier class; none is unconditional.
+    const chips = markup.match(/<kbd[^>]*>/g) ?? []
+    expect(chips.length).toBeGreaterThan(0)
+    for (const chip of chips) expect(chip).toContain('@max-[400px]/cohost-pane:hidden')
+  })
+
+  it('keeps the chat mood in the status tooltip when the mood label folds', () => {
+    const markup = renderPane({ state: state({ mood: 'hype' }) })
+    expect(markup).toContain('Chat mood: Chat is hyped')
+  })
+
   it('offers jump + dismiss when a flag is the only row', () => {
     const markup = renderPane({
       state: state({ questions: [], flags: [flag()] }),

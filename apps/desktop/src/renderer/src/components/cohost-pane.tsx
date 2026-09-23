@@ -41,6 +41,7 @@ import {
   EMPTY_COHOST_UNREAD
 } from '@/lib/cohost-view'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
+import { cn } from '@/lib/utils'
 
 /**
  * The Co-host segment above the live message list, in BOTH the in-app rail and
@@ -273,12 +274,12 @@ export function CohostPane({
   return (
     <Collapsible
       ref={paneRef}
-      className="shrink-0 rounded-row border border-border/60 bg-card/30"
+      className="@container/cohost-pane shrink-0 rounded-row border border-border/60 bg-card/30"
       data-slot="cohost-pane"
       open={open}
       onOpenChange={setOpen}
     >
-      <CollapsibleTrigger className="group flex w-full items-center gap-2 rounded-row px-2.5 py-1.5 text-left transition-colors hover:bg-accent/60">
+      <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 overflow-hidden rounded-row px-2.5 py-1.5 text-left transition-colors hover:bg-accent/60 @max-[400px]/cohost-pane:gap-1.5">
         <ChevronDownIcon
           aria-hidden
           className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
@@ -289,14 +290,24 @@ export function CohostPane({
           weight="duotone"
         />
         <span className="shrink-0 text-xs font-medium text-foreground">Orcle</span>
-        <span className="shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground">
+        <span
+          className={cn(
+            'shrink-0 text-[10px] font-medium tracking-wide text-muted-foreground',
+            PANE_NARROW_HIDDEN
+          )}
+        >
           alpha
         </span>
         <CohostPresenceDot view={presence} />
         <span
-          className="truncate text-[11px] text-muted-foreground"
+          className="min-w-0 truncate text-[11px] text-muted-foreground"
           data-slot="cohost-pane-status"
-          title={presence.tooltipLines.join('\n') || undefined}
+          title={
+            [
+              ...presence.tooltipLines,
+              ...(state?.mood ? [`Chat mood: ${COHOST_MOOD_LABELS[state.mood]}`] : [])
+            ].join('\n') || undefined
+          }
         >
           {flash ?? presence.label.replace(/^Orcle\s*(·\s*)?/, '')}
         </span>
@@ -324,13 +335,17 @@ export function CohostPane({
           </Badge>
         ))}
         {state?.partial ? (
-          <Badge title="Chat outran one AI pass; the newest messages were used." variant="outline">
+          <Badge
+            className={cn('shrink-0', PANE_NARROW_HIDDEN)}
+            title="Chat outran one AI pass; the newest messages were used."
+            variant="outline"
+          >
             Partial
           </Badge>
         ) : null}
         {state?.mood ? (
           <span
-            className="shrink-0 text-[11px] text-subtle"
+            className={cn('shrink-0 text-[11px] text-subtle', PANE_NARROW_HIDDEN)}
             title={cohostMoodScoresLabel(state.moodScores) ?? undefined}
           >
             {COHOST_MOOD_LABELS[state.mood]}
@@ -400,8 +415,16 @@ export function CohostPane({
         {activeRow ? (
           <>
             <Separator />
-            <div className="flex items-center gap-1 px-2 py-1" data-slot="cohost-actions">
-              <span className="min-w-0 flex-1 truncate text-[11px] text-subtle">
+            <div
+              className="flex flex-wrap items-center justify-end gap-1 px-2 py-1"
+              data-slot="cohost-actions"
+            >
+              <span
+                className={cn(
+                  'min-w-0 flex-1 truncate text-[11px] text-subtle',
+                  PANE_NARROW_HIDDEN
+                )}
+              >
                 Nothing sends without you.
               </span>
               {activeRow.kind === 'question' ? (
@@ -487,12 +510,24 @@ function CohostAction({
   onClick: () => void
 }): ReactElement {
   return (
-    <Button disabled={disabled} size="xs" type="button" variant="ghost" onClick={onClick}>
+    <Button
+      disabled={disabled}
+      size="xs"
+      title={`${label} (${keyLabel})`}
+      type="button"
+      variant="ghost"
+      onClick={onClick}
+    >
       {label}
-      <Kbd>{keyLabel}</Kbd>
+      <Kbd className={PANE_NARROW_HIDDEN}>{keyLabel}</Kbd>
     </Button>
   )
 }
+
+// The pane is a container: in a narrow Chat window (320px minimum) it drops
+// decoration and key chips before anything clips. Shortcuts keep working and
+// stay named in each action's title. Literal so Tailwind generates it.
+const PANE_NARROW_HIDDEN = '@max-[400px]/cohost-pane:hidden'
 
 /** One-line explanation that REPLACES the pane (Premium, consent). Same shape
  * as the multistream upsell: state the reason, offer the one action. */

@@ -136,6 +136,21 @@ describe('CohostStatus', () => {
     expect(markup).toContain('next pass in ~7s')
   })
 
+  it('shrinks to its dot in a narrow Chat header without losing the label', () => {
+    const markup = renderStatus({
+      state: listening({ status: 'paused', reason: 'quota-exhausted' })
+    })
+    // The trigger may shrink; the label truncates, then leaves the eye only.
+    expect(markup).toContain('min-w-0')
+    expect(markup).not.toMatch(/data-slot="cohost-status"[^>]*shrink-0/)
+    expect(markup).toMatch(
+      /class="[^"]*@max-\[330px\]\/chat-header:sr-only[^"]*"[^>]*data-slot="cohost-status-label"/
+    )
+    expect(markup).toContain('aria-label="Orcle paused · quota')
+    // Hovering the lone dot still says what Orcle is doing.
+    expect(markup).toMatch(/title="Orcle paused · quota/)
+  })
+
   it('keeps the trigger draggable-safe in the frameless window header', () => {
     expect(renderStatus()).toContain('[-webkit-app-region:no-drag]')
   })

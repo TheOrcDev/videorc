@@ -14,6 +14,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import type { CohostState } from '@/lib/backend'
 import { cohostPresenceView, type CohostPresenceView } from '@/lib/cohost-presence'
+import { CHAT_HEADER_TIGHT_HIDDEN, CHAT_HEADER_TIGHT_SR_ONLY } from '@/lib/chat-header-tiers'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { cn } from '@/lib/utils'
 
@@ -57,7 +58,9 @@ export function CohostStatus({
 }): ReactElement {
   const [open, setOpen] = useState(false)
   const view = cohostPresenceView(state, nowMs, { starting, unread })
-  const tooltip = view.tooltipLines.join('\n')
+  // The label leads the tooltip: in a narrow Chat header the dot is all that
+  // shows, and hovering it must still say what the co-host is doing.
+  const tooltip = [flash ?? view.label, ...view.tooltipLines].join('\n')
   const offPopover = view.kind === 'off'
 
   const body = <CohostStatusBody flash={flash} label={view.label} view={view} />
@@ -69,7 +72,7 @@ export function CohostStatus({
         className={STATUS_TRIGGER}
         data-slot="cohost-status"
         data-state-kind={view.kind}
-        title={tooltip || undefined}
+        title={tooltip}
         type="button"
         onClick={onOpenPane}
       >
@@ -85,7 +88,7 @@ export function CohostStatus({
         className={STATUS_TRIGGER}
         data-slot="cohost-status"
         data-state-kind={view.kind}
-        title={tooltip || undefined}
+        title={tooltip}
       >
         {body}
       </PopoverTrigger>
@@ -152,8 +155,10 @@ export function CohostStatus({
   )
 }
 
+// Shrinks and truncates instead of pushing the header's other items out: a
+// paused label with its reason is the longest thing the header can hold.
 const STATUS_TRIGGER =
-  'flex shrink-0 items-center gap-1.5 rounded-chip px-1.5 py-0.5 text-xs transition-colors duration-100 hover:bg-accent/60 [-webkit-app-region:no-drag]'
+  'flex min-w-0 max-w-40 shrink items-center gap-1.5 rounded-chip px-1.5 py-0.5 text-xs transition-colors duration-100 hover:bg-accent/60 [-webkit-app-region:no-drag]'
 
 function CohostStatusBody({
   view,
@@ -170,11 +175,18 @@ function CohostStatusBody({
       {/* The DOT carries the error; the label stays chrome. The logo has two
           red eyes, not a red face. */}
       <span
-        className={cn('truncate', view.kind === 'off' ? 'text-subtle' : 'text-muted-foreground')}
+        className={cn(
+          'min-w-0 truncate',
+          view.kind === 'off' ? 'text-subtle' : 'text-muted-foreground',
+          CHAT_HEADER_TIGHT_SR_ONLY
+        )}
+        data-slot="cohost-status-label"
       >
         {flash ?? label}
       </span>
-      {view.dots ? <CohostTypingDots fast={view.kind === 'thinking'} /> : null}
+      {view.dots ? (
+        <CohostTypingDots className={CHAT_HEADER_TIGHT_HIDDEN} fast={view.kind === 'thinking'} />
+      ) : null}
       {view.unreadBadge ? (
         <span
           aria-label={`${view.unreadBadge} new questions`}
@@ -219,9 +231,19 @@ export function CohostPresenceDot({
 }
 
 /** Three shimmering dots — "someone is typing", read instantly as "working". */
-export function CohostTypingDots({ fast = false }: { fast?: boolean }): ReactElement {
+export function CohostTypingDots({
+  fast = false,
+  className
+}: {
+  fast?: boolean
+  className?: string
+}): ReactElement {
   return (
-    <span aria-hidden className="flex shrink-0 items-center gap-0.5" data-slot="cohost-typing-dots">
+    <span
+      aria-hidden
+      className={cn('flex shrink-0 items-center gap-0.5', className)}
+      data-slot="cohost-typing-dots"
+    >
       {[0, 1, 2].map((index) => (
         <span
           className={cn('typing-dot size-1 rounded-full bg-current', fast && 'typing-dot-fast')}
