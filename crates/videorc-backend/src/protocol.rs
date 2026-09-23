@@ -1461,6 +1461,29 @@ pub struct StreamOutputTopologyProbeResult {
     pub fallback_reason: Option<String>,
 }
 
+/// Outcome of the Linux VAAPI render-node policy for one `/dev/dri/renderD*`
+/// node (Plan 052). `quarantined` means a previous probe of that node never
+/// returned (the host hung); `skipped` means another node was pinned.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinuxRenderNodeState {
+    ProbedOk,
+    Rejected,
+    Quarantined,
+    Skipped,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LinuxRenderNodeDiagnostic {
+    pub node: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub driver: Option<String>,
+    pub state: LinuxRenderNodeState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+}
+
 /// `performance.check.run` params. The ceiling is the largest output worth
 /// testing on this machine (the renderer sends the larger of the selected
 /// output and the display's native size); the ladder walks down from there.
@@ -2222,6 +2245,10 @@ pub struct DiagnosticStats {
     /// encode (previously unrecorded).
     #[serde(default)]
     pub encode_backend: Option<EncodeBackend>,
+    /// Linux only: every render node the VAAPI policy saw and what it did
+    /// with it, so the evidence names the GPU that encoded (Plan 052).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux_render_nodes: Option<Vec<LinuxRenderNodeDiagnostic>>,
     /// Which compositor backend produced the most recent diagnostic window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compositor_backend: Option<CompositorBackend>,

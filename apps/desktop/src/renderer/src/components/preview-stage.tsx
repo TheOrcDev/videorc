@@ -121,8 +121,41 @@ export function PreviewStage({
       onOpenPermissions={onOpenPermissions}
       onRetry={onRetry}
       onStick={() => void setPreviewWindowMode('docked')}
+      platform={runtimeInfo?.platform}
     />
   )
+}
+
+export type PreviewDisabledCopy = {
+  title: string
+  detail: string
+  /** Whether "Retry preview" makes sense: never on Linux, where no native
+   * preview exists to retry. */
+  retryable: boolean
+  tone: 'expected' | 'warn'
+}
+
+/** Copy for the card when no native preview surface is enabled. On Linux the
+ * surface is not built yet (port plan L5), so the honest message names the
+ * missing phase instead of implying a fault the user could fix. */
+export function previewDisabledCopy(
+  platform: string | undefined,
+  disabledMessage: string
+): PreviewDisabledCopy {
+  if (platform === 'linux') {
+    return {
+      title: "Preview isn't built for Linux yet",
+      detail: 'Recording still works. A Linux preview arrives in a later port phase.',
+      retryable: false,
+      tone: 'expected'
+    }
+  }
+  return {
+    title: 'Native preview is disabled',
+    detail: disabledMessage,
+    retryable: true,
+    tone: 'warn'
+  }
 }
 
 /** All three preview states occupy the same FOOTPRINT rect so the Studio
@@ -292,6 +325,7 @@ function DetachedPreviewCard({
   onRetry,
   permissionAccess,
   onOpenPermissions,
+  platform,
   className
 }: {
   previewWindowOpen: boolean
@@ -308,6 +342,7 @@ function DetachedPreviewCard({
   onRetry?: () => void
   permissionAccess: PreviewPermissionAccess | null
   onOpenPermissions?: (pane: SystemPermissionPane) => void
+  platform?: string
   className?: string
 }): ReactElement {
   const supervisorStatus = previewSupervisorDisplay(
@@ -325,10 +360,12 @@ function DetachedPreviewCard({
         previewSurfaceStatus?.nativePreviewHostKind
       ))
     : null
-  const disabledMessage =
+  const disabledCopy = previewDisabledCopy(
+    platform,
     previewLiveStatus?.message ??
-    previewSurfaceStatus?.message ??
-    'Native preview surface is disabled.'
+      previewSurfaceStatus?.message ??
+      'Native preview surface is disabled.'
+  )
   const permissionPane = previewPermissionPane(previewSupervisor)
   const showPermissionAction =
     previewWindowOpen && permissionPane !== null && Boolean(permissionAccess?.action)
@@ -344,7 +381,13 @@ function DetachedPreviewCard({
       data-videorc-preview-card
       style={{ aspectRatio: previewFootprintRatio(aspect) }}
     >
-      {nativePreviewSurfaceEnabled && supervisorStatus.tone !== 'warn' ? (
+      {nativePreviewSurfaceEnabled ? (
+        supervisorStatus.tone !== 'warn' ? (
+          <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
+        ) : (
+          <WarningIcon className="size-8 text-warning" weight="duotone" />
+        )
+      ) : disabledCopy.tone === 'expected' ? (
         <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
       ) : (
         <WarningIcon className="size-8 text-warning" weight="duotone" />
@@ -402,11 +445,11 @@ function DetachedPreviewCard({
       ) : (
         <>
           <div className="flex flex-col gap-1">
-            <span className="text-sm font-medium">Native preview is disabled</span>
-            <span className="text-xs text-muted-foreground">{disabledMessage}</span>
+            <span className="text-sm font-medium">{disabledCopy.title}</span>
+            <span className="text-xs text-muted-foreground">{disabledCopy.detail}</span>
           </div>
           <div className="flex flex-wrap justify-center gap-2">
-            {onRetry ? (
+            {onRetry && disabledCopy.retryable ? (
               <Button size="sm" variant="outline" onClick={onRetry}>
                 Retry preview
               </Button>

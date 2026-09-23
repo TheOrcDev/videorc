@@ -29,6 +29,9 @@ Use the smallest gate that proves the change, then run the broader gate before h
 - Rust lint: `cargo clippy -p videorc-backend -- -D warnings`
 - Combined dependency advisory audit: `pnpm audit:deps`
 - Local smoke bundle: `pnpm smoke:local-gates`
+- Linux FFmpeg provisioning (Linux x64 only): `pnpm ffmpeg:fetch:linux`
+- Linux in-app encoder bridge, one backend, no host gate (Linux box only): `VIDEORC_LINUX_H264_ENCODER=openh264 VIDEORC_MATRIX_ONLY=1080p30 VIDEORC_MATRIX_PRINT_BRIDGE_DIAGNOSTICS=1 VIDEORC_SMOKE_FFMPEG_PATH=$PWD/vendor/ffmpeg/linux-x64/bin/ffmpeg node scripts/smoke-recording-matrix-app.mjs`
+- Linux L1.5 named-box acceptance (both backends): `pnpm smoke:linux-encoder-acceptance` with the tester env from `docs/linux-dev-loop.md`
 
 CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advisory audit, TS format, TS lint, TS typecheck, desktop unit tests, and Node script tests. Device, preview, recording, and packaging smokes still need a local macOS environment with the right permissions.
 
@@ -45,6 +48,7 @@ CI covers Rust advisory audit, Rust fmt, clippy, Rust tests, JS production advis
 - For native preview, source compatibility, layout liveness, or real-device capture changes, run `pnpm smoke:recording-studio:devices` when the local macOS host has the required screen/camera/mic permissions. If that cannot run, say why and run the closest focused native-preview probe or smoke.
 - For audio sync changes, keep `pnpm test:scripts` and a final-artifact A/V analysis in the verification set. Do not rely on manual playback alone.
 - Do not hand off recording-studio work with only typecheck/lint unless the change is docs-only or the relevant smoke is explicitly blocked.
+- Changes that touch the Linux arm of the recording path (`cfg(target_os = "linux")` in `recording.rs`, the VAAPI probe, render-node policy, or the Linux FFmpeg args) need a run of the direct matrix command on the named Linux box from `docs/linux-port-plan.md`, or an explicit statement of why that box could not run it. macOS cannot compile that arm; the `Linux` CI job is the compile gate, not the behaviour gate. Never probe a render node the box has quarantined.
 
 ## Native Preview Rules
 

@@ -76,10 +76,26 @@ function readLedger() {
 function processExists(pid) {
   try {
     process.kill(pid, 0)
-    return true
   } catch {
     return false
   }
+  if (process.platform === 'linux') {
+    // kill(pid, 0) still succeeds for a zombie until its parent waits on it.
+    // A reaped backend that is only waiting to be collected is not alive.
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const state = stat
+        .slice(stat.lastIndexOf(')') + 1)
+        .trim()
+        .split(/\s+/)[0]
+      if (state === 'Z' || state === 'X') {
+        return false
+      }
+    } catch {
+      return false
+    }
+  }
+  return true
 }
 
 async function waitUntil(predicate, timeoutMs, label) {
