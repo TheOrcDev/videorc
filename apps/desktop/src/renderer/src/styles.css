@@ -2,6 +2,10 @@
 @import 'tw-animate-css';
 
 @custom-variant dark (&:is(.dark *));
+/* Windows-only chrome. theme-bootstrap.js sets data-platform before the
+   first paint, so this never waits for runtime info (the Mica coats key on
+   the same attribute). */
+@custom-variant win32 (&:is([data-platform='win32'] *));
 /* The radix-rhea registry components style by orientation through these
    variants; without them Tailwind matches a literal data-horizontal
    attribute that radix never sets, and e.g. slider tracks get zero height. */

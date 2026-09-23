@@ -22,6 +22,7 @@ import {
 import { useTheme } from 'next-themes'
 import { useEffect, useState, type ReactElement } from 'react'
 
+import logoUrl from '@/assets/videorc-logo.png'
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
 import { NavigableRow } from '@/components/navigable-row'
 import { StatusBadge } from '@/components/status-badge'
@@ -31,6 +32,7 @@ import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PhoneRemoteSection } from '@/components/phone-remote-section'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -47,6 +49,7 @@ import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
 import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 import { shortcutsByGroup } from '@/lib/shortcuts'
 import { displayAccelerator, displayKeyGlyphs, osSettingsName } from '@/lib/platform'
+import { releaseTrackLabel } from '@/lib/release-track'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isUpdateInstallable } from '@/lib/update-ui'
 
@@ -736,9 +739,24 @@ function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): Re
       title="About & updates"
     >
       <div className="flex flex-col gap-4">
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-sm text-muted-foreground">Current version</span>
-          <span className="font-mono text-sm text-foreground">{runtimeInfo?.version ?? '-'}</span>
+        {/* The app's identity, like a macOS About panel: the icon, the name,
+            and the version with its release track. The PNG carries its own
+            rounded tile and transparent margin, so it needs no mask or shadow. */}
+        <div className="flex items-center gap-3">
+          <img alt="" className="size-16 shrink-0" src={logoUrl} />
+          <div className="flex min-w-0 flex-col gap-1">
+            <span className="text-sm font-semibold text-foreground">Videorc</span>
+            <span className="flex items-center gap-2 text-xs text-muted-foreground">
+              <span>
+                Version <span className="font-mono">{runtimeInfo?.version ?? '-'}</span>
+              </span>
+              {runtimeInfo ? (
+                <Badge variant="outline">
+                  {releaseTrackLabel(runtimeInfo.platform, runtimeInfo.isPackaged)}
+                </Badge>
+              ) : null}
+            </span>
+          </div>
         </div>
         <UpdateControl
           captureActive={captureActive}

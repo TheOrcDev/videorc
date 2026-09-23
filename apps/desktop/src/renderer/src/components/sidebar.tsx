@@ -1,6 +1,7 @@
 import { type AppIcon, SearchIcon, SyncIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
 
+import logoUrl from '@/assets/videorc-logo.png'
 import { AccountMenu } from '@/components/account-menu'
 import { type StatusDotTone } from '@/components/status-dot'
 import { ThemeToggle } from '@/components/theme-toggle'
@@ -176,14 +177,21 @@ export function Sidebar({
     // what makes it read lighter than the content pane (plan 050 D3). A white
     // tint here dropped secondary text under 4.5:1 over a bright desktop.
     <aside className="flex w-52 shrink-0 flex-col border-r text-sidebar-foreground">
-      {/* The top row shares the window's 40 px header band with the toolbar:
-          traffic lights, then search. The brand lives in About and the Dock. */}
+      {/* The top row shares the window's 40 px header band with the toolbar.
+          macOS: traffic lights, then search; the brand lives in About and the
+          Dock. Windows has no traffic lights, and its title bars lead with the
+          app icon and name, so the row does too (the win32 variant, from the
+          first paint). */}
       <div
         className={cn(
           'flex h-toolbar shrink-0 items-center justify-end pr-2 [-webkit-app-region:drag]',
           trafficLightGutter
         )}
       >
+        <span className="mr-auto hidden items-center gap-2 text-xs win32:flex">
+          <img alt="" className="size-4" src={logoUrl} />
+          Videorc
+        </span>
         <Button
           aria-keyshortcuts="Meta+K"
           aria-label={`Search (${modKey}K)`}
