@@ -21,9 +21,9 @@ use uuid::Uuid;
 
 use crate::audio::{
     AudioCaptureStats, AudioProcessingSettings, NATIVE_AUDIO_CHANNELS, NATIVE_AUDIO_SAMPLE_RATE,
-    NativeAudioCaptureSession, NativeAudioInputState, NativeAudioSource, attach_fifo_writer,
-    audio_capture_coverage, create_native_audio_fifo, native_audio_fifo_path,
-    parse_coreaudio_microphone_id, parse_windows_dshow_microphone_id, start_native_audio_source,
+    NativeAudioCaptureSession, NativeAudioInputState, audio_capture_coverage,
+    create_native_audio_fifo, native_audio_fifo_path, parse_coreaudio_microphone_id,
+    parse_windows_dshow_microphone_id,
 };
 use crate::camera_capture::{
     native_camera_name_for_id, parse_native_camera_id, parse_windows_dshow_camera_id,
@@ -2674,11 +2674,6 @@ async fn start_session_with_timeline(
     // every uncommitted return publishes the exact-session terminal replacement
     // before another start can be admitted.
     let mut published_session_start = PublishedSessionStartGuard::unarmed();
-    if crate::session_audio::cleanup_pending() && state.recording.lock().await.is_none() {
-        bail!(
-            "The previous audio source is still closing. Wait for cleanup before starting another session."
-        );
-    }
     // This backend-owned edge closes the gap between Electron's last sampled
     // status and the first Starting event. A permission restart or updater
     // install that already owns the interruption lease rejects this start; a
@@ -2688,6 +2683,18 @@ async fn start_session_with_timeline(
         _session_start_publication_fence,
         _session_start_source_transition_fence,
     ) = admit_session_start(&state).await?;
+    if !state.warm_microphone.wait_for_open().await {
+        bail!(
+            "The standby microphone is still opening. Wait for it to finish before starting the session."
+        );
+    }
+    if crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count())
+        && state.recording.lock().await.is_none()
+    {
+        bail!(
+            "The previous microphone is still opening or closing. Wait for cleanup before starting another session."
+        );
+    }
     timeline.mark(RecordingStartPhase::Admission);
     let mut session_start_admission = Some(session_start_admission);
     // SessionStarting becomes authoritative before `state.recording` is
@@ -2894,6 +2901,9 @@ async fn start_session_with_timeline(
     timeline.mark(RecordingStartPhase::DeviceResolve);
     let mut native_audio_source =
         prepare_native_audio_source(&state, &session_id, &mut capture, &params).await;
+    // A mismatched standby must not remain an extra active input while the bus
+    // owns program audio. Managed handles retire without closing on this task.
+    state.warm_microphone.disarm();
     timeline.mark(RecordingStartPhase::AudioOpen);
     // Warm up the microphone before the video pipeline starts so audio and video begin in
     // lockstep. CoreAudio takes a few hundred ms to deliver its first callback while video
@@ -2903,7 +2913,7 @@ async fn start_session_with_timeline(
         && !await_microphone_warmup(&state, prepared.source.stats_handle()).await
         && let Some(prepared) = native_audio_source.take()
     {
-        let device_name = prepared.source.device_name.clone();
+        let device_name = prepared.source.device_name();
         if live_captions_requested(&params) {
             let message = format!(
                 "Native microphone {device_name} did not deliver warmup frames. Live captions require this post-controls native microphone bus, so the session will not be published."
@@ -4166,10 +4176,12 @@ async fn start_session_with_timeline(
     let attached_native_audio = native_audio_source
         .take()
         .map(|prepared| {
-            attach_fifo_writer(
-                prepared.source,
+            crate::session_audio::attach_prepared(
+                Some(prepared.source),
                 prepared.fifo_path,
                 use_encoder_bridge.then(|| video_epoch.clone()),
+                audio_processing_settings(&params),
+                crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
             )
         })
         .or_else(|| {
@@ -4179,7 +4191,7 @@ async fn start_session_with_timeline(
                     path,
                     use_encoder_bridge.then(|| video_epoch.clone()),
                     audio_processing_settings(&params),
-                    Duration::from_secs(1),
+                    crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
                 )
             })
         });
@@ -4589,8 +4601,15 @@ async fn start_session_with_timeline(
         None => None,
     };
     let sources_snapshot = {
-        let mut sources = state.live_source_switch.lock().await;
+        let mut sources = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         sources.start(session_id.clone(), confirmed_sources);
+        sources.set_output_process_id(pending_active.pid);
+        if cfg!(target_os = "macos") && pending_active.native_audio.is_some() {
+            sources.enable_microphone();
+        }
         sources
             .snapshot(&session_id)
             .expect("new session source snapshot")
@@ -5154,7 +5173,7 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
         state
             .live_source_switch
             .lock()
-            .await
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .stop(&active.session_id);
     }
     #[cfg(target_os = "windows")]
@@ -7219,10 +7238,10 @@ struct SessionMonitorContext {
 /// `micDroppedFrames` and the derived capture-coverage gap signal update *during* the run
 /// instead of only at stop. Exits as soon as the session is replaced or ends.
 async fn sample_native_audio_during_recording(state: AppState, session_id: String) {
-    let started_at = std::time::Instant::now();
     let mut ticker = tokio::time::interval(NATIVE_AUDIO_SAMPLE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
+    let mut microphone_generation = 0;
     loop {
         ticker.tick().await;
         let counters = {
@@ -7230,16 +7249,18 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             match recording.as_ref() {
                 Some(active) if active.session_id == session_id => {
                     active.native_audio.as_ref().map(|audio| {
+                        let observation = audio.observation(false);
                         (
-                            audio.captured_frames(),
-                            audio.dropped_frames(),
-                            audio.live_peak(),
-                            audio.session_peak(),
-                            audio.device_name.clone(),
-                            audio.recording_window_elapsed_secs(),
-                            audio.input_state(),
-                            audio.claim_source_loss_event(),
-                            audio.has_selected_input(),
+                            observation.captured_frames,
+                            observation.dropped_frames,
+                            observation.live_peak,
+                            observation.session_peak,
+                            observation.device_name,
+                            observation.elapsed_secs,
+                            observation.input_state,
+                            observation.losses,
+                            observation.selected_input,
+                            observation.generation,
                         )
                     })
                 }
@@ -7256,18 +7277,23 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             input_state,
             source_loss_event_after_ms,
             selected_input,
+            generation,
         )) = counters
         else {
             return;
         };
 
-        if let Some(source_loss_after_ms) = source_loss_event_after_ms {
-            silent_mic_reported = true;
+        if generation != microphone_generation {
+            microphone_generation = generation;
+            silent_mic_reported = false;
+        }
+        for source_loss_after_ms in source_loss_event_after_ms {
+            silent_mic_reported |= source_loss_after_ms.generation == generation;
             emit_microphone_input_lost_health_event(
                 &state,
                 &session_id,
-                &device_name,
-                source_loss_after_ms,
+                &source_loss_after_ms.device_name,
+                source_loss_after_ms.after_ms,
             );
         }
 
@@ -7280,7 +7306,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             input_state,
             NativeAudioInputState::Starting | NativeAudioInputState::Live
         ) && !silent_mic_reported
-            && started_at.elapsed() >= MIC_SILENT_CHECK_AFTER
+            && capture_elapsed_secs.unwrap_or_default() >= MIC_SILENT_CHECK_AFTER.as_secs_f64()
             && let Some(kind) = silent_mic_verdict(captured_frames, session_peak)
         {
             silent_mic_reported = true;
@@ -7651,16 +7677,16 @@ async fn monitor_session(
         .filter(|active| active.session_id == session_id)
         .map(|active| {
             let native_audio_stats = active.native_audio.as_ref().map(|audio| {
-                audio.finish_recording_window();
+                let observation = audio.observation(true);
                 NativeAudioStats {
-                    selected_input: audio.has_selected_input(),
-                    device_name: audio.device_name.clone(),
-                    captured_frames: audio.captured_frames(),
-                    dropped_frames: audio.dropped_frames(),
-                    session_peak: audio.session_peak(),
-                    input_state: audio.input_state(),
-                    source_loss_after_ms: audio.source_loss_after_ms(),
-                    unreported_source_loss_after_ms: audio.claim_source_loss_event(),
+                    selected_input: observation.selected_input,
+                    device_name: observation.device_name,
+                    captured_frames: observation.captured_frames,
+                    dropped_frames: observation.dropped_frames,
+                    session_peak: observation.session_peak,
+                    input_state: observation.input_state,
+                    source_loss_after_ms: observation.source_loss_after_ms,
+                    unreported_source_loss_after_ms: observation.losses,
                 }
             });
             MonitoredRecording {
@@ -7682,7 +7708,11 @@ async fn monitor_session(
         .then(|| guard.take())
         .flatten();
     if monitored_recording.is_some() {
-        state.live_source_switch.lock().await.stop(&session_id);
+        state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stop(&session_id);
     }
     drop(guard);
 
@@ -7896,12 +7926,12 @@ async fn monitor_session(
             "diagnostics.stats",
             apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
         );
-        if let Some(source_loss_after_ms) = native_audio_stats.unreported_source_loss_after_ms {
+        for source_loss_after_ms in &native_audio_stats.unreported_source_loss_after_ms {
             emit_microphone_input_lost_health_event(
                 &state,
                 &session_id,
-                &native_audio_stats.device_name,
-                source_loss_after_ms,
+                &source_loss_after_ms.device_name,
+                source_loss_after_ms.after_ms,
             );
         }
         state.emit_log(
@@ -9893,7 +9923,7 @@ struct NativeAudioStats {
     session_peak: f32,
     input_state: NativeAudioInputState,
     source_loss_after_ms: Option<u64>,
-    unreported_source_loss_after_ms: Option<u64>,
+    unreported_source_loss_after_ms: Vec<crate::session_audio::SourceLoss>,
 }
 
 impl NativeAudioStats {
@@ -10035,7 +10065,7 @@ struct StreamTargetResolution {
 
 #[derive(Debug)]
 struct PreparedNativeAudioSource {
-    source: NativeAudioSource,
+    source: crate::session_audio::InitialAudioSource,
     fifo_path: PathBuf,
 }
 
@@ -10231,7 +10261,6 @@ const MICROPHONE_WARMUP_TIMEOUT: Duration = Duration::from_millis(1500);
 /// microphone permission check. It runs off the async runtime and is bounded
 /// so a stalled device open degrades to video-only instead of holding the
 /// start (and the whole ordered command lane) indefinitely.
-const NATIVE_AUDIO_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Smoke/dev switch: skip the native microphone entirely. The dev app has no
 /// microphone TCC grant, so renderer-driven smokes set this to keep Record
 /// honest instead of waiting out the permission-blind device open.
@@ -11754,29 +11783,11 @@ async fn prepare_native_audio_source(
     let taken_warm = warm_source.is_some();
     let opened = match warm_source {
         Some(source) => Ok(source),
-        None => {
-            let opened = tokio::time::timeout(
-                NATIVE_AUDIO_OPEN_TIMEOUT,
-                tokio::task::spawn_blocking(move || {
-                    start_native_audio_source(open_device_id, settings)
-                }),
-            )
-            .await;
-            match opened {
-                Ok(Ok(result)) => result,
-                Ok(Err(join_error)) => Err(anyhow::anyhow!(
-                    "CoreAudio device open task failed: {join_error}"
-                )),
-                Err(_) => Err(anyhow::anyhow!(
-                    "CoreAudio input device did not open within {}s (waiting on a microphone permission prompt or a stalled device)",
-                    NATIVE_AUDIO_OPEN_TIMEOUT.as_secs()
-                )),
-            }
-        }
+        None => crate::session_audio::prepare_initial_native(open_device_id).await,
     };
     match opened {
         Ok(source) => {
-            let device_name = source.device_name.clone();
+            let device_name = source.device_name();
             *fifo_path = Some(path.clone());
             state.emit_log(
                 "info",
@@ -19662,7 +19673,7 @@ mod tests {
             session_peak: 0.0,
             input_state: NativeAudioInputState::Stopped,
             source_loss_after_ms: None,
-            unreported_source_loss_after_ms: None,
+            unreported_source_loss_after_ms: vec![],
         };
         assert_eq!(stats.silence_verdict(), None);
         stats.selected_input = true;
@@ -22097,6 +22108,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn stop_waits_for_start_which_is_waiting_on_standby_microphone() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let warm_open = state.warm_microphone.hold_open_for_test();
+        let start_state = state.clone();
+        // Invalid output keeps this ownership test independent of hardware,
+        // but validation occurs after the real warm-open/publication boundary.
+        let start =
+            tokio::spawn(
+                async move { start_session(start_state, base_params(false, false)).await },
+            );
+        timeout(Duration::from_secs(1), async {
+            while state.capture_interruption.capture_admission_is_idle() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Start must take admission before waiting for warm open");
+        let stop_state = state.clone();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let stop = tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            stop_recording_with_intent(stop_state, SessionStopParams::default()).await
+        });
+        entered_rx.await.unwrap();
+        assert!(
+            !stop.is_finished(),
+            "Stop cannot return Idle before pending Start resolves"
+        );
+        drop(warm_open);
+        assert!(
+            timeout(Duration::from_secs(2), start)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(matches!(
+            timeout(Duration::from_secs(2), stop)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .state,
+            RecordingState::Idle
+        ));
+        assert!(state.recording.lock().await.is_none());
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.event != "recording.status"
+                || event
+                    .payload
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("recording")
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn session_start_admission_waits_for_prior_physical_source_transition() {
         let state = test_state();
         let source_transition = state.source_transition_fence.begin();
@@ -22902,7 +22971,9 @@ mod tests {
         let params = base_params(true, false);
         let warm = crate::audio::test_native_audio_source(audio_processing_settings(&params));
         let warm_stats = warm.stats_handle();
-        state.warm_microphone.install(4242, warm);
+        state
+            .warm_microphone
+            .install(4242, crate::session_audio::InitialAudioSource::warm(warm));
 
         let mut capture = CaptureInputs {
             video: VideoInput::MacScreen { index: 0 },
@@ -22938,7 +23009,9 @@ mod tests {
 
         // A different selected device leaves a warm source alone and opens cold.
         let other = crate::audio::test_native_audio_source(audio_processing_settings(&params));
-        state.warm_microphone.install(7, other);
+        state
+            .warm_microphone
+            .install(7, crate::session_audio::InitialAudioSource::warm(other));
         let mut capture = CaptureInputs {
             video: VideoInput::MacScreen { index: 0 },
             camera_index: None,

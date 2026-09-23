@@ -139,6 +139,7 @@
     "smoke:backend-resilience": "node scripts/smoke-backend-resilience.mjs",
     "smoke:command-lanes": "node scripts/smoke-command-lanes.mjs",
     "smoke:live-control-recycle": "node scripts/smoke-live-control-recycle.mjs",
+    "smoke:live-source-switch": "node scripts/smoke-live-source-switch-app.mjs",
     "smoke:captions-contract": "cargo build -p videorc-backend && node scripts/smoke-captions-contract.mjs",
     "smoke:cohost-fake": "cargo build -p videorc-backend && node scripts/smoke-cohost-fake.mjs",
     "smoke:captions-live": "node scripts/smoke-captions-live-app.mjs",

@@ -3376,6 +3376,20 @@ async fn start_captions_with_bearer_for_session(
     };
     let capture_active =
         capture_elapsed_seconds.is_some() || caption_contract_idle_session_enabled();
+    let real_input_eligible = if let Some(recording) = expected_recording.as_ref() {
+        recording
+            .as_ref()
+            .and_then(|active| active.native_audio.as_ref())
+            .is_some_and(|audio| audio.caption_start_eligible())
+    } else {
+        state
+            .recording
+            .lock()
+            .await
+            .as_ref()
+            .and_then(|active| active.native_audio.as_ref())
+            .is_some_and(|audio| audio.caption_start_eligible())
+    };
 
     let mut coordinator = state.captions.lock().await;
     coordinator.desired_enabled = true;
@@ -3401,6 +3415,14 @@ async fn start_captions_with_bearer_for_session(
         )
     {
         return Ok(Some(status.clone()));
+    }
+    // An existing authorized caption task keeps its timeline through None or
+    // input loss. Starting a new task still requires an actual supported input.
+    if !real_input_eligible && !caption_contract_idle_session_enabled() {
+        drop(coordinator);
+        let message = "Select an available microphone before starting live captions.";
+        block_captions_after_control(state, "captions-microphone-required", message.into()).await;
+        anyhow::bail!(message);
     }
     if let Some(task) = coordinator.task.take() {
         task.abort();
@@ -5585,6 +5607,33 @@ mod tests {
     fn test_caption_app_state_with_database(database: crate::storage::Database) -> AppState {
         let (events, _) = tokio::sync::broadcast::channel(16);
         AppState::new("test-token".to_string(), 0, events, database)
+    }
+
+    #[tokio::test]
+    async fn no_microphone_refuses_new_captions_but_preserves_an_authorized_task() {
+        let _caption_test_guard = caption_lifecycle_test_lock().lock().await;
+        let state = test_caption_app_state();
+        *state.recording.lock().await =
+            Some(crate::recording::test_active_recording_stub("none-input"));
+        let error =
+            start_captions_with_bearer(&state, Some("en".into()), || Some("test-bearer".into()))
+                .await
+                .expect_err("an active silence bus is not microphone eligibility");
+        assert!(error.to_string().contains("Select an available microphone"));
+        assert!(state.captions.lock().await.task.is_none());
+        let _runtime = install_caption_sign_out_test_session(&state).await;
+        let task_id = state.captions.lock().await.task.as_ref().unwrap().id();
+        let status =
+            start_captions_with_bearer(&state, Some("en".into()), || Some("test-bearer".into()))
+                .await
+                .expect("an authorized caption timeline survives missing input");
+        assert_eq!(status.state, CaptionsState::Listening);
+        assert_eq!(
+            state.captions.lock().await.task.as_ref().unwrap().id(),
+            task_id
+        );
+        assert!(caption_sign_out_test_snapshot(&state).await.tap_active);
+        stop_captions(&state).await;
     }
 
     #[tokio::test]

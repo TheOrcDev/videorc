@@ -608,6 +608,44 @@ scene-editor redesign, output profile changes, releases, and adding remote/LAN
 device controls. Additional native dependencies or a new platform capture stack
 require a written amendment with measured reasons before expanding scope.
 
+## S4 implementation amendment: AVFoundation capture clock metadata
+
+Approved during execution on 2026-09-23. Inspection of bundled FFmpeg 8.1.1
+`libavdevice/avfoundation.m` shows that audio packet PTS comes from
+`CMSampleBufferGetOutputSampleTimingInfoArray`; the stock worker does not export
+the capture session clock's relationship to the host clock. Arrival time at
+stdout is not that relationship. The implementation may add a narrow maintained
+FFmpeg patch, rather than infer capture time from downstream scheduling.
+
+Additional scope is limited to `scripts/build-ffmpeg-macos.sh`, a maintained
+patch under `scripts/patches/`, a focused capture-clock capability probe and its
+pure tests under `scripts/`, associated package/packaging preflight wiring, and
+generated bundle source/build metadata. No new native capture stack or runtime
+dependency is introduced.
+
+Requirements:
+
+- Convert each delivered audio buffer's presentation timestamp from the capture
+  session clock to `CMClockGetHostTimeClock()` using `CMSyncConvertTime`. Export
+  versioned metadata that can be matched to the exact packet/PCM interval,
+  including original PTS, converted host time, sample count/rate, and freshness
+  evidence. Invalid or unmappable clock values fail the adapter explicitly.
+- Keep metadata associated with the retained buffer when AVFoundation replaces
+  an unread buffer. Bounded parsers reject missing, mismatched, stale, malformed,
+  or discontinuous metadata; neither stderr nor stdout receive time substitutes
+  for capture time. Pair the backend monotonic clock with the platform host
+  clock explicitly and record the mapping uncertainty.
+- Apply the patch after a clean source extraction. Fingerprint the patch and
+  protocol version in source/build manifests, retain the patch with the bundle's
+  source information, and refuse reuse of a bundle without the required
+  capability. A capability probe must check the actual binary.
+- Preserve existing FFmpeg licensing, TLS, dynamic-library and packaging gates.
+  Record the exact upstream archive and modifications needed to reproduce the
+  binary; future public source distribution must include the patch.
+- Rebuild the local bundle, run adapter/parser rejection tests and the capability
+  probe, then verify signed-candidate fallback recording/stream artifacts and
+  per-switch A/V timing. This amendment does not waive physical-device acceptance.
+
 ## Done criteria, stop conditions, and maintenance
 
 - [ ] Both UI entry points switch all supported sources in every session mode.
@@ -693,3 +731,42 @@ recording, stream, or release was run during planning.
   `reviewer-s2-scripts.log`, `s2-captions-contract.log`, `s2-record-latency.log`,
   and `s2-recording-studio.log` in the evidence directory above. These are phase
   regression gates, not final live-switch/device acceptance.
+
+- S3 implementation: bounded producer owners (including cold start and standby),
+  exact CoreAudio selection, fresh-PCM preparation, chunk-boundary replacement,
+  separate old/new 5 ms ramps, authoritative commit receipts, latest bus controls,
+  None/retry/loss behavior, coherent generation health and cumulative finalization
+  evidence. A process-wide two-producer limit retains quarantined late open/close
+  owners; startup waits for current standby opening under the publication fence.
+  New caption tasks require a real input; existing authorized caption tasks retain
+  their bus timeline through None/loss. Removed unused legacy preroll-only tests;
+  current bus tests cover epoch trimming, bounded silence and replacement.
+- S3 deterministic evidence: raw bus/ownership tests 19/19; warm handoff tests 5/5;
+  explicit new-caption refusal/existing-task retention test passed. The maintained
+  `smoke:live-source-switch` now runs record-only, stream-only and combined modes.
+  All three passed with decoded 440/880 Hz identities, zero RMS during None,
+  duplicate-request receipt parity, unchanged encoder/session/output identity,
+  one 48 kHz stereo audio track, monotonic DTS, and exactly one actual RTMP
+  connection per streaming session. Reports are under
+  `/tmp/videorc-live-sources-evidence/s3-encoded-v2/`; aggregate log
+  `s3-encoded-smoke-v2.log`. Latest Node suite 1445/1445 and typecheck passed.
+  These reports explicitly set `completePlanAcceptance:false`: visual switching,
+  per-switch A/V timing, endurance, and physical-device acceptance remain pending.
+- S3 restoration boundary: ordinary CoreAudio open failures preserve a healthy
+  previous producer; an already-lost producer is reported unavailable. Structured
+  exclusive-owner release/open/restoration is integrated with the S4 adapter
+  contract, rather than guessing that an arbitrary native error means exclusive
+  ownership. Physical two-microphone acceptance will use the final signed candidate;
+  no native-device readiness claim is made from injected PCM.
+- Final S3 backend regression gate: default optimized suite passed 2233 backend
+  tests, 80 native-preview helper tests and one wire integration test (9 ignored),
+  including Stop while Start waits on standby and atomic warm admission/disarm.
+  Log: `s3-rust-final.log`. Reviewer independently reran final warm tests 6/6.
+- S3 final loss/replacement artifact run passed all three modes after exercising
+  actual producer disconnect, an unavailable-target failure with honest
+  previous-source health, encoded silence during loss, and successful replacement.
+  Evidence: `s3-encoded-loss-v2/{record,stream,combined}/live-source-switch-evidence.json`
+  and `s3-encoded-loss-v2.log`. The first loss harness attempt correctly hit the
+  Electron-main-only debug-method restriction; the harness now uses the existing
+  authenticated main smoke command, without weakening backend authorization.
+  Final clippy with warnings denied and TypeScript lint also passed.

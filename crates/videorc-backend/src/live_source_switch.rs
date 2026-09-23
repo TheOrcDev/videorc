@@ -44,6 +44,7 @@ fn required_device_id<'de, D: serde::Deserializer<'de>>(
 pub enum SwitchStage {
     Admitted,
     Preparing,
+    Restoring,
     Committing,
     Applied,
     Failed,
@@ -102,6 +103,7 @@ pub struct SessionSourceHealth {
 pub struct SessionSources {
     pub session_id: String,
     pub source_revision: u64,
+    pub output_process_id: Option<u32>,
     pub audio: Option<crate::session_audio::AudioBusStatus>,
     pub confirmed: SourceSelection,
     pub health: Vec<SessionSourceHealth>,
@@ -175,6 +177,7 @@ pub enum Admission {
 }
 
 impl Admission {
+    #[cfg(test)]
     pub fn snapshot(self) -> SessionSources {
         match self {
             Self::New(snapshot) | Self::Existing(snapshot) => snapshot,
@@ -189,14 +192,19 @@ pub struct SourceSwitchCoordinator {
     completed: VecDeque<(SourceSwitchParams, SourceSwitchOperation)>,
     stopping: bool,
     deadline: Option<Instant>,
+    cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl SourceSwitchCoordinator {
     pub fn start(&mut self, session_id: String, confirmed: SourceSelection) {
+        if let Some(cancelled) = self.cancellation.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        }
         *self = Self {
             snapshot: Some(SessionSources {
                 session_id,
                 source_revision: 0,
+                output_process_id: None,
                 audio: None,
                 health: [
                     (
@@ -238,6 +246,23 @@ impl SourceSwitchCoordinator {
             }),
             ..Self::default()
         };
+    }
+
+    pub fn set_output_process_id(&mut self, pid: u32) {
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            snapshot.output_process_id = Some(pid);
+        }
+    }
+
+    pub fn enable_microphone(&mut self) {
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            for capability in &mut snapshot.capabilities {
+                if capability.kind == SourceKind::Microphone {
+                    capability.supported = true;
+                    capability.reason = None;
+                }
+            }
+        }
     }
 
     pub fn snapshot(&self, session_id: &str) -> Result<SessionSources, SwitchError> {
@@ -346,10 +371,97 @@ impl SourceSwitchCoordinator {
             previous_source: SourcePreservation::Preserved,
             output_observed: false,
         };
+        self.cancellation = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
+            false,
+        )));
         self.deadline = Some(Instant::now() + SOURCE_SWITCH_EXECUTION_TIMEOUT);
         self.pending_request = Some(request.clone());
         self.snapshot.as_mut().expect("validated session").pending = Some(operation);
         self.snapshot(&request.session_id).map(Admission::New)
+    }
+
+    pub fn cancellation(
+        &self,
+        request: &SourceSwitchParams,
+    ) -> Result<std::sync::Arc<std::sync::atomic::AtomicBool>, SwitchError> {
+        self.validate_commit(request)?;
+        self.cancellation.clone().ok_or(SwitchError::Superseded)
+    }
+
+    pub fn validate_commit(&self, request: &SourceSwitchParams) -> Result<(), SwitchError> {
+        let snapshot = self.snapshot(&request.session_id)?;
+        if self.stopping {
+            return Err(SwitchError::Stopping);
+        }
+        if self.pending_request.as_ref() != Some(request)
+            || snapshot.source_revision != request.expected_source_revision
+            || self
+                .cancellation
+                .as_ref()
+                .is_none_or(|cancelled| cancelled.load(std::sync::atomic::Ordering::Acquire))
+        {
+            return Err(SwitchError::Superseded);
+        }
+        Ok(())
+    }
+
+    pub fn previous_unavailable(&mut self, request: &SourceSwitchParams) {
+        if self.pending_request.as_ref() == Some(request)
+            && let Some(operation) = self
+                .snapshot
+                .as_mut()
+                .and_then(|snapshot| snapshot.pending.as_mut())
+        {
+            operation.previous_source = SourcePreservation::Unavailable;
+        }
+    }
+
+    pub fn set_stage(
+        &mut self,
+        request: &SourceSwitchParams,
+        stage: SwitchStage,
+    ) -> Result<SessionSources, SwitchError> {
+        self.validate_commit(request)?;
+        self.snapshot
+            .as_mut()
+            .expect("validated session")
+            .pending
+            .as_mut()
+            .expect("admitted operation")
+            .stage = stage;
+        self.snapshot(&request.session_id)
+    }
+
+    /// Called under the same short mutex as the bus route installation. This
+    /// receipt survives a lost RPC response and never waits for transport I/O.
+    pub fn commit_microphone(
+        &mut self,
+        request: &SourceSwitchParams,
+    ) -> Result<SessionSources, SwitchError> {
+        self.validate_commit(request)?;
+        let snapshot = self.snapshot.as_mut().expect("validated session");
+        snapshot.confirmed.microphone_id = request.device_id.clone();
+        snapshot.source_revision = snapshot.source_revision.saturating_add(1);
+        self.finish(request, SwitchStage::Applied, None)
+    }
+
+    pub fn observe_output(&mut self, session_id: &str, request_id: &str) {
+        if self.snapshot(session_id).is_err() {
+            return;
+        }
+        for (request, operation) in &mut self.completed {
+            if request.request_id == request_id {
+                operation.output_observed = true;
+            }
+        }
+        if let Some(operation) = self
+            .snapshot
+            .as_mut()
+            .and_then(|snapshot| snapshot.last_operation.as_mut())
+            && operation.request_id == request_id
+        {
+            operation.output_observed = true;
+        }
     }
 
     pub fn expire_at(&mut self, now: Instant) {
@@ -364,7 +476,7 @@ impl SourceSwitchCoordinator {
         }
     }
 
-    fn finish(
+    pub fn finish(
         &mut self,
         request: &SourceSwitchParams,
         stage: SwitchStage,
@@ -381,6 +493,9 @@ impl SourceSwitchCoordinator {
         snapshot.last_operation = Some(operation.clone());
         self.pending_request = None;
         self.deadline = None;
+        if let Some(cancelled) = self.cancellation.take() {
+            cancelled.store(true, std::sync::atomic::Ordering::Release);
+        }
         self.completed.push_back((request.clone(), operation));
         while self.completed.len() > RESULT_CACHE_CAPACITY {
             self.completed.pop_front();
@@ -413,7 +528,7 @@ pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, S
     let camera = crate::preview_camera::preview_camera_status(state).await;
     let capture = crate::preview_screen::preview_screen_status(state).await;
     let recording = state.recording.lock().await;
-    let (stopping, audio_health, audio_status) = recording
+    let (stopping, audio_handle) = recording
         .as_ref()
         .filter(|active| active.session_id == session_id)
         .map(|active| {
@@ -422,18 +537,21 @@ pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, S
                 active
                     .native_audio
                     .as_ref()
-                    .map(|audio| audio.input_state()),
-                active.native_audio.as_ref().map(|audio| audio.status()),
+                    .map(|audio| audio.switch_handle()),
             )
         })
         .ok_or(SwitchError::InactiveSession)?;
-    let mut coordinator = state.live_source_switch.lock().await;
+    let mut coordinator = state
+        .live_source_switch
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     coordinator.expire_at(Instant::now());
     if stopping {
         coordinator.stop(session_id);
     }
     let mut snapshot = coordinator.snapshot(session_id)?;
-    snapshot.audio = audio_status;
+    snapshot.audio = audio_handle.as_ref().map(|audio| audio.status());
+    let audio_health = audio_handle.as_ref().map(|audio| audio.input_state());
     for health in &mut snapshot.health {
         health.device_id = match health.kind {
             SourceKind::Camera => snapshot.confirmed.camera_id.clone(),
@@ -475,19 +593,113 @@ pub async fn switch(
     state: &AppState,
     request: SourceSwitchParams,
 ) -> Result<SessionSources, SwitchError> {
-    let recording = state.recording.lock().await;
-    let stopping = recording
-        .as_ref()
-        .filter(|active| active.session_id == request.session_id)
-        .map(|active| active.stop_requested)
-        .ok_or(SwitchError::InactiveSession)?;
-    let mut coordinator = state.live_source_switch.lock().await;
-    coordinator.expire_at(Instant::now());
-    if stopping {
-        coordinator.stop(&request.session_id);
+    let (handle, existing) = {
+        let recording = state.recording.lock().await;
+        let active = recording
+            .as_ref()
+            .filter(|active| active.session_id == request.session_id)
+            .ok_or(SwitchError::InactiveSession)?;
+        let mut coordinator = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        coordinator.expire_at(Instant::now());
+        if active.stop_requested {
+            coordinator.stop(&request.session_id);
+        }
+        let existing = match coordinator.admit(&request)? {
+            Admission::Existing(snapshot) => Some(snapshot),
+            Admission::New(_) => {
+                if request.kind == SourceKind::Microphone
+                    && let Some(audio) = active.native_audio.as_ref()
+                {
+                    let status = audio.status();
+                    if status.device_id == request.device_id
+                        && (request.device_id.is_none()
+                            || audio.input_state() == crate::audio::NativeAudioInputState::Live)
+                    {
+                        coordinator.finish(&request, SwitchStage::Applied, None)?;
+                        if status.sample_cursor > 0 {
+                            coordinator.observe_output(&request.session_id, &request.request_id);
+                        }
+                        Some(coordinator.snapshot(&request.session_id)?)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+        };
+        (
+            active
+                .native_audio
+                .as_ref()
+                .map(|audio| audio.switch_handle()),
+            existing,
+        )
+    };
+    if let Some(existing) = existing {
+        let mut snapshot = get(state, &request.session_id).await?;
+        // Current selection/health stays authoritative, while the cached
+        // terminal outcome still belongs to the retried operation.
+        snapshot.last_operation = existing.last_operation;
+        return Ok(snapshot);
     }
-    // Adapters are enabled only after their lifetime/readiness contracts exist.
-    coordinator.admit(&request).map(Admission::snapshot)
+    let cancelled = {
+        let mut coordinator = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let cancelled = coordinator.cancellation(&request)?;
+        let snapshot = coordinator.set_stage(&request, SwitchStage::Preparing)?;
+        state.emit_event("session.sources.changed", snapshot);
+        cancelled
+    };
+    let result = async {
+        if request.kind != SourceKind::Microphone {
+            anyhow::bail!("This source adapter is not ready for replacement.");
+        }
+        let handle = handle
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("This session has no replaceable audio bus."))?;
+        handle
+            .replace(request.clone(), state.live_source_switch.clone(), cancelled)
+            .await
+    }
+    .await;
+    let snapshot = {
+        let mut coordinator = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if result.is_err()
+            && handle.as_ref().is_some_and(|audio| {
+                matches!(
+                    audio.input_state(),
+                    crate::audio::NativeAudioInputState::SourceLost
+                        | crate::audio::NativeAudioInputState::DownstreamClosed
+                )
+            })
+        {
+            coordinator.previous_unavailable(&request);
+        }
+        match result {
+            Ok(_) => coordinator.snapshot(&request.session_id)?,
+            Err(error) => {
+                match coordinator.finish(&request, SwitchStage::Failed, Some(error.to_string())) {
+                    Ok(snapshot) => snapshot,
+                    // Stop or an authoritative bus commit may have won already.
+                    Err(SwitchError::Superseded | SwitchError::Stopping) => {
+                        coordinator.snapshot(&request.session_id)?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+        }
+    };
+    state.emit_event("session.sources.changed", &snapshot);
+    get(state, &request.session_id).await
 }
 
 #[cfg(test)]

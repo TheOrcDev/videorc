@@ -23,6 +23,10 @@ pub struct AudioBusCounters {
 #[serde(rename_all = "camelCase")]
 pub struct AudioBusStatus {
     pub sample_cursor: u64,
+    pub generation: u64,
+    pub device_id: Option<String>,
+    pub device_name: String,
+    pub last_commit: Option<AudioCommitReceipt>,
     pub selected_input: bool,
     pub counters: AudioBusCounters,
 }
@@ -210,78 +214,625 @@ static OWNED_WRITERS: AtomicU64 = AtomicU64::new(0);
 /// A timed-out native close keeps its writer/producer owned by the original
 /// thread. It cannot publish PCM after stop, and admission can observe this
 /// fence rather than repeatedly opening devices behind a stuck cleanup.
-pub fn cleanup_pending() -> bool {
+pub fn cleanup_pending(standby_owners: u64) -> bool {
     OWNED_WRITERS.load(Ordering::Acquire) != 0
+        || OWNED_PRODUCERS.load(Ordering::Acquire) > standby_owners
+}
+
+const PRODUCER_LIMIT: u64 = 2;
+static OWNED_PRODUCERS: AtomicU64 = AtomicU64::new(0);
+static PRODUCER_CLOSED: OnceLock<(std::sync::Mutex<()>, std::sync::Condvar)> = OnceLock::new();
+fn wait_for_producer_cleanup(count: &AtomicU64, deadline: Instant) -> bool {
+    let (mutex, closed) = PRODUCER_CLOSED.get_or_init(Default::default);
+    let mut guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
+    while count.load(Ordering::Acquire) != 0 {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return false;
+        }
+        let (next, _) = closed
+            .wait_timeout(guard, remaining)
+            .unwrap_or_else(|p| p.into_inner());
+        guard = next;
+    }
+    true
+}
+
+#[cfg(not(test))]
+static PLATFORM_PRODUCER_POOL: OnceLock<Arc<AtomicU64>> = OnceLock::new();
+struct ProducerPermit {
+    local: Arc<AtomicU64>,
+    platform: Arc<AtomicU64>,
+}
+impl ProducerPermit {
+    fn acquire(local: Arc<AtomicU64>) -> anyhow::Result<Self> {
+        #[cfg(not(test))]
+        let platform = PLATFORM_PRODUCER_POOL
+            .get_or_init(|| Arc::new(AtomicU64::new(0)))
+            .clone();
+        #[cfg(test)]
+        let platform = local.clone(); // Independent unit sessions do not share devices.
+        Self::acquire_in(local, platform)
+    }
+    fn acquire_in(local: Arc<AtomicU64>, platform: Arc<AtomicU64>) -> anyhow::Result<Self> {
+        platform.fetch_update(Ordering::AcqRel,Ordering::Acquire,|count|(count<PRODUCER_LIMIT).then_some(count+1))
+            .map_err(|_|anyhow::anyhow!("A microphone is still opening or closing; wait for its cleanup before retrying."))?;
+        if !Arc::ptr_eq(&local, &platform) {
+            local.fetch_add(1, Ordering::AcqRel);
+        }
+        OWNED_PRODUCERS.fetch_add(1, Ordering::AcqRel);
+        Ok(Self { local, platform })
+    }
+}
+impl Drop for ProducerPermit {
+    fn drop(&mut self) {
+        let (mutex, closed) = PRODUCER_CLOSED.get_or_init(Default::default);
+        let _guard = mutex.lock().unwrap_or_else(|p| p.into_inner());
+        self.platform.fetch_sub(1, Ordering::AcqRel);
+        if !Arc::ptr_eq(&self.local, &self.platform) {
+            self.local.fetch_sub(1, Ordering::AcqRel);
+        }
+        OWNED_PRODUCERS.fetch_sub(1, Ordering::AcqRel);
+        closed.notify_all();
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProducerCompletion {
+    Running,
+    Closed,
+    Panicked,
+}
+
+struct CompletionGuard {
+    state: tokio::sync::watch::Sender<ProducerCompletion>,
+    closed: mpsc::SyncSender<ProducerCompletion>,
+}
+impl Drop for CompletionGuard {
+    fn drop(&mut self) {
+        let state = if thread::panicking() {
+            ProducerCompletion::Panicked
+        } else {
+            ProducerCompletion::Closed
+        };
+        self.state.send_replace(state);
+        let _ = self.closed.send(state);
+    }
+}
+struct CompletionTicket {
+    state: tokio::sync::watch::Receiver<ProducerCompletion>,
+    closed: mpsc::Receiver<ProducerCompletion>,
+}
+impl CompletionTicket {
+    fn running(&self) -> bool {
+        *self.state.borrow() == ProducerCompletion::Running
+    }
+}
+fn completion_channel() -> (CompletionGuard, CompletionTicket) {
+    let (state_tx, state_rx) = tokio::sync::watch::channel(ProducerCompletion::Running);
+    let (closed_tx, closed_rx) = mpsc::sync_channel(1);
+    (
+        CompletionGuard {
+            state: state_tx,
+            closed: closed_tx,
+        },
+        CompletionTicket {
+            state: state_rx,
+            closed: closed_rx,
+        },
+    )
+}
+
+struct ManagedProducer {
+    device_id: String,
+    device_name: String,
+    receiver: Option<mpsc::Receiver<AudioFrame>>,
+    stats: Arc<AudioCaptureStats>,
+    stop: Option<mpsc::Sender<()>>,
+    completion: Option<CompletionTicket>,
+    #[cfg(debug_assertions)]
+    caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
+}
+impl ManagedProducer {
+    fn retire(mut self) -> CompletionTicket {
+        self.stop.take();
+        self.completion.take().expect("owned completion receipt")
+    }
+}
+impl Drop for ManagedProducer {
+    fn drop(&mut self) {
+        self.stop.take();
+    }
+}
+
+struct OpenCancellation(Option<Arc<AtomicBool>>);
+impl OpenCancellation {
+    fn disarm(&mut self) {
+        self.0.take();
+    }
+}
+impl Drop for OpenCancellation {
+    fn drop(&mut self) {
+        if let Some(cancelled) = self.0.take() {
+            cancelled.store(true, Ordering::Release);
+        }
+    }
+}
+
+struct ProducerSource {
+    device_id: String,
+    device_name: String,
+    receiver: mpsc::Receiver<AudioFrame>,
+    stats: Arc<AudioCaptureStats>,
+    _owner: Box<dyn Send>,
+    #[cfg(debug_assertions)]
+    caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
+}
+impl ProducerSource {
+    fn native(mut source: NativeAudioSource) -> Self {
+        Self {
+            device_id: format!("microphone:coreaudio:{}", source.device_id),
+            device_name: source.device_name.clone(),
+            receiver: source
+                .receiver
+                .take()
+                .expect("native receiver before transfer"),
+            stats: source.stats_handle(),
+            #[cfg(debug_assertions)]
+            caption_injector: source.caption_contract_test_injector.clone(),
+            _owner: Box::new(source),
+        }
+    }
+    fn into_managed(
+        self,
+        stop: mpsc::Sender<()>,
+        completion: CompletionTicket,
+    ) -> (ManagedProducer, Box<dyn Send>) {
+        (
+            ManagedProducer {
+                device_id: self.device_id,
+                device_name: self.device_name,
+                receiver: Some(self.receiver),
+                stats: self.stats,
+                stop: Some(stop),
+                completion: Some(completion),
+                #[cfg(debug_assertions)]
+                caption_injector: self.caption_injector,
+            },
+            self._owner,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnerPhase {
+    BeforeOpened,
+    BeforeReady,
+}
+type OwnerTask = Box<dyn FnOnce() + Send>;
+fn spawn_owner(task: OwnerTask) -> io::Result<thread::JoinHandle<()>> {
+    thread::Builder::new()
+        .name("microphone-owner".into())
+        .spawn(task)
+}
+
+async fn prepare_native_with_readiness(
+    device_id: u32,
+    cancelled: Arc<AtomicBool>,
+    count: Arc<AtomicU64>,
+    require_readiness: bool,
+) -> anyhow::Result<ManagedProducer> {
+    prepare_producer_with(
+        move || {
+            // Enumeration and open share the limited owner's five-second budget.
+            let id = format!("microphone:coreaudio:{device_id}");
+            let exact = crate::audio::list_native_microphones()
+                .iter()
+                .filter(|device| device.id == id)
+                .count()
+                == 1;
+            #[cfg(debug_assertions)]
+            let exact = exact
+                || device_id == crate::audio::CAPTION_CONTRACT_TEST_DEVICE_ID
+                || (device_id == crate::audio::CAPTION_CONTRACT_TEST_DEVICE_ID - 1
+                    && std::env::var("VIDEORC_LIVE_SOURCE_SWITCH_TEST").as_deref() == Ok("1"));
+            if !exact {
+                anyhow::bail!("The selected microphone is missing or its identity is ambiguous.");
+            }
+            crate::audio::start_native_audio_source(device_id, AudioProcessingSettings::default())
+                .map(ProducerSource::native)
+        },
+        cancelled,
+        count,
+        spawn_owner,
+        |_| {},
+        require_readiness,
+    )
+    .await
+}
+
+async fn prepare_producer_with(
+    open: impl FnOnce() -> anyhow::Result<ProducerSource> + Send + 'static,
+    operation_cancelled: Arc<AtomicBool>,
+    count: Arc<AtomicU64>,
+    spawn: impl FnOnce(OwnerTask) -> io::Result<thread::JoinHandle<()>>,
+    phase: impl Fn(OwnerPhase) + Send + 'static,
+    require_readiness: bool,
+) -> anyhow::Result<ManagedProducer> {
+    let permit = ProducerPermit::acquire(count)?;
+    let mut cancellation = OpenCancellation(Some(Arc::new(AtomicBool::new(false))));
+    let worker_cancelled = cancellation.0.as_ref().expect("armed cancellation").clone();
+    let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let (completion_guard, completion) = completion_channel();
+    spawn(Box::new(move || {
+        let _completion = completion_guard;
+        let _permit = permit;
+        let cancelled = || {
+            worker_cancelled.load(Ordering::Acquire) || operation_cancelled.load(Ordering::Acquire)
+        };
+        if cancelled() {
+            return;
+        }
+        let source = match open() {
+            Ok(source) => source,
+            Err(error) => {
+                let _ = opened_tx.send(Err(error));
+                return;
+            }
+        };
+        phase(OwnerPhase::BeforeOpened);
+        if cancelled() || opened_tx.send(Ok(())).is_err() {
+            return;
+        }
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if !require_readiness {
+                break;
+            }
+            if cancelled() {
+                return;
+            }
+            if Instant::now() >= deadline {
+                let _ = ready_tx.send(Err(anyhow::anyhow!(
+                    "The microphone did not deliver fresh PCM within 2s."
+                )));
+                return;
+            }
+            match source.receiver.recv_timeout(Duration::from_millis(20)) {
+                Ok(frame) if valid_fresh_frame(&frame, Instant::now()) => break,
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let _ = ready_tx.send(Err(anyhow::anyhow!(
+                        "The microphone stopped before readiness."
+                    )));
+                    return;
+                }
+            }
+        }
+        let (stop_tx, stop_rx) = mpsc::channel();
+        let (producer, owner) = source.into_managed(stop_tx, completion);
+        phase(OwnerPhase::BeforeReady);
+        if cancelled() || ready_tx.send(Ok(producer)).is_err() {
+            return;
+        }
+        let _ = stop_rx.recv();
+        drop(owner);
+    }))?;
+    tokio::time::timeout(Duration::from_secs(5), opened_rx)
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "Microphone opening exceeded 5s; its owner is still responsible for cleanup."
+            )
+        })???;
+    let producer = tokio::time::timeout(Duration::from_secs(2), ready_rx)
+        .await
+        .map_err(|_| anyhow::anyhow!("Microphone readiness exceeded 2s."))???;
+    cancellation.disarm();
+    Ok(producer)
+}
+
+struct ProducerLifetime {
+    owner: Option<Box<dyn Send>>,
+    permit: Option<ProducerPermit>,
+    completion: Option<CompletionGuard>,
+}
+impl Drop for ProducerLifetime {
+    fn drop(&mut self) {
+        // Driver teardown precedes capacity release and completion, including
+        // failure to spawn the dedicated owner thread.
+        drop(self.owner.take());
+        drop(self.permit.take());
+        drop(self.completion.take());
+    }
+}
+fn own_initial_source(
+    source: NativeAudioSource,
+    count: Arc<AtomicU64>,
+) -> anyhow::Result<ManagedProducer> {
+    let permit = ProducerPermit::acquire(count)?;
+    adopt_initial_source(source, permit)
+}
+fn adopt_initial_source(
+    source: NativeAudioSource,
+    permit: ProducerPermit,
+) -> anyhow::Result<ManagedProducer> {
+    let (stop_tx, stop_rx) = mpsc::channel();
+    let (completion_guard, completion) = completion_channel();
+    let (producer, owner) = ProducerSource::native(source).into_managed(stop_tx, completion);
+    let lifetime = ProducerLifetime {
+        owner: Some(owner),
+        permit: Some(permit),
+        completion: Some(completion_guard),
+    };
+    spawn_owner(Box::new(move || {
+        let _ = stop_rx.recv();
+        drop(lifetime);
+    }))?;
+    Ok(producer)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AudioCommitReceipt {
+    pub session_id: String,
+    pub request_id: String,
+    pub generation: u64,
+    pub cutover_sample: u64,
+    pub device_id: Option<String>,
+    pub output_observed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceLoss {
+    pub generation: u64,
+    pub device_name: String,
+    pub after_ms: u64,
+}
+
+pub struct AudioObservation {
+    pub generation: u64,
+    pub device_name: String,
+    pub selected_input: bool,
+    pub captured_frames: u64,
+    pub dropped_frames: u64,
+    pub live_peak: f32,
+    pub session_peak: f32,
+    pub elapsed_secs: Option<f64>,
+    pub input_state: NativeAudioInputState,
+    pub source_loss_after_ms: Option<u64>,
+    pub losses: Vec<SourceLoss>,
+}
+
+struct AudioShared {
+    status: AudioBusStatus,
+    stats: Arc<AudioCaptureStats>,
+    totals: Arc<AudioCaptureStats>,
+    ever_selected: bool,
+    last_selected_name: String,
+    losses: VecDeque<SourceLoss>,
+    #[cfg(test)]
+    after_ramp: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    #[cfg(debug_assertions)]
+    caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
+}
+
+#[derive(Clone)]
+pub struct AudioSwitchHandle {
+    commands: mpsc::SyncSender<AudioSwitchCommand>,
+    shared: Arc<std::sync::Mutex<AudioShared>>,
+    producer_count: Arc<AtomicU64>,
+    stop: Arc<AtomicBool>,
+}
+
+struct AudioSwitchCommand {
+    request: crate::live_source_switch::SourceSwitchParams,
+    coordinator: Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
+    cancelled: Arc<AtomicBool>,
+    candidate: Option<ManagedProducer>,
+    admitted_at: Instant,
+    acknowledgement: tokio::sync::oneshot::Sender<anyhow::Result<AudioCommitReceipt>>,
+}
+
+pub struct InitialAudioSource {
+    source: InitialInput,
+}
+impl std::fmt::Debug for InitialAudioSource {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("InitialAudioSource")
+            .field("device_id", &self.device_id())
+            .field("device_name", &self.device_name())
+            .finish_non_exhaustive()
+    }
+}
+enum InitialInput {
+    Warm(NativeAudioSource),
+    Owned {
+        producer: ManagedProducer,
+        count: Arc<AtomicU64>,
+    },
+}
+impl InitialAudioSource {
+    pub fn warm(source: NativeAudioSource) -> Self {
+        Self {
+            source: InitialInput::Warm(source),
+        }
+    }
+    pub fn owned_producer_count(&self) -> u64 {
+        match &self.source {
+            InitialInput::Owned { .. } => 1,
+            InitialInput::Warm(_) => 0,
+        }
+    }
+    pub fn stats_handle(&self) -> Arc<AudioCaptureStats> {
+        match &self.source {
+            InitialInput::Warm(source) => source.stats_handle(),
+            InitialInput::Owned { producer, .. } => producer.stats.clone(),
+        }
+    }
+    pub fn device_name(&self) -> String {
+        match &self.source {
+            InitialInput::Warm(source) => source.device_name.clone(),
+            InitialInput::Owned { producer, .. } => producer.device_name.clone(),
+        }
+    }
+    fn device_id(&self) -> String {
+        match &self.source {
+            InitialInput::Warm(source) => format!("microphone:coreaudio:{}", source.device_id),
+            InitialInput::Owned { producer, .. } => producer.device_id.clone(),
+        }
+    }
+    #[cfg(debug_assertions)]
+    fn caption_injector(&self) -> Option<crate::audio::CaptionContractTestAudioInjector> {
+        match &self.source {
+            InitialInput::Warm(source) => source.caption_contract_test_injector.clone(),
+            InitialInput::Owned { producer, .. } => producer.caption_injector.clone(),
+        }
+    }
+    fn count(&self) -> Arc<AtomicU64> {
+        match &self.source {
+            InitialInput::Warm(_) => Arc::new(AtomicU64::new(0)),
+            InitialInput::Owned { count, .. } => count.clone(),
+        }
+    }
+    fn into_owned(self, count: Arc<AtomicU64>) -> anyhow::Result<ManagedProducer> {
+        match self.source {
+            InitialInput::Warm(source) => own_initial_source(source, count),
+            InitialInput::Owned { producer, .. } => Ok(producer),
+        }
+    }
+}
+
+pub async fn prepare_initial_native(device_id: u32) -> anyhow::Result<InitialAudioSource> {
+    let count = Arc::new(AtomicU64::new(0));
+    let producer = prepare_native_with_readiness(
+        device_id,
+        Arc::new(AtomicBool::new(false)),
+        count.clone(),
+        false,
+    )
+    .await?;
+    Ok(InitialAudioSource {
+        source: InitialInput::Owned { producer, count },
+    })
 }
 
 pub struct SessionAudio {
-    pub device_id: u32,
-    pub device_name: String,
     pub fifo_path: PathBuf,
-    stats: Arc<AudioCaptureStats>,
-    selected_input: bool,
-    status: Arc<std::sync::Mutex<AudioBusStatus>>,
+    handle: AudioSwitchHandle,
     processing_settings: AudioProcessingSettingsHandle,
-    stop: Arc<AtomicBool>,
     writer: Option<thread::JoinHandle<()>>,
     finished: mpsc::Receiver<()>,
-    #[cfg(debug_assertions)]
-    caption_contract_test_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
 }
 
 impl std::fmt::Debug for SessionAudio {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
             .debug_struct("SessionAudio")
-            .field("device_id", &self.device_id)
-            .field("device_name", &self.device_name)
+            .field("status", &self.status())
             .field("fifo_path", &self.fifo_path)
-            .field("captured_frames", &self.captured_frames())
             .finish_non_exhaustive()
     }
 }
 
 impl SessionAudio {
-    pub fn status(&self) -> AudioBusStatus {
-        self.status
+    fn totals(&self) -> Arc<AudioCaptureStats> {
+        self.handle
+            .shared
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(|p| p.into_inner())
+            .totals
             .clone()
     }
+    /// Identity and generation are captured under one lock. Atomic PCM counters
+    /// may progress, but observations can never combine two source generations.
+    pub fn caption_start_eligible(&self) -> bool {
+        let shared = self.handle.shared.lock().unwrap_or_else(|p| p.into_inner());
+        shared.status.selected_input
+            && matches!(
+                shared.stats.input_state(),
+                NativeAudioInputState::Starting | NativeAudioInputState::Live
+            )
+    }
+    pub fn observation(&self, finalizing: bool) -> AudioObservation {
+        let mut shared = self.handle.shared.lock().unwrap_or_else(|p| p.into_inner());
+        if finalizing {
+            shared.stats.finish_recording_window();
+            shared.totals.finish_recording_window();
+        }
+        let stats = if finalizing {
+            &shared.totals
+        } else {
+            &shared.stats
+        };
+        AudioObservation {
+            generation: shared.status.generation,
+            device_name: if finalizing {
+                shared.last_selected_name.clone()
+            } else {
+                shared.status.device_name.clone()
+            },
+            selected_input: if finalizing {
+                shared.ever_selected
+            } else {
+                shared.status.selected_input
+            },
+            captured_frames: stats.captured_frames(),
+            dropped_frames: stats.dropped_frames(),
+            live_peak: stats.live_peak(),
+            session_peak: stats.session_peak(),
+            elapsed_secs: stats.recording_window_elapsed_secs(),
+            input_state: shared.stats.input_state(),
+            source_loss_after_ms: shared.stats.source_loss_after_ms(),
+            losses: shared.losses.drain(..).collect(),
+        }
+    }
+    pub fn switch_handle(&self) -> AudioSwitchHandle {
+        self.handle.clone()
+    }
+    fn stats(&self) -> Arc<AudioCaptureStats> {
+        self.handle
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .stats
+            .clone()
+    }
+    pub fn status(&self) -> AudioBusStatus {
+        self.handle.status()
+    }
+    #[cfg(test)]
     pub fn has_selected_input(&self) -> bool {
-        self.selected_input
+        self.status().selected_input
     }
+    #[cfg(test)]
     pub fn captured_frames(&self) -> u64 {
-        self.stats.captured_frames()
-    }
-    pub fn dropped_frames(&self) -> u64 {
-        self.stats.dropped_frames()
-    }
-    pub fn live_peak(&self) -> f32 {
-        self.stats.live_peak()
-    }
-    pub fn session_peak(&self) -> f32 {
-        self.stats.session_peak()
+        self.stats().captured_frames()
     }
     pub fn input_state(&self) -> NativeAudioInputState {
-        self.stats.input_state()
+        self.stats().input_state()
     }
+    #[cfg(test)]
     pub fn source_loss_after_ms(&self) -> Option<u64> {
-        self.stats.source_loss_after_ms()
+        self.stats().source_loss_after_ms()
     }
-    pub fn claim_source_loss_event(&self) -> Option<u64> {
-        self.stats.claim_source_loss_event()
-    }
-    pub fn recording_window_elapsed_secs(&self) -> Option<f64> {
-        self.stats.recording_window_elapsed_secs()
-    }
-    pub fn finish_recording_window(&self) {
-        self.stats.finish_recording_window();
+    #[cfg(test)]
+    pub fn claim_source_loss_event(&self) -> Option<SourceLoss> {
+        self.handle
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .losses
+            .pop_front()
     }
     pub fn request_stop(&self) {
-        self.stop.store(true, Ordering::Release);
-        self.stats.mark_stopped();
-        self.stats.finish_recording_window();
+        self.handle.stop.store(true, Ordering::Release);
+        let stats = self.stats();
+        stats.mark_stopped();
+        stats.finish_recording_window();
+        self.totals().finish_recording_window();
     }
     pub fn update_processing_settings(&self, settings: AudioProcessingSettings) {
         self.processing_settings.update(settings);
@@ -290,7 +841,103 @@ impl SessionAudio {
     pub fn caption_contract_test_injector(
         &self,
     ) -> Option<crate::audio::CaptionContractTestAudioInjector> {
-        self.caption_contract_test_injector.clone()
+        self.handle
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .caption_injector
+            .clone()
+    }
+}
+
+impl AudioSwitchHandle {
+    pub async fn replace(
+        &self,
+        request: crate::live_source_switch::SourceSwitchParams,
+        coordinator: Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
+        cancelled: Arc<AtomicBool>,
+    ) -> anyhow::Result<AudioCommitReceipt> {
+        let _cancel_on_drop = OpenCancellation(Some(cancelled.clone()));
+        if self.stop.load(Ordering::Acquire) {
+            anyhow::bail!("Session stopping");
+        }
+        if self
+            .shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .losses
+            .len()
+            >= 32
+        {
+            anyhow::bail!(
+                "Microphone loss events are awaiting delivery; retry after status refresh."
+            );
+        }
+        let candidate = match request.device_id.as_deref() {
+            None => None,
+            Some(id) => {
+                let device_id =
+                    crate::audio::parse_coreaudio_microphone_id(id).ok_or_else(|| {
+                        anyhow::anyhow!("This microphone adapter cannot prepare that device ID.")
+                    })?;
+                if id != format!("microphone:coreaudio:{device_id}") {
+                    anyhow::bail!("The microphone ID is not canonical.");
+                }
+                Some(
+                    prepare_native_with_readiness(
+                        device_id,
+                        cancelled.clone(),
+                        self.producer_count.clone(),
+                        true,
+                    )
+                    .await?,
+                )
+            }
+        };
+        if self.stop.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire) {
+            anyhow::bail!("Source change cancelled");
+        }
+        let (acknowledgement, receipt) = tokio::sync::oneshot::channel();
+        self.commands
+            .try_send(AudioSwitchCommand {
+                request: request.clone(),
+                coordinator,
+                cancelled,
+                candidate,
+                admitted_at: Instant::now(),
+                acknowledgement,
+            })
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "The session audio writer is unavailable or already changing sources."
+                )
+            })?;
+        let result = tokio::time::timeout(Duration::from_secs(1), receipt).await;
+        // The bus owns the terminal receipt. Response loss after cutover never
+        // turns an audible committed selection back into a failed old source.
+        if let Some(receipt) = self.status().last_commit
+            && receipt.session_id == request.session_id
+            && receipt.request_id == request.request_id
+        {
+            return Ok(receipt);
+        }
+        result
+            .map_err(|_| anyhow::anyhow!("Microphone cutover acknowledgement timed out."))?
+            .map_err(|_| anyhow::anyhow!("Session audio stopped before acknowledging cutover."))?
+    }
+    pub fn status(&self) -> AudioBusStatus {
+        self.shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .status
+            .clone()
+    }
+    pub fn input_state(&self) -> NativeAudioInputState {
+        self.shared
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .stats
+            .input_state()
     }
 }
 
@@ -311,35 +958,63 @@ impl Drop for SessionAudio {
 }
 
 pub fn attach(
-    mut source: Option<NativeAudioSource>,
+    source: Option<NativeAudioSource>,
     fifo_path: PathBuf,
     video_epoch: Option<Arc<OnceLock<Instant>>>,
     settings: AudioProcessingSettings,
     source_stall_timeout: Duration,
 ) -> SessionAudio {
-    let selected_input = source.is_some();
-    let device_id = source.as_ref().map_or(0, |source| source.device_id);
-    let device_name = source.as_ref().map_or_else(
-        || "No microphone".into(),
-        |source| source.device_name.clone(),
-    );
-    #[cfg(debug_assertions)]
-    let caption_contract_test_injector = source
-        .as_ref()
-        .and_then(|source| source.caption_contract_test_injector.clone());
-    let receiver = source.as_mut().and_then(|source| source.receiver.take());
-    let producer_stats = source.as_ref().map(NativeAudioSource::stats_handle);
-    let status = Arc::new(std::sync::Mutex::new(AudioBusStatus {
-        selected_input,
-        ..Default::default()
-    }));
-    let writer_status = status.clone();
+    attach_prepared(
+        source.map(InitialAudioSource::warm),
+        fifo_path,
+        video_epoch,
+        settings,
+        source_stall_timeout,
+    )
+}
+
+pub fn attach_prepared(
+    source: Option<InitialAudioSource>,
+    fifo_path: PathBuf,
+    video_epoch: Option<Arc<OnceLock<Instant>>>,
+    settings: AudioProcessingSettings,
+    source_stall_timeout: Duration,
+) -> SessionAudio {
     let stats = Arc::new(AudioCaptureStats::default());
+    let shared = Arc::new(std::sync::Mutex::new(AudioShared {
+        status: AudioBusStatus {
+            selected_input: source.is_some(),
+            device_id: source.as_ref().map(InitialAudioSource::device_id),
+            device_name: source
+                .as_ref()
+                .map_or_else(|| "No microphone".into(), |source| source.device_name()),
+            ..Default::default()
+        },
+        stats: stats.clone(),
+        totals: Arc::new(AudioCaptureStats::default()),
+        ever_selected: source.is_some(),
+        last_selected_name: source
+            .as_ref()
+            .map_or_else(|| "No microphone".into(), |source| source.device_name()),
+        losses: VecDeque::new(),
+        #[cfg(test)]
+        after_ramp: None,
+        #[cfg(debug_assertions)]
+        caption_injector: source.as_ref().and_then(|source| source.caption_injector()),
+    }));
     let stop = Arc::new(AtomicBool::new(false));
     let processing_settings = AudioProcessingSettingsHandle::new(settings);
     let (finished_tx, finished) = mpsc::sync_channel(1);
-    let writer_stats = stats.clone();
-    let writer_stop = stop.clone();
+    let (commands, command_rx) = mpsc::sync_channel(1);
+    let producer_count = source
+        .as_ref()
+        .map_or_else(|| Arc::new(AtomicU64::new(0)), InitialAudioSource::count);
+    let handle = AudioSwitchHandle {
+        commands,
+        shared: shared.clone(),
+        producer_count: producer_count.clone(),
+        stop: stop.clone(),
+    };
     let writer_settings = processing_settings.clone();
     let path = fifo_path.clone();
     OWNED_WRITERS.fetch_add(1, Ordering::AcqRel);
@@ -351,45 +1026,52 @@ pub fn attach(
             }
         }
         let _owner = Owner;
-        let result = run_bus(
-            receiver,
-            &path,
-            video_epoch,
-            producer_stats,
-            BusContext {
-                settings: &writer_settings,
-                stats: &writer_stats,
-                stop: &writer_stop,
-                source_stall_timeout,
-                status: &writer_status,
-            },
-        );
+        // Even a failed owner spawn is cleaned up on this bounded writer owner,
+        // never on the dispatcher/recording mutex thread.
+        let result = source
+            .map(|source| source.into_owned(producer_count.clone()))
+            .transpose()
+            .map_err(|error| io::Error::other(error.to_string()))
+            .and_then(|producer| {
+                run_bus(
+                    producer,
+                    &path,
+                    video_epoch,
+                    command_rx,
+                    BusContext {
+                        settings: &writer_settings,
+                        stop: &stop,
+                        source_stall_timeout,
+                        shared: &shared,
+                    },
+                )
+            });
         if let Err(error) = result {
-            if writer_stop.load(Ordering::Acquire) {
-                writer_stats.mark_stopped();
+            let stats = shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .stats
+                .clone();
+            if stop.load(Ordering::Acquire) {
+                stats.mark_stopped();
             } else {
-                writer_stats.mark_downstream_closed();
+                stats.mark_downstream_closed();
             }
             tracing::warn!("Session audio transport ended: {error}");
         }
-        // The output file is already closed and publication fenced. If a
-        // native driver hangs here it retains only its own retired producer.
-        drop(source);
+        if !wait_for_producer_cleanup(&producer_count, Instant::now() + WRITE_DEADLINE) {
+            tracing::warn!(
+                "Microphone owner remains quarantined after 5s; next session admission is fenced until actual close."
+            );
+        }
         let _ = finished_tx.send(());
     });
     SessionAudio {
-        device_id,
-        device_name,
         fifo_path,
-        stats,
-        selected_input,
-        status,
+        handle,
         processing_settings,
-        stop,
         writer: Some(writer),
         finished,
-        #[cfg(debug_assertions)]
-        caption_contract_test_injector,
     }
 }
 
@@ -510,28 +1192,228 @@ fn resample_frame(mut frame: AudioFrame, frames: usize) -> AudioFrame {
     frame
 }
 
+struct OutputObservation {
+    request: crate::live_source_switch::SourceSwitchParams,
+    coordinator: Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
+    acknowledgement: Option<tokio::sync::oneshot::Sender<anyhow::Result<AudioCommitReceipt>>>,
+}
+
+struct PendingHandoff {
+    command: AudioSwitchCommand,
+    generation: u64,
+    cutover: u64,
+    deadline: Instant,
+    clock: Option<SourceClock>,
+    pcm: AudioTimeline,
+    lost: bool,
+    old_ramped_down: bool,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum HandoffAction {
+    Continue,
+    RampOld,
+    Commit,
+    Cancel,
+}
+
+fn next_cutover_sample(cursor: u64, elapsed: Duration) -> u64 {
+    let wall = (elapsed.as_nanos() * 48_000).div_ceil(1_000_000_000) as u64;
+    wall.div_ceil(CHUNK_FRAMES as u64)
+        .saturating_mul(CHUNK_FRAMES as u64)
+        .max(cursor.saturating_add(CHUNK_FRAMES as u64))
+}
+
+impl AudioTimeline {
+    fn covers(&self, start: u64, frames: u64) -> bool {
+        let end = start.saturating_add(frames);
+        let mut covered = start;
+        for packet in &self.packets {
+            if packet.start > covered {
+                return false;
+            }
+            covered = covered.max(packet.end());
+            if covered >= end {
+                return true;
+            }
+        }
+        false
+    }
+}
+
+impl PendingHandoff {
+    fn new(
+        command: AudioSwitchCommand,
+        generation: u64,
+        cursor: u64,
+        epoch: Instant,
+        now: Instant,
+    ) -> Self {
+        let cutover = next_cutover_sample(cursor, now.saturating_duration_since(epoch));
+        let mut pcm = AudioTimeline::new();
+        pcm.cursor = cutover;
+        pcm.select_generation(generation);
+        let deadline = command.admitted_at + Duration::from_secs(1);
+        Self {
+            command,
+            generation,
+            cutover,
+            deadline,
+            clock: None,
+            pcm,
+            lost: false,
+            old_ramped_down: false,
+        }
+    }
+
+    fn poll(&mut self, epoch: Instant, now: Instant) {
+        let Some(receiver) = self
+            .command
+            .candidate
+            .as_ref()
+            .and_then(|candidate| candidate.receiver.as_ref())
+        else {
+            return;
+        };
+        loop {
+            match receiver.try_recv() {
+                Ok(frame) => {
+                    if !valid_fresh_frame(&frame, now) {
+                        self.pcm.counters.discarded_frames += frame.frame_count() as u64;
+                        continue;
+                    }
+                    let clock = self
+                        .clock
+                        .get_or_insert_with(|| SourceClock::new(&frame, epoch));
+                    let Some((start, frames)) = clock.interval(&frame) else {
+                        self.pcm.counters.discarded_frames += frame.frame_count() as u64;
+                        continue;
+                    };
+                    // The timeline floor removes every sample before cutover,
+                    // including straddling blocks and fractional clock mapping.
+                    self.pcm
+                        .push(self.generation, start, resample_frame(frame, frames));
+                }
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.lost = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    fn ready(&self) -> bool {
+        self.command.candidate.is_none()
+            || (!self.lost && self.pcm.covers(self.cutover, CHUNK_FRAMES as u64))
+    }
+
+    fn action(&mut self, cursor: u64, now: Instant, stopping: bool) -> HandoffAction {
+        if stopping
+            || self.command.cancelled.load(Ordering::Acquire)
+            || self.lost
+            || now >= self.deadline
+        {
+            return HandoffAction::Cancel;
+        }
+        if cursor == self.cutover {
+            return if self.old_ramped_down && self.ready() {
+                HandoffAction::Commit
+            } else {
+                HandoffAction::Cancel
+            };
+        }
+        if cursor + CHUNK_FRAMES as u64 == self.cutover {
+            if self.ready() {
+                return HandoffAction::RampOld;
+            }
+            // A target arriving after this decision cannot skip the old ramp.
+            // Move both the boundary and candidate floor by one whole chunk.
+            self.cutover += CHUNK_FRAMES as u64;
+            self.pcm.cursor = self.cutover;
+            self.pcm.discard_before(self.cutover);
+        }
+        HandoffAction::Continue
+    }
+}
+
+fn ramp_through_zero(samples: &mut [f32], ramp_in: bool) {
+    let frames = samples.len() / 2;
+    let length = 240.min(frames);
+    for index in 0..length {
+        let (frame, gain) = if ramp_in {
+            (index, index as f32 / length as f32)
+        } else {
+            (
+                frames - length + index,
+                (length - index - 1) as f32 / length as f32,
+            )
+        };
+        samples[frame * 2] *= gain;
+        samples[frame * 2 + 1] *= gain;
+    }
+}
+
 struct BusContext<'a> {
     settings: &'a AudioProcessingSettingsHandle,
-    stats: &'a AudioCaptureStats,
     stop: &'a AtomicBool,
     source_stall_timeout: Duration,
-    status: &'a std::sync::Mutex<AudioBusStatus>,
+    shared: &'a std::sync::Mutex<AudioShared>,
 }
 
 fn run_bus(
-    mut receiver: Option<mpsc::Receiver<AudioFrame>>,
+    mut producer: Option<ManagedProducer>,
     path: &std::path::Path,
     video_epoch: Option<Arc<OnceLock<Instant>>>,
-    producer_stats: Option<Arc<AudioCaptureStats>>,
+    commands: mpsc::Receiver<AudioSwitchCommand>,
     context: BusContext<'_>,
+) -> io::Result<()> {
+    let mut retired = Vec::new();
+    let result = run_bus_owned(
+        &mut producer,
+        path,
+        video_epoch,
+        commands,
+        context,
+        &mut retired,
+    );
+    if let Some(producer) = producer {
+        retired.push(producer.retire());
+    }
+    for completion in retired {
+        if matches!(
+            completion.closed.try_recv(),
+            Ok(ProducerCompletion::Panicked)
+        ) {
+            tracing::warn!("Microphone owner terminated unexpectedly during close.");
+        }
+    }
+    result
+}
+
+fn run_bus_owned(
+    producer: &mut Option<ManagedProducer>,
+    path: &std::path::Path,
+    video_epoch: Option<Arc<OnceLock<Instant>>>,
+    commands: mpsc::Receiver<AudioSwitchCommand>,
+    context: BusContext<'_>,
+    retired: &mut Vec<CompletionTicket>,
 ) -> io::Result<()> {
     let BusContext {
         settings,
-        stats,
         stop,
         source_stall_timeout,
-        status,
+        shared,
     } = context;
+    let mut receiver = producer
+        .as_mut()
+        .and_then(|producer| producer.receiver.take());
+    let mut producer_stats = producer.as_ref().map(|producer| producer.stats.clone());
+    let mut stats = shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .stats
+        .clone();
     let mut file = crate::fifo::open_writer(
         path,
         stop,
@@ -561,12 +1443,21 @@ fn run_bus(
         },
         None => Instant::now(),
     };
+    let totals = shared
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .totals
+        .clone();
+    totals.reset_recording_window();
     stats.reset_recording_window();
     if receiver.is_none() {
         stats.mark_silent();
     }
     let mut timeline = AudioTimeline::new();
     timeline.select_generation(0);
+    let mut generation = 0;
+    let mut pending: Option<PendingHandoff> = None;
+    let mut observe: Option<OutputObservation> = None;
     let mut last_source_frame = Instant::now();
     let mut clock = None;
     let mut accounted = AudioBusCounters::default();
@@ -574,6 +1465,20 @@ fn run_bus(
         .as_ref()
         .map_or(0, |stats| stats.dropped_frames());
     while !stop.load(Ordering::Acquire) {
+        if pending.is_none()
+            && let Ok(command) = commands.try_recv()
+        {
+            pending = Some(PendingHandoff::new(
+                command,
+                generation + 1,
+                timeline.cursor(),
+                epoch,
+                Instant::now(),
+            ));
+        }
+        if let Some(pending) = pending.as_mut() {
+            pending.poll(epoch, Instant::now());
+        }
         if let Some(stats) = producer_stats.as_ref() {
             let drops = stats.dropped_frames();
             timeline.counters.dropped_frames += drops.saturating_sub(previous_producer_drops);
@@ -599,7 +1504,7 @@ fn run_bus(
                             timeline.counters.discarded_frames += frame.frame_count() as u64;
                             continue;
                         };
-                        if timeline.push(0, start, resample_frame(frame, frames)) {
+                        if timeline.push(generation, start, resample_frame(frame, frames)) {
                             last_source_frame = now;
                             stats.mark_live();
                         }
@@ -615,7 +1520,22 @@ fn run_bus(
         }
         if source_lost {
             receiver = None;
+            if let Some(old) = producer.take() {
+                retired.push(old.retire());
+            }
+            producer_stats = None;
             stats.mark_source_lost_at(Instant::now());
+            if let Some(after_ms) = stats.claim_source_loss_event() {
+                let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
+                let device_name = shared.status.device_name.clone();
+                // Admission backpressure bounds losses without dropping an
+                // unreported generation's event during rapid replacement.
+                shared.losses.push_back(SourceLoss {
+                    generation,
+                    device_name,
+                    after_ms,
+                });
+            }
         }
         let now = Instant::now();
         let wall_cursor = now
@@ -635,10 +1555,127 @@ fn run_bus(
             thread::sleep(remaining.min(Duration::from_millis(2)));
             continue;
         }
+        let mut ramp_old = false;
+        let mut ramp_in = false;
+        if let Some(handoff) = pending.as_mut() {
+            match handoff.action(
+                timeline.cursor(),
+                Instant::now(),
+                stop.load(Ordering::Acquire),
+            ) {
+                HandoffAction::Continue => {}
+                HandoffAction::RampOld => {
+                    handoff.old_ramped_down = true;
+                    ramp_old = true;
+                }
+                HandoffAction::Cancel => {
+                    let handoff = pending.take().expect("pending handoff");
+                    ramp_in = handoff.old_ramped_down;
+                    let _ = handoff.command.acknowledgement.send(Err(anyhow::anyhow!("The prepared microphone became unavailable or the source change was cancelled before cutover.")));
+                }
+                HandoffAction::Commit => {
+                    let mut handoff = pending.take().expect("pending handoff");
+                    let mut coordinator = handoff
+                        .command
+                        .coordinator
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    if let Err(error) = coordinator.validate_commit(&handoff.command.request) {
+                        ramp_in = handoff.old_ramped_down;
+                        let _ = handoff
+                            .command
+                            .acknowledgement
+                            .send(Err(anyhow::anyhow!(error.message())));
+                    } else {
+                        let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
+                        // Selection, route and receipt share this linearization
+                        // point with Stop. No write or native close under locks.
+                        generation = handoff.generation;
+                        timeline.select_generation(generation);
+                        timeline.counters.discarded_frames += handoff.pcm.counters.discarded_frames;
+                        timeline.counters.dropped_frames += handoff.pcm.counters.dropped_frames;
+                        timeline.packets = std::mem::take(&mut handoff.pcm.packets);
+                        if let Some(old) = producer.take() {
+                            retired.push(old.retire());
+                        }
+                        *producer = handoff.command.candidate.take();
+                        receiver = producer
+                            .as_mut()
+                            .and_then(|producer| producer.receiver.take());
+                        producer_stats = producer.as_ref().map(|producer| producer.stats.clone());
+                        previous_producer_drops = producer_stats
+                            .as_ref()
+                            .map_or(0, |stats| stats.dropped_frames());
+                        clock = handoff.clock.take();
+                        last_source_frame = Instant::now();
+                        stats = Arc::new(AudioCaptureStats::default());
+                        stats.reset_recording_window();
+                        if producer.is_none() {
+                            stats.mark_silent();
+                        } else {
+                            stats.mark_live();
+                        }
+                        shared.stats = stats.clone();
+                        if let Some(producer) = producer.as_ref() {
+                            shared.ever_selected = true;
+                            shared.last_selected_name = producer.device_name.clone();
+                        }
+                        shared.status.generation = generation;
+                        shared.status.selected_input = producer.is_some();
+                        shared.status.device_id =
+                            producer.as_ref().map(|producer| producer.device_id.clone());
+                        shared.status.device_name = producer.as_ref().map_or_else(
+                            || "No microphone".into(),
+                            |producer| producer.device_name.clone(),
+                        );
+                        #[cfg(debug_assertions)]
+                        {
+                            shared.caption_injector = producer
+                                .as_ref()
+                                .and_then(|producer| producer.caption_injector.clone());
+                        }
+                        shared.status.last_commit = Some(AudioCommitReceipt {
+                            session_id: handoff.command.request.session_id.clone(),
+                            request_id: handoff.command.request.request_id.clone(),
+                            generation,
+                            cutover_sample: timeline.cursor(),
+                            device_id: shared.status.device_id.clone(),
+                            output_observed: false,
+                        });
+                        coordinator
+                            .commit_microphone(&handoff.command.request)
+                            .expect("validated under same mutex");
+                        observe = Some(OutputObservation {
+                            request: handoff.command.request.clone(),
+                            coordinator: handoff.command.coordinator.clone(),
+                            acknowledgement: Some(handoff.command.acknowledgement),
+                        });
+                        ramp_in = true;
+                    }
+                }
+            }
+        }
         let start = timeline.cursor();
-        let raw = timeline.render_with_provenance();
+        let mut raw = timeline.render_with_provenance();
+        if ramp_old {
+            ramp_through_zero(&mut raw.samples, false);
+        }
+        if ramp_in {
+            ramp_through_zero(&mut raw.samples, true);
+        }
         let written = write_chunk(&mut file, &raw.samples, settings, stop)?;
         timeline.account_stale_chunk(&raw, written.stale_from);
+        #[cfg(test)]
+        if ramp_old {
+            let observer = shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .after_ramp
+                .clone();
+            if let Some(observer) = observer {
+                observer(start);
+            }
+        }
         let frame = AudioFrame {
             timestamp_micros: start * 1_000_000 / u64::from(NATIVE_AUDIO_SAMPLE_RATE),
             captured_at: epoch
@@ -653,18 +1690,49 @@ fn run_bus(
                 .iter()
                 .fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
         );
+        totals.record_live_peak(
+            frame
+                .samples
+                .iter()
+                .fold(0.0_f32, |peak, sample| peak.max(sample.abs())),
+        );
         crate::captions::offer_caption_frame(&frame);
         let after = timeline.counters();
         stats.record_captured_frames(after.captured_frames - accounted.captured_frames);
         stats.record_generated_frames(after.generated_frames - accounted.generated_frames);
         stats.record_dropped_frames(after.dropped_frames - accounted.dropped_frames);
+        totals.record_captured_frames(after.captured_frames - accounted.captured_frames);
+        totals.record_generated_frames(after.generated_frames - accounted.generated_frames);
+        totals.record_dropped_frames(after.dropped_frames - accounted.dropped_frames);
         accounted = after;
-        let mut status = status
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        status.sample_cursor = timeline.cursor();
-        status.counters = after;
+        {
+            let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
+            shared.status.sample_cursor = timeline.cursor();
+            shared.status.counters = after;
+        }
+        if let Some(OutputObservation {
+            request,
+            coordinator,
+            acknowledgement,
+        }) = observe.as_mut()
+        {
+            let mut coordinator = coordinator.lock().unwrap_or_else(|p| p.into_inner());
+            let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(receipt) = shared.status.last_commit.as_mut() {
+                receipt.output_observed |= written.stale_from.is_none()
+                    && (request.device_id.is_none()
+                        || raw.captured.iter().all(|captured| *captured));
+                if receipt.output_observed {
+                    coordinator.observe_output(&request.session_id, &request.request_id);
+                }
+                if let Some(acknowledgement) = acknowledgement.take() {
+                    let _ = acknowledgement.send(Ok(receipt.clone()));
+                }
+            }
+        }
+        retired.retain(CompletionTicket::running);
     }
+
     Ok(())
 }
 
@@ -1067,5 +2135,638 @@ mod tests {
         malformed.sample_rate = 44100;
         assert!(!timeline.push(0, 480, malformed));
         assert!(!timeline.push(0, 480, frame(f32::NAN, 480)));
+    }
+    fn source_request(
+        id: &str,
+        device_id: Option<&str>,
+    ) -> crate::live_source_switch::SourceSwitchParams {
+        crate::live_source_switch::SourceSwitchParams {
+            session_id: "test-session".into(),
+            request_id: id.into(),
+            expected_source_revision: 0,
+            kind: crate::live_source_switch::SourceKind::Microphone,
+            device_id: device_id.map(str::to_string),
+            protected_overlay_window_ids: vec![],
+        }
+    }
+
+    fn source_coordinator(
+        request: &crate::live_source_switch::SourceSwitchParams,
+    ) -> Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>> {
+        let mut coordinator = crate::live_source_switch::SourceSwitchCoordinator::default();
+        coordinator.start(
+            request.session_id.clone(),
+            crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+        );
+        coordinator.enable_microphone();
+        coordinator.admit(request).unwrap();
+        Arc::new(std::sync::Mutex::new(coordinator))
+    }
+
+    fn handoff(
+        epoch: Instant,
+        cursor: u64,
+        now: Instant,
+    ) -> (PendingHandoff, mpsc::Sender<AudioFrame>) {
+        let (sender, receiver) = mpsc::channel();
+        let (completion_guard, completion) = completion_channel();
+        drop(completion_guard);
+        let candidate = ManagedProducer {
+            device_id: "microphone:coreaudio:7".into(),
+            device_name: "Target".into(),
+            receiver: Some(receiver),
+            stats: Arc::new(AudioCaptureStats::default()),
+            stop: None,
+            completion: Some(completion),
+            #[cfg(debug_assertions)]
+            caption_injector: None,
+        };
+        let request = source_request("switch", Some("microphone:coreaudio:7"));
+        let coordinator = source_coordinator(&request);
+        let cancelled = coordinator.lock().unwrap().cancellation(&request).unwrap();
+        let (acknowledgement, _) = tokio::sync::oneshot::channel();
+        let command = AudioSwitchCommand {
+            request,
+            coordinator,
+            cancelled,
+            candidate: Some(candidate),
+            admitted_at: now,
+            acknowledgement,
+        };
+        (PendingHandoff::new(command, 1, cursor, epoch, now), sender)
+    }
+
+    #[test]
+    fn handoff_requires_complete_boundary_coverage_and_an_old_source_ramp() {
+        let epoch = Instant::now();
+        let now = epoch + Duration::from_millis(20);
+        let (mut handoff, _sender) = handoff(epoch, 480, now);
+        assert_eq!(handoff.cutover, 960);
+        handoff.pcm.push(1, 960, frame(0.8, 1));
+        assert!(!handoff.ready(), "one sample is not a healthy next chunk");
+        assert_eq!(handoff.action(480, now, false), HandoffAction::Continue);
+        assert_eq!(
+            handoff.cutover, 1440,
+            "late preparation must defer the ramp and boundary together"
+        );
+        handoff.pcm.push(1, 1440, frame(0.8, 480));
+        assert_eq!(handoff.action(960, now, false), HandoffAction::RampOld);
+        assert_eq!(
+            handoff.action(1440, now, false),
+            HandoffAction::Cancel,
+            "no commit without an acknowledged old envelope"
+        );
+        handoff.old_ramped_down = true;
+        assert_eq!(handoff.action(1440, now, false), HandoffAction::Commit);
+        handoff.command.cancelled.store(true, Ordering::Release);
+        assert_eq!(handoff.action(1440, now, false), HandoffAction::Cancel);
+        assert!(
+            handoff.old_ramped_down,
+            "cancellation must restore the old envelope"
+        );
+    }
+
+    #[test]
+    fn handoff_variable_blocks_trim_preparation_and_reject_discontinuous_coverage() {
+        let epoch = Instant::now();
+        let now = epoch + Duration::from_millis(20);
+        let (mut handoff, sender) = handoff(epoch, 480, now);
+        let mut first = frame(-0.8, 300);
+        first.timestamp_micros = 15_000;
+        first.captured_at = epoch + Duration::from_nanos(1_020 * 1_000_000_000 / 48_000);
+        sender.send(first).unwrap();
+        let mut second = frame(0.7, 500);
+        second.timestamp_micros = 21_250;
+        second.captured_at = epoch + Duration::from_nanos(1_520 * 1_000_000_000 / 48_000);
+        sender.send(second).unwrap();
+        handoff.poll(epoch, epoch + Duration::from_millis(35));
+        assert!(handoff.ready());
+        assert_eq!(handoff.pcm.counters.discarded_frames, 240);
+        assert!(handoff.pcm.packets.iter().all(|packet| packet.start >= 960));
+        let chunk = handoff.pcm.render_chunk();
+        assert_eq!(&chunk[..120], &vec![-0.8; 120]);
+        assert_eq!(&chunk[120..], &vec![0.7; 840]);
+        let mut timeline = AudioTimeline::new();
+        timeline.push(0, 0, frame(0.1, 200));
+        timeline.push(0, 201, frame(0.2, 279));
+        assert!(
+            !timeline.covers(0, 480),
+            "a missing sample must not confirm full coverage"
+        );
+        assert_eq!(
+            next_cutover_sample(0, Duration::from_nanos(10_000_001)),
+            960
+        );
+        assert_eq!(
+            next_cutover_sample(0, Duration::from_nanos(10_020_834)),
+            960
+        );
+    }
+
+    #[test]
+    fn eof_after_candidate_readiness_and_stop_both_preserve_old_route() {
+        let epoch = Instant::now();
+        let (mut handoff, sender) = handoff(epoch, 0, epoch);
+        handoff.pcm.push(1, 480, frame(0.7, 480));
+        drop(sender);
+        handoff.poll(epoch, epoch);
+        assert_eq!(handoff.action(0, epoch, false), HandoffAction::Cancel);
+        assert_eq!(handoff.action(0, epoch, true), HandoffAction::Cancel);
+        assert_eq!(
+            handoff
+                .command
+                .coordinator
+                .lock()
+                .unwrap()
+                .snapshot("test-session")
+                .unwrap()
+                .confirmed
+                .microphone_id,
+            None
+        );
+    }
+
+    struct SignalDrop(mpsc::Sender<()>);
+    impl Drop for SignalDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+    fn fake_source(
+        receiver: mpsc::Receiver<AudioFrame>,
+        closed: mpsc::Sender<()>,
+    ) -> ProducerSource {
+        ProducerSource {
+            device_id: "test:microphone".into(),
+            device_name: "Test microphone".into(),
+            receiver,
+            stats: Arc::new(AudioCaptureStats::default()),
+            _owner: Box::new(SignalDrop(closed)),
+            #[cfg(debug_assertions)]
+            caption_injector: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_open_and_ready_handoffs_close_the_owned_source_before_releasing_capacity() {
+        for boundary in [OwnerPhase::BeforeOpened, OwnerPhase::BeforeReady] {
+            let count = Arc::new(AtomicU64::new(0));
+            let (pcm, receiver) = mpsc::channel();
+            let (closed_tx, closed_rx) = mpsc::channel();
+            let (boundary_tx, boundary_rx) = tokio::sync::oneshot::channel();
+            let boundary_tx = std::sync::Mutex::new(Some(boundary_tx));
+            let (release_tx, release_rx) = mpsc::channel();
+            let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+            let worker_count = count.clone();
+            let task = tokio::spawn(async move {
+                prepare_producer_with(
+                    move || {
+                        pcm.send(frame(0.0, 480)).unwrap();
+                        Ok(fake_source(receiver, closed_tx))
+                    },
+                    Arc::new(AtomicBool::new(false)),
+                    worker_count,
+                    move |task| {
+                        thread::Builder::new().spawn(move || {
+                            task();
+                            let _ = done_tx.send(());
+                        })
+                    },
+                    move |phase| {
+                        if phase == boundary {
+                            let _ = boundary_tx.lock().unwrap().take().unwrap().send(());
+                            release_rx.recv().unwrap();
+                        }
+                    },
+                    true,
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(2), boundary_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(count.load(Ordering::Acquire), 1);
+            task.abort();
+            assert!(matches!(task.await,Err(error) if error.is_cancelled()));
+            release_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(2), done_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            closed_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+            assert_eq!(count.load(Ordering::Acquire), 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_owner_spawn_returns_capacity_and_never_opens_a_device() {
+        let count = Arc::new(AtomicU64::new(0));
+        let opened = Arc::new(AtomicBool::new(false));
+        let worker_opened = opened.clone();
+        let result = prepare_producer_with(
+            move || {
+                worker_opened.store(true, Ordering::Release);
+                unreachable!()
+            },
+            Arc::new(AtomicBool::new(false)),
+            count.clone(),
+            |_task| Err(io::Error::other("injected spawn failure")),
+            |_| {},
+            true,
+        )
+        .await;
+        assert!(result.is_err());
+        assert!(!opened.load(Ordering::Acquire));
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn owner_capacity_stays_bounded_until_actual_driver_close() {
+        let count = Arc::new(AtomicU64::new(0));
+        let first = ProducerPermit::acquire(count.clone()).unwrap();
+        let second = ProducerPermit::acquire(count.clone()).unwrap();
+        assert!(ProducerPermit::acquire(count.clone()).is_err());
+        drop(first);
+        let replacement = ProducerPermit::acquire(count.clone()).unwrap();
+        assert_eq!(count.load(Ordering::Acquire), 2);
+        drop(second);
+        drop(replacement);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+    struct PcmTestOwner {
+        stop: Arc<AtomicBool>,
+        thread: Option<thread::JoinHandle<()>>,
+    }
+    impl Drop for PcmTestOwner {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
+    async fn paced_test_producer(
+        id: &str,
+        value: f32,
+        count: Arc<AtomicU64>,
+        controls: Option<(AudioProcessingSettingsHandle, AudioProcessingSettings)>,
+    ) -> ManagedProducer {
+        let id = id.to_string();
+        prepare_producer_with(
+            move || {
+                let (sender, receiver) = mpsc::channel();
+                let stop = Arc::new(AtomicBool::new(false));
+                let producer_stop = stop.clone();
+                let epoch = Instant::now();
+                let worker = thread::spawn(move || {
+                    for index in 0.. {
+                        let end = epoch + Duration::from_millis((index + 1) * 10);
+                        // Media pacing only; readiness and cleanup use channels.
+                        if let Some(remaining) = end.checked_duration_since(Instant::now()) {
+                            thread::sleep(remaining);
+                        }
+                        if producer_stop.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let mut packet = frame(value, 480);
+                        packet.timestamp_micros = index * 10_000;
+                        packet.captured_at = end;
+                        if sender.send(packet).is_err() {
+                            break;
+                        }
+                    }
+                });
+                Ok(ProducerSource {
+                    device_id: id.clone(),
+                    device_name: id,
+                    receiver,
+                    stats: Arc::new(AudioCaptureStats::default()),
+                    _owner: Box::new(PcmTestOwner {
+                        stop,
+                        thread: Some(worker),
+                    }),
+                    #[cfg(debug_assertions)]
+                    caption_injector: None,
+                })
+            },
+            Arc::new(AtomicBool::new(false)),
+            count,
+            spawn_owner,
+            move |phase| {
+                if phase == OwnerPhase::BeforeReady
+                    && let Some((handle, settings)) = controls.as_ref()
+                {
+                    handle.update(*settings);
+                }
+            },
+            true,
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn send_test_switch(
+        session: &SessionAudio,
+        coordinator: &Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
+        id: &str,
+        target: Option<&str>,
+        value: f32,
+        cancel_after_ramp: bool,
+        controls: Option<AudioProcessingSettings>,
+    ) -> (anyhow::Result<AudioCommitReceipt>, Option<u64>) {
+        let mut request = source_request(id, target);
+        request.expected_source_revision = coordinator
+            .lock()
+            .unwrap()
+            .snapshot("test-session")
+            .unwrap()
+            .source_revision;
+        let cancelled = {
+            let mut coordinator = coordinator.lock().unwrap();
+            coordinator.admit(&request).unwrap();
+            coordinator.cancellation(&request).unwrap()
+        };
+        let candidate = match target {
+            Some(id) => Some(
+                paced_test_producer(
+                    id,
+                    value,
+                    session.handle.producer_count.clone(),
+                    controls.map(|settings| (session.processing_settings.clone(), settings)),
+                )
+                .await,
+            ),
+            None => None,
+        };
+        let (ramp_tx, ramp_rx) = mpsc::channel();
+        if cancel_after_ramp {
+            let cancellation = cancelled.clone();
+            session.handle.shared.lock().unwrap().after_ramp = Some(Arc::new(move |start| {
+                cancellation.store(true, Ordering::Release);
+                ramp_tx.send(start + 480).unwrap();
+            }));
+        }
+        let (acknowledgement, receipt) = tokio::sync::oneshot::channel();
+        session
+            .handle
+            .commands
+            .try_send(AudioSwitchCommand {
+                request: request.clone(),
+                coordinator: coordinator.clone(),
+                cancelled,
+                candidate,
+                admitted_at: Instant::now(),
+                acknowledgement,
+            })
+            .unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(2), receipt)
+            .await
+            .unwrap()
+            .unwrap();
+        let cancelled_at = if cancel_after_ramp {
+            session.handle.shared.lock().unwrap().after_ramp = None;
+            Some(ramp_rx.recv_timeout(Duration::from_secs(1)).unwrap())
+        } else {
+            None
+        };
+        if let Err(error) = &result {
+            coordinator
+                .lock()
+                .unwrap()
+                .finish(
+                    &request,
+                    crate::live_source_switch::SwitchStage::Failed,
+                    Some(error.to_string()),
+                )
+                .unwrap();
+        }
+        (result, cancelled_at)
+    }
+
+    #[tokio::test]
+    async fn real_bus_handoffs_preserve_one_pcm_stream_ramps_mute_none_and_cancelled_old_route() {
+        use std::io::Read;
+        let path =
+            crate::audio::native_audio_fifo_path(&format!("switch-bus-{}", uuid::Uuid::new_v4()));
+        crate::audio::create_native_audio_fifo(&path).unwrap();
+        let reader_path = path.clone();
+        let (progress_tx, progress_rx) = tokio::sync::mpsc::unbounded_channel();
+        let reader = thread::spawn(move || {
+            let mut file = std::fs::File::open(reader_path).unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0u8; 3840];
+                match file.read_exact(&mut chunk) {
+                    Ok(()) => {
+                        bytes.extend_from_slice(&chunk);
+                        let _ = progress_tx.send(bytes.len() / 8);
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
+                    Err(error) => panic!("{error}"),
+                }
+            }
+            bytes
+        });
+        let session = attach(
+            None,
+            path,
+            None,
+            AudioProcessingSettings::default(),
+            Duration::from_secs(1),
+        );
+        let mut progress_rx = progress_rx;
+        tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        let mut initial = crate::live_source_switch::SourceSwitchCoordinator::default();
+        initial.start(
+            "test-session".into(),
+            crate::protocol::SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+        );
+        initial.enable_microphone();
+        let coordinator = Arc::new(std::sync::Mutex::new(initial));
+        assert!(!session.caption_start_eligible());
+        let a = send_test_switch(
+            &session,
+            &coordinator,
+            "a",
+            Some("microphone:coreaudio:7"),
+            0.4,
+            false,
+            None,
+        )
+        .await
+        .0
+        .unwrap();
+        assert!(session.caption_start_eligible());
+        let b = send_test_switch(
+            &session,
+            &coordinator,
+            "b",
+            Some("microphone:coreaudio:8"),
+            0.8,
+            false,
+            Some(AudioProcessingSettings {
+                gain_db: -3.0,
+                muted: true,
+            }),
+        )
+        .await
+        .0
+        .unwrap();
+        session.update_processing_settings(AudioProcessingSettings {
+            gain_db: -3.0,
+            muted: false,
+        });
+        loop {
+            let frames = tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if frames >= b.cutover_sample as usize + 1440 {
+                break;
+            }
+        }
+        let none = send_test_switch(&session, &coordinator, "none", None, 0.0, false, None)
+            .await
+            .0
+            .unwrap();
+        assert!(!session.caption_start_eligible());
+        session.update_processing_settings(AudioProcessingSettings::default());
+        let a2 = send_test_switch(
+            &session,
+            &coordinator,
+            "a2",
+            Some("microphone:coreaudio:7"),
+            0.4,
+            false,
+            None,
+        )
+        .await
+        .0
+        .unwrap();
+        let (cancelled, boundary) = send_test_switch(
+            &session,
+            &coordinator,
+            "cancelled-b",
+            Some("microphone:coreaudio:8"),
+            0.8,
+            true,
+            None,
+        )
+        .await;
+        assert!(cancelled.is_err());
+        let boundary = boundary.unwrap();
+        loop {
+            let frames = tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            if frames >= boundary as usize + 480 {
+                break;
+            }
+        }
+        assert_eq!(
+            session.status().device_id.as_deref(),
+            Some("microphone:coreaudio:7")
+        );
+        let final_none =
+            send_test_switch(&session, &coordinator, "final-none", None, 0.0, false, None)
+                .await
+                .0
+                .unwrap();
+        session.request_stop();
+        let observation = session.observation(true);
+        assert!(
+            observation.selected_input,
+            "final totals retain earlier selected microphone evidence"
+        );
+        assert!(observation.captured_frames >= 960);
+        assert!(observation.session_peak >= 0.39);
+        let count = session.handle.producer_count.clone();
+        drop(session);
+        assert_eq!(count.load(Ordering::Acquire), 0);
+        let bytes = reader.join().unwrap();
+        let samples = bytes
+            .chunks_exact(8)
+            .map(|frame| f32::from_le_bytes(frame[..4].try_into().unwrap()))
+            .collect::<Vec<_>>();
+        for receipt in [&a, &b, &none, &a2, &final_none] {
+            assert_eq!(receipt.session_id, "test-session");
+            assert!(receipt.output_observed);
+        }
+        assert!(
+            a.cutover_sample < b.cutover_sample
+                && b.cutover_sample < none.cutover_sample
+                && none.cutover_sample < a2.cutover_sample
+        );
+        assert!(
+            samples[..a.cutover_sample as usize]
+                .iter()
+                .all(|sample| *sample == 0.0),
+            "candidate PCM before commit must not escape"
+        );
+        assert_eq!(samples[a.cutover_sample as usize], 0.0);
+        assert!((samples[a.cutover_sample as usize + 240] - 0.4).abs() < 0.001);
+        assert!(
+            samples[b.cutover_sample as usize..b.cutover_sample as usize + 480]
+                .iter()
+                .all(|sample| *sample == 0.0),
+            "mute changed at the preparation barrier applies to the first committed B chunk"
+        );
+        assert!(
+            (samples[b.cutover_sample as usize + 960] - 0.8 * 10.0_f32.powf(-3.0 / 20.0)).abs()
+                < 0.001,
+            "unmuted B must reach output with exactly one gain application"
+        );
+        assert!(
+            samples[none.cutover_sample as usize..a2.cutover_sample as usize]
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+        assert!((samples[boundary as usize - 241] - 0.4).abs() < 0.001);
+        assert_eq!(samples[boundary as usize - 1], 0.0);
+        assert_eq!(samples[boundary as usize], 0.0);
+        assert!(
+            (samples[boundary as usize + 240] - 0.4).abs() < 0.001,
+            "cancelled handoff must restore old gain envelope"
+        );
+        assert!(
+            samples[final_none.cutover_sample as usize..]
+                .iter()
+                .all(|sample| *sample == 0.0)
+        );
+    }
+    #[test]
+    fn failed_initial_open_cannot_escape_platform_capacity_via_a_silence_bus_pool() {
+        let platform = Arc::new(AtomicU64::new(0));
+        let initial = Arc::new(AtomicU64::new(0));
+        let silent_bus = Arc::new(AtomicU64::new(0));
+        let stuck_initial = ProducerPermit::acquire_in(initial.clone(), platform.clone()).unwrap();
+        let active_b = ProducerPermit::acquire_in(silent_bus.clone(), platform.clone()).unwrap();
+        for _ in 0..50 {
+            assert!(ProducerPermit::acquire_in(silent_bus.clone(), platform.clone()).is_err());
+        }
+        assert_eq!(platform.load(Ordering::Acquire), 2);
+        drop(stuck_initial);
+        let candidate_c = ProducerPermit::acquire_in(silent_bus.clone(), platform.clone()).unwrap();
+        assert_eq!(platform.load(Ordering::Acquire), 2);
+        drop(candidate_c);
+        drop(active_b);
+        assert_eq!(platform.load(Ordering::Acquire), 0);
     }
 }

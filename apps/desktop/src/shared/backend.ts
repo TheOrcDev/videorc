@@ -4493,7 +4493,7 @@ export interface SourceSwitchOperation {
   requestId: string
   kind: SessionSourceKind
   deviceId: string | null
-  stage: 'admitted' | 'preparing' | 'committing' | 'applied' | 'failed' | 'cancelled'
+  stage: 'admitted' | 'preparing' | 'restoring' | 'committing' | 'applied' | 'failed' | 'cancelled'
   reason: string | null
   previousSource: 'preserved' | 'restored' | 'unavailable'
   outputObserved: boolean
@@ -4501,6 +4501,17 @@ export interface SourceSwitchOperation {
 export interface SessionSources {
   audio: {
     sampleCursor: number
+    generation: number
+    deviceId: string | null
+    deviceName: string
+    lastCommit: {
+      sessionId: string
+      requestId: string
+      generation: number
+      cutoverSample: number
+      deviceId: string | null
+      outputObserved: boolean
+    } | null
     selectedInput: boolean
     counters: {
       capturedFrames: number
@@ -4511,6 +4522,7 @@ export interface SessionSources {
   } | null
   sessionId: string
   sourceRevision: number
+  outputProcessId: number | null
   confirmed: SourceSelection
   health: Array<{
     kind: SessionSourceKind

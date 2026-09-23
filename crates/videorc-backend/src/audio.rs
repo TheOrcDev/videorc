@@ -1,10 +1,10 @@
 #[cfg(test)]
-use std::collections::VecDeque;
-#[cfg(test)]
 use std::fs::File;
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -25,9 +25,9 @@ const AUDIO_RING_CAPACITY_PACKETS: usize = 1024;
 const METER_SAMPLE_DURATION: Duration = Duration::from_millis(700);
 pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 1024;
 /// Once a warmed native microphone stops producing callbacks for this long,
-/// end its FIFO as a source loss so FFmpeg can pad silence while video keeps
-/// the session clock. The source is deliberately not hot-reconnected mid-take.
-const NATIVE_AUDIO_SOURCE_STALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// retire its producer as a source loss. The session bus keeps its FIFO open
+/// with paced silence and can accept an explicitly selected replacement.
+pub(crate) const NATIVE_AUDIO_SOURCE_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Reserved CoreAudio id used only by the maintained debug caption smoke.
 /// A release build does not compile the synthetic source or its RPC handle.
@@ -551,12 +551,6 @@ impl NativeAudioSource {
     pub fn stats_handle(&self) -> Arc<AudioCaptureStats> {
         self.stats.clone()
     }
-
-    /// Applies gain/mute to a source that is not attached to a session yet
-    /// (the warm standby microphone, instant-record P5).
-    pub fn update_processing_settings(&self, settings: AudioProcessingSettings) {
-        self.processing_settings.update(settings);
-    }
 }
 
 impl std::fmt::Debug for NativeAudioSource {
@@ -625,108 +619,19 @@ pub fn start_native_audio_source(
     settings: AudioProcessingSettings,
 ) -> Result<NativeAudioSource> {
     #[cfg(debug_assertions)]
-    if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID {
+    if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID
+        || device_id == CAPTION_CONTRACT_TEST_DEVICE_ID - 1
+    {
         if !caption_contract_test_audio_enabled() {
-            bail!("The caption contract test microphone requires VIDEORC_CAPTION_CONTRACT_TEST=1.");
+            bail!("The synthetic microphone requires VIDEORC_CAPTION_CONTRACT_TEST=1.");
         }
-        return start_caption_contract_test_audio_source(settings);
+        let switch_fixture = std::env::var("VIDEORC_LIVE_SOURCE_SWITCH_TEST").as_deref() == Ok("1");
+        if device_id != CAPTION_CONTRACT_TEST_DEVICE_ID && !switch_fixture {
+            bail!("The second synthetic microphone requires VIDEORC_LIVE_SOURCE_SWITCH_TEST=1.");
+        }
+        return start_contract_test_audio_source(settings, device_id, switch_fixture);
     }
     start_platform_audio_source(device_id, settings)
-}
-
-/// How long the FIFO writer waits for the encoder bridge to deliver its first video
-/// frame before giving up on epoch alignment (mirrors the recording startup budget).
-#[cfg(test)]
-const VIDEO_EPOCH_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
-
-#[cfg(test)]
-struct AudioPreroll {
-    discarded_frames: u64,
-    ready_frames: VecDeque<AudioFrame>,
-}
-
-/// Discard queued audio until the shared video epoch is set (the encoder bridge's
-/// first composited video frame), so the first audio sample written corresponds to the
-/// same instant as the first video frame. This replaces the old calibrated constant:
-/// the video pipeline's startup latency varies with resolution (4K warms slower than
-/// 1080p), so no fixed offset can align both. Returns the discarded frame count plus
-/// any already-queued audio captured at/after the epoch, or None when the wait timed
-/// out and the writer should proceed unaligned.
-#[cfg(test)]
-fn discard_audio_until_video_epoch(
-    receiver: &mpsc::Receiver<AudioFrame>,
-    video_epoch: &OnceLock<Instant>,
-    stop: &AtomicBool,
-) -> Option<AudioPreroll> {
-    let waited_since = Instant::now();
-    let mut pending = VecDeque::new();
-    loop {
-        if let Some(epoch) = video_epoch.get().copied() {
-            return Some(discard_audio_before_epoch(receiver, pending, epoch, stop));
-        }
-        if stop.load(Ordering::Relaxed) || waited_since.elapsed() >= VIDEO_EPOCH_WAIT_TIMEOUT {
-            return None;
-        }
-        match receiver.recv_timeout(Duration::from_millis(2)) {
-            Ok(frame) => pending.push_back(frame),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Some(AudioPreroll {
-                    discarded_frames: pending.iter().map(|frame| frame.frame_count() as u64).sum(),
-                    ready_frames: VecDeque::new(),
-                });
-            }
-        }
-    }
-}
-
-#[cfg(test)]
-fn discard_audio_before_epoch(
-    receiver: &mpsc::Receiver<AudioFrame>,
-    mut pending: VecDeque<AudioFrame>,
-    epoch: Instant,
-    stop: &AtomicBool,
-) -> AudioPreroll {
-    let mut discarded_frames = 0_u64;
-    let mut ready_frames = VecDeque::new();
-
-    loop {
-        let frame = if let Some(frame) = pending.pop_front() {
-            frame
-        } else if ready_frames.is_empty() && !stop.load(Ordering::Relaxed) {
-            match receiver.recv_timeout(Duration::from_millis(50)) {
-                Ok(frame) => frame,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return AudioPreroll {
-                        discarded_frames,
-                        ready_frames,
-                    };
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return AudioPreroll {
-                        discarded_frames,
-                        ready_frames,
-                    };
-                }
-            }
-        } else {
-            return AudioPreroll {
-                discarded_frames,
-                ready_frames,
-            };
-        };
-
-        let trimmed = trim_audio_frame_before_epoch(frame, epoch);
-        discarded_frames = discarded_frames.saturating_add(trimmed.discarded_frames);
-        if let Some(frame) = trimmed.frame {
-            ready_frames.push_back(frame);
-            ready_frames.extend(pending);
-            return AudioPreroll {
-                discarded_frames,
-                ready_frames,
-            };
-        }
-    }
 }
 
 pub(crate) struct TrimmedAudioFrame {
@@ -738,7 +643,11 @@ pub(crate) fn trim_audio_frame_before_epoch(
     mut frame: AudioFrame,
     epoch: Instant,
 ) -> TrimmedAudioFrame {
-    let frame_count = frame.frame_count();
+    let frame_count = if frame.channels == 0 {
+        0
+    } else {
+        frame.frame_count()
+    };
     if frame_count == 0 || frame.sample_rate == 0 || frame.channels == 0 {
         return TrimmedAudioFrame {
             discarded_frames: frame_count as u64,
@@ -787,49 +696,6 @@ pub(crate) fn trim_audio_frame_before_epoch(
         discarded_frames: frames_to_trim as u64,
         frame: Some(frame),
     }
-}
-
-/// Leading silence padding (instant-record P3): when the first audio sample
-/// arrives AFTER the video epoch (a mic still warming up, a slow device open),
-/// write zeros for the gap so audio stays aligned to the first frame instead
-/// of the whole track lagging by the warm-up latency.
-#[cfg(test)]
-const LEADING_SILENCE_MIN: Duration = Duration::from_millis(2);
-#[cfg(test)]
-const LEADING_SILENCE_MAX: Duration = Duration::from_secs(2);
-
-/// Frames of silence to write before `first` so its first sample lands at its
-/// true offset from `epoch`. Zero when the frame starts at/before the epoch.
-#[cfg(test)]
-fn leading_silence_frame_count(first: &AudioFrame, epoch: Instant) -> usize {
-    if first.sample_rate == 0 || first.channels == 0 {
-        return 0;
-    }
-    let frame_start = first
-        .captured_at
-        .checked_sub(first.duration())
-        .unwrap_or(first.captured_at);
-    let gap = frame_start.saturating_duration_since(epoch);
-    if gap < LEADING_SILENCE_MIN {
-        return 0;
-    }
-    let gap = gap.min(LEADING_SILENCE_MAX);
-    (gap.as_secs_f64() * f64::from(first.sample_rate)).round() as usize
-}
-
-pub fn attach_fifo_writer(
-    source: NativeAudioSource,
-    fifo_path: PathBuf,
-    video_epoch: Option<Arc<OnceLock<Instant>>>,
-) -> NativeAudioCaptureSession {
-    let settings = source.processing_settings.load();
-    crate::session_audio::attach(
-        Some(source),
-        fifo_path,
-        video_epoch,
-        settings,
-        NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
-    )
 }
 
 #[cfg(test)]
@@ -1014,9 +880,18 @@ pub(crate) fn test_native_audio_source(settings: AudioProcessingSettings) -> Nat
     start_caption_contract_test_audio_source(settings).expect("test audio source starts")
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn start_caption_contract_test_audio_source(
     settings: AudioProcessingSettings,
+) -> Result<NativeAudioSource> {
+    start_contract_test_audio_source(settings, CAPTION_CONTRACT_TEST_DEVICE_ID, false)
+}
+
+#[cfg(debug_assertions)]
+fn start_contract_test_audio_source(
+    settings: AudioProcessingSettings,
+    device_id: u32,
+    continuous_tone: bool,
 ) -> Result<NativeAudioSource> {
     let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
     let stats = Arc::new(AudioCaptureStats::default());
@@ -1057,13 +932,20 @@ fn start_caption_contract_test_audio_source(
                 .is_ok();
             let raw_peak = if inject_tone {
                 f32::from_bits(producer_injector.raw_peak_bits.load(Ordering::Acquire) as u32)
+            } else if continuous_tone {
+                0.12
             } else {
                 0.0
             };
             let mut input = Vec::with_capacity(samples_per_channel * SOURCE_CHANNELS);
             for sample_index in 0..samples_per_channel {
                 let absolute = frame_cursor as usize + sample_index;
-                let phase = absolute as f32 * 440.0 * std::f32::consts::TAU
+                let frequency = if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID {
+                    440.0
+                } else {
+                    880.0
+                };
+                let phase = absolute as f32 * frequency * std::f32::consts::TAU
                     / NATIVE_AUDIO_SAMPLE_RATE as f32;
                 let sample = phase.sin() * raw_peak;
                 input.extend_from_slice(&[sample, sample]);
@@ -1104,8 +986,19 @@ fn start_caption_contract_test_audio_source(
     });
 
     Ok(NativeAudioSource {
-        device_id: CAPTION_CONTRACT_TEST_DEVICE_ID,
-        device_name: "Caption contract test microphone".to_string(),
+        device_id,
+        device_name: if continuous_tone {
+            format!(
+                "Live source switch fixture {}",
+                if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID {
+                    "A"
+                } else {
+                    "B"
+                }
+            )
+        } else {
+            "Caption contract test microphone".into()
+        },
         receiver: Some(receiver),
         stats,
         processing_settings,
@@ -1563,49 +1456,6 @@ fn utf16_z(value: &[u16]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn silence_probe_frame(captured_at: Instant, frames: usize) -> AudioFrame {
-        AudioFrame {
-            timestamp_micros: 0,
-            captured_at,
-            sample_rate: NATIVE_AUDIO_SAMPLE_RATE,
-            channels: NATIVE_AUDIO_CHANNELS,
-            samples: vec![0.0; frames * usize::from(NATIVE_AUDIO_CHANNELS)],
-        }
-    }
-
-    #[test]
-    fn leading_silence_covers_only_a_gap_after_the_epoch() {
-        let epoch = Instant::now();
-        // 10 ms frame that ENDS 130 ms after the epoch -> starts 120 ms after it.
-        let late = silence_probe_frame(
-            epoch + Duration::from_millis(130),
-            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
-        );
-        let expected = (0.120 * f64::from(NATIVE_AUDIO_SAMPLE_RATE)).round() as usize;
-        assert_eq!(leading_silence_frame_count(&late, epoch), expected);
-
-        // A frame straddling the epoch needs no padding (trim handles it).
-        let straddling = silence_probe_frame(
-            epoch + Duration::from_millis(5),
-            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
-        );
-        assert_eq!(leading_silence_frame_count(&straddling, epoch), 0);
-
-        // Sub-threshold jitter is left alone.
-        let jitter = silence_probe_frame(
-            epoch + Duration::from_millis(11),
-            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
-        );
-        assert_eq!(leading_silence_frame_count(&jitter, epoch), 0);
-
-        // Absurd gaps are capped so a stale epoch cannot write seconds of zeros.
-        let very_late = silence_probe_frame(epoch + Duration::from_secs(30), 480);
-        assert_eq!(
-            leading_silence_frame_count(&very_late, epoch),
-            (LEADING_SILENCE_MAX.as_secs_f64() * f64::from(NATIVE_AUDIO_SAMPLE_RATE)) as usize
-        );
-    }
-
     #[cfg(unix)]
     fn test_fifo_path(label: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -1702,74 +1552,6 @@ mod tests {
             channels: NATIVE_AUDIO_CHANNELS,
             samples: vec![0.0; samples * NATIVE_AUDIO_CHANNELS as usize],
         }
-    }
-
-    #[test]
-    fn epoch_trim_discards_audio_captured_before_the_first_video_frame() {
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
-        let epoch: OnceLock<Instant> = OnceLock::new();
-        let stop = AtomicBool::new(false);
-
-        // Pre-epoch capture: queued before the video pipeline delivered anything.
-        let anchor = Instant::now();
-        tx.send(frame_at(anchor + Duration::from_millis(10), 480))
-            .unwrap();
-        tx.send(frame_at(anchor + Duration::from_millis(20), 480))
-            .unwrap();
-        epoch.set(anchor + Duration::from_millis(25)).unwrap();
-
-        let preroll = discard_audio_until_video_epoch(&rx, &epoch, &stop)
-            .expect("epoch was set, the wait must succeed");
-        assert_eq!(
-            preroll.discarded_frames, 960,
-            "both pre-epoch frames are trimmed"
-        );
-        assert!(preroll.ready_frames.is_empty());
-
-        // Post-epoch frames flow to the FIFO untouched.
-        tx.send(frame(480)).unwrap();
-        assert_eq!(rx.try_recv().unwrap().frame_count(), 480);
-    }
-
-    #[test]
-    fn epoch_trim_preserves_audio_already_captured_after_the_first_video_frame() {
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
-        let epoch: OnceLock<Instant> = OnceLock::new();
-        let stop = AtomicBool::new(false);
-        let anchor = Instant::now();
-
-        tx.send(frame_at(anchor + Duration::from_millis(10), 480))
-            .unwrap();
-        tx.send(frame_at(anchor + Duration::from_millis(30), 480))
-            .unwrap();
-        tx.send(frame_at(anchor + Duration::from_millis(40), 480))
-            .unwrap();
-        epoch.set(anchor + Duration::from_millis(25)).unwrap();
-
-        let preroll = discard_audio_until_video_epoch(&rx, &epoch, &stop)
-            .expect("epoch was set, the wait must succeed");
-
-        assert_eq!(
-            preroll.discarded_frames, 720,
-            "one full pre-roll packet and half of the boundary packet are trimmed"
-        );
-        let ready_counts = preroll
-            .ready_frames
-            .iter()
-            .map(AudioFrame::frame_count)
-            .collect::<Vec<_>>();
-        assert_eq!(ready_counts, vec![240]);
-        assert_eq!(preroll.ready_frames[0].timestamp_micros, 5_000);
-        assert_eq!(rx.try_recv().unwrap().frame_count(), 480);
-    }
-
-    #[test]
-    fn epoch_trim_gives_up_when_stopped_before_video_arrives() {
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
-        let epoch: OnceLock<Instant> = OnceLock::new();
-        let stop = AtomicBool::new(true);
-        tx.send(frame(480)).unwrap();
-        assert!(discard_audio_until_video_epoch(&rx, &epoch, &stop).is_none());
     }
 
     #[test]

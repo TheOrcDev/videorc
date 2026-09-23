@@ -1755,7 +1755,7 @@ async fn commit_scene_with_layout_at_time_with_policy(
             && let Some(sources) = state
                 .live_source_switch
                 .lock()
-                .await
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .reconcile_scene(&session_id, scene)
         {
             state.emit_event("session.sources.changed", sources);
