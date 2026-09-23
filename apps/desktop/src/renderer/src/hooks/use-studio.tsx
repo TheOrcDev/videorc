@@ -3441,9 +3441,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // session to fence, and the next recording.status reconciles the pick.
       if (sourceStatusUnknownRef.current && (wsStatus === 'connecting' || wsStatus === 'connected'))
         return 'Checking the current session…'
-      const sessionActive = isActiveRecordingState(recordingRef.current.state)
       // An idle microphone is not part of the scene, so a scene change cannot race it.
-      if (layoutSwitchPending && (sessionActive || kind !== 'microphone'))
+      if (
+        layoutSwitchPending &&
+        (kind !== 'microphone' || isActiveRecordingState(recordingRef.current.state))
+      )
         return 'The scene is changing.'
       if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current)
         return 'The session is starting.'
@@ -5986,17 +5988,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Backend-authored commits (live source switches) arrive only as this
         // event; advance committed truth so a later resync never re-presents
         // an older revision. Layout transactions record their own proven commit.
-        const committedScene = nativePreviewCommittedSceneRef.current
-        const statusSceneId = status.sceneId ?? transformSceneRef.current?.id
+        const sceneRevision = status.sceneRevision ?? -1
         if (
           layoutIntentAwaitingProofRef.current === null &&
-          typeof status.sceneRevision === 'number' &&
-          statusSceneId &&
-          status.sceneRevision > (committedScene?.sceneRevision ?? -1)
+          status.sceneId &&
+          sceneRevision > (nativePreviewCommittedSceneRef.current?.sceneRevision ?? -1)
         ) {
           nativePreviewCommittedSceneRef.current = {
-            sceneId: statusSceneId,
-            sceneRevision: status.sceneRevision,
+            sceneId: status.sceneId,
+            sceneRevision,
             compositorStatus: status
           }
         }
@@ -6296,30 +6296,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // nothing; it still fails the batch below so the error surfaces.
         // Session authority must settle even if device discovery or another
         // bootstrap query fails. Idle fallback remains blocked until this read.
-        const recordingStatusBootstrap = bootstrapRequest<RecordingStatus>('recording.status')
-        // A failed first read would otherwise leave every picker on "Checking
-        // the current session…" until some later recording.status event.
-        const retryRecordingStatus = async (attempt: number): Promise<void> => {
-          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
-          if (!generationIsCurrent() || !sourceStatusUnknownRef.current) return
-          const retrySnapshot = bootstrapGuard.snapshot()
-          try {
-            const status = await bootstrapRequest<RecordingStatus>('recording.status')
-            if (generationIsCurrent() && bootstrapGuard.isCurrent(retrySnapshot, 'recording')) {
-              applyRecordingStatus(status)
+        // A failed read retries: otherwise every picker stays on "Checking the
+        // current session…" until some later recording.status event.
+        const readRecordingStatus = (attempt: number): Promise<RecordingStatus> => {
+          const snapshot = bootstrapGuard.snapshot()
+          const read = bootstrapRequest<RecordingStatus>('recording.status')
+          read.then(
+            (status) => {
+              if (generationIsCurrent() && bootstrapGuard.isCurrent(snapshot, 'recording')) {
+                applyRecordingStatus(status)
+              }
+            },
+            () => {
+              if (attempt < 4)
+                setTimeout(() => {
+                  if (generationIsCurrent() && sourceStatusUnknownRef.current)
+                    void readRecordingStatus(attempt + 1)
+                }, 1000 * attempt)
             }
-          } catch {
-            if (attempt < 3) await retryRecordingStatus(attempt + 1)
-          }
+          )
+          return read
         }
-        void recordingStatusBootstrap.then(
-          (status) => {
-            if (generationIsCurrent() && bootstrapGuard.isCurrent(bootstrapSnapshot, 'recording')) {
-              applyRecordingStatus(status)
-            }
-          },
-          () => retryRecordingStatus(1)
-        )
+        const recordingStatusBootstrap = readRecordingStatus(1)
         const activeScreenBootstrap = bootstrapRequest<StreamScreen | null>('screens.active')
         void activeScreenBootstrap.then(
           (nextActiveScreen) => {
