@@ -17,7 +17,14 @@ import {
   shouldBackgroundRecheck,
   updateStatusFromEvent
 } from './updater-status'
-import { consumeWindowsUpdaterStartupConfig } from './windows-pilot-update'
+import {
+  accountPilotUpdaterConfig,
+  consumeWindowsUpdaterStartupConfig,
+  isWindowsPilotUpdateGrant,
+  shouldProbeAccountPilotFeed,
+  WINDOWS_PILOT_UPDATE_URL
+} from './windows-pilot-update'
+import type { PublicFeedOutcome } from './windows-pilot-update'
 
 const { autoUpdater } = electronUpdater
 
@@ -41,7 +48,13 @@ let getMainWindow: MainWindowGetter = () => null
 let listenersAttached = false
 let updaterConfigurationBlocked = false
 let feedRoute: UpdateFeedRoute = 'primary'
+// Operator pilot mode (env token) pins every check to the pilot feed.
 let pilotFeedActive = false
+// Signed-in Windows installs: the current check moved to the pilot feed with a
+// short-lived account token. Every check starts on the public feed again.
+let accountPilotActive = false
+let probingAccountPilot = false
+let requestAccountPilotGrant: (() => Promise<unknown>) | null = null
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -53,7 +66,11 @@ function errorMessage(error: unknown): string {
 function setStatusFromUpdaterError(message: string): void {
   setStatus(
     updateStatusFromEvent(
-      isMissingUpdateFeedError(message) ? { type: 'unsupported' } : { type: 'error', message }
+      isMissingUpdateFeedError(message)
+        ? process.platform === 'win32'
+          ? { type: 'unsupported', reason: 'windows-feed-unpublished' }
+          : { type: 'unsupported' }
+        : { type: 'error', message }
     )
   )
 }
@@ -69,7 +86,7 @@ function setStatus(next: UpdateStatus): void {
 // The feed baked into the build is the primary route, so it needs no
 // setFeedURL until the first fallback has moved the updater off it.
 function switchFeedRoute(route: UpdateFeedRoute): void {
-  if (pilotFeedActive || feedRoute === route) {
+  if (pilotFeedActive || accountPilotActive || feedRoute === route) {
     return
   }
   autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URLS[route] })
@@ -79,7 +96,7 @@ function switchFeedRoute(route: UpdateFeedRoute): void {
 function retriesOnMirror(error: unknown): boolean {
   return shouldRetryUpdateOnMirror({
     message: errorMessage(error),
-    pilot: pilotFeedActive,
+    pilot: pilotFeedActive || accountPilotActive,
     route: feedRoute
   })
 }
@@ -106,9 +123,103 @@ async function checkForUpdatesWithMirrorFallback(): Promise<void> {
   }
 }
 
+function leaveAccountPilotFeed(): void {
+  if (!accountPilotActive) {
+    return
+  }
+  accountPilotActive = false
+  autoUpdater.requestHeaders = null
+  autoUpdater.disableDifferentialDownload = false
+  autoUpdater.setFeedURL({ provider: 'generic', url: UPDATE_FEED_URLS.primary })
+  feedRoute = 'primary'
+}
+
+// Returns a fresh pilot bearer for this signed-in install, or null when the
+// account is signed out, the pilot is closed, or the backend is unavailable.
+async function accountPilotRequestHeaders(): Promise<Record<string, string> | null> {
+  if (!requestAccountPilotGrant) {
+    return null
+  }
+  try {
+    const grant = await requestAccountPilotGrant()
+    return isWindowsPilotUpdateGrant(grant) ? accountPilotUpdaterConfig(grant).requestHeaders : null
+  } catch (error) {
+    safeConsole.warn(`[auto-update] Windows pilot access unavailable: ${errorMessage(error)}`)
+    return null
+  }
+}
+
+async function enterAccountPilotFeed(): Promise<boolean> {
+  const requestHeaders = await accountPilotRequestHeaders()
+  if (!requestHeaders) {
+    return false
+  }
+  // The bearer stays on the branded proxy: the pilot route streams bytes and
+  // the full downloader never follows a cross-origin redirect with it.
+  autoUpdater.setFeedURL({ provider: 'generic', url: WINDOWS_PILOT_UPDATE_URL })
+  autoUpdater.requestHeaders = requestHeaders
+  autoUpdater.disableDifferentialDownload = true
+  accountPilotActive = true
+  return true
+}
+
+function publicFeedOutcome(error: unknown): PublicFeedOutcome {
+  if (error) {
+    return isMissingUpdateFeedError(errorMessage(error)) ? 'missing-feed' : 'failed'
+  }
+  return currentStatus.phase === 'available' ? 'available' : 'not-available'
+}
+
+// Public feed first (with its mirror fallback). A signed-in Windows install
+// then consults the pilot feed when public has nothing for it; a pilot failure
+// restores the public outcome instead of surfacing a pilot-only error.
+async function checkForUpdatesOnAllFeeds(): Promise<void> {
+  leaveAccountPilotFeed()
+  let publicError: unknown = null
+  try {
+    await checkForUpdatesWithMirrorFallback()
+  } catch (error) {
+    publicError = error
+  }
+  if (
+    shouldProbeAccountPilotFeed({
+      operatorPilot: pilotFeedActive,
+      platform: process.platform,
+      publicOutcome: publicFeedOutcome(publicError)
+    }) &&
+    (await enterAccountPilotFeed())
+  ) {
+    const publicStatus = currentStatus
+    probingAccountPilot = true
+    try {
+      await autoUpdater.checkForUpdates()
+      return
+    } catch (error) {
+      safeConsole.warn(`[auto-update] Windows pilot feed check failed: ${errorMessage(error)}`)
+      leaveAccountPilotFeed()
+      setStatus(publicStatus)
+    } finally {
+      probingAccountPilot = false
+    }
+  }
+  if (publicError) {
+    throw publicError
+  }
+}
+
 // A download is bound to the update info of the route that was checked, so a
 // fallback re-checks on the mirror before downloading from it.
 async function downloadUpdateWithMirrorFallback(): Promise<void> {
+  if (accountPilotActive) {
+    // The pilot bearer is short-lived; a manual download can come long after
+    // the check that found the update.
+    const requestHeaders = await accountPilotRequestHeaders()
+    if (!requestHeaders) {
+      leaveAccountPilotFeed()
+      throw new Error('Windows pilot update access ended. Check for updates again.')
+    }
+    autoUpdater.requestHeaders = requestHeaders
+  }
   try {
     await autoUpdater.downloadUpdate()
   } catch (error) {
@@ -173,6 +284,10 @@ function attachUpdaterListeners(): void {
     const message = errorMessage(error)
     // Update failures are non-fatal.
     safeConsole.warn(`[auto-update] error: ${message}`)
+    // A failed pilot probe restores the public outcome; never flash its error.
+    if (probingAccountPilot) {
+      return
+    }
     // A primary transport failure is about to be retried on the mirror; the
     // caller reports the outcome, so the UI never flashes an error in between.
     if (retriesOnMirror(error)) {
@@ -189,7 +304,9 @@ function attachUpdaterListeners(): void {
 // applies on the NEXT quit — never a forced restart, so a recording is never
 // cut off; the sidebar chip and Settings reflect the same shared status.
 // Escape hatch: VIDEORC_DISABLE_AUTO_UPDATE=1.
-export function initAutoUpdater(): void {
+export function initAutoUpdater(
+  options: { requestWindowsPilotUpdateGrant?: () => Promise<unknown> } = {}
+): void {
   if (!app.isPackaged) {
     delete process.env.VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN
     return
@@ -216,6 +333,12 @@ export function initAutoUpdater(): void {
     return
   }
 
+  // Operator mode already pins the pilot feed; otherwise a signed-in Windows
+  // install may follow it (manual checks included).
+  if (process.platform === 'win32' && !pilotFeedActive) {
+    requestAccountPilotGrant = options.requestWindowsPilotUpdateGrant ?? null
+  }
+
   // The opt-out suppresses only silent checks. Pilot feed routing and bearer
   // ownership still apply to the packaged app's explicit manual update flow.
   if (backgroundUpdatesDisabled) return
@@ -232,7 +355,7 @@ export function initAutoUpdater(): void {
   })
 
   const backgroundCheck = (): void => {
-    void checkForUpdatesWithMirrorFallback().catch((error) => {
+    void checkForUpdatesOnAllFeeds().catch((error) => {
       const message = errorMessage(error)
       safeConsole.warn(`[auto-update] check failed: ${message}`)
       setStatusFromUpdaterError(message)
@@ -279,7 +402,7 @@ export function registerUpdaterIpc(
     }
     try {
       setStatus(updateStatusFromEvent({ type: 'checking' }))
-      await checkForUpdatesWithMirrorFallback()
+      await checkForUpdatesOnAllFeeds()
       // The events above have set the truth by the time checkForUpdates resolves.
       // If an update is available, start downloading immediately for a one-click
       // feel; progress + downloaded states flow through the listeners.

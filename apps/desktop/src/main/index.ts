@@ -8609,6 +8609,7 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'account.auth.begin_intent',
   'account.refresh',
   'account.sign_out',
+  'account.windows_pilot_update_token',
   'resource.capability.issue',
   'resource.capability.revoke',
   'resource.capability.register_background',
@@ -12750,7 +12751,12 @@ app.whenReady().then(async () => {
     dispatchOAuthCallbackUrl(callbackUrl)
   }
   registerManagedAssetProtocol()
-  initAutoUpdater()
+  initAutoUpdater({
+    // Signed-in Windows installs follow the pilot feed with a short-lived token
+    // the backend mints from the account session (null when not entitled).
+    requestWindowsPilotUpdateGrant: () =>
+      requestBackendAdmin<unknown>('account.windows_pilot_update_token', {}, 20_000)
+  })
   registerUpdaterIpc(
     () => mainWindow,
     () => captureStateBlocksInterruption(mainCaptureState, backendConnection !== null),
