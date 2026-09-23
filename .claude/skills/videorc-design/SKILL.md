@@ -121,11 +121,13 @@ Everything except ⌘K uses the desktop scale.
   filter bar, a section header, or the PageHeader row). The toolbar never
   scrolls; only `PaneBody` does.
 - **Sidebar.**
-  - The top row holds the traffic lights and the ⌘K button.
+  - The top row holds the traffic lights and the ⌘K button. Windows has no
+    traffic lights, so there the row leads with the app icon (16 px) and
+    "Videorc" in 12 px regular, the Windows 11 title-bar convention.
   - Section labels are 11 px / 600, tertiary.
   - Rows are 28 px, with 14 px text and 16 px icons.
-  - The account row sits at the bottom. The brand lives in About and the
-    Dock, not in the sidebar.
+  - The account row sits at the bottom. On macOS the brand lives in About
+    and the Dock, never in the sidebar (owner call, 2026-09-23).
 - **Status bar** (`StatusBar`, 26 px): connection and record/live state on
   the left. On the right, quiet 11 px shortcut hints, each still clickable:
   `⌘K Search`, `⌘P Preview`, `⇧⌘N Notes`, `⇧⌘J Chat`.
@@ -231,9 +233,16 @@ near-opaque `bg-popover` surfaces with one soft shadow and a hairline ring.
   has no per-window appearance pin.
 - Windows 10 and older builds use the solid palette.
 - The D3D11 preview window and the proof surface stay opaque.
+- Windows-only chrome uses the `win32:` variant (`hidden win32:flex`). It
+  keys on the `data-platform` attribute that `theme-bootstrap.js` sets before
+  the first paint, so it never waits for runtime info and never pops in.
 
 ## Icons
 
+- The app icon (`assets/videorc-logo.png`) carries its own rounded tile and
+  transparent margin: no mask, no shadow. It appears in Settings → About
+  (64 px, beside the name, version, and release-track tag), in the Windows
+  sidebar top row (16 px), and in first-run onboarding. Nowhere else.
 - App/source icons: 24 px rounded-square (radius about 6), vivid, full
   colour. They are the only large colour on screen.
 - Inline and status icons: 16 px, secondary gray unless conveying status.
