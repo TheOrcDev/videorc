@@ -212,27 +212,31 @@ fn destination_preflight(
                     account_id = Some(account.account_id.clone());
                     account_label = Some(account.account_label.clone());
                 }
-                match x_live::x_native_live_capability(account) {
-                    Ok(capability) if capability.native_available => {
-                        message = capability.message;
-                    }
-                    Ok(capability) => {
-                        ready = false;
-                        message = capability.message.clone();
-                        issues.push(target_issue(
-                            target,
-                            GoLivePreflightIssueSeverity::Error,
-                            capability.message,
-                        ));
-                    }
-                    Err(error) => {
-                        ready = false;
-                        message = error.to_string();
-                        issues.push(target_issue(
-                            target,
-                            GoLivePreflightIssueSeverity::Error,
-                            error.to_string(),
-                        ));
+                if let Some(fixture) = scheduled_smoke_x_fixture(target) {
+                    message = fixture;
+                } else {
+                    match x_live::x_native_live_capability(account) {
+                        Ok(capability) if capability.native_available => {
+                            message = capability.message;
+                        }
+                        Ok(capability) => {
+                            ready = false;
+                            message = capability.message.clone();
+                            issues.push(target_issue(
+                                target,
+                                GoLivePreflightIssueSeverity::Error,
+                                capability.message,
+                            ));
+                        }
+                        Err(error) => {
+                            ready = false;
+                            message = error.to_string();
+                            issues.push(target_issue(
+                                target,
+                                GoLivePreflightIssueSeverity::Error,
+                                error.to_string(),
+                            ));
+                        }
                     }
                 }
             } else {
@@ -298,6 +302,26 @@ fn destination_preflight(
         chat_write,
         chat_message,
     }
+}
+
+/// Debug builds only: the scheduling smoke's X fixture account counts as
+/// authorized for X Live, exactly as `scheduled_streams_service::x_api` already
+/// authorizes it, so `smoke:scheduled-streams` can take a saved X broadcast
+/// through Go Live. It needs the loopback-only smoke endpoint; release builds
+/// never take this path.
+#[cfg(debug_assertions)]
+fn scheduled_smoke_x_fixture(target: &StreamTargetSettings) -> Option<String> {
+    (target.account_id.as_deref() == Some(crate::scheduled_streams_service::X_SMOKE_ACCOUNT_ID)
+        && crate::scheduled_streams_service::smoke_api_base()
+            .ok()
+            .flatten()
+            .is_some())
+    .then(|| "Local X scheduling fixture: X Live is authorized.".to_string())
+}
+
+#[cfg(not(debug_assertions))]
+fn scheduled_smoke_x_fixture(_target: &StreamTargetSettings) -> Option<String> {
+    None
 }
 
 fn destination_chat_preflight(

@@ -1,12 +1,9 @@
 import {
   AlertIcon,
-  type AppIcon,
   ChevronDownIcon,
   GaugeIcon,
   HeartbeatIcon,
-  InstagramIcon,
   LinkIcon,
-  LivestreamIcon,
   ResetIcon,
   SaveIcon,
   SearchIcon,
@@ -14,11 +11,7 @@ import {
   SuccessIcon,
   SyncIcon,
   TextIcon,
-  TiktokIcon,
-  TwitchIcon,
-  WarningIcon,
-  XPlatformIcon,
-  YoutubeIcon
+  WarningIcon
 } from '@/components/icons'
 import { lazy, Suspense, useEffect, useMemo, useState, type ReactElement } from 'react'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
@@ -27,6 +20,7 @@ const ScheduledStreams = lazy(() =>
 )
 
 import { GroupedList, ListRow } from '@/components/list-row'
+import { PlatformGlyph } from '@/components/platform-glyph'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -98,15 +92,6 @@ import { cn } from '@/lib/utils'
 import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
 type BadgeTone = 'success' | 'warning' | 'destructive' | 'live' | 'outline'
-
-const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
-  youtube: YoutubeIcon,
-  twitch: TwitchIcon,
-  x: XPlatformIcon,
-  tiktok: TiktokIcon,
-  instagram: InstagramIcon,
-  custom: LivestreamIcon
-}
 
 export function StreamingTab(): ReactElement {
   const [view, setView] = useState(() =>
@@ -938,17 +923,6 @@ function openExternalUrl(url: string): void {
   window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-// The vivid 24px rounded-square platform tile — per the design skill, source
-// and platform icons are the ONLY large saturated color in the chrome.
-const PLATFORM_GLYPH_TINT: Record<StreamPlatform, string> = {
-  youtube: 'bg-platform-youtube/15 text-platform-youtube',
-  twitch: 'bg-platform-twitch/15 text-platform-twitch-ink',
-  x: 'bg-foreground/10 text-foreground',
-  tiktok: 'bg-foreground/10 text-foreground',
-  instagram: 'bg-platform-instagram/15 text-platform-instagram',
-  custom: 'bg-foreground/10 text-muted-foreground'
-}
-
 // Manual-key platforms rotate their key per broadcast and gate LIVE access on
 // their side — link the user to the source of truth instead of promising
 // automation Videorc cannot deliver (no public ingest APIs).
@@ -971,20 +945,6 @@ function manualKeyGuidance(
     default:
       return null
   }
-}
-
-function PlatformGlyph({ platform }: { platform: StreamPlatform }): ReactElement {
-  const AppIcon = PLATFORM_ICON[platform]
-  return (
-    <span
-      className={cn(
-        'flex size-5 items-center justify-center rounded-[5px]',
-        PLATFORM_GLYPH_TINT[platform]
-      )}
-    >
-      <AppIcon className="size-3.5" weight="fill" />
-    </span>
-  )
 }
 
 function streamTargetStatusBadge(state: NonNullable<StreamTargetSettings['status']>['state']): {

@@ -11246,70 +11246,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (preparedXCompletionTargets(nextStreaming).length > 0) {
         complete = false
       }
-      // A saved X broadcast keeps its schedule when Go Live never reached
-      // publish, and records completion once END is confirmed. Either way the
-      // preparation attempt is released exactly once.
-      for (const target of nextStreaming.targets.filter(
-        (target) =>
-          target.platform === 'x' &&
-          target.authMode === 'oauth' &&
-          Boolean(target.scheduledEventId) &&
-          Boolean(target.scheduledAttemptId) &&
-          target.status?.state !== 'live' &&
-          !(target.status?.state === 'warning' && Boolean(target.status.redactedUrl))
-      )) {
-        try {
-          const released = await (
-            await import('@/lib/scheduled-streams')
-          ).scheduledTargetOperation<{ lifecycleStatus: string; message: string }>(
-            client,
-            'releasePreparation',
-            target.scheduledEventId!,
-            {
-              attemptId: target.scheduledAttemptId,
-              sessionId:
-                sessionId && !isPreparedPlatformLifecycleOwner(sessionId) ? sessionId : undefined
-            }
-          )
-          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-            scheduledAttemptId: undefined,
-            status: {
-              state: 'stopped',
-              message:
-                released.lifecycleStatus === 'ready'
-                  ? 'Upcoming broadcast preserved.'
-                  : released.message
-            }
+      // Saved X broadcasts release their preparation exactly once. The
+      // scheduler module does it, so it loads only after such a session.
+      if (
+        nextStreaming.targets.some((target) => target.platform === 'x' && target.scheduledEventId)
+      ) {
+        const scheduled = await import('@/lib/scheduled-streams')
+        const released = await scheduled.releaseScheduledXPreparations(
+          client,
+          nextStreaming,
+          sessionId && !isPreparedPlatformLifecycleOwner(sessionId) ? sessionId : undefined
+        )
+        const settled = released.streaming
+        nextStreaming = settled
+        if (!released.complete) complete = false
+        setCaptureConfig((current) =>
+          bridgeStreamingToLegacy({
+            ...current,
+            streaming: scheduled.settleScheduledXTargets(current.streaming, settled)
           })
-        } catch (error) {
-          const message = error instanceof Error ? error.message : String(error)
-          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
-            status: {
-              state: 'warning',
-              message: `X scheduled cleanup needs review: ${message}`
-            }
-          })
-          complete = false
-        }
+        )
       }
-      setCaptureConfig((current) =>
-        bridgeStreamingToLegacy({
-          ...current,
-          streaming: {
-            ...current.streaming,
-            targets: current.streaming.targets.map((target) => {
-              const settled = nextStreaming.targets.find((item) => item.id === target.id)
-              return settled && target.platform === 'x' && target.scheduledEventId
-                ? {
-                    ...target,
-                    scheduledAttemptId: settled.scheduledAttemptId,
-                    status: settled.status
-                  }
-                : target
-            })
-          }
-        })
-      )
       return { streaming: nextStreaming, complete }
     },
     [client, completeYouTubeBroadcastOnce, endPreparedXBroadcasts]

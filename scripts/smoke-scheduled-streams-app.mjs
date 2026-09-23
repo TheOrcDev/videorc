@@ -130,7 +130,7 @@ try {
     }
     // Opening the real form has no provider side effect.
     await evaluate(
-      `const button=[...document.querySelectorAll('button')].find(item=>item.textContent==='Schedule stream'); button.click(); return true`
+      `const button=[...document.querySelectorAll('button')].find(item=>item.textContent==='Schedule on YouTube'); button.click(); return true`
     )
     assert.equal(fixture.events.size, 0)
     await waitFor(
@@ -227,7 +227,38 @@ try {
       () => evaluate(`return !document.querySelector('#schedule-title')`),
       'form dismissal'
     )
-    assert.equal(await evaluate(`return document.activeElement?.textContent`), 'Schedule stream')
+    // Focus returns after the dialog unmounts, a frame later; an occluded
+    // window can hold that frame back, so wait instead of reading at once.
+    await waitFor(
+      () => evaluate(`return document.activeElement?.textContent === 'Schedule on YouTube'`),
+      'focus restoration to Schedule on YouTube'
+    )
+    // X has its own form: its planned end is filled from the start, it keeps
+    // replay, and YouTube's visibility never appears.
+    await evaluate(
+      `const button=[...document.querySelectorAll('button')].find(item=>item.textContent==='Schedule on X'); button.click(); return true`
+    )
+    await waitFor(
+      () => evaluate(`return Boolean(document.querySelector('#schedule-end'))`),
+      'X schedule form'
+    )
+    assert.deepEqual(
+      await evaluate(
+        `return {end:document.querySelector('#schedule-end').value!=='',replay:Boolean(document.querySelector('#schedule-replay')),visibility:Boolean(document.querySelector('#schedule-privacy'))}`
+      ),
+      { end: true, replay: true, visibility: false },
+      'the X form carries X fields only'
+    )
+    console.log(
+      await requestSmokeCommand(smoke, 'capture-page', { name: 'scheduled-form-x' }, { timeoutMs })
+    )
+    await evaluate(
+      `document.dispatchEvent(new KeyboardEvent('keydown',{key:'Escape',bubbles:true})); return true`
+    )
+    await waitFor(
+      () => evaluate(`return !document.querySelector('#schedule-end')`),
+      'X form dismissal'
+    )
     if (process.argv.includes('--ui-only')) {
       console.log(
         'Scheduled stream UI smoke PASS: theme, 200% viewport, scroll, keyboard, dirty-dismiss and focus restoration.'
@@ -539,6 +570,15 @@ try {
     await action('update', xId, {
       metadata: { ...xEvent.requested, title: 'Scheduled X smoke edited' }
     })
+    // YouTube and X keep separate sections in Upcoming; keep a picture of both.
+    console.log(
+      await requestSmokeCommand(
+        smoke,
+        'capture-page',
+        { name: 'scheduled-upcoming-platforms' },
+        { timeoutMs }
+      )
+    )
     const xEdited = fixture.xSchedules.get(xEvent.providerEventId)
     assert.equal(xEdited.title, 'Scheduled X smoke edited')
     assert.equal(xEdited.manual_publish, true)

@@ -1,3 +1,4 @@
+import { ChevronDownIcon } from '@/components/icons'
 import { useEffect, useState, type ReactElement } from 'react'
 import { Button } from '@/components/ui/button'
 import {
@@ -8,7 +9,14 @@ import {
   DialogHeader,
   DialogTitle
 } from '@/components/ui/dialog'
-import { Field, FieldDescription, FieldGroup, FieldLabel } from '@/components/ui/field'
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+  FieldLegend,
+  FieldSet
+} from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import {
@@ -31,6 +39,8 @@ import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
+import { Kbd } from '@/components/ui/kbd'
+import { PlatformGlyph } from '@/components/platform-glyph'
 import type {
   ScheduledEventMetadata,
   ScheduledStreamEvent,
@@ -38,7 +48,8 @@ import type {
   ScheduledStreamProvider
 } from '@/lib/backend'
 import type { useScheduledStreams } from '@/hooks/use-scheduled-streams'
-import { scheduledProviderLabel } from '@/lib/scheduled-streams'
+import { displayKeyGlyph } from '@/lib/platform'
+import { scheduledProviderLabel, scheduledProviderNoun } from '@/lib/scheduled-streams'
 
 function localWallTime(date: Date): string {
   return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
@@ -51,7 +62,7 @@ export function defaultPlannedEnd(localStart: string): string {
   return localWallTime(new Date(start.getTime() + 2 * 3_600_000))
 }
 
-function freshMetadata(): ScheduledEventMetadata {
+function freshMetadata(provider: ScheduledStreamProvider): ScheduledEventMetadata {
   const local = localWallTime(new Date(Date.now() + 3_600_000))
   return {
     title: '',
@@ -62,24 +73,29 @@ function freshMetadata(): ScheduledEventMetadata {
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     offsetChoice: null,
     thumbnailAssetId: null,
-    plannedEndLocal: null,
+    // X requires a planned end on every update; start from the usual two hours.
+    plannedEndLocal: provider === 'x' ? defaultPlannedEnd(local) : null,
     availableForReplay: true
   }
 }
 
 export function ScheduleStreamDialog({
   event,
+  provider: requestedProvider,
   state,
   onClose
 }: {
   event: ScheduledStreamEvent | null
+  /** The platform section the form was opened from; a saved event keeps its own. */
+  provider?: ScheduledStreamProvider
   state: ReturnType<typeof useScheduledStreams>
   onClose: () => void
 }): ReactElement {
   const providers = state.capabilities?.providers ?? []
-  const [provider, setProvider] = useState<ScheduledStreamProvider>(
+  const [provider] = useState<ScheduledStreamProvider>(
     () =>
       event?.provider ??
+      requestedProvider ??
       providers.find((item) => item.available && item.accounts.length > 0)?.provider ??
       'youtube'
   )
@@ -96,7 +112,9 @@ export function ScheduleStreamDialog({
         }
       : undefined)
   const providerLabel = scheduledProviderLabel(provider)
-  const [metadata, setMetadata] = useState(() => event?.requested ?? freshMetadata())
+  const providerNoun = scheduledProviderNoun(provider)
+  const submitKey = displayKeyGlyph('⌘', document.documentElement.dataset.platform)
+  const [metadata, setMetadata] = useState(() => event?.requested ?? freshMetadata(provider))
   const [accountId, setAccountId] = useState(event?.accountId ?? '')
   const [audience, setAudience] = useState(event ? String(event.requested.madeForKids) : '')
   const [zoneOpen, setZoneOpen] = useState(false)
@@ -278,8 +296,11 @@ export function ScheduleStreamDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>
-              {event?.providerEventId ? 'Edit upcoming stream' : 'Schedule stream'}
+            <DialogTitle className="flex items-center gap-2">
+              <PlatformGlyph platform={provider} />
+              {event?.providerEventId
+                ? `Edit ${providerLabel} ${providerNoun}`
+                : `Schedule on ${providerLabel}`}
             </DialogTitle>
             <DialogDescription>
               {provider === 'x'
@@ -289,37 +310,6 @@ export function ScheduleStreamDialog({
           </DialogHeader>
           <ScrollArea className="min-h-0 overflow-hidden pr-3">
             <FieldGroup>
-              {providers.length > 1 && (
-                <Field>
-                  <FieldLabel htmlFor="schedule-provider">Platform</FieldLabel>
-                  <Select
-                    value={provider}
-                    onValueChange={(value) => {
-                      const next = value as ScheduledStreamProvider
-                      setProvider(next)
-                      setAccountId('')
-                      if (next === 'x' && !metadata.plannedEndLocal) {
-                        patch({ plannedEndLocal: defaultPlannedEnd(metadata.localStart) })
-                      }
-                      setDirty(true)
-                    }}
-                    disabled={Boolean(event)}
-                  >
-                    <SelectTrigger id="schedule-provider" aria-label="Platform">
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectGroup>
-                        {providers.map((item) => (
-                          <SelectItem key={item.provider} value={item.provider}>
-                            {scheduledProviderLabel(item.provider)}
-                          </SelectItem>
-                        ))}
-                      </SelectGroup>
-                    </SelectContent>
-                  </Select>
-                </Field>
-              )}
               <Field>
                 <FieldLabel htmlFor="schedule-channel">
                   {provider === 'x' ? 'X account' : 'YouTube channel'}
@@ -377,144 +367,165 @@ export function ScheduleStreamDialog({
                   {Array.from(metadata.description).length}/5,000 characters
                 </FieldDescription>
               </Field>
-              <Field>
-                <FieldLabel htmlFor="schedule-start">Date and time</FieldLabel>
-                <Input
-                  id="schedule-start"
-                  type="datetime-local"
-                  value={metadata.localStart}
-                  onChange={(e) => patch({ localStart: e.target.value })}
-                />
-              </Field>
-              {provider === 'x' && (
-                <Field>
-                  <FieldLabel htmlFor="schedule-end">Planned end</FieldLabel>
-                  <Input
-                    id="schedule-end"
-                    type="datetime-local"
-                    value={metadata.plannedEndLocal ?? ''}
-                    onChange={(e) => patch({ plannedEndLocal: e.target.value || null })}
-                  />
-                  <FieldDescription>
-                    {plannedEndError || 'X shows the planned length. Stop whenever you like.'}
-                  </FieldDescription>
-                </Field>
-              )}
-              <Field>
-                <FieldLabel>Time zone</FieldLabel>
-                <Popover open={zoneOpen} onOpenChange={setZoneOpen}>
-                  <PopoverTrigger asChild>
-                    <Button variant="outline" aria-label="Time zone" aria-haspopup="dialog">
-                      {metadata.timeZone}
-                    </Button>
-                  </PopoverTrigger>
-                  <PopoverContent className="p-0">
-                    <Command>
-                      <CommandInput placeholder="Search time zones" />
-                      <CommandList>
-                        <CommandEmpty>No time zones found.</CommandEmpty>
-                        <CommandGroup>
-                          {zones.map((zone) => (
-                            <CommandItem
-                              key={zone}
-                              value={zone}
-                              onSelect={() => {
-                                patch({ timeZone: zone })
-                                setZoneOpen(false)
-                              }}
-                            >
-                              {zone}
-                            </CommandItem>
-                          ))}
-                        </CommandGroup>
-                      </CommandList>
-                    </Command>
-                  </PopoverContent>
-                </Popover>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="schedule-offset">Repeated-time offset</FieldLabel>
-                <Select
-                  value={metadata.offsetChoice ?? 'ask'}
-                  onValueChange={(value) =>
-                    patch({ offsetChoice: value === 'ask' ? null : (value as 'earlier' | 'later') })
-                  }
-                >
-                  <SelectTrigger id="schedule-offset" aria-label="Repeated-time offset">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="ask">Ask if clocks repeat this time</SelectItem>
-                      <SelectItem value="earlier">Earlier offset</SelectItem>
-                      <SelectItem value="later">Later offset</SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                <FieldDescription>
-                  {timeError || `${resolved} · ${metadata.timeZone}`}
-                </FieldDescription>
-              </Field>
-              {provider === 'x' && (
-                <Field orientation="horizontal">
-                  <Switch
-                    id="schedule-replay"
-                    checked={metadata.availableForReplay ?? true}
-                    onCheckedChange={(checked) => patch({ availableForReplay: checked })}
-                  />
-                  <FieldLabel htmlFor="schedule-replay">Keep replay available</FieldLabel>
-                </Field>
-              )}
-              {provider === 'youtube' && (
-                <>
+              <FieldSet>
+                <FieldLegend className="text-[11px] font-semibold text-subtle" variant="label">
+                  When
+                </FieldLegend>
+                <FieldGroup>
                   <Field>
-                    <FieldLabel htmlFor="schedule-privacy">Visibility</FieldLabel>
+                    <FieldLabel htmlFor="schedule-start">Date and time</FieldLabel>
+                    <Input
+                      id="schedule-start"
+                      type="datetime-local"
+                      value={metadata.localStart}
+                      onChange={(e) => patch({ localStart: e.target.value })}
+                    />
+                  </Field>
+                  {provider === 'x' && (
+                    <Field>
+                      <FieldLabel htmlFor="schedule-end">Planned end</FieldLabel>
+                      <Input
+                        id="schedule-end"
+                        type="datetime-local"
+                        value={metadata.plannedEndLocal ?? ''}
+                        onChange={(e) => patch({ plannedEndLocal: e.target.value || null })}
+                      />
+                      <FieldDescription>
+                        {plannedEndError || 'X shows the planned length. Stop whenever you like.'}
+                      </FieldDescription>
+                    </Field>
+                  )}
+                  <Field>
+                    <FieldLabel>Time zone</FieldLabel>
+                    <Popover open={zoneOpen} onOpenChange={setZoneOpen}>
+                      <PopoverTrigger asChild>
+                        <Button
+                          aria-haspopup="dialog"
+                          aria-label="Time zone"
+                          className="justify-between font-normal"
+                          variant="outline"
+                        >
+                          {metadata.timeZone}
+                          <ChevronDownIcon data-icon="inline-end" />
+                        </Button>
+                      </PopoverTrigger>
+                      <PopoverContent className="p-0">
+                        <Command>
+                          <CommandInput placeholder="Search time zones" />
+                          <CommandList>
+                            <CommandEmpty>No time zones found.</CommandEmpty>
+                            <CommandGroup>
+                              {zones.map((zone) => (
+                                <CommandItem
+                                  key={zone}
+                                  value={zone}
+                                  onSelect={() => {
+                                    patch({ timeZone: zone })
+                                    setZoneOpen(false)
+                                  }}
+                                >
+                                  {zone}
+                                </CommandItem>
+                              ))}
+                            </CommandGroup>
+                          </CommandList>
+                        </Command>
+                      </PopoverContent>
+                    </Popover>
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor="schedule-offset">Repeated-time offset</FieldLabel>
                     <Select
-                      value={metadata.privacy}
+                      value={metadata.offsetChoice ?? 'ask'}
                       onValueChange={(value) =>
-                        patch({ privacy: value as ScheduledEventMetadata['privacy'] })
+                        patch({
+                          offsetChoice: value === 'ask' ? null : (value as 'earlier' | 'later')
+                        })
                       }
                     >
-                      <SelectTrigger id="schedule-privacy" aria-label="Visibility">
+                      <SelectTrigger id="schedule-offset" aria-label="Repeated-time offset">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectGroup>
-                          <SelectItem value="private">Private</SelectItem>
-                          <SelectItem value="unlisted">Unlisted</SelectItem>
-                          <SelectItem value="public">Public</SelectItem>
+                          <SelectItem value="ask">Ask if clocks repeat this time</SelectItem>
+                          <SelectItem value="earlier">Earlier offset</SelectItem>
+                          <SelectItem value="later">Later offset</SelectItem>
                         </SelectGroup>
                       </SelectContent>
                     </Select>
+                    <FieldDescription>
+                      {timeError || `${resolved} · ${metadata.timeZone}`}
+                    </FieldDescription>
                   </Field>
-                  <Field>
-                    <FieldLabel htmlFor="schedule-audience">Made for kids?</FieldLabel>
-                    <Select
-                      value={audience}
-                      disabled={Boolean(published)}
-                      onValueChange={(value) => {
-                        setAudience(value)
-                        setDirty(true)
-                      }}
-                    >
-                      <SelectTrigger id="schedule-audience" aria-label="Made for kids">
-                        <SelectValue placeholder="Choose audience" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        <SelectGroup>
-                          <SelectItem value="false">No, not made for kids</SelectItem>
-                          <SelectItem value="true">Yes, made for kids</SelectItem>
-                        </SelectGroup>
-                      </SelectContent>
-                    </Select>
-                    {event?.providerEventId && (
-                      <FieldDescription>
-                        Change audience in YouTube Studio, then refresh.
-                      </FieldDescription>
-                    )}
-                  </Field>
-                </>
-              )}
+                </FieldGroup>
+              </FieldSet>
+              <FieldSet>
+                <FieldLegend className="text-[11px] font-semibold text-subtle" variant="label">
+                  {providerLabel} settings
+                </FieldLegend>
+                <FieldGroup>
+                  {provider === 'x' ? (
+                    <Field orientation="horizontal">
+                      <Switch
+                        id="schedule-replay"
+                        checked={metadata.availableForReplay ?? true}
+                        onCheckedChange={(checked) => patch({ availableForReplay: checked })}
+                      />
+                      <FieldLabel htmlFor="schedule-replay">Keep replay available</FieldLabel>
+                    </Field>
+                  ) : (
+                    <>
+                      <Field>
+                        <FieldLabel htmlFor="schedule-privacy">Visibility</FieldLabel>
+                        <Select
+                          value={metadata.privacy}
+                          onValueChange={(value) =>
+                            patch({ privacy: value as ScheduledEventMetadata['privacy'] })
+                          }
+                        >
+                          <SelectTrigger id="schedule-privacy" aria-label="Visibility">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectItem value="private">Private</SelectItem>
+                              <SelectItem value="unlisted">Unlisted</SelectItem>
+                              <SelectItem value="public">Public</SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                      </Field>
+                      <Field>
+                        <FieldLabel htmlFor="schedule-audience">Made for kids?</FieldLabel>
+                        <Select
+                          value={audience}
+                          disabled={Boolean(published)}
+                          onValueChange={(value) => {
+                            setAudience(value)
+                            setDirty(true)
+                          }}
+                        >
+                          <SelectTrigger id="schedule-audience" aria-label="Made for kids">
+                            <SelectValue placeholder="Choose audience" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectGroup>
+                              <SelectItem value="false">No, not made for kids</SelectItem>
+                              <SelectItem value="true">Yes, made for kids</SelectItem>
+                            </SelectGroup>
+                          </SelectContent>
+                        </Select>
+                        {event?.providerEventId && (
+                          <FieldDescription>
+                            Change audience in YouTube Studio, then refresh.
+                          </FieldDescription>
+                        )}
+                      </Field>
+                    </>
+                  )}
+                </FieldGroup>
+              </FieldSet>
               <Field>
                 <FieldLabel>Thumbnail</FieldLabel>
                 {preview && (
@@ -619,11 +630,9 @@ export function ScheduleStreamDialog({
               {saving
                 ? 'Saving…'
                 : published
-                  ? provider === 'x'
-                    ? 'Update broadcast'
-                    : 'Update event'
+                  ? `Update ${providerNoun}`
                   : `Schedule on ${providerLabel}`}
-              <span aria-hidden="true">⌘↵</span>
+              <Kbd aria-hidden="true">{submitKey}↵</Kbd>
             </Button>
           </DialogFooter>
         </DialogContent>
