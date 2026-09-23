@@ -727,15 +727,28 @@ fn avfoundation_microphone_picker_devices(
 }
 
 fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
+    // The capture worker and meter only open stable UID identities. An
+    // index-only row (FFmpeg without the Videorc AVF identity patch) can never
+    // record or meter, so it is listed as unavailable with the reason instead
+    // of as a selectable dead end.
+    let (id, status, detail) = match device.uid_hex.as_ref() {
+        Some(uid) => (
+            format!("microphone:avfoundation-uid:{uid}"),
+            DeviceStatus::Available,
+            "FFmpeg avfoundation fallback; native CoreAudio probe did not return an available input.",
+        ),
+        None => (
+            format!("microphone:avfoundation:{}", device.index),
+            DeviceStatus::Unavailable,
+            "This FFmpeg build cannot report a stable microphone identity. Rebuild the bundled FFmpeg with the Videorc AVF capture clock patch.",
+        ),
+    };
     Device {
-        id: device.uid_hex.as_ref().map(|uid| format!("microphone:avfoundation-uid:{uid}")).unwrap_or_else(|| format!("microphone:avfoundation:{}", device.index)),
+        id,
         name: device.name.clone(),
         kind: DeviceKind::Microphone,
-        status: DeviceStatus::Available,
-        detail: Some(
-            "FFmpeg avfoundation fallback; native CoreAudio probe did not return an available input."
-                .to_string(),
-        ),
+        status,
+        detail: Some(detail.to_string()),
         width: None,
         height: None,
     }
@@ -996,6 +1009,21 @@ mod tests {
         assert_eq!(devices.len(), 1);
         assert_eq!(devices[0].id, "microphone:avfoundation:2");
         assert_eq!(devices[0].name, "MacBook Pro Microphone");
+        // No stable identity: the worker and meter reject index IDs, so the
+        // row must not be offered as a selectable microphone.
+        assert_eq!(devices[0].status, DeviceStatus::Unavailable);
+        assert!(
+            devices[0]
+                .detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("stable microphone identity")
+        );
+
+        let mut with_uid = av_devices.clone();
+        with_uid[1].uid_hex = Some("6d6963".into());
+        let devices = avfoundation_microphone_picker_devices(&with_uid, false);
+        assert_eq!(devices[0].id, "microphone:avfoundation-uid:6d6963");
         assert_eq!(devices[0].status, DeviceStatus::Available);
         assert!(
             devices[0]

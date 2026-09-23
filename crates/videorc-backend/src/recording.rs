@@ -4650,7 +4650,7 @@ async fn start_session_with_timeline(
     // recording without its reaper.
     let mut recording = state.recording.lock().await;
     let mut confirmed_sources = params.sources.clone();
-    confirmed_sources.microphone_id = match capture.microphone.as_ref() {
+    let live_microphone_id = match capture.microphone.as_ref() {
         Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
             Some(format!("microphone:avfoundation-uid:{uid_hex}"))
         }
@@ -4667,12 +4667,23 @@ async fn start_session_with_timeline(
             .and_then(|audio| audio.status().device_id),
         None => None,
     };
+    // The input is always resolved from the picked ID, so a live producer
+    // reports that pick. A fallback path (AVFoundation UID after a missed
+    // CoreAudio warm-up) is kept as an alias: the renderer persists the
+    // confirmed ID and must never be handed an identity outside devices.list.
+    confirmed_sources.microphone_id = live_microphone_id
+        .as_ref()
+        .and(params.sources.microphone_id.clone())
+        .or_else(|| live_microphone_id.clone());
     let sources_snapshot = {
         let mut sources = state
             .live_source_switch
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         sources.start(session_id.clone(), confirmed_sources);
+        if let Some(live_microphone_id) = live_microphone_id {
+            sources.alias_microphone(live_microphone_id);
+        }
         sources.set_output_process_id(pending_active.pid);
         #[cfg(target_os = "windows")]
         let replaceable_video = pending_active.windows_d3d11_media.is_some()

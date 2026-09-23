@@ -200,6 +200,11 @@ pub struct SourceSwitchCoordinator {
     stopping: bool,
     deadline: Option<Instant>,
     cancellation: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// `(live producer ID, confirmed ID)` when session start opened the picked
+    /// microphone through a fallback path (for example the AVFoundation UID of
+    /// a CoreAudio input that missed warm-up). The renderer persists the
+    /// confirmed ID, so it must stay the one the user picked from devices.list.
+    microphone_alias: Option<(String, String)>,
 }
 
 impl SourceSwitchCoordinator {
@@ -285,6 +290,32 @@ impl SourceSwitchCoordinator {
     pub fn set_output_process_id(&mut self, pid: u32) {
         if let Some(snapshot) = self.snapshot.as_mut() {
             snapshot.output_process_id = Some(pid);
+        }
+    }
+
+    /// Record that the confirmed microphone is being captured under a
+    /// different live producer identity. A no-op when the IDs already agree.
+    pub fn alias_microphone(&mut self, live_id: String) {
+        let Some(confirmed) = self
+            .snapshot
+            .as_ref()
+            .and_then(|snapshot| snapshot.confirmed.microphone_id.clone())
+        else {
+            return;
+        };
+        if confirmed != live_id {
+            self.microphone_alias = Some((live_id, confirmed));
+        }
+    }
+
+    /// True when `live_id` is the producer currently standing in for the
+    /// confirmed microphone `requested_id`.
+    pub fn microphone_is_aliased(&self, live_id: Option<&str>, requested_id: Option<&str>) -> bool {
+        match (live_id, requested_id, self.microphone_alias.as_ref()) {
+            (Some(live), Some(requested), Some((alias_live, alias_confirmed))) => {
+                live == alias_live && requested == alias_confirmed
+            }
+            _ => false,
         }
     }
 
@@ -602,6 +633,8 @@ impl SourceSwitchCoordinator {
         let snapshot = self.snapshot.as_mut().expect("validated session");
         snapshot.confirmed.microphone_id = request.device_id.clone();
         snapshot.source_revision = snapshot.source_revision.saturating_add(1);
+        // The committed producer opened the requested ID itself.
+        self.microphone_alias = None;
         self.finish(request, SwitchStage::Applied, None)
     }
 
@@ -611,15 +644,16 @@ impl SourceSwitchCoordinator {
         device_id: Option<&str>,
     ) -> Result<(), SwitchError> {
         self.validate_commit(request)?;
-        if self
+        let confirmed = self
             .snapshot
             .as_ref()
             .expect("validated session")
             .confirmed
             .microphone_id
-            .as_deref()
-            != device_id
-        {
+            .as_deref();
+        // Restoring reopens the previous producer, which may be the fallback
+        // identity standing in for the confirmed microphone.
+        if confirmed != device_id && !self.microphone_is_aliased(device_id, confirmed) {
             return Err(SwitchError::InvalidRequest);
         }
         Ok(())
@@ -741,21 +775,25 @@ fn screen_health(
 }
 
 pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, SwitchError> {
-    // Preview reads do not hold the recording mutex or block Stop behind native work.
-    let recording = state.recording.lock().await;
-    let (stopping, audio_handle) = recording
-        .as_ref()
-        .filter(|active| active.session_id == session_id)
-        .map(|active| {
-            (
-                active.stop_requested,
-                active
-                    .native_audio
-                    .as_ref()
-                    .map(|audio| audio.switch_handle()),
-            )
-        })
-        .ok_or(SwitchError::InactiveSession)?;
+    // Preview reads do not hold the recording mutex or block Stop behind native
+    // work: copy what is needed and release it before waiting on preview or
+    // compositor locks, which a layout commit or source prepare can hold.
+    let (stopping, audio_handle) = {
+        let recording = state.recording.lock().await;
+        recording
+            .as_ref()
+            .filter(|active| active.session_id == session_id)
+            .map(|active| {
+                (
+                    active.stop_requested,
+                    active
+                        .native_audio
+                        .as_ref()
+                        .map(|audio| audio.switch_handle()),
+                )
+            })
+            .ok_or(SwitchError::InactiveSession)?
+    };
     let camera_slot = state.preview_camera.lock().await;
     let capture_slot = state.preview_screen.lock().await;
     let compositor = state.compositor.lock().await;
@@ -843,7 +881,11 @@ pub async fn switch(
                     && let Some(audio) = active.native_audio.as_ref()
                 {
                     let status = audio.status();
-                    if status.device_id == request.device_id
+                    if (status.device_id == request.device_id
+                        || coordinator.microphone_is_aliased(
+                            status.device_id.as_deref(),
+                            request.device_id.as_deref(),
+                        ))
                         && (request.device_id.is_none()
                             || audio.input_state() == crate::audio::NativeAudioInputState::Live)
                     {
@@ -1016,6 +1058,59 @@ mod tests {
         );
         request.device_id = None;
         assert!(coordinator.validate_video_target(&request).is_ok());
+    }
+
+    #[test]
+    fn fallback_microphone_keeps_the_picked_identity_and_still_restores() {
+        let picked = "microphone:coreaudio:7";
+        let fallback = "microphone:avfoundation-uid:6d6963";
+        let mut coordinator = coordinator();
+        let mut sources = coordinator.snapshot("session").unwrap().confirmed;
+        sources.microphone_id = Some(picked.into());
+        coordinator.start("session".into(), sources);
+        coordinator.enable_microphone();
+        coordinator.alias_microphone(fallback.into());
+        assert_eq!(
+            coordinator
+                .snapshot("session")
+                .unwrap()
+                .confirmed
+                .microphone_id
+                .as_deref(),
+            Some(picked),
+            "the renderer persists only the ID picked from devices.list"
+        );
+        assert!(coordinator.microphone_is_aliased(Some(fallback), Some(picked)));
+        assert!(!coordinator.microphone_is_aliased(Some(fallback), Some("microphone:coreaudio:8")));
+
+        let mut switch = request("switch");
+        switch.device_id = Some("microphone:coreaudio:8".into());
+        coordinator.admit(&switch).unwrap();
+        coordinator.cancellation(&switch).unwrap();
+        // A failed switch reopens the fallback producer that stood in for the pick.
+        assert!(
+            coordinator
+                .validate_microphone_restoration(&switch, Some(fallback))
+                .is_ok()
+        );
+        assert!(
+            coordinator
+                .validate_microphone_restoration(&switch, Some("microphone:coreaudio:9"))
+                .is_err()
+        );
+        coordinator.commit_microphone(&switch).unwrap();
+        assert!(
+            !coordinator.microphone_is_aliased(Some(fallback), Some(picked)),
+            "a committed producer opened its own ID"
+        );
+
+        // Matching IDs never alias.
+        let mut direct = self::coordinator();
+        let mut sources = direct.snapshot("session").unwrap().confirmed;
+        sources.microphone_id = Some(picked.into());
+        direct.start("session".into(), sources);
+        direct.alias_microphone(picked.into());
+        assert!(!direct.microphone_is_aliased(Some(picked), Some(picked)));
     }
 
     #[test]
