@@ -141,7 +141,7 @@ export function captionReaderAppearance(styleId: CaptionStyleId): {
       // The glass plate is its translucent colour alone: the window already
       // sits on real glass, and CSS backdrop-filter on a vibrancy window
       // wedged the compositor (plan 050, no backdrop-filter in the renderer).
-      hasPlate && 'border border-white/10 shadow-xl',
+      hasPlate && 'border border-white/10',
       definition.wide && 'w-full'
     ),
     style: {
