@@ -90,7 +90,13 @@ function WorkspaceTabFallback(): ReactElement {
 // Screens move onto the flush pane layout one slice at a time (plan 050,
 // S12–S17). Until a screen is flush it keeps a 16 px gutter here; the last
 // screen slice deletes this frame.
-const FLUSH_TABS: ReadonlySet<WorkspaceTab> = new Set<WorkspaceTab>(['studio', 'live'])
+const FLUSH_TABS: ReadonlySet<WorkspaceTab> = new Set<WorkspaceTab>([
+  'studio',
+  'live',
+  'sources',
+  'layouts',
+  'assets'
+])
 
 function TabFrame({ tab, children }: { tab: WorkspaceTab; children: ReactNode }): ReactElement {
   if (FLUSH_TABS.has(tab)) {

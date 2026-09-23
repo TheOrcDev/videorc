@@ -12,7 +12,7 @@ import {
 } from '@/components/icons'
 import { useRef, useState, type ReactElement } from 'react'
 
-import { ConfigGrid } from '@/components/page'
+import { PageStack } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { SourceSelect } from '@/components/source-select'
@@ -212,7 +212,7 @@ export function SourcesTab(): ReactElement {
   }
 
   return (
-    <ConfigGrid>
+    <PageStack>
       <PanelSection
         action={
           <Button
@@ -233,7 +233,6 @@ export function SourcesTab(): ReactElement {
             {refreshing ? 'Refreshing…' : 'Refresh'}
           </Button>
         }
-        className="lg:col-span-2"
         description="Pick what gets captured. Unavailable devices need permission or reconnection."
         icon={DisplayIcon}
         title="Capture sources"
@@ -365,7 +364,7 @@ export function SourcesTab(): ReactElement {
         ) : null}
 
         {import.meta.env.DEV ? (
-          <div className="flex items-center justify-between gap-3 rounded-row border border-dashed bg-muted/20 px-3 py-2">
+          <div className="flex items-center justify-between gap-3 rounded-row border border-border bg-foreground/[0.03] px-3 py-2">
             <div className="flex min-w-0 flex-col">
               <span className="text-sm font-medium">Synthetic diagnostic source</span>
               <span className="text-xs text-muted-foreground">
@@ -399,7 +398,6 @@ export function SourcesTab(): ReactElement {
       </PanelSection>
 
       <PanelSection
-        className="lg:col-span-2"
         description="Live input meter with manual source gain. No automatic processing is applied."
         icon={WaveformIcon}
         title="Microphone mixer"
@@ -431,7 +429,7 @@ export function SourcesTab(): ReactElement {
           )}
           {selectedMicrophone ? selectedMicrophone.name : 'No microphone selected'}
         </div>
-        <div className="grid gap-2 rounded-row border bg-muted/30 px-3 py-2">
+        <div className="grid gap-2 rounded-row border border-border bg-foreground/[0.03] px-3 py-2">
           <div className="flex items-center justify-between gap-3">
             <span className="text-xs font-medium text-muted-foreground">Mute</span>
             <Switch
@@ -481,7 +479,7 @@ export function SourcesTab(): ReactElement {
                 }))
               }
             />
-            <div className="grid gap-2 rounded-row border border-border/70 bg-muted/20 p-2.5">
+            <div className="grid gap-2 border-t border-border pt-2">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <Badge
                   variant={
@@ -554,6 +552,6 @@ export function SourcesTab(): ReactElement {
           </div>
         </div>
       </PanelSection>
-    </ConfigGrid>
+    </PageStack>
   )
 }
