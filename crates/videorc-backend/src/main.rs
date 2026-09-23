@@ -9,6 +9,7 @@ mod account;
 mod ai;
 mod atomic_file;
 mod audio;
+mod audio_capture_adapter;
 mod backend_authority;
 mod camera_capture;
 mod captions;
@@ -36,6 +37,7 @@ mod live_layout;
 mod live_pipeline;
 mod live_render;
 mod live_scene;
+mod live_source_switch;
 mod metal_compositor;
 mod mpeg_ts;
 mod native_preview_host;
@@ -69,6 +71,7 @@ mod scheduled_streams_service;
 mod scheduled_youtube;
 mod screen_capture;
 mod secrets;
+mod session_audio;
 mod session_ops;
 mod source_mask;
 mod source_registry;
@@ -85,6 +88,8 @@ mod video_toolbox_encoder;
 mod videorc_api;
 mod viewer_stats;
 mod warm_microphone;
+#[allow(dead_code)]
+mod windows_capture_owner;
 #[allow(dead_code)]
 mod windows_d3d11_capture;
 #[allow(dead_code)]
@@ -4724,6 +4729,10 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "preview.live.start"
         | "preview.live.stop" => Some(DEFAULT_MUTATION_POLICY),
 
+        "session.source.switch" => Some(Mutation {
+            max_execution_age: live_source_switch::SOURCE_SWITCH_EXECUTION_TIMEOUT,
+        }),
+
         "scene.layout.apply_live" | "scene.layout.apply_preview" | "scene.source.device.switch" => {
             Some(Mutation {
                 max_execution_age: WEBSOCKET_LIVE_LAYOUT_MAX_EXECUTION_AGE,
@@ -4848,6 +4857,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "noiseCleanup.list"
         | "ai.artifacts.list"
         | "preview.live.status"
+        | "session.sources.get"
         | "recording.status"
         | "stream.targets.snapshot" => Some(Observation),
 
@@ -7002,6 +7012,31 @@ async fn websocket_session_with_handler_role_and_redaction(
         return;
     }
 
+    if role != BackendRole::Remote {
+        let session_id = state
+            .recording
+            .lock()
+            .await
+            .as_ref()
+            .map(|active| active.session_id.clone());
+        if let Some(session_id) = session_id
+            && let Ok(snapshot) = live_source_switch::get(&state, &session_id).await
+            && let Ok(text) =
+                serde_json::to_string(&ServerEvent::new("session.sources.changed", snapshot))
+            && !send_tracked_reliable_websocket_item(
+                &outgoing_tx,
+                &reliable_metrics,
+                Message::Text(text.into()),
+                &slow_pressure,
+            )
+            .await
+        {
+            pressure_watchdog_task.abort();
+            writer_task.abort();
+            return;
+        }
+    }
+
     let event_task = tokio::spawn(relay_websocket_events(
         state.clone(),
         events,
@@ -8326,6 +8361,11 @@ async fn handle_text_message_with_role(
                 state.smoke_rpc_enabled,
             );
             let devices = devices::list_devices(&ffmpeg_path).await;
+            state
+                .live_source_switch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .observe_devices(&devices.devices);
             state.emit_event("devices.changed", &devices);
             ServerResponse::ok(command.id, devices)
         }
@@ -8897,6 +8937,26 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "session.sources.get" => match serde_json::from_value::<
+            live_source_switch::SessionSourcesParams,
+        >(command.params)
+        {
+            Ok(params) => match live_source_switch::get(state, &params.session_id).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, error.code(), error.message()),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
+        "session.source.switch" => match serde_json::from_value::<
+            live_source_switch::SourceSwitchParams,
+        >(command.params)
+        {
+            Ok(params) => match live_source_switch::switch(state, params).await {
+                Ok(status) => ServerResponse::ok(command.id, status),
+                Err(error) => ServerResponse::error(command.id, error.code(), error.message()),
+            },
+            Err(error) => ServerResponse::error(command.id, "invalid-params", error.to_string()),
+        },
         "scene.source.device.switch" => {
             match serde_json::from_value::<protocol::SceneConfigParams>(command.params) {
                 Ok(params) => {

@@ -14,6 +14,7 @@ import {
   defaultCaptureConfig,
   formatMeasuredAudioLag,
   legacyStreamKeyMigrationCandidates,
+  mergeSourceKind,
   hasSelectedCameraSource,
   hasSelectedScreenSource,
   isCapturePickerDevice,
@@ -1640,6 +1641,59 @@ describe('buildCaptureSources / buildCameraSources / buildMicrophoneSources', ()
     const cleared = buildMicrophoneSources({ microphoneId: 'mic:1' }, microphones, undefined)
     expect(cleared.microphoneId).toBeUndefined()
     expect(cleared.microphoneName).toBeUndefined()
+  })
+})
+
+describe('mergeSourceKind', () => {
+  const stale: SourceSelection = {
+    screenId: 'screen:1',
+    screenName: 'Old Screen',
+    cameraId: 'cam:old',
+    cameraName: 'Old Cam',
+    microphoneId: 'mic:1',
+    microphoneName: 'Old Mic'
+  }
+  const latest: SourceSelection = {
+    screenId: 'screen:2',
+    screenName: 'Confirmed Screen',
+    cameraId: 'cam:new',
+    cameraName: 'Confirmed Cam',
+    microphoneId: 'mic:1',
+    microphoneName: 'Old Mic'
+  }
+
+  it('applies only the picked kind onto the latest selection', () => {
+    const picked = { ...stale, microphoneId: 'mic:2', microphoneName: 'New Mic' }
+    expect(mergeSourceKind(latest, picked, 'microphone')).toEqual({
+      ...latest,
+      microphoneId: 'mic:2',
+      microphoneName: 'New Mic'
+    })
+    const camera = { ...stale, cameraId: undefined, cameraName: undefined }
+    expect(mergeSourceKind(latest, camera, 'camera')).toEqual({
+      ...latest,
+      cameraId: undefined,
+      cameraName: undefined
+    })
+  })
+
+  it('moves the whole capture identity together', () => {
+    const picked: SourceSelection = {
+      ...stale,
+      screenId: undefined,
+      screenName: undefined,
+      windowId: 'window:9',
+      windowName: 'Editor',
+      testPattern: false
+    }
+    expect(mergeSourceKind({ ...latest, testPattern: true }, picked, 'capture')).toEqual({
+      ...latest,
+      screenId: undefined,
+      screenName: undefined,
+      windowId: 'window:9',
+      windowName: 'Editor',
+      testPattern: false
+    })
   })
 })
 

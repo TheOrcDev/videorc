@@ -3,6 +3,7 @@ import type { MicVisualFrameBuffer } from './mic-visual-frame'
 import { amplitudeToDb, approachMeterLevel, dbToMeterLevel, gatedDbToMeterLevel } from './mic-meter'
 import {
   createMicStreamController,
+  registerVisualMicrophoneSuspension,
   microphoneStreamAcquisitionEnabled,
   type MicMediaDevicesLike,
   type MicMediaStreamLike,
@@ -61,6 +62,8 @@ export type MicVisualPipelineDependencies<S extends MicMediaStreamLike> = {
 export type MicVisualSource = Readonly<{
   /** Stable backend device identity; acquisition still matches Chromium by label. */
   selectionKey?: string
+  strictDevice?: boolean
+  resumeEpoch?: number
   deviceName: string | undefined
   permissionStatus: MediaAccessStatus | undefined
   enabled: boolean
@@ -372,7 +375,7 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
       publishLifecycle(Object.freeze({ status: 'acquiring', active: false }))
     }
 
-    void controller.open(source.deviceName).then((stream) => {
+    void controller.open(source.deviceName, source.strictDevice).then((stream) => {
       if (
         disposed ||
         pendingSession !== pending ||
@@ -425,6 +428,16 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
     })
   }
 
+  const unregisterSuspension = registerVisualMicrophoneSuspension(() => {
+    generation += 1
+    releaseGeneration += 1
+    desiredKey = null
+    const pending = pendingSession
+    pendingSession = null
+    stopPendingSession(pending)
+    retireSelectedDevice('idle')
+  })
+
   const applyConfiguration = (): void => {
     const source = configuredSource
     if (
@@ -436,7 +449,7 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
       return
     }
 
-    const nextKey = source.selectionKey ?? source.deviceName ?? ''
+    const nextKey = `${source.selectionKey ?? source.deviceName ?? ''}:${source.strictDevice === true}`
     if (desiredKey === nextKey) {
       // Cancels a StrictMode cleanup scheduled between identical effect
       // setups without reopening the device.
@@ -539,6 +552,7 @@ export function createMicVisualPipeline<S extends MicMediaStreamLike>(
         return
       }
       disposed = true
+      unregisterSuspension()
       configuredSource = null
       demandCount = 0
       generation += 1

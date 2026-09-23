@@ -1,4 +1,6 @@
 import type {
+  SessionSources,
+  SourceSwitchParams,
   BackendHealth,
   ScheduledStreamEvent,
   ScheduledStreamOperation,
@@ -96,6 +98,8 @@ type LayoutTransactionResult = LiveLayoutApplyStatus & {
  * overload while they are migrated incrementally.
  */
 export interface BackendRpcMethodMap {
+  'session.sources.get': BackendRpcDefinition<{ sessionId: string }, SessionSources>
+  'session.source.switch': BackendRpcDefinition<SourceSwitchParams, SessionSources>
   'scheduledStreams.resolveTime': BackendRpcDefinition<
     { localStart: string; timeZone: string; offsetChoice?: string | null },
     { startUtc: string }
@@ -1105,7 +1109,12 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
     auxiliaryEncoderAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
     generation: optionalSchema(nonNegativeInteger),
     captureBackend: optionalSchema(
-      enumSchema(['desktop-duplication', 'windows-graphics-capture-monitor', 'legacy-ffmpeg'])
+      enumSchema([
+        'desktop-duplication',
+        'windows-graphics-capture-monitor',
+        'legacy-ffmpeg',
+        'preview-bgra-upload'
+      ])
     ),
     cursorMode: optionalSchema(
       enumSchema(['embedded', 'separate', 'excluded-wgc', 'disabled-fallback'])
@@ -1842,7 +1851,127 @@ const scheduledMutationSchema = objectSchema(
   { allowUnknown: false }
 )
 
+const sessionSourceKindSchema = enumSchema(['capture', 'camera', 'microphone'])
+const sourceSwitchOperationSchema = objectSchema(
+  {
+    requestId: boundedString,
+    kind: sessionSourceKindSchema,
+    deviceId: nullableSchema(boundedString),
+    stage: enumSchema([
+      'admitted',
+      'preparing',
+      'restoring',
+      'committing',
+      'applied',
+      'failed',
+      'cancelled'
+    ]),
+    reason: nullableSchema(stringSchema({ maxLength: 16384 })),
+    previousSource: enumSchema(['preserved', 'restored', 'unavailable']),
+    outputObserved: booleanSchema,
+    outputSuperseded: optionalSchema(booleanSchema)
+  },
+  { allowUnknown: false }
+)
+const sessionSourcesSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    sourceRevision: nonNegativeInteger,
+    outputProcessId: nullableSchema(nonNegativeInteger),
+    confirmed: objectSchema(
+      {
+        screenId: nullableSchema(boundedString),
+        windowId: nullableSchema(boundedString),
+        cameraId: nullableSchema(boundedString),
+        microphoneId: nullableSchema(boundedString),
+        testPattern: booleanSchema
+      },
+      { allowUnknown: false }
+    ),
+    health: arraySchema(
+      objectSchema(
+        {
+          kind: sessionSourceKindSchema,
+          deviceId: nullableSchema(boundedString),
+          health: enumSchema(['none', 'starting', 'ready', 'unavailable', 'unknown'])
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 3 }
+    ),
+    pending: nullableSchema(sourceSwitchOperationSchema),
+    lastOperation: nullableSchema(sourceSwitchOperationSchema),
+    capabilities: arraySchema(
+      objectSchema(
+        {
+          kind: sessionSourceKindSchema,
+          supported: booleanSchema,
+          allowsNone: optionalSchema(booleanSchema),
+          reason: nullableSchema(stringSchema({ maxLength: 16384 }))
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 3 }
+    ),
+    audio: nullableSchema(
+      objectSchema(
+        {
+          sampleCursor: nonNegativeInteger,
+          generation: nonNegativeInteger,
+          deviceId: nullableSchema(boundedString),
+          deviceName: stringSchema({ maxLength: 16384 }),
+          selectedInput: booleanSchema,
+          counters: objectSchema(
+            {
+              capturedFrames: nonNegativeInteger,
+              generatedFrames: nonNegativeInteger,
+              discardedFrames: nonNegativeInteger,
+              droppedFrames: nonNegativeInteger
+            },
+            { allowUnknown: false }
+          ),
+          lastCommit: nullableSchema(
+            objectSchema(
+              {
+                sessionId: boundedString,
+                requestId: boundedString,
+                generation: nonNegativeInteger,
+                cutoverSample: nonNegativeInteger,
+                deviceId: nullableSchema(boundedString),
+                outputObserved: booleanSchema
+              },
+              { allowUnknown: false }
+            )
+          )
+        },
+        { allowUnknown: false }
+      )
+    )
+  },
+  { allowUnknown: false }
+)
+
 const runtimeContracts = {
+  'session.sources.get': {
+    params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
+    result: sessionSourcesSchema
+  },
+  'session.source.switch': {
+    params: objectSchema(
+      {
+        sessionId: boundedString,
+        requestId: boundedString,
+        expectedSourceRevision: nonNegativeInteger,
+        kind: sessionSourceKindSchema,
+        deviceId: nullableSchema(boundedString),
+        protectedOverlayWindowIds: optionalSchema(
+          arraySchema(nonNegativeInteger, { maxLength: 128 })
+        )
+      },
+      { allowUnknown: false }
+    ),
+    result: sessionSourcesSchema
+  },
   'scheduledStreams.resolveTime': {
     params: objectSchema(
       {

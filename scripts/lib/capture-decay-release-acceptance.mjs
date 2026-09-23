@@ -79,7 +79,8 @@ const CAPTURE_DECAY_D3_SENSITIVE_EXACT_PATHS = new Set([
   'apps/desktop/src/renderer/theme-bootstrap.js',
   '.github/workflows/promote-macos-capture-decay-d3.yml',
   '.github/workflows/release-macos.yml',
-  'scripts/build-ffmpeg-macos.sh'
+  'scripts/build-ffmpeg-macos.sh',
+  'scripts/patches/avfoundation-capture-clock.patch'
 ])
 const CAPTURE_DECAY_D3_SENSITIVE_PREFIXES = Object.freeze([
   'crates/videorc-native-preview-addon/',
@@ -114,6 +115,7 @@ export const CAPTURE_DECAY_D3_SCRIPT_DEPENDENCY_PATHS = Object.freeze([
   'scripts/build-native-preview-addon.mjs',
   'scripts/generate-macos-beta-manifest.mjs',
   'scripts/preflight-macos-package.mjs',
+  'scripts/ffmpeg-capture-clock.mjs',
   'scripts/preflight-macos-release-upload.mjs',
   'scripts/preflight-macos-release.mjs',
   'scripts/real-source-baseline-app.mjs',

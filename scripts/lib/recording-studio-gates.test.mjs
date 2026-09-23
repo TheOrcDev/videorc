@@ -252,8 +252,10 @@ describe('buildRecordingStudioGateSteps', () => {
     const probe = readFileSync(new URL('../probe-live-audio-controls.mjs', import.meta.url), 'utf8')
     assert.match(probe, /const productionStatsPeriodSeconds = 2/)
     assert.match(probe, /const productionReplyTimeoutMs = 5000/)
-    assert.match(probe, /'-stats',\s*'-stats_period',\s*String\(productionStatsPeriodSeconds\)/)
-    assert.match(probe, /line\.trim\(\) === 'progress=continue'/)
+    assert.match(probe, /'-nostats',\s*'-stats_period',\s*String\(productionStatsPeriodSeconds\)/)
+    assert.match(probe, /'-progress',\s*'pipe:1'/)
+    assert.match(probe, /protocol\.push\('stdout', chunk\)/)
+    assert.match(probe, /protocol\.push\('stderr', chunk\)/)
     assert.match(probe, /latencyMs < productionReplyTimeoutMs/)
     assert.match(
       probe,

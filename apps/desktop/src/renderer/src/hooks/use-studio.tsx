@@ -1,3 +1,7 @@
+import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
+import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-loader'
+import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
+import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
@@ -100,6 +104,7 @@ import {
   sourceSelectionChangeEvents,
   layoutPresetMemoryPatch,
   layoutPresetOrientation,
+  mergeSourceKind,
   STORAGE_KEYS,
   streamOutputVideosForTargets,
   streamOutputVideoSettings,
@@ -1136,6 +1141,10 @@ export type StudioContextValue = {
   // (drives the "Switching…" pending state; plan slice D2).
   layoutSwitchPending: LayoutPreset | null
   sourceDeviceSwitchPending: LiveSourceDeviceSwitchPending | null
+  sourceSelectionState: LiveSourceSelectionState
+  sourceSwitchReason: (kind: LiveSourceDeviceSwitchPending) => string | null
+  allowCaptureNone: boolean
+  retrySourceStatus: () => Promise<void>
   switchSourceDeviceLive: (
     sourceKind: LiveSourceDeviceSwitchPending,
     sources: SourceSelection
@@ -1614,7 +1623,7 @@ const idlePreviewSurfaceStatus = (): PreviewSurfaceStatus => ({
 const isPreviewSurfaceTransport = (transport: PreviewLiveStatus['transport']): boolean =>
   transport === 'native-surface' || transport === 'electron-proof-surface'
 
-type LiveSourceDeviceSwitchPending = 'capture' | 'camera'
+type LiveSourceDeviceSwitchPending = 'capture' | 'camera' | 'microphone'
 
 const idlePreviewCameraStatus = (): PreviewCameraStatus => ({
   state: 'device-missing',
@@ -3175,6 +3184,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   } | null>(null)
   const previewCameraStatusRef = useRef<PreviewCameraStatus>(idlePreviewCameraStatus())
   const previewScreenStatusRef = useRef<PreviewScreenStatus>(idlePreviewScreenStatus())
+  const sourceStatusUnknownRef = useRef(true)
+  const [sourceStatusKnown, setSourceStatusKnown] = useState(false)
   const recordingRef = useRef<RecordingStatus>({ state: 'idle', message: 'Ready.' })
   const sessionStartLifecycleActiveRef = useRef(false)
   const sessionStartLifecycleSessionIdRef = useRef<string | null>(null)
@@ -3362,6 +3373,89 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }
     },
     []
+  )
+
+  const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutPreset | null>(null)
+  const [sourceSelectionState, setSourceSelectionState] = useState<LiveSourceSelectionState>({
+    snapshot: null,
+    pending: null,
+    checking: false,
+    error: null
+  })
+  const [sourceSelectionController] = useState(
+    () =>
+      new LazyLiveSourceSelectionController({
+        get: async (sessionId) => {
+          if (!clientRef.current) throw new Error('Backend socket is not connected.')
+          return clientRef.current.requestTyped('session.sources.get', { sessionId })
+        },
+        switch: async (request) => {
+          if (request.kind === 'microphone') closeVisualMicrophoneStreams()
+          if (!clientRef.current) throw new Error('Backend socket is not connected.')
+          return clientRef.current.requestTyped('session.source.switch', request)
+        },
+        changed: setSourceSelectionState,
+        failed: (requestId, message) => toast.error(message, { id: `source-switch-${requestId}` }),
+        requestId: () => crypto.randomUUID(),
+        confirmed: (snapshot) => {
+          const current = captureConfigRef.current
+          const sources = confirmedSourceSelection(
+            current.sources,
+            snapshot,
+            deviceListRef.current.devices
+          )
+          if (JSON.stringify(sources) === JSON.stringify(current.sources)) return
+          captureConfigRef.current = { ...current, sources }
+          setCaptureConfig((latest) => ({
+            ...latest,
+            sources: confirmedSourceSelection(
+              latest.sources,
+              snapshot,
+              deviceListRef.current.devices
+            )
+          }))
+          if (
+            JSON.stringify(visualSources(sources)) !==
+            JSON.stringify(visualSources(current.sources))
+          ) {
+            persistWorkingVisual(
+              current.layout,
+              sources,
+              resolveSavedBackground(confirmedVisualRef.current.background),
+              activeSavedSceneIdRef.current
+            )
+          }
+        }
+      })
+  )
+  useEffect(() => () => sourceSelectionController.dispose(), [sourceSelectionController])
+  const allowCaptureNone =
+    !['recording', 'streaming'].includes(recording.state) ||
+    sourceSelectionState.snapshot?.capabilities.some(
+      (capability) => capability.kind === 'capture' && capability.allowsNone === true
+    ) === true
+  const sourceDeviceSwitchPending = sourceSelectionState.pending
+  const sourceSwitchReason = useCallback(
+    (kind: LiveSourceDeviceSwitchPending): string | null => {
+      // Only a live socket can be mid-bootstrap. With no backend there is no
+      // session to fence, and the next recording.status reconciles the pick.
+      if (sourceStatusUnknownRef.current && (wsStatus === 'connecting' || wsStatus === 'connected'))
+        return 'Checking the current session…'
+      // An idle microphone is not part of the scene, so a scene change cannot race it.
+      if (
+        layoutSwitchPending &&
+        (kind !== 'microphone' || isActiveRecordingState(recordingRef.current.state))
+      )
+        return 'The scene is changing.'
+      if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current)
+        return 'The session is starting.'
+      return sourceSelectionController.reason(kind)
+    },
+    [sourceSelectionController, layoutSwitchPending, wsStatus]
+  )
+  const retrySourceStatus = useCallback(
+    () => sourceSelectionController.retryStatus(),
+    [sourceSelectionController]
   )
 
   const reportError = useCallback((error: unknown) => {
@@ -4071,6 +4165,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         lastSessionActivityRef.current = status.state === 'streaming' ? 'live-stream' : 'recording'
       }
       recordingRef.current = status
+      sourceStatusUnknownRef.current = false
+      setSourceStatusKnown(true)
+      sourceSelectionController.setSession(status.sessionId, status.state)
+      void sourceSelectionController.refresh()
       setRecording(status)
       syncFramePollingSuppressionRef.current?.()
       const latencySample = recordLatencyTrackerRef.current.observe(status, performance.now())
@@ -4086,7 +4184,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         }
       }
     },
-    [appendLog]
+    [appendLog, sourceSelectionController]
   )
 
   // Smoke-only state hydration for harnesses that start a capture through a
@@ -5219,6 +5317,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   useEffect(() => {
+    if (
+      sourceStatusUnknownRef.current ||
+      isActiveRecordingState(recordingRef.current.state) ||
+      sessionStartInFlightRef.current ||
+      sessionStartLifecycleActiveRef.current
+    )
+      return
     setCaptureConfig((current) => {
       const nextSources = reconcileSourceSelection(current.sources, deviceList.devices)
 
@@ -5229,7 +5334,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recordAutomaticSourceFallbacks(current.sources, nextSources)
       return { ...current, sources: nextSources }
     })
-  }, [deviceList, recordAutomaticSourceFallbacks])
+    // recording.state re-runs this when a session ends: a device that vanished
+    // mid-session was skipped above and must fall back once the session is idle.
+  }, [deviceList, sourceStatusKnown, recording.state, recordAutomaticSourceFallbacks])
 
   useEffect(() => {
     if (!connection) {
@@ -5247,7 +5354,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     sessionRuntimeEpochRef.current += 1
     const priorSessionState = lastRecordingStateRef.current ?? recordingRef.current.state
     const priorSessionId = lastRecordingSessionIdRef.current ?? recordingRef.current.sessionId
-    const priorSessionWasActive = ['recording', 'streaming', 'stopping'].includes(priorSessionState)
+    const priorSessionWasActive = ['starting', 'recording', 'streaming', 'stopping'].includes(
+      priorSessionState
+    )
     const focusRefreshCoordinator = focusRefreshCoordinatorRef.current
     const accountSnapshotCoordinator = accountSnapshotCoordinatorRef.current
     entitlementsRevisionRef.current += 1
@@ -5505,6 +5614,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return liveChatRecovery
     }
     setClient(nextClient)
+    sourceStatusUnknownRef.current = true
+    setSourceStatusKnown(false)
     setWsStatus('connecting')
     setLastError(null)
 
@@ -5524,6 +5635,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (!disposed) reportError(error)
       })
     const unsubscribers = [
+      nextClient.on('session.sources.changed', () => {
+        // Read the complete current authority; event delivery can race RPC completion.
+        void sourceSelectionController.refresh()
+      }),
       nextClient.on('backend.ready', () => {
         setWsStatus('connected')
         // The backend's remote surface slate is blank on (re)connect.
@@ -5870,6 +5985,21 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('compositor.status', (payload) => {
         bootstrapGuard.mark('compositor')
         const status = payload as CompositorStatus
+        // Backend-authored commits (live source switches) arrive only as this
+        // event; advance committed truth so a later resync never re-presents
+        // an older revision. Layout transactions record their own proven commit.
+        const sceneRevision = status.sceneRevision ?? -1
+        if (
+          layoutIntentAwaitingProofRef.current === null &&
+          status.sceneId &&
+          sceneRevision > (nativePreviewCommittedSceneRef.current?.sceneRevision ?? -1)
+        ) {
+          nativePreviewCommittedSceneRef.current = {
+            sceneId: status.sceneId,
+            sceneRevision,
+            compositorStatus: status
+          }
+        }
         const receivedAtMs = Date.now()
         const fallbackOwnsPresentation = rendererFallbackOwnsPresentation({
           mainPumpActive: mainPumpActiveRef.current,
@@ -6164,6 +6294,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // failed request used to skip it and strand a muted microphone with
         // no takeover selected. A failed read stays unknown and commits
         // nothing; it still fails the batch below so the error surfaces.
+        // Session authority must settle even if device discovery or another
+        // bootstrap query fails. Idle fallback remains blocked until this read.
+        // A failed read retries: otherwise every picker stays on "Checking the
+        // current session…" until some later recording.status event.
+        const readRecordingStatus = (attempt: number): Promise<RecordingStatus> => {
+          const snapshot = bootstrapGuard.snapshot()
+          const read = bootstrapRequest<RecordingStatus>('recording.status')
+          read.then(
+            (status) =>
+              generationIsCurrent() &&
+              bootstrapGuard.isCurrent(snapshot, 'recording') &&
+              applyRecordingStatus(status),
+            () =>
+              attempt < 4 &&
+              setTimeout(
+                () => generationIsCurrent() && readRecordingStatus(attempt + 1),
+                1000 * attempt
+              )
+          )
+          return read
+        }
+        const recordingStatusBootstrap = readRecordingStatus(1)
         const activeScreenBootstrap = bootstrapRequest<StreamScreen | null>('screens.active')
         void activeScreenBootstrap.then(
           (nextActiveScreen) => {
@@ -6203,7 +6355,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           bootstrapRequest<EntitlementsSnapshot>('entitlements.refresh'),
           bootstrapRequest<VideorcAccountSnapshot>('account.get'),
           bootstrapRequest<DeviceList>('devices.list'),
-          bootstrapRequest<RecordingStatus>('recording.status'),
+          recordingStatusBootstrap,
           bootstrapRequest<DiagnosticStats>('diagnostics.stats'),
           bootstrapRequest<CaptureRecoveryStatus>('capture.recovery.status'),
           bootstrapRequest<CaptionsStatus>('captions.status.get'),
@@ -7118,10 +7270,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
   )
 
-  const [layoutSwitchPending, setLayoutSwitchPending] = useState<LayoutPreset | null>(null)
-  const [sourceDeviceSwitchPending, setSourceDeviceSwitchPending] =
-    useState<LiveSourceDeviceSwitchPending | null>(null)
-
   const rememberLayoutTransactionSnapshot = useCallback((snapshot: LayoutTransactionSnapshot) => {
     latestLayoutTransactionCommitRef.current = latestLayoutTransactionCommit(
       latestLayoutTransactionCommitRef.current,
@@ -7204,23 +7352,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       return true
     },
     [applyPreviewSurfaceStatus, client, nativePreviewSurfaceEnabled, runtimeInfo?.platform]
-  )
-
-  const rememberLiveLayoutCommit = useCallback(
-    async (status: LiveLayoutApplyStatus) => {
-      if (!client) {
-        return
-      }
-      const compositorStatus = await waitForLiveLayoutProof(client, status)
-      if (typeof compositorStatus.sceneRevision === 'number') {
-        nativePreviewCommittedSceneRef.current = {
-          sceneId: status.scene.id,
-          sceneRevision: compositorStatus.sceneRevision,
-          compositorStatus
-        }
-      }
-    },
-    [client]
   )
 
   const applyLayoutTransactionState = useCallback(
@@ -7970,86 +8101,49 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const switchSourceDeviceLive = useCallback(
     async (sourceKind: LiveSourceDeviceSwitchPending, sources: SourceSelection) => {
-      const isActive = isActiveRecordingState(recordingRef.current.state)
-      if (!isActive) {
-        setCaptureConfig((current) => ({ ...current, sources }))
-        if (sceneEditMode) {
+      const blocked = sourceSwitchReason(sourceKind)
+      if (blocked) {
+        toast.error(blocked)
+        return
+      }
+      if (!isActiveRecordingState(recordingRef.current.state)) {
+        // Pickers build `sources` from a render-time snapshot; merge only the
+        // picked kind so a concurrent confirmation or reconcile is not undone.
+        setCaptureConfig((current) => ({
+          ...current,
+          sources: mergeSourceKind(current.sources, sources, sourceKind)
+        }))
+        if (sceneEditMode && sourceKind !== 'microphone') {
           await loadScene({
-            sources,
-            layout: captureConfig.layout,
-            video: captureConfig.video
+            sources: mergeSourceKind(captureConfigRef.current.sources, sources, sourceKind),
+            layout: captureConfigRef.current.layout,
+            video: captureConfigRef.current.video
           }).catch(reportError)
         }
         return
       }
-
-      if (!client || wsStatus !== 'connected') {
-        toast.error('Backend socket is not connected. Source unchanged.')
-        return
-      }
-      if (sourceDeviceSwitchPending) {
-        return
-      }
-
-      setSourceDeviceSwitchPending(sourceKind)
+      const deviceId =
+        sourceKind === 'camera'
+          ? sources.cameraId
+          : sourceKind === 'microphone'
+            ? sources.microphoneId
+            : (sources.screenId ?? sources.windowId)
       try {
-        const protectedOverlayWindowIds = await currentProtectedOverlayWindowIds()
-        const status = await client.request<LiveLayoutApplyStatus>('scene.source.device.switch', {
-          sources,
-          layout: captureConfig.layout,
-          video: captureConfig.video,
-          background: activeSceneBackground,
-          protectedOverlayWindowIds
-        })
-        let proofError: unknown = null
-        let proofFailed = false
-        try {
-          await rememberLiveLayoutCommit(status)
-        } catch (error) {
-          proofFailed = true
-          proofError = error
-        }
-        applyScene(status.scene)
-        setCaptureConfig((current) => ({ ...current, sources }))
-        persistWorkingVisual(
-          captureConfigRef.current.layout,
-          sources,
-          status.scene.background ?? null,
-          activeSavedSceneIdRef.current
+        await sourceSelectionController.select(
+          sourceKind,
+          deviceId ?? null,
+          currentProtectedOverlayWindowIds(),
+          sourceKind === 'camera'
+            ? sources.cameraName
+            : sourceKind === 'microphone'
+              ? sources.microphoneName
+              : (sources.screenName ?? sources.windowName)
         )
-        if (proofFailed) {
-          const detail = proofError instanceof Error ? proofError.message : String(proofError)
-          console.warn(
-            `Source switch committed at revision ${status.sceneRevision}; output proof was not observed. ${detail}`
-          )
-          toast.warning('Switch committed. Output catching up.', {
-            id: 'live-source-switch-output-catching-up',
-            description:
-              'The source selection was applied. Videorc will reconcile the output status as it catches up.'
-          })
-        }
-        // Success is visible in the preview itself — no confirmation popup
-        // for a routine source switch (errors still report below).
       } catch (error) {
         reportError(error)
-      } finally {
-        setSourceDeviceSwitchPending(null)
       }
     },
-    [
-      applyScene,
-      persistWorkingVisual,
-      activeSceneBackground,
-      captureConfig.layout,
-      captureConfig.video,
-      client,
-      loadScene,
-      rememberLiveLayoutCommit,
-      reportError,
-      sceneEditMode,
-      sourceDeviceSwitchPending,
-      wsStatus
-    ]
+    [sourceSelectionController, sourceSwitchReason, loadScene, reportError, sceneEditMode]
   )
 
   const ensureNativePreviewCamera = useCallback(async () => {
@@ -13665,6 +13759,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           hasScene: scene !== null,
           visualTransactionPending,
           sourceDeviceSwitchPending,
+          sourceSelectionState,
+          sourceSwitchReason,
+          allowCaptureNone,
+          retrySourceStatus,
           sceneGesturePending,
           sceneTransformPending,
           confirmedVisual: confirmedVisualRef.current
@@ -13877,6 +13975,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
+      sourceSelectionState,
+      sourceSwitchReason,
+      allowCaptureNone,
+      retrySourceStatus,
       switchSourceDeviceLive,
       setSceneSourceVisible,
       moveSceneSource,
@@ -14093,6 +14195,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       applySimulcastLeg,
       layoutSwitchPending,
       sourceDeviceSwitchPending,
+      sourceSelectionState,
+      sourceSwitchReason,
+      allowCaptureNone,
+      retrySourceStatus,
       switchSourceDeviceLive,
       setSceneSourceVisible,
       moveSceneSource,

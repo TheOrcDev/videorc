@@ -111,8 +111,22 @@ jobs:
           # the allows from BOTH gates together — they must not drift again.
           Invoke-NativeGate 'Clippy' { cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut }
 
+      - name: Set up minimal Windows capture-worker toolchain
+        id: capture-msys2
+        # Pinned setup-msys2 v2; output encoder stays the separately pinned binary.
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make diffutils patch curl tar xz
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-nasm
+
       - name: Build exact unsigned staging payload
         env:
+          VIDEORC_MSYS2_ROOT: ${{ steps.capture-msys2.outputs.msys2-location }}
           VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
           VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
           VIDEORC_WINDOWS_ACCEPTANCE_STATUS: pending

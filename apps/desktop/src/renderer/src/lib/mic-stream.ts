@@ -9,6 +9,14 @@
 import type { MediaAccessStatus } from './backend'
 import { matchMicrophoneDeviceId } from './mic-meter'
 
+import { registerVisualMicrophoneOwner } from './mic-visual-ownership'
+export {
+  closeVisualMicrophoneStreams,
+  registerVisualMicrophoneSuspension,
+  subscribeVisualMicrophoneEpoch,
+  visualMicrophoneEpoch
+} from './mic-visual-ownership'
+
 type MicTrackLike = { stop: () => void }
 
 export type MicMediaStreamLike = { getTracks: () => MicTrackLike[] }
@@ -47,7 +55,7 @@ export type MicStreamController<S extends MicMediaStreamLike> = {
    * are unavailable, permission is denied, or the controller closed while
    * acquiring (the racing stream's tracks are stopped).
    */
-  open: (deviceName: string | undefined) => Promise<S | null>
+  open: (deviceName: string | undefined, strict?: boolean) => Promise<S | null>
   /** Stop every open track; the controller cannot be reused afterwards. */
   close: () => void
 }
@@ -69,16 +77,25 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
 ): MicStreamController<S> {
   let current: S | null = null
   let closed = false
+  let unregisterOwner: (() => void) | undefined
 
   const stopTracks = (stream: S | null): void => {
     stream?.getTracks().forEach((track) => track.stop())
   }
 
+  const close = (): void => {
+    closed = true
+    stopTracks(current)
+    current = null
+    unregisterOwner?.()
+    unregisterOwner = undefined
+  }
   return {
-    async open(deviceName) {
+    async open(deviceName, strict = false) {
       if (closed || !media?.getUserMedia) {
         return null
       }
+      unregisterOwner ??= registerVisualMicrophoneOwner(close)
       try {
         const inputs = ((await media.enumerateDevices?.().catch(() => [])) ?? [])
           .filter((device) => device.kind === 'audioinput')
@@ -86,7 +103,21 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
         if (closed) {
           return null
         }
-        const deviceId = matchMicrophoneDeviceId(deviceName, inputs)
+        const normalize = (value: string): string =>
+          value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
+        const exact = inputs.filter(
+          (input) =>
+            input.deviceId !== 'default' &&
+            input.deviceId !== 'communications' &&
+            deviceName &&
+            normalize(input.label) === normalize(deviceName)
+        )
+        const deviceId = strict
+          ? exact.length === 1
+            ? exact[0].deviceId
+            : undefined
+          : matchMicrophoneDeviceId(deviceName, inputs)
+        if (strict && !deviceId) return null
         const stream = await media.getUserMedia({
           audio: deviceId
             ? { ...MIC_METER_STREAM_PROCESSING, deviceId: { exact: deviceId } }
@@ -103,10 +134,6 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
         return null
       }
     },
-    close() {
-      closed = true
-      stopTracks(current)
-      current = null
-    }
+    close
   }
 }

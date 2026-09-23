@@ -1432,6 +1432,7 @@ export type WindowsD3d11MediaState =
   | 'failed'
 
 export type WindowsD3d11CaptureBackend =
+  | 'preview-bgra-upload'
   | 'desktop-duplication'
   | 'windows-graphics-capture-monitor'
   | 'legacy-ffmpeg'
@@ -4477,4 +4478,71 @@ export interface ScheduledStreamCandidate {
   id: string
   snippet: { title: string; scheduledStartTime: string | null }
   profile: { resolution: string | null; frameRate: string | null }
+}
+
+/** Session selection revisions are independent of compositor scene revisions. */
+export type SessionSourceKind = 'capture' | 'camera' | 'microphone'
+export interface SourceSwitchParams {
+  sessionId: string
+  requestId: string
+  expectedSourceRevision: number
+  kind: SessionSourceKind
+  deviceId: string | null
+  protectedOverlayWindowIds?: number[]
+}
+export interface SourceSwitchOperation {
+  requestId: string
+  kind: SessionSourceKind
+  deviceId: string | null
+  stage: 'admitted' | 'preparing' | 'restoring' | 'committing' | 'applied' | 'failed' | 'cancelled'
+  reason: string | null
+  previousSource: 'preserved' | 'restored' | 'unavailable'
+  outputObserved: boolean
+  outputSuperseded?: boolean
+}
+export interface SessionSources {
+  audio: {
+    sampleCursor: number
+    generation: number
+    deviceId: string | null
+    deviceName: string
+    lastCommit: {
+      sessionId: string
+      requestId: string
+      generation: number
+      cutoverSample: number
+      deviceId: string | null
+      outputObserved: boolean
+    } | null
+    selectedInput: boolean
+    counters: {
+      capturedFrames: number
+      generatedFrames: number
+      discardedFrames: number
+      droppedFrames: number
+    }
+  } | null
+  sessionId: string
+  sourceRevision: number
+  outputProcessId: number | null
+  confirmed: {
+    screenId?: string | null
+    windowId?: string | null
+    cameraId?: string | null
+    microphoneId?: string | null
+    testPattern?: boolean
+  }
+  health: Array<{
+    kind: SessionSourceKind
+    deviceId: string | null
+    health: 'none' | 'starting' | 'ready' | 'unavailable' | 'unknown'
+  }>
+  pending: SourceSwitchOperation | null
+  lastOperation: SourceSwitchOperation | null
+  capabilities: Array<{
+    kind: SessionSourceKind
+    supported: boolean
+    allowsNone?: boolean
+    reason: string | null
+  }>
 }

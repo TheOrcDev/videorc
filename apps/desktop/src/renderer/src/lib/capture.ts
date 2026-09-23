@@ -2399,6 +2399,27 @@ export function buildMicrophoneSources(
   return { ...current, microphoneId, microphoneName: selected?.name }
 }
 
+const SOURCE_KIND_FIELDS = {
+  capture: ['screenId', 'screenName', 'windowId', 'windowName', 'testPattern'],
+  camera: ['cameraId', 'cameraName'],
+  microphone: ['microphoneId', 'microphoneName']
+} as const satisfies Record<string, readonly (keyof SourceSelection)[]>
+
+/**
+ * Apply only the fields one picker owns onto the latest selection, so a pick
+ * built from a render-time snapshot cannot revert a concurrent update to the
+ * other sources (backend confirmation, device reconcile, another picker).
+ */
+export function mergeSourceKind(
+  current: SourceSelection,
+  picked: SourceSelection,
+  kind: keyof typeof SOURCE_KIND_FIELDS
+): SourceSelection {
+  const next: Record<string, unknown> = { ...current }
+  for (const field of SOURCE_KIND_FIELDS[kind]) next[field] = picked[field]
+  return next as SourceSelection
+}
+
 function isAvFoundationScreenCaptureDevice(device: Device): boolean {
   return device.kind === 'screen' && isAvFoundationScreenSourceId(device.id)
 }

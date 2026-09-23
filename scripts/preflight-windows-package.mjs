@@ -13,6 +13,11 @@ import { fileURLToPath } from 'node:url'
 
 import { probeWindowsFfmpegCapabilities } from './lib/windows-ffmpeg-capabilities.mjs'
 
+import {
+  verifyWindowsCaptureManifest,
+  probeWindowsCaptureWorker
+} from './ffmpeg-capture-windows.mjs'
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const ffmpegExe = join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64', 'bin', 'ffmpeg.exe')
 const bundledBackgrounds = [
@@ -77,7 +82,11 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
+const captureBundle = join(repoRoot, 'vendor', 'ffmpeg', 'windows-x64')
+verifyWindowsCaptureManifest(captureBundle)
+
 if (process.platform === 'win32') {
+  probeWindowsCaptureWorker(captureBundle)
   let capabilities
   try {
     capabilities = probeWindowsFfmpegCapabilities(ffmpegExe, { execFileSync })

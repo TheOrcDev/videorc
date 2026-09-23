@@ -113,7 +113,7 @@ describe('sanitizeWindowsLocalGateChildEnvironment', () => {
 describe('Windows candidate payload binding', () => {
   const executableSha256 = 'a'.repeat(64)
   const components = WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS.map((relativePath, index) => {
-    const sha256 = index === 0 ? executableSha256 : String(index + 1).repeat(64)
+    const sha256 = index === 0 ? executableSha256 : (index + 1).toString(16).repeat(64)
     return {
       relativePath,
       sha256,
@@ -261,7 +261,13 @@ describe('Windows candidate payload binding', () => {
         'apps/desktop/release/win-unpacked/resources/app.asar',
         'apps/desktop/release/win-unpacked/resources/videorc-backend.exe',
         'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg.exe',
-        'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffprobe.exe'
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffprobe.exe',
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/bin/ffmpeg-capture.exe',
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/capture/MANIFEST.json',
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/capture/SOURCE.txt',
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/capture/LICENSE.txt',
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/capture/TOOLCHAIN.txt',
+        'apps/desktop/release/win-unpacked/resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch'
       ].map((path) => posixPath(resolve('/repo', path)))
     )
 
@@ -378,7 +384,10 @@ describe('Windows candidate payload binding', () => {
     assert.equal(extracted.archiveRelativePath, '$PLUGINSDIR/app-64.7z')
     assert.match(extracted.archiveSha256, /^[a-f0-9]{64}$/)
     assert.equal(extracted.packagePayload.root, '$PLUGINSDIR/app-64.7z')
-    assert.equal(extracted.packagePayload.components.length, 5)
+    assert.equal(
+      extracted.packagePayload.components.length,
+      WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS.length
+    )
     await assert.rejects(stat(scratchRoot), /ENOENT/)
   })
 
@@ -914,8 +923,10 @@ describe('buildWindowsLocalGateSteps', () => {
       'owned process lifecycle cleanup smoke',
       'build release backend',
       'fetch pinned Windows FFmpeg',
+      'build verified Windows capture worker',
       'Windows package preflight',
       'package desktop Windows dir',
+      'verify packaged capture worker and source manifests',
       'packaged recording and bundled-background smoke',
       'native Windows ScreenOnly D3D11 zero-copy smoke',
       'native Windows ScreenCamera D3D11 direct-record smoke 1080p30',
@@ -949,7 +960,12 @@ describe('buildWindowsLocalGateSteps', () => {
     ]) {
       const step = steps.find((candidate) => candidate.label === label)
       assert.ok(step, `missing protected-lane step: ${label}`)
-      assert.deepEqual(step.args, ['smoke:windows-native-screen', '--', '--d3d11', '--require-d3d11'])
+      assert.deepEqual(step.args, [
+        'smoke:windows-native-screen',
+        '--',
+        '--d3d11',
+        '--require-d3d11'
+      ])
       assert.equal(step.env.VIDEORC_WINDOWS_INCLUDE_CAMERA, '1')
       assert.equal(step.env.VIDEORC_WINDOWS_REQUIRE_DIRECT_D3D11_RECORDING, '1')
       assert.equal(step.env.VIDEORC_SMOKE_VIDEO_WIDTH, '1920')

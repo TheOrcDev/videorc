@@ -85,6 +85,13 @@ async function seed() {
   await writeFile(join(packagedFfmpeg, 'bin', 'ffprobe.exe'), 'ffprobe')
   await writeFile(join(packagedFfmpeg, 'LICENSE.txt'), 'packaged license')
   await writeFile(join(packagedFfmpeg, 'SOURCE.txt'), 'packaged source')
+  await mkdir(join(packagedFfmpeg, 'capture/source-patches'), { recursive: true })
+  await writeFile(join(packagedFfmpeg, 'bin/ffmpeg-capture.exe'), 'worker')
+  await writeFile(join(packagedFfmpeg, 'capture/MANIFEST.json'), 'manifest')
+  await writeFile(join(packagedFfmpeg, 'capture/SOURCE.txt'), 'source')
+  await writeFile(join(packagedFfmpeg, 'capture/LICENSE.txt'), 'license')
+  await writeFile(join(packagedFfmpeg, 'capture/TOOLCHAIN.txt'), 'toolchain')
+  await writeFile(join(packagedFfmpeg, 'capture/source-patches/dshow-capture-clock.patch'), 'patch')
   return {
     ffmpegLicensePath,
     ffmpegSourcePath,
@@ -124,6 +131,15 @@ describe('Windows private candidate storage plan', () => {
         ['validation-backend', 'win-unpacked/resources/videorc-backend.exe'],
         ['validation-ffmpeg', 'win-unpacked/resources/ffmpeg/bin/ffmpeg.exe'],
         ['validation-ffprobe', 'win-unpacked/resources/ffmpeg/bin/ffprobe.exe'],
+        ['validation-capture-worker', 'win-unpacked/resources/ffmpeg/bin/ffmpeg-capture.exe'],
+        ['validation-capture-manifest', 'win-unpacked/resources/ffmpeg/capture/MANIFEST.json'],
+        ['validation-capture-source', 'win-unpacked/resources/ffmpeg/capture/SOURCE.txt'],
+        ['validation-capture-license', 'win-unpacked/resources/ffmpeg/capture/LICENSE.txt'],
+        ['validation-capture-toolchain', 'win-unpacked/resources/ffmpeg/capture/TOOLCHAIN.txt'],
+        [
+          'validation-capture-patch',
+          'win-unpacked/resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch'
+        ],
         ['validation-ffmpeg-license', 'win-unpacked/resources/ffmpeg/LICENSE.txt'],
         ['validation-ffmpeg-source', 'win-unpacked/resources/ffmpeg/SOURCE.txt']
       ].map(([label, name]) => ({ label, objectKey: `${plan.prefix}/${name}` }))
@@ -363,12 +379,20 @@ describe('classifyCandidateObjectHead under response compression', () => {
   it('treats a matching hash with a stripped content-length as identical', () => {
     // Cloudflare gzips text/plain and removes content-length; the hash still
     // proves identity. This exact shape failed attempt nine.
-    const response = { ok: true, status: 200, headers: asHeaders({ 'x-amz-meta-sha256': artifact.sha256 }) }
+    const response = {
+      ok: true,
+      status: 200,
+      headers: asHeaders({ 'x-amz-meta-sha256': artifact.sha256 })
+    }
     assert.equal(classifyCandidateObjectHead({ artifact, response }), 'identical')
   })
 
   it('still refuses a hash mismatch even without content-length', () => {
-    const response = { ok: true, status: 200, headers: asHeaders({ 'x-amz-meta-sha256': 'b'.repeat(64) }) }
+    const response = {
+      ok: true,
+      status: 200,
+      headers: asHeaders({ 'x-amz-meta-sha256': 'b'.repeat(64) })
+    }
     assert.throws(
       () => classifyCandidateObjectHead({ artifact, response }),
       /already exists with different bytes/
@@ -386,5 +410,4 @@ describe('classifyCandidateObjectHead under response compression', () => {
       /already exists with different bytes/
     )
   })
-
 })

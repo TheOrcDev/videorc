@@ -5,6 +5,8 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 const providerState = vi.hoisted(() => ({
   microphoneMuted: false,
   sessionActive: false,
+  sourcePending: null as 'microphone' | null,
+  sourceChecking: false,
   microphoneId: 'backend-mic-1',
   keepMicrophoneWarm: true as boolean | undefined,
   armWarmMicrophone: vi.fn(async () => null),
@@ -20,6 +22,10 @@ vi.mock('@/hooks/use-studio', () => ({
     mediaAccess: { microphone: 'granted' },
     selectedMicrophone: { id: providerState.microphoneId, name: 'Studio microphone' },
     isSessionActive: providerState.sessionActive,
+    sourceSelectionState: {
+      pending: providerState.sourcePending,
+      checking: providerState.sourceChecking
+    },
     settings: { keepMicrophoneWarm: providerState.keepMicrophoneWarm },
     armWarmMicrophone: providerState.armWarmMicrophone,
     disarmWarmMicrophone: providerState.disarmWarmMicrophone
@@ -56,6 +62,8 @@ describe('StudioMicVisualProvider', () => {
     restoreEnvironment = undefined
     providerState.microphoneMuted = false
     providerState.sessionActive = false
+    providerState.sourcePending = null
+    providerState.sourceChecking = false
     providerState.microphoneId = 'backend-mic-1'
     providerState.keepMicrophoneWarm = true
     providerState.armWarmMicrophone.mockClear()
@@ -197,6 +205,47 @@ describe('StudioMicVisualProvider', () => {
     expect(environment.stopTrack).toHaveBeenCalledTimes(1)
     expect(environment.scheduledFrames.size).toBe(0)
     expect(lifecycleStates.at(-1)).toBe(false)
+  })
+
+  it('closes visual capture while preparing or reconciling and resumes the confirmed microphone', async () => {
+    const environment = installBrowserAudioEnvironment()
+    restoreEnvironment = environment.restore
+    providerState.sessionActive = true
+    const lifecycleStates: boolean[] = []
+    root = createRoot(environment.container)
+    const render = async () => {
+      await act(async () => {
+        root?.render(
+          createElement(StudioMicVisualProvider, {
+            enabled: true,
+            children: createElement(VisualConsumer, {
+              onLifecycle: (active) => lifecycleStates.push(active)
+            })
+          })
+        )
+        await import('../lib/browser-mic-visual-pipeline')
+        await Promise.resolve()
+      })
+    }
+    await render()
+    await vi.waitFor(() => expect(environment.contexts).toHaveLength(1))
+    providerState.sourcePending = 'microphone'
+    await render()
+    expect(environment.stopTrack).toHaveBeenCalledTimes(1)
+    expect(lifecycleStates.at(-1)).toBe(false)
+    providerState.sourcePending = null
+    providerState.sourceChecking = true
+    await render()
+    expect(environment.getUserMedia).toHaveBeenCalledTimes(1)
+    providerState.sourceChecking = false
+    await render()
+    await vi.waitFor(() => expect(environment.contexts).toHaveLength(2))
+    expect(lifecycleStates.at(-1)).toBe(true)
+    expect(environment.getUserMedia).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        audio: expect.objectContaining({ deviceId: { exact: 'mic-1' } })
+      })
+    )
   })
 
   it('tears down visual microphone resources and stops reporting live when muted', async () => {

@@ -31,7 +31,11 @@ export function MicPickerPreview({
   const muted = enabled && captureConfig.audio.microphoneMuted
 
   return (
-    <div className="flex flex-col gap-1" data-videorc-mic-preview>
+    <div
+      className="flex flex-col gap-1"
+      data-videorc-mic-preview
+      aria-label="Visual microphone preview"
+    >
       <div className="rounded-row border bg-muted/20 px-2 py-1 text-foreground/70">
         <LiveWaveform
           ref={waveformRef}

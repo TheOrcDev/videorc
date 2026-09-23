@@ -113,6 +113,8 @@ pub type PreviewCameraSlot = Arc<tokio::sync::Mutex<PreviewCameraRuntime>>;
 
 #[derive(Debug)]
 pub struct PreviewCameraRuntime {
+    #[cfg(all(test, target_os = "windows"))]
+    test_dshow_inventory: Option<String>,
     pub status: PreviewCameraStatus,
     /// Source-level ownership keeps surface-backed frames observable while a
     /// capture session replaces its per-session `FrameStore`.
@@ -771,6 +773,8 @@ fn log_camera_generation(
 
 pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
     PreviewCameraRuntime {
+        #[cfg(all(test, target_os = "windows"))]
+        test_dshow_inventory: None,
         status: idle_status(Some("Native camera preview is not running.".to_string())),
         surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
@@ -878,6 +882,59 @@ pub(crate) async fn start_preview_camera_for_layout_until_transition_complete(
     .await
 }
 
+#[cfg(target_os = "windows")]
+async fn resolve_windows_camera_target(
+    state: &AppState,
+    ffmpeg: &str,
+    selected: &str,
+) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(inventory) = state
+        .preview_camera
+        .lock()
+        .await
+        .test_dshow_inventory
+        .clone()
+    {
+        return crate::audio_capture_adapter::resolve_dshow_video_name(&inventory, selected)
+            .map_err(|error| error.to_string());
+    }
+    #[cfg(not(test))]
+    let _ = state;
+    static INVENTORY_OWNERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let permit = INVENTORY_OWNERS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "Camera inventory is still closing. Retry shortly.".to_string())?;
+    let ffmpeg = ffmpeg.to_string();
+    let selected = selected.to_string();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let output = crate::process_job::output_owned_std_with_timeout(
+            std::process::Command::new(ffmpeg).args([
+                "-hide_banner",
+                "-list_devices",
+                "true",
+                "-f",
+                "dshow",
+                "-i",
+                "dummy",
+            ]),
+            Duration::from_secs(2),
+        )
+        .map_err(|error| format!("Could not verify the selected camera: {error}"))?;
+        crate::audio_capture_adapter::resolve_dshow_video_name(
+            &String::from_utf8_lossy(&output.stderr),
+            &selected,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("Camera inventory owner failed: {error}"))?
+}
+
 async fn start_preview_camera_with_owner(
     state: AppState,
     params: PreviewCameraStartParams,
@@ -932,10 +989,21 @@ async fn start_preview_camera_with_owner(
         signal_camera_layout_admission(&mut admission_ready, None);
         return PreviewCameraLayoutStart::without_admission(status);
     };
-    let explicit_mutation =
-        begin_capture_recovery_explicit_camera_configuration_mutation(&state).await;
     let unique_id = camera_source.device_unique_id().to_string();
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
+    #[cfg(target_os = "windows")]
+    let unique_id = match resolve_windows_camera_target(&state, &ffmpeg_path, &unique_id).await {
+        Ok(target) => target,
+        Err(error) => {
+            // Inventory admission precedes old-owner retirement. A missing or
+            // ambiguous DirectShow target cannot evict a healthy camera.
+            let status = status_for_missing_camera(Some(camera_id.clone()), &error);
+            signal_camera_layout_admission(&mut admission_ready, None);
+            return PreviewCameraLayoutStart::without_admission(status);
+        }
+    };
+    let explicit_mutation =
+        begin_capture_recovery_explicit_camera_configuration_mutation(&state).await;
     refresh_camera_capability_diagnostics(&state, Some(camera_id.clone())).await;
 
     let target_fps = params.video.fps.clamp(1, 120);
@@ -2491,7 +2559,7 @@ pub async fn stop_preview_camera(state: &AppState) -> PreviewCameraStatus {
 }
 
 pub(crate) async fn begin_preview_camera_stop(state: &AppState) -> PreviewCameraStop {
-    try_begin_preview_camera_stop_supervised(state, false, None)
+    try_begin_preview_camera_stop_supervised(state, false, None, None)
         .await
         .expect("unconditional camera stop admission")
 }
@@ -2504,7 +2572,7 @@ pub(crate) async fn begin_preview_camera_stop_if_starting(
     state: &AppState,
     expected: &PreviewCameraStartingIdentity,
 ) -> Option<PreviewCameraStop> {
-    try_begin_preview_camera_stop_supervised(state, false, Some(expected)).await
+    try_begin_preview_camera_stop_supervised(state, false, Some(expected), None).await
 }
 
 fn camera_starting_identity_from_slot(
@@ -2547,16 +2615,32 @@ pub(crate) async fn acquire_preview_camera_transition(
     transition_gate.lock_owned().await
 }
 
+/// Release only an abandoned, already-live source generation. A replacement
+/// owner can never be stopped by a late transaction cleanup.
+pub(crate) async fn stop_abandoned_camera_generation(
+    state: &AppState,
+    expected: &(SourceKey, u64),
+) -> Option<PreviewCameraStop> {
+    try_begin_preview_camera_stop_supervised(state, false, None, Some(expected)).await
+}
+
 async fn try_begin_preview_camera_stop_supervised(
     state: &AppState,
     force_shutdown: bool,
     expected_starting: Option<&PreviewCameraStartingIdentity>,
+    expected_active: Option<&(SourceKey, u64)>,
 ) -> Option<PreviewCameraStop> {
     let (status, generation, poll_task, explicit_mutation) = {
         // Same preview-runtime -> source-registry order as start admission.
         // No mutation precedes the registry await, and there is no suspension
         // between consumer release and desired-generation invalidation.
         let mut slot = state.preview_camera.lock().await;
+        if expected_active
+            .is_some_and(|expected| source_identity_locked(&slot).as_ref() != Some(expected))
+        {
+            return None;
+        }
+
         if let Some(expected) = expected_starting
             && camera_starting_identity_from_slot(&slot).as_ref() != Some(expected)
         {
@@ -2720,7 +2804,7 @@ pub(crate) async fn shutdown_preview_camera(state: &AppState) -> bool {
 }
 
 async fn shutdown_preview_camera_with_timeout(state: &AppState, timeout: Duration) -> bool {
-    let mut stop = try_begin_preview_camera_stop_supervised(state, true, None)
+    let mut stop = try_begin_preview_camera_stop_supervised(state, true, None, None)
         .await
         .expect("unconditional camera shutdown admission");
     let Some(mut completion) = stop.completion.take() else {
@@ -2787,8 +2871,21 @@ pub async fn preview_camera_latest_frame_info(state: &AppState) -> Option<Previe
     })
 }
 
-pub async fn preview_camera_frame_source(state: &AppState) -> Option<PreviewCameraFrameSource> {
-    let slot = state.preview_camera.lock().await;
+pub(crate) fn source_identity_locked(slot: &PreviewCameraRuntime) -> Option<(SourceKey, u64)> {
+    slot.active.as_ref()?;
+    Some((slot.source_key.clone()?, slot.active_generation?))
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn available_frame_source_locked(
+    slot: &PreviewCameraRuntime,
+) -> Option<PreviewCameraFrameSource> {
+    (slot.status.state == PreviewCameraState::Live)
+        .then(|| frame_source_locked(slot))
+        .flatten()
+}
+
+pub(crate) fn frame_source_locked(slot: &PreviewCameraRuntime) -> Option<PreviewCameraFrameSource> {
     let active = slot.active.as_ref()?;
     let generation = slot.active_generation?;
     Some(PreviewCameraFrameSource {
@@ -2798,6 +2895,10 @@ pub async fn preview_camera_frame_source(state: &AppState) -> Option<PreviewCame
         target_fps: active.effective_fps,
         generation,
     })
+}
+
+pub async fn preview_camera_frame_source(state: &AppState) -> Option<PreviewCameraFrameSource> {
+    frame_source_locked(&*state.preview_camera.lock().await)
 }
 
 pub fn try_preview_camera_frame_source(
@@ -6201,6 +6302,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn fenced_layout_join_waits_past_command_timeout_and_starting_clear() {
         let state = test_state();
+        // This ownership test seeds a known in-flight generation. Its exact
+        // inventory is scoped to this AppState, never real host hardware or a
+        // process-global bypass; production still resolves before retirement.
+        #[cfg(target_os = "windows")]
+        {
+            state.preview_camera.lock().await.test_dshow_inventory = Some(
+                "[dshow] \"abc\" (video)\n[dshow]   Alternative name \"@device_cm_test_abc\"\n"
+                    .into(),
+            );
+        }
         let video = test_video();
         let layout = test_layout(false);
         let source_key = SourceKey::camera("camera:avfoundation-native:616263");

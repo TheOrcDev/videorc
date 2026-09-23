@@ -366,6 +366,7 @@ pub struct LayoutIntentState {
     pub latest_intent_id: u64,
     pub latest_needs_camera: bool,
     pub latest_needs_screen: bool,
+    pub latest_sources: Option<crate::protocol::SourceSelection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -975,6 +976,8 @@ pub struct AppState {
     pub oauth_callback_port: Option<u16>,
     pub events: broadcast::Sender<ServerEvent>,
     pub recording: RecordingSlot,
+    pub live_source_switch:
+        Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
     /// Serializes user Stop/Force-stop with the shutdown-only idempotent stop
     /// join so process shutdown can never reinterpret an in-flight graceful
     /// stop as a second force request.
@@ -1163,6 +1166,9 @@ impl AppState {
             oauth_callback_port: None,
             events,
             recording: Arc::new(tokio::sync::Mutex::new(None)),
+            live_source_switch: Arc::new(std::sync::Mutex::new(
+                crate::live_source_switch::SourceSwitchCoordinator::default(),
+            )),
             recording_stop_fence: Arc::new(tokio::sync::Mutex::new(())),
             capture_interruption: Arc::new(CaptureInterruptionCoordinator::default()),
             live_preview: Arc::new(tokio::sync::Mutex::new(initial_live_preview_state())),
@@ -1257,6 +1263,11 @@ impl AppState {
     pub(crate) fn publish_latest_layout_intent_id(&self, intent_id: u64) {
         self.latest_layout_intent_id
             .store(intent_id, Ordering::Release);
+    }
+
+    pub(crate) fn invalidate_layout_source_work(&self) {
+        let _admission = self.lock_layout_source_admission();
+        self.latest_layout_intent_id.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(crate) fn latest_layout_intent_id(&self) -> u64 {

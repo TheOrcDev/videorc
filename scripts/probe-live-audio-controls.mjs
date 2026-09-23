@@ -5,7 +5,10 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { successfulLiveCommandReplies } from './lib/live-audio-control-protocol.mjs'
+import {
+  liveAudioProtocolStreams,
+  successfulLiveCommandReplies
+} from './lib/live-audio-control-protocol.mjs'
 
 const ffmpegPath = process.env.VIDEORC_SMOKE_FFMPEG_PATH ?? 'ffmpeg'
 const productionStatsPeriodSeconds = 2
@@ -29,8 +32,7 @@ const artifactAnalysisWindowSeconds = artifactApplicationSettleSeconds + 0.75
 // then retain enough audio to inspect the final unmuted state. Hosted Windows
 // runners can otherwise exhaust a fixed 16s source before scheduling command 3.
 const probeDurationSeconds = Math.ceil(
-  ((liveCommands.length + 1) * productionReplyTimeoutMs) / 1000 +
-    artifactAnalysisWindowSeconds
+  ((liveCommands.length + 1) * productionReplyTimeoutMs) / 1000 + artifactAnalysisWindowSeconds
 )
 const processTimeoutMs = 30000
 const outputDirectory = await mkdtemp(join(tmpdir(), 'videorc-live-audio-controls-'))
@@ -174,11 +176,11 @@ function runLiveAudioControlProbe() {
       '-hide_banner',
       '-loglevel',
       'warning',
-      '-stats',
+      '-nostats',
       '-stats_period',
       String(productionStatsPeriodSeconds),
       '-progress',
-      'pipe:2',
+      'pipe:1',
       '-y',
       '-re',
       '-f',
@@ -200,7 +202,7 @@ function runLiveAudioControlProbe() {
       'pcm_s16le',
       artifacts[1]
     ],
-    { stdio: ['pipe', 'ignore', 'pipe'] }
+    { stdio: ['pipe', 'pipe', 'pipe'] }
   )
 
   return new Promise((resolveProbe, rejectProbe) => {
@@ -213,7 +215,6 @@ function runLiveAudioControlProbe() {
     const commandSentAt = []
     const acknowledgements = []
     let processStartedAt = 0
-    let progressLineBuffer = ''
     let commandScheduled = false
 
     const scheduleNextCommand = () => {
@@ -235,11 +236,10 @@ function runLiveAudioControlProbe() {
       )
     }
 
-    const processProtocolLine = (line) => {
-      const successfulReplies = successfulLiveCommandReplies(line)
-      for (const _reply of successfulReplies) {
+    const protocol = liveAudioProtocolStreams({
+      reply: () => {
         successfulRepliesSeen += 1
-        if (successfulRepliesSeen % artifacts.length !== 0) continue
+        if (successfulRepliesSeen % artifacts.length !== 0) return
         const commandIndex = successfulRepliesSeen / artifacts.length - 1
         const sentAt = commandSentAt[commandIndex]
         if (sentAt !== undefined && acknowledgements[commandIndex] === undefined) {
@@ -248,28 +248,20 @@ function runLiveAudioControlProbe() {
             appliedAtSeconds: (Date.now() - processStartedAt) / 1000
           }
         }
+      },
+      progress: () => {
+        if (successfulRepliesSeen >= commandsSent * artifacts.length) {
+          // Keep the production2s poll boundary and complete two-output replies.
+          scheduleNextCommand()
+        }
       }
-
-      if (
-        line.trim() === 'progress=continue' &&
-        successfulRepliesSeen >= commandsSent * artifacts.length
-      ) {
-        // Write just after FFmpeg's production report/poll boundary. The reply
-        // must then survive a full 2s stats period, exposing the old 2s
-        // deadline as a zero-headroom race while proving the 5s contract.
-        scheduleNextCommand()
-      }
-    }
-
+    })
+    ffmpeg.stdout.setEncoding('utf8')
+    ffmpeg.stdout.on('data', (chunk) => protocol.push('stdout', chunk))
     ffmpeg.stderr.setEncoding('utf8')
     ffmpeg.stderr.on('data', (chunk) => {
       stderr += chunk
-      progressLineBuffer += chunk
-      const lines = progressLineBuffer.split(/[\r\n]/)
-      progressLineBuffer = lines.pop() ?? ''
-      for (const line of lines) {
-        processProtocolLine(line)
-      }
+      protocol.push('stderr', chunk)
     })
     ffmpeg.once('spawn', () => {
       processStartedAt = Date.now()
@@ -315,9 +307,7 @@ function runLiveAudioControlProbe() {
         )
         return
       }
-      if (progressLineBuffer) {
-        processProtocolLine(progressLineBuffer)
-      }
+      protocol.finish()
       resolveProbe({ stderr, acknowledgements })
     })
   })

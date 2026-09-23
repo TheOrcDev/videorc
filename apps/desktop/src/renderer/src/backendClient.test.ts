@@ -341,6 +341,11 @@ describe('BackendClient request lifetime', () => {
     )
   })
 
+  it('allows preparation plus restoration and keeps reconciliation short', () => {
+    expect(backendRequestTimeoutMs('session.source.switch')).toBe(76_000)
+    expect(backendRequestTimeoutMs('session.sources.get')).toBe(10_000)
+  })
+
   it('gives media jobs a longer finite method-specific timeout', () => {
     expect(backendRequestTimeoutMs('preview.surface.present')).toBe(5_000)
     expect(backendRequestTimeoutMs('liveChat.send')).toBe(12_000)

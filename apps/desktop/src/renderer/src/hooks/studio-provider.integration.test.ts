@@ -50,6 +50,10 @@ import type {
   Scene,
   SceneCommitStatus,
   SessionLogEntry,
+  SessionSources,
+  SourceSwitchOperation,
+  SourceSwitchParams,
+  SourceSelection,
   SessionSummary,
   StreamOutputTopologyProbeResult,
   StreamScreen,
@@ -356,6 +360,10 @@ class StudioBackend {
   currentLayout = defaultCaptureConfig.layout
   currentScene = sceneForLayout(this.currentLayout)
   revision = 1
+  confirmedSources = { ...defaultCaptureConfig.sources }
+  confirmedSourceRevision = 0
+  sourceOperation: SourceSwitchOperation | null = null
+  sourceFailure: string | null = null
   recordingState: RecordingStatus['state'] = 'idle'
   recordingSessionId: string | undefined
   recordingStatusOverride: RecordingStatus | undefined
@@ -517,6 +525,30 @@ class StudioBackend {
           })
         : job
     )
+  }
+
+  sourceSnapshot(sessionId: string): SessionSources {
+    return {
+      sessionId,
+      sourceRevision: this.confirmedSourceRevision,
+      outputProcessId: 42,
+      audio: null,
+      confirmed: {
+        screenId: this.confirmedSources.screenId ?? null,
+        windowId: this.confirmedSources.windowId ?? null,
+        cameraId: this.confirmedSources.cameraId ?? null,
+        microphoneId: this.confirmedSources.microphoneId ?? null,
+        testPattern: this.confirmedSources.testPattern ?? false
+      },
+      health: [],
+      pending: null,
+      lastOperation: this.sourceOperation,
+      capabilities: [
+        { kind: 'camera', supported: true, reason: null },
+        { kind: 'capture', supported: true, reason: null },
+        { kind: 'microphone', supported: true, reason: null }
+      ]
+    }
   }
 
   response(command: BackendCommand): unknown {
@@ -839,6 +871,45 @@ class StudioBackend {
           compositorStatus: compositorFor(this.currentScene, this.currentLayout, this.revision)
         }
       }
+      case 'session.source.switch': {
+        const params = command.params as SourceSwitchParams
+        if (params.expectedSourceRevision !== this.confirmedSourceRevision)
+          throw Object.assign(new Error('Source revision changed'), {
+            code: 'source-switch-stale-revision'
+          })
+        if (this.sourceFailure) {
+          this.sourceOperation = {
+            requestId: params.requestId,
+            kind: params.kind,
+            deviceId: params.deviceId,
+            stage: 'failed',
+            reason: this.sourceFailure,
+            previousSource: 'preserved',
+            outputObserved: false
+          }
+          return this.sourceSnapshot(params.sessionId)
+        }
+        const deviceId = params.deviceId ?? undefined
+        if (params.kind === 'camera') this.confirmedSources.cameraId = deviceId
+        else if (params.kind === 'microphone') this.confirmedSources.microphoneId = deviceId
+        else {
+          this.confirmedSources.screenId = deviceId?.startsWith('screen:') ? deviceId : undefined
+          this.confirmedSources.windowId = deviceId?.startsWith('window:') ? deviceId : undefined
+        }
+        this.confirmedSourceRevision += 1
+        this.sourceOperation = {
+          requestId: params.requestId,
+          kind: params.kind,
+          deviceId: params.deviceId,
+          stage: 'applied',
+          reason: null,
+          previousSource: 'preserved',
+          outputObserved: false
+        }
+        return this.sourceSnapshot(params.sessionId)
+      }
+      case 'session.sources.get':
+        return this.sourceSnapshot(String(params.sessionId))
       case 'scene.source.device.switch': {
         this.revision += 1
         return {
@@ -1186,6 +1257,7 @@ class StudioBackend {
           throw new Error(this.sessionStartError)
         }
         this.recordingState = 'recording'
+        this.confirmedSources = { ...(params.sources as SourceSelection) }
         return {
           state: 'recording',
           sessionId: 'session-1',
@@ -3959,6 +4031,12 @@ describe('real StudioProvider lifecycle', () => {
   it('re-derives the vertical leg from each committed program scene, even on a fast double switch', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
+    backend.recordingSessionId = 'session-vertical'
+    backend.confirmedSources = {
+      ...backend.confirmedSources,
+      screenId: 'screen:dxgi:0000000000000001:1',
+      cameraId: 'camera:1'
+    }
     backend.reportsActiveSceneRevision = true
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
@@ -3981,7 +4059,8 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.wsStatus === 'connected' &&
         latest()?.recording.recording.state === 'recording' &&
         latest()?.core.captureConfig.sources.screenId != null &&
-        latest()?.core.captureConfig.sources.cameraId != null
+        latest()?.core.captureConfig.sources.cameraId != null &&
+        latest()?.core.deviceList.devices.some((device) => device.id === 'camera:1') === true
     )
 
     // A live horizontal program (Screen + Cam) with the YouTube Vertical leg
@@ -4074,6 +4153,7 @@ describe('real StudioProvider lifecycle', () => {
   it('keeps a committed live source selection when output proof catches up late', async () => {
     const backend = new StudioBackend()
     backend.recordingState = 'recording'
+    backend.recordingSessionId = 'session-1'
     TestWebSocket.backend = backend
     vi.stubGlobal('WebSocket', TestWebSocket)
 
@@ -4111,6 +4191,7 @@ describe('real StudioProvider lifecycle', () => {
         latest()?.core.wsStatus === 'connected' &&
         latest()?.recording.recording.state === 'recording'
     )
+    expect(latest()?.core.sourceSwitchReason('capture')).toBeNull()
     vi.clearAllMocks()
 
     const sources = {
@@ -4122,12 +4203,31 @@ describe('real StudioProvider lifecycle', () => {
       await latest()!.core.switchSourceDeviceLive('capture', sources)
     })
 
-    expect(latest()?.core.captureConfig.sources).toEqual(sources)
+    expect(latest()?.core.captureConfig.sources.screenId).toBe(sources.screenId)
+    expect(latest()?.core.sourceSelectionState.snapshot?.lastOperation).toMatchObject({
+      stage: 'applied',
+      outputObserved: false
+    })
     expect(toastSpies.error).not.toHaveBeenCalled()
-    expect(toastSpies.warning).toHaveBeenCalledWith(
-      'Switch committed. Output catching up.',
-      expect.objectContaining({ id: 'live-source-switch-output-catching-up' })
-    )
+    expect(
+      backend.sentCommands.some((command) => command.method === 'scene.source.device.switch')
+    ).toBe(false)
+
+    backend.sourceFailure = 'The selected display is unavailable.'
+    await act(async () => {
+      await latest()!.core.switchSourceDeviceLive('capture', {
+        ...sources,
+        screenId: 'screen:missing'
+      })
+      await latest()!.core.retrySourceStatus()
+      await latest()!.core.retrySourceStatus()
+    })
+    expect(latest()?.core.captureConfig.sources.screenId).toBe(sources.screenId)
+    expect(toastSpies.error).toHaveBeenCalledTimes(1)
+    expect(toastSpies.error).toHaveBeenCalledWith('The selected display is unavailable.', {
+      id: expect.stringContaining('source-switch-')
+    })
+    expect(toastSpies.success).not.toHaveBeenCalled()
   }, 10_000)
 
   it('builds the exact secret-free shared and split output topology shapes', () => {

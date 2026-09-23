@@ -622,3 +622,736 @@ async fn scene_switch_artifact_fixture() {
         }
     }
 }
+
+#[test]
+fn source_edit_camera_none_round_trip_preserves_every_scene_field_on_both_legs() {
+    use crate::live_source_switch::SourceKind;
+    let mut primary = snapshot(SceneSourceKind::Camera);
+    primary.scene.as_mut().unwrap().sources[0].device_id = Some("camera:A".into());
+    primary.scene.as_mut().unwrap().sources[0]
+        .transform
+        .crop_left = 0.17;
+    primary.scene.as_mut().unwrap().sources[0].transform.width = 0.42;
+    primary.scene.as_mut().unwrap().sources[0].locked = true;
+    let mut auxiliary = primary.clone();
+    auxiliary.scene.as_mut().unwrap().sources[0].visible = false;
+    auxiliary.scene.as_mut().unwrap().sources[0].transform.y = 0.63;
+    auxiliary.layout.layout_preset = crate::protocol::LayoutPreset::VerticalCameraOnly;
+    let expected_primary = primary.clone();
+    let expected_auxiliary = auxiliary.clone();
+    let mut edit = CompositorSourceEdit {
+        primary,
+        auxiliary: Some(auxiliary),
+    };
+    let mut sources = crate::protocol::SourceSelection {
+        camera_id: None,
+        screen_id: None,
+        window_id: None,
+        microphone_id: None,
+        test_pattern: false,
+    };
+    edit.patch(SourceKind::Camera, None, &sources);
+    assert!(!crate::live_layout::required_scene_sources(edit.primary()).camera);
+    assert!(!scene_needs_live_camera_frame(Some(&edit.primary), None));
+    let mut bytes = vec![0; raw_yuv420p_len(64, 36)];
+    let mut store = FrameStore::new(1);
+    store.publish(
+        55,
+        64,
+        36,
+        PreviewCameraPixelFormat::Bgra8,
+        Instant::now(),
+        vec![255; 64 * 36 * 4],
+    );
+    let old = store.latest().unwrap();
+    render_compositor_yuv420p_frame(
+        CompositorRenderInputs {
+            camera_frame: Some(&old),
+            ..inputs(Some(&edit.primary))
+        },
+        &mut bytes,
+    );
+    assert_black(&bytes, 64, 36);
+    #[cfg(target_os = "macos")]
+    if let Some(mut gpu) = new_gpu_compositor(false) {
+        let frame = try_gpu_compose(
+            Some(&mut gpu),
+            &CompositorRenderInputs {
+                camera_frame: Some(&old),
+                ..inputs(Some(&edit.primary))
+            },
+            true,
+        )
+        .unwrap();
+        assert_black(&frame.yuv, 64, 36);
+    }
+    sources.camera_id = Some("camera:A".into());
+    edit.patch(SourceKind::Camera, Some("camera:A"), &sources);
+    assert_eq!(edit.primary, expected_primary);
+    assert_eq!(edit.auxiliary, Some(expected_auxiliary));
+}
+
+#[test]
+fn source_edit_inserts_only_a_never_created_camera_slot_and_keeps_auxiliary_demand() {
+    let mut primary = snapshot(SceneSourceKind::Screen);
+    primary.layout.layout_preset = crate::protocol::LayoutPreset::ScreenCamera;
+    let base = primary.scene.as_ref().unwrap().sources[0].clone();
+    let mut auxiliary = primary.clone();
+    auxiliary.layout.layout_preset = crate::protocol::LayoutPreset::VerticalCameraOnly;
+    let mut edit = CompositorSourceEdit {
+        primary,
+        auxiliary: Some(auxiliary),
+    };
+    let sources = crate::protocol::SourceSelection {
+        camera_id: Some("camera:B".into()),
+        screen_id: Some("screen:fixture".into()),
+        window_id: None,
+        microphone_id: None,
+        test_pattern: false,
+    };
+    edit.patch(
+        crate::live_source_switch::SourceKind::Camera,
+        Some("camera:B"),
+        &sources,
+    );
+    assert_eq!(edit.primary().sources[0], base);
+    assert_eq!(
+        edit.primary()
+            .sources
+            .iter()
+            .filter(|source| source.kind == SceneSourceKind::Camera)
+            .count(),
+        1
+    );
+    assert!(
+        edit.scenes()
+            .all(|scene| crate::live_layout::required_scene_sources(scene).camera)
+    );
+    let added = edit.primary().clone();
+    edit.patch(
+        crate::live_source_switch::SourceKind::Camera,
+        Some("camera:B"),
+        &sources,
+    );
+    assert_eq!(edit.primary(), &added);
+}
+
+#[test]
+fn source_edit_inserts_missing_capture_only_where_the_existing_layout_admits_it() {
+    let mut primary = snapshot(SceneSourceKind::Camera);
+    primary.layout.layout_preset = crate::protocol::LayoutPreset::ScreenCamera;
+    let base = primary.scene.as_ref().unwrap().sources[0].clone();
+    let mut auxiliary = primary.clone();
+    auxiliary.layout.layout_preset = crate::protocol::LayoutPreset::VerticalCameraOnly;
+    let mut edit = CompositorSourceEdit {
+        primary,
+        auxiliary: Some(auxiliary),
+    };
+    let sources = crate::protocol::SourceSelection {
+        camera_id: base.device_id.clone(),
+        screen_id: Some("screen:B".into()),
+        window_id: None,
+        microphone_id: None,
+        test_pattern: false,
+    };
+    edit.patch(
+        crate::live_source_switch::SourceKind::Capture,
+        Some("screen:B"),
+        &sources,
+    );
+    assert_eq!(edit.primary().sources[0], base);
+    assert!(crate::live_layout::required_scene_sources(edit.primary()).screen);
+    assert!(
+        !crate::live_layout::required_scene_sources(
+            edit.auxiliary.as_ref().unwrap().scene.as_ref().unwrap()
+        )
+        .screen
+    );
+    let once = edit.clone();
+    edit.patch(
+        crate::live_source_switch::SourceKind::Capture,
+        Some("screen:B"),
+        &sources,
+    );
+    assert!(edit == once);
+}
+
+#[test]
+fn camera_only_initial_none_never_reveals_retained_screen_after_round_trip() {
+    use crate::live_source_switch::SourceKind;
+    for preset in [
+        crate::protocol::LayoutPreset::CameraOnly,
+        crate::protocol::LayoutPreset::VerticalCameraOnly,
+    ] {
+        let mut primary = snapshot(SceneSourceKind::Screen);
+        primary.layout.layout_preset = preset;
+        primary.layout.arrangement_mode = crate::protocol::ArrangementMode::Preset;
+        let mut sources = crate::protocol::SourceSelection {
+            camera_id: None,
+            screen_id: Some("screen:retained".into()),
+            window_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
+        primary.scene = Some(crate::scene::scene_from_capture_config(
+            crate::protocol::SceneConfigParams {
+                sources: sources.clone(),
+                layout: primary.layout.clone(),
+                video: Some(video()),
+                background: None,
+                protected_overlay_window_ids: vec![],
+                transition_ms: None,
+            },
+        ));
+        let mut edit = CompositorSourceEdit {
+            primary,
+            auxiliary: None,
+        };
+        assert_eq!(edit.primary().sources.len(), 1);
+        assert_eq!(edit.primary().sources[0].kind, SceneSourceKind::Camera);
+        assert!(edit.primary().sources[0].device_id.is_none());
+        sources.camera_id = Some("camera:B".into());
+        edit.patch(SourceKind::Camera, Some("camera:B"), &sources);
+        sources.camera_id = None;
+        edit.patch(SourceKind::Camera, None, &sources);
+        assert!(!crate::live_layout::required_scene_sources(edit.primary()).screen);
+        let mut store = FrameStore::new(1);
+        store.publish(
+            99,
+            64,
+            36,
+            PreviewScreenPixelFormat::Bgra8,
+            Instant::now(),
+            vec![255; 64 * 36 * 4],
+        );
+        let screen = store.latest().unwrap();
+        let mut bytes = vec![0; raw_yuv420p_len(64, 36)];
+        render_compositor_yuv420p_frame(
+            CompositorRenderInputs {
+                screen_frame: Some(&screen),
+                ..inputs(Some(&edit.primary))
+            },
+            &mut bytes,
+        );
+        assert_black(&bytes, 64, 36);
+    }
+}
+
+#[tokio::test]
+async fn source_edit_required_capture_none_is_rejected_before_any_mutation() {
+    let state = state();
+    let original = snapshot(SceneSourceKind::Screen);
+    state.compositor.lock().await.scene = Some(original.clone());
+    let error = crate::live_layout::switch_session_video_source(
+        &state,
+        &crate::live_source_switch::SourceSwitchParams {
+            session_id: "not-started".into(),
+            request_id: "required-none".into(),
+            expected_source_revision: 0,
+            kind: crate::live_source_switch::SourceKind::Capture,
+            device_id: None,
+            protected_overlay_window_ids: vec![],
+        },
+    )
+    .await
+    .unwrap_err();
+    assert!(error.to_string().contains("requires a screen or window"));
+    assert!(state.compositor.lock().await.scene.as_ref() == Some(&original));
+    assert_eq!(state.latest_layout_intent_id(), 0);
+}
+
+#[test]
+fn source_edit_proof_requires_exact_generation_revision_and_renderable_camera() {
+    let mut scene = snapshot(SceneSourceKind::Camera);
+    scene.scene.as_mut().unwrap().sources[0].device_id = Some("camera:B".into());
+    let key = SourceKey::camera("camera:B");
+    let receipt = SourceEditReceipt {
+        session_id: "session".into(),
+        request_id: "switch".into(),
+        revision: 1,
+        auxiliary_revision: None,
+        kind: crate::live_source_switch::SourceKind::Camera,
+        device_id: Some("camera:B".into()),
+        camera: Some((key.clone(), 3)),
+        screen: None,
+    };
+    assert!(source_edit_frame_matches(
+        &receipt,
+        Some(&scene),
+        Some((&key, 3)),
+        None,
+        true,
+        false
+    ));
+    assert!(!source_edit_frame_matches(
+        &receipt,
+        Some(&scene),
+        Some((&key, 2)),
+        None,
+        true,
+        false
+    ));
+    assert!(!source_edit_frame_matches(
+        &receipt,
+        Some(&scene),
+        Some((&key, 3)),
+        None,
+        false,
+        false
+    ));
+    let stale = Instant::now() - Duration::from_secs(5);
+    assert!(!source_edit_frame_matches(
+        &receipt,
+        Some(&scene),
+        Some((&key, 3)),
+        None,
+        !source_frame_is_too_stale(stale),
+        false
+    ));
+    scene.revision = 2;
+    assert!(!source_edit_frame_matches(
+        &receipt,
+        Some(&scene),
+        Some((&key, 3)),
+        None,
+        true,
+        false
+    ));
+}
+
+#[tokio::test]
+async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_output() {
+    use crate::live_source_switch::{SourceKind, SourceSwitchParams};
+    for case in [
+        "stale-camera",
+        "native-authority",
+        "native-authority-gap",
+        "empty-auxiliary",
+        "missing-auxiliary",
+        "layout-before-frame",
+        "layout-replaced-source",
+        "healthy",
+    ] {
+        let state = state();
+        let mut scene = snapshot(SceneSourceKind::Camera);
+        scene.scene.as_mut().unwrap().sources[0].device_id = Some("camera:B".into());
+        scene.layout.layout_preset = crate::protocol::LayoutPreset::CameraOnly;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:B",
+            &scene.layout,
+            &video(),
+        )
+        .await;
+        crate::preview_camera::test_publish_camera_pixels(
+            &state,
+            8,
+            [0, 0, 255, 255],
+            if case == "stale-camera" {
+                Instant::now() - Duration::from_secs(5)
+            } else {
+                Instant::now()
+            },
+        )
+        .await;
+        let camera = crate::preview_camera::preview_camera_frame_source(&state)
+            .await
+            .unwrap();
+        let selected = crate::protocol::SourceSelection {
+            camera_id: Some("camera:B".into()),
+            screen_id: None,
+            window_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
+        let request = SourceSwitchParams {
+            session_id: "proof-session".into(),
+            request_id: "proof-switch".into(),
+            expected_source_revision: 0,
+            kind: SourceKind::Camera,
+            device_id: Some("camera:B".into()),
+            protected_overlay_window_ids: vec![],
+        };
+        {
+            let mut coordinator = state.live_source_switch.lock().unwrap();
+            coordinator.start(request.session_id.clone(), selected);
+            coordinator.enable_video();
+            coordinator.admit(&request).unwrap();
+            coordinator.commit_video(&request).unwrap();
+        }
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.run_id = Some("scene-switch-test".into());
+            compositor.scene = Some(scene.clone());
+            compositor.simulcast_scene = Some(scene.clone());
+            compositor.stream_frame_store =
+                (case != "missing-auxiliary").then(|| Arc::new(StdMutex::new(FrameStore::new(2))));
+            compositor.source_edit_receipt = Some(SourceEditReceipt {
+                session_id: request.session_id.clone(),
+                request_id: request.request_id.clone(),
+                revision: 1,
+                auxiliary_revision: Some(1),
+                kind: crate::live_source_switch::SourceKind::Camera,
+                device_id: Some("camera:B".into()),
+                camera: Some((SourceKey::camera("camera:B"), camera.generation())),
+                screen: None,
+            });
+        }
+        let mut native_lease = if matches!(case, "native-authority" | "native-authority-gap") {
+            Some(
+                state
+                    .compositor
+                    .lock()
+                    .await
+                    .claim_native_source_output("proof-session", 7),
+            )
+        } else {
+            None
+        };
+        if case == "native-authority-gap" {
+            drop(native_lease.take());
+        }
+        if matches!(case, "layout-before-frame" | "layout-replaced-source") {
+            let mut changed = scene.scene.clone().unwrap();
+            changed.sources[0].transform.width = 0.6;
+            if case == "layout-replaced-source" {
+                changed.sources[0].device_id = Some("camera:C".into());
+            }
+            update_compositor_scene(
+                &state,
+                crate::protocol::CompositorSceneUpdateParams {
+                    revision: 2,
+                    scene: Some(changed),
+                    layout: scene.layout.clone(),
+                    active_screen: None,
+                    transition_ms: None,
+                },
+            )
+            .await;
+            assert!(
+                !state
+                    .live_source_switch
+                    .lock()
+                    .unwrap()
+                    .snapshot("proof-session")
+                    .unwrap()
+                    .last_operation
+                    .unwrap()
+                    .output_observed
+            );
+        }
+        let mut sources = CompositorLiveSources::default();
+        let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+        publish_compositor_frame(
+            &state,
+            "scene-switch-test",
+            1,
+            64,
+            36,
+            &mut sources,
+            &mut cache,
+            None,
+            CompositorFrameConsumer::RawYuvEncoder,
+            Some(CompositorAuxiliaryOutput {
+                width: 36,
+                height: 64,
+                frame_consumer: if case == "empty-auxiliary" {
+                    CompositorFrameConsumer::NativePreview
+                } else {
+                    CompositorFrameConsumer::RawYuvEncoder
+                },
+                composes_simulcast_scene: true,
+            }),
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+        let snapshot = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("proof-session")
+            .unwrap();
+        assert_eq!(
+            snapshot.last_operation.as_ref().unwrap().output_observed,
+            matches!(case, "healthy" | "layout-before-frame"),
+            "{case}"
+        );
+        assert_eq!(
+            snapshot.last_operation.unwrap().output_superseded,
+            case == "layout-replaced-source"
+        );
+        if matches!(case, "native-authority" | "native-authority-gap") {
+            let mut compositor = state.compositor.lock().await;
+            let recovered_lease = compositor.claim_native_source_output("proof-session", 8);
+            let edit = compositor.source_edit_snapshot().unwrap();
+            let mut coordinator = state.live_source_switch.lock().unwrap();
+            for (session, generation, both_legs) in [
+                ("old-session", 7, true),
+                ("proof-session", 6, true),
+                ("proof-session", 8, false),
+            ] {
+                compositor.observe_windows_source_publication(
+                    &mut coordinator,
+                    &edit,
+                    session,
+                    generation,
+                    camera.source_key().map(|key| (key, camera.generation())),
+                    None,
+                    true,
+                    false,
+                    both_legs,
+                );
+                assert!(
+                    !coordinator
+                        .snapshot("proof-session")
+                        .unwrap()
+                        .last_operation
+                        .unwrap()
+                        .output_observed
+                );
+            }
+            compositor.observe_windows_source_publication(
+                &mut coordinator,
+                &edit,
+                "proof-session",
+                8,
+                camera.source_key().map(|key| (key, camera.generation())),
+                None,
+                true,
+                false,
+                true,
+            );
+            assert!(
+                coordinator
+                    .snapshot("proof-session")
+                    .unwrap()
+                    .last_operation
+                    .unwrap()
+                    .output_observed
+            );
+            drop(native_lease); // guaranteed even while the compositor mutex is held
+            drop(recovered_lease);
+            assert!(
+                !compositor
+                    .native_source_output_authority
+                    .is_generic_for("proof-session")
+            );
+            compositor
+                .native_source_output_authority
+                .release_session("proof-session");
+            assert!(
+                compositor
+                    .native_source_output_authority
+                    .is_generic_for("proof-session")
+            );
+        }
+        crate::preview_camera::stop_preview_camera(&state).await;
+    }
+}
+
+#[tokio::test]
+async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_reveals_target() {
+    use crate::live_source_switch::{SourceKind, SourceSwitchParams};
+    let state = state();
+    install_screen(&state, "screen:fixture", 7, 40, [0, 255, 0, 255]).await;
+    let mut scene = snapshot(SceneSourceKind::Screen);
+    scene.active_screen = Some(crate::protocol::StreamScreen {
+        id: "takeover".into(),
+        name: "Takeover".into(),
+        image_path: "fixture.png".into(),
+        thumbnail_path: None,
+        sort_order: 0,
+        status: crate::protocol::StreamScreenStatus::Ready,
+        created_at: String::new(),
+        updated_at: String::new(),
+    });
+    let request = SourceSwitchParams {
+        session_id: "proof".into(),
+        request_id: "capture-B".into(),
+        expected_source_revision: 0,
+        kind: SourceKind::Capture,
+        device_id: Some("screen:fixture".into()),
+        protected_overlay_window_ids: vec![],
+    };
+    {
+        let mut coordinator = state.live_source_switch.lock().unwrap();
+        coordinator.start(
+            "proof".into(),
+            crate::protocol::SourceSelection {
+                camera_id: None,
+                screen_id: Some("screen:fixture".into()),
+                window_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+        );
+        coordinator.enable_video();
+        coordinator.admit(&request).unwrap();
+        coordinator.commit_video(&request).unwrap();
+    }
+    {
+        let mut compositor = state.compositor.lock().await;
+        compositor.run_id = Some("scene-switch-test".into());
+        compositor.scene = Some(scene.clone());
+        compositor.simulcast_scene = Some(scene.clone());
+        compositor.stream_frame_store = Some(Arc::new(StdMutex::new(FrameStore::new(2))));
+        compositor.cache_prepared_image(
+            "takeover".into(),
+            CompositorImageSource {
+                width: Some(2),
+                height: Some(2),
+                rgba: Some(Arc::new(vec![255; 16])),
+                bgra: Some(Arc::new(vec![255; 16])),
+                ..missing_image()
+            },
+        );
+        compositor.source_edit_receipt = Some(SourceEditReceipt {
+            session_id: "proof".into(),
+            request_id: "capture-B".into(),
+            revision: 1,
+            auxiliary_revision: Some(1),
+            kind: SourceKind::Capture,
+            device_id: Some("screen:fixture".into()),
+            camera: None,
+            screen: Some((SourceKey::screen("screen:fixture"), 7)),
+        });
+    }
+    let mut sources = CompositorLiveSources::default();
+    let mut cache = CompositorRenderCache::refresh_initial(&state).await;
+    for takeover in [true, false] {
+        if !takeover {
+            state
+                .compositor
+                .lock()
+                .await
+                .scene
+                .as_mut()
+                .unwrap()
+                .active_screen = None;
+        }
+        publish_compositor_frame(
+            &state,
+            "scene-switch-test",
+            if takeover { 1 } else { 2 },
+            64,
+            36,
+            &mut sources,
+            &mut cache,
+            None,
+            CompositorFrameConsumer::RawYuvEncoder,
+            Some(CompositorAuxiliaryOutput {
+                width: 36,
+                height: 64,
+                frame_consumer: CompositorFrameConsumer::RawYuvEncoder,
+                composes_simulcast_scene: true,
+            }),
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+        let observed = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("proof")
+            .unwrap()
+            .last_operation
+            .unwrap()
+            .output_observed;
+        assert_eq!(observed, !takeover);
+        let pixels = latest_bytes(&state).await;
+        if takeover {
+            assert!(
+                pixels[18 * 64 + 32] > 220,
+                "white takeover center is rendered"
+            );
+        } else {
+            assert!(
+                pixels[18 * 64 + 32] < 200,
+                "the green capture replaces the takeover center"
+            );
+        }
+    }
+    crate::preview_screen::stop_preview_screen(&state).await;
+}
+
+#[tokio::test]
+async fn windows_source_binding_rejects_failed_cached_source_but_accepts_static_live_screen() {
+    let state = state();
+    install_screen(&state, "screen:fixture", 7, 40, [0, 255, 0, 255]).await;
+    let mut screen = state.preview_screen.lock().await;
+    screen.status.state = crate::protocol::PreviewScreenState::Live;
+    screen.status.frame_age_ms = Some(10_000);
+    assert!(
+        crate::preview_screen::available_frame_source_locked(&screen)
+            .unwrap()
+            .latest_frame_blocking()
+            .is_some()
+    );
+    screen.status.state = crate::protocol::PreviewScreenState::Failed;
+    assert!(
+        crate::preview_screen::frame_source_locked(&screen).is_some(),
+        "failed adapter retains cached frame store"
+    );
+    assert!(
+        crate::preview_screen::available_frame_source_locked(&screen).is_none(),
+        "failed store is not an on-air source"
+    );
+    drop(screen);
+    let scene = snapshot(SceneSourceKind::Camera);
+    crate::preview_camera::test_install_live_camera_for_layout(
+        &state,
+        "camera:B",
+        &scene.layout,
+        &video(),
+    )
+    .await;
+    let mut camera = state.preview_camera.lock().await;
+    assert!(crate::preview_camera::available_frame_source_locked(&camera).is_some());
+    camera.status.state = crate::protocol::PreviewCameraState::Failed;
+    assert!(crate::preview_camera::available_frame_source_locked(&camera).is_none());
+    drop(camera);
+    crate::preview_camera::stop_preview_camera(&state).await;
+}
+
+#[tokio::test]
+async fn windows_source_render_edit_samples_glide_without_mutating_committed_proof() {
+    let state = state();
+    let now = Instant::now();
+    let mut target = snapshot(SceneSourceKind::Camera);
+    target.scene.as_mut().unwrap().sources[0].transform.x = 0.5;
+    let mut from = target.scene.clone().unwrap();
+    from.sources[0].transform.x = 0.0;
+    let mut compositor = state.compositor.lock().await;
+    compositor.scene = Some(target.clone());
+    compositor.scene_transition = Some(SceneTransition {
+        from,
+        started_at: now,
+        duration: Duration::from_secs(2),
+    });
+    let committed = compositor.source_edit_snapshot().unwrap();
+    let rendered = compositor
+        .source_render_edit(now + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(
+        rendered.primary.scene.as_ref().unwrap().sources[0]
+            .transform
+            .x,
+        0.25
+    );
+    assert_eq!(
+        committed.primary.scene.as_ref().unwrap().sources[0]
+            .transform
+            .x,
+        0.5
+    );
+    assert!(compositor.source_edit_is_current(&committed));
+    assert!(!compositor.source_edit_is_current(&rendered));
+}

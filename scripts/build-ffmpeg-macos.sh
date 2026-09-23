@@ -11,6 +11,8 @@ INSTALL_DIR="${REPO_ROOT}/vendor/ffmpeg/macos-${ARCH}"
 CURRENT_DIR="${REPO_ROOT}/vendor/ffmpeg/current"
 TARBALL="${SOURCE_DIR}/ffmpeg-${FFMPEG_VERSION}.tar.xz"
 EXTRACTED_DIR="${SOURCE_DIR}/ffmpeg-${FFMPEG_VERSION}"
+CLOCK_PATCH="${REPO_ROOT}/scripts/patches/avfoundation-capture-clock.patch"
+CLOCK_PATCH_SHA256="$(shasum -a 256 "${CLOCK_PATCH}" | awk '{print $1}')"
 JOBS="${JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
@@ -30,9 +32,12 @@ if [[ -z "${OPENSSL_PREFIX}" || ! -f "${OPENSSL_PREFIX}/lib/libssl.a" || ! -f "$
 fi
 
 if [[ -x "${CURRENT_DIR}/bin/ffmpeg" && -x "${CURRENT_DIR}/bin/ffprobe" && "${FFMPEG_REBUILD:-0}" != "1" ]]; then
-  "${CURRENT_DIR}/bin/ffmpeg" -version | head -1
-  echo "Using existing bundled FFmpeg at ${CURRENT_DIR}/bin/ffmpeg"
-  exit 0
+  if node "${REPO_ROOT}/scripts/ffmpeg-capture-clock.mjs" "${CURRENT_DIR}"; then
+    "${CURRENT_DIR}/bin/ffmpeg" -version | head -1
+    echo "Using existing bundled FFmpeg at ${CURRENT_DIR}/bin/ffmpeg"
+    exit 0
+  fi
+  echo "Rebuilding FFmpeg: current bundle lacks the required capture clock patch." >&2
 fi
 
 mkdir -p "${SOURCE_DIR}" "${BUILD_DIR}"
@@ -53,6 +58,7 @@ fi
 rm -rf "${EXTRACTED_DIR}" "${BUILD_DIR}" "${INSTALL_DIR}" "${CURRENT_DIR}"
 mkdir -p "${BUILD_DIR}" "${INSTALL_DIR}"
 tar -xJf "${TARBALL}" -C "${SOURCE_DIR}"
+patch --batch --forward -d "${EXTRACTED_DIR}" -p1 < "${CLOCK_PATCH}"
 
 # Stage ONLY the static archives: if the linker can see Homebrew's .dylib next
 # to the .a it will pick the dylib, and the packaged binary would break on
@@ -136,15 +142,21 @@ under the Apache License 2.0, to provide TLS for rtmps:// outputs.
 FFmpeg project: https://ffmpeg.org/
 NOTICE
 
+mkdir -p "${INSTALL_DIR}/source-patches"
+cp "${CLOCK_PATCH}" "${INSTALL_DIR}/source-patches/avfoundation-capture-clock.patch"
+
 cat > "${INSTALL_DIR}/SOURCE.txt" <<SOURCE
 FFmpeg source archive: ${SOURCE_URL}
 FFmpeg version: ${FFMPEG_VERSION}
 Source SHA-256: ${SOURCE_SHA256}
+Videorc AVF clock protocol: 1
+Videorc AVF clock patch SHA-256: ${CLOCK_PATCH_SHA256}
+Patch: source-patches/avfoundation-capture-clock.patch
 
 Exact configure command:
 ${EXTRACTED_DIR}/configure ${CONFIGURE_FLAGS[*]}
 
-Source code for this exact archive must be made available beside public Videorc binary downloads.
+Source code for this exact archive AND the source-patches directory must be made available beside public Videorc binary downloads. Apply the patch with patch -p1 before configuring.
 SOURCE
 
 cat > "${INSTALL_DIR}/BUILD-CONFIG.txt" <<CONFIG
@@ -152,9 +164,13 @@ Built at: $(date -u +"%Y-%m-%dT%H:%M:%SZ")
 Build host: $(uname -a)
 Architecture: ${ARCH}
 Jobs: ${JOBS}
+Videorc AVF clock protocol: 1
+Videorc AVF clock patch SHA-256: ${CLOCK_PATCH_SHA256}
 
 ${VERSION_OUTPUT}
 CONFIG
+
+node "${REPO_ROOT}/scripts/ffmpeg-capture-clock.mjs" "${INSTALL_DIR}"
 
 mkdir -p "${CURRENT_DIR}"
 ditto "${INSTALL_DIR}" "${CURRENT_DIR}"

@@ -10,6 +10,7 @@ import {
 } from '@/components/icons'
 import type { ReactElement, ReactNode } from 'react'
 
+import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { SourceSelect } from '@/components/source-select'
 import { Button } from '@/components/ui/button'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
@@ -73,14 +74,16 @@ const TRIGGER_CLASS =
  * Quick Settings (SD2): four compact cards mirroring the controls that own
  * their own pages: Source, Mic, Output, Captions. They edit the SAME
  * captureConfig via the shared builders / setters (one state). Device + preset
- * edits are off-air (disabled mid-session, as on Sources); mic mute is the
- * live-safe action. Scene switching lives in the Scenes gallery below, and the
+ * source edits use the shared session controller; mic mute remains live-safe. Scene switching lives in the Scenes gallery below, and the
  * live mic VU in the mixer.
  */
 export function QuickSettings(): ReactElement {
   const {
     captureConfig,
     setCaptureConfig,
+    switchSourceDeviceLive,
+    sourceSwitchReason,
+    allowCaptureNone,
     deviceList,
     selectedCaptureDevice,
     selectedCamera,
@@ -128,7 +131,7 @@ export function QuickSettings(): ReactElement {
 
   return (
     <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-      {/* SOURCE — screen + camera, edited off-air; full picker on Sources. */}
+      {/* SOURCE — shared live source controller; full picker on Sources. */}
       <QuickCard icon={DisplayIcon} label="Source">
         <Popover>
           <PopoverTrigger className={TRIGGER_CLASS} title={sourceSummary}>
@@ -137,43 +140,47 @@ export function QuickSettings(): ReactElement {
           </PopoverTrigger>
           <PopoverContent align="start" className="flex w-72 flex-col gap-3 p-3">
             <SourceSelect
-              allowNone
+              allowNone={allowCaptureNone}
               discoveryPending={discoveryPending}
               devices={captureDevices}
-              disabled={isSessionActive}
+              disabled={Boolean(sourceSwitchReason('capture'))}
+              description={<SourceSwitchStatus kind="capture" />}
+              selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
               label="Screen / window"
               value={selectedCaptureId}
               onChange={(captureId) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  sources: buildCaptureSources(current.sources, captureDevices, captureId)
-                }))
+                void switchSourceDeviceLive(
+                  'capture',
+                  buildCaptureSources(captureConfig.sources, captureDevices, captureId)
+                )
               }
             />
             <SourceSelect
               allowNone
               discoveryPending={discoveryPending}
               devices={cameras}
-              disabled={isSessionActive}
+              disabled={Boolean(sourceSwitchReason('camera'))}
+              description={<SourceSwitchStatus kind="camera" />}
+              selectedName={captureConfig.sources.cameraName}
               label="Camera"
               value={captureConfig.sources.cameraId}
               onChange={(cameraId) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  sources: buildCameraSources(current.sources, cameras, cameraId)
-                }))
+                void switchSourceDeviceLive(
+                  'camera',
+                  buildCameraSources(captureConfig.sources, cameras, cameraId)
+                )
               }
             />
           </PopoverContent>
         </Popover>
       </QuickCard>
 
-      {/* MIC — picker off-air; mute is live-safe. */}
+      {/* MIC — confirmed source selection and live mute. */}
       <QuickCard icon={MicrophoneIcon} label="Mic">
         <Popover>
           <PopoverTrigger className={TRIGGER_CLASS}>
             <span className="min-w-0 flex-1 truncate text-left font-medium">
-              {selectedMicrophone?.name ?? 'No microphone'}
+              {selectedMicrophone?.name ?? captureConfig.sources.microphoneName ?? 'No microphone'}
             </span>
             {selectedMicrophone && muted ? (
               <SpeakerOffIcon className="size-3.5 shrink-0 text-warning" weight="fill" />
@@ -185,17 +192,19 @@ export function QuickSettings(): ReactElement {
               allowNone
               discoveryPending={discoveryPending}
               devices={microphones}
-              disabled={isSessionActive}
+              disabled={Boolean(sourceSwitchReason('microphone'))}
+              description={<SourceSwitchStatus kind="microphone" />}
+              selectedName={captureConfig.sources.microphoneName}
               label="Microphone"
               value={captureConfig.sources.microphoneId}
               onChange={(microphoneId) =>
-                setCaptureConfig((current) => ({
-                  ...current,
-                  sources: buildMicrophoneSources(current.sources, microphones, microphoneId)
-                }))
+                void switchSourceDeviceLive(
+                  'microphone',
+                  buildMicrophoneSources(captureConfig.sources, microphones, microphoneId)
+                )
               }
             />
-            {selectedMicrophone ? (
+            {selectedMicrophone || isSessionActive || captureConfig.sources.microphoneId ? (
               <Button
                 aria-pressed={muted}
                 size="sm"

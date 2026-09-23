@@ -48,9 +48,16 @@ pub enum WindowsScreenCaptureBackend {
 /// FIFO, or ffmpeg capturing the device directly as the fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MicrophoneInput {
+    /// Session-owned PCM, including intentional silence when no device is selected.
+    SessionPcm {
+        fifo_path: PathBuf,
+    },
     CoreAudio {
         device_id: u32,
         fifo_path: Option<PathBuf>,
+    },
+    AvFoundationUid {
+        uid_hex: String,
     },
     AvFoundation {
         index: usize,
@@ -216,7 +223,8 @@ pub fn append_microphone_input(
         MicrophoneInput::CoreAudio {
             fifo_path: Some(fifo_path),
             ..
-        } => {
+        }
+        | MicrophoneInput::SessionPcm { fifo_path } => {
             args.extend([
                 "-f".to_string(),
                 "f32le".to_string(),
@@ -235,6 +243,18 @@ pub fn append_microphone_input(
         MicrophoneInput::CoreAudio {
             fifo_path: None, ..
         } => false,
+        MicrophoneInput::AvFoundationUid { uid_hex } => {
+            args.extend([
+                "-f".into(),
+                "avfoundation".into(),
+                "-videorc_audio_uid".into(),
+                uid_hex.clone(),
+                "-i".into(),
+                "none:none".into(),
+            ]);
+            *next_input_index += 1;
+            true
+        }
         MicrophoneInput::AvFoundation { index } => {
             args.extend([
                 "-f".to_string(),
@@ -277,8 +297,10 @@ pub fn microphone_needs_graph_gain(microphone: Option<&MicrophoneInput>) -> bool
 
 pub fn microphone_channels(microphone: Option<&MicrophoneInput>) -> u16 {
     match microphone {
-        Some(MicrophoneInput::CoreAudio { .. }) => NATIVE_AUDIO_CHANNELS,
-        Some(MicrophoneInput::AvFoundation { .. }) => 1,
+        Some(MicrophoneInput::CoreAudio { .. } | MicrophoneInput::SessionPcm { .. }) => {
+            NATIVE_AUDIO_CHANNELS
+        }
+        Some(MicrophoneInput::AvFoundation { .. } | MicrophoneInput::AvFoundationUid { .. }) => 1,
         Some(MicrophoneInput::WindowsDshow { .. }) => NATIVE_AUDIO_CHANNELS,
         None => 0,
     }

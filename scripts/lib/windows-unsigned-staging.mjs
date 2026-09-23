@@ -15,6 +15,12 @@ const REQUIRED_FILES = [
   'resources/ffmpeg/SOURCE.txt',
   'resources/ffmpeg/bin/ffmpeg.exe',
   'resources/ffmpeg/bin/ffprobe.exe',
+  'resources/ffmpeg/bin/ffmpeg-capture.exe',
+  'resources/ffmpeg/capture/MANIFEST.json',
+  'resources/ffmpeg/capture/SOURCE.txt',
+  'resources/ffmpeg/capture/LICENSE.txt',
+  'resources/ffmpeg/capture/TOOLCHAIN.txt',
+  'resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch',
   'resources/videorc-backend.exe'
 ]
 

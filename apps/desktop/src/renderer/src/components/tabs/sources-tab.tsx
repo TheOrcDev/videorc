@@ -14,6 +14,7 @@ import { useRef, useState, type ReactElement } from 'react'
 
 import { ConfigGrid } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
+import { SourceSwitchStatus } from '@/components/studio/source-switch-status'
 import { SourceSelect } from '@/components/source-select'
 import { MicPickerPreview } from '@/components/studio/mic-picker-preview'
 import { StatusBadge, type StatusTone } from '@/components/status-badge'
@@ -110,6 +111,8 @@ export function SourcesTab(): ReactElement {
     layoutSwitchPending,
     sourceDeviceSwitchPending,
     switchSourceDeviceLive,
+    sourceSwitchReason,
+    allowCaptureNone,
     handleSystemPermission,
     revealPermissionTarget,
     runtimeInfo,
@@ -155,7 +158,6 @@ export function SourcesTab(): ReactElement {
   const syncCalibration = audioSyncCalibrationState(syncRecommendation, captureConfig.audio)
 
   const selectedCaptureId = captureConfig.sources.screenId ?? captureConfig.sources.windowId
-  const liveDeviceSwitchDisabled = Boolean(sourceDeviceSwitchPending || layoutSwitchPending)
 
   const captureSourcesForDevice = (captureId: string | undefined): SourceSelection =>
     buildCaptureSources(captureConfig.sources, captureDevices, captureId)
@@ -164,21 +166,10 @@ export function SourcesTab(): ReactElement {
     buildCameraSources(captureConfig.sources, cameras, cameraId)
 
   const applyCaptureSource = (captureId: string | undefined): void => {
-    const sources = captureSourcesForDevice(captureId)
-    if (isSessionActive) {
-      void switchSourceDeviceLive('capture', sources)
-      return
-    }
-    setCaptureConfig((current) => ({ ...current, sources }))
+    void switchSourceDeviceLive('capture', captureSourcesForDevice(captureId))
   }
-
   const applyCameraSource = (cameraId: string | undefined): void => {
-    const sources = cameraSourcesForDevice(cameraId)
-    if (isSessionActive) {
-      void switchSourceDeviceLive('camera', sources)
-      return
-    }
-    setCaptureConfig((current) => ({ ...current, sources }))
+    void switchSourceDeviceLive('camera', cameraSourcesForDevice(cameraId))
   }
 
   const importSyncMeasurementFile = async (file: File | null): Promise<void> => {
@@ -304,9 +295,12 @@ export function SourcesTab(): ReactElement {
         <div className="grid gap-4 md:grid-cols-2">
           <div className="flex flex-col gap-1.5">
             <SourceSelect
+              allowNone={allowCaptureNone}
               devices={captureDevices}
               discoveryPending={discoveryPending}
-              disabled={isSessionActive && liveDeviceSwitchDisabled}
+              disabled={Boolean(sourceSwitchReason('capture') || layoutSwitchPending)}
+              description={<SourceSwitchStatus kind="capture" />}
+              selectedName={captureConfig.sources.screenName ?? captureConfig.sources.windowName}
               label="Screen / window"
               searchable
               value={selectedCaptureId}
@@ -330,7 +324,9 @@ export function SourcesTab(): ReactElement {
             <SourceSelect
               allowNone
               devices={cameras}
-              disabled={isSessionActive && liveDeviceSwitchDisabled}
+              disabled={Boolean(sourceSwitchReason('camera') || layoutSwitchPending)}
+              description={<SourceSwitchStatus kind="camera" />}
+              selectedName={captureConfig.sources.cameraName}
               discoveryPending={discoveryPending}
               label="Camera"
               value={captureConfig.sources.cameraId}
@@ -411,15 +407,17 @@ export function SourcesTab(): ReactElement {
         <SourceSelect
           allowNone
           devices={microphones}
-          disabled={isSessionActive}
+          disabled={Boolean(sourceSwitchReason('microphone'))}
+          description={<SourceSwitchStatus kind="microphone" />}
+          selectedName={captureConfig.sources.microphoneName}
           discoveryPending={discoveryPending}
           label="Microphone"
           value={captureConfig.sources.microphoneId}
           onChange={(microphoneId) =>
-            setCaptureConfig((current) => ({
-              ...current,
-              sources: buildMicrophoneSources(current.sources, microphones, microphoneId)
-            }))
+            void switchSourceDeviceLive(
+              'microphone',
+              buildMicrophoneSources(captureConfig.sources, microphones, microphoneId)
+            )
           }
         />
         {/* See-before-you-pick: live waveform of the selected mic (shared with

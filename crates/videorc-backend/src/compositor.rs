@@ -300,6 +300,73 @@ impl CompositorPixelFormat {
     }
 }
 
+/// Separate from the async compositor lock: dropping a pump must always retire
+/// its proof authority, even while a scene transaction holds that lock.
+#[derive(Debug, Default)]
+pub(crate) struct NativeSourceOutputAuthority {
+    current: std::sync::Mutex<Option<(String, u64)>>,
+}
+impl NativeSourceOutputAuthority {
+    fn is_generic_for(&self, session: &str) -> bool {
+        self.current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_none_or(|(current, _)| current != session)
+    }
+    #[cfg(any(target_os = "windows", test))]
+    fn release_session(&self, session: &str) {
+        let mut current = self.current.lock().unwrap_or_else(|p| p.into_inner());
+        if current
+            .as_ref()
+            .is_some_and(|(current, _)| current == session)
+        {
+            *current = None;
+        }
+    }
+    #[cfg(any(target_os = "windows", test))]
+    fn matches(&self, session: &str, generation: u64) -> bool {
+        self.current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|(current, value)| current == session && *value == generation)
+    }
+    #[cfg(any(target_os = "windows", test))]
+    fn claim(self: &Arc<Self>, session: &str, generation: u64) -> NativeSourceOutputLease {
+        *self.current.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((session.into(), generation));
+        NativeSourceOutputLease {
+            authority: self.clone(),
+            session: session.into(),
+            generation,
+        }
+    }
+}
+#[cfg(any(target_os = "windows", test))]
+pub(crate) struct NativeSourceOutputLease {
+    authority: Arc<NativeSourceOutputAuthority>,
+    session: String,
+    generation: u64,
+}
+#[cfg(any(target_os = "windows", test))]
+impl Drop for NativeSourceOutputLease {
+    fn drop(&mut self) {
+        let mut current = self
+            .authority
+            .current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if current.as_ref().is_some_and(|(session, generation)| {
+            session == &self.session && *generation == self.generation
+        }) {
+            // Keep session-level native ownership through recovery. Generation
+            // zero means no pump may acknowledge; it never means generic output.
+            *current = Some((self.session.clone(), 0));
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CompositorRuntime {
     pub status: CompositorStatus,
@@ -308,6 +375,8 @@ pub struct CompositorRuntime {
     /// auxiliary output when it is simulcast-bound; independent of (and never
     /// a rescale of) the primary snapshot.
     simulcast_scene: Option<CompositorSceneSnapshot>,
+    source_edit_receipt: Option<SourceEditReceipt>,
+    native_source_output_authority: Arc<NativeSourceOutputAuthority>,
     /// Process-local arrival order for scene updates. External revisions can
     /// intentionally repeat, so equal-revision prepares need this second
     /// fence to ensure the latest request wins without rejecting a later
@@ -1012,10 +1081,11 @@ fn scene_needs_live_camera_frame(
     snapshot
         .and_then(|snapshot| snapshot.scene.as_ref())
         .is_some_and(|scene| {
-            scene
-                .sources
-                .iter()
-                .any(|source| source.visible && matches!(source.kind, SceneSourceKind::Camera))
+            scene.sources.iter().any(|source| {
+                source.visible
+                    && source.device_id.is_some()
+                    && matches!(source.kind, SceneSourceKind::Camera)
+            })
         })
 }
 
@@ -1031,6 +1101,7 @@ fn scene_needs_live_screen_frame(
         .is_some_and(|scene| {
             scene.sources.iter().any(|source| {
                 source.visible
+                    && source.device_id.is_some()
                     && matches!(
                         source.kind,
                         SceneSourceKind::Screen | SceneSourceKind::Window
@@ -1309,6 +1380,26 @@ struct CompositorImageSource {
     message: Option<String>,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+pub(crate) struct WindowsSceneImage {
+    pub(crate) pixels: Arc<Vec<u8>>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) revision: u64,
+}
+#[cfg(target_os = "windows")]
+impl CompositorImageSource {
+    fn windows_image(&self) -> Option<WindowsSceneImage> {
+        Some(WindowsSceneImage {
+            pixels: self.bgra.clone()?,
+            width: self.width?,
+            height: self.height?,
+            revision: self.content_revision,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct CompositorImagePreparation {
     role: CompositorImagePreparationRole,
@@ -1540,6 +1631,8 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         status: stopped_status(Some("Compositor is not running.".to_string())),
         scene: None,
         simulcast_scene: None,
+        source_edit_receipt: None,
+        native_source_output_authority: Arc::default(),
         scene_request_token: 0,
         pending_scene_request: None,
         scene_transition: None,
@@ -2999,12 +3092,470 @@ async fn update_compositor_scene_with_prepare_hook(
         );
         compositor.status.image_cache = compositor.image_sources.status();
         compositor.status.updated_at = Utc::now().to_rfc3339();
+        compositor.carry_source_edit_proof(state, &snapshot, false);
         compositor.scene = Some(snapshot);
         compositor.pending_scene_request = None;
         compositor.status.clone()
     };
     state.emit_event("compositor.status", status.clone());
     status
+}
+
+/// A source edit keeps exact program/auxiliary scenes and their image caches.
+#[derive(Clone, PartialEq)]
+pub(crate) struct CompositorSourceEdit {
+    primary: CompositorSceneSnapshot,
+    auxiliary: Option<CompositorSceneSnapshot>,
+}
+impl CompositorSourceEdit {
+    #[cfg(all(target_os = "windows", test))]
+    pub(crate) fn test_from_scenes(
+        primary: Scene,
+        auxiliary: Option<Scene>,
+        layout: LayoutSettings,
+    ) -> Self {
+        let snapshot = |scene| CompositorSceneSnapshot {
+            revision: 1,
+            scene: Some(scene),
+            layout: layout.clone(),
+            active_screen: None,
+        };
+        Self {
+            primary: snapshot(primary),
+            auxiliary: auxiliary.map(snapshot),
+        }
+    }
+
+    pub(crate) fn primary(&self) -> &Scene {
+        self.primary.scene.as_ref().expect("source edit scene")
+    }
+    pub(crate) fn layout(&self) -> &LayoutSettings {
+        &self.primary.layout
+    }
+    pub(crate) fn scenes(&self) -> impl Iterator<Item = &Scene> {
+        self.primary.scene.iter().chain(
+            self.auxiliary
+                .iter()
+                .filter_map(|snapshot| snapshot.scene.as_ref()),
+        )
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn legs(&self) -> impl Iterator<Item = (&Scene, &LayoutSettings)> {
+        std::iter::once(&self.primary)
+            .chain(self.auxiliary.iter())
+            .filter_map(|snapshot| {
+                snapshot
+                    .scene
+                    .as_ref()
+                    .map(|scene| (scene, &snapshot.layout))
+            })
+    }
+    pub(crate) fn patch(
+        &mut self,
+        kind: crate::live_source_switch::SourceKind,
+        device_id: Option<&str>,
+        target_sources: &crate::protocol::SourceSelection,
+    ) {
+        for snapshot in std::iter::once(&mut self.primary).chain(self.auxiliary.iter_mut()) {
+            if let Some(scene) = snapshot.scene.as_mut() {
+                if kind == crate::live_source_switch::SourceKind::Camera
+                    && snapshot.layout.arrangement_mode
+                        != crate::protocol::ArrangementMode::Freeform
+                    && matches!(
+                        snapshot.layout.layout_preset,
+                        crate::protocol::LayoutPreset::CameraOnly
+                            | crate::protocol::LayoutPreset::VerticalCameraOnly
+                    )
+                    && scene.sources.len() == 1
+                    && matches!(
+                        scene.sources[0].id.as_str(),
+                        "source:base" | "source:test-pattern"
+                    )
+                    && matches!(
+                        scene.sources[0].kind,
+                        SceneSourceKind::Screen
+                            | SceneSourceKind::Window
+                            | SceneSourceKind::TestPattern
+                    )
+                {
+                    // Migrate only the legacy preset fallback. A camera-only
+                    // None slot must never expose the saved screen selection.
+                    // Freeform and intentionally added layers are untouched.
+                    scene.sources.clear();
+                }
+                let matches_kind = |source: &crate::protocol::SceneSource| match kind {
+                    crate::live_source_switch::SourceKind::Camera => {
+                        source.kind == SceneSourceKind::Camera
+                    }
+                    crate::live_source_switch::SourceKind::Capture => matches!(
+                        source.kind,
+                        SceneSourceKind::Screen
+                            | SceneSourceKind::Window
+                            | SceneSourceKind::TestPattern
+                    ),
+                    crate::live_source_switch::SourceKind::Microphone => false,
+                };
+                if device_id.is_some() && !scene.sources.iter().any(matches_kind) {
+                    // A never-created slot has no geometry to preserve. Derive
+                    // only that missing layer from this leg's current layout.
+                    let video = scene
+                        .outputs
+                        .last()
+                        .map(|output| crate::protocol::VideoSettings {
+                            preset: crate::protocol::VideoPreset::Tutorial1440p30,
+                            width: output.width,
+                            height: output.height,
+                            fps: output.fps,
+                            bitrate_kbps: 8000,
+                        });
+                    let template = crate::scene::scene_from_capture_config(
+                        crate::protocol::SceneConfigParams {
+                            sources: target_sources.clone(),
+                            layout: snapshot.layout.clone(),
+                            video,
+                            background: scene.background.clone(),
+                            protected_overlay_window_ids: vec![],
+                            transition_ms: None,
+                        },
+                    );
+                    if let Some(camera) = template.sources.into_iter().find(matches_kind) {
+                        scene.sources.push(camera);
+                    }
+                }
+                for source in &mut scene.sources {
+                    let matches = match kind {
+                        crate::live_source_switch::SourceKind::Camera => {
+                            source.kind == SceneSourceKind::Camera
+                        }
+                        crate::live_source_switch::SourceKind::Capture => matches!(
+                            source.kind,
+                            SceneSourceKind::Screen
+                                | SceneSourceKind::Window
+                                | SceneSourceKind::TestPattern
+                        ),
+                        crate::live_source_switch::SourceKind::Microphone => false,
+                    };
+                    if matches {
+                        source.device_id = device_id.map(str::to_string);
+                        if kind == crate::live_source_switch::SourceKind::Capture {
+                            source.kind = if device_id.is_some_and(|id| id.starts_with("window:")) {
+                                SceneSourceKind::Window
+                            } else {
+                                SceneSourceKind::Screen
+                            };
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+#[derive(Debug, Clone)]
+struct SourceEditReceipt {
+    session_id: String,
+    request_id: String,
+    revision: u64,
+    auxiliary_revision: Option<u64>,
+    kind: crate::live_source_switch::SourceKind,
+    device_id: Option<String>,
+    camera: Option<(SourceKey, u64)>,
+    screen: Option<(SourceKey, u64)>,
+}
+impl CompositorRuntime {
+    fn carry_source_edit_proof(
+        &mut self,
+        state: &AppState,
+        next: &CompositorSceneSnapshot,
+        auxiliary: bool,
+    ) {
+        let Some(receipt) = self.source_edit_receipt.as_ref() else {
+            return;
+        };
+        let scenes = if auxiliary {
+            self.scene
+                .iter()
+                .chain(std::iter::once(next))
+                .collect::<Vec<_>>()
+        } else {
+            std::iter::once(next)
+                .chain(self.simulcast_scene.iter())
+                .collect::<Vec<_>>()
+        };
+        let preserved = source_edit_bindings_preserved(receipt, &scenes);
+        if preserved {
+            let receipt = self.source_edit_receipt.as_mut().expect("checked receipt");
+            if auxiliary {
+                receipt.auxiliary_revision = Some(next.revision);
+            } else {
+                receipt.revision = next.revision;
+            }
+        } else {
+            let receipt = self.source_edit_receipt.take().expect("checked receipt");
+            let mut coordinator = state
+                .live_source_switch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            coordinator.supersede_output(&receipt.session_id, &receipt.request_id);
+            if let Ok(snapshot) = coordinator.snapshot(&receipt.session_id) {
+                state.emit_event("session.sources.changed", snapshot);
+            }
+        }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn release_native_session_output(&self, session_id: &str) {
+        self.native_source_output_authority
+            .release_session(session_id);
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn claim_native_source_output(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> NativeSourceOutputLease {
+        self.native_source_output_authority
+            .claim(session_id, generation)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_windows_source_publication(
+        &mut self,
+        coordinator: &mut crate::live_source_switch::SourceSwitchCoordinator,
+        edit: &CompositorSourceEdit,
+        session_id: &str,
+        generation: u64,
+        camera: Option<(&SourceKey, u64)>,
+        screen: Option<(&SourceKey, u64)>,
+        camera_pixels: bool,
+        screen_pixels: bool,
+        all_legs_published: bool,
+    ) -> bool {
+        if !all_legs_published || !self.source_edit_is_current(edit) {
+            return false;
+        }
+        let Some(receipt) = self.source_edit_receipt.as_ref() else {
+            return false;
+        };
+        if receipt.session_id != session_id
+            || !self
+                .native_source_output_authority
+                .matches(session_id, generation)
+            || coordinator.running_snapshot(session_id).is_err()
+        {
+            return false;
+        }
+        if CompositorRenderCache::from_runtime(self)
+            .active_image_source
+            .is_some()
+        {
+            return false;
+        }
+        if !source_edit_frame_matches(
+            receipt,
+            Some(&edit.primary),
+            camera,
+            screen,
+            camera_pixels,
+            screen_pixels,
+        ) {
+            return false;
+        }
+        if let Some(auxiliary) = edit.auxiliary.as_ref() {
+            let mut auxiliary_receipt = receipt.clone();
+            auxiliary_receipt.revision = receipt.auxiliary_revision.unwrap_or(receipt.revision);
+            if !source_edit_frame_matches(
+                &auxiliary_receipt,
+                Some(auxiliary),
+                camera,
+                screen,
+                camera_pixels,
+                screen_pixels,
+            ) {
+                return false;
+            }
+        }
+        let receipt = self
+            .source_edit_receipt
+            .take()
+            .expect("checked source proof");
+        coordinator.observe_output(&receipt.session_id, &receipt.request_id);
+        true
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_takeover_active(&self) -> bool {
+        self.scene
+            .as_ref()
+            .is_some_and(|scene| scene.active_screen.is_some())
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_scene_images(
+        &self,
+        edit: &CompositorSourceEdit,
+    ) -> (Option<WindowsSceneImage>, Vec<Option<WindowsSceneImage>>) {
+        let takeover = CompositorRenderCache::from_runtime(self)
+            .active_image_source
+            .and_then(|image| image.windows_image());
+        let backgrounds = edit
+            .scenes()
+            .map(|scene| {
+                scene
+                    .background
+                    .as_ref()
+                    .and_then(|background| {
+                        self.image_sources.get(&background_cache_key(background))
+                    })
+                    .and_then(CompositorImageSource::windows_image)
+            })
+            .collect();
+        (takeover, backgrounds)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn source_render_edit(&self, now: Instant) -> Option<CompositorSourceEdit> {
+        let mut edit = self.source_edit_snapshot()?;
+        edit.primary =
+            snapshot_with_transition(Some(edit.primary), self.scene_transition.as_ref(), now)?;
+        Some(edit)
+    }
+
+    pub(crate) fn source_edit_snapshot(&self) -> Option<CompositorSourceEdit> {
+        let primary = self.scene.clone()?;
+        primary.scene.as_ref()?;
+        Some(CompositorSourceEdit {
+            primary,
+            auxiliary: self.simulcast_scene.clone(),
+        })
+    }
+    pub(crate) fn source_edit_is_current(&self, original: &CompositorSourceEdit) -> bool {
+        self.scene.as_ref() == Some(&original.primary) && self.simulcast_scene == original.auxiliary
+    }
+    pub(crate) fn commit_source_edit(
+        &mut self,
+        mut edit: CompositorSourceEdit,
+        revision: u64,
+        request: &crate::live_source_switch::SourceSwitchParams,
+        camera: Option<(SourceKey, u64)>,
+        screen: Option<(SourceKey, u64)>,
+    ) -> CompositorStatus {
+        edit.primary.revision = revision;
+        if let Some(auxiliary) = edit.auxiliary.as_mut() {
+            auxiliary.revision = revision;
+        }
+        self.scene_request_token = self
+            .scene_request_token
+            .checked_add(1)
+            .expect("scene token exhausted");
+        self.pending_scene_request = None;
+        self.status.scene_revision = Some(revision);
+        // Only the selected device changes. Layer geometry/background caches,
+        // layout, encoder dimensions and an in-flight geometry glide survive.
+        let mut sources = compositor_scene_sources(&edit.primary, None, None);
+        for source in &mut sources {
+            if !edit
+                .primary()
+                .sources
+                .iter()
+                .any(|layer| layer.id == source.id)
+                && let Some(cached) = self
+                    .status
+                    .scene_sources
+                    .iter()
+                    .find(|cached| cached.id == source.id)
+            {
+                *source = cached.clone();
+            }
+        }
+        self.status.scene_sources = sources;
+        self.status.updated_at = Utc::now().to_rfc3339();
+        self.scene = Some(edit.primary);
+        self.simulcast_scene = edit.auxiliary;
+        self.source_edit_receipt = Some(SourceEditReceipt {
+            session_id: request.session_id.clone(),
+            request_id: request.request_id.clone(),
+            revision,
+            auxiliary_revision: self.simulcast_scene.as_ref().map(|scene| scene.revision),
+            kind: request.kind,
+            device_id: request.device_id.clone(),
+            camera,
+            screen,
+        });
+        self.status.clone()
+    }
+}
+
+fn source_edit_bindings_preserved(
+    receipt: &SourceEditReceipt,
+    snapshots: &[&CompositorSceneSnapshot],
+) -> bool {
+    use crate::live_source_switch::SourceKind;
+    let mut target_present = receipt.device_id.is_none();
+    for snapshot in snapshots {
+        let Some(scene) = snapshot.scene.as_ref() else {
+            return false;
+        };
+        for source in &scene.sources {
+            let kind = match source.kind {
+                SceneSourceKind::Camera => SourceKind::Camera,
+                SceneSourceKind::Screen | SceneSourceKind::Window => SourceKind::Capture,
+                _ => continue,
+            };
+            if kind == receipt.kind {
+                if source.device_id == receipt.device_id {
+                    target_present = true;
+                } else if source.visible && source.device_id.is_some() {
+                    return false;
+                }
+            }
+            if !source.visible || source.device_id.is_none() {
+                continue;
+            }
+            let expected = if kind == SourceKind::Camera {
+                receipt.camera.as_ref()
+            } else {
+                receipt.screen.as_ref()
+            };
+            if expected.is_none_or(|(key, _)| Some(key.id.as_str()) != source.device_id.as_deref())
+            {
+                return false;
+            }
+        }
+    }
+    target_present
+}
+
+fn source_edit_frame_matches(
+    receipt: &SourceEditReceipt,
+    snapshot: Option<&CompositorSceneSnapshot>,
+    camera: Option<(&SourceKey, u64)>,
+    screen: Option<(&SourceKey, u64)>,
+    camera_frame: bool,
+    screen_frame: bool,
+) -> bool {
+    let Some(snapshot) = snapshot.filter(|snapshot| snapshot.revision == receipt.revision) else {
+        return false;
+    };
+    let Some(scene) = snapshot.scene.as_ref() else {
+        return false;
+    };
+    let needs = crate::live_layout::required_scene_sources(scene);
+    (receipt.kind != crate::live_source_switch::SourceKind::Camera
+        || !needs.camera
+        || (camera_frame
+            && receipt
+                .camera
+                .as_ref()
+                .is_some_and(|(key, generation)| camera == Some((key, *generation)))))
+        && (receipt.kind != crate::live_source_switch::SourceKind::Capture
+            || !needs.screen
+            || (screen_frame
+                && receipt
+                    .screen
+                    .as_ref()
+                    .is_some_and(|(key, generation)| screen == Some((key, *generation)))))
 }
 
 /// Set (or replace) the vertical leg's scene. Revision-ordered like the
@@ -3032,12 +3583,14 @@ pub async fn update_compositor_simulcast_scene(
     {
         return;
     }
-    compositor.simulcast_scene = Some(CompositorSceneSnapshot {
+    let snapshot = CompositorSceneSnapshot {
         revision,
         scene,
         layout,
         active_screen,
-    });
+    };
+    compositor.carry_source_edit_proof(state, &snapshot, true);
+    compositor.simulcast_scene = Some(snapshot);
 }
 
 /// Session stop / non-dual sessions: the vertical leg has no scene.
@@ -4863,7 +5416,10 @@ fn try_gpu_compose(
     for source in scene
         .into_iter()
         .flat_map(|scene| &scene.sources)
-        .filter(|source| source.visible)
+        .filter(|source| {
+            source.visible
+                && (source.device_id.is_some() || source.kind == SceneSourceKind::TestPattern)
+        })
     {
         let transform =
             scene_source_render_transform(&source.transform, &source.kind, stage_margin);
@@ -5901,6 +6457,18 @@ async fn publish_compositor_frame(
         );
         timings.frame_store_publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
     }
+    let primary_published = frame_store
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .latest()
+        .is_some_and(|frame| {
+            frame.sequence == sequence
+                && (!frame.bytes.is_empty()
+                    || frame.metadata.has_metal_iosurface_target()
+                    || frame.metadata.has_d3d11_texture())
+        });
+    let auxiliary_required = stream_output.is_some();
+    let mut auxiliary_proof = None;
     if let (Some(stream_output), Some(stream_frame_store)) = (stream_output, stream_frame_store) {
         // A simulcast-bound aux composes the VERTICAL scene; the classic
         // caption/profile-split aux re-renders the primary snapshot. The
@@ -5943,6 +6511,7 @@ async fn publish_compositor_frame(
                 None
             },
         };
+        let proof_store = stream_frame_store.clone();
         if let Some(aux_timings) = publish_auxiliary_compositor_frame(
             sequence,
             captured_at,
@@ -5953,6 +6522,17 @@ async fn publish_compositor_frame(
         ) {
             timings.merge_gpu(aux_timings);
         }
+        let published = proof_store
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .latest()
+            .is_some_and(|frame| {
+                frame.sequence == sequence
+                    && (!frame.bytes.is_empty()
+                        || frame.metadata.has_metal_iosurface_target()
+                        || frame.metadata.has_d3d11_texture())
+            });
+        auxiliary_proof = Some((aux_snapshot, published));
     }
     let evidence = CompositorFrameEvidence {
         sequence,
@@ -5965,8 +6545,66 @@ async fn publish_compositor_frame(
         has_image_source,
         published_at,
     };
-    if let Ok(mut compositor) = state.compositor.try_lock() {
-        set_latest_frame_evidence_if_current_run(&mut compositor, run_id, evidence);
+    if let Ok(mut compositor) = state.compositor.try_lock()
+        && set_latest_frame_evidence_if_current_run(&mut compositor, run_id, evidence)
+        && let Some(receipt) = compositor.source_edit_receipt.as_ref()
+        && compositor
+            .native_source_output_authority
+            .is_generic_for(&receipt.session_id)
+    {
+        let camera_identity = live_sources
+            .camera
+            .as_ref()
+            .and_then(|source| source.source_key().map(|key| (key, source.generation())));
+        let screen_identity = live_sources
+            .screen
+            .as_ref()
+            .and_then(|source| source.source_key().map(|key| (key, source.generation())));
+        let primary_matches = primary_published
+            && source_edit_frame_matches(
+                receipt,
+                snapshot.as_ref(),
+                camera_identity,
+                screen_identity,
+                active_image_source.is_none()
+                    && primary_camera_frame
+                        .is_some_and(|frame| !source_frame_is_too_stale(frame.captured_at)),
+                primary_screen_frame.is_some() && active_image_source.is_none(),
+            );
+        let auxiliary_matches = (!auxiliary_required || auxiliary_proof.is_some())
+            && auxiliary_proof.is_none_or(|(aux, published)| {
+                let mut auxiliary_receipt = receipt.clone();
+                auxiliary_receipt.revision = receipt.auxiliary_revision.unwrap_or(receipt.revision);
+                published
+                    && source_edit_frame_matches(
+                        &auxiliary_receipt,
+                        aux,
+                        camera_identity,
+                        screen_identity,
+                        active_image_source.is_none()
+                            && camera_frame.as_ref().is_some_and(|(frame, _)| {
+                                !source_frame_is_too_stale(frame.captured_at)
+                            })
+                            && scene_accepts_source(aux, camera_key),
+                        screen_frame.is_some()
+                            && active_image_source.is_none()
+                            && scene_accepts_source(aux, screen_key),
+                    )
+            });
+        if primary_matches && auxiliary_matches {
+            let receipt = compositor
+                .source_edit_receipt
+                .take()
+                .expect("pending source proof");
+            let mut coordinator = state
+                .live_source_switch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            coordinator.observe_output(&receipt.session_id, &receipt.request_id);
+            if let Ok(snapshot) = coordinator.snapshot(&receipt.session_id) {
+                state.emit_event("session.sources.changed", snapshot);
+            }
+        }
     }
     CompositorPublishResult {
         fallback_frame_age_ms: captured_at.elapsed().as_millis() as u64,
@@ -6168,7 +6806,10 @@ fn render_compositor_yuv420p_scene(inputs: CompositorRenderInputs<'_>, bytes: &m
         return;
     }
 
-    for source in scene.sources.iter().filter(|source| source.visible) {
+    for source in scene.sources.iter().filter(|source| {
+        source.visible
+            && (source.device_id.is_some() || source.kind == SceneSourceKind::TestPattern)
+    }) {
         let transform =
             scene_source_render_transform(&source.transform, &source.kind, stage_margin);
         let Some(rect) = scene_source_rect_pixels(&transform, width, height) else {
@@ -7588,6 +8229,38 @@ fn percentile(sorted: &[f64], p: u32) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_source_output_authority_fences_preview_old_sessions_and_drop_without_compositor_lock()
+    {
+        let authority = std::sync::Arc::new(super::NativeSourceOutputAuthority::default());
+        assert!(authority.is_generic_for("A"));
+        let old = authority.claim("A", 1);
+        assert!(
+            !authority.is_generic_for("A"),
+            "generic preview cannot observe native receipt"
+        );
+        assert!(authority.matches("A", 1));
+        let current = authority.claim("B", 2);
+        drop(old);
+        assert!(!authority.matches("A", 1));
+        assert!(
+            authority.matches("B", 2),
+            "late old pump drop cannot retire B"
+        );
+        // No compositor runtime access is needed to retire even on startup error.
+        drop(current);
+        assert!(
+            !authority.is_generic_for("B"),
+            "generic preview cannot prove output during native recovery"
+        );
+        assert!(!authority.matches("B", 2));
+        assert!(authority.is_generic_for("next-generic-session"));
+        authority.release_session("A");
+        assert!(!authority.is_generic_for("B"));
+        authority.release_session("B");
+        assert!(authority.is_generic_for("B"));
+    }
+
     use super::*;
     use crate::protocol::{
         SceneConfigParams, SourceSelection, StreamScreenStatus, VideoPreset, VideoSettings,

@@ -21,9 +21,9 @@ use uuid::Uuid;
 
 use crate::audio::{
     AudioCaptureStats, AudioProcessingSettings, NATIVE_AUDIO_CHANNELS, NATIVE_AUDIO_SAMPLE_RATE,
-    NativeAudioCaptureSession, NativeAudioInputState, NativeAudioSource, attach_fifo_writer,
-    audio_capture_coverage, create_native_audio_fifo, native_audio_fifo_path,
-    parse_coreaudio_microphone_id, parse_windows_dshow_microphone_id, start_native_audio_source,
+    NativeAudioCaptureSession, NativeAudioInputState, audio_capture_coverage,
+    create_native_audio_fifo, native_audio_fifo_path, parse_coreaudio_microphone_id,
+    parse_windows_dshow_microphone_id,
 };
 use crate::camera_capture::{
     native_camera_name_for_id, parse_native_camera_id, parse_windows_dshow_camera_id,
@@ -43,7 +43,7 @@ use crate::compositor::{
     update_compositor_scene, wait_for_compositor_startup_frames,
 };
 use crate::devices::{
-    find_avfoundation_camera_index, find_avfoundation_microphone_index_for_native_name,
+    find_avfoundation_camera_index, find_avfoundation_microphone_uid_for_native_name,
     find_avfoundation_screen_index, find_avfoundation_screen_index_for_native_display_id,
 };
 use crate::diagnostics::{
@@ -2683,6 +2683,18 @@ async fn start_session_with_timeline(
         _session_start_publication_fence,
         _session_start_source_transition_fence,
     ) = admit_session_start(&state).await?;
+    if !state.warm_microphone.wait_for_open().await {
+        bail!(
+            "The standby microphone is still opening. Wait for it to finish before starting the session."
+        );
+    }
+    if crate::session_audio::cleanup_pending(state.warm_microphone.owned_producer_count())
+        && state.recording.lock().await.is_none()
+    {
+        bail!(
+            "The previous microphone is still opening or closing. Wait for cleanup before starting another session."
+        );
+    }
     timeline.mark(RecordingStartPhase::Admission);
     let mut session_start_admission = Some(session_start_admission);
     // SessionStarting becomes authoritative before `state.recording` is
@@ -2889,6 +2901,9 @@ async fn start_session_with_timeline(
     timeline.mark(RecordingStartPhase::DeviceResolve);
     let mut native_audio_source =
         prepare_native_audio_source(&state, &session_id, &mut capture, &params).await;
+    // A mismatched standby must not remain an extra active input while the bus
+    // owns program audio. Managed handles retire without closing on this task.
+    state.warm_microphone.disarm();
     timeline.mark(RecordingStartPhase::AudioOpen);
     // Warm up the microphone before the video pipeline starts so audio and video begin in
     // lockstep. CoreAudio takes a few hundred ms to deliver its first callback while video
@@ -2898,7 +2913,7 @@ async fn start_session_with_timeline(
         && !await_microphone_warmup(&state, prepared.source.stats_handle()).await
         && let Some(prepared) = native_audio_source.take()
     {
-        let device_name = prepared.source.device_name.clone();
+        let device_name = prepared.source.device_name();
         if live_captions_requested(&params) {
             let message = format!(
                 "Native microphone {device_name} did not deliver warmup frames. Live captions require this post-controls native microphone bus, so the session will not be published."
@@ -2912,8 +2927,8 @@ async fn start_session_with_timeline(
                 &message,
             );
             capture.microphone = None;
-        } else if let Some(index) =
-            find_avfoundation_microphone_index_for_native_name(&ffmpeg_path, &device_name).await
+        } else if let Some(uid_hex) =
+            find_avfoundation_microphone_uid_for_native_name(&ffmpeg_path, &device_name).await
         {
             let message = format!(
                 "Native microphone {device_name} did not deliver warmup frames; switching this session to the FFmpeg avfoundation fallback input."
@@ -2926,7 +2941,7 @@ async fn start_session_with_timeline(
                 "microphone-fallback-selected",
                 &message,
             );
-            capture.microphone = Some(MicrophoneInput::AvFoundation { index });
+            capture.microphone = Some(MicrophoneInput::AvFoundationUid { uid_hex });
         } else {
             let message = format!(
                 "Native microphone {device_name} did not deliver warmup frames and no matching fallback input was found; omitting the mic FIFO so FFmpeg can finalize video instead of blocking on an empty audio input."
@@ -2943,6 +2958,57 @@ async fn start_session_with_timeline(
         }
         let _ = crate::fifo::cleanup(&prepared.fifo_path);
     }
+    // Capture-only workers own replaceable device inputs; the encoder reads
+    // one persistent PCM track. Older Windows development bundles keep their
+    // initial DirectShow path until the separately verified worker is present.
+    let worker_device = match capture.microphone.as_ref() {
+        Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
+            Some(format!("microphone:avfoundation-uid:{uid_hex}"))
+        }
+        Some(MicrophoneInput::AvFoundation { index }) => {
+            Some(format!("microphone:avfoundation:{index}"))
+        }
+        Some(MicrophoneInput::WindowsDshow { .. })
+            if crate::audio_capture_adapter::windows_worker_path(&ffmpeg_path).is_file() =>
+        {
+            params.sources.microphone_id.clone()
+        }
+        _ => None,
+    };
+    if let Some(id) = worker_device {
+        let path = native_audio_fifo_path(&session_id);
+        let prepared = async {
+            create_native_audio_fifo(&path)?;
+            crate::session_audio::prepare_initial_adapter(id, ffmpeg_path.clone()).await
+        }
+        .await;
+        match prepared {
+            Ok(source) => {
+                capture.microphone = Some(MicrophoneInput::SessionPcm {
+                    fifo_path: path.clone(),
+                });
+                native_audio_source = Some(PreparedNativeAudioSource {
+                    source,
+                    fifo_path: path,
+                });
+            }
+            Err(error) => {
+                let _ = crate::fifo::cleanup(&path);
+                capture.microphone = None;
+                state.emit_log(
+                    "warn",
+                    format!("Capture-worker microphone unavailable: {error}"),
+                );
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "microphone-capture-worker-unavailable",
+                    &format!("The selected microphone could not supply timestamped audio: {error}"),
+                );
+            }
+        }
+    }
     timeline.mark(RecordingStartPhase::MicWarm);
     if let Some(prepared) = native_audio_source.as_ref() {
         startup_resources.track_fifo(&prepared.fifo_path);
@@ -2950,6 +3016,20 @@ async fn start_session_with_timeline(
     let has_native_audio = native_audio_source.is_some();
     let session_start_publication_permit =
         authorize_session_start_publication(&state, &session_id, &params, has_native_audio).await?;
+    // Input topology is fixed for the lifetime of this output process. An empty
+    // selection has a real paced zero-PCM producer, never a device or test tone.
+    let silent_audio_fifo = if capture.microphone.is_none() {
+        let path = native_audio_fifo_path(&session_id);
+        create_native_audio_fifo(&path)?;
+        startup_resources.track_fifo(&path);
+        capture.microphone = Some(MicrophoneInput::SessionPcm {
+            fifo_path: path.clone(),
+        });
+        Some(path)
+    } else {
+        None
+    };
+    let has_session_audio = has_native_audio || silent_audio_fifo.is_some();
     let audio_tracks = capture_audio_tracks(&capture);
     if matches!(capture.video, VideoInput::TestPattern) {
         let (code, message) = if matches!(params.layout.layout_preset, LayoutPreset::CameraOnly) {
@@ -3318,6 +3398,7 @@ async fn start_session_with_timeline(
                     plan.clone(),
                     camera_input.clone(),
                     overlays.clone(),
+                    crate::windows_d3d11_session::WindowsLiveSources::new(&state, &session_id),
                 ) {
                     Ok(pump) => {
                         match validate_windows_d3d11_startup_evidence(
@@ -3457,6 +3538,15 @@ async fn start_session_with_timeline(
             }
         }
     };
+    #[cfg(target_os = "windows")]
+    if windows_d3d11_media.is_none() {
+        state
+            .compositor
+            .lock()
+            .await
+            .release_native_session_output(&session_id);
+    }
+
     let screen_overlay_fifo =
         if !use_encoder_bridge && (active_screen.is_some() || params.output.stream_enabled) {
             let fifo_path = screen_overlay_fifo_path(&session_id);
@@ -4144,13 +4234,28 @@ async fn start_session_with_timeline(
     // await between construction and publication, synchronously signalling
     // FFmpeg before this active value joins its native-audio FIFO writer.
     let pending_active: ActiveRecording;
-    let attached_native_audio = native_audio_source.take().map(|prepared| {
-        attach_fifo_writer(
-            prepared.source,
-            prepared.fifo_path,
-            use_encoder_bridge.then(|| video_epoch.clone()),
-        )
-    });
+    let attached_native_audio = native_audio_source
+        .take()
+        .map(|prepared| {
+            crate::session_audio::attach_prepared(
+                Some(prepared.source),
+                prepared.fifo_path,
+                use_encoder_bridge.then(|| video_epoch.clone()),
+                audio_processing_settings(&params),
+                crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
+            )
+        })
+        .or_else(|| {
+            silent_audio_fifo.map(|path| {
+                crate::session_audio::attach(
+                    None,
+                    path,
+                    use_encoder_bridge.then(|| video_epoch.clone()),
+                    audio_processing_settings(&params),
+                    crate::audio::NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
+                )
+            })
+        });
     // Declare the uncommitted process guard after every blocking FIFO writer.
     // Rust drops locals in reverse declaration order, so even cancellation or
     // a future unhandled early return starts terminating FFmpeg before native
@@ -4544,6 +4649,64 @@ async fn start_session_with_timeline(
     // cancellation can leave neither an orphan FFmpeg child nor an active
     // recording without its reaper.
     let mut recording = state.recording.lock().await;
+    let mut confirmed_sources = params.sources.clone();
+    let live_microphone_id = match capture.microphone.as_ref() {
+        Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
+            Some(format!("microphone:avfoundation-uid:{uid_hex}"))
+        }
+        Some(MicrophoneInput::CoreAudio { device_id, .. }) => {
+            Some(format!("microphone:coreaudio:{device_id}"))
+        }
+        Some(MicrophoneInput::AvFoundation { index }) => {
+            Some(format!("microphone:avfoundation:{index}"))
+        }
+        Some(MicrophoneInput::WindowsDshow { .. }) => params.sources.microphone_id.clone(),
+        Some(MicrophoneInput::SessionPcm { .. }) => pending_active
+            .native_audio
+            .as_ref()
+            .and_then(|audio| audio.status().device_id),
+        None => None,
+    };
+    // The input is always resolved from the picked ID, so a live producer
+    // reports that pick. A fallback path (AVFoundation UID after a missed
+    // CoreAudio warm-up) is kept as an alias: the renderer persists the
+    // confirmed ID and must never be handed an identity outside devices.list.
+    confirmed_sources.microphone_id = live_microphone_id
+        .as_ref()
+        .and(params.sources.microphone_id.clone())
+        .or_else(|| live_microphone_id.clone());
+    let sources_snapshot = {
+        let mut sources = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        sources.start(session_id.clone(), confirmed_sources);
+        if let Some(live_microphone_id) = live_microphone_id {
+            sources.alias_microphone(live_microphone_id);
+        }
+        sources.set_output_process_id(pending_active.pid);
+        #[cfg(target_os = "windows")]
+        let replaceable_video = pending_active.windows_d3d11_media.is_some()
+            || (pending_active.encoder_bridge.is_some()
+                && pending_active.direct_d3d11_consumer_lease.is_none());
+        #[cfg(not(target_os = "windows"))]
+        let replaceable_video = pending_active.encoder_bridge.is_some();
+        if replaceable_video {
+            sources.enable_video();
+        }
+        if pending_active.native_audio.is_some()
+            && (cfg!(target_os = "macos")
+                || (cfg!(target_os = "windows")
+                    && crate::audio_capture_adapter::windows_worker_path(&ffmpeg_path).is_file()))
+        {
+            sources.enable_microphone();
+        } else if cfg!(target_os = "windows") {
+            sources.microphone_unavailable("Live microphone replacement requires the verified capture worker. This session keeps its initial microphone input.");
+        }
+        sources
+            .snapshot(&session_id)
+            .expect("new session source snapshot")
+    };
     let (child, session_start_admission) = uncommitted_capture_process.commit();
     let watchdog_pid = pending_active.pid;
     *recording = Some(pending_active);
@@ -4553,6 +4716,7 @@ async fn start_session_with_timeline(
     // path will then reject it instead of silently replacing the startup scene.
     drop(recording_startup_scene.take());
     timeline.mark(RecordingStartPhase::Running);
+    state.emit_event("session.sources.changed", sources_snapshot);
     state.emit_event("recording.status", running_status.clone());
     if let Some(receiver) = deferred_ffmpeg_output_startup.take() {
         spawn_ffmpeg_output_startup_watchdog(
@@ -4639,7 +4803,7 @@ async fn start_session_with_timeline(
             }
         });
     }
-    if has_native_audio {
+    if has_session_audio {
         tokio::spawn(sample_native_audio_during_recording(
             state.clone(),
             session_id.clone(),
@@ -5099,7 +5263,19 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
             let _ = stop_intent_sender.send(());
         }
         active.stop_requested = true;
+        state.invalidate_layout_source_work();
+        state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stop(&active.session_id);
     }
+    #[cfg(target_os = "windows")]
+    state
+        .compositor
+        .lock()
+        .await
+        .release_native_session_output(&active.session_id);
     #[cfg(target_os = "windows")]
     release_direct_d3d11_consumer(&state, active);
     if let Some(native_audio) = active.native_audio.as_ref() {
@@ -7162,10 +7338,10 @@ struct SessionMonitorContext {
 /// `micDroppedFrames` and the derived capture-coverage gap signal update *during* the run
 /// instead of only at stop. Exits as soon as the session is replaced or ends.
 async fn sample_native_audio_during_recording(state: AppState, session_id: String) {
-    let started_at = std::time::Instant::now();
     let mut ticker = tokio::time::interval(NATIVE_AUDIO_SAMPLE_INTERVAL);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut silent_mic_reported = false;
+    let mut microphone_generation = 0;
     loop {
         ticker.tick().await;
         let counters = {
@@ -7173,15 +7349,18 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             match recording.as_ref() {
                 Some(active) if active.session_id == session_id => {
                     active.native_audio.as_ref().map(|audio| {
+                        let observation = audio.observation(false);
                         (
-                            audio.captured_frames(),
-                            audio.dropped_frames(),
-                            audio.live_peak(),
-                            audio.session_peak(),
-                            audio.device_name.clone(),
-                            audio.recording_window_elapsed_secs(),
-                            audio.input_state(),
-                            audio.claim_source_loss_event(),
+                            observation.captured_frames,
+                            observation.dropped_frames,
+                            observation.live_peak,
+                            observation.session_peak,
+                            observation.device_name,
+                            observation.elapsed_secs,
+                            observation.input_state,
+                            observation.losses,
+                            observation.selected_input,
+                            observation.generation,
                         )
                     })
                 }
@@ -7197,18 +7376,24 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             capture_elapsed_secs,
             input_state,
             source_loss_event_after_ms,
+            selected_input,
+            generation,
         )) = counters
         else {
             return;
         };
 
-        if let Some(source_loss_after_ms) = source_loss_event_after_ms {
-            silent_mic_reported = true;
+        if generation != microphone_generation {
+            microphone_generation = generation;
+            silent_mic_reported = false;
+        }
+        for source_loss_after_ms in source_loss_event_after_ms {
+            silent_mic_reported |= source_loss_after_ms.generation == generation;
             emit_microphone_input_lost_health_event(
                 &state,
                 &session_id,
-                &device_name,
-                source_loss_after_ms,
+                &source_loss_after_ms.device_name,
+                source_loss_after_ms.after_ms,
             );
         }
 
@@ -7217,9 +7402,11 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         // while stopping and fixing still saves the take. A TCC-unauthorized
         // process receives silent zeros (frames count, peak stays 0), so both
         // "no frames" and "all-silence" trip the check. Fires at most once.
-        if input_state != NativeAudioInputState::SourceLost
-            && !silent_mic_reported
-            && started_at.elapsed() >= MIC_SILENT_CHECK_AFTER
+        if matches!(
+            input_state,
+            NativeAudioInputState::Starting | NativeAudioInputState::Live
+        ) && !silent_mic_reported
+            && capture_elapsed_secs.unwrap_or_default() >= MIC_SILENT_CHECK_AFTER.as_secs_f64()
             && let Some(kind) = silent_mic_verdict(captured_frames, session_peak)
         {
             silent_mic_reported = true;
@@ -7239,9 +7426,12 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                 &message,
             );
         }
-        let coverage = capture_elapsed_secs.and_then(|elapsed_secs| {
-            audio_capture_coverage(captured_frames, elapsed_secs, NATIVE_AUDIO_SAMPLE_RATE)
-        });
+        let coverage = selected_input
+            .then_some(capture_elapsed_secs)
+            .flatten()
+            .and_then(|elapsed_secs| {
+                audio_capture_coverage(captured_frames, elapsed_secs, NATIVE_AUDIO_SAMPLE_RATE)
+            });
         let diagnostic_stats = {
             let mut diagnostics = state.diagnostics.lock().await;
             let next = apply_audio_stats(
@@ -7587,15 +7777,16 @@ async fn monitor_session(
         .filter(|active| active.session_id == session_id)
         .map(|active| {
             let native_audio_stats = active.native_audio.as_ref().map(|audio| {
-                audio.finish_recording_window();
+                let observation = audio.observation(true);
                 NativeAudioStats {
-                    device_name: audio.device_name.clone(),
-                    captured_frames: audio.captured_frames(),
-                    dropped_frames: audio.dropped_frames(),
-                    session_peak: audio.session_peak(),
-                    input_state: audio.input_state(),
-                    source_loss_after_ms: audio.source_loss_after_ms(),
-                    unreported_source_loss_after_ms: audio.claim_source_loss_event(),
+                    selected_input: observation.selected_input,
+                    device_name: observation.device_name,
+                    captured_frames: observation.captured_frames,
+                    dropped_frames: observation.dropped_frames,
+                    session_peak: observation.session_peak,
+                    input_state: observation.input_state,
+                    source_loss_after_ms: observation.source_loss_after_ms,
+                    unreported_source_loss_after_ms: observation.losses,
                 }
             });
             MonitoredRecording {
@@ -7616,7 +7807,23 @@ async fn monitor_session(
         .is_some()
         .then(|| guard.take())
         .flatten();
+    if monitored_recording.is_some() {
+        state.invalidate_layout_source_work();
+        state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .stop(&session_id);
+    }
     drop(guard);
+    #[cfg(target_os = "windows")]
+    if monitored_recording.is_some() {
+        state
+            .compositor
+            .lock()
+            .await
+            .release_native_session_output(&session_id);
+    }
 
     let Some(mut monitored_recording) = monitored_recording else {
         return;
@@ -7828,12 +8035,12 @@ async fn monitor_session(
             "diagnostics.stats",
             apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
         );
-        if let Some(source_loss_after_ms) = native_audio_stats.unreported_source_loss_after_ms {
+        for source_loss_after_ms in &native_audio_stats.unreported_source_loss_after_ms {
             emit_microphone_input_lost_health_event(
                 &state,
                 &session_id,
-                &native_audio_stats.device_name,
-                source_loss_after_ms,
+                &source_loss_after_ms.device_name,
+                source_loss_after_ms.after_ms,
             );
         }
         state.emit_log(
@@ -7868,12 +8075,7 @@ async fn monitor_session(
         }
         // Silent-mic verdict at finalize (plan 021 F3): the user must learn the
         // file has no sound from the app, not from playing it back.
-        if native_audio_stats.input_state != NativeAudioInputState::SourceLost
-            && let Some(kind) = silent_mic_verdict(
-                native_audio_stats.captured_frames,
-                native_audio_stats.session_peak,
-            )
-        {
+        if let Some(kind) = native_audio_stats.silence_verdict() {
             let message = match kind {
                 SilentMicKind::NoFrames => format!(
                     "Microphone \"{}\" captured no audio. This recording has a silent audio track. Check the input device in Settings.",
@@ -9823,13 +10025,23 @@ struct PublishedRecordingMp4 {
 
 #[derive(Debug)]
 struct NativeAudioStats {
+    selected_input: bool,
     device_name: String,
     captured_frames: u64,
     dropped_frames: u64,
     session_peak: f32,
     input_state: NativeAudioInputState,
     source_loss_after_ms: Option<u64>,
-    unreported_source_loss_after_ms: Option<u64>,
+    unreported_source_loss_after_ms: Vec<crate::session_audio::SourceLoss>,
+}
+
+impl NativeAudioStats {
+    fn silence_verdict(&self) -> Option<SilentMicKind> {
+        if !self.selected_input || self.input_state == NativeAudioInputState::SourceLost {
+            return None;
+        }
+        silent_mic_verdict(self.captured_frames, self.session_peak)
+    }
 }
 
 #[derive(Debug)]
@@ -9962,7 +10174,7 @@ struct StreamTargetResolution {
 
 #[derive(Debug)]
 struct PreparedNativeAudioSource {
-    source: NativeAudioSource,
+    source: crate::session_audio::InitialAudioSource,
     fifo_path: PathBuf,
 }
 
@@ -10079,6 +10291,11 @@ fn duplicate_capture_source_label(kind: &str, source_id: &str) -> String {
 
 fn resolve_microphone_input(microphone_id: Option<&str>) -> Option<MicrophoneInput> {
     let microphone_id = microphone_id?;
+    if let Some(uid) = crate::devices::parse_avfoundation_microphone_uid(microphone_id) {
+        return Some(MicrophoneInput::AvFoundationUid {
+            uid_hex: uid.to_owned(),
+        });
+    }
     parse_coreaudio_microphone_id(microphone_id)
         .map(|device_id| MicrophoneInput::CoreAudio {
             device_id,
@@ -10158,7 +10375,6 @@ const MICROPHONE_WARMUP_TIMEOUT: Duration = Duration::from_millis(1500);
 /// microphone permission check. It runs off the async runtime and is bounded
 /// so a stalled device open degrades to video-only instead of holding the
 /// start (and the whole ordered command lane) indefinitely.
-const NATIVE_AUDIO_OPEN_TIMEOUT: Duration = Duration::from_secs(5);
 /// Smoke/dev switch: skip the native microphone entirely. The dev app has no
 /// microphone TCC grant, so renderer-driven smokes set this to keep Record
 /// honest instead of waiting out the permission-blind device open.
@@ -11681,29 +11897,11 @@ async fn prepare_native_audio_source(
     let taken_warm = warm_source.is_some();
     let opened = match warm_source {
         Some(source) => Ok(source),
-        None => {
-            let opened = tokio::time::timeout(
-                NATIVE_AUDIO_OPEN_TIMEOUT,
-                tokio::task::spawn_blocking(move || {
-                    start_native_audio_source(open_device_id, settings)
-                }),
-            )
-            .await;
-            match opened {
-                Ok(Ok(result)) => result,
-                Ok(Err(join_error)) => Err(anyhow::anyhow!(
-                    "CoreAudio device open task failed: {join_error}"
-                )),
-                Err(_) => Err(anyhow::anyhow!(
-                    "CoreAudio input device did not open within {}s (waiting on a microphone permission prompt or a stalled device)",
-                    NATIVE_AUDIO_OPEN_TIMEOUT.as_secs()
-                )),
-            }
-        }
+        None => crate::session_audio::prepare_initial_native(open_device_id).await,
     };
     match opened {
         Ok(source) => {
-            let device_name = source.device_name.clone();
+            let device_name = source.device_name();
             *fifo_path = Some(path.clone());
             state.emit_log(
                 "info",
@@ -13378,7 +13576,7 @@ fn windows_d3d11_live_diagnostics(
         requested: mode != WindowsD3d11MediaMode::Disabled,
         required: mode.is_required(),
         adapter_luid: Some(format!("{:016x}", snapshot.pump.authority_adapter_luid)),
-        capture_adapter_luid: Some(format!("{:016x}", snapshot.pump.capture_adapter_luid)),
+        capture_adapter_luid: (!snapshot.pump.capture_route_bgra).then(|| format!("{:016x}", snapshot.pump.capture_adapter_luid)),
         compositor_adapter_luid: Some(format!("{:016x}", snapshot.pump.compositor_adapter_luid)),
         primary_encoder_adapter_luid: Some(format!(
             "{:016x}",
@@ -13389,18 +13587,19 @@ fn windows_d3d11_live_diagnostics(
             .auxiliary_encoder_adapter_luid
             .map(|luid| format!("{luid:016x}")),
         generation: Some(snapshot.pump.generation),
-        capture_backend,
-        cursor_mode,
-        cursor_requested: capture.is_some_and(|diagnostics| diagnostics.cursor_requested),
-        cursor_pixels_source: capture.and_then(|diagnostics| {
+        capture_backend: if snapshot.pump.capture_route_bgra { Some(crate::protocol::WindowsD3d11CaptureBackend::PreviewBgraUpload) } else { capture_backend },
+        cursor_mode: if snapshot.pump.capture_route_bgra { None } else { cursor_mode },
+        cursor_requested: !snapshot.pump.capture_route_bgra && capture.is_some_and(|diagnostics| diagnostics.cursor_requested),
+        cursor_pixels_source: capture.filter(|_| !snapshot.pump.capture_route_bgra).and_then(|diagnostics| {
             diagnostics
                 .cursor_pixels_source
                 .map(|source| source.as_str().to_string())
         }),
-        cursor_exclusion_guaranteed: capture
+        cursor_exclusion_guaranteed: !snapshot.pump.capture_route_bgra && capture
             .is_some_and(|diagnostics| diagnostics.cursor_exclusion_guaranteed),
         capture_readback_frames: capture
-            .map_or(0, |diagnostics| diagnostics.capture_readback_frames),
+            .map_or(0, |diagnostics| diagnostics.capture_readback_frames)
+            .saturating_add(snapshot.pump.capture_upload_frames),
         protected_content_masked_frames: capture
             .map_or(0, |diagnostics| diagnostics.protected_content_masked_frames),
         texture_import_frames: snapshot.pump.composed_frames,
@@ -13424,7 +13623,7 @@ fn windows_d3d11_live_diagnostics(
         maximum_consecutive_media_batch: u64::from(pump.max_media_batch),
         encoder_gpu_samples: snapshot.device.runtime.encoder_gpu_samples,
         encoder_system_memory_samples: snapshot.device.runtime.encoder_system_memory_samples,
-        raw_video_copied_frames: 0,
+        raw_video_copied_frames: snapshot.pump.capture_upload_frames,
         texture_pool_capacity: snapshot.device.runtime.texture_pool_capacity,
         texture_pool_in_use: snapshot.device.runtime.texture_pool_in_use,
         texture_pool_pressure_events: snapshot
@@ -13441,7 +13640,10 @@ fn windows_d3d11_live_diagnostics(
         render_tick_overruns: snapshot.pump.render_tick_overruns,
         render_tick_lag_max_ms: u64_ms_option(snapshot.pump.render_tick_lag_max_us),
         render_compose_stage_max_ms: u64_ms_option(snapshot.pump.render_compose_stage_max_us),
-        fallback_reason: terminal_error.or(capture_fallback),
+        fallback_reason: terminal_error.or_else(|| snapshot.pump.capture_source_error.clone())
+            .or_else(|| snapshot.pump.capture_cleanup_pending.then(|| "Previous capture is still closing; output continues on the committed source".into()))
+            .or_else(|| (snapshot.pump.capture_upload_frames > 0).then(|| "Live capture replacement uses the existing preview BGRA upload route".into()))
+            .or(capture_fallback),
     }
 }
 
@@ -13837,11 +14039,22 @@ async fn recover_windows_d3d11_session(
         return Err("D3D11 recovery was cancelled after authority retirement".to_string());
     }
 
+    let recovery_sources =
+        match crate::windows_d3d11_session::WindowsLiveSources::for_recovery(state, session_id)
+            .await
+        {
+            Ok(sources) => sources,
+            Err(error) => {
+                fail_windows_d3d11_recovery(state, session_id).await;
+                return Err(error);
+            }
+        };
     let pump = match WindowsD3d11SessionPump::start(
         &state.windows_d3d11_media,
         recovery.plan.clone(),
         recovery.camera.clone(),
         recovery.overlays.clone(),
+        recovery_sources,
     ) {
         Ok(pump) => pump,
         Err(error) => {
@@ -19580,6 +19793,25 @@ mod tests {
     // a device that never delivers frames, and CoreAudio's silent zeros for a
     // TCC-unauthorized process (frames advance, every sample is 0).
     #[test]
+    fn finalization_does_not_report_intentional_none_as_a_broken_microphone() {
+        let mut stats = NativeAudioStats {
+            selected_input: false,
+            device_name: "No microphone".into(),
+            captured_frames: 0,
+            dropped_frames: 0,
+            session_peak: 0.0,
+            input_state: NativeAudioInputState::Stopped,
+            source_loss_after_ms: None,
+            unreported_source_loss_after_ms: vec![],
+        };
+        assert_eq!(stats.silence_verdict(), None);
+        stats.selected_input = true;
+        assert_eq!(stats.silence_verdict(), Some(SilentMicKind::NoFrames));
+        stats.input_state = NativeAudioInputState::SourceLost;
+        assert_eq!(stats.silence_verdict(), None);
+    }
+
+    #[test]
     fn silent_mic_verdict_catches_no_frames_and_all_silence() {
         assert_eq!(silent_mic_verdict(0, 0.0), Some(SilentMicKind::NoFrames));
         // No frames wins even if a stale peak value lingered.
@@ -22005,6 +22237,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn stop_waits_for_start_which_is_waiting_on_standby_microphone() {
+        let state = test_state();
+        let mut events = state.events.subscribe();
+        let warm_open = state.warm_microphone.hold_open_for_test();
+        let start_state = state.clone();
+        // Invalid output keeps this ownership test independent of hardware,
+        // but validation occurs after the real warm-open/publication boundary.
+        let start =
+            tokio::spawn(
+                async move { start_session(start_state, base_params(false, false)).await },
+            );
+        timeout(Duration::from_secs(1), async {
+            while state.capture_interruption.capture_admission_is_idle() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("Start must take admission before waiting for warm open");
+        let stop_state = state.clone();
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let stop = tokio::spawn(async move {
+            let _ = entered_tx.send(());
+            stop_recording_with_intent(stop_state, SessionStopParams::default()).await
+        });
+        entered_rx.await.unwrap();
+        assert!(
+            !stop.is_finished(),
+            "Stop cannot return Idle before pending Start resolves"
+        );
+        drop(warm_open);
+        assert!(
+            timeout(Duration::from_secs(2), start)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert!(matches!(
+            timeout(Duration::from_secs(2), stop)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+                .state,
+            RecordingState::Idle
+        ));
+        assert!(state.recording.lock().await.is_none());
+        assert!(std::iter::from_fn(|| events.try_recv().ok()).all(|event| {
+            event.event != "recording.status"
+                || event
+                    .payload
+                    .get("state")
+                    .and_then(serde_json::Value::as_str)
+                    != Some("recording")
+        }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn session_start_admission_waits_for_prior_physical_source_transition() {
         let state = test_state();
         let source_transition = state.source_transition_fence.begin();
@@ -22810,7 +23100,9 @@ mod tests {
         let params = base_params(true, false);
         let warm = crate::audio::test_native_audio_source(audio_processing_settings(&params));
         let warm_stats = warm.stats_handle();
-        state.warm_microphone.install(4242, warm);
+        state
+            .warm_microphone
+            .install(4242, crate::session_audio::InitialAudioSource::warm(warm));
 
         let mut capture = CaptureInputs {
             video: VideoInput::MacScreen { index: 0 },
@@ -22846,7 +23138,9 @@ mod tests {
 
         // A different selected device leaves a warm source alone and opens cold.
         let other = crate::audio::test_native_audio_source(audio_processing_settings(&params));
-        state.warm_microphone.install(7, other);
+        state
+            .warm_microphone
+            .install(7, crate::session_audio::InitialAudioSource::warm(other));
         let mut capture = CaptureInputs {
             video: VideoInput::MacScreen { index: 0 },
             camera_index: None,
@@ -25448,7 +25742,7 @@ mod tests {
                 &audio_fifo_path.display().to_string(),
                 "-thread_queue_size"
             ),
-            Some("1024")
+            Some("4")
         );
         assert_eq!(
             input_arg_value(&args, &fifo_path.display().to_string(), "-f"),
@@ -29270,7 +29564,7 @@ mod tests {
         );
         assert_eq!(
             input_arg_value(&args, "/tmp/videorc-audio-test.f32le", "-thread_queue_size"),
-            Some("1024")
+            Some("4")
         );
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_eq!(

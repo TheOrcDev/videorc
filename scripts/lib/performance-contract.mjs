@@ -31,7 +31,16 @@ const WINDOWS_PACKAGED_APP_PAYLOAD_SPECS = [
   { relativePath: 'resources/app.asar', requiresCodeSignature: false },
   { relativePath: 'resources/videorc-backend.exe', requiresCodeSignature: false },
   { relativePath: 'resources/ffmpeg/bin/ffmpeg.exe', requiresCodeSignature: false },
-  { relativePath: 'resources/ffmpeg/bin/ffprobe.exe', requiresCodeSignature: false }
+  { relativePath: 'resources/ffmpeg/bin/ffprobe.exe', requiresCodeSignature: false },
+  { relativePath: 'resources/ffmpeg/bin/ffmpeg-capture.exe', requiresCodeSignature: false },
+  { relativePath: 'resources/ffmpeg/capture/MANIFEST.json', requiresCodeSignature: false },
+  { relativePath: 'resources/ffmpeg/capture/SOURCE.txt', requiresCodeSignature: false },
+  { relativePath: 'resources/ffmpeg/capture/LICENSE.txt', requiresCodeSignature: false },
+  { relativePath: 'resources/ffmpeg/capture/TOOLCHAIN.txt', requiresCodeSignature: false },
+  {
+    relativePath: 'resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch',
+    requiresCodeSignature: false
+  }
 ]
 export const WINDOWS_PACKAGED_APP_PAYLOAD_COMPONENTS = WINDOWS_PACKAGED_APP_PAYLOAD_SPECS.map(
   ({ relativePath }) => relativePath
@@ -441,10 +450,7 @@ export function evaluateChildPerformanceMetadata({ actual, expected, requireClea
       )
     }
   }
-  if (
-    (actual?.electronBackgroundPolicy ?? null) !==
-    (expected?.electronBackgroundPolicy ?? null)
-  ) {
+  if ((actual?.electronBackgroundPolicy ?? null) !== (expected?.electronBackgroundPolicy ?? null)) {
     failures.push(
       `child Electron background policy was ${actual?.electronBackgroundPolicy ?? 'missing'}; expected ${expected?.electronBackgroundPolicy ?? 'missing'}`
     )

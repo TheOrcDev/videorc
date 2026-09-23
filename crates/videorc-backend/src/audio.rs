@@ -1,9 +1,10 @@
-use std::collections::VecDeque;
+#[cfg(test)]
 use std::fs::File;
-use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock, mpsc};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -22,12 +23,13 @@ pub const AUDIO_COVERAGE_WARMUP_SECS: f64 = 3.0;
 // bounded multi-second packet cushion instead of dropping valid mic callbacks.
 const AUDIO_RING_CAPACITY_PACKETS: usize = 1024;
 const METER_SAMPLE_DURATION: Duration = Duration::from_millis(700);
-const FIFO_OPEN_RETRY: Duration = Duration::from_millis(20);
-pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 1024;
+// Raw PCM demux packets are bounded, so four pending packets replace the
+// previous multi-second queue. The bus discards unpublished stale samples.
+pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 4;
 /// Once a warmed native microphone stops producing callbacks for this long,
-/// end its FIFO as a source loss so FFmpeg can pad silence while video keeps
-/// the session clock. The source is deliberately not hot-reconnected mid-take.
-const NATIVE_AUDIO_SOURCE_STALL_TIMEOUT: Duration = Duration::from_secs(2);
+/// retire its producer as a source loss. The session bus keeps its FIFO open
+/// with paced silence and can accept an explicitly selected replacement.
+pub(crate) const NATIVE_AUDIO_SOURCE_STALL_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Reserved CoreAudio id used only by the maintained debug caption smoke.
 /// A release build does not compile the synthetic source or its RPC handle.
@@ -75,6 +77,7 @@ pub enum NativeAudioInputState {
     Starting,
     Live,
     SourceLost,
+    Silent,
     DownstreamClosed,
     Stopped,
 }
@@ -87,6 +90,7 @@ impl NativeAudioInputState {
             Self::SourceLost => 2,
             Self::DownstreamClosed => 3,
             Self::Stopped => 4,
+            Self::Silent => 5,
         }
     }
 
@@ -96,6 +100,7 @@ impl NativeAudioInputState {
             2 => Self::SourceLost,
             3 => Self::DownstreamClosed,
             4 => Self::Stopped,
+            5 => Self::Silent,
             _ => Self::Starting,
         }
     }
@@ -109,7 +114,7 @@ impl AudioFrame {
         self.samples.len() / usize::from(self.channels)
     }
 
-    fn duration(&self) -> Duration {
+    pub(crate) fn duration(&self) -> Duration {
         if self.sample_rate == 0 {
             return Duration::ZERO;
         }
@@ -132,9 +137,9 @@ impl Default for AudioProcessingSettings {
     }
 }
 
-/// Lock-free snapshot read by the realtime CoreAudio callback on every frame.
-/// Gain and mute share one atomic word so callbacks never observe a mixed pair
-/// from two renderer updates, and the callback never takes a mutex.
+/// Lock-free controls read by the session bus at each output boundary.
+/// Gain and mute share one atomic word so the bus cannot observe a mixed pair
+/// from two renderer updates. Device producers enqueue raw normalized PCM.
 #[derive(Debug, Clone)]
 pub struct AudioProcessingSettingsHandle {
     packed: Arc<AtomicU64>,
@@ -152,7 +157,7 @@ impl AudioProcessingSettingsHandle {
             .store(pack_audio_processing_settings(settings), Ordering::Release);
     }
 
-    fn load(&self) -> AudioProcessingSettings {
+    pub(crate) fn load(&self) -> AudioProcessingSettings {
         unpack_audio_processing_settings(self.packed.load(Ordering::Acquire))
     }
 }
@@ -186,8 +191,8 @@ fn unpack_audio_processing_settings(packed: u64) -> AudioProcessingSettings {
 ///
 /// The producer owns the real source cadence. This handle only selects a
 /// bounded number of raw packets to fill with a tone; the producer then runs
-/// them through `processed_capture_frame_with_handle` before the shared FIFO
-/// writer fans the resulting frame out to captions and FFmpeg.
+/// normalizes them without gain/mute. The session bus applies current controls
+/// and fans the emitted PCM out to captions and FFmpeg.
 #[cfg(debug_assertions)]
 #[derive(Debug, Clone)]
 pub struct CaptionContractTestAudioInjector {
@@ -289,6 +294,7 @@ fn caption_contract_test_audio_enabled() -> bool {
 pub struct AudioCaptureStats {
     captured_frames: AtomicU64,
     dropped_frames: AtomicU64,
+    generated_frames: AtomicU64,
     fifo_write_errors: AtomicU64,
     recording_window_finished: AtomicBool,
     input_state: AtomicU8,
@@ -333,16 +339,16 @@ impl AudioCaptureStats {
         self.session_peak_milli.load(Ordering::Relaxed) as f32 / 1000.0
     }
 
-    fn input_state(&self) -> NativeAudioInputState {
+    pub(crate) fn input_state(&self) -> NativeAudioInputState {
         NativeAudioInputState::from_u8(self.input_state.load(Ordering::Acquire))
     }
 
-    fn source_loss_after_ms(&self) -> Option<u64> {
+    pub(crate) fn source_loss_after_ms(&self) -> Option<u64> {
         (self.input_state() == NativeAudioInputState::SourceLost)
             .then(|| self.source_loss_after_ms.load(Ordering::Acquire))
     }
 
-    fn claim_source_loss_event(&self) -> Option<u64> {
+    pub(crate) fn claim_source_loss_event(&self) -> Option<u64> {
         let source_loss_after_ms = self.source_loss_after_ms()?;
         self.source_loss_event_claimed
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -350,7 +356,7 @@ impl AudioCaptureStats {
             .map(|_| source_loss_after_ms)
     }
 
-    fn mark_source_lost_at(&self, lost_at: Instant) {
+    pub(crate) fn mark_source_lost_at(&self, lost_at: Instant) {
         let loss_after_ms = self
             .recording_window_elapsed_at(lost_at)
             .unwrap_or_default()
@@ -358,24 +364,35 @@ impl AudioCaptureStats {
             .min(u128::from(u64::MAX)) as u64;
         self.source_loss_after_ms
             .store(loss_after_ms, Ordering::Release);
-        if self
-            .input_state
-            .compare_exchange(
-                NativeAudioInputState::Live.as_u8(),
-                NativeAudioInputState::SourceLost.as_u8(),
-                Ordering::AcqRel,
-                Ordering::Acquire,
-            )
-            .is_ok()
-        {
-            // Once this take has lost its source, later callbacks are not part
-            // of the recorded mic track. FFmpeg-generated padding therefore
-            // never inflates the native capture counters either.
-            self.finish_recording_window_at(lost_at);
+        for from in [NativeAudioInputState::Starting, NativeAudioInputState::Live] {
+            if self
+                .input_state
+                .compare_exchange(
+                    from.as_u8(),
+                    NativeAudioInputState::SourceLost.as_u8(),
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                break;
+            }
+        }
+        // The bus and its accounting window continue through device loss.
+    }
+
+    pub(crate) fn mark_silent(&self) {
+        self.input_state
+            .store(NativeAudioInputState::Silent.as_u8(), Ordering::Release);
+    }
+
+    pub(crate) fn record_generated_frames(&self, frames: u64) {
+        if !self.recording_window_finished() {
+            self.generated_frames.fetch_add(frames, Ordering::Relaxed);
         }
     }
 
-    fn mark_live(&self) {
+    pub(crate) fn mark_live(&self) {
         let _ = self.input_state.compare_exchange(
             NativeAudioInputState::Starting.as_u8(),
             NativeAudioInputState::Live.as_u8(),
@@ -384,8 +401,13 @@ impl AudioCaptureStats {
         );
     }
 
-    fn mark_downstream_closed(&self) {
-        for from in [NativeAudioInputState::Starting, NativeAudioInputState::Live] {
+    pub(crate) fn mark_downstream_closed(&self) {
+        for from in [
+            NativeAudioInputState::Starting,
+            NativeAudioInputState::Live,
+            NativeAudioInputState::Silent,
+            NativeAudioInputState::SourceLost,
+        ] {
             if self
                 .input_state
                 .compare_exchange(
@@ -401,8 +423,12 @@ impl AudioCaptureStats {
         }
     }
 
-    fn mark_stopped(&self) {
-        for from in [NativeAudioInputState::Starting, NativeAudioInputState::Live] {
+    pub(crate) fn mark_stopped(&self) {
+        for from in [
+            NativeAudioInputState::Starting,
+            NativeAudioInputState::Live,
+            NativeAudioInputState::Silent,
+        ] {
             if self
                 .input_state
                 .compare_exchange(
@@ -418,14 +444,14 @@ impl AudioCaptureStats {
         }
     }
 
-    fn record_live_peak(&self, peak: f32) {
+    pub(crate) fn record_live_peak(&self, peak: f32) {
         let clamped = (peak.clamp(0.0, 1.0) * 1000.0) as u64;
         self.live_peak_milli.store(clamped, Ordering::Relaxed);
         self.session_peak_milli
             .fetch_max(clamped, Ordering::Relaxed);
     }
 
-    fn reset_recording_window(&self) {
+    pub(crate) fn reset_recording_window(&self) {
         self.reset_recording_window_at(Instant::now());
     }
 
@@ -450,7 +476,7 @@ impl AudioCaptureStats {
             .store(false, Ordering::Relaxed);
     }
 
-    fn finish_recording_window(&self) {
+    pub(crate) fn finish_recording_window(&self) {
         self.finish_recording_window_at(Instant::now());
     }
 
@@ -473,7 +499,7 @@ impl AudioCaptureStats {
         self.recording_window_finished.load(Ordering::Relaxed)
     }
 
-    fn recording_window_elapsed_secs(&self) -> Option<f64> {
+    pub(crate) fn recording_window_elapsed_secs(&self) -> Option<f64> {
         self.recording_window_elapsed_at(Instant::now())
             .map(|elapsed| elapsed.as_secs_f64())
     }
@@ -491,13 +517,13 @@ impl AudioCaptureStats {
         )
     }
 
-    fn record_captured_frames(&self, frames: u64) {
+    pub(crate) fn record_captured_frames(&self, frames: u64) {
         if !self.recording_window_finished() {
             self.captured_frames.fetch_add(frames, Ordering::Relaxed);
         }
     }
 
-    fn record_dropped_frames(&self, frames: u64) {
+    pub(crate) fn record_dropped_frames(&self, frames: u64) {
         if !self.recording_window_finished() {
             self.dropped_frames.fetch_add(frames, Ordering::Relaxed);
         }
@@ -507,13 +533,13 @@ impl AudioCaptureStats {
 pub struct NativeAudioSource {
     pub device_id: u32,
     pub device_name: String,
-    receiver: Option<mpsc::Receiver<AudioFrame>>,
+    pub(crate) receiver: Option<mpsc::Receiver<AudioFrame>>,
     stats: Arc<AudioCaptureStats>,
     processing_settings: AudioProcessingSettingsHandle,
     stop: Arc<AtomicBool>,
     stop_on_drop: bool,
     #[cfg(debug_assertions)]
-    caption_contract_test_injector: Option<CaptionContractTestAudioInjector>,
+    pub(crate) caption_contract_test_injector: Option<CaptionContractTestAudioInjector>,
     #[cfg(debug_assertions)]
     caption_contract_test_producer: Option<thread::JoinHandle<()>>,
     #[cfg(target_os = "macos")]
@@ -526,12 +552,6 @@ impl NativeAudioSource {
     /// stays zero until CoreAudio delivers its first callback (the warmed-up signal).
     pub fn stats_handle(&self) -> Arc<AudioCaptureStats> {
         self.stats.clone()
-    }
-
-    /// Applies gain/mute to a source that is not attached to a session yet
-    /// (the warm standby microphone, instant-record P5).
-    pub fn update_processing_settings(&self, settings: AudioProcessingSettings) {
-        self.processing_settings.update(settings);
     }
 }
 
@@ -564,114 +584,7 @@ impl Drop for NativeAudioSource {
     }
 }
 
-pub struct NativeAudioCaptureSession {
-    pub device_id: u32,
-    pub device_name: String,
-    pub fifo_path: PathBuf,
-    stats: Arc<AudioCaptureStats>,
-    processing_settings: AudioProcessingSettingsHandle,
-    stop: Arc<AtomicBool>,
-    writer: Option<thread::JoinHandle<()>>,
-    #[cfg(debug_assertions)]
-    caption_contract_test_injector: Option<CaptionContractTestAudioInjector>,
-    #[cfg(debug_assertions)]
-    caption_contract_test_producer: Option<thread::JoinHandle<()>>,
-    #[cfg(target_os = "macos")]
-    audio_unit: Option<coreaudio::audio_unit::AudioUnit>,
-}
-
-impl std::fmt::Debug for NativeAudioCaptureSession {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("NativeAudioCaptureSession")
-            .field("device_id", &self.device_id)
-            .field("device_name", &self.device_name)
-            .field("fifo_path", &self.fifo_path)
-            .field("captured_frames", &self.captured_frames())
-            .field("dropped_frames", &self.dropped_frames())
-            .finish_non_exhaustive()
-    }
-}
-
-impl NativeAudioCaptureSession {
-    pub fn captured_frames(&self) -> u64 {
-        self.stats.captured_frames()
-    }
-
-    pub fn dropped_frames(&self) -> u64 {
-        self.stats.dropped_frames()
-    }
-
-    pub fn live_peak(&self) -> f32 {
-        self.stats.live_peak()
-    }
-
-    pub fn session_peak(&self) -> f32 {
-        self.stats.session_peak()
-    }
-
-    pub fn input_state(&self) -> NativeAudioInputState {
-        self.stats.input_state()
-    }
-
-    pub fn source_loss_after_ms(&self) -> Option<u64> {
-        self.stats.source_loss_after_ms()
-    }
-
-    /// Atomically reserves publication of the one source-loss health event.
-    /// The live sampler normally claims it; finalization may use the same
-    /// method as a fallback without ever duplicating the warning.
-    pub fn claim_source_loss_event(&self) -> Option<u64> {
-        self.stats.claim_source_loss_event()
-    }
-
-    pub fn recording_window_elapsed_secs(&self) -> Option<f64> {
-        self.stats.recording_window_elapsed_secs()
-    }
-
-    pub fn finish_recording_window(&self) {
-        self.stats.finish_recording_window();
-    }
-
-    /// Marks an intentional session stop before freezing counters and closing
-    /// the producer/FIFO. Terminal source/downstream failures remain
-    /// authoritative if they won the race before the stop request.
-    pub fn request_stop(&self) {
-        self.stats.mark_stopped();
-        self.stop.store(true, Ordering::Release);
-        self.stats.finish_recording_window();
-    }
-
-    pub fn update_processing_settings(&self, settings: AudioProcessingSettings) {
-        self.processing_settings.update(settings);
-    }
-
-    /// Clone the permissionless raw-PCM controller installed only for the
-    /// maintained debug caption smoke. Production CoreAudio sessions return
-    /// `None`, so the RPC cannot inject into an ordinary microphone session.
-    #[cfg(debug_assertions)]
-    pub fn caption_contract_test_injector(&self) -> Option<CaptionContractTestAudioInjector> {
-        self.caption_contract_test_injector.clone()
-    }
-}
-
-impl Drop for NativeAudioCaptureSession {
-    fn drop(&mut self) {
-        self.request_stop();
-        #[cfg(debug_assertions)]
-        if let Some(producer) = self.caption_contract_test_producer.take() {
-            let _ = producer.join();
-        }
-        if let Some(writer) = self.writer.take() {
-            let _ = writer.join();
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(audio_unit) = self.audio_unit.as_mut() {
-            let _ = audio_unit.stop();
-        }
-        let _ = crate::fifo::cleanup(&self.fifo_path);
-    }
-}
+pub use crate::session_audio::SessionAudio as NativeAudioCaptureSession;
 
 pub fn parse_coreaudio_microphone_id(id: &str) -> Option<u32> {
     id.strip_prefix("microphone:coreaudio:")?.parse().ok()
@@ -699,7 +612,7 @@ pub fn create_native_audio_fifo(path: &Path) -> Result<()> {
     crate::fifo::cleanup(path)
         .with_context(|| format!("Could not remove stale audio FIFO {}", path.display()))?;
 
-    crate::fifo::create(path)
+    crate::fifo::create_audio(path)
         .with_context(|| format!("Could not create audio FIFO {}", path.display()))
 }
 
@@ -708,113 +621,35 @@ pub fn start_native_audio_source(
     settings: AudioProcessingSettings,
 ) -> Result<NativeAudioSource> {
     #[cfg(debug_assertions)]
-    if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID {
+    if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID
+        || device_id == CAPTION_CONTRACT_TEST_DEVICE_ID - 1
+    {
         if !caption_contract_test_audio_enabled() {
-            bail!("The caption contract test microphone requires VIDEORC_CAPTION_CONTRACT_TEST=1.");
+            bail!("The synthetic microphone requires VIDEORC_CAPTION_CONTRACT_TEST=1.");
         }
-        return start_caption_contract_test_audio_source(settings);
+        let switch_fixture = std::env::var("VIDEORC_LIVE_SOURCE_SWITCH_TEST").as_deref() == Ok("1");
+        if device_id != CAPTION_CONTRACT_TEST_DEVICE_ID && !switch_fixture {
+            bail!("The second synthetic microphone requires VIDEORC_LIVE_SOURCE_SWITCH_TEST=1.");
+        }
+        return start_contract_test_audio_source(settings, device_id, switch_fixture);
     }
     start_platform_audio_source(device_id, settings)
 }
 
-/// How long the FIFO writer waits for the encoder bridge to deliver its first video
-/// frame before giving up on epoch alignment (mirrors the recording startup budget).
-const VIDEO_EPOCH_WAIT_TIMEOUT: Duration = Duration::from_secs(20);
-
-struct AudioPreroll {
-    discarded_frames: u64,
-    ready_frames: VecDeque<AudioFrame>,
+pub(crate) struct TrimmedAudioFrame {
+    pub(crate) discarded_frames: u64,
+    pub(crate) frame: Option<AudioFrame>,
 }
 
-/// Discard queued audio until the shared video epoch is set (the encoder bridge's
-/// first composited video frame), so the first audio sample written corresponds to the
-/// same instant as the first video frame. This replaces the old calibrated constant:
-/// the video pipeline's startup latency varies with resolution (4K warms slower than
-/// 1080p), so no fixed offset can align both. Returns the discarded frame count plus
-/// any already-queued audio captured at/after the epoch, or None when the wait timed
-/// out and the writer should proceed unaligned.
-fn discard_audio_until_video_epoch(
-    receiver: &mpsc::Receiver<AudioFrame>,
-    video_epoch: &OnceLock<Instant>,
-    stop: &AtomicBool,
-) -> Option<AudioPreroll> {
-    let waited_since = Instant::now();
-    let mut pending = VecDeque::new();
-    loop {
-        if let Some(epoch) = video_epoch.get().copied() {
-            return Some(discard_audio_before_epoch(receiver, pending, epoch, stop));
-        }
-        if stop.load(Ordering::Relaxed) || waited_since.elapsed() >= VIDEO_EPOCH_WAIT_TIMEOUT {
-            return None;
-        }
-        match receiver.recv_timeout(Duration::from_millis(2)) {
-            Ok(frame) => pending.push_back(frame),
-            Err(mpsc::RecvTimeoutError::Timeout) => {}
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return Some(AudioPreroll {
-                    discarded_frames: pending.iter().map(|frame| frame.frame_count() as u64).sum(),
-                    ready_frames: VecDeque::new(),
-                });
-            }
-        }
-    }
-}
-
-fn discard_audio_before_epoch(
-    receiver: &mpsc::Receiver<AudioFrame>,
-    mut pending: VecDeque<AudioFrame>,
+pub(crate) fn trim_audio_frame_before_epoch(
+    mut frame: AudioFrame,
     epoch: Instant,
-    stop: &AtomicBool,
-) -> AudioPreroll {
-    let mut discarded_frames = 0_u64;
-    let mut ready_frames = VecDeque::new();
-
-    loop {
-        let frame = if let Some(frame) = pending.pop_front() {
-            frame
-        } else if ready_frames.is_empty() && !stop.load(Ordering::Relaxed) {
-            match receiver.recv_timeout(Duration::from_millis(50)) {
-                Ok(frame) => frame,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return AudioPreroll {
-                        discarded_frames,
-                        ready_frames,
-                    };
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return AudioPreroll {
-                        discarded_frames,
-                        ready_frames,
-                    };
-                }
-            }
-        } else {
-            return AudioPreroll {
-                discarded_frames,
-                ready_frames,
-            };
-        };
-
-        let trimmed = trim_audio_frame_before_epoch(frame, epoch);
-        discarded_frames = discarded_frames.saturating_add(trimmed.discarded_frames);
-        if let Some(frame) = trimmed.frame {
-            ready_frames.push_back(frame);
-            ready_frames.extend(pending);
-            return AudioPreroll {
-                discarded_frames,
-                ready_frames,
-            };
-        }
-    }
-}
-
-struct TrimmedAudioFrame {
-    discarded_frames: u64,
-    frame: Option<AudioFrame>,
-}
-
-fn trim_audio_frame_before_epoch(mut frame: AudioFrame, epoch: Instant) -> TrimmedAudioFrame {
-    let frame_count = frame.frame_count();
+) -> TrimmedAudioFrame {
+    let frame_count = if frame.channels == 0 {
+        0
+    } else {
+        frame.frame_count()
+    };
     if frame_count == 0 || frame.sample_rate == 0 || frame.channels == 0 {
         return TrimmedAudioFrame {
             discarded_frames: frame_count as u64,
@@ -865,266 +700,24 @@ fn trim_audio_frame_before_epoch(mut frame: AudioFrame, epoch: Instant) -> Trimm
     }
 }
 
-/// Leading silence padding (instant-record P3): when the first audio sample
-/// arrives AFTER the video epoch (a mic still warming up, a slow device open),
-/// write zeros for the gap so audio stays aligned to the first frame instead
-/// of the whole track lagging by the warm-up latency.
-const LEADING_SILENCE_MIN: Duration = Duration::from_millis(2);
-const LEADING_SILENCE_MAX: Duration = Duration::from_secs(2);
-
-/// Frames of silence to write before `first` so its first sample lands at its
-/// true offset from `epoch`. Zero when the frame starts at/before the epoch.
-fn leading_silence_frame_count(first: &AudioFrame, epoch: Instant) -> usize {
-    if first.sample_rate == 0 || first.channels == 0 {
-        return 0;
-    }
-    let frame_start = first
-        .captured_at
-        .checked_sub(first.duration())
-        .unwrap_or(first.captured_at);
-    let gap = frame_start.saturating_duration_since(epoch);
-    if gap < LEADING_SILENCE_MIN {
-        return 0;
-    }
-    let gap = gap.min(LEADING_SILENCE_MAX);
-    (gap.as_secs_f64() * f64::from(first.sample_rate)).round() as usize
-}
-
-fn write_silence_f32le(file: &mut File, frame_count: usize, channels: u16) -> io::Result<()> {
-    if frame_count == 0 || channels == 0 {
-        return Ok(());
-    }
-    let bytes = vec![0_u8; frame_count * usize::from(channels) * std::mem::size_of::<f32>()];
-    file.write_all(&bytes)
-}
-
-/// Pads once, before the very first frame written after the epoch is known.
-fn pad_leading_silence_once(
-    file: &mut File,
-    frame: &AudioFrame,
-    epoch: Option<Instant>,
-    padded: &mut bool,
-) -> io::Result<()> {
-    if *padded {
-        return Ok(());
-    }
-    *padded = true;
-    let Some(epoch) = epoch else {
-        return Ok(());
-    };
-    let frames = leading_silence_frame_count(frame, epoch);
-    if frames > 0 {
-        tracing::info!(
-            "Padding {}ms of leading silence so the microphone stays aligned to the first video frame.",
-            frames as u64 * 1000 / u64::from(frame.sample_rate.max(1))
-        );
-        write_silence_f32le(file, frames, frame.channels)?;
-    }
-    Ok(())
-}
-
-pub fn attach_fifo_writer(
-    source: NativeAudioSource,
-    fifo_path: PathBuf,
-    video_epoch: Option<Arc<OnceLock<Instant>>>,
-) -> NativeAudioCaptureSession {
-    attach_fifo_writer_with_stall_timeout(
-        source,
-        fifo_path,
-        video_epoch,
-        NATIVE_AUDIO_SOURCE_STALL_TIMEOUT,
-    )
-}
-
+#[cfg(test)]
 fn attach_fifo_writer_with_stall_timeout(
-    mut source: NativeAudioSource,
+    source: NativeAudioSource,
     fifo_path: PathBuf,
     video_epoch: Option<Arc<OnceLock<Instant>>>,
     source_stall_timeout: Duration,
 ) -> NativeAudioCaptureSession {
-    source.stop_on_drop = false;
-    let device_id = source.device_id;
-    let device_name = std::mem::take(&mut source.device_name);
-    let receiver = source
-        .receiver
-        .take()
-        .expect("native audio source receiver is available before attaching FIFO writer");
-    let stats = source.stats.clone();
-    let processing_settings = source.processing_settings.clone();
-    let stop = source.stop.clone();
-    #[cfg(debug_assertions)]
-    let caption_contract_test_injector = source.caption_contract_test_injector.clone();
-    #[cfg(debug_assertions)]
-    let caption_contract_test_producer = source.caption_contract_test_producer.take();
-    #[cfg(target_os = "macos")]
-    let audio_unit = source.audio_unit.take();
-
-    let writer_stats = stats.clone();
-    let writer_stop = stop.clone();
-    let writer_path = fifo_path.clone();
-    // Clear warmup/pre-roll counters before the session is published as active; the
-    // writer thread repeats this after it drains queued pre-roll frames.
-    stats.reset_recording_window();
-    let writer = thread::spawn(move || {
-        let mut file = match open_fifo_writer(&writer_path, &writer_stop) {
-            Ok(file) => file,
-            Err(error) => {
-                writer_stats
-                    .fifo_write_errors
-                    .fetch_add(1, Ordering::Relaxed);
-                if writer_stop.load(Ordering::Acquire) {
-                    writer_stats.mark_stopped();
-                } else {
-                    writer_stats.mark_downstream_closed();
-                }
-                tracing::warn!("Could not open native audio FIFO: {error}");
-                return;
-            }
-        };
-
-        let preroll = match video_epoch.as_deref() {
-            Some(epoch) => match discard_audio_until_video_epoch(&receiver, epoch, &writer_stop) {
-                Some(preroll) => preroll,
-                None => {
-                    tracing::warn!(
-                        "Video epoch never arrived; writing native audio without epoch alignment."
-                    );
-                    AudioPreroll {
-                        discarded_frames: discard_preroll_audio_frames(&receiver),
-                        ready_frames: VecDeque::new(),
-                    }
-                }
-            },
-            None => AudioPreroll {
-                discarded_frames: discard_preroll_audio_frames(&receiver),
-                ready_frames: VecDeque::new(),
-            },
-        };
-        if preroll.discarded_frames > 0 {
-            tracing::info!(
-                "Discarded {} native audio pre-roll frames before starting the recording FIFO.",
-                preroll.discarded_frames
-            );
-        }
-        // Warmup starts CoreAudio before FFmpeg is ready, so the bounded callback queue can
-        // legitimately fill during pre-roll. The live recording diagnostics should count
-        // only frames captured/dropped after the FIFO is open and pre-roll has been
-        // discarded.
-        writer_stats.reset_recording_window();
-        writer_stats.mark_live();
-        let mut last_source_frame_at = Instant::now();
-        let padding_epoch = video_epoch
-            .as_deref()
-            .and_then(|epoch| epoch.get().copied());
-        let mut leading_silence_padded = false;
-
-        for frame in preroll.ready_frames {
-            let frame_count = frame.frame_count() as u64;
-            if let Err(error) = pad_leading_silence_once(
-                &mut file,
-                &frame,
-                padding_epoch,
-                &mut leading_silence_padded,
-            )
-            .and_then(|()| write_frame_f32le(&mut file, &frame))
-            {
-                writer_stats
-                    .fifo_write_errors
-                    .fetch_add(1, Ordering::Relaxed);
-                if writer_stop.load(Ordering::Acquire) {
-                    writer_stats.mark_stopped();
-                } else {
-                    writer_stats.mark_downstream_closed();
-                }
-                tracing::warn!("Could not write native audio frame: {error}");
-                return;
-            }
-            last_source_frame_at = Instant::now();
-            writer_stats.record_captured_frames(frame_count);
-        }
-
-        while !writer_stop.load(Ordering::Relaxed) {
-            match receiver.recv_timeout(Duration::from_millis(50)) {
-                Ok(frame) => {
-                    last_source_frame_at = Instant::now();
-                    // Live captions listen on this same post-gain/post-mute mic
-                    // bus; the offer is a relaxed-atomic no-op unless a caption
-                    // session is active and never blocks this writer.
-                    crate::captions::offer_caption_frame(&frame);
-                    let frame_peak = frame
-                        .samples
-                        .iter()
-                        .fold(0.0_f32, |peak, sample| peak.max(sample.abs()));
-                    writer_stats.record_live_peak(frame_peak);
-                    if let Err(error) = pad_leading_silence_once(
-                        &mut file,
-                        &frame,
-                        padding_epoch,
-                        &mut leading_silence_padded,
-                    )
-                    .and_then(|()| write_frame_f32le(&mut file, &frame))
-                    {
-                        writer_stats
-                            .fifo_write_errors
-                            .fetch_add(1, Ordering::Relaxed);
-                        if writer_stop.load(Ordering::Acquire) {
-                            writer_stats.mark_stopped();
-                        } else {
-                            // BrokenPipe/EPIPE says FFmpeg closed its reader; it
-                            // is downstream evidence, never microphone loss.
-                            writer_stats.mark_downstream_closed();
-                        }
-                        tracing::warn!("Could not write native audio frame: {error}");
-                        break;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Timeout) => {
-                    if last_source_frame_at.elapsed() >= source_stall_timeout {
-                        let lost_at = Instant::now();
-                        writer_stats.mark_source_lost_at(lost_at);
-                        writer_stop.store(true, Ordering::Release);
-                        tracing::warn!(
-                            "Native microphone input stopped producing frames; closing its FIFO so recording can continue with silence."
-                        );
-                        break;
-                    }
-                }
-                Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    if writer_stop.load(Ordering::Acquire) {
-                        writer_stats.mark_stopped();
-                    } else {
-                        writer_stats.mark_source_lost_at(Instant::now());
-                        writer_stop.store(true, Ordering::Release);
-                        tracing::warn!(
-                            "Native microphone input disconnected; closing its FIFO so recording can continue with silence."
-                        );
-                    }
-                    break;
-                }
-            }
-        }
-        if writer_stop.load(Ordering::Acquire) {
-            writer_stats.mark_stopped();
-        }
-    });
-
-    NativeAudioCaptureSession {
-        device_id,
-        device_name,
+    let settings = source.processing_settings.load();
+    crate::session_audio::attach(
+        Some(source),
         fifo_path,
-        stats,
-        processing_settings,
-        stop,
-        writer: Some(writer),
-        #[cfg(debug_assertions)]
-        caption_contract_test_injector,
-        #[cfg(debug_assertions)]
-        caption_contract_test_producer,
-        #[cfg(target_os = "macos")]
-        audio_unit,
-    }
+        video_epoch,
+        settings,
+        source_stall_timeout,
+    )
 }
 
+#[cfg(test)]
 fn discard_preroll_audio_frames(receiver: &mpsc::Receiver<AudioFrame>) -> u64 {
     let mut discarded = 0_u64;
     while let Ok(frame) = receiver.try_recv() {
@@ -1169,7 +762,11 @@ fn sample_meter_from_source(mut source: NativeAudioSource, duration: Duration) -
     while started.elapsed() < duration {
         match receiver.recv_timeout(Duration::from_millis(80)) {
             Ok(frame) => {
-                for sample in frame.samples {
+                for sample in process_interleaved_f32(
+                    &frame.samples,
+                    usize::from(frame.channels),
+                    source.processing_settings.load(),
+                ) {
                     let value = sample.abs();
                     peak = peak.max(value);
                     sum_squares += f64::from(value * value);
@@ -1215,31 +812,6 @@ fn sample_meter_from_source(mut source: NativeAudioSource, duration: Duration) -
             "Native microphone signal detected.".to_string()
         }),
     }
-}
-
-fn open_fifo_writer(path: &Path, stop: &AtomicBool) -> io::Result<File> {
-    crate::fifo::open_writer(
-        path,
-        stop,
-        FIFO_OPEN_RETRY,
-        true,
-        "native audio writer stopped before FIFO opened",
-    )
-}
-
-fn write_frame_f32le(file: &mut File, frame: &AudioFrame) -> io::Result<()> {
-    if frame.sample_rate != NATIVE_AUDIO_SAMPLE_RATE || frame.channels != NATIVE_AUDIO_CHANNELS {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "native audio frame format does not match FFmpeg FIFO format",
-        ));
-    }
-    let _timestamp_micros = frame.timestamp_micros;
-    let mut bytes = Vec::with_capacity(frame.samples.len() * std::mem::size_of::<f32>());
-    for sample in &frame.samples {
-        bytes.extend_from_slice(&sample.to_le_bytes());
-    }
-    file.write_all(&bytes)
 }
 
 pub fn process_interleaved_f32(
@@ -1310,9 +882,18 @@ pub(crate) fn test_native_audio_source(settings: AudioProcessingSettings) -> Nat
     start_caption_contract_test_audio_source(settings).expect("test audio source starts")
 }
 
-#[cfg(debug_assertions)]
+#[cfg(test)]
 fn start_caption_contract_test_audio_source(
     settings: AudioProcessingSettings,
+) -> Result<NativeAudioSource> {
+    start_contract_test_audio_source(settings, CAPTION_CONTRACT_TEST_DEVICE_ID, false)
+}
+
+#[cfg(debug_assertions)]
+fn start_contract_test_audio_source(
+    settings: AudioProcessingSettings,
+    device_id: u32,
+    continuous_tone: bool,
 ) -> Result<NativeAudioSource> {
     let (sender, receiver) = mpsc::sync_channel(AUDIO_RING_CAPACITY_PACKETS);
     let stats = Arc::new(AudioCaptureStats::default());
@@ -1328,7 +909,6 @@ fn start_caption_contract_test_audio_source(
     };
 
     let producer_stats = stats.clone();
-    let producer_settings = processing_settings.clone();
     let producer_stop = stop.clone();
     let producer_injector = injector.clone();
     let producer = thread::spawn(move || {
@@ -1339,6 +919,7 @@ fn start_caption_contract_test_audio_source(
         let packet_duration = Duration::from_millis(CAPTION_CONTRACT_TEST_PACKET_MS);
         let mut frame_cursor = 0_u64;
         let mut next_tick = Instant::now();
+        let raw_settings = AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
 
         while !producer_stop.load(Ordering::Acquire)
             && !producer_injector
@@ -1353,13 +934,20 @@ fn start_caption_contract_test_audio_source(
                 .is_ok();
             let raw_peak = if inject_tone {
                 f32::from_bits(producer_injector.raw_peak_bits.load(Ordering::Acquire) as u32)
+            } else if continuous_tone {
+                0.12
             } else {
                 0.0
             };
             let mut input = Vec::with_capacity(samples_per_channel * SOURCE_CHANNELS);
             for sample_index in 0..samples_per_channel {
                 let absolute = frame_cursor as usize + sample_index;
-                let phase = absolute as f32 * 440.0 * std::f32::consts::TAU
+                let frequency = if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID {
+                    440.0
+                } else {
+                    880.0
+                };
+                let phase = absolute as f32 * frequency * std::f32::consts::TAU
                     / NATIVE_AUDIO_SAMPLE_RATE as f32;
                 let sample = phase.sin() * raw_peak;
                 input.extend_from_slice(&[sample, sample]);
@@ -1367,7 +955,7 @@ fn start_caption_contract_test_audio_source(
             let frame = processed_capture_frame_with_handle(
                 &input,
                 SOURCE_CHANNELS,
-                &producer_settings,
+                &raw_settings,
                 timestamp_for_frame(frame_cursor),
             );
             let frame_count = frame.frame_count() as u64;
@@ -1400,8 +988,19 @@ fn start_caption_contract_test_audio_source(
     });
 
     Ok(NativeAudioSource {
-        device_id: CAPTION_CONTRACT_TEST_DEVICE_ID,
-        device_name: "Caption contract test microphone".to_string(),
+        device_id,
+        device_name: if continuous_tone {
+            format!(
+                "Live source switch fixture {}",
+                if device_id == CAPTION_CONTRACT_TEST_DEVICE_ID {
+                    "A"
+                } else {
+                    "B"
+                }
+            )
+        } else {
+            "Caption contract test microphone".into()
+        },
         receiver: Some(receiver),
         stats,
         processing_settings,
@@ -1577,7 +1176,8 @@ fn start_platform_audio_source(
     let stats = Arc::new(AudioCaptureStats::default());
     let callback_stats = stats.clone();
     let processing_settings = AudioProcessingSettingsHandle::new(settings);
-    let callback_processing_settings = processing_settings.clone();
+    let callback_processing_settings =
+        AudioProcessingSettingsHandle::new(AudioProcessingSettings::default());
     let stop = Arc::new(AtomicBool::new(false));
     let callback_stop = stop.clone();
     let mut frame_cursor = 0_u64;
@@ -1589,10 +1189,9 @@ fn start_platform_audio_source(
                 return Ok(());
             }
 
-            // This processed frame is the single native microphone bus shared
-            // by FFmpeg and live captions. Gain/mute are already applied before
-            // either consumer can see it, so muted speech never reaches cloud
-            // transcription and caption levels match audible mic levels.
+            // Normalize device channels here; session gain/mute are applied
+            // at the continuous bus output so queued PCM cannot retain stale
+            // pre-mute controls during a device change.
             let frame = processed_capture_frame_with_handle(
                 args.data.buffer,
                 args.data.channels,
@@ -1859,49 +1458,6 @@ fn utf16_z(value: &[u16]) -> Option<String> {
 mod tests {
     use super::*;
 
-    fn silence_probe_frame(captured_at: Instant, frames: usize) -> AudioFrame {
-        AudioFrame {
-            timestamp_micros: 0,
-            captured_at,
-            sample_rate: NATIVE_AUDIO_SAMPLE_RATE,
-            channels: NATIVE_AUDIO_CHANNELS,
-            samples: vec![0.0; frames * usize::from(NATIVE_AUDIO_CHANNELS)],
-        }
-    }
-
-    #[test]
-    fn leading_silence_covers_only_a_gap_after_the_epoch() {
-        let epoch = Instant::now();
-        // 10 ms frame that ENDS 130 ms after the epoch -> starts 120 ms after it.
-        let late = silence_probe_frame(
-            epoch + Duration::from_millis(130),
-            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
-        );
-        let expected = (0.120 * f64::from(NATIVE_AUDIO_SAMPLE_RATE)).round() as usize;
-        assert_eq!(leading_silence_frame_count(&late, epoch), expected);
-
-        // A frame straddling the epoch needs no padding (trim handles it).
-        let straddling = silence_probe_frame(
-            epoch + Duration::from_millis(5),
-            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
-        );
-        assert_eq!(leading_silence_frame_count(&straddling, epoch), 0);
-
-        // Sub-threshold jitter is left alone.
-        let jitter = silence_probe_frame(
-            epoch + Duration::from_millis(11),
-            usize::try_from(NATIVE_AUDIO_SAMPLE_RATE / 100).unwrap(),
-        );
-        assert_eq!(leading_silence_frame_count(&jitter, epoch), 0);
-
-        // Absurd gaps are capped so a stale epoch cannot write seconds of zeros.
-        let very_late = silence_probe_frame(epoch + Duration::from_secs(30), 480);
-        assert_eq!(
-            leading_silence_frame_count(&very_late, epoch),
-            (LEADING_SILENCE_MAX.as_secs_f64() * f64::from(NATIVE_AUDIO_SAMPLE_RATE)) as usize
-        );
-    }
-
     #[cfg(unix)]
     fn test_fifo_path(label: &str) -> PathBuf {
         static NEXT_ID: AtomicU64 = AtomicU64::new(1);
@@ -1968,7 +1524,26 @@ mod tests {
     }
 
     fn frame(samples: usize) -> AudioFrame {
-        frame_at(Instant::now(), samples)
+        static CLOCK: OnceLock<Instant> = OnceLock::new();
+        let now = Instant::now();
+        let anchor = CLOCK.get_or_init(|| now);
+        let mut frame = frame_at(now, samples);
+        frame.timestamp_micros = now.saturating_duration_since(*anchor).as_micros() as u64;
+        frame
+    }
+
+    #[cfg(unix)]
+    fn prime_test_source(
+        session: &NativeAudioCaptureSession,
+        sender: &mpsc::SyncSender<AudioFrame>,
+    ) {
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while session.input_state() == NativeAudioInputState::Starting && Instant::now() < deadline
+        {
+            let _ = sender.try_send(frame(480));
+            thread::sleep(Duration::from_millis(10));
+        }
+        wait_for_input_state(session, NativeAudioInputState::Live);
     }
 
     fn frame_at(captured_at: Instant, samples: usize) -> AudioFrame {
@@ -1979,74 +1554,6 @@ mod tests {
             channels: NATIVE_AUDIO_CHANNELS,
             samples: vec![0.0; samples * NATIVE_AUDIO_CHANNELS as usize],
         }
-    }
-
-    #[test]
-    fn epoch_trim_discards_audio_captured_before_the_first_video_frame() {
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
-        let epoch: OnceLock<Instant> = OnceLock::new();
-        let stop = AtomicBool::new(false);
-
-        // Pre-epoch capture: queued before the video pipeline delivered anything.
-        let anchor = Instant::now();
-        tx.send(frame_at(anchor + Duration::from_millis(10), 480))
-            .unwrap();
-        tx.send(frame_at(anchor + Duration::from_millis(20), 480))
-            .unwrap();
-        epoch.set(anchor + Duration::from_millis(25)).unwrap();
-
-        let preroll = discard_audio_until_video_epoch(&rx, &epoch, &stop)
-            .expect("epoch was set, the wait must succeed");
-        assert_eq!(
-            preroll.discarded_frames, 960,
-            "both pre-epoch frames are trimmed"
-        );
-        assert!(preroll.ready_frames.is_empty());
-
-        // Post-epoch frames flow to the FIFO untouched.
-        tx.send(frame(480)).unwrap();
-        assert_eq!(rx.try_recv().unwrap().frame_count(), 480);
-    }
-
-    #[test]
-    fn epoch_trim_preserves_audio_already_captured_after_the_first_video_frame() {
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
-        let epoch: OnceLock<Instant> = OnceLock::new();
-        let stop = AtomicBool::new(false);
-        let anchor = Instant::now();
-
-        tx.send(frame_at(anchor + Duration::from_millis(10), 480))
-            .unwrap();
-        tx.send(frame_at(anchor + Duration::from_millis(30), 480))
-            .unwrap();
-        tx.send(frame_at(anchor + Duration::from_millis(40), 480))
-            .unwrap();
-        epoch.set(anchor + Duration::from_millis(25)).unwrap();
-
-        let preroll = discard_audio_until_video_epoch(&rx, &epoch, &stop)
-            .expect("epoch was set, the wait must succeed");
-
-        assert_eq!(
-            preroll.discarded_frames, 720,
-            "one full pre-roll packet and half of the boundary packet are trimmed"
-        );
-        let ready_counts = preroll
-            .ready_frames
-            .iter()
-            .map(AudioFrame::frame_count)
-            .collect::<Vec<_>>();
-        assert_eq!(ready_counts, vec![240]);
-        assert_eq!(preroll.ready_frames[0].timestamp_micros, 5_000);
-        assert_eq!(rx.try_recv().unwrap().frame_count(), 480);
-    }
-
-    #[test]
-    fn epoch_trim_gives_up_when_stopped_before_video_arrives() {
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
-        let epoch: OnceLock<Instant> = OnceLock::new();
-        let stop = AtomicBool::new(true);
-        tx.send(frame(480)).unwrap();
-        assert!(discard_audio_until_video_epoch(&rx, &epoch, &stop).is_none());
     }
 
     #[test]
@@ -2072,7 +1579,7 @@ mod tests {
         let (source, sender, _stats) = test_native_audio_source();
         let session =
             attach_fifo_writer_with_stall_timeout(source, path, None, Duration::from_secs(1));
-        wait_for_input_state(&session, NativeAudioInputState::Live);
+        prime_test_source(&session, &sender);
 
         sender.send(frame(480)).unwrap();
         drop(sender);
@@ -2081,6 +1588,14 @@ mod tests {
         assert!(session.source_loss_after_ms().is_some());
         assert!(session.claim_source_loss_event().is_some());
         assert_eq!(session.claim_source_loss_event(), None);
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while session.status().sample_cursor < 4800 && Instant::now() < deadline {
+            thread::yield_now();
+        }
+        assert!(
+            session.status().counters.generated_frames > 0,
+            "EOF preserves the output with silence"
+        );
         drop(session);
         assert!(!reader.join().unwrap().is_empty());
     }
@@ -2108,7 +1623,7 @@ mod tests {
         let (source, sender, _stats) = test_native_audio_source();
         let session =
             attach_fifo_writer_with_stall_timeout(source, path, None, Duration::from_millis(250));
-        wait_for_input_state(&session, NativeAudioInputState::Live);
+        prime_test_source(&session, &sender);
 
         sender.send(frame(480)).unwrap();
         thread::sleep(Duration::from_millis(75));
@@ -2145,17 +1660,17 @@ mod tests {
         let path = test_fifo_path("intentional-stop");
         create_native_audio_fifo(&path).unwrap();
         let reader = start_fifo_drain(&path);
-        let (source, _sender, _stats) = test_native_audio_source();
+        let (source, sender, _stats) = test_native_audio_source();
         let session =
             attach_fifo_writer_with_stall_timeout(source, path, None, Duration::from_secs(1));
-        wait_for_input_state(&session, NativeAudioInputState::Live);
+        prime_test_source(&session, &sender);
 
         session.request_stop();
         wait_for_input_state(&session, NativeAudioInputState::Stopped);
         assert_eq!(session.source_loss_after_ms(), None);
         assert_eq!(session.claim_source_loss_event(), None);
         drop(session);
-        assert!(reader.join().unwrap().is_empty());
+        let _ = reader.join().unwrap();
     }
 
     #[cfg(unix)]
@@ -2177,7 +1692,6 @@ mod tests {
             .recv_timeout(Duration::from_secs(1))
             .expect("reader opened before inducing EPIPE");
         reader.join().unwrap();
-        wait_for_input_state(&session, NativeAudioInputState::Live);
 
         sender.send(frame(480)).unwrap();
         wait_for_input_state(&session, NativeAudioInputState::DownstreamClosed);
@@ -2209,8 +1723,18 @@ mod tests {
         assert!(injector.disconnect_source());
         assert!(!injector.disconnect_source());
         wait_for_input_state(&session, NativeAudioInputState::SourceLost);
+        // Valid PCM queued before EOF may still be delivered in its original
+        // interval. Once the bounded queue drains only generated silence grows.
+        let loss_cursor = session.status().sample_cursor;
+        let deadline = Instant::now() + Duration::from_secs(1);
+        while session.status().sample_cursor < loss_cursor + 4800 && Instant::now() < deadline {
+            thread::yield_now();
+        }
         let captured_at_loss = session.captured_frames();
-        thread::sleep(Duration::from_millis(60));
+        let drained_cursor = session.status().sample_cursor;
+        while session.status().sample_cursor < drained_cursor + 960 && Instant::now() < deadline {
+            thread::yield_now();
+        }
         assert_eq!(session.captured_frames(), captured_at_loss);
         assert!(captured_at_loss >= captured_before_disconnect);
         assert!(session.claim_source_loss_event().is_some());

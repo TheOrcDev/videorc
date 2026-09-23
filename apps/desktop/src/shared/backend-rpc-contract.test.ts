@@ -1254,6 +1254,24 @@ describe('backend RPC contract', () => {
     }
 
     expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    const switchedCapture = JSON.parse(
+      JSON.stringify({
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          captureBackend: 'preview-bgra-upload',
+          captureAdapterLuid: undefined,
+          cursorMode: undefined,
+          cursorPixelsSource: undefined,
+          cursorRequested: false,
+          captureReadbackFrames: 60,
+          rawVideoCopiedFrames: 60,
+          compositorCpuFallbackFrames: 0
+        }
+      })
+    )
+    expect(validateBackendRpcResult('diagnostics.stats', switchedCapture)).toEqual(switchedCapture)
+
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {
         ...diagnostics,
@@ -1547,5 +1565,74 @@ describe('backend RPC contract', () => {
     expect(() => parseBackendWireMessage(' '.repeat(16_000_001))).toThrow(
       'oversized websocket message'
     )
+  })
+})
+
+describe('session source backend wire results', () => {
+  it('accepts Rust null source IDs for GET and switch without relaxing preference parameters', () => {
+    const result = {
+      sessionId: 'session',
+      sourceRevision: 4,
+      outputProcessId: 123,
+      confirmed: {
+        screenId: null,
+        windowId: null,
+        cameraId: null,
+        microphoneId: 'microphone:coreaudio:81',
+        testPattern: false
+      },
+      health: [{ kind: 'microphone', deviceId: 'microphone:coreaudio:81', health: 'ready' }],
+      pending: null,
+      lastOperation: {
+        requestId: 'request',
+        kind: 'microphone',
+        deviceId: 'microphone:coreaudio:81',
+        stage: 'applied',
+        reason: null,
+        previousSource: 'preserved',
+        outputObserved: true,
+        outputSuperseded: false
+      },
+      capabilities: [{ kind: 'microphone', supported: true, allowsNone: true, reason: null }],
+      audio: {
+        sampleCursor: 240000,
+        generation: 4,
+        deviceId: 'microphone:coreaudio:81',
+        deviceName: 'Microphone',
+        selectedInput: true,
+        counters: {
+          capturedFrames: 240000,
+          generatedFrames: 0,
+          discardedFrames: 0,
+          droppedFrames: 0
+        },
+        lastCommit: {
+          sessionId: 'session',
+          requestId: 'request',
+          generation: 4,
+          cutoverSample: 0,
+          deviceId: 'microphone:coreaudio:81',
+          outputObserved: true
+        }
+      }
+    }
+    for (const method of ['session.sources.get', 'session.source.switch'] as const) {
+      expect(validateBackendRpcResult(method, result)).toEqual(result)
+      expect(() =>
+        validateBackendRpcResult(method, {
+          ...result,
+          confirmed: { ...result.confirmed, cameraId: 42 }
+        })
+      ).toThrow()
+      expect(
+        validateBackendRpcResult(method, {
+          ...result,
+          confirmed: { ...result.confirmed, microphoneId: null }
+        })
+      ).toBeTruthy()
+    }
+    expect(() =>
+      validateBackendRpcParams('session.start', { sources: { cameraId: null } })
+    ).toThrow(/cameraId/)
   })
 })
