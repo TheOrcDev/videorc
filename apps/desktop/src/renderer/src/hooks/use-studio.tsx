@@ -104,6 +104,7 @@ import {
   sourceSelectionChangeEvents,
   layoutPresetMemoryPatch,
   layoutPresetOrientation,
+  mergeSourceKind,
   STORAGE_KEYS,
   streamOutputVideosForTargets,
   streamOutputVideoSettings,
@@ -3436,13 +3437,19 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const sourceDeviceSwitchPending = sourceSelectionState.pending
   const sourceSwitchReason = useCallback(
     (kind: LiveSourceDeviceSwitchPending): string | null => {
-      if (sourceStatusUnknownRef.current) return 'Checking the current session…'
-      if (layoutSwitchPending) return 'The scene is changing.'
+      // Only a live socket can be mid-bootstrap. With no backend there is no
+      // session to fence, and the next recording.status reconciles the pick.
+      if (sourceStatusUnknownRef.current && (wsStatus === 'connecting' || wsStatus === 'connected'))
+        return 'Checking the current session…'
+      const sessionActive = isActiveRecordingState(recordingRef.current.state)
+      // An idle microphone is not part of the scene, so a scene change cannot race it.
+      if (layoutSwitchPending && (sessionActive || kind !== 'microphone'))
+        return 'The scene is changing.'
       if (sessionStartInFlightRef.current || sessionStartLifecycleActiveRef.current)
         return 'The session is starting.'
       return sourceSelectionController.reason(kind)
     },
-    [sourceSelectionController, layoutSwitchPending]
+    [sourceSelectionController, layoutSwitchPending, wsStatus]
   )
   const retrySourceStatus = useCallback(
     () => sourceSelectionController.retryStatus(),
@@ -5325,7 +5332,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recordAutomaticSourceFallbacks(current.sources, nextSources)
       return { ...current, sources: nextSources }
     })
-  }, [deviceList, sourceStatusKnown, recordAutomaticSourceFallbacks])
+    // recording.state re-runs this when a session ends: a device that vanished
+    // mid-session was skipped above and must fall back once the session is idle.
+  }, [deviceList, sourceStatusKnown, recording.state, recordAutomaticSourceFallbacks])
 
   useEffect(() => {
     if (!connection) {
@@ -5974,6 +5983,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       nextClient.on('compositor.status', (payload) => {
         bootstrapGuard.mark('compositor')
         const status = payload as CompositorStatus
+        // Backend-authored commits (live source switches) arrive only as this
+        // event; advance committed truth so a later resync never re-presents
+        // an older revision. Layout transactions record their own proven commit.
+        const committedScene = nativePreviewCommittedSceneRef.current
+        const statusSceneId = status.sceneId ?? transformSceneRef.current?.id
+        if (
+          layoutIntentAwaitingProofRef.current === null &&
+          typeof status.sceneRevision === 'number' &&
+          statusSceneId &&
+          status.sceneRevision > (committedScene?.sceneRevision ?? -1)
+        ) {
+          nativePreviewCommittedSceneRef.current = {
+            sceneId: statusSceneId,
+            sceneRevision: status.sceneRevision,
+            compositorStatus: status
+          }
+        }
         const receivedAtMs = Date.now()
         const fallbackOwnsPresentation = rendererFallbackOwnsPresentation({
           mainPumpActive: mainPumpActiveRef.current,
@@ -6271,13 +6297,28 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         // Session authority must settle even if device discovery or another
         // bootstrap query fails. Idle fallback remains blocked until this read.
         const recordingStatusBootstrap = bootstrapRequest<RecordingStatus>('recording.status')
+        // A failed first read would otherwise leave every picker on "Checking
+        // the current session…" until some later recording.status event.
+        const retryRecordingStatus = async (attempt: number): Promise<void> => {
+          await new Promise((resolve) => setTimeout(resolve, 1000 * attempt))
+          if (!generationIsCurrent() || !sourceStatusUnknownRef.current) return
+          const retrySnapshot = bootstrapGuard.snapshot()
+          try {
+            const status = await bootstrapRequest<RecordingStatus>('recording.status')
+            if (generationIsCurrent() && bootstrapGuard.isCurrent(retrySnapshot, 'recording')) {
+              applyRecordingStatus(status)
+            }
+          } catch {
+            if (attempt < 3) await retryRecordingStatus(attempt + 1)
+          }
+        }
         void recordingStatusBootstrap.then(
           (status) => {
             if (generationIsCurrent() && bootstrapGuard.isCurrent(bootstrapSnapshot, 'recording')) {
               applyRecordingStatus(status)
             }
           },
-          () => undefined
+          () => retryRecordingStatus(1)
         )
         const activeScreenBootstrap = bootstrapRequest<StreamScreen | null>('screens.active')
         void activeScreenBootstrap.then(
@@ -8070,10 +8111,15 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return
       }
       if (!isActiveRecordingState(recordingRef.current.state)) {
-        setCaptureConfig((current) => ({ ...current, sources }))
+        // Pickers build `sources` from a render-time snapshot; merge only the
+        // picked kind so a concurrent confirmation or reconcile is not undone.
+        setCaptureConfig((current) => ({
+          ...current,
+          sources: mergeSourceKind(current.sources, sources, sourceKind)
+        }))
         if (sceneEditMode && sourceKind !== 'microphone') {
           await loadScene({
-            sources,
+            sources: mergeSourceKind(captureConfigRef.current.sources, sources, sourceKind),
             layout: captureConfigRef.current.layout,
             video: captureConfigRef.current.video
           }).catch(reportError)
