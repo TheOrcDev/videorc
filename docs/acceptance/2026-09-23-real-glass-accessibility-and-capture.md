@@ -79,6 +79,8 @@ it. After a 20 s settle, `top` is sampled once a second for 15 s. The runs
 alternate modes so drift cancels. Sampling is read-only and never sends a
 signal.
 
+S7 run (after S7):
+
 | Run | Mode  | WindowServer | App total | Electron main | Main renderer | Backend |
 | --- | ----- | -----------: | --------: | ------------: | ------------: | ------: |
 | 1   | glass |        62.7% |     21.3% |          9.6% |          3.5% |    4.6% |
@@ -86,7 +88,18 @@ signal.
 | 3   | glass |        47.1% |     18.5% |          8.0% |          4.0% |    3.7% |
 | 4   | solid |        44.2% |     15.2% |          6.1% |          3.4% |    3.0% |
 
-- Per-process CPU stays inside the plan's +5 pp budget. The largest mover is
-  Electron main, at +2.7 pp on average: transparent windows cost the
-  browser process some CALayer work.
-- WindowServer: see the confirmation run below.
+Confirmation run (S22, the finished branch):
+
+| Run | Mode  | WindowServer | App total | Electron main | Main renderer | Backend |
+| --- | ----- | -----------: | --------: | ------------: | ------------: | ------: |
+| 1   | glass |        52.0% |     17.7% |          6.2% |          4.2% |    3.9% |
+| 2   | solid |        61.3% |     22.7% |          8.9% |          4.8% |    5.2% |
+| 3   | glass |        49.9% |     18.2% |          6.0% |          4.5% |    4.3% |
+| 4   | solid |        56.9% |     23.3% |         10.1% |          4.7% |    4.7% |
+
+- No measurable cost. Across all eight runs, WindowServer averages 52.9%
+  with glass and 52.3% solid (+0.6 pp, inside the +3 pp budget). App CPU
+  averages 18.9% with glass and 19.0% solid.
+- Runs of the same mode vary by about ±10 pp: the arrangement of other
+  apps' windows moves WindowServer more than the material does.
+- Per-process CPU stays inside the plan's +5 pp budget in every run.

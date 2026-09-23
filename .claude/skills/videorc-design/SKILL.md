@@ -213,7 +213,10 @@ near-opaque `bg-popover` surfaces with one soft shadow and a hairline ring.
   chat messages, notes, transcripts, logs, and inputs. Images are not
   draggable.
 - Editable fields get the native context menu (Cut, Copy, Paste, Select All,
-  spelling), which main builds on `context-menu`.
+  spelling), which main builds on `context-menu` (`main/context-menu.ts`).
+  Notes has none: a popup menu is not capture-protected.
+- `renderer-style-guards.test.ts` fails on backdrop blur, `cursor-pointer`,
+  or a colour literal outside its short content allowlist.
 - macOS overlay scrollbars: no custom scrollbar recipe. Radix `ScrollArea`
   uses `type="scroll"`.
 - Rows highlight instantly. No `cursor-pointer`: desktop controls use the
@@ -221,9 +224,11 @@ near-opaque `bg-popover` surfaces with one soft shadow and a hairline ring.
 
 ## Windows
 
-- Windows 11 22H2+ (build ≥ 22621): `backgroundMaterial: 'mica'` on every
-  role, with the same coats at Windows-tuned alphas. Mica tints from the
-  wallpaper without a live blur, so it stays cheap on low-end iGPUs.
+- Windows 11 22H2+ (build ≥ 22621): `backgroundMaterial: 'mica'` on the
+  main window, with its own coats (`[data-platform='win32']` in styles.css).
+  Mica tints from the wallpaper without a live blur, so it stays cheap on
+  low-end iGPUs. Chat, Captions, Notes, and Preview stay solid dark: Windows
+  has no per-window appearance pin.
 - Windows 10 and older builds use the solid palette.
 - The D3D11 preview window and the proof surface stay opaque.
 
