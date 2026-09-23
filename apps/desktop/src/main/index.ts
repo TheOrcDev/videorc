@@ -48,7 +48,7 @@ import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
 import {
   OwnedProcessRegistry,
@@ -759,106 +759,9 @@ const glassMode = resolveGlassMode({
   glass: process.env.VIDEORC_GLASS,
   legacyVibrancy: process.env.VIDEORC_GLASS_VIBRANCY
 })
-const glassVibrancyEnabled = glassMode.kind === 'material'
 const glassVibrancyMaterial: GlassVibrancyMaterial =
   glassMode.kind === 'material' ? glassMode.material : DEFAULT_GLASS_MATERIAL
 
-// Blurred-wallpaper underlay (the glassmorphism frost): the renderer blurs
-// the actual wallpaper as its bottom layer since the OS material cannot do
-// it here. Fetching uses System Events — the one-time Automation prompt, if
-// denied, degrades cleanly to the plain translucent glass.
-// macOS-only today: the underlay is fetched through System Events (osascript),
-// so gating on isMac keeps the move/resize/focus listeners from shelling out on
-// Windows. The Windows wallpaper underlay (a registry read, no prompt) is Phase 4.
-const glassWallpaperEnabled =
-  isMac && glassVibrancyEnabled && process.env.VIDEORC_GLASS_WALLPAPER !== '0'
-let glassWallpaperDataUrl: string | null = null
-let glassWallpaperSourcePath: string | null = null
-let glassGeometryTimer: ReturnType<typeof setTimeout> | null = null
-
-// The underlay is drawn per window (each one offsets the same wallpaper by its
-// own bounds), so geometry is always asked for a specific window.
-function glassGeometry(
-  target: BrowserWindow | null = mainWindow
-): { window: Electron.Rectangle; display: Electron.Rectangle } | null {
-  if (!target || target.isDestroyed()) {
-    return null
-  }
-  const bounds = target.getBounds()
-  return { window: bounds, display: screen.getDisplayMatching(bounds).bounds }
-}
-
-// Main plus the detached Chat and Captions windows: they share the black-glass
-// material, so they share the wallpaper underlay feed.
-function glassWindows(): BrowserWindow[] {
-  return [mainWindow, commentsWindow, captionsWindow].filter(
-    (window): window is BrowserWindow =>
-      Boolean(window) && !window!.isDestroyed() && !window!.webContents.isDestroyed()
-  )
-}
-
-function queueGlassGeometryBroadcast(): void {
-  if (!glassWallpaperEnabled || glassGeometryTimer) {
-    return
-  }
-  glassGeometryTimer = setTimeout(() => {
-    glassGeometryTimer = null
-    if (!glassWallpaperDataUrl) {
-      return
-    }
-    for (const window of glassWindows()) {
-      const geometry = glassGeometry(window)
-      if (geometry) {
-        sendElectronEvent(window.webContents, 'glass:geometry', geometry)
-      }
-    }
-  }, 40)
-}
-
-function currentWallpaperPath(): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile(
-      'osascript',
-      ['-e', 'tell application "System Events" to get picture of current desktop'],
-      { timeout: 3000 },
-      (error, stdout) => resolve(error ? null : stdout.trim() || null)
-    )
-  })
-}
-
-async function refreshGlassWallpaper(): Promise<void> {
-  if (!glassWallpaperEnabled) {
-    return
-  }
-  const wallpaperPath = await currentWallpaperPath()
-  if (!wallpaperPath || (wallpaperPath === glassWallpaperSourcePath && glassWallpaperDataUrl)) {
-    return
-  }
-  try {
-    let image = nativeImage.createFromPath(wallpaperPath)
-    if (image.isEmpty()) {
-      return
-    }
-    // The layer gets a 70px blur anyway; 1800px wide is plenty of detail and
-    // keeps the data URL a few hundred KB instead of tens of MB.
-    if (image.getSize().width > 1800) {
-      image = image.resize({ width: 1800 })
-    }
-    glassWallpaperDataUrl = `data:image/jpeg;base64,${image.toJPEG(72).toString('base64')}`
-    glassWallpaperSourcePath = wallpaperPath
-    for (const window of glassWindows()) {
-      const geometry = glassGeometry(window)
-      if (geometry) {
-        sendElectronEvent(window.webContents, 'glass:wallpaper', {
-          imageDataUrl: glassWallpaperDataUrl,
-          ...geometry
-        })
-      }
-    }
-  } catch {
-    /* unreadable wallpaper: stay on the plain translucent glass */
-  }
-}
 // Lifecycle smokes can isolate the app-level backend ledger without touching
 // the developer's real app data.
 if (app.isPackaged) {
@@ -1857,15 +1760,6 @@ function createWindow(): void {
         queueDockedPreviewPlacement()
       }
     })
-  }
-
-  if (glassWallpaperEnabled) {
-    mainWindow.on('move', queueGlassGeometryBroadcast)
-    mainWindow.on('resize', queueGlassGeometryBroadcast)
-    // Wallpaper changes have no event; refresh on focus (cheap no-op when the
-    // path is unchanged) and once the renderer is ready to receive it.
-    mainWindow.on('focus', () => void refreshGlassWallpaper())
-    mainWindow.webContents.once('did-finish-load', () => void refreshGlassWallpaper())
   }
 
   if (backendConnection) {
@@ -7390,9 +7284,9 @@ function setDockIcon(): void {
   }
 }
 
-// Videorc targets Windows 11 only (build 22000+): it unlocks Mica/acrylic,
-// mature Windows.Graphics.Capture, and per-monitor wallpaper for the glass
-// underlay. The installer can't enforce an OS floor, so we check at startup.
+// Videorc targets Windows 11 only (build 22000+): it unlocks Mica/acrylic
+// window materials and mature Windows.Graphics.Capture. The installer can't
+// enforce an OS floor, so we check at startup.
 // Returns true if the app should stop launching.
 function enforceWindowsVersionFloor(): boolean {
   if (!isWindows) {
@@ -12762,12 +12656,6 @@ app.whenReady().then(async () => {
 
   installRendererSessionPermissions(session.defaultSession)
 
-  // Warm the glass-wallpaper cache while Electron/renderer boot: the underlay
-  // then finds it on first mount instead of swapping the whole background in
-  // a beat after the window shows. Fire-and-forget — osascript can stall on
-  // an Automation prompt and must never delay the window.
-  void refreshGlassWallpaper()
-
   registerOAuthCallbackProtocol()
   const initialCallbackUrl = process.argv.find((argument) =>
     argument.startsWith(`${OAUTH_CALLBACK_PROTOCOL}://`)
@@ -12904,14 +12792,6 @@ app.whenReady().then(async () => {
     if (glassMode.kind === 'solid') {
       mainWindow?.setBackgroundColor(solidWindowBase('main', theme !== 'light'))
     }
-  })
-  secureIpcHandle('glass:wallpaper:get', (event) => {
-    // Each glass window asks for ITS OWN offset into the shared wallpaper.
-    const geometry = glassGeometry(BrowserWindow.fromWebContents(event.sender))
-    if (!glassWallpaperDataUrl || !geometry) {
-      return null
-    }
-    return { imageDataUrl: glassWallpaperDataUrl, ...geometry }
   })
   secureIpcHandle('preview-window:open', () => openPreviewWindow())
   secureIpcHandle('preview-window:close', () => closePreviewWindow())

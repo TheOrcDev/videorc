@@ -26,9 +26,8 @@
 //   node scripts/ui-glass-probe.mjs [--gate] [--themes=dark,light]
 //     [--roles=main,chat,captions,notes,preview]
 //
-// Calibration: VIDEORC_UI_GLASS_HIDE_UNDERLAY=1 hides the legacy wallpaper
-// underlay through CDP, and extra app env rides in VIDEORC_UI_GLASS_APP_ENV
-// (JSON), e.g. '{"VIDEORC_GLASS_VIBRANCY":"under-window"}'.
+// Extra app env rides in VIDEORC_UI_GLASS_APP_ENV (JSON), e.g.
+// '{"VIDEORC_GLASS":"0"}' to measure the solid palette.
 
 import { execFileSync } from 'node:child_process'
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
@@ -120,7 +119,6 @@ const option = (name, fallback) =>
 const gate = flag('gate')
 const themes = option('themes', 'dark,light').split(',')
 const roles = option('roles', 'main,chat,captions,notes,preview').split(',')
-const hideUnderlay = process.env.VIDEORC_UI_GLASS_HIDE_UNDERLAY === '1'
 const extraAppEnv = process.env.VIDEORC_UI_GLASS_APP_ENV
   ? JSON.parse(process.env.VIDEORC_UI_GLASS_APP_ENV)
   : {}
@@ -219,12 +217,6 @@ async function assertTheme(devtoolsHost, theme) {
     )
   }
 }
-
-const HIDE_UNDERLAY_EXPRESSION = `(() => {
-  document.querySelectorAll('[data-glass-underlay],[data-glass-underlay-fallback]')
-    .forEach((element) => { element.style.display = 'none' });
-  return true
-})()`
 
 function capture(bounds, name) {
   const file = join(outputDir, `${name}.png`)
@@ -403,7 +395,6 @@ async function main() {
   const smoke = launched.connections['preview-motion-ready']
   const report = {
     thresholds: GLASS_THRESHOLDS,
-    hideUnderlay,
     extraAppEnv,
     results: [],
     windowServerCpu: null
@@ -425,13 +416,6 @@ async function main() {
 
     for (const theme of themes) {
       await applyTheme(devtoolsHost, theme)
-      if (hideUnderlay) {
-        for (const role of ['main', 'chat', 'captions']) {
-          const target = await pageTarget(devtoolsHost, role)
-          if (target) await cdpEvaluate(target.webSocketDebuggerUrl, HIDE_UNDERLAY_EXPRESSION)
-        }
-        await sleep(500)
-      }
       for (const role of roles) {
         await assertTheme(devtoolsHost, theme)
         const shots = {}

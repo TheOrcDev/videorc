@@ -276,19 +276,15 @@ describe('renderer security policy', () => {
     expect(AUXILIARY_API_KEYS.captions).not.toContain('cacheChatAvatar')
   })
 
-  it('shares the glass wallpaper feed with the Chat and Captions windows but not Notes', () => {
-    // Chat and Captions draw the same black-glass underlay as the main window.
-    // Notes is a main-built data-URL window and never asks for the wallpaper.
-    for (const role of ['main', 'comments', 'captions'] as const) {
-      expect(roleCanInvokeChannel(role, 'glass:wallpaper:get')).toBe(true)
+  it('keeps the retired glass wallpaper feed out of every window (plan 050)', () => {
+    // Real vibrancy replaced the blurred-wallpaper underlay; no window may
+    // reach the old System Events wallpaper feed.
+    for (const role of ['main', 'comments', 'captions', 'notes'] as const) {
+      expect(roleCanInvokeChannel(role, 'glass:wallpaper:get')).toBe(false)
     }
-    expect(roleCanInvokeChannel('notes', 'glass:wallpaper:get')).toBe(false)
-    for (const role of ['comments', 'captions'] as const) {
-      expect(AUXILIARY_API_KEYS[role]).toEqual(
-        expect.arrayContaining(['getGlassWallpaper', 'onGlassWallpaper', 'onGlassGeometry'])
-      )
+    for (const keys of Object.values(AUXILIARY_API_KEYS)) {
+      expect(keys).not.toContain('getGlassWallpaper')
     }
-    expect(AUXILIARY_API_KEYS.notes).not.toContain('getGlassWallpaper')
   })
 
   it('lets only main and the Chat window pick the highlight corner', () => {

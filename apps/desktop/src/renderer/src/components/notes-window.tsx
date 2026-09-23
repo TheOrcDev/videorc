@@ -3,11 +3,10 @@ import { useCallback, useEffect, useRef, useState, type ReactElement } from 'rea
 import { PinIcon } from '@/components/icons'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useTrafficLightGutter } from '@/components/window-frame'
 import type { NotesFontScale, NotesWindowState } from '@/lib/backend'
 import { cn } from '@/lib/utils'
-import { MAX_NOTES_TEXT_LENGTH } from '../../../shared/electron-ipc-contract'
+import { MAX_NOTES_TEXT_LENGTH } from '../../../shared/notes-limits'
 
 // The detached Notes window (plan 050 S4): the private teleprompter, now a real
 // renderer window on the same glass, header and controls as Chat and Captions.
@@ -154,33 +153,37 @@ export function NotesWindow({
       >
         <span className="text-[13px] font-semibold">Notes</span>
         <span className="flex-1" />
-        <ToggleGroup
+        {/* Plain Buttons, not ToggleGroup: Radix roving focus would split a
+            shared chunk the main window then loads eagerly (asset budget). */}
+        <div
           aria-label="Text size"
-          className="[-webkit-app-region:no-drag]"
-          size="sm"
-          spacing={0}
-          type="single"
-          value={fontScale}
-          variant="outline"
-          onValueChange={(value) => {
-            if (!isFontScale(value)) return
-            setFontScale(value)
-            fontScaleRef.current = value
-            queueSave()
-            textareaRef.current?.focus()
-          }}
+          className="flex items-center rounded-chip border border-border [-webkit-app-region:no-drag]"
+          role="group"
         >
           {(['sm', 'md', 'lg'] as const).map((scale) => (
-            <ToggleGroupItem
+            <Button
               key={scale}
               aria-label={`${FONT_SCALE_LABEL[scale]} text`}
-              className={cn('h-7 min-w-8 px-2 text-[11px]', marker)}
-              value={scale}
+              aria-pressed={fontScale === scale}
+              className={cn(
+                'h-6 min-w-7 rounded-none px-2 text-[11px] first:rounded-l-chip last:rounded-r-chip',
+                fontScale === scale ? 'bg-accent text-foreground' : 'text-muted-foreground',
+                marker
+              )}
+              size="sm"
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setFontScale(scale)
+                fontScaleRef.current = scale
+                queueSave()
+                textareaRef.current?.focus()
+              }}
             >
               {FONT_SCALE_LABEL[scale]}
-            </ToggleGroupItem>
+            </Button>
           ))}
-        </ToggleGroup>
+        </div>
         <Button
           aria-label={pinLabel}
           aria-pressed={alwaysOnTop}

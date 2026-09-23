@@ -31,7 +31,7 @@ export function PanelSection({
   return (
     <section
       className={cn(
-        'glass-shine flex flex-col gap-5 rounded-panel border border-border bg-card/40 p-5 shadow-soft',
+        'flex flex-col gap-5 rounded-panel border border-border bg-card/40 p-5 shadow-soft',
         className
       )}
       data-slot="panel-section"

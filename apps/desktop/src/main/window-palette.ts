@@ -1,12 +1,10 @@
 // Main-side palette for surfaces that CANNOT read the renderer's CSS tokens:
-// the data-URL windows (Notes, Preview — dark-always by design, they frame
-// video) and BrowserWindow backgroundColor fallbacks. The detached Chat and
-// Captions windows are black glass on macOS (transparent + the renderer's
-// wallpaper underlay) and fall back to this solid base off macOS or when glass
-// is opted out. Values are the
-// solid equivalents of styles.css (the black-glass / porcelain columns) —
-// styles.css is the source of truth; change them together.
-// (.claude/skills/videorc-design documents both.)
+// the Preview frame's data-URL document (dark-always, it frames video) and the
+// BrowserWindow solid bases used off macOS, with VIDEORC_GLASS=0, or when a
+// dark-always window cannot pin its appearance (window-glass.ts). Values are
+// the solid equivalents of styles.css (the black-glass / porcelain columns);
+// styles.css is the source of truth. window-palette.test.ts pins the glass
+// coats to it. (.claude/skills/videorc-design documents both.)
 
 export interface WindowPalette {
   /** Window/body background — solid fallback of the theme's glass base. */

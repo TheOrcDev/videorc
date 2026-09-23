@@ -39,11 +39,9 @@
 :root {
   --radius: 0.625rem;
 
-  /* Scrollbars carry no track at all — only a thumb, and barely that. Glass
-     here means what it means everywhere else in this app: translucency plus a
-     hairline, never a real backdrop blur (unreachable in this Electron setup;
-     see the design language's wallpaper-underlay note). Light mode needs a
-     darker thumb to register on porcelain. */
+  /* Scrollbars carry no track at all — only a thumb, and barely that: the
+     window glass shows through. Light mode needs a darker thumb to register
+     on porcelain. */
   --scrollbar-thumb: oklch(0 0 0 / 15%);
   --scrollbar-thumb-hover: oklch(0 0 0 / 28%);
   --scrollbar-thumb-ring: oklch(0 0 0 / 6%);
@@ -108,12 +106,6 @@
   /* Floating glass panel shadow + hairline ring. */
   --shadow-glass-panel: 0 16px 70px oklch(0 0 0 / 25%), 0 0 0 1px oklch(0 0 0 / 12%);
 
-  /* The wallpaper frost (GlassWallpaperUnderlay img filter). Light keeps the
-     airy porcelain frost. */
-  /* Solid degradation base for when no wallpaper is available (Automation
-     denied): the transparent window must never show other apps through the
-     translucent coat. Matches the porcelain solid (#FAFAFB). */
-  --glass-fallback-base: oklch(0.985 0.001 286);
   /* Window glass (plan 050): real macOS vibrancy under every window. The body
      wears --glass-window (the one window coat), content panes add
      --glass-content so the sidebar reads lighter, and --glass-solid replaces
@@ -122,23 +114,6 @@
   --glass-window: oklch(0.985 0.001 286 / 60%);
   --glass-content: oklch(0.985 0.001 286 / 30%);
   --glass-solid: oklch(0.985 0.001 286);
-  --glass-underlay-filter: blur(70px) saturate(1.4) brightness(1.05);
-  /* A whisper of true translucency. What bleeds through the transparent
-     window is other apps' windows, UNBLURRED (backdrop blur cannot see
-     behind the window), so this is a privacy dial: at the old 0.86, sharp
-     text behind the app was faintly readable through the glass. 0.94 keeps
-     the glass feeling alive without legible bleed — do not lower it. */
-  --glass-underlay-opacity: 0.94;
-
-  /* Glass reflection (the .glass-shine utility): a specular sweep from the
-     upper-left + a bright top rim where light catches the edge. */
-  --glass-shine-rim: inset 0 1px 0 oklch(1 0 0 / 85%);
-  --glass-shine-sweep: linear-gradient(
-    160deg,
-    oklch(1 0 0 / 50%) 0%,
-    oklch(1 0 0 / 18%) 20%,
-    transparent 45%
-  );
 }
 
 .dark {
@@ -203,33 +178,12 @@
 
   --shadow-glass-panel: 0 16px 70px oklch(0 0 0 / 60%), 0 0 0 1px oklch(1 0 0 / 10%);
 
-  /* Solid degradation base for when no wallpaper is available (Automation
-     denied): matches the black-glass solid (#0D0D0F). */
-  --glass-fallback-base: oklch(0.13 0.003 286);
   /* Dark window glass: over pure white the dark under-window material reads
      #4A4B49, so these coats keep secondary text at 4.5:1 or better on any
      desktop (probe:ui-glass contrast check). */
   --glass-window: oklch(0.13 0.003 286 / 42%);
   --glass-content: oklch(0.13 0.003 286 / 34%);
   --glass-solid: oklch(0.13 0.003 286);
-  /* Black glass: the frost itself goes dark — the wallpaper is dimmed into a
-     smoky texture (the translucent coat alone cannot make a bright wallpaper
-     read black; this can). */
-  --glass-underlay-filter: blur(70px) saturate(1.1) brightness(0.35);
-  /* A whisper of true translucency — see the light-theme note: this is a
-     privacy dial (bleed-through is unblurred); was 0.82, which let text
-     behind the app read through. Do not lower it. */
-  --glass-underlay-opacity: 0.92;
-
-  /* Glass reflection: the orb's specular highlight — subtle white sweep from
-     the upper-left + a glinting top rim on the black glass. */
-  --glass-shine-rim: inset 0 1px 0 oklch(1 0 0 / 14%);
-  --glass-shine-sweep: linear-gradient(
-    160deg,
-    oklch(1 0 0 / 7%) 0%,
-    oklch(1 0 0 / 2.5%) 22%,
-    transparent 45%
-  );
 }
 
 /* The OS paints the material solid under Reduce Transparency; the coats go
@@ -311,21 +265,6 @@
 }
 
 @layer components {
-  /* Glass reflection overlay — apply to any glass surface (window frame,
-     panels, dialogs). Token-driven per theme; pure chrome, no color. */
-  .glass-shine {
-    position: relative;
-  }
-  .glass-shine::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    pointer-events: none;
-    background: var(--glass-shine-sweep);
-    box-shadow: var(--glass-shine-rim);
-  }
-
   /* Co-host "working on it" shimmer — the chat-app typing affordance. Opacity
      only: nothing bounces, nothing moves, nothing reflows the toolbar row. The
      dots inherit currentColor so they stay monochrome chrome. */

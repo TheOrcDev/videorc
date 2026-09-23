@@ -28,7 +28,7 @@ import { outputSummary, streamingSummary } from '@/lib/studio-session-view'
 // The session's primary actions rendered as a matched pair of glassy hero
 // controls: taller, translucent, specular-shined (videorc-design glass tokens).
 // Record/Stop keep the brand-red record accent; Stream is neutral glass.
-const HERO_CONTROL = 'glass-shine h-11 flex-1 rounded-lg border font-semibold shadow-soft'
+const HERO_CONTROL = 'h-11 flex-1 rounded-lg border font-semibold shadow-soft'
 
 /**
  * Session panel (SD1): the glanceable session facts as a label→value list, plus
