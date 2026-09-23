@@ -6,12 +6,16 @@ import { cn } from '@/lib/utils'
 function ScrollArea({
   className,
   children,
+  type = 'scroll',
   ...props
 }: React.ComponentProps<typeof ScrollAreaPrimitive.Root>) {
+  // type="scroll": the thumb shows while scrolling, like the macOS overlay
+  // scrollbars (plan 050, D6).
   return (
     <ScrollAreaPrimitive.Root
       data-slot="scroll-area"
       className={cn('relative', className)}
+      type={type}
       {...props}
     >
       <ScrollAreaPrimitive.Viewport

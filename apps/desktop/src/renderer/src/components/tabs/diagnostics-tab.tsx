@@ -876,7 +876,7 @@ function LastBackendCrash({ record }: { record: BackendCrashRecord | null }): Re
   }
   const view = backendCrashView(record)
   return (
-    <div className="mb-2 rounded-row bg-destructive/10 px-3 py-2 text-xs">
+    <div className="mb-2 rounded-row bg-destructive/10 px-3 py-2 text-xs select-text">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <Badge variant="destructive">{view.intentional ? 'exit' : 'crash'}</Badge>
         <span className="font-medium">
@@ -910,7 +910,7 @@ function LogRow({
   sourceId?: string
 }): ReactElement {
   return (
-    <div className="border-b border-border py-2 text-xs last:border-b-0">
+    <div className="border-b border-border py-2 text-xs select-text last:border-b-0">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <Badge variant={levelBadgeVariant(level)}>{level}</Badge>
         <span className="font-medium">{code}</span>

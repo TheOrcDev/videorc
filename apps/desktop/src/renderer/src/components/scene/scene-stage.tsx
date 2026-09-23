@@ -478,7 +478,7 @@ export function SceneStage({
                   className={
                     dragEnabled && editable(source)
                       ? 'cursor-grab active:cursor-grabbing'
-                      : 'cursor-pointer'
+                      : 'cursor-default'
                   }
                   onClick={(event) => {
                     if (

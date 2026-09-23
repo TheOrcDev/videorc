@@ -251,6 +251,7 @@ import {
   redactAvatarFetchError,
   withAvatarFetchDeadline
 } from './avatar-cache'
+import { installContextMenu } from './context-menu'
 import {
   DARK_GLASS_COATS,
   DARK_WINDOW_PALETTE,
@@ -1614,6 +1615,7 @@ function createWindow(): void {
     }
   })
   finishGlassWindow(mainWindow, 'main', glassMode)
+  installContextMenu(mainWindow.webContents)
   applyVideorcWindowCaptureProtection(mainWindow, 'main', {
     onFailure: (reason) =>
       safeConsole.warn(`Main window content protection could not be enabled: ${reason}`)
@@ -2852,6 +2854,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   })
   registerRendererWindow(window, 'comments')
   finishGlassWindow(window, 'chat', chrome.mode)
+  installContextMenu(window.webContents)
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
@@ -3075,6 +3078,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
   installCaptureProtectionSmokeMarker(window, 'captions')
   registerRendererWindow(window, 'captions')
   finishGlassWindow(window, 'captions', chrome.mode)
+  installContextMenu(window.webContents)
   captionsWindowClosing = false
   captionsWindow = window
   captionsWindowAlwaysOnTop = captionsWindowAlwaysOnTopPreference(prefs)

@@ -535,7 +535,8 @@ function ArtifactView({
   )
 
   return (
-    <div className="flex flex-col gap-2">
+    // Everything Publish generates is meant to be copied out.
+    <div className="flex flex-col gap-2 select-text">
       {problemArtifact ? <ArtifactProblem artifact={problemArtifact} /> : null}
 
       {/* What the last run PRODUCED, even when it was local-only: the audio
