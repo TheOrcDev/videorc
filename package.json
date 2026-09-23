@@ -172,6 +172,7 @@
     "smoke:preview-motion": "node scripts/smoke-preview-motion-app.mjs",
     "probe:preview-window": "node scripts/preview-window-probe.mjs",
     "probe:comments-window": "node scripts/comments-window-probe.mjs",
+    "probe:ui-glass": "node scripts/ui-glass-probe.mjs",
     "probe:preview-lifecycle": "node scripts/preview-lifecycle-probe.mjs --gate",
     "probe:split-flv": "node scripts/probe-split-flv-capture.mjs",
     "probe:release-storage-compat": "node scripts/probe-release-storage-compat.mjs",

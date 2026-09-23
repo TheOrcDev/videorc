@@ -2528,10 +2528,22 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   notesWindow = window
   attachAuxWindowShortcuts(window)
   notesWindowAlwaysOnTop = notesWindowAlwaysOnTopPreference(prefs)
-  notesWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'notes', {
-    onFailure: (reason) =>
-      safeConsole.warn(`Notes window content protection could not be enabled: ${reason}`)
-  }).protected
+  // probe:ui-glass has to photograph the Notes glass, and screencapture
+  // honours the capture exclusion. Only an unpackaged smoke run that asks for
+  // it explicitly waives it; `notes-window-state` then reports protected:false.
+  const notesCaptureExclusionWaived =
+    !app.isPackaged &&
+    smokeCommandServerEnabled &&
+    process.env.VIDEORC_SMOKE_GLASS_PROBE_NOTES_VISIBLE === '1'
+  if (notesCaptureExclusionWaived) {
+    safeConsole.warn('Notes capture exclusion waived for probe:ui-glass (unpackaged smoke run).')
+    notesWindowContentProtected = false
+  } else {
+    notesWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'notes', {
+      onFailure: (reason) =>
+        safeConsole.warn(`Notes window content protection could not be enabled: ${reason}`)
+    }).protected
+  }
   installCaptureProtectionSmokeMarker(window, 'notes')
   if (notesWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
@@ -9112,6 +9124,100 @@ async function handleSmokePreviewMotionRequest(
   })
 }
 
+// probe:ui-glass backdrop (dev-only smoke commands; never in a packaged app).
+let smokeBackdropWindow: BrowserWindow | null = null
+const SMOKE_BACKDROP_PHOTO_PATH = '/Library/Desktop Pictures/Mojave Day.jpg'
+
+function smokeBackdropBody(variant: string): { html: string; photo: boolean } | null {
+  const page = (style: string, content = ''): string =>
+    `<body style="margin:0;height:100vh;overflow:hidden;${style}">${content}</body>`
+  if (variant === 'stripes') {
+    return {
+      html: page(
+        'background:linear-gradient(90deg,#ffffff 0 30%,#ff8a00 30% 50%,#2f6bff 50% 70%,#ffffff 70%);font:700 80px -apple-system;color:#000',
+        'BACKDROP BACKDROP BACKDROP BACKDROP'
+      ),
+      photo: false
+    }
+  }
+  const solids: Record<string, string> = {
+    red: '#ff0000',
+    blue: '#0000ff',
+    white: '#ffffff',
+    black: '#000000'
+  }
+  if (solids[variant]) {
+    return { html: page(`background:${solids[variant]}`), photo: false }
+  }
+  if (variant === 'text') {
+    // Dense, high-contrast body text: if any of it reads through a window,
+    // the probe's sharpness metric sees the glyph edges.
+    const line = 'Private text behind the window must never be readable 0123456789 '
+    return {
+      html: page(
+        'background:#ffffff;color:#000000;font:700 26px/1.15 -apple-system;padding:6px;word-break:break-all',
+        line.repeat(160)
+      ),
+      photo: false
+    }
+  }
+  if (variant === 'photo') {
+    const image = existsSync(SMOKE_BACKDROP_PHOTO_PATH)
+      ? nativeImage.createFromPath(SMOKE_BACKDROP_PHOTO_PATH)
+      : null
+    if (!image || image.isEmpty()) {
+      // No system wallpaper on this host: a warm two-tone stand-in.
+      return {
+        html: page('background:linear-gradient(160deg,#c98b4b 0%,#6b3f2a 45%,#1e2a44 100%)'),
+        photo: false
+      }
+    }
+    // JPEG keeps the data URL far under Chromium's 2 MB URL limit.
+    const url = `data:image/jpeg;base64,${image.resize({ width: 1600 }).toJPEG(72).toString('base64')}`
+    return {
+      html: page(`background:#000 url('${url}') center/cover no-repeat`),
+      photo: true
+    }
+  }
+  return null
+}
+
+function smokeWindowForRole(role: string): BrowserWindow | null {
+  if (role === 'main') return mainWindow
+  if (role === 'chat') return commentsWindow
+  if (role === 'captions') return captionsWindow
+  if (role === 'notes') return notesWindow
+  if (role === 'preview') return previewWindow
+  return null
+}
+
+// Windows raise-window lifted to the floating level, restored to their own
+// keep-on-top preference when the probe closes its backdrop.
+const smokeRaisedWindowRoles = new Map<BrowserWindow, string>()
+
+function restoreSmokeRaisedWindowLevels(): void {
+  for (const [window, role] of smokeRaisedWindowRoles) {
+    if (window.isDestroyed()) {
+      continue
+    }
+    if (role === 'chat') {
+      applyNotesWindowAlwaysOnTop(window, commentsWindowAlwaysOnTop)
+    } else if (role === 'captions') {
+      applyNotesWindowAlwaysOnTop(window, captionsWindowAlwaysOnTop)
+    } else if (role === 'notes') {
+      applyNotesWindowAlwaysOnTop(window, notesWindowAlwaysOnTop)
+    } else if (role === 'preview') {
+      window.setAlwaysOnTop(
+        previewWindowAlwaysOnTop && currentPreviewWindowMode() !== 'docked',
+        'floating'
+      )
+    } else {
+      window.setAlwaysOnTop(false)
+    }
+  }
+  smokeRaisedWindowRoles.clear()
+}
+
 async function runSmokePreviewMotionCommand(
   command: string,
   params: Record<string, unknown>
@@ -10759,25 +10865,81 @@ async function runSmokePreviewMotionCommand(
     }
   }
 
-  // Glass tuning: a deliberately loud backdrop window behind the main window
-  // so composited captures can SHOW how much desktop the glass passes —
-  // dark-on-dark shots cannot distinguish translucent from solid.
+  // Glass probes: a stand-in wallpaper behind the app windows so REGION
+  // captures show what the glass passes (and never the user's own desktop).
+  // `stripes` is the historic loud backdrop; red/blue measure transmission,
+  // white/black bound the coat's contrast, `text` measures legibility of what
+  // sits behind a window, `photo` is a real wallpaper for the owner's sheet.
   if (command === 'open-backdrop-window') {
+    const variant = typeof params.variant === 'string' ? params.variant : 'stripes'
+    const body = smokeBackdropBody(variant)
+    if (!body) {
+      throw new Error(`Unknown backdrop variant: ${variant}`)
+    }
     const area = screen.getPrimaryDisplay().workArea
-    const backdrop = new BrowserWindow({
-      ...area,
-      frame: false,
-      webPreferences: { sandbox: true }
-    })
-    await backdrop.loadURL(
-      'data:text/html,' +
-        encodeURIComponent(
-          '<body style="margin:0;height:100vh;background:linear-gradient(90deg,#ffffff 0 30%,#ff8a00 30% 50%,#2f6bff 50% 70%,#ffffff 70%);font:700 80px -apple-system;color:#000;overflow:hidden">BACKDROP BACKDROP BACKDROP BACKDROP</body>'
-        )
-    )
-    mainWindow.moveTop()
-    mainWindow.focus()
-    return { opened: true }
+    if (!smokeBackdropWindow || smokeBackdropWindow.isDestroyed()) {
+      smokeBackdropWindow = new BrowserWindow({
+        ...area,
+        frame: false,
+        hasShadow: false,
+        show: false,
+        webPreferences: { sandbox: true }
+      })
+    }
+    const backdrop = smokeBackdropWindow
+    await backdrop.loadURL(`data:text/html,${encodeURIComponent(body.html)}`)
+    if (params.raise === false) {
+      // probe:ui-glass: float the backdrop without activating the app, so the
+      // run never takes key focus (or the user's keystrokes) from them.
+      backdrop.setAlwaysOnTop(true, 'floating')
+      backdrop.showInactive()
+    } else {
+      backdrop.showInactive()
+      mainWindow.moveTop()
+      mainWindow.focus()
+    }
+    return { opened: true, variant, photo: body.photo }
+  }
+
+  if (command === 'close-backdrop-window') {
+    const closed = Boolean(smokeBackdropWindow && !smokeBackdropWindow.isDestroyed())
+    if (closed) {
+      smokeBackdropWindow?.destroy()
+    }
+    smokeBackdropWindow = null
+    restoreSmokeRaisedWindowLevels()
+    return { closed }
+  }
+
+  // Lifts one app window just above the floating backdrop and reports where it
+  // is, so a probe can shoot exactly its rect. `focus: true` also makes it key;
+  // probes leave it off so the run never steals the user's focus.
+  // close-backdrop-window restores every lifted window's own level.
+  if (command === 'raise-window') {
+    const role = typeof params.role === 'string' ? params.role : ''
+    const target = smokeWindowForRole(role)
+    if (!target || target.isDestroyed()) {
+      throw new Error(`No open window for role: ${role}`)
+    }
+    smokeRaisedWindowRoles.set(target, role)
+    target.setAlwaysOnTop(true, 'floating', 1)
+    if (params.focus === true) {
+      target.show()
+      target.focus()
+    } else {
+      target.showInactive()
+    }
+    target.moveTop()
+    const match = /^window:(\d+):/.exec(target.getMediaSourceId())
+    return {
+      role,
+      bounds: target.getBounds(),
+      windowId: match ? Number(match[1]) : null,
+      focused: target.isFocused(),
+      // The backdrop covers the primary display only; probes move every
+      // window onto it so no capture can include the user's real desktop.
+      primaryWorkArea: screen.getPrimaryDisplay().workArea
+    }
   }
 
   // Wedge research: candidate levers for recovering frame production after a
