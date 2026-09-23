@@ -288,24 +288,24 @@ impl XVideoAccess {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-struct XStreamSource {
-    id: String,
+pub(crate) struct XStreamSource {
+    pub(crate) id: String,
     #[serde(default)]
-    name: Option<String>,
+    pub(crate) name: Option<String>,
     #[serde(default)]
-    rtmp_region: Option<String>,
+    pub(crate) rtmp_region: Option<String>,
     #[serde(default)]
-    rtmps_url: Option<String>,
+    pub(crate) rtmps_url: Option<String>,
     #[serde(default)]
-    rtmp_url: Option<String>,
+    pub(crate) rtmp_url: Option<String>,
     #[serde(default)]
-    rtmp_stream_key: Option<String>,
+    pub(crate) rtmp_stream_key: Option<String>,
     #[serde(default)]
-    is_stream_active: bool,
+    pub(crate) is_stream_active: bool,
     #[serde(default)]
-    recommended_configuration: Option<serde_json::Value>,
+    pub(crate) recommended_configuration: Option<serde_json::Value>,
     #[serde(default)]
-    compatibility_info: Option<serde_json::Value>,
+    pub(crate) compatibility_info: Option<serde_json::Value>,
 }
 
 /// Persisted per-source playback record (app_settings key `xSourceHealth`,
@@ -996,7 +996,7 @@ pub fn default_chat_option() -> u8 {
     .unwrap_or(DEFAULT_CHAT_OPTION)
 }
 
-async fn get_region(
+pub(crate) async fn get_region(
     client: &reqwest::Client,
     credentials: &XLivestreamCredentials,
     base_url: &str,
@@ -1050,6 +1050,13 @@ fn x_source_cleanup_ids(
     sources
         .iter()
         .filter(|source| source.id != keep_source_id && !source.is_stream_active)
+        // A scheduled broadcast's dedicated source outlives every instant
+        // session; it is deleted only by the scheduler that created it.
+        .filter(|source| {
+            !source.name.as_deref().is_some_and(|name| {
+                name.starts_with(crate::scheduled_x::SCHEDULED_SOURCE_NAME_PREFIX)
+            })
+        })
         .filter(|source| {
             source.name.as_deref() == Some(source_name) || retired_source_ids.contains(&source.id)
         })
@@ -1528,7 +1535,7 @@ pub async fn delete_broadcast_chat_subscriptions(
     Ok(subscription_ids.len())
 }
 
-async fn end_broadcast(
+pub(crate) async fn end_broadcast(
     client: &reqwest::Client,
     credentials: &XLivestreamCredentials,
     base_url: &str,
@@ -1720,7 +1727,7 @@ pub(crate) fn oauth_timestamp() -> u64 {
         .as_secs()
 }
 
-fn api_base_url(value: Option<&str>) -> String {
+pub(crate) fn api_base_url(value: Option<&str>) -> String {
     value
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -1744,7 +1751,7 @@ fn optional_env_any(names: &[&str]) -> Option<String> {
     })
 }
 
-fn sanitize_secret_ref_segment(value: &str) -> String {
+pub(crate) fn sanitize_secret_ref_segment(value: &str) -> String {
     value
         .chars()
         .map(|character| {
@@ -1757,7 +1764,7 @@ fn sanitize_secret_ref_segment(value: &str) -> String {
         .collect()
 }
 
-fn x_error_detail(body: &str) -> Option<String> {
+pub(crate) fn x_error_detail(body: &str) -> Option<String> {
     let value: serde_json::Value = serde_json::from_str(body).ok()?;
     if let Some(message) = value
         .get("message")
@@ -2184,15 +2191,18 @@ mod tests {
             test_source("studio1", Some("Videorc"), false),
             test_source("streamyard", Some("StreamYardApp"), false),
             test_source("retired1", Some("Other Name"), false),
+            test_source("sched1", Some("Videorc Scheduled 11111111"), false),
+            test_source("sched2", Some("Videorc Scheduled 22222222"), false),
         ];
 
         let cleanup = x_source_cleanup_ids(
             &sources,
             "Videorc Primary Encoder",
-            &["retired1".to_string()],
+            &["retired1".to_string(), "sched2".to_string()],
             "fresh1",
         );
 
+        // Scheduled sources survive both the name sweep and the retired list.
         assert_eq!(cleanup, vec!["old1".to_string(), "retired1".to_string()]);
     }
 

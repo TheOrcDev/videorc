@@ -1846,7 +1846,9 @@ const scheduledMutationSchema = objectSchema(
     attemptId: optionalSchema(boundedString),
     targetId: optionalSchema(boundedString),
     video: optionalSchema(boundedBackendPayloadSchema),
-    sessionId: optionalSchema(boundedString)
+    sessionId: optionalSchema(boundedString),
+    // Provider of a brand-new draft; YouTube when absent.
+    provider: optionalSchema(enumSchema(['youtube', 'x']))
   },
   { allowUnknown: false }
 )

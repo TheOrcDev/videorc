@@ -30,18 +30,29 @@ import {
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
 import { Alert, AlertDescription } from '@/components/ui/alert'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Switch } from '@/components/ui/switch'
 import type {
   ScheduledEventMetadata,
   ScheduledStreamEvent,
-  ScheduledStreamOperation
+  ScheduledStreamOperation,
+  ScheduledStreamProvider
 } from '@/lib/backend'
 import type { useScheduledStreams } from '@/hooks/use-scheduled-streams'
+import { scheduledProviderLabel } from '@/lib/scheduled-streams'
+
+function localWallTime(date: Date): string {
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60_000).toISOString().slice(0, 16)
+}
+
+/** Two hours after a `datetime-local` value, in the same wall clock. */
+export function defaultPlannedEnd(localStart: string): string {
+  const start = new Date(localStart)
+  if (Number.isNaN(start.getTime())) return ''
+  return localWallTime(new Date(start.getTime() + 2 * 3_600_000))
+}
 
 function freshMetadata(): ScheduledEventMetadata {
-  const date = new Date(Date.now() + 3_600_000)
-  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000)
-    .toISOString()
-    .slice(0, 16)
+  const local = localWallTime(new Date(Date.now() + 3_600_000))
   return {
     title: '',
     description: '',
@@ -50,7 +61,9 @@ function freshMetadata(): ScheduledEventMetadata {
     localStart: local,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     offsetChoice: null,
-    thumbnailAssetId: null
+    thumbnailAssetId: null,
+    plannedEndLocal: null,
+    availableForReplay: true
   }
 }
 
@@ -63,6 +76,26 @@ export function ScheduleStreamDialog({
   state: ReturnType<typeof useScheduledStreams>
   onClose: () => void
 }): ReactElement {
+  const providers = state.capabilities?.providers ?? []
+  const [provider, setProvider] = useState<ScheduledStreamProvider>(
+    () =>
+      event?.provider ??
+      providers.find((item) => item.available && item.accounts.length > 0)?.provider ??
+      'youtube'
+  )
+  const providerCapability =
+    providers.find((item) => item.provider === provider) ??
+    (state.capabilities
+      ? {
+          provider,
+          available: state.capabilities.available,
+          reason: state.capabilities.reason,
+          accounts: state.capabilities.accounts,
+          fields: [],
+          audienceEditable: false as const
+        }
+      : undefined)
+  const providerLabel = scheduledProviderLabel(provider)
   const [metadata, setMetadata] = useState(() => event?.requested ?? freshMetadata())
   const [accountId, setAccountId] = useState(event?.accountId ?? '')
   const [audience, setAudience] = useState(event ? String(event.requested.madeForKids) : '')
@@ -124,26 +157,43 @@ export function ScheduleStreamDialog({
       clearTimeout(timer)
     }
   }, [metadata.localStart, metadata.timeZone, metadata.offsetChoice, request])
+  // X requires an end on every update, so the form never submits an open-ended
+  // X broadcast; the local strings share one zone, so they compare directly.
+  const plannedEndError =
+    provider === 'x'
+      ? !metadata.plannedEndLocal
+        ? 'Choose a planned end.'
+        : metadata.plannedEndLocal <= metadata.localStart
+          ? 'The planned end must be after the start.'
+          : ''
+      : ''
   const valid =
     accountId &&
     metadata.title.trim() &&
     Array.from(metadata.title).length <= 100 &&
     Array.from(metadata.description).length <= 5000 &&
     !/[<>]/.test(metadata.title + metadata.description) &&
-    audience &&
+    (provider === 'x' || audience) &&
+    !plannedEndError &&
     resolved &&
     !timeError
   const submit = async (publish: boolean) => {
-    if (!valid || saving || conflict || (publish && !state.capabilities?.available)) return
+    if (!valid || saving || conflict || (publish && !providerCapability?.available)) return
     setSaving(true)
     setError('')
     let operationId = crypto.randomUUID()
     try {
-      const values = { ...metadata, madeForKids: audience === 'true' }
+      const values = {
+        ...metadata,
+        madeForKids: provider === 'x' ? false : audience === 'true',
+        plannedEndLocal: provider === 'x' ? metadata.plannedEndLocal : null,
+        availableForReplay: provider === 'x' ? (metadata.availableForReplay ?? true) : null
+      }
       await state.mutate(published ? 'update' : 'saveDraft', {
         operationId,
         eventId: identity.id,
         expectedRevision: identity.revision,
+        ...(published || identity.revision > 0 ? {} : { provider }),
         accountId,
         metadata: values
       })
@@ -232,13 +282,48 @@ export function ScheduleStreamDialog({
               {event?.providerEventId ? 'Edit upcoming stream' : 'Schedule stream'}
             </DialogTitle>
             <DialogDescription>
-              Your event appears on YouTube. Start it manually from Videorc.
+              {provider === 'x'
+                ? 'Your broadcast appears on X. Start it manually from Videorc.'
+                : 'Your event appears on YouTube. Start it manually from Videorc.'}
             </DialogDescription>
           </DialogHeader>
           <ScrollArea className="min-h-0 overflow-hidden pr-3">
             <FieldGroup>
+              {providers.length > 1 && (
+                <Field>
+                  <FieldLabel htmlFor="schedule-provider">Platform</FieldLabel>
+                  <Select
+                    value={provider}
+                    onValueChange={(value) => {
+                      const next = value as ScheduledStreamProvider
+                      setProvider(next)
+                      setAccountId('')
+                      if (next === 'x' && !metadata.plannedEndLocal) {
+                        patch({ plannedEndLocal: defaultPlannedEnd(metadata.localStart) })
+                      }
+                      setDirty(true)
+                    }}
+                    disabled={Boolean(event)}
+                  >
+                    <SelectTrigger id="schedule-provider" aria-label="Platform">
+                      <SelectValue />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectGroup>
+                        {providers.map((item) => (
+                          <SelectItem key={item.provider} value={item.provider}>
+                            {scheduledProviderLabel(item.provider)}
+                          </SelectItem>
+                        ))}
+                      </SelectGroup>
+                    </SelectContent>
+                  </Select>
+                </Field>
+              )}
               <Field>
-                <FieldLabel htmlFor="schedule-channel">YouTube channel</FieldLabel>
+                <FieldLabel htmlFor="schedule-channel">
+                  {provider === 'x' ? 'X account' : 'YouTube channel'}
+                </FieldLabel>
                 <Select
                   value={accountId}
                   onValueChange={(value) => {
@@ -247,16 +332,25 @@ export function ScheduleStreamDialog({
                   }}
                   disabled={Boolean(event)}
                 >
-                  <SelectTrigger id="schedule-channel" aria-label="YouTube channel">
-                    <SelectValue placeholder="Choose connected channel" />
+                  <SelectTrigger
+                    id="schedule-channel"
+                    aria-label={provider === 'x' ? 'X account' : 'YouTube channel'}
+                  >
+                    <SelectValue
+                      placeholder={
+                        provider === 'x' ? 'Choose connected account' : 'Choose connected channel'
+                      }
+                    />
                   </SelectTrigger>
                   <SelectContent>
                     <SelectGroup>
-                      {state.capabilities?.accounts.map((account) => (
-                        <SelectItem key={account.accountId} value={account.accountId}>
-                          {account.accountLabel}
-                        </SelectItem>
-                      ))}
+                      {(providerCapability?.accounts ?? state.capabilities?.accounts ?? []).map(
+                        (account) => (
+                          <SelectItem key={account.accountId} value={account.accountId}>
+                            {account.accountLabel}
+                          </SelectItem>
+                        )
+                      )}
                     </SelectGroup>
                   </SelectContent>
                 </Select>
@@ -292,6 +386,20 @@ export function ScheduleStreamDialog({
                   onChange={(e) => patch({ localStart: e.target.value })}
                 />
               </Field>
+              {provider === 'x' && (
+                <Field>
+                  <FieldLabel htmlFor="schedule-end">Planned end</FieldLabel>
+                  <Input
+                    id="schedule-end"
+                    type="datetime-local"
+                    value={metadata.plannedEndLocal ?? ''}
+                    onChange={(e) => patch({ plannedEndLocal: e.target.value || null })}
+                  />
+                  <FieldDescription>
+                    {plannedEndError || 'X shows the planned length. Stop whenever you like.'}
+                  </FieldDescription>
+                </Field>
+              )}
               <Field>
                 <FieldLabel>Time zone</FieldLabel>
                 <Popover open={zoneOpen} onOpenChange={setZoneOpen}>
@@ -347,52 +455,66 @@ export function ScheduleStreamDialog({
                   {timeError || `${resolved} · ${metadata.timeZone}`}
                 </FieldDescription>
               </Field>
-              <Field>
-                <FieldLabel htmlFor="schedule-privacy">Visibility</FieldLabel>
-                <Select
-                  value={metadata.privacy}
-                  onValueChange={(value) =>
-                    patch({ privacy: value as ScheduledEventMetadata['privacy'] })
-                  }
-                >
-                  <SelectTrigger id="schedule-privacy" aria-label="Visibility">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="private">Private</SelectItem>
-                      <SelectItem value="unlisted">Unlisted</SelectItem>
-                      <SelectItem value="public">Public</SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-              </Field>
-              <Field>
-                <FieldLabel htmlFor="schedule-audience">Made for kids?</FieldLabel>
-                <Select
-                  value={audience}
-                  disabled={Boolean(published)}
-                  onValueChange={(value) => {
-                    setAudience(value)
-                    setDirty(true)
-                  }}
-                >
-                  <SelectTrigger id="schedule-audience" aria-label="Made for kids">
-                    <SelectValue placeholder="Choose audience" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="false">No, not made for kids</SelectItem>
-                      <SelectItem value="true">Yes, made for kids</SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
-                {event?.providerEventId && (
-                  <FieldDescription>
-                    Change audience in YouTube Studio, then refresh.
-                  </FieldDescription>
-                )}
-              </Field>
+              {provider === 'x' && (
+                <Field orientation="horizontal">
+                  <Switch
+                    id="schedule-replay"
+                    checked={metadata.availableForReplay ?? true}
+                    onCheckedChange={(checked) => patch({ availableForReplay: checked })}
+                  />
+                  <FieldLabel htmlFor="schedule-replay">Keep replay available</FieldLabel>
+                </Field>
+              )}
+              {provider === 'youtube' && (
+                <>
+                  <Field>
+                    <FieldLabel htmlFor="schedule-privacy">Visibility</FieldLabel>
+                    <Select
+                      value={metadata.privacy}
+                      onValueChange={(value) =>
+                        patch({ privacy: value as ScheduledEventMetadata['privacy'] })
+                      }
+                    >
+                      <SelectTrigger id="schedule-privacy" aria-label="Visibility">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value="private">Private</SelectItem>
+                          <SelectItem value="unlisted">Unlisted</SelectItem>
+                          <SelectItem value="public">Public</SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                  </Field>
+                  <Field>
+                    <FieldLabel htmlFor="schedule-audience">Made for kids?</FieldLabel>
+                    <Select
+                      value={audience}
+                      disabled={Boolean(published)}
+                      onValueChange={(value) => {
+                        setAudience(value)
+                        setDirty(true)
+                      }}
+                    >
+                      <SelectTrigger id="schedule-audience" aria-label="Made for kids">
+                        <SelectValue placeholder="Choose audience" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectGroup>
+                          <SelectItem value="false">No, not made for kids</SelectItem>
+                          <SelectItem value="true">Yes, made for kids</SelectItem>
+                        </SelectGroup>
+                      </SelectContent>
+                    </Select>
+                    {event?.providerEventId && (
+                      <FieldDescription>
+                        Change audience in YouTube Studio, then refresh.
+                      </FieldDescription>
+                    )}
+                  </Field>
+                </>
+              )}
               <Field>
                 <FieldLabel>Thumbnail</FieldLabel>
                 {preview && (
@@ -444,7 +566,7 @@ export function ScheduleStreamDialog({
                         void window.videorc.openOAuthUrl(watchUrl)
                       }}
                     >
-                      Open event on YouTube
+                      Open event on {providerLabel}
                     </Button>
                   </AlertDescription>
                 </Alert>
@@ -466,9 +588,9 @@ export function ScheduleStreamDialog({
                   </AlertDescription>
                 </Alert>
               )}
-              {(error || state.capabilities?.reason) && (
+              {(error || providerCapability?.reason) && (
                 <Alert>
-                  <AlertDescription>{error || state.capabilities?.reason}</AlertDescription>
+                  <AlertDescription>{error || providerCapability?.reason}</AlertDescription>
                 </Alert>
               )}
             </FieldGroup>
@@ -489,12 +611,18 @@ export function ScheduleStreamDialog({
               </Button>
             )}
             <Button
-              disabled={!valid || saving || conflict || !state.capabilities?.available}
+              disabled={!valid || saving || conflict || !providerCapability?.available}
               onClick={() => {
                 void submit(true)
               }}
             >
-              {saving ? 'Saving…' : published ? 'Update event' : 'Schedule on YouTube'}
+              {saving
+                ? 'Saving…'
+                : published
+                  ? provider === 'x'
+                    ? 'Update broadcast'
+                    : 'Update event'
+                  : `Schedule on ${providerLabel}`}
               <span aria-hidden="true">⌘↵</span>
             </Button>
           </DialogFooter>

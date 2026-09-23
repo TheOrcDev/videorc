@@ -496,8 +496,151 @@ try {
       fixture.calls.filter((call) => call.path.endsWith('/transition')).map((call) => call.id),
       [remoteId, remoteId]
     )
+    // X: the same scheduler, second provider. A saved X broadcast owns a
+    // dedicated source and goes live through its schedule, never through the
+    // instant create+publish pair.
+    console.log('[scheduling] X leg')
+    const xId = randomUUID()
+    await evaluate(
+      `return window.__videorcSmokeScheduledStreams.mutate('saveDraft', ${JSON.stringify({
+        eventId: xId,
+        expectedRevision: 0,
+        provider: 'x',
+        accountId: 'scheduled-smoke-x',
+        metadata: {
+          title: 'Scheduled X smoke',
+          description: 'X description',
+          privacy: 'private',
+          madeForKids: false,
+          localStart: '2035-01-01T12:00',
+          timeZone: 'Europe/Madrid',
+          offsetChoice: null,
+          thumbnailAssetId: thumbnails[1].id,
+          plannedEndLocal: '2035-01-01T13:00',
+          availableForReplay: false
+        }
+      })})`
+    )
+    await action('schedule', xId)
+    const xEvent = await get(xId)
+    assert.equal(xEvent.provider, 'x')
+    assert.equal(xEvent.lifecycle, 'scheduled')
+    assert.equal(xEvent.thumbnailState, 'uploaded')
+    assert.ok(xEvent.watchUrl.startsWith('https://x.com/i/broadcasts/'))
+    assert.equal(fixture.xSources.size, 1)
+    const xSource = [...fixture.xSources.values()][0]
+    assert.ok(xSource.name.startsWith('Videorc Scheduled '))
+    const xSchedule = fixture.xSchedules.get(xEvent.providerEventId)
+    assert.equal(xSchedule.manual_publish, true)
+    assert.equal(xSchedule.source_id, xSource.id)
+    assert.equal(xSchedule.scheduled_start_ms, String(Date.UTC(2035, 0, 1, 11, 0)))
+    assert.equal(xSchedule.scheduled_end_ms, String(Date.UTC(2035, 0, 1, 12, 0)))
+    assert.ok(/^\d+$/.test(xSchedule.thumbnail_media_id))
+    await action('update', xId, {
+      metadata: { ...xEvent.requested, title: 'Scheduled X smoke edited' }
+    })
+    const xEdited = fixture.xSchedules.get(xEvent.providerEventId)
+    assert.equal(xEdited.title, 'Scheduled X smoke edited')
+    assert.equal(xEdited.manual_publish, true)
+    assert.equal(xEdited.thumbnail_media_id, xSchedule.thumbnail_media_id)
+    assert.equal(xEdited.scheduled_end_ms, xSchedule.scheduled_end_ms)
+    const xTarget = {
+      id: 'x',
+      platform: 'x',
+      label: 'Scheduled X fixture',
+      enabled: true,
+      authMode: 'oauth',
+      accountId: 'scheduled-smoke-x',
+      accountLabel: 'Local X scheduling fixture',
+      scheduledEventId: xId,
+      scheduledEventTitle: 'Scheduled X smoke edited',
+      serverUrl: '',
+      streamKey: '',
+      streamKeyPresent: false,
+      outputPreset: 'custom',
+      outputBitrateKbps: 2000,
+      createdAt: stamp,
+      updatedAt: stamp
+    }
+    await evaluate(
+      `window.__videorcSmokeScenePresets.configure(${JSON.stringify({ video, recordEnabled: true, streamEnabled: true, streaming: { enabled: true, mode: 'single', targets: [xTarget], enabledTargetIds: ['x'], defaultOutputPreset: 'custom', defaultBitrateKbps: 2000 } })}); return true`
+    )
+    await waitFor(
+      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().canStart'),
+      'X Studio ready to start'
+    )
+    const xReceivePath = join(directory, 'received-x.flv')
+    listener = spawn(
+      'ffmpeg',
+      [
+        '-y',
+        '-hide_banner',
+        '-loglevel',
+        'info',
+        '-listen',
+        '1',
+        '-i',
+        `rtmp://127.0.0.1:${port}/live/scheduled-smoke-x`,
+        '-c',
+        'copy',
+        '-f',
+        'flv',
+        xReceivePath
+      ],
+      { stdio: ['ignore', 'ignore', 'pipe'] }
+    )
+    listener.stderr.on('data', (bytes) => {
+      if (/Input #0|Video:/.test(bytes.toString())) fixture.controls.xSourceActive = true
+    })
+    await wait(1000)
+    assert.equal(listener.exitCode, null)
+    await evaluate('await window.__videorcSmokeScenePresets.start(); return true')
+    await waitFor(
+      () => evaluate('return window.__videorcSmokeScenePresets.streamingState().confirmationOpen'),
+      'X Go Live confirmation'
+    )
+    await evaluate('await window.__videorcSmokeScenePresets.confirmGoLive(); return true')
+    await waitFor(
+      async () => fixture.xSchedules.get(xEvent.providerEventId).state === 'Running',
+      'scheduled X broadcast live'
+    )
+    const xStarted = await request(ws, timeoutMs, 'recording.status')
+    await wait(3000)
+    await evaluate('await window.__videorcSmokeScenePresets.stop(); return true')
+    await waitFor(
+      async () => (await get(xId)).lifecycle === 'completed',
+      'X provider-confirmed completion'
+    )
+    const xStopped = await request(ws, timeoutMs, 'recording.status')
+    assert.equal(fixture.xSchedules.get(xEvent.providerEventId).state, 'Ended')
+    assert.equal(fixture.xSources.size, 0, 'completed schedule releases its source')
+    assert.equal(
+      fixture.calls.filter(
+        (call) => call.method === 'POST' && /^\/2\/users\/[^/]+\/broadcasts$/.test(call.path)
+      ).length,
+      0,
+      'no instant X broadcast was created'
+    )
+    assert.equal(fixture.calls.filter((call) => call.path.endsWith('/live')).length, 1)
+    const xPath = await resolveFinalRecordingPath({
+      started: xStarted,
+      stopped: xStopped,
+      timeoutMs
+    })
+    await waitFor(async () => listener.exitCode !== null, 'X RTMP receiver finalization')
+    for (const artifact of [xPath, xReceivePath]) {
+      const report = await analyzeRecording(artifact, {
+        ffmpegPath: 'ffmpeg',
+        ffprobePath: 'ffprobe',
+        intendedFps: 30,
+        expectAudio: false,
+        gates: { requireMotion: false, avSyncTargetMs: Infinity, avSyncHardFailMs: Infinity }
+      })
+      assert.ok(report.verdict.pass, report.verdict.failures.join('; '))
+      console.log(`Scheduled X artifact: ${writeReports(report).mdPath}`)
+    }
     console.log(
-      'Scheduled streams smoke PASS: durable events, thumbnails, restart, recovery, cancellation, manual exact-ID start and final media artifacts.'
+      'Scheduled streams smoke PASS: durable events, thumbnails, restart, recovery, cancellation, manual exact-ID start (YouTube and X) and final media artifacts.'
     )
   })()
 } finally {

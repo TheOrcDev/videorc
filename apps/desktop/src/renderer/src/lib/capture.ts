@@ -1776,9 +1776,10 @@ function normalizeStreamTarget(
         ? clampNumber(saved.outputBitrateKbps, 6000, 1000, 50000)
         : undefined
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+  // Saved events exist for the two scheduling providers only.
   const scheduledEventId =
     authMode === 'oauth' &&
-    base.platform === 'youtube' &&
+    (base.platform === 'youtube' || base.platform === 'x') &&
     typeof saved.accountId === 'string' &&
     saved.accountId.length > 0 &&
     typeof saved.scheduledEventId === 'string' &&
@@ -2129,7 +2130,7 @@ export function patchStreamTargetForEdit(
   }
   if (
     next.authMode !== 'oauth' ||
-    next.platform !== 'youtube' ||
+    (next.platform !== 'youtube' && next.platform !== 'x') ||
     next.accountId !== target.accountId
   ) {
     next.scheduledEventId = undefined

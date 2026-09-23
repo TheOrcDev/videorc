@@ -10786,14 +10786,25 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           )
 
           // Metadata (title, announce-on-timeline) is derived backend-side
-          // from the stream metadata draft — never hardcoded here.
-          const publishRequest = client.request<XPublishResult>('streamTargets.x.publish', {
-            accountId: target.accountId,
-            sourceId,
-            region,
-            isLowLatency: true,
-            sessionId
-          })
+          // from the stream metadata draft — never hardcoded here. A saved
+          // broadcast goes live through its own schedule instead of a fresh
+          // create+publish pair.
+          const publishRequest = target.scheduledEventId
+            ? import('@/lib/scheduled-streams').then(({ scheduledTargetOperation }) =>
+                scheduledTargetOperation<XPublishResult>(
+                  client,
+                  'activate',
+                  target.scheduledEventId!,
+                  { attemptId: target.scheduledAttemptId, sessionId }
+                )
+              )
+            : client.request<XPublishResult>('streamTargets.x.publish', {
+                accountId: target.accountId,
+                sourceId,
+                region,
+                isLowLatency: true,
+                sessionId
+              })
           const publishedStreamingPromise = publishRequest.then((result) =>
             patchPreparedStreamTarget(nextStreaming, target.id, {
               accountId: result.accountId,
@@ -11235,6 +11246,70 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       if (preparedXCompletionTargets(nextStreaming).length > 0) {
         complete = false
       }
+      // A saved X broadcast keeps its schedule when Go Live never reached
+      // publish, and records completion once END is confirmed. Either way the
+      // preparation attempt is released exactly once.
+      for (const target of nextStreaming.targets.filter(
+        (target) =>
+          target.platform === 'x' &&
+          target.authMode === 'oauth' &&
+          Boolean(target.scheduledEventId) &&
+          Boolean(target.scheduledAttemptId) &&
+          target.status?.state !== 'live' &&
+          !(target.status?.state === 'warning' && Boolean(target.status.redactedUrl))
+      )) {
+        try {
+          const released = await (
+            await import('@/lib/scheduled-streams')
+          ).scheduledTargetOperation<{ lifecycleStatus: string; message: string }>(
+            client,
+            'releasePreparation',
+            target.scheduledEventId!,
+            {
+              attemptId: target.scheduledAttemptId,
+              sessionId:
+                sessionId && !isPreparedPlatformLifecycleOwner(sessionId) ? sessionId : undefined
+            }
+          )
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            scheduledAttemptId: undefined,
+            status: {
+              state: 'stopped',
+              message:
+                released.lifecycleStatus === 'ready'
+                  ? 'Upcoming broadcast preserved.'
+                  : released.message
+            }
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'warning',
+              message: `X scheduled cleanup needs review: ${message}`
+            }
+          })
+          complete = false
+        }
+      }
+      setCaptureConfig((current) =>
+        bridgeStreamingToLegacy({
+          ...current,
+          streaming: {
+            ...current.streaming,
+            targets: current.streaming.targets.map((target) => {
+              const settled = nextStreaming.targets.find((item) => item.id === target.id)
+              return settled && target.platform === 'x' && target.scheduledEventId
+                ? {
+                    ...target,
+                    scheduledAttemptId: settled.scheduledAttemptId,
+                    status: settled.status
+                  }
+                : target
+            })
+          }
+        })
+      )
       return { streaming: nextStreaming, complete }
     },
     [client, completeYouTubeBroadcastOnce, endPreparedXBroadcasts]
@@ -11886,13 +11961,38 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               }
             })
           } else if (target.platform === 'x') {
-            const prepared = await client.request<PreparedXStreamSource>(
-              'streamTargets.x.prepare',
-              {
-                accountId: target.accountId
-              }
-            )
+            const scheduledAttemptId = target.scheduledEventId ? crypto.randomUUID() : undefined
+            // A saved X broadcast already owns its ingest source: prepare reads
+            // that source's key instead of creating a fresh session source.
+            const prepared = target.scheduledEventId
+              ? await (
+                  await import('@/lib/scheduled-streams')
+                ).scheduledTargetOperation<PreparedXStreamSource>(
+                  client,
+                  'prepareForGoLive',
+                  target.scheduledEventId,
+                  {
+                    accountId: target.accountId,
+                    confirmationFingerprint: confirmedPreflight?.destinations.find(
+                      (destination) => destination.targetId === target.id
+                    )?.scheduled?.fingerprint,
+                    attemptId: scheduledAttemptId,
+                    targetId: target.id,
+                    video: coerceVideoToOrientation(
+                      streamOutputVideoForTarget(
+                        captureConfig.video,
+                        captureConfig.streaming,
+                        target
+                      ),
+                      target.outputOrientation ?? 'horizontal'
+                    )
+                  }
+                )
+              : await client.request<PreparedXStreamSource>('streamTargets.x.prepare', {
+                  accountId: target.accountId
+                })
             nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+              scheduledAttemptId,
               accountId: prepared.accountId,
               accountLabel: prepared.accountLabel,
               serverUrl: prepared.serverUrl,
@@ -11902,9 +12002,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
               platformStreamId: prepared.sourceId,
               status: {
                 state: 'ready',
-                message: prepared.isStreamActive
-                  ? 'X source prepared; ingest is already active.'
-                  : 'X source prepared.'
+                message: target.scheduledEventId
+                  ? 'Saved X broadcast prepared.'
+                  : prepared.isStreamActive
+                    ? 'X source prepared; ingest is already active.'
+                    : 'X source prepared.'
               }
             })
           }
