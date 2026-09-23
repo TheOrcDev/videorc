@@ -6302,18 +6302,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const snapshot = bootstrapGuard.snapshot()
           const read = bootstrapRequest<RecordingStatus>('recording.status')
           read.then(
-            (status) => {
-              if (generationIsCurrent() && bootstrapGuard.isCurrent(snapshot, 'recording')) {
-                applyRecordingStatus(status)
-              }
-            },
-            () => {
-              if (attempt < 4)
-                setTimeout(() => {
-                  if (generationIsCurrent() && sourceStatusUnknownRef.current)
-                    void readRecordingStatus(attempt + 1)
-                }, 1000 * attempt)
-            }
+            (status) =>
+              generationIsCurrent() &&
+              bootstrapGuard.isCurrent(snapshot, 'recording') &&
+              applyRecordingStatus(status),
+            () =>
+              attempt < 4 &&
+              setTimeout(
+                () => generationIsCurrent() && readRecordingStatus(attempt + 1),
+                1000 * attempt
+              )
           )
           return read
         }
