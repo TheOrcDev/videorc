@@ -12,6 +12,8 @@
 //                 (the July text leak, as a number)
 //   contrast      text tokens against the coat measured over white and black
 //   pinned        dark-always windows stay dark while main is in light theme
+//   native        the window's NSVisualEffectViews read back as `active`
+//                 (window-glass-state), so the glass never follows focus
 //
 // The run never activates the app: the backdrop and the window under test sit
 // on floating levels and are shown inactive, so the user's focus (and their
@@ -282,7 +284,7 @@ function round(value, digits = 2) {
   return Number(value.toFixed(digits))
 }
 
-function evaluate(theme, role, shots) {
+function evaluate(theme, role, shots, glassState) {
   const results = []
   const byName = (variant) => shots[variant]
   for (const [index, sample] of SAMPLES[role].entries()) {
@@ -305,11 +307,14 @@ function evaluate(theme, role, shots) {
     if (theme === 'light' && PINNED_DARK_ROLES.has(role)) {
       checks.pinnedDark = whiteLuminance <= GLASS_THRESHOLDS.maxPinnedLuminance
     }
+    const effectViews = glassState?.effectViews ?? []
+    checks.native = effectViews.length > 0 && effectViews.every((view) => view.state === 'active')
     results.push({
       theme,
       role,
       sample: sample.name,
       metrics: {
+        glass: glassState?.applied?.mode?.kind ?? 'unknown',
         transmission: round(transmission),
         sharpness: round(sharpness),
         primaryContrast: round(primaryContrast),
@@ -419,7 +424,8 @@ async function main() {
         await assertTheme(devtoolsHost, theme)
         const look = await shoot(smoke, theme, role, 'photo')
         looks.push({ file: look.file, label: `${theme} · ${role}` })
-        report.results.push(...evaluate(theme, role, shots))
+        const glassState = await requestSmokeCommand(smoke, 'window-glass-state', { role })
+        report.results.push(...evaluate(theme, role, shots, glassState))
       }
     }
     await requestSmokeCommand(smoke, 'close-backdrop-window')

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   DEFAULT_GLASS_MATERIAL,
+  glassModeForRole,
   resolveGlassMode,
   solidWindowBase,
   trafficLightPosition,
@@ -93,5 +94,30 @@ describe('windowGlassOptions', () => {
       dark: true
     })
     expect(options).toEqual({ backgroundColor: DARK_WINDOW_PALETTE.base })
+  })
+})
+
+describe('glassModeForRole', () => {
+  const material = resolveGlassMode(mac)
+
+  it('keeps the material for every role when the appearance pin is available', () => {
+    for (const role of ROLES) {
+      expect(glassModeForRole(role, material, true)).toEqual(material)
+    }
+  })
+
+  it('paints dark-always roles solid without a pin, and leaves main on the material', () => {
+    expect(glassModeForRole('main', material, false)).toEqual(material)
+    for (const role of ['chat', 'captions', 'notes', 'preview'] as const) {
+      expect(glassModeForRole(role, material, false)).toEqual({
+        kind: 'solid',
+        reason: 'appearance-unpinned'
+      })
+    }
+  })
+
+  it('never turns a solid mode back into a material', () => {
+    const solid = resolveGlassMode({ ...mac, glass: '0' })
+    expect(glassModeForRole('chat', solid, true)).toEqual(solid)
   })
 })

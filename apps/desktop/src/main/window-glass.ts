@@ -19,7 +19,7 @@ export type GlassMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>
 
 export type GlassMode =
   | { kind: 'material'; material: GlassMaterial }
-  | { kind: 'solid'; reason: 'disabled' | 'platform' }
+  | { kind: 'solid'; reason: 'disabled' | 'platform' | 'appearance-unpinned' }
 
 export interface GlassEnvironment {
   platform: NodeJS.Platform
@@ -102,6 +102,22 @@ export const DARK_ALWAYS_ROLES: ReadonlySet<GlassWindowRole> = new Set([
   'notes',
   'preview'
 ])
+
+/**
+ * A dark-always window whose appearance cannot be pinned paints the solid
+ * palette: its material would otherwise follow a light app theme and put dark
+ * text tokens on light glass.
+ */
+export function glassModeForRole(
+  role: GlassWindowRole,
+  mode: GlassMode,
+  appearancePinAvailable: boolean
+): GlassMode {
+  if (mode.kind === 'material' && DARK_ALWAYS_ROLES.has(role) && !appearancePinAvailable) {
+    return { kind: 'solid', reason: 'appearance-unpinned' }
+  }
+  return mode
+}
 
 export function solidWindowBase(role: GlassWindowRole, dark: boolean): string {
   return (DARK_ALWAYS_ROLES.has(role) || dark ? DARK_WINDOW_PALETTE : LIGHT_WINDOW_PALETTE).base

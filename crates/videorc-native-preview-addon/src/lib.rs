@@ -21,7 +21,10 @@ mod macos {
     use napi_derive::napi;
     use objc2::rc::Retained;
     use objc2::{ClassType, MainThreadMarker};
-    use objc2_app_kit::NSView;
+    use objc2_app_kit::{
+        NSAppearance, NSAppearanceCustomization, NSAppearanceNameAqua, NSAppearanceNameDarkAqua,
+        NSView, NSVisualEffectState, NSVisualEffectView,
+    };
     use objc2_core_foundation::{CGPoint, CGRect, CGSize};
     use objc2_quartz_core::{CALayer, CAMetalLayer, CATransaction};
 
@@ -424,6 +427,94 @@ mod macos {
         }
     }
 
+    /// Pins one window's AppKit appearance: `dark`, `light`, or `system` (follow
+    /// the app). `nativeTheme` is app-global in Electron, so without this the
+    /// dark-always windows (Chat, Captions, Notes, Preview) would get a light
+    /// vibrancy material whenever the main window is in light theme (plan 050).
+    /// Returns false when the view is not in a window yet.
+    #[napi]
+    pub fn set_window_appearance(native_window_handle: Buffer, appearance: String) -> Result<bool> {
+        MainThreadMarker::new().ok_or_else(|| {
+            Error::from_reason("Window appearance must be set on the macOS main thread.")
+        })?;
+        let view_pointer = native_view_pointer(&native_window_handle)?;
+        let view = unsafe { Retained::retain(view_pointer) }
+            .ok_or_else(|| Error::from_reason("Electron window NSView could not be retained."))?;
+        let Some(window) = view.window() else {
+            return Ok(false);
+        };
+        let named = match appearance.as_str() {
+            "dark" => Some(unsafe { NSAppearanceNameDarkAqua }),
+            "light" => Some(unsafe { NSAppearanceNameAqua }),
+            "system" => None,
+            other => {
+                return Err(Error::from_reason(format!(
+                    "Unknown window appearance {other:?}; expected dark, light or system."
+                )));
+            }
+        };
+        let resolved = match named {
+            Some(name) => Some(NSAppearance::appearanceNamed(name).ok_or_else(|| {
+                Error::from_reason(format!("AppKit has no appearance named {appearance:?}."))
+            })?),
+            None => None,
+        };
+        window.setAppearance(resolved.as_deref());
+        Ok(true)
+    }
+
+    /// One NSVisualEffectView found in a window: what glass it paints.
+    #[napi(object)]
+    pub struct WindowEffectView {
+        /// `active`, `inactive` or `follows-window`.
+        pub state: String,
+        pub material: i64,
+        pub blending_mode: i64,
+    }
+
+    /// Reads back the vibrancy views of one window (plan 050 diagnostics):
+    /// the probe asserts the glass is really `active`, not following focus.
+    #[napi]
+    pub fn window_effect_views(native_window_handle: Buffer) -> Result<Vec<WindowEffectView>> {
+        MainThreadMarker::new().ok_or_else(|| {
+            Error::from_reason("Window effect views must be read on the macOS main thread.")
+        })?;
+        let view_pointer = native_view_pointer(&native_window_handle)?;
+        let view = unsafe { Retained::retain(view_pointer) }
+            .ok_or_else(|| Error::from_reason("Electron window NSView could not be retained."))?;
+        let Some(window) = view.window() else {
+            return Ok(Vec::new());
+        };
+        let mut found = Vec::new();
+        if let Some(content) = window.contentView() {
+            collect_effect_views(&content, &mut found, 0);
+        }
+        Ok(found)
+    }
+
+    fn collect_effect_views(view: &NSView, found: &mut Vec<WindowEffectView>, depth: usize) {
+        if depth > 4 {
+            return;
+        }
+        if let Some(effect) = view.downcast_ref::<NSVisualEffectView>() {
+            let state = effect.state();
+            found.push(WindowEffectView {
+                state: if state == NSVisualEffectState::Active {
+                    "active".to_owned()
+                } else if state == NSVisualEffectState::Inactive {
+                    "inactive".to_owned()
+                } else {
+                    "follows-window".to_owned()
+                },
+                material: effect.material().0 as i64,
+                blending_mode: effect.blendingMode().0 as i64,
+            });
+        }
+        for child in view.subviews().iter() {
+            collect_effect_views(&child, found, depth + 1);
+        }
+    }
+
     fn native_view_pointer(buffer: &Buffer) -> Result<*mut NSView> {
         let pointer_size = std::mem::size_of::<usize>();
         if buffer.len() < pointer_size {
@@ -520,5 +611,15 @@ pub use macos::*;
 #[cfg(not(target_os = "macos"))]
 #[napi_derive::napi]
 pub fn native_preview_attached() -> bool {
+    false
+}
+
+/// AppKit appearances exist only on macOS; elsewhere the pin never applies.
+#[cfg(not(target_os = "macos"))]
+#[napi_derive::napi]
+pub fn set_window_appearance(
+    _native_window_handle: napi::bindgen_prelude::Buffer,
+    _appearance: String,
+) -> bool {
     false
 }

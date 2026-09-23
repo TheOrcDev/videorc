@@ -110,6 +110,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'set-vibrancy',
   'suspend-native-preview-surface',
   'window-bounds-storm',
+  'window-glass-state',
   'windows-preview-os-input-probe',
   'windows-live-audio-harness'
 ])

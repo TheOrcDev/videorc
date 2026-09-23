@@ -16,7 +16,7 @@ napi-build = "2.3.2"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = { version = "0.6.4", features = ["exception"] }
-objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSResponder", "NSView", "NSWindow", "objc2-quartz-core"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSAppearance", "NSResponder", "NSView", "NSVisualEffectView", "NSWindow", "objc2-quartz-core"] }
 objc2-core-foundation = { version = "0.3.2", default-features = false, features = ["std", "CFCGTypes", "CFNumber"] }
 objc2-core-video = { version = "0.3.2", default-features = false, features = ["std", "objc2", "CVBase", "CVBuffer", "CVImageBuffer", "CVPixelBuffer", "CVPixelBufferIOSurface", "CVMetalTexture", "CVMetalTextureCache", "CVReturn", "objc2-metal", "objc2-io-surface"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }

@@ -252,12 +252,18 @@ import {
   withAvatarFetchDeadline
 } from './avatar-cache'
 import { DARK_WINDOW_PALETTE } from './window-palette'
+import { loadWindowAppearanceBinding, pinWindowAppearance } from './window-appearance'
 import {
+  appliedGlass,
+  DARK_ALWAYS_ROLES,
   DEFAULT_GLASS_MATERIAL,
+  glassModeForRole,
   recordAppliedGlass,
   resolveGlassMode,
   solidWindowBase,
-  windowGlassOptions
+  windowGlassOptions,
+  type GlassMode,
+  type GlassWindowRole
 } from './window-glass'
 import {
   applyVideorcWindowCaptureProtection,
@@ -668,6 +674,9 @@ const notesWindowSmokeMarkerEnabled =
 app.setName('Videorc')
 // Dark glass is the default theme; the renderer re-syncs this on toggle.
 nativeTheme.themeSource = 'dark'
+// An OS appearance change (or any themeSource write) resets per-window
+// appearances; keep the dark-always windows pinned.
+nativeTheme.on('updated', () => repinDarkAlwaysWindows())
 // Window glass is real macOS vibrancy (window-glass.ts, plan 050). VIDEORC_GLASS=0
 // paints the solid palette; a material name overrides the material.
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
@@ -1019,6 +1028,18 @@ const nativePreviewInProcessModuleResolution = resolveNativePreviewInProcessModu
   workspaceRoot: workspaceRoot(),
   exists: existsSync
 })
+// Per-window appearance pins (plan 050): the same addon, loaded on its own so a
+// preview-driver fallback never costs the dark-always windows their pin.
+const windowAppearanceLoad = loadWindowAppearanceBinding({
+  platform: process.platform,
+  resolution: nativePreviewInProcessModuleResolution,
+  loadModule: (modulePath) => requireNativePreviewRealSurfaceModule(modulePath)
+})
+if (windowAppearanceLoad.unavailableReason && process.platform === 'darwin') {
+  safeConsole.warn(
+    `Window appearance pin unavailable; Chat, Captions, Notes and Preview paint the solid palette: ${windowAppearanceLoad.unavailableReason}`
+  )
+}
 type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
 const nativePreviewRealSurfaceDriverLoad = loadNativePreviewPrimaryDriver()
 const NATIVE_PREVIEW_HANDOFF_SAMPLE_LIMIT = 900
@@ -1589,39 +1610,82 @@ type NativePreviewMainSceneMismatchFields = Pick<
   | 'nativePreviewMainLastSkippedFrameSceneRevision'
 >
 
-// Detached Chat/Captions windows: same black-glass backing as the main window
-// on macOS (transparent + the renderer's wallpaper underlay), solid palette
-// base everywhere else and when glass is opted out. The traffic lights are
-// centred on the renderer's fixed 40px header from ONE constant so the title
-// row cannot drift off their centre line again.
-const AUX_WINDOW_HEADER_HEIGHT = 40
-const MAC_TRAFFIC_LIGHT_DIAMETER = 14
-
-function auxWindowChromeOptions(): Electron.BrowserWindowConstructorOptions {
-  const glass = isMac && glassVibrancyEnabled
+// Every window's chrome comes from window-glass.ts (plan 050): one material,
+// the traffic lights centred on the role's header. A dark-always window that
+// cannot pin its appearance paints the solid palette instead.
+function glassWindowChrome(role: GlassWindowRole): {
+  mode: GlassMode
+  options: Electron.BrowserWindowConstructorOptions
+} {
+  const mode = glassModeForRole(role, glassMode, windowAppearanceLoad.binding !== null)
   return {
-    ...(isMac
-      ? {
-          titleBarStyle: 'hiddenInset' as const,
-          trafficLightPosition: {
-            x: 14,
-            y: Math.round((AUX_WINDOW_HEADER_HEIGHT - MAC_TRAFFIC_LIGHT_DIAMETER) / 2)
-          }
-        }
-      : {}),
-    ...(glass
-      ? { transparent: true, backgroundColor: '#00000000', visualEffectState: 'active' as const }
-      : { backgroundColor: DARK_WINDOW_PALETTE.base })
+    mode,
+    options: windowGlassOptions(role, {
+      platform: process.platform,
+      mode,
+      dark: role === 'main' ? nativeTheme.shouldUseDarkColors : true
+    })
   }
 }
 
-function watchAuxWindowGlass(window: BrowserWindow): void {
-  if (!glassWallpaperEnabled) {
+// Pins a dark-always window dark and records what every window got. A pin that
+// fails at runtime drops the material rather than leave dark text tokens on a
+// light material.
+function finishGlassWindow(window: BrowserWindow, role: GlassWindowRole, mode: GlassMode): void {
+  if (!DARK_ALWAYS_ROLES.has(role)) {
+    recordAppliedGlass(window, { role, mode, appearance: 'follows-app' })
     return
   }
-  window.on('move', queueGlassGeometryBroadcast)
-  window.on('resize', queueGlassGeometryBroadcast)
-  window.webContents.once('did-finish-load', () => void refreshGlassWallpaper())
+  if (mode.kind !== 'material') {
+    recordAppliedGlass(window, {
+      role,
+      mode,
+      appearance: mode.reason === 'appearance-unpinned' ? 'pin-unavailable' : 'follows-app',
+      ...(mode.reason === 'appearance-unpinned'
+        ? { appearanceNote: windowAppearanceLoad.unavailableReason ?? undefined }
+        : {})
+    })
+    return
+  }
+  const pin = pinWindowAppearance(
+    windowAppearanceLoad,
+    () => window.getNativeWindowHandle(),
+    'dark'
+  )
+  if (pin.pinned) {
+    recordAppliedGlass(window, { role, mode, appearance: 'pinned-dark' })
+    return
+  }
+  window.setVibrancy(null)
+  window.setBackgroundColor(solidWindowBase(role, true))
+  safeConsole.warn(
+    `${role} window appearance pin failed; painting the solid palette: ${pin.reason}`
+  )
+  recordAppliedGlass(window, {
+    role,
+    mode: { kind: 'solid', reason: 'appearance-unpinned' },
+    appearance: 'pin-unavailable',
+    appearanceNote: pin.reason
+  })
+}
+
+// Electron re-applies every window's appearance when nativeTheme.themeSource
+// changes, which drops the per-window pin (a light theme would lighten the
+// dark-always glass). Re-pin them after every theme change.
+function repinDarkAlwaysWindows(): void {
+  for (const window of [commentsWindow, captionsWindow, notesWindow, previewWindow]) {
+    if (!window || window.isDestroyed() || appliedGlass(window)?.appearance !== 'pinned-dark') {
+      continue
+    }
+    const pin = pinWindowAppearance(
+      windowAppearanceLoad,
+      () => window.getNativeWindowHandle(),
+      'dark'
+    )
+    if (!pin.pinned) {
+      safeConsole.warn(`Re-pinning a dark window after a theme change failed: ${pin.reason}`)
+    }
+  }
 }
 
 function createWindow(): void {
@@ -1635,11 +1699,7 @@ function createWindow(): void {
     // frame — showing it at create time put an empty pane on screen that then
     // visibly filled in piece by piece.
     show: false,
-    ...windowGlassOptions('main', {
-      platform: process.platform,
-      mode: glassMode,
-      dark: nativeTheme.shouldUseDarkColors
-    }),
+    ...glassWindowChrome('main').options,
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -1647,7 +1707,7 @@ function createWindow(): void {
       backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy)
     }
   })
-  recordAppliedGlass(mainWindow, { role: 'main', mode: glassMode, appearance: 'follows-app' })
+  finishGlassWindow(mainWindow, 'main', glassMode)
   applyVideorcWindowCaptureProtection(mainWindow, 'main', {
     onFailure: (reason) =>
       safeConsole.warn(`Main window content protection could not be enabled: ${reason}`)
@@ -3059,6 +3119,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   const prefs = loadCommentsWindowPrefs()
   const rememberedFrame = commentsWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const chrome = glassWindowChrome('chat')
   const window = new BrowserWindow({
     width: frame?.width ?? 420,
     height: frame?.height ?? 640,
@@ -3066,7 +3127,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     minWidth: 320,
     minHeight: 360,
     title: 'Videorc Chat',
-    ...auxWindowChromeOptions(),
+    ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
     webPreferences: {
@@ -3076,7 +3137,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     }
   })
   registerRendererWindow(window, 'comments')
-  watchAuxWindowGlass(window)
+  finishGlassWindow(window, 'chat', chrome.mode)
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
@@ -3276,6 +3337,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
   const prefs = loadCaptionsWindowPrefs()
   const rememberedFrame = captionsWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const chrome = glassWindowChrome('captions')
   const window = new BrowserWindow({
     width: frame?.width ?? 640,
     height: frame?.height ?? 320,
@@ -3283,7 +3345,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     minWidth: 360,
     minHeight: 200,
     title: 'Videorc Captions',
-    ...auxWindowChromeOptions(),
+    ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
     webPreferences: {
@@ -3298,7 +3360,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
   })
   installCaptureProtectionSmokeMarker(window, 'captions')
   registerRendererWindow(window, 'captions')
-  watchAuxWindowGlass(window)
+  finishGlassWindow(window, 'captions', chrome.mode)
   captionsWindowClosing = false
   captionsWindow = window
   captionsWindowAlwaysOnTop = captionsWindowAlwaysOnTopPreference(prefs)
@@ -9139,6 +9201,8 @@ function smokeBackdropBody(variant: string): { html: string; photo: boolean } | 
   return null
 }
 
+const SMOKE_WINDOW_ROLES = ['main', 'chat', 'captions', 'notes', 'preview'] as const
+
 function smokeWindowForRole(role: string): BrowserWindow | null {
   if (role === 'main') return mainWindow
   if (role === 'chat') return commentsWindow
@@ -9148,8 +9212,8 @@ function smokeWindowForRole(role: string): BrowserWindow | null {
   return null
 }
 
-// Windows raise-window lifted to the floating level, restored to their own
-// keep-on-top preference when the probe closes its backdrop.
+// Windows raise-window re-levelled (lifted above the backdrop or dropped below
+// it), restored to their own keep-on-top preference when the backdrop closes.
 const smokeRaisedWindowRoles = new Map<BrowserWindow, string>()
 
 function restoreSmokeRaisedWindowLevels(): void {
@@ -10302,11 +10366,7 @@ async function runSmokePreviewMotionCommand(
           headerTitle: document.querySelector('header span')?.textContent ?? '',
           highlightPositionControl:
             document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('title') ?? null,
-          glassUnderlay: document.querySelector('[data-glass-underlay]')
-            ? 'wallpaper'
-            : document.querySelector('[data-glass-underlay-fallback]')
-              ? 'fallback'
-              : 'missing',
+          windowFrame: document.querySelector('[data-slot="window-frame"]') !== null,
           highlightActionCount: document.querySelectorAll('button[aria-label^="Show "][aria-label$=" on the stream"]').length,
           destinationStatus: document.querySelector('[data-slot="comments-destination-status"]')?.textContent ?? '',
           deliveryStatus: document.querySelector('[aria-label="Latest message delivery"]')?.textContent ?? '',
@@ -10322,7 +10382,7 @@ async function runSmokePreviewMotionCommand(
       })()`,
       true
     )
-    return rendered
+    return { ...rendered, glass: appliedGlass(window) }
   }
 
   if (command === 'comments-window-capture-page') {
@@ -10798,7 +10858,11 @@ async function runSmokePreviewMotionCommand(
   // a composited material × token-alpha matrix without relaunching per cell.
   if (command === 'set-vibrancy') {
     const material = typeof params.material === 'string' ? params.material : null
-    mainWindow.setVibrancy((material as Parameters<BrowserWindow['setVibrancy']>[0]) ?? null)
+    const target = smokeWindowForRole(typeof params.role === 'string' ? params.role : 'main')
+    if (!target || target.isDestroyed()) {
+      throw new Error('No open window for that role.')
+    }
+    target.setVibrancy((material as Parameters<BrowserWindow['setVibrancy']>[0]) ?? null)
     return { material }
   }
 
@@ -10868,6 +10932,27 @@ async function runSmokePreviewMotionCommand(
     return { closed }
   }
 
+  // What window-glass.ts applied to one window: material or solid (and why),
+  // and whether its appearance is pinned.
+  if (command === 'window-glass-state') {
+    const role = typeof params.role === 'string' ? params.role : ''
+    const target = smokeWindowForRole(role)
+    if (!target || target.isDestroyed()) {
+      throw new Error(`No open window for role: ${role}`)
+    }
+    return {
+      role,
+      applied: appliedGlass(target),
+      appearancePin: windowAppearanceLoad.binding
+        ? 'available'
+        : windowAppearanceLoad.unavailableReason,
+      // What AppKit actually paints: the probe asserts `active`, never a
+      // material that follows window focus.
+      effectViews:
+        windowAppearanceLoad.binding?.windowEffectViews?.(target.getNativeWindowHandle()) ?? null
+    }
+  }
+
   // Lifts one app window just above the floating backdrop and reports where it
   // is, so a probe can shoot exactly its rect. `focus: true` also makes it key;
   // probes leave it off so the run never steals the user's focus.
@@ -10877,6 +10962,16 @@ async function runSmokePreviewMotionCommand(
     const target = smokeWindowForRole(role)
     if (!target || target.isDestroyed()) {
       throw new Error(`No open window for role: ${role}`)
+    }
+    // Every other app window drops below the floating backdrop: a window's
+    // glass blurs whatever sits directly behind it, so an overlapping app
+    // window would be measured instead of the backdrop.
+    for (const otherRole of SMOKE_WINDOW_ROLES) {
+      const other = smokeWindowForRole(otherRole)
+      if (other && other !== target && !other.isDestroyed()) {
+        smokeRaisedWindowRoles.set(other, otherRole)
+        other.setAlwaysOnTop(false)
+      }
     }
     smokeRaisedWindowRoles.set(target, role)
     target.setAlwaysOnTop(true, 'floating', 1)
@@ -12989,6 +13084,7 @@ app.whenReady().then(async () => {
   // the blur material always matches the in-app theme (videorc-design).
   secureIpcHandle('app:set-native-theme', (_event, theme: string) => {
     nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
+    repinDarkAlwaysWindows()
     // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
     // with the theme; the glass windows' material follows nativeTheme itself.
     if (glassMode.kind === 'solid') {

@@ -21,6 +21,7 @@ import {
 import { Kbd } from '@/components/ui/kbd'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
+import { useTrafficLightGutter } from '@/components/window-frame'
 import type {
   CohostFlag,
   CohostQuestion,
@@ -150,6 +151,7 @@ export function CommentsReader({
   onCohostEnableConsent?: () => void
   onCohostUpgrade?: (url: string) => void
 }): ReactElement {
+  const trafficLightGutter = useTrafficLightGutter()
   const messages = sortMessagesChronological(snapshot.messages)
   const live = Boolean(snapshot.sessionId)
   const mode =
@@ -314,21 +316,22 @@ export function CommentsReader({
   }
 
   return (
-    // No bg-background here: the body paints the one translucent coat over the
-    // wallpaper underlay. A second coat is what made this window read flat black.
+    // No bg here: the window frame paints the content coat over the body's
+    // window coat and the OS material (plan 050). A third coat reads flat black.
     <div className="relative flex h-screen flex-col text-foreground">
       {/* Fixed height, not min-height: the macOS traffic lights are centred on
           this exact strip from main (AUX_WINDOW_HEADER_HEIGHT), so a child that
           grew the row would silently pull the title off their centre line.
-          Gutter: on current macOS the three 14px lights end 74px in (measured
-          on a real window), so 88px leaves the title a clear 14px of air.
+          Gutter: the shared traffic-light gutter (window-frame.tsx), 88px on
+          macOS, collapsing in native fullscreen where the lights hide.
           The header is also a container: its tiers (comments-header.tsx)
           follow its own width, so the viewer count keeps one line and every
           control stays reachable down to the 320px window minimum. */}
       <header
         className={cn(
           CHAT_HEADER_CONTAINER,
-          'flex h-10 shrink-0 items-center gap-2 overflow-hidden pl-[88px] pr-3 [-webkit-app-region:drag]'
+          'flex h-10 shrink-0 items-center gap-2 overflow-hidden pr-3 [-webkit-app-region:drag]',
+          trafficLightGutter
         )}
         data-slot="chat-header"
       >

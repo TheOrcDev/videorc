@@ -2,6 +2,7 @@ import { PinIcon } from '@/components/icons'
 import { useEffect, useRef, type CSSProperties, type ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { useTrafficLightGutter } from '@/components/window-frame'
 import type { CaptionStyleId, CaptionsStatus, CaptionsUpdate } from '@/lib/backend'
 import { captionStyleDefinition } from '@/lib/caption-overlay'
 import { latestFinalCaptionText } from '@/lib/captions-ui'
@@ -29,6 +30,7 @@ export function CaptionsReader({
   alwaysOnTop?: boolean
   onToggleAlwaysOnTop?: () => void
 }): ReactElement {
+  const trafficLightGutter = useTrafficLightGutter()
   const feedRef = useRef<HTMLDivElement | null>(null)
 
   // Captions always track the latest speech — no unread state, just follow.
@@ -48,8 +50,14 @@ export function CaptionsReader({
   return (
     <div className="flex h-screen flex-col text-foreground">
       {/* The whole drag bar moves the window (hiddenInset titlebar); the
-          controls opt back out of the drag region. */}
-      <header className="flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border px-3 [-webkit-app-region:drag]">
+          controls opt back out of the drag region. The label clears the
+          traffic lights with the shared gutter. */}
+      <header
+        className={cn(
+          'flex h-10 shrink-0 items-center justify-between gap-2 border-b border-border pr-3 [-webkit-app-region:drag]',
+          trafficLightGutter
+        )}
+      >
         <span className="flex items-center gap-2 text-xs font-medium text-subtle">
           Live captions
           <span className="flex items-center gap-1.5 text-muted-foreground">
@@ -131,8 +139,10 @@ export function captionReaderAppearance(styleId: CaptionStyleId): {
   const hasPlate = definition.plate !== 'none'
   return {
     className: cn(
+      // The glass plate is its translucent colour alone: the window already
+      // sits on real glass, and CSS backdrop-filter on a vibrancy window
+      // wedged the compositor (plan 050, no backdrop-filter in the renderer).
       hasPlate && 'border border-white/10 shadow-xl',
-      definition.plate === 'glass' && 'backdrop-blur-xl',
       definition.wide && 'w-full'
     ),
     style: {
