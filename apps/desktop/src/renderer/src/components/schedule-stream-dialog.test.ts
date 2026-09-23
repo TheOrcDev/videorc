@@ -139,4 +139,44 @@ describe('scheduled form ownership', () => {
     await click('Discard')
     expect(close).toHaveBeenCalledTimes(1)
   })
+  it('opens each platform with its own fields: X plans an end, YouTube sets visibility', async () => {
+    const account = (accountId: string) => ({ accountId, accountLabel: accountId })
+    const state = {
+      request,
+      mutate,
+      capabilities: {
+        available: true,
+        accounts: [],
+        providers: [
+          { provider: 'youtube', available: true, reason: null, accounts: [account('channel')] },
+          { provider: 'x', available: true, reason: null, accounts: [account('x-account')] }
+        ]
+      }
+    } as unknown as ReturnType<typeof useScheduledStreams>
+    const open = async (provider: 'youtube' | 'x') => {
+      await act(async () => {
+        root.render(
+          createElement(ScheduleStreamDialog, {
+            key: provider,
+            event: null,
+            provider,
+            state,
+            onClose: close
+          })
+        )
+      })
+    }
+    await open('x')
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Schedule on X')
+    expect(document.querySelector<HTMLInputElement>('#schedule-end')?.value).not.toBe('')
+    expect(document.querySelector('#schedule-replay')).not.toBeNull()
+    expect(document.querySelector('#schedule-privacy')).toBeNull()
+    expect(document.querySelector('#schedule-audience')).toBeNull()
+    await open('youtube')
+    expect(document.querySelector('[role="dialog"]')?.textContent).toContain('Schedule on YouTube')
+    expect(document.querySelector('#schedule-end')).toBeNull()
+    expect(document.querySelector('#schedule-replay')).toBeNull()
+    expect(document.querySelector('#schedule-privacy')).not.toBeNull()
+    expect(document.querySelector('#schedule-audience')).not.toBeNull()
+  })
 })
