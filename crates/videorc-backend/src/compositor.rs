@@ -300,6 +300,73 @@ impl CompositorPixelFormat {
     }
 }
 
+/// Separate from the async compositor lock: dropping a pump must always retire
+/// its proof authority, even while a scene transaction holds that lock.
+#[derive(Debug, Default)]
+pub(crate) struct NativeSourceOutputAuthority {
+    current: std::sync::Mutex<Option<(String, u64)>>,
+}
+impl NativeSourceOutputAuthority {
+    fn is_generic_for(&self, session: &str) -> bool {
+        self.current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_none_or(|(current, _)| current != session)
+    }
+    #[cfg(any(target_os = "windows", test))]
+    fn release_session(&self, session: &str) {
+        let mut current = self.current.lock().unwrap_or_else(|p| p.into_inner());
+        if current
+            .as_ref()
+            .is_some_and(|(current, _)| current == session)
+        {
+            *current = None;
+        }
+    }
+    #[cfg(any(target_os = "windows", test))]
+    fn matches(&self, session: &str, generation: u64) -> bool {
+        self.current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .as_ref()
+            .is_some_and(|(current, value)| current == session && *value == generation)
+    }
+    #[cfg(any(target_os = "windows", test))]
+    fn claim(self: &Arc<Self>, session: &str, generation: u64) -> NativeSourceOutputLease {
+        *self.current.lock().unwrap_or_else(|p| p.into_inner()) =
+            Some((session.into(), generation));
+        NativeSourceOutputLease {
+            authority: self.clone(),
+            session: session.into(),
+            generation,
+        }
+    }
+}
+#[cfg(any(target_os = "windows", test))]
+pub(crate) struct NativeSourceOutputLease {
+    authority: Arc<NativeSourceOutputAuthority>,
+    session: String,
+    generation: u64,
+}
+#[cfg(any(target_os = "windows", test))]
+impl Drop for NativeSourceOutputLease {
+    fn drop(&mut self) {
+        let mut current = self
+            .authority
+            .current
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if current.as_ref().is_some_and(|(session, generation)| {
+            session == &self.session && *generation == self.generation
+        }) {
+            // Keep session-level native ownership through recovery. Generation
+            // zero means no pump may acknowledge; it never means generic output.
+            *current = Some((self.session.clone(), 0));
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct CompositorRuntime {
     pub status: CompositorStatus,
@@ -309,6 +376,7 @@ pub struct CompositorRuntime {
     /// a rescale of) the primary snapshot.
     simulcast_scene: Option<CompositorSceneSnapshot>,
     source_edit_receipt: Option<SourceEditReceipt>,
+    native_source_output_authority: Arc<NativeSourceOutputAuthority>,
     /// Process-local arrival order for scene updates. External revisions can
     /// intentionally repeat, so equal-revision prepares need this second
     /// fence to ensure the latest request wins without rejecting a later
@@ -1312,6 +1380,26 @@ struct CompositorImageSource {
     message: Option<String>,
 }
 
+#[cfg(target_os = "windows")]
+#[derive(Clone)]
+pub(crate) struct WindowsSceneImage {
+    pub(crate) pixels: Arc<Vec<u8>>,
+    pub(crate) width: u32,
+    pub(crate) height: u32,
+    pub(crate) revision: u64,
+}
+#[cfg(target_os = "windows")]
+impl CompositorImageSource {
+    fn windows_image(&self) -> Option<WindowsSceneImage> {
+        Some(WindowsSceneImage {
+            pixels: self.bgra.clone()?,
+            width: self.width?,
+            height: self.height?,
+            revision: self.content_revision,
+        })
+    }
+}
+
 #[derive(Debug)]
 struct CompositorImagePreparation {
     role: CompositorImagePreparationRole,
@@ -1544,6 +1632,7 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         scene: None,
         simulcast_scene: None,
         source_edit_receipt: None,
+        native_source_output_authority: Arc::default(),
         scene_request_token: 0,
         pending_scene_request: None,
         scene_transition: None,
@@ -3019,6 +3108,24 @@ pub(crate) struct CompositorSourceEdit {
     auxiliary: Option<CompositorSceneSnapshot>,
 }
 impl CompositorSourceEdit {
+    #[cfg(all(target_os = "windows", test))]
+    pub(crate) fn test_from_scenes(
+        primary: Scene,
+        auxiliary: Option<Scene>,
+        layout: LayoutSettings,
+    ) -> Self {
+        let snapshot = |scene| CompositorSceneSnapshot {
+            revision: 1,
+            scene: Some(scene),
+            layout: layout.clone(),
+            active_screen: None,
+        };
+        Self {
+            primary: snapshot(primary),
+            auxiliary: auxiliary.map(snapshot),
+        }
+    }
+
     pub(crate) fn primary(&self) -> &Scene {
         self.primary.scene.as_ref().expect("source edit scene")
     }
@@ -3031,6 +3138,17 @@ impl CompositorSourceEdit {
                 .iter()
                 .filter_map(|snapshot| snapshot.scene.as_ref()),
         )
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn legs(&self) -> impl Iterator<Item = (&Scene, &LayoutSettings)> {
+        std::iter::once(&self.primary)
+            .chain(self.auxiliary.iter())
+            .filter_map(|snapshot| {
+                snapshot
+                    .scene
+                    .as_ref()
+                    .map(|scene| (scene, &snapshot.layout))
+            })
     }
     pub(crate) fn patch(
         &mut self,
@@ -3182,6 +3300,126 @@ impl CompositorRuntime {
                 state.emit_event("session.sources.changed", snapshot);
             }
         }
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn release_native_session_output(&self, session_id: &str) {
+        self.native_source_output_authority
+            .release_session(session_id);
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn claim_native_source_output(
+        &self,
+        session_id: &str,
+        generation: u64,
+    ) -> NativeSourceOutputLease {
+        self.native_source_output_authority
+            .claim(session_id, generation)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn observe_windows_source_publication(
+        &mut self,
+        coordinator: &mut crate::live_source_switch::SourceSwitchCoordinator,
+        edit: &CompositorSourceEdit,
+        session_id: &str,
+        generation: u64,
+        camera: Option<(&SourceKey, u64)>,
+        screen: Option<(&SourceKey, u64)>,
+        camera_pixels: bool,
+        screen_pixels: bool,
+        all_legs_published: bool,
+    ) -> bool {
+        if !all_legs_published || !self.source_edit_is_current(edit) {
+            return false;
+        }
+        let Some(receipt) = self.source_edit_receipt.as_ref() else {
+            return false;
+        };
+        if receipt.session_id != session_id
+            || !self
+                .native_source_output_authority
+                .matches(session_id, generation)
+            || coordinator.running_snapshot(session_id).is_err()
+        {
+            return false;
+        }
+        if CompositorRenderCache::from_runtime(self)
+            .active_image_source
+            .is_some()
+        {
+            return false;
+        }
+        if !source_edit_frame_matches(
+            receipt,
+            Some(&edit.primary),
+            camera,
+            screen,
+            camera_pixels,
+            screen_pixels,
+        ) {
+            return false;
+        }
+        if let Some(auxiliary) = edit.auxiliary.as_ref() {
+            let mut auxiliary_receipt = receipt.clone();
+            auxiliary_receipt.revision = receipt.auxiliary_revision.unwrap_or(receipt.revision);
+            if !source_edit_frame_matches(
+                &auxiliary_receipt,
+                Some(auxiliary),
+                camera,
+                screen,
+                camera_pixels,
+                screen_pixels,
+            ) {
+                return false;
+            }
+        }
+        let receipt = self
+            .source_edit_receipt
+            .take()
+            .expect("checked source proof");
+        coordinator.observe_output(&receipt.session_id, &receipt.request_id);
+        true
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_takeover_active(&self) -> bool {
+        self.scene
+            .as_ref()
+            .is_some_and(|scene| scene.active_screen.is_some())
+    }
+
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_scene_images(
+        &self,
+        edit: &CompositorSourceEdit,
+    ) -> (Option<WindowsSceneImage>, Vec<Option<WindowsSceneImage>>) {
+        let takeover = CompositorRenderCache::from_runtime(self)
+            .active_image_source
+            .and_then(|image| image.windows_image());
+        let backgrounds = edit
+            .scenes()
+            .map(|scene| {
+                scene
+                    .background
+                    .as_ref()
+                    .and_then(|background| {
+                        self.image_sources.get(&background_cache_key(background))
+                    })
+                    .and_then(CompositorImageSource::windows_image)
+            })
+            .collect();
+        (takeover, backgrounds)
+    }
+
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn source_render_edit(&self, now: Instant) -> Option<CompositorSourceEdit> {
+        let mut edit = self.source_edit_snapshot()?;
+        edit.primary =
+            snapshot_with_transition(Some(edit.primary), self.scene_transition.as_ref(), now)?;
+        Some(edit)
     }
 
     pub(crate) fn source_edit_snapshot(&self) -> Option<CompositorSourceEdit> {
@@ -6310,6 +6548,9 @@ async fn publish_compositor_frame(
     if let Ok(mut compositor) = state.compositor.try_lock()
         && set_latest_frame_evidence_if_current_run(&mut compositor, run_id, evidence)
         && let Some(receipt) = compositor.source_edit_receipt.as_ref()
+        && compositor
+            .native_source_output_authority
+            .is_generic_for(&receipt.session_id)
     {
         let camera_identity = live_sources
             .camera
@@ -7988,6 +8229,38 @@ fn percentile(sorted: &[f64], p: u32) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn native_source_output_authority_fences_preview_old_sessions_and_drop_without_compositor_lock()
+    {
+        let authority = std::sync::Arc::new(super::NativeSourceOutputAuthority::default());
+        assert!(authority.is_generic_for("A"));
+        let old = authority.claim("A", 1);
+        assert!(
+            !authority.is_generic_for("A"),
+            "generic preview cannot observe native receipt"
+        );
+        assert!(authority.matches("A", 1));
+        let current = authority.claim("B", 2);
+        drop(old);
+        assert!(!authority.matches("A", 1));
+        assert!(
+            authority.matches("B", 2),
+            "late old pump drop cannot retire B"
+        );
+        // No compositor runtime access is needed to retire even on startup error.
+        drop(current);
+        assert!(
+            !authority.is_generic_for("B"),
+            "generic preview cannot prove output during native recovery"
+        );
+        assert!(!authority.matches("B", 2));
+        assert!(authority.is_generic_for("next-generic-session"));
+        authority.release_session("A");
+        assert!(!authority.is_generic_for("B"));
+        authority.release_session("B");
+        assert!(authority.is_generic_for("B"));
+    }
+
     use super::*;
     use crate::protocol::{
         SceneConfigParams, SourceSelection, StreamScreenStatus, VideoPreset, VideoSettings,

@@ -569,6 +569,17 @@ pub(crate) async fn switch_session_video_source(
     }) {
         bail!("The selected source identity does not match its source kind.");
     }
+    #[cfg(target_os = "windows")]
+    if request.kind == SourceKind::Capture
+        && request
+            .device_id
+            .as_deref()
+            .is_some_and(|id| id.starts_with("window:"))
+    {
+        bail!(
+            "Live Windows window capture is unavailable in the current capture adapter. Choose an available display; the current source is preserved."
+        );
+    }
     state
         .live_source_switch
         .lock()

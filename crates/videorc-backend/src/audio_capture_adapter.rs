@@ -496,6 +496,15 @@ pub(crate) fn windows_worker_path(output_ffmpeg: &str) -> std::path::PathBuf {
 }
 
 fn resolve_dshow_name(inventory: &str, selected: &str) -> Result<String> {
+    resolve_dshow_kind(inventory, selected, "(audio)")
+}
+
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn resolve_dshow_video_name(inventory: &str, selected: &str) -> Result<String> {
+    resolve_dshow_kind(inventory, selected, "(video)")
+}
+
+fn resolve_dshow_kind(inventory: &str, selected: &str, kind: &str) -> Result<String> {
     let mut audio: Vec<(String, Option<String>)> = Vec::new();
     let mut current_audio = false;
     for line in inventory.lines() {
@@ -504,7 +513,7 @@ fn resolve_dshow_name(inventory: &str, selected: &str) -> Result<String> {
                 *alternate = quoted_name(line);
             }
         } else if line.contains("(audio)") || line.contains("(video)") {
-            current_audio = line.contains("(audio)");
+            current_audio = line.contains(kind);
             if current_audio && let Some(name) = quoted_name(line) {
                 audio.push((name, None));
             }
@@ -512,7 +521,7 @@ fn resolve_dshow_name(inventory: &str, selected: &str) -> Result<String> {
     }
     let matching: Vec<_> = audio.iter().filter(|(name, _)| name == selected).collect();
     if matching.len() != 1 {
-        bail!("The selected DirectShow microphone is missing or its friendly name is ambiguous");
+        bail!("The selected DirectShow device is missing or its friendly name is ambiguous");
     }
     let target = matching[0].1.as_deref().unwrap_or(selected);
     if target.is_empty()
@@ -1263,6 +1272,38 @@ mod tests {
             ..mapping
         };
         assert!(dshow_anchor(&dshow_metadata(), &uncertain).is_err());
+    }
+
+    #[test]
+    fn dshow_video_identity_uses_only_unique_video_monikers() {
+        let inventory = r#"[dshow] "Studio" (audio)
+[dshow] Alternative name "@device_audio"
+[dshow] "Studio" (video)
+[dshow] Alternative name "@device_video"
+[dshow] "Other" (video)
+[dshow] Alternative name "@device_other""#;
+        assert_eq!(
+            resolve_dshow_video_name(inventory, "Studio").unwrap(),
+            "@device_video"
+        );
+        assert_eq!(
+            resolve_dshow_name(inventory, "Studio").unwrap(),
+            "@device_audio"
+        );
+        assert!(
+            resolve_dshow_video_name(
+                &format!("{inventory}\n[dshow] \"Studio\" (video)"),
+                "Studio"
+            )
+            .is_err()
+        );
+        assert!(
+            resolve_dshow_video_name(
+                "[dshow] \"Camera:audio=Other\" (video)",
+                "Camera:audio=Other"
+            )
+            .is_err()
+        );
     }
 
     #[test]

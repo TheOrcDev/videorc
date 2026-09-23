@@ -2905,7 +2905,11 @@ mod tests {
                 match file.read_exact(&mut chunk) {
                     Ok(()) => {
                         bytes.extend_from_slice(&chunk);
-                        let _ = progress_tx.send(bytes.len() / 8);
+                        let decoded = chunk
+                            .chunks_exact(8)
+                            .map(|frame| f32::from_le_bytes(frame[..4].try_into().unwrap()))
+                            .collect::<Vec<_>>();
+                        let _ = progress_tx.send((bytes.len() / 8, decoded));
                     }
                     Err(error) if error.kind() == io::ErrorKind::UnexpectedEof => break,
                     Err(error) => panic!("{error}"),
@@ -2971,15 +2975,22 @@ mod tests {
             gain_db: -3.0,
             muted: false,
         });
-        loop {
-            let frames = tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
-                .await
-                .unwrap()
-                .unwrap();
-            if frames >= b.cutover_sample as usize + 1440 {
-                break;
+        // Acknowledgement delivery and Tokio scheduling are not a PCM boundary.
+        // Wait for an actual complete decoded chunk with the new controls before
+        // replacing B, and retain its exact sample interval for the assertion.
+        let expected_b = 0.8 * 10.0_f32.powf(-3.0 / 20.0);
+        let unmuted_b = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                let (end, decoded) = progress_rx.recv().await.unwrap();
+                if end >= b.cutover_sample as usize + 960
+                    && decoded.iter().all(|sample| sample.abs() > 0.001)
+                {
+                    break end - decoded.len()..end;
+                }
             }
-        }
+        })
+        .await
+        .expect("B never emitted a full chunk with the confirmed controls");
         let none = send_test_switch(&session, &coordinator, "none", None, 0.0, false, None)
             .await
             .0
@@ -3011,7 +3022,7 @@ mod tests {
         assert!(cancelled.is_err());
         let boundary = boundary.unwrap();
         loop {
-            let frames = tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
+            let (frames, _) = tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
                 .await
                 .unwrap()
                 .unwrap();
@@ -3068,8 +3079,9 @@ mod tests {
             "mute changed at the preparation barrier applies to the first committed B chunk"
         );
         assert!(
-            (samples[b.cutover_sample as usize + 960] - 0.8 * 10.0_f32.powf(-3.0 / 20.0)).abs()
-                < 0.001,
+            samples[unmuted_b]
+                .iter()
+                .all(|sample| (*sample - expected_b).abs() < 0.001),
             "unmuted B must reach output with exactly one gain application"
         );
         assert!(

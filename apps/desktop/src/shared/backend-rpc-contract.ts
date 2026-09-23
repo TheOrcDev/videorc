@@ -1109,7 +1109,12 @@ const windowsD3d11MediaDiagnosticsSchema = objectSchema(
     auxiliaryEncoderAdapterLuid: optionalSchema(stringSchema({ minLength: 1, maxLength: 128 })),
     generation: optionalSchema(nonNegativeInteger),
     captureBackend: optionalSchema(
-      enumSchema(['desktop-duplication', 'windows-graphics-capture-monitor', 'legacy-ffmpeg'])
+      enumSchema([
+        'desktop-duplication',
+        'windows-graphics-capture-monitor',
+        'legacy-ffmpeg',
+        'preview-bgra-upload'
+      ])
     ),
     cursorMode: optionalSchema(
       enumSchema(['embedded', 'separate', 'excluded-wgc', 'disabled-fallback'])

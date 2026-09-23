@@ -1254,6 +1254,24 @@ describe('backend RPC contract', () => {
     }
 
     expect(validateBackendRpcResult('diagnostics.stats', diagnostics)).toEqual(diagnostics)
+    const switchedCapture = JSON.parse(
+      JSON.stringify({
+        ...diagnostics,
+        windowsD3d11Media: {
+          ...windowsD3d11Media,
+          captureBackend: 'preview-bgra-upload',
+          captureAdapterLuid: undefined,
+          cursorMode: undefined,
+          cursorPixelsSource: undefined,
+          cursorRequested: false,
+          captureReadbackFrames: 60,
+          rawVideoCopiedFrames: 60,
+          compositorCpuFallbackFrames: 0
+        }
+      })
+    )
+    expect(validateBackendRpcResult('diagnostics.stats', switchedCapture)).toEqual(switchedCapture)
+
     expect(() =>
       validateBackendRpcResult('diagnostics.stats', {
         ...diagnostics,

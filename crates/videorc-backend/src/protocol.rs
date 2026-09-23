@@ -1573,6 +1573,7 @@ pub enum WindowsD3d11MediaState {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
 pub enum WindowsD3d11CaptureBackend {
+    PreviewBgraUpload,
     DesktopDuplication,
     WindowsGraphicsCaptureMonitor,
     LegacyFfmpeg,

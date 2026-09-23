@@ -3398,6 +3398,7 @@ async fn start_session_with_timeline(
                     plan.clone(),
                     camera_input.clone(),
                     overlays.clone(),
+                    crate::windows_d3d11_session::WindowsLiveSources::new(&state, &session_id),
                 ) {
                     Ok(pump) => {
                         match validate_windows_d3d11_startup_evidence(
@@ -3537,6 +3538,15 @@ async fn start_session_with_timeline(
             }
         }
     };
+    #[cfg(target_os = "windows")]
+    if windows_d3d11_media.is_none() {
+        state
+            .compositor
+            .lock()
+            .await
+            .release_native_session_output(&session_id);
+    }
+
     let screen_overlay_fifo =
         if !use_encoder_bridge && (active_screen.is_some() || params.output.stream_enabled) {
             let fifo_path = screen_overlay_fifo_path(&session_id);
@@ -4665,9 +4675,9 @@ async fn start_session_with_timeline(
         sources.start(session_id.clone(), confirmed_sources);
         sources.set_output_process_id(pending_active.pid);
         #[cfg(target_os = "windows")]
-        // Windows video capability is enabled with the generation-fenced pump
-        // and exact camera adapter in the following implementation checkpoint.
-        let replaceable_video = false;
+        let replaceable_video = pending_active.windows_d3d11_media.is_some()
+            || (pending_active.encoder_bridge.is_some()
+                && pending_active.direct_d3d11_consumer_lease.is_none());
         #[cfg(not(target_os = "windows"))]
         let replaceable_video = pending_active.encoder_bridge.is_some();
         if replaceable_video {
@@ -5249,6 +5259,12 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .stop(&active.session_id);
     }
+    #[cfg(target_os = "windows")]
+    state
+        .compositor
+        .lock()
+        .await
+        .release_native_session_output(&active.session_id);
     #[cfg(target_os = "windows")]
     release_direct_d3d11_consumer(&state, active);
     if let Some(native_audio) = active.native_audio.as_ref() {
@@ -7789,6 +7805,14 @@ async fn monitor_session(
             .stop(&session_id);
     }
     drop(guard);
+    #[cfg(target_os = "windows")]
+    if monitored_recording.is_some() {
+        state
+            .compositor
+            .lock()
+            .await
+            .release_native_session_output(&session_id);
+    }
 
     let Some(mut monitored_recording) = monitored_recording else {
         return;
@@ -13541,7 +13565,7 @@ fn windows_d3d11_live_diagnostics(
         requested: mode != WindowsD3d11MediaMode::Disabled,
         required: mode.is_required(),
         adapter_luid: Some(format!("{:016x}", snapshot.pump.authority_adapter_luid)),
-        capture_adapter_luid: Some(format!("{:016x}", snapshot.pump.capture_adapter_luid)),
+        capture_adapter_luid: (!snapshot.pump.capture_route_bgra).then(|| format!("{:016x}", snapshot.pump.capture_adapter_luid)),
         compositor_adapter_luid: Some(format!("{:016x}", snapshot.pump.compositor_adapter_luid)),
         primary_encoder_adapter_luid: Some(format!(
             "{:016x}",
@@ -13552,18 +13576,19 @@ fn windows_d3d11_live_diagnostics(
             .auxiliary_encoder_adapter_luid
             .map(|luid| format!("{luid:016x}")),
         generation: Some(snapshot.pump.generation),
-        capture_backend,
-        cursor_mode,
-        cursor_requested: capture.is_some_and(|diagnostics| diagnostics.cursor_requested),
-        cursor_pixels_source: capture.and_then(|diagnostics| {
+        capture_backend: if snapshot.pump.capture_route_bgra { Some(crate::protocol::WindowsD3d11CaptureBackend::PreviewBgraUpload) } else { capture_backend },
+        cursor_mode: if snapshot.pump.capture_route_bgra { None } else { cursor_mode },
+        cursor_requested: !snapshot.pump.capture_route_bgra && capture.is_some_and(|diagnostics| diagnostics.cursor_requested),
+        cursor_pixels_source: capture.filter(|_| !snapshot.pump.capture_route_bgra).and_then(|diagnostics| {
             diagnostics
                 .cursor_pixels_source
                 .map(|source| source.as_str().to_string())
         }),
-        cursor_exclusion_guaranteed: capture
+        cursor_exclusion_guaranteed: !snapshot.pump.capture_route_bgra && capture
             .is_some_and(|diagnostics| diagnostics.cursor_exclusion_guaranteed),
         capture_readback_frames: capture
-            .map_or(0, |diagnostics| diagnostics.capture_readback_frames),
+            .map_or(0, |diagnostics| diagnostics.capture_readback_frames)
+            .saturating_add(snapshot.pump.capture_upload_frames),
         protected_content_masked_frames: capture
             .map_or(0, |diagnostics| diagnostics.protected_content_masked_frames),
         texture_import_frames: snapshot.pump.composed_frames,
@@ -13587,7 +13612,7 @@ fn windows_d3d11_live_diagnostics(
         maximum_consecutive_media_batch: u64::from(pump.max_media_batch),
         encoder_gpu_samples: snapshot.device.runtime.encoder_gpu_samples,
         encoder_system_memory_samples: snapshot.device.runtime.encoder_system_memory_samples,
-        raw_video_copied_frames: 0,
+        raw_video_copied_frames: snapshot.pump.capture_upload_frames,
         texture_pool_capacity: snapshot.device.runtime.texture_pool_capacity,
         texture_pool_in_use: snapshot.device.runtime.texture_pool_in_use,
         texture_pool_pressure_events: snapshot
@@ -13604,7 +13629,10 @@ fn windows_d3d11_live_diagnostics(
         render_tick_overruns: snapshot.pump.render_tick_overruns,
         render_tick_lag_max_ms: u64_ms_option(snapshot.pump.render_tick_lag_max_us),
         render_compose_stage_max_ms: u64_ms_option(snapshot.pump.render_compose_stage_max_us),
-        fallback_reason: terminal_error.or(capture_fallback),
+        fallback_reason: terminal_error.or_else(|| snapshot.pump.capture_source_error.clone())
+            .or_else(|| snapshot.pump.capture_cleanup_pending.then(|| "Previous capture is still closing; output continues on the committed source".into()))
+            .or_else(|| (snapshot.pump.capture_upload_frames > 0).then(|| "Live capture replacement uses the existing preview BGRA upload route".into()))
+            .or(capture_fallback),
     }
 }
 
@@ -14000,11 +14028,22 @@ async fn recover_windows_d3d11_session(
         return Err("D3D11 recovery was cancelled after authority retirement".to_string());
     }
 
+    let recovery_sources =
+        match crate::windows_d3d11_session::WindowsLiveSources::for_recovery(state, session_id)
+            .await
+        {
+            Ok(sources) => sources,
+            Err(error) => {
+                fail_windows_d3d11_recovery(state, session_id).await;
+                return Err(error);
+            }
+        };
     let pump = match WindowsD3d11SessionPump::start(
         &state.windows_d3d11_media,
         recovery.plan.clone(),
         recovery.camera.clone(),
         recovery.overlays.clone(),
+        recovery_sources,
     ) {
         Ok(pump) => pump,
         Err(error) => {

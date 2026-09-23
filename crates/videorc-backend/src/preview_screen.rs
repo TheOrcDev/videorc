@@ -2705,8 +2705,16 @@ pub(crate) fn source_identity_locked(slot: &PreviewScreenRuntime) -> Option<(Sou
     Some((slot.source_key.clone()?, slot.active_generation?))
 }
 
-pub async fn preview_screen_frame_source(state: &AppState) -> Option<PreviewScreenFrameSource> {
-    let slot = state.preview_screen.lock().await;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn available_frame_source_locked(
+    slot: &PreviewScreenRuntime,
+) -> Option<PreviewScreenFrameSource> {
+    (slot.status.state == PreviewScreenState::Live)
+        .then(|| frame_source_locked(slot))
+        .flatten()
+}
+
+pub(crate) fn frame_source_locked(slot: &PreviewScreenRuntime) -> Option<PreviewScreenFrameSource> {
     let active = slot.active.as_ref()?;
     let generation = slot.active_generation?;
     Some(PreviewScreenFrameSource {
@@ -2714,6 +2722,10 @@ pub async fn preview_screen_frame_source(state: &AppState) -> Option<PreviewScre
         source_key: slot.source_key.clone(),
         generation,
     })
+}
+
+pub async fn preview_screen_frame_source(state: &AppState) -> Option<PreviewScreenFrameSource> {
+    frame_source_locked(&*state.preview_screen.lock().await)
 }
 
 pub fn try_preview_screen_frame_source(

@@ -878,6 +878,42 @@ pub(crate) async fn start_preview_camera_for_layout_until_transition_complete(
     .await
 }
 
+#[cfg(target_os = "windows")]
+async fn resolve_windows_camera_target(ffmpeg: &str, selected: &str) -> Result<String, String> {
+    static INVENTORY_OWNERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let permit = INVENTORY_OWNERS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
+        .try_acquire_owned()
+        .map_err(|_| "Camera inventory is still closing. Retry shortly.".to_string())?;
+    let ffmpeg = ffmpeg.to_string();
+    let selected = selected.to_string();
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        let output = crate::process_job::output_owned_std_with_timeout(
+            std::process::Command::new(ffmpeg).args([
+                "-hide_banner",
+                "-list_devices",
+                "true",
+                "-f",
+                "dshow",
+                "-i",
+                "dummy",
+            ]),
+            Duration::from_secs(2),
+        )
+        .map_err(|error| format!("Could not verify the selected camera: {error}"))?;
+        crate::audio_capture_adapter::resolve_dshow_video_name(
+            &String::from_utf8_lossy(&output.stderr),
+            &selected,
+        )
+        .map_err(|error| error.to_string())
+    })
+    .await
+    .map_err(|error| format!("Camera inventory owner failed: {error}"))?
+}
+
 async fn start_preview_camera_with_owner(
     state: AppState,
     params: PreviewCameraStartParams,
@@ -932,10 +968,21 @@ async fn start_preview_camera_with_owner(
         signal_camera_layout_admission(&mut admission_ready, None);
         return PreviewCameraLayoutStart::without_admission(status);
     };
-    let explicit_mutation =
-        begin_capture_recovery_explicit_camera_configuration_mutation(&state).await;
     let unique_id = camera_source.device_unique_id().to_string();
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
+    #[cfg(target_os = "windows")]
+    let unique_id = match resolve_windows_camera_target(&ffmpeg_path, &unique_id).await {
+        Ok(target) => target,
+        Err(error) => {
+            // Inventory admission precedes old-owner retirement. A missing or
+            // ambiguous DirectShow target cannot evict a healthy camera.
+            let status = status_for_missing_camera(Some(camera_id.clone()), &error);
+            signal_camera_layout_admission(&mut admission_ready, None);
+            return PreviewCameraLayoutStart::without_admission(status);
+        }
+    };
+    let explicit_mutation =
+        begin_capture_recovery_explicit_camera_configuration_mutation(&state).await;
     refresh_camera_capability_diagnostics(&state, Some(camera_id.clone())).await;
 
     let target_fps = params.video.fps.clamp(1, 120);
@@ -2808,8 +2855,16 @@ pub(crate) fn source_identity_locked(slot: &PreviewCameraRuntime) -> Option<(Sou
     Some((slot.source_key.clone()?, slot.active_generation?))
 }
 
-pub async fn preview_camera_frame_source(state: &AppState) -> Option<PreviewCameraFrameSource> {
-    let slot = state.preview_camera.lock().await;
+#[cfg(any(target_os = "windows", test))]
+pub(crate) fn available_frame_source_locked(
+    slot: &PreviewCameraRuntime,
+) -> Option<PreviewCameraFrameSource> {
+    (slot.status.state == PreviewCameraState::Live)
+        .then(|| frame_source_locked(slot))
+        .flatten()
+}
+
+pub(crate) fn frame_source_locked(slot: &PreviewCameraRuntime) -> Option<PreviewCameraFrameSource> {
     let active = slot.active.as_ref()?;
     let generation = slot.active_generation?;
     Some(PreviewCameraFrameSource {
@@ -2819,6 +2874,10 @@ pub async fn preview_camera_frame_source(state: &AppState) -> Option<PreviewCame
         target_fps: active.effective_fps,
         generation,
     })
+}
+
+pub async fn preview_camera_frame_source(state: &AppState) -> Option<PreviewCameraFrameSource> {
+    frame_source_locked(&*state.preview_camera.lock().await)
 }
 
 pub fn try_preview_camera_frame_source(

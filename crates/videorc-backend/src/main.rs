@@ -89,6 +89,8 @@ mod videorc_api;
 mod viewer_stats;
 mod warm_microphone;
 #[allow(dead_code)]
+mod windows_capture_owner;
+#[allow(dead_code)]
 mod windows_d3d11_capture;
 #[allow(dead_code)]
 mod windows_d3d11_compositor;

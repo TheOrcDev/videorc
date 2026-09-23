@@ -300,6 +300,14 @@ impl SourceSwitchCoordinator {
         }
     }
 
+    #[cfg(any(target_os = "windows", test))]
+    pub(crate) fn running_snapshot(&self, session_id: &str) -> Result<SessionSources, SwitchError> {
+        if self.stopping {
+            return Err(SwitchError::InactiveSession);
+        }
+        self.snapshot(session_id)
+    }
+
     pub fn enable_video(&mut self) {
         if let Some(snapshot) = self.snapshot.as_mut() {
             for capability in &mut snapshot.capabilities {

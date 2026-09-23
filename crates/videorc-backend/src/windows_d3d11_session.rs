@@ -68,6 +68,24 @@ fn windows_d3d11_overlay_layer_geometry(
     )
 }
 
+/// Presenter liveness follows the sources actually required by the effective
+/// scene. A valid intentional empty scene is distinct from a failed input.
+#[cfg(any(target_os = "windows", test))]
+fn windows_scene_sources_live<'a>(
+    mut scenes: impl Iterator<Item = &'a crate::protocol::Scene>,
+    camera_pixels: bool,
+    capture_pixels: bool,
+    takeover: Option<bool>,
+) -> bool {
+    if let Some(available) = takeover {
+        return available;
+    }
+    scenes.all(|scene| {
+        let needs = crate::live_layout::required_scene_sources(scene);
+        (!needs.camera || camera_pixels) && (!needs.screen || capture_pixels)
+    })
+}
+
 /// Screen-camera composition keeps one more full-frame layer in flight and
 /// stretches NV12/BGRA lease residency past the screen-only envelope. Size the
 /// capture and primary render pools so transient fence lag cannot starve a CFR
@@ -399,6 +417,7 @@ pub(crate) fn select_windows_d3d11_session(
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(crate) struct WindowsD3d11StartupEvidence {
     pub(crate) capture_started: bool,
+    pub(crate) resumed_committed_sources: bool,
     pub(crate) preview_ticket: bool,
     pub(crate) primary_ticket: bool,
     pub(crate) auxiliary_ticket: bool,
@@ -411,7 +430,7 @@ pub(crate) fn validate_windows_d3d11_startup_evidence(
     plan: &WindowsD3d11SessionPlan,
     evidence: WindowsD3d11StartupEvidence,
 ) -> Result<Option<WindowsD3d11NaturalFallback>, String> {
-    let missing = if !evidence.capture_started {
+    let missing = if !evidence.capture_started && !evidence.resumed_committed_sources {
         Some((
             "windows-d3d11-media-capture-not-started",
             "capture did not start on the D3D11 media authority",
@@ -474,6 +493,24 @@ struct WindowsD3d11CfrSequencer {
 }
 
 impl WindowsD3d11CfrSequencer {
+    fn replace_source(&mut self) {
+        // Capture sequences restart per binding; encoder time never does.
+        self.source_sequence = None;
+    }
+    fn advance_blank(&mut self) -> Result<Option<WindowsD3d11CfrTick>, String> {
+        if self.output_sequence == 0 {
+            return Ok(None);
+        }
+        self.output_sequence = self
+            .output_sequence
+            .checked_add(1)
+            .ok_or_else(|| "D3D11 CFR output sequence was exhausted".to_string())?;
+        Ok(Some(WindowsD3d11CfrTick {
+            output_sequence: self.output_sequence,
+            source_sequence: 0,
+            repeated_source: true,
+        }))
+    }
     fn advance(
         &mut self,
         new_source_sequence: Option<u64>,
@@ -557,8 +594,8 @@ mod runtime {
     use crate::windows_media_foundation_encoder::MediaFoundationEncoderConfig;
 
     use super::{
-        WindowsD3d11CfrSequencer, WindowsD3d11SessionPlan, WindowsD3d11StartupEvidence,
-        windows_d3d11_terminal_source_error,
+        WindowsD3d11CfrSequencer, WindowsD3d11CfrTick, WindowsD3d11SessionPlan,
+        WindowsD3d11StartupEvidence, windows_d3d11_terminal_source_error,
     };
 
     const STARTUP_TIMEOUT: Duration = Duration::from_secs(4);
@@ -568,6 +605,158 @@ mod runtime {
     const CAPTION_AUXILIARY_SOURCE_ID: u64 = 11;
     const HIGHLIGHT_PRIMARY_SOURCE_ID: u64 = 12;
     const HIGHLIGHT_AUXILIARY_SOURCE_ID: u64 = 13;
+
+    /// Shared committed authority only; no recording/pump back-reference.
+    pub(crate) struct WindowsLiveSources {
+        session_id: String,
+        compositor: crate::compositor::CompositorSlot,
+        camera: crate::preview_camera::PreviewCameraSlot,
+        capture: crate::preview_screen::PreviewScreenSlot,
+        coordinator: Arc<StdMutex<crate::live_source_switch::SourceSwitchCoordinator>>,
+        generation: u64,
+        authority: Option<crate::compositor::NativeSourceOutputLease>,
+        bootstrap: Option<WindowsLiveSnapshot>,
+        events: tokio::sync::broadcast::Sender<crate::protocol::ServerEvent>,
+    }
+    struct WindowsLiveSnapshot {
+        edit: crate::compositor::CompositorSourceEdit,
+        render_edit: crate::compositor::CompositorSourceEdit,
+        camera: Option<PreviewCameraFrameSource>,
+        capture: Option<crate::preview_screen::PreviewScreenFrameSource>,
+        confirmed: crate::protocol::SourceSelection,
+        source_revision: u64,
+        takeover: Option<crate::compositor::WindowsSceneImage>,
+        takeover_active: bool,
+        backgrounds: Vec<Option<crate::compositor::WindowsSceneImage>>,
+    }
+    impl WindowsLiveSources {
+        pub(crate) fn new(state: &crate::state::AppState, session_id: &str) -> Self {
+            Self {
+                session_id: session_id.into(),
+                compositor: state.compositor.clone(),
+                camera: state.preview_camera.clone(),
+                capture: state.preview_screen.clone(),
+                coordinator: state.live_source_switch.clone(),
+                generation: 0,
+                authority: None,
+                bootstrap: None,
+                events: state.events.clone(),
+            }
+        }
+        pub(crate) async fn for_recovery(
+            state: &crate::state::AppState,
+            session_id: &str,
+        ) -> Result<Self, String> {
+            let mut sources = Self::new(state, session_id);
+            let deadline = Instant::now() + Duration::from_secs(1);
+            loop {
+                if let Some(snapshot) = sources.snapshot() {
+                    sources.bootstrap = Some(snapshot);
+                    return Ok(sources);
+                }
+                if sources
+                    .coordinator
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .running_snapshot(session_id)
+                    .is_err()
+                {
+                    return Err("Source authority stopped during GPU recovery".into());
+                }
+                if Instant::now() >= deadline {
+                    return Err("Current committed sources were busy during GPU recovery; no previous source was reopened".into());
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        }
+        fn snapshot(&self) -> Option<WindowsLiveSnapshot> {
+            // Match the publication lock order and never wait on an async lock
+            // from the CFR thread. A busy transaction leaves the last route live.
+            let camera = self.camera.try_lock().ok()?;
+            let capture = self.capture.try_lock().ok()?;
+            let compositor = self.compositor.try_lock().ok()?;
+            let coordinator = self.coordinator.try_lock().ok()?;
+            let confirmed = coordinator.running_snapshot(&self.session_id).ok()?;
+            // Same-ID retry candidates can be installed before commit. Their
+            // generation is not authorized merely because the ID still matches.
+            if confirmed.pending.as_ref().is_some_and(|operation| {
+                operation.kind != crate::live_source_switch::SourceKind::Microphone
+            }) {
+                return None;
+            }
+            let camera =
+                crate::preview_camera::available_frame_source_locked(&camera).filter(|source| {
+                    source
+                        .source_key()
+                        .is_some_and(|key| Some(&key.id) == confirmed.confirmed.camera_id.as_ref())
+                });
+            let capture =
+                crate::preview_screen::available_frame_source_locked(&capture).filter(|source| {
+                    source.source_key().is_some_and(|key| {
+                        Some(&key.id)
+                            == confirmed
+                                .confirmed
+                                .window_id
+                                .as_ref()
+                                .or(confirmed.confirmed.screen_id.as_ref())
+                    })
+                });
+            let edit = compositor.source_edit_snapshot()?;
+            let (takeover, backgrounds) = compositor.windows_scene_images(&edit);
+            Some(WindowsLiveSnapshot {
+                render_edit: compositor.source_render_edit(Instant::now())?,
+                edit,
+                takeover,
+                takeover_active: compositor.windows_takeover_active(),
+                backgrounds,
+                camera,
+                capture,
+                confirmed: confirmed.confirmed,
+                source_revision: confirmed.source_revision,
+            })
+        }
+        fn observe(
+            &self,
+            snapshot: &WindowsLiveSnapshot,
+            camera_pixels: bool,
+            capture_pixels: bool,
+            all_legs: bool,
+        ) {
+            let Ok(mut compositor) = self.compositor.try_lock() else {
+                return;
+            };
+            let Ok(mut coordinator) = self.coordinator.try_lock() else {
+                return;
+            };
+            let observed =
+                compositor.observe_windows_source_publication(
+                    &mut coordinator,
+                    &snapshot.edit,
+                    &self.session_id,
+                    self.generation,
+                    snapshot.camera.as_ref().and_then(|source| {
+                        source.source_key().map(|key| (key, source.generation()))
+                    }),
+                    snapshot.capture.as_ref().and_then(|source| {
+                        source.source_key().map(|key| (key, source.generation()))
+                    }),
+                    camera_pixels,
+                    capture_pixels,
+                    all_legs,
+                );
+            let changed = observed
+                .then(|| coordinator.snapshot(&self.session_id).ok())
+                .flatten();
+            drop(coordinator);
+            drop(compositor);
+            if let Some(changed) = changed {
+                let _ = self.events.send(crate::protocol::ServerEvent::new(
+                    "session.sources.changed",
+                    changed,
+                ));
+            }
+        }
+    }
 
     #[derive(Debug, Clone)]
     pub(crate) struct WindowsD3d11CameraInput {
@@ -606,6 +795,11 @@ mod runtime {
         pub(crate) auxiliary_encoder_adapter_luid: Option<u64>,
         pub(crate) adapter_mismatches: u64,
         pub(crate) captured_frames: u64,
+        pub(crate) capture_upload_frames: u64,
+        pub(crate) capture_route_bgra: bool,
+        pub(crate) source_revision: u64,
+        pub(crate) capture_cleanup_pending: bool,
+        pub(crate) capture_source_error: Option<String>,
         pub(crate) composed_frames: u64,
         pub(crate) camera_upload_frames: u64,
         pub(crate) latest_capture_sequence: Option<u64>,
@@ -961,11 +1155,32 @@ mod runtime {
     impl WindowsD3d11SessionPump {
         pub(crate) fn start(
             coordinator: &WindowsD3d11MediaCoordinatorSlot,
-            plan: WindowsD3d11SessionPlan,
-            camera: Option<WindowsD3d11CameraInput>,
+            mut plan: WindowsD3d11SessionPlan,
+            mut camera: Option<WindowsD3d11CameraInput>,
             overlays: WindowsD3d11OverlayInput,
+            mut live_sources: WindowsLiveSources,
         ) -> Result<Self, String> {
-            if plan.camera_required != camera.is_some() {
+            let resuming = live_sources.bootstrap.is_some();
+            if let Some(current) = live_sources.bootstrap.as_ref() {
+                plan.camera_required = current
+                    .edit
+                    .scenes()
+                    .any(|scene| crate::live_layout::required_scene_sources(scene).camera);
+                camera = current
+                    .camera
+                    .clone()
+                    .map(|source| WindowsD3d11CameraInput {
+                        source,
+                        layout: current
+                            .edit
+                            .legs()
+                            .next()
+                            .expect("primary recovery scene")
+                            .1
+                            .clone(),
+                    });
+            }
+            if !resuming && plan.camera_required != camera.is_some() {
                 return Err(format!(
                     "D3D11 screen-camera plan/source mismatch: plan requires camera={}, source supplied={}",
                     plan.camera_required,
@@ -1030,6 +1245,22 @@ mod runtime {
                     plan.screen_id
                 ));
             }
+            live_sources.generation = status.generation;
+            live_sources.authority = Some({
+                let compositor = live_sources
+                    .compositor
+                    .try_lock()
+                    .map_err(|_| "source output authority is busy")?;
+                if resuming {
+                    live_sources
+                        .coordinator
+                        .try_lock()
+                        .map_err(|_| "source authority is busy")?
+                        .running_snapshot(&live_sources.session_id)
+                        .map_err(|error| error.message())?;
+                }
+                compositor.claim_native_source_output(&live_sources.session_id, status.generation)
+            });
             let capture_plan = WindowsD3d11CapturePlan::resolve(
                 &plan.screen_id,
                 true,
@@ -1038,11 +1269,18 @@ mod runtime {
                 WindowsD3d11WgcCursorExclusionProbe::default(),
             )
             .map_err(|error| error.to_string())?;
-            let capture_session = client
-                .start_capture(capture_plan)
-                .map_err(|error| format!("could not start D3D11 capture: {error}"))?;
             let authority_adapter_luid = status.adapter_luid.as_u64();
-            let capture_adapter_luid = capture_session.diagnostics.adapter_luid;
+            let capture_adapter_luid = if resuming {
+                // Recovery retains GPU/encoder affinity but never reopens the
+                // startup display. Current committed BGRA/None supplies frames.
+                authority_adapter_luid
+            } else {
+                client
+                    .start_capture(capture_plan)
+                    .map_err(|error| format!("could not start D3D11 capture: {error}"))?
+                    .diagnostics
+                    .adapter_luid
+            };
             if capture_adapter_luid != authority_adapter_luid {
                 let _ = client.stop_capture();
                 return Err(format!(
@@ -1115,6 +1353,7 @@ mod runtime {
                 compositor_adapter_luid: selection.adapter_luid.as_u64(),
                 primary_encoder_adapter_luid,
                 auxiliary_encoder_adapter_luid,
+                capture_route_bgra: resuming,
                 ..Default::default()
             }));
             let preview_generation = Arc::new(AtomicU64::new(0));
@@ -1146,6 +1385,7 @@ mod runtime {
                                     camera,
                                     overlays,
                                     preview_generation,
+                                    live_sources,
                                 );
                             }));
                         if result.is_err() {
@@ -1299,21 +1539,13 @@ mod runtime {
         last_frame: &mut Option<FrameHandle<PreviewCameraPixelFormat>>,
     ) -> Option<FrameHandle<PreviewCameraPixelFormat>> {
         let camera = camera?;
-        let latest = match camera.source.try_latest_frame_result() {
-            Ok(Some((frame, _))) => Some(frame),
-            Ok(None) | Err(()) => None,
-        }
-        .or_else(|| {
-            last_frame
-                .is_none()
-                .then(|| camera.source.latest_frame_blocking())
-                .flatten()
-                .map(|(frame, _)| frame)
-        });
-        if let Some(frame) = latest {
+        if let Ok(Some((frame, _))) = camera.source.try_latest_frame_result() {
             *last_frame = Some(frame);
         }
-        last_frame.clone()
+        last_frame.clone().filter(|frame| {
+            frame.captured_at.elapsed() <= Duration::from_millis(1500)
+                && frame.bytes.len() == frame.width as usize * frame.height as usize * 4
+        })
     }
 
     fn current_overlay_frames(
@@ -1426,6 +1658,7 @@ mod runtime {
         camera: Option<WindowsD3d11CameraInput>,
         overlays: WindowsD3d11OverlayInput,
         preview_generation: Arc<AtomicU64>,
+        mut live_sources: WindowsLiveSources,
     ) {
         let mut startup_tx = Some(startup_tx);
         let render_fps = plan
@@ -1439,13 +1672,159 @@ mod runtime {
         let mut last_camera_upload: Option<(u64, Arc<Vec<u8>>)> = None;
         let mut retained_capture_ticket: Option<WindowsD3d11TextureLeaseTicket> = None;
         let mut cfr = WindowsD3d11CfrSequencer::default();
+        let mut pending_capture: Option<crate::windows_d3d11_device::WindowsD3d11CapturePoll> =
+            None;
+        let resuming = live_sources.bootstrap.is_some();
+        let mut committed = live_sources.bootstrap.take();
+        let mut camera = camera;
+        let mut camera_identity = camera.as_ref().and_then(|input| {
+            input
+                .source
+                .source_key()
+                .cloned()
+                .map(|key| (key, input.source.generation()))
+        });
+        let mut capture_identity = None;
+        let mut native_binding = None;
+        let mut native_capture = !resuming;
+        let mut native_retire_required = false;
+        let mut native_retirement = None;
+        let mut capture_frame: Option<
+            FrameHandle<crate::preview_screen::PreviewScreenPixelFormat>,
+        > = None;
+        let mut upload_revision = 0u64;
+        let mut last_capture_upload: Option<(u64, Arc<Vec<u8>>, u64)> = None;
+        let mut camera_upload_revision = 0u64;
         while !stop.load(Ordering::Relaxed) {
             let frame_started_at = Instant::now();
+            let fresh_committed = live_sources.snapshot();
+            if resuming && startup_tx.is_some() && fresh_committed.is_none() {
+                // A recovery bootstrap is a source of dimensions/readiness, not
+                // permission to publish an older binding through contention.
+                record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
+                pace_render_tick(frame_started_at, frame_interval);
+                continue;
+            }
+            if let Some(next) = fresh_committed {
+                let next_camera = next.camera.as_ref().and_then(|source| {
+                    source
+                        .source_key()
+                        .cloned()
+                        .map(|key| (key, source.generation()))
+                });
+                if next_camera != camera_identity {
+                    camera_identity = next_camera;
+                    last_camera_frame = None;
+                    last_camera_upload = None;
+                }
+                camera = next.camera.clone().map(|source| WindowsD3d11CameraInput {
+                    source,
+                    layout: next.edit.legs().next().expect("primary scene").1.clone(),
+                });
+                let next_capture = next.capture.as_ref().and_then(|source| {
+                    source
+                        .source_key()
+                        .cloned()
+                        .map(|key| (key, source.generation()))
+                });
+                let requested_capture = next
+                    .confirmed
+                    .window_id
+                    .as_ref()
+                    .or(next.confirmed.screen_id.as_ref());
+                if native_capture
+                    && (requested_capture.map(String::as_str) != Some(plan.screen_id.as_str())
+                        || next_capture
+                            .as_ref()
+                            .zip(native_binding.as_ref())
+                            .is_some_and(|(next, previous)| next != previous))
+                {
+                    native_capture = false;
+                    update_snapshot(&snapshot, |current| current.capture_route_bgra = true);
+                    native_retire_required = true;
+                    pending_capture = None;
+                    retained_capture_ticket = None;
+                    cfr.replace_source();
+                }
+                if native_capture && native_binding.is_none() {
+                    native_binding = next_capture.clone();
+                }
+                if !native_capture && next_capture != capture_identity {
+                    capture_frame = None;
+                    last_capture_upload = None;
+                    cfr.replace_source();
+                }
+                capture_identity = next_capture;
+                update_snapshot(&snapshot, |current| {
+                    current.source_revision = next.source_revision
+                });
+                committed = Some(next);
+            }
+            if native_retire_required && native_retirement.is_none() {
+                match client.begin_stop_capture() {
+                    Ok(receipt) => {
+                        native_retirement = Some(receipt);
+                        native_retire_required = false;
+                        update_snapshot(&snapshot, |current| {
+                            current.capture_cleanup_pending = true
+                        });
+                    }
+                    Err(error) if is_transient_pressure(&error) => {}
+                    Err(error) => {
+                        finish_with_error(&snapshot, &mut startup_tx, error.to_string());
+                        break;
+                    }
+                }
+            }
+            if let Some(receipt) = native_retirement.as_ref() {
+                match receipt.try_recv() {
+                    Ok(Ok(_)) => {
+                        native_retirement = None;
+                        update_snapshot(&snapshot, |current| {
+                            current.capture_cleanup_pending = false
+                        });
+                    }
+                    Ok(Err(error)) => {
+                        native_retirement = None;
+                        update_snapshot(&snapshot, |current| {
+                            current.capture_source_error =
+                                Some(format!("Previous capture cleanup: {error}"))
+                        });
+                    }
+                    Err(mpsc::TryRecvError::Empty) => {}
+                    Err(mpsc::TryRecvError::Disconnected) => {
+                        finish_with_error(
+                            &snapshot,
+                            &mut startup_tx,
+                            "Capture owner retirement lost its completion receipt".into(),
+                        );
+                        break;
+                    }
+                }
+            }
             let mut new_capture_sequence = None;
-            match client.acquire_capture(
-                super::WINDOWS_D3D11_CAPTURE_POLL_WAIT_MS,
-                vec![WindowsD3d11MediaRole::Compositor],
-            ) {
+            if native_capture && pending_capture.is_none() {
+                match client.begin_capture_poll(
+                    super::WINDOWS_D3D11_CAPTURE_POLL_WAIT_MS,
+                    vec![WindowsD3d11MediaRole::Compositor],
+                ) {
+                    Ok(pending) => pending_capture = Some(pending),
+                    Err(error) if is_transient_pressure(&error) => {
+                        update_snapshot(&snapshot, |current| {
+                            current.pressure_skips = current.pressure_skips.saturating_add(1)
+                        });
+                    }
+                    Err(error) => {
+                        finish_with_error(&snapshot, &mut startup_tx, error.to_string());
+                        break;
+                    }
+                }
+            }
+            let acquired = pending_capture.as_mut().and_then(|pending| pending.poll());
+            if acquired.is_some() {
+                pending_capture = None;
+            }
+            match acquired.unwrap_or(Ok(None)) {
                 Ok(Some(capture)) => {
                     let sequence = capture.metadata.sequence;
                     let source_ticket = match ticket_for_role(
@@ -1473,6 +1852,19 @@ mod runtime {
                         current.pressure_skips = current.pressure_skips.saturating_add(1);
                     });
                 }
+                Err(error)
+                    if error.code == WindowsD3d11ErrorCode::CaptureUnavailable
+                        && startup_tx.is_none() =>
+                {
+                    native_capture = false;
+                    update_snapshot(&snapshot, |current| current.capture_route_bgra = true);
+                    native_retire_required = true;
+                    retained_capture_ticket = None;
+                    cfr.replace_source();
+                    update_snapshot(&snapshot, |current| {
+                        current.capture_source_error = Some(error.to_string())
+                    });
+                }
                 Err(error) => {
                     attribute_adapter_mismatch(&snapshot, &error);
                     attribute_device_loss(&snapshot, &error);
@@ -1484,7 +1876,52 @@ mod runtime {
                     break;
                 }
             }
-            let tick = match cfr.advance(new_capture_sequence) {
+            if !native_capture {
+                if let Some(source) = committed
+                    .as_ref()
+                    .and_then(|current| current.capture.as_ref())
+                {
+                    if let Ok(Some(frame)) = source.try_latest_frame_result()
+                        && frame.bytes.len() == frame.width as usize * frame.height as usize * 4
+                        && capture_frame
+                            .as_ref()
+                            .is_none_or(|previous| previous.sequence != frame.sequence)
+                    {
+                        new_capture_sequence = Some(frame.sequence);
+                        capture_frame = Some(frame);
+                    }
+                } else {
+                    capture_frame = None;
+                    last_capture_upload = None;
+                }
+            }
+            if !resuming
+                && startup_tx.is_some()
+                && retained_capture_ticket.is_none()
+                && capture_frame.is_none()
+            {
+                record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
+                pace_render_tick(frame_started_at, frame_interval);
+                continue;
+            }
+            let tick_result = if new_capture_sequence.is_none()
+                && retained_capture_ticket.is_none()
+                && capture_frame.is_none()
+            {
+                if resuming && cfr.output_sequence == 0 {
+                    cfr.output_sequence = 1;
+                    Ok(Some(WindowsD3d11CfrTick {
+                        output_sequence: 1,
+                        source_sequence: 0,
+                        repeated_source: true,
+                    }))
+                } else {
+                    cfr.advance_blank()
+                }
+            } else {
+                cfr.advance(new_capture_sequence)
+            };
+            let tick = match tick_result {
                 Ok(Some(tick)) => tick,
                 Ok(None) => {
                     record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
@@ -1496,12 +1933,8 @@ mod runtime {
                     break;
                 }
             };
-            let source_ticket = retained_capture_ticket
-                .as_ref()
-                .expect("CFR tick requires one retained capture ticket")
-                .clone();
             let camera_frame = latest_camera_frame(camera.as_ref(), &mut last_camera_frame);
-            if plan.camera_required && camera_frame.is_none() {
+            if !resuming && startup_tx.is_some() && plan.camera_required && camera_frame.is_none() {
                 record_render_tick_overrun(&snapshot, frame_started_at, frame_interval);
                 pace_render_tick(frame_started_at, frame_interval);
                 continue;
@@ -1516,12 +1949,20 @@ mod runtime {
             let scene = match build_scene_plan(
                 &plan,
                 tick.output_sequence,
-                source_ticket.metadata().generation,
+                live_sources.generation,
                 camera_frame
                     .as_ref()
                     .map(|frame| (frame.width, frame.height)),
                 camera.as_ref().map(|input| &input.layout),
                 &overlay_frames,
+                committed.as_ref(),
+                if retained_capture_ticket.is_some() {
+                    Some((plan.source_width, plan.source_height))
+                } else {
+                    capture_frame
+                        .as_ref()
+                        .map(|frame| (frame.width, frame.height))
+                },
             ) {
                 Ok(scene) => scene,
                 Err(error) => {
@@ -1529,14 +1970,43 @@ mod runtime {
                     break;
                 }
             };
-            let mut sources = vec![WindowsD3d11CompositionSource::TextureLease {
-                source_id: CAPTURE_SOURCE_ID,
-                ticket: source_ticket,
-            }];
+            let mut sources = Vec::new();
+            if let Some(ticket) = retained_capture_ticket.as_ref() {
+                sources.push(WindowsD3d11CompositionSource::TextureLease {
+                    source_id: CAPTURE_SOURCE_ID,
+                    ticket: ticket.clone(),
+                });
+            }
+            if let Some(frame) = capture_frame.as_ref() {
+                let (pixels, revision) = match last_capture_upload.as_ref() {
+                    Some((sequence, pixels, revision)) if *sequence == frame.sequence => {
+                        (pixels.clone(), *revision)
+                    }
+                    _ => {
+                        upload_revision += 1;
+                        let pixels = Arc::new(frame.bytes.clone());
+                        last_capture_upload =
+                            Some((frame.sequence, pixels.clone(), upload_revision));
+                        update_snapshot(&snapshot, |current| current.capture_upload_frames += 1);
+                        (pixels, upload_revision)
+                    }
+                };
+                sources.push(WindowsD3d11CompositionSource::BgraUpload {
+                    source_id: CAPTURE_SOURCE_ID,
+                    pixels,
+                    dimensions: WindowsD3d11OutputDimensions::new(frame.width, frame.height)
+                        .expect("validated preview dimensions"),
+                    row_pitch: frame.width * 4,
+                    pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
+                    content_revision: revision,
+                    immutable: true,
+                });
+            }
             if let Some(frame) = camera_frame.as_ref() {
                 let pixels = match last_camera_upload.as_ref() {
                     Some((revision, pixels)) if *revision == frame.sequence => Arc::clone(pixels),
                     _ => {
+                        camera_upload_revision += 1;
                         let pixels = Arc::new(frame.bytes.clone());
                         last_camera_upload = Some((frame.sequence, Arc::clone(&pixels)));
                         pixels
@@ -1565,12 +2035,37 @@ mod runtime {
                     },
                     row_pitch,
                     pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
-                    content_revision: frame.sequence,
+                    content_revision: camera_upload_revision,
                     // FrameHandle bytes are immutable. Repeated CFR ticks at a
                     // higher render cadence reuse the generation-scoped upload
                     // until the camera sequence advances.
                     immutable: true,
                 });
+            }
+            if let Some(committed) = committed.as_ref() {
+                for (source_id, image) in std::iter::once((20, committed.takeover.as_ref())).chain(
+                    committed
+                        .backgrounds
+                        .iter()
+                        .enumerate()
+                        .map(|(index, image)| (30 + index as u64, image.as_ref())),
+                ) {
+                    if let Some(image) = image {
+                        sources.push(WindowsD3d11CompositionSource::BgraUpload {
+                            source_id,
+                            pixels: image.pixels.clone(),
+                            dimensions: WindowsD3d11OutputDimensions::new(
+                                image.width,
+                                image.height,
+                            )
+                            .expect("prepared image dimensions"),
+                            row_pitch: image.width * 4,
+                            pixel_order: WindowsD3d11UploadPixelOrder::Bgra,
+                            content_revision: image.revision,
+                            immutable: true,
+                        });
+                    }
+                }
             }
             let overlay_sources = overlay_frames
                 .iter()
@@ -1632,7 +2127,11 @@ mod runtime {
                 );
                 break;
             }
-            if plan.camera_required && composition.diagnostics.camera_upload_frames == 0 {
+            if !resuming
+                && startup_tx.is_some()
+                && plan.camera_required
+                && composition.diagnostics.camera_upload_frames == 0
+            {
                 finish_with_error(
                     &snapshot,
                     &mut startup_tx,
@@ -1650,7 +2149,23 @@ mod runtime {
                     WindowsD3d11TextureFormat::Bgra8Unorm,
                 )
             {
-                match client.offer_preview(ticket, configured_preview_generation, true) {
+                let source_live = committed.as_ref().map_or_else(
+                    || {
+                        retained_capture_ticket.is_some()
+                            && (!plan.camera_required || camera_frame.is_some())
+                    },
+                    |current| {
+                        super::windows_scene_sources_live(
+                            current.render_edit.scenes(),
+                            camera_frame.is_some(),
+                            retained_capture_ticket.is_some() || capture_frame.is_some(),
+                            current
+                                .takeover_active
+                                .then_some(current.takeover.is_some()),
+                        )
+                    },
+                );
+                match client.offer_preview(ticket, configured_preview_generation, source_live) {
                     Ok(offer) => {
                         update_snapshot(&snapshot, |current| {
                             current.preview_offered_sequence = Some(offer.sequence);
@@ -1681,6 +2196,14 @@ mod runtime {
                     break;
                 }
             };
+            if let Some(committed) = committed.as_ref() {
+                live_sources.observe(
+                    committed,
+                    camera_frame.is_some(),
+                    retained_capture_ticket.is_some() || capture_frame.is_some(),
+                    plan.auxiliary.is_none() || auxiliary_sequence.is_some(),
+                );
+            }
             update_snapshot(&snapshot, |current| {
                 current.composed_frames = current.composed_frames.saturating_add(1);
                 if tick.repeated_source {
@@ -1699,7 +2222,8 @@ mod runtime {
             });
             if let Some(sender) = startup_tx.take() {
                 let _ = sender.send(Ok(WindowsD3d11StartupEvidence {
-                    capture_started: true,
+                    capture_started: !resuming,
+                    resumed_committed_sources: resuming,
                     preview_ticket: preview_sequence.is_some(),
                     primary_ticket: true,
                     auxiliary_ticket: plan.auxiliary.is_none() || auxiliary_sequence.is_some(),
@@ -1823,6 +2347,7 @@ mod runtime {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_scene_plan(
         plan: &WindowsD3d11SessionPlan,
         sequence: u64,
@@ -1830,15 +2355,9 @@ mod runtime {
         camera_dimensions: Option<(u32, u32)>,
         camera_layout: Option<&LayoutSettings>,
         overlays: &[WindowsD3d11OverlayFrame],
+        committed: Option<&WindowsLiveSnapshot>,
+        capture_dimensions: Option<(u32, u32)>,
     ) -> Result<crate::windows_d3d11_compositor::WindowsD3d11ScenePlan, String> {
-        if plan.camera_required != camera_dimensions.is_some()
-            || plan.camera_required != camera_layout.is_some()
-        {
-            return Err(
-                "D3D11 scene plan did not receive the camera dimensions/layout required by the session"
-                    .to_string(),
-            );
-        }
         let selection = WindowsDxgiOutputSelection::parse(&plan.screen_id)
             .map_err(|error| error.to_string())?;
         let dimensions = WindowsD3d11OutputDimensions::new(plan.primary.width, plan.primary.height)
@@ -1915,6 +2434,156 @@ mod runtime {
                 output_targets: WindowsD3d11SceneOutputTargets::ALL,
             });
         }
+        if let Some(committed) = committed {
+            layers.clear();
+            let legs = committed.render_edit.legs().collect::<Vec<_>>();
+            for (index, (scene, layout)) in legs.iter().enumerate() {
+                let targets = if legs.len() == 1 {
+                    WindowsD3d11SceneOutputTargets::ALL
+                } else if index == 0 {
+                    WindowsD3d11SceneOutputTargets::PRIMARY
+                        .union(WindowsD3d11SceneOutputTargets::PREVIEW)
+                } else {
+                    WindowsD3d11SceneOutputTargets::AUXILIARY
+                };
+                let background = committed.backgrounds.get(index).and_then(Option::as_ref);
+                if let (Some(image), Some(background)) = (background, scene.background.as_ref()) {
+                    let crop = crate::scene_geometry::background_zoom_crop(Some(background));
+                    layers.push(WindowsD3d11SceneLayerInput {
+                        source_id: 30 + index as u64,
+                        source_kind: WindowsD3d11SceneSourceKind::BackgroundImage,
+                        source_dimensions: WindowsD3d11OutputDimensions::new(
+                            image.width,
+                            image.height,
+                        )
+                        .map_err(|error| error.to_string())?,
+                        transform: WindowsD3d11NormalizedTransform::full_canvas(),
+                        crop: WindowsD3d11Crop {
+                            left: crop.left as f32,
+                            top: crop.top as f32,
+                            right: crop.right as f32,
+                            bottom: crop.bottom as f32,
+                        },
+                        fit: if matches!(background.fit, crate::protocol::BackgroundFit::Fit) {
+                            WindowsD3d11SceneFit::Contain
+                        } else {
+                            WindowsD3d11SceneFit::Cover
+                        },
+                        mirror_x: false,
+                        mask: WindowsD3d11SceneMask::None,
+                        effects: WindowsD3d11LayerEffects::default(),
+                        z_index: -1,
+                        output_targets: targets,
+                    });
+                }
+                let stage_margin = if background.is_some() {
+                    crate::scene_geometry::background_stage_margin(scene.background.as_ref())
+                } else {
+                    0.0
+                };
+                if committed.takeover_active {
+                    if let Some(image) = committed.takeover.as_ref() {
+                        layers.push(WindowsD3d11SceneLayerInput {
+                            source_id: 20,
+                            source_kind: WindowsD3d11SceneSourceKind::Image,
+                            source_dimensions: WindowsD3d11OutputDimensions::new(
+                                image.width,
+                                image.height,
+                            )
+                            .map_err(|error| error.to_string())?,
+                            transform: WindowsD3d11NormalizedTransform {
+                                x: stage_margin as f32,
+                                y: stage_margin as f32,
+                                width: (1.0 - 2.0 * stage_margin) as f32,
+                                height: (1.0 - 2.0 * stage_margin) as f32,
+                            },
+                            crop: WindowsD3d11Crop::none(),
+                            fit: windows_scene_fit(scene_source_fit(
+                                &SceneSourceKind::Screen,
+                                layout,
+                            )),
+                            mirror_x: false,
+                            mask: WindowsD3d11SceneMask::None,
+                            effects: WindowsD3d11LayerEffects::default(),
+                            z_index: 0,
+                            output_targets: targets,
+                        });
+                    }
+                    continue;
+                }
+                for (order, source) in scene
+                    .sources
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, source)| source.visible && source.device_id.is_some())
+                {
+                    let (id, kind, size) = match source.kind {
+                        SceneSourceKind::Camera => (
+                            CAMERA_SOURCE_ID,
+                            WindowsD3d11SceneSourceKind::CameraUpload,
+                            camera_dimensions,
+                        ),
+                        SceneSourceKind::Screen | SceneSourceKind::Window => (
+                            CAPTURE_SOURCE_ID,
+                            WindowsD3d11SceneSourceKind::Display,
+                            capture_dimensions,
+                        ),
+                        SceneSourceKind::TestPattern => continue,
+                    };
+                    let Some((width, height)) = size else {
+                        continue;
+                    };
+                    let transform = crate::scene_geometry::scene_source_render_transform(
+                        &source.transform,
+                        &source.kind,
+                        stage_margin,
+                    );
+                    let crop = scene_crop_from_transform(&transform);
+                    let is_camera = source.kind == SceneSourceKind::Camera;
+                    layers.push(WindowsD3d11SceneLayerInput {
+                        source_id: id,
+                        source_kind: kind,
+                        source_dimensions: WindowsD3d11OutputDimensions::new(width, height)
+                            .map_err(|error| error.to_string())?,
+                        transform: WindowsD3d11NormalizedTransform {
+                            x: transform.x as f32,
+                            y: transform.y as f32,
+                            width: transform.width as f32,
+                            height: transform.height as f32,
+                        },
+                        crop: WindowsD3d11Crop {
+                            left: crop.left as f32,
+                            top: crop.top as f32,
+                            right: crop.right as f32,
+                            bottom: crop.bottom as f32,
+                        },
+                        fit: windows_scene_fit(scene_source_fit(&source.kind, layout)),
+                        mirror_x: is_camera && layout.camera_mirror,
+                        mask: if is_camera {
+                            windows_scene_mask(camera_mask(layout))
+                        } else {
+                            WindowsD3d11SceneMask::None
+                        },
+                        effects: WindowsD3d11LayerEffects {
+                            chroma_key: is_camera.then(|| camera_chroma_key(layout)).flatten().map(
+                                |key| WindowsD3d11ChromaKey {
+                                    key_rgb: key.key_rgb,
+                                    angle_threshold_degrees: key.max_angle_deg as f32,
+                                    softness_degrees: key.band_deg as f32,
+                                    spill_suppression: key.spill as f32,
+                                    saturation_floor: (CHROMA_KEY_SATURATION_FLOOR / 255.0) as f32,
+                                },
+                            ),
+                            ..Default::default()
+                        },
+                        z_index: order as i32,
+                        output_targets: targets,
+                    });
+                }
+            }
+        } else if capture_dimensions.is_none() {
+            layers.retain(|layer| layer.source_id != CAPTURE_SOURCE_ID);
+        }
         for overlay in overlays {
             let (transform, crop) = super::windows_d3d11_overlay_layer_geometry(
                 (overlay.overlay.width, overlay.overlay.height),
@@ -1972,6 +2641,284 @@ mod runtime {
             SceneMask::Circle => WindowsD3d11SceneMask::Circle,
             SceneMask::Rounded { radius_pct } => WindowsD3d11SceneMask::Rounded { radius_pct },
         }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn windows_live_scene_mapping_keeps_slots_auxiliary_geometry_and_takeover() {
+        use crate::protocol::{SceneSource, SceneTransform, SourceSelection};
+        let transform = SceneTransform {
+            x: 0.2,
+            y: 0.1,
+            width: 0.4,
+            height: 0.6,
+            crop_left: 0.1,
+            crop_top: 0.05,
+            crop_right: 0.15,
+            crop_bottom: 0.1,
+        };
+        let mut scene = crate::scene::default_scene();
+        scene.sources.push(SceneSource {
+            id: "camera-slot".into(),
+            name: "Camera".into(),
+            kind: SceneSourceKind::Camera,
+            device_id: None,
+            transform: transform.clone(),
+            default_transform: transform,
+            visible: true,
+            locked: true,
+        });
+        let mut layout = crate::protocol::default_layout_settings();
+        layout.camera_fit = crate::protocol::CameraFit::Fill;
+        let edit = crate::compositor::CompositorSourceEdit::test_from_scenes(
+            scene.clone(),
+            Some(scene),
+            layout.clone(),
+        );
+        let mut current = WindowsLiveSnapshot {
+            render_edit: edit.clone(),
+            edit,
+            camera: None,
+            capture: None,
+            confirmed: SourceSelection {
+                screen_id: None,
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+            source_revision: 1,
+            takeover: None,
+            takeover_active: false,
+            backgrounds: vec![None, None],
+        };
+        let primary = super::WindowsD3d11VideoPlan {
+            width: 1280,
+            height: 720,
+            fps: 30,
+            bitrate_kbps: 4500,
+        };
+        let plan = WindowsD3d11SessionPlan {
+            screen_id: "screen:dxgi:00000000000003f1:2".into(),
+            source_width: 1920,
+            source_height: 1080,
+            primary,
+            auxiliary: Some(primary),
+            camera_required: false,
+            preview_required_at_startup: false,
+            primary_role: WindowsD3d11MediaRole::Record,
+            roles: [WindowsD3d11MediaRole::Record, WindowsD3d11MediaRole::Stream]
+                .into_iter()
+                .collect(),
+        };
+        let map = |current: &WindowsLiveSnapshot, camera| {
+            build_scene_plan(&plan, 9, 4, camera, Some(&layout), &[], Some(current), None).unwrap()
+        };
+        assert!(
+            map(&current, None).layers.is_empty(),
+            "None is black even with a retained slot"
+        );
+        let original = current.render_edit.clone();
+        current.confirmed.camera_id = Some("camera:B".into());
+        current.render_edit.patch(
+            crate::live_source_switch::SourceKind::Camera,
+            Some("camera:B"),
+            &current.confirmed,
+        );
+        let applied = map(&current, Some((640, 480)));
+        assert_eq!(applied.layers.len(), 2);
+        assert_eq!((applied.generation, applied.sequence), (4, 9));
+        assert_eq!(applied.encoded_outputs.len(), 2);
+        assert_eq!(
+            applied.layers[0].destination_normalized,
+            [0.2, 0.1, 0.4, 0.6]
+        );
+        assert_ne!(
+            applied.layers[0].source_uv,
+            [0.0, 0.0, 1.0, 1.0],
+            "slot crop remains in the actual GPU plan"
+        );
+        assert!(applied.layers[0].applies_to(
+            crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTarget::Encoded(
+                WindowsD3d11EncodedOutputRole::Primary
+            )
+        ));
+        assert!(!applied.layers[0].applies_to(
+            crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTarget::Encoded(
+                WindowsD3d11EncodedOutputRole::Auxiliary
+            )
+        ));
+        assert!(applied.layers[1].applies_to(
+            crate::windows_d3d11_compositor::WindowsD3d11SceneOutputTarget::Encoded(
+                WindowsD3d11EncodedOutputRole::Auxiliary
+            )
+        ));
+        current.confirmed.camera_id = None;
+        current.render_edit.patch(
+            crate::live_source_switch::SourceKind::Camera,
+            None,
+            &current.confirmed,
+        );
+        assert!(current.render_edit == original);
+        assert!(
+            map(&current, Some((640, 480))).layers.is_empty(),
+            "stale available camera bytes cannot fill None"
+        );
+        current.takeover_active = true;
+        current.takeover = Some(crate::compositor::WindowsSceneImage {
+            pixels: Arc::new(vec![255; 16]),
+            width: 2,
+            height: 2,
+            revision: 1,
+        });
+        assert!(
+            map(&current, Some((640, 480)))
+                .layers
+                .iter()
+                .all(|layer| layer.source_id == 20)
+        );
+    }
+
+    #[cfg(test)]
+    #[tokio::test]
+    async fn windows_live_snapshot_fences_precommit_same_id_generations_and_recovery_bootstrap() {
+        use crate::live_source_switch::{SourceKind, SourceSwitchParams};
+        use std::future::Future;
+        let (events, _) = tokio::sync::broadcast::channel(16);
+        let state = crate::state::AppState::new(
+            "fixture".into(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        let layout = crate::protocol::default_layout_settings();
+        let video = crate::protocol::VideoSettings {
+            preset: crate::protocol::VideoPreset::Tutorial720p30,
+            width: 64,
+            height: 36,
+            fps: 30,
+            bitrate_kbps: 1000,
+        };
+        crate::compositor::update_compositor_scene(
+            &state,
+            crate::protocol::CompositorSceneUpdateParams {
+                revision: 1,
+                scene: Some(crate::scene::default_scene()),
+                layout: layout.clone(),
+                active_screen: None,
+                transition_ms: None,
+            },
+        )
+        .await;
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state, "camera:A", &layout, &video,
+        )
+        .await;
+        let confirmed = crate::protocol::SourceSelection {
+            camera_id: Some("camera:A".into()),
+            screen_id: None,
+            window_id: None,
+            microphone_id: None,
+            test_pattern: false,
+        };
+        {
+            let mut coordinator = state.live_source_switch.lock().unwrap();
+            coordinator.start("session".into(), confirmed);
+            coordinator.enable_video();
+        }
+        let sources = WindowsLiveSources::new(&state, "session");
+        let first = sources.snapshot().unwrap().camera.unwrap().generation();
+        let request = SourceSwitchParams {
+            session_id: "session".into(),
+            request_id: "retry-A".into(),
+            expected_source_revision: 0,
+            kind: SourceKind::Camera,
+            device_id: Some("camera:A".into()),
+            protected_overlay_window_ids: vec![],
+        };
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .admit(&request)
+            .unwrap();
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state, "camera:A", &layout, &video,
+        )
+        .await;
+        assert!(
+            sources.snapshot().is_none(),
+            "prepared same-ID pixels are not committed bindings"
+        );
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .commit_video(&request)
+            .unwrap();
+        let next = sources.snapshot().unwrap().camera.unwrap().generation();
+        assert_ne!(next, first);
+        let remove = SourceSwitchParams {
+            request_id: "none".into(),
+            expected_source_revision: 1,
+            device_id: None,
+            ..request.clone()
+        };
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .admit(&remove)
+            .unwrap();
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .commit_video(&remove)
+            .unwrap();
+        let compositor_guard = state.compositor.lock().await;
+        let mut recovery = std::pin::pin!(WindowsLiveSources::for_recovery(&state, "session"));
+        let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+        assert!(
+            recovery.as_mut().poll(&mut context).is_pending(),
+            "busy current authority cannot fall back to startup A"
+        );
+        drop(compositor_guard);
+        let recovered = recovery.await.unwrap();
+        assert!(recovered.bootstrap.as_ref().unwrap().camera.is_none());
+        assert!(
+            recovered
+                .bootstrap
+                .as_ref()
+                .unwrap()
+                .confirmed
+                .camera_id
+                .is_none()
+        );
+        let stopped = SourceSwitchParams {
+            request_id: "stop-race".into(),
+            expected_source_revision: 2,
+            device_id: Some("camera:A".into()),
+            ..request
+        };
+        state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .admit(&stopped)
+            .unwrap();
+        assert!(sources.snapshot().is_none());
+        state.live_source_switch.lock().unwrap().stop("session");
+        assert!(
+            sources.snapshot().is_none(),
+            "late candidate cannot survive Stop authority"
+        );
+        assert!(
+            WindowsLiveSources::for_recovery(&state, "session")
+                .await
+                .is_err()
+        );
+        crate::preview_camera::stop_preview_camera(&state).await;
     }
 
     fn publish_composition(
@@ -2121,6 +3068,7 @@ pub(crate) use runtime::{
     WindowsD3d11CameraInput, WindowsD3d11EncoderTicketSource,
     WindowsD3d11EncoderTicketSourceSnapshot, WindowsD3d11OverlayInput,
     WindowsD3d11SessionDiagnosticsSnapshot, WindowsD3d11SessionMonitor, WindowsD3d11SessionPump,
+    WindowsLiveSources,
 };
 
 #[cfg(test)]
@@ -2284,6 +3232,77 @@ mod tests {
     }
 
     #[test]
+    fn windows_source_presenter_liveness_distinguishes_unavailable_inputs_none_and_takeover() {
+        let mut scene = crate::scene::default_scene();
+        assert!(windows_scene_sources_live(
+            [&scene].into_iter(),
+            false,
+            false,
+            None
+        ));
+        let transform = crate::protocol::SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        scene.sources.push(crate::protocol::SceneSource {
+            id: "capture".into(),
+            name: "Screen".into(),
+            kind: crate::protocol::SceneSourceKind::Screen,
+            device_id: Some("screen:A".into()),
+            transform: transform.clone(),
+            default_transform: transform,
+            visible: true,
+            locked: false,
+        });
+        assert!(!windows_scene_sources_live(
+            [&scene].into_iter(),
+            true,
+            false,
+            None
+        ));
+        assert!(
+            windows_scene_sources_live([&scene].into_iter(), false, true, None),
+            "static healthy capture remains live"
+        );
+        scene.sources[0].kind = crate::protocol::SceneSourceKind::Camera;
+        assert!(!windows_scene_sources_live(
+            [&scene].into_iter(),
+            false,
+            true,
+            None
+        ));
+        assert!(windows_scene_sources_live(
+            [&scene].into_iter(),
+            true,
+            false,
+            None
+        ));
+        assert!(windows_scene_sources_live(
+            [&scene].into_iter(),
+            false,
+            false,
+            Some(true)
+        ));
+        assert!(!windows_scene_sources_live(
+            [&scene].into_iter(),
+            true,
+            true,
+            Some(false)
+        ));
+        scene.sources[0].device_id = None;
+        assert!(
+            windows_scene_sources_live([&scene].into_iter(), false, false, None),
+            "intentional camera None is a valid black scene"
+        );
+    }
+
+    #[test]
     fn windows_d3d11_cfr_repeats_retained_static_source_at_render_cadence() {
         assert_eq!(
             WINDOWS_D3D11_CAPTURE_POLL_WAIT_MS, 0,
@@ -2305,6 +3324,55 @@ mod tests {
             [(2, 41), (3, 41), (4, 41)]
         );
         assert!(repeats.iter().all(|tick| tick.repeated_source));
+    }
+
+    #[test]
+    fn windows_d3d11_cfr_replacement_resets_only_the_source_fence() {
+        let mut sequencer = WindowsD3d11CfrSequencer::default();
+        assert_eq!(
+            sequencer
+                .advance(Some(500))
+                .unwrap()
+                .unwrap()
+                .output_sequence,
+            1
+        );
+        assert_eq!(sequencer.advance(None).unwrap().unwrap().output_sequence, 2);
+        sequencer.replace_source();
+        assert!(sequencer.advance(None).unwrap().is_none());
+        let first_b = sequencer.advance(Some(1)).unwrap().unwrap();
+        assert_eq!((first_b.output_sequence, first_b.source_sequence), (3, 1));
+        assert!(sequencer.advance(Some(1)).is_err());
+    }
+
+    #[test]
+    fn windows_d3d11_cfr_blank_preserves_clock_after_start_but_never_supplies_startup() {
+        let mut sequencer = WindowsD3d11CfrSequencer::default();
+        assert!(
+            sequencer.advance_blank().unwrap().is_none(),
+            "delayed first acquire cannot fake startup"
+        );
+        assert_eq!(
+            sequencer
+                .advance(Some(100))
+                .unwrap()
+                .unwrap()
+                .output_sequence,
+            1
+        );
+        sequencer.replace_source();
+        assert_eq!(
+            sequencer.advance_blank().unwrap().unwrap().output_sequence,
+            2
+        );
+        assert_eq!(
+            sequencer.advance_blank().unwrap().unwrap().output_sequence,
+            3
+        );
+        assert_eq!(
+            sequencer.advance(Some(1)).unwrap().unwrap().output_sequence,
+            4
+        );
     }
 
     #[test]

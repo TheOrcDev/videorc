@@ -955,6 +955,44 @@ impl WindowsD3d11BoundedTexturePool {
         }
     }
 
+    /// Release a destination that may contain submitted GPU commands only
+    /// after publishing a synchronization fence. Signal failures leave its
+    /// internal role held, quarantining the slot for device-loss teardown.
+    pub(crate) fn retire_written_destination(
+        &mut self,
+        producer: WindowsD3d11ProducerTextureLease,
+        signal: impl FnOnce(u64) -> Result<(), WindowsD3d11Error>,
+    ) -> Result<(), WindowsD3d11Error> {
+        let published = self.publish(producer, [WindowsD3d11MediaRole::Compositor])?;
+        signal(published.synchronization.fence_value)?;
+        self.release_role(WindowsD3d11LeaseRelease {
+            generation: producer.generation,
+            lease_id: published.lease_id,
+            role: WindowsD3d11MediaRole::Compositor,
+        })?;
+        Ok(())
+    }
+
+    fn retire_failed_capture_write(
+        &mut self,
+        producer: WindowsD3d11ProducerTextureLease,
+        error: WindowsD3d11Error,
+        signal: impl FnOnce(u64) -> Result<(), WindowsD3d11Error>,
+    ) -> WindowsD3d11Error {
+        if self.still_writing(producer)
+            && let Err(retirement_error) = self.retire_written_destination(producer, signal)
+        {
+            return retirement_error;
+        }
+        error
+    }
+
+    fn still_writing(&self, producer: WindowsD3d11ProducerTextureLease) -> bool {
+        self.slots.get(usize::from(producer.slot_id.as_u16())).is_some_and(|slot| {
+            matches!(slot.phase, WindowsD3d11TextureSlotPhase::Writing { lease_id } if lease_id == producer.lease_id)
+        })
+    }
+
     pub(crate) fn publish(
         &mut self,
         lease: WindowsD3d11ProducerTextureLease,
@@ -1641,11 +1679,13 @@ impl WindowsD3d11MediaAuthorityState {
 #[cfg(target_os = "windows")]
 mod runtime {
     use super::*;
+    use crate::windows_capture_owner::{CaptureOwner, CaptureOwnerCompletion};
     use crate::windows_d3d11_capture::{
-        WindowsD3d11CaptureBackend, WindowsD3d11CaptureDiagnostics, WindowsD3d11CaptureError,
-        WindowsD3d11CaptureFallbackReason, WindowsD3d11CapturePlan,
+        WindowsD3d11CaptureBackend, WindowsD3d11CaptureDecision, WindowsD3d11CaptureDiagnostics,
+        WindowsD3d11CaptureError, WindowsD3d11CaptureFallbackReason, WindowsD3d11CapturePlan,
         WindowsD3d11CaptureSubmissionMetadata, WindowsD3d11DesktopDuplicationCapture,
-        WindowsD3d11DesktopDuplicationState, WindowsD3d11Point, WindowsD3d11WgcMonitorCapture,
+        WindowsD3d11DesktopDuplicationState, WindowsD3d11Point, WindowsD3d11RuntimeAcquisition,
+        WindowsD3d11WgcMonitorCapture,
     };
     use crate::windows_d3d11_compositor::{
         WindowsD3d11BgraUpload, WindowsD3d11ComposedFrame, WindowsD3d11Compositor,
@@ -1729,6 +1769,25 @@ mod runtime {
     }
 
     impl WindowsD3d11Device {
+        fn capture_owner_factory(&self) -> impl FnOnce() -> Self + Send + 'static {
+            let device = self.device.clone();
+            let immediate_context = self.immediate_context.clone();
+            let fence = self.fence.clone();
+            let adapter_luid = self.adapter_luid;
+            let feature_level = self.feature_level;
+            let multithread_protected = self.multithread_protected;
+            move || Self {
+                device,
+                immediate_context,
+                fence,
+                adapter_luid,
+                feature_level,
+                multithread_protected,
+                device_loss_code: None,
+                _thread_affinity: PhantomData,
+            }
+        }
+
         fn create(selection: WindowsDxgiOutputSelection) -> Result<Self, WindowsD3d11Error> {
             let adapter = select_adapter(selection)?;
             let mut base_device: Option<ID3D11Device> = None;
@@ -2246,9 +2305,64 @@ mod runtime {
         }
     }
 
+    struct CaptureInput {
+        destination: ID3D11Texture2D,
+        timeout_ms: u32,
+    }
+    struct CaptureOutput {
+        pointer: Option<(WindowsD3d11CaptureDecision, WindowsD3d11RuntimeAcquisition)>,
+        metadata: Option<WindowsD3d11CaptureSubmissionMetadata>,
+        diagnostics: WindowsD3d11CaptureDiagnostics,
+    }
+    // Field drop order keeps native objects and their COM interfaces inside the
+    // initialized apartment through actual driver close.
+    struct CaptureWorker {
+        capture: WindowsD3d11CaptureRuntime,
+        device: WindowsD3d11Device,
+        _apartment: ComApartment,
+    }
+    #[derive(Clone, Debug)]
+    struct CaptureReply {
+        sender: SyncSender<Result<Option<WindowsD3d11RawCaptureSubmission>, WindowsD3d11Error>>,
+        publication: Arc<Mutex<()>>,
+    }
+    impl CaptureReply {
+        // The unsent value returns its exact raw lease for bounded retirement;
+        // avoid an extra allocation on every successful capture publication.
+        #[allow(clippy::result_large_err)]
+        fn try_send(
+            &self,
+            result: Result<Option<WindowsD3d11RawCaptureSubmission>, WindowsD3d11Error>,
+        ) -> Result<
+            (),
+            TrySendError<Result<Option<WindowsD3d11RawCaptureSubmission>, WindowsD3d11Error>>,
+        > {
+            let _publication = self.publication.lock().unwrap_or_else(|p| p.into_inner());
+            self.sender.try_send(result)
+        }
+    }
+    struct PendingCapture {
+        producer: WindowsD3d11ProducerTextureLease,
+        consumers: Vec<WindowsD3d11MediaRole>,
+        reply: CaptureReply,
+    }
+    struct ManagedCapture {
+        plan: WindowsD3d11CapturePlan,
+        owner: CaptureOwner<CaptureInput, CaptureOutput, WindowsD3d11Error>,
+        diagnostics: WindowsD3d11CaptureDiagnostics,
+        opened_diagnostics: Arc<Mutex<Option<WindowsD3d11CaptureDiagnostics>>>,
+        panic_notified: bool,
+        starting: Option<SyncSender<Result<WindowsD3d11CaptureSession, WindowsD3d11Error>>>,
+        started_at: Instant,
+        pending: Option<PendingCapture>,
+        stopped: Option<SyncSender<Result<bool, WindowsD3d11Error>>>,
+    }
+
     struct WindowsD3d11MediaRuntimeState {
         contract: WindowsD3d11MediaAuthorityState,
-        capture: Option<WindowsD3d11CaptureRuntime>,
+        capture: Option<ManagedCapture>,
+        retiring_captures: Vec<ManagedCapture>,
+        wake_event: Option<Arc<WindowsD3d11WakeEvent>>,
         compositor: Result<WindowsD3d11Compositor, WindowsD3d11CompositorError>,
         encoders: BTreeMap<WindowsD3d11MediaRole, WindowsD3d11EncoderRuntime>,
         presenter: Option<WindowsD3d11Presenter>,
@@ -2266,6 +2380,8 @@ mod runtime {
             Ok(Self {
                 contract: WindowsD3d11MediaAuthorityState::new(generation, compositor.is_ok())?,
                 capture: None,
+                retiring_captures: Vec::new(),
+                wake_event: None,
                 compositor,
                 encoders: BTreeMap::new(),
                 presenter: None,
@@ -2406,7 +2522,7 @@ mod runtime {
         AcquireCapture {
             timeout_ms: u32,
             consumers: Vec<WindowsD3d11MediaRole>,
-            reply: SyncSender<Result<Option<WindowsD3d11RawCaptureSubmission>, WindowsD3d11Error>>,
+            reply: CaptureReply,
         },
         StopCapture {
             reply: SyncSender<Result<bool, WindowsD3d11Error>>,
@@ -2484,6 +2600,44 @@ mod runtime {
         preview_replaced_frames: Arc<AtomicU64>,
     }
 
+    /// One bounded capture request. Polling never waits on the native driver;
+    /// dropping it returns any already queued lease, while a later actor reply
+    /// observes disconnection and releases its own roles.
+    pub(crate) struct WindowsD3d11CapturePoll {
+        publication: Arc<Mutex<()>>,
+        response:
+            Option<Receiver<Result<Option<WindowsD3d11RawCaptureSubmission>, WindowsD3d11Error>>>,
+        client: WindowsD3d11MediaClient,
+    }
+    impl WindowsD3d11CapturePoll {
+        pub(crate) fn poll(
+            &mut self,
+        ) -> Option<Result<Option<WindowsD3d11CaptureFrameSubmission>, WindowsD3d11Error>> {
+            let response = self.response.as_ref()?;
+            let result = match response.try_recv() {
+                Ok(result) => result.and_then(|frame| self.client.ticket_capture(frame)),
+                Err(mpsc::TryRecvError::Empty) => return None,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Err(capture_unavailable("Capture response channel closed"))
+                }
+            };
+            self.response = None;
+            Some(result)
+        }
+    }
+    impl Drop for WindowsD3d11CapturePoll {
+        fn drop(&mut self) {
+            let _publication = self.publication.lock().unwrap_or_else(|p| p.into_inner());
+            if let Some(response) = self.response.take() {
+                // Hold the same fence as the publisher through receiver drop;
+                // no successful late send can fall between drain and disconnect.
+                for frame in response.try_iter().flatten() {
+                    drop(self.client.ticket_capture(frame));
+                }
+            }
+        }
+    }
+
     impl fmt::Debug for WindowsD3d11MediaClient {
         fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
             formatter
@@ -2533,11 +2687,11 @@ mod runtime {
             receive_response(response)
         }
 
-        pub(crate) fn acquire_capture(
+        pub(crate) fn begin_capture_poll(
             &self,
             timeout_ms: u32,
             consumers: Vec<WindowsD3d11MediaRole>,
-        ) -> Result<Option<WindowsD3d11CaptureFrameSubmission>, WindowsD3d11Error> {
+        ) -> Result<WindowsD3d11CapturePoll, WindowsD3d11Error> {
             if timeout_ms > MAX_CAPTURE_WAIT_MS {
                 return Err(WindowsD3d11Error::new(
                     WindowsD3d11ErrorCode::UnsupportedCapability,
@@ -2547,13 +2701,51 @@ mod runtime {
                 ));
             }
             validate_consumer_roles("captured BGRA", &consumers, false)?;
-            let (reply, response) = mpsc::sync_channel(1);
+            let (sender, response) = mpsc::sync_channel(1);
+            let publication = Arc::new(Mutex::new(()));
+            let reply = CaptureReply {
+                sender,
+                publication: publication.clone(),
+            };
             self.enqueue(WindowsD3d11MediaCommand::AcquireCapture {
                 timeout_ms,
                 consumers,
                 reply,
             })?;
-            receive_response(response)?
+            Ok(WindowsD3d11CapturePoll {
+                publication,
+                response: Some(response),
+                client: self.clone(),
+            })
+        }
+
+        pub(crate) fn acquire_capture(
+            &self,
+            timeout_ms: u32,
+            consumers: Vec<WindowsD3d11MediaRole>,
+        ) -> Result<Option<WindowsD3d11CaptureFrameSubmission>, WindowsD3d11Error> {
+            let mut pending = self.begin_capture_poll(timeout_ms, consumers)?;
+            match pending
+                .response
+                .as_ref()
+                .expect("new capture response")
+                .recv_timeout(MEDIA_RESPONSE_TIMEOUT)
+            {
+                Ok(result) => {
+                    pending.response = None;
+                    self.ticket_capture(result?)
+                }
+                Err(error) => Err(capture_unavailable(&format!(
+                    "Capture response did not complete: {error}"
+                ))),
+            }
+        }
+
+        fn ticket_capture(
+            &self,
+            submission: Option<WindowsD3d11RawCaptureSubmission>,
+        ) -> Result<Option<WindowsD3d11CaptureFrameSubmission>, WindowsD3d11Error> {
+            submission
                 .map(|submission| {
                     Ok(WindowsD3d11CaptureFrameSubmission {
                         metadata: submission.metadata,
@@ -2567,6 +2759,14 @@ mod runtime {
                     })
                 })
                 .transpose()
+        }
+
+        pub(crate) fn begin_stop_capture(
+            &self,
+        ) -> Result<mpsc::Receiver<Result<bool, WindowsD3d11Error>>, WindowsD3d11Error> {
+            let (reply, response) = mpsc::sync_channel(1);
+            self.enqueue(WindowsD3d11MediaCommand::StopCapture { reply })?;
+            Ok(response)
         }
 
         pub(crate) fn stop_capture(&self) -> Result<bool, WindowsD3d11Error> {
@@ -3270,7 +3470,8 @@ mod runtime {
             let texture_pool =
                 WindowsD3d11TexturePoolOwner::create(&device, generation, pool_config)?;
             let compositor = WindowsD3d11Compositor::new(&device, generation);
-            let media_runtime = WindowsD3d11MediaRuntimeState::new(generation, compositor)?;
+            let mut media_runtime = WindowsD3d11MediaRuntimeState::new(generation, compositor)?;
+            media_runtime.wake_event = Some(event.clone());
             Ok::<_, WindowsD3d11Error>((apartment, event, device, texture_pool, media_runtime))
         })();
         let Ok((apartment, event, mut device, mut texture_pool, mut media_runtime)) = setup else {
@@ -3307,6 +3508,12 @@ mod runtime {
             if cancel_startup.load(AtomicOrdering::Acquire) {
                 break;
             }
+            poll_capture_owners(
+                generation,
+                &mut device,
+                &mut texture_pool,
+                &mut media_runtime,
+            );
             let message_count = drain_window_messages(&mut shutdown, &mut message_lag_samples);
             metrics.max_message_batch = metrics
                 .max_message_batch
@@ -3495,7 +3702,7 @@ mod runtime {
         counters.capture = media_runtime
             .capture
             .as_ref()
-            .map(WindowsD3d11CaptureRuntime::diagnostics);
+            .map(|capture| capture.diagnostics);
         counters.compositor = media_runtime
             .compositor
             .as_ref()
@@ -3563,8 +3770,11 @@ mod runtime {
                 false
             }
             WindowsD3d11MediaCommand::StartCapture { plan, reply } => {
-                let response = start_capture_runtime(plan, device, media_runtime);
-                let _ = reply.try_send(response);
+                if let Err(error) =
+                    start_capture_runtime(plan, reply.clone(), device, media_runtime)
+                {
+                    let _ = reply.try_send(Err(error));
+                }
                 false
             }
             WindowsD3d11MediaCommand::AcquireCapture {
@@ -3572,25 +3782,34 @@ mod runtime {
                 consumers,
                 reply,
             } => {
-                let response = acquire_capture_submission(
+                if let Err(error) = begin_capture_submission(
                     generation,
                     timeout_ms,
                     consumers,
+                    reply.clone(),
                     device,
                     texture_pool,
                     media_runtime,
-                );
-                let _ = reply.try_send(response);
+                ) {
+                    let _ = reply.try_send(Err(error));
+                }
                 false
             }
             WindowsD3d11MediaCommand::StopCapture { reply } => {
-                let response = media_runtime
-                    .contract
-                    .stop_capture(generation)
-                    .inspect(|_| {
-                        media_runtime.capture = None;
-                    });
-                let _ = reply.try_send(response);
+                match media_runtime.contract.stop_capture(generation) {
+                    Ok(_) => {
+                        if let Some(mut capture) = media_runtime.capture.take() {
+                            capture.owner.stop();
+                            capture.stopped = Some(reply);
+                            media_runtime.retiring_captures.push(capture);
+                        } else {
+                            let _ = reply.try_send(Ok(false));
+                        }
+                    }
+                    Err(error) => {
+                        let _ = reply.try_send(Err(error));
+                    }
+                }
                 false
             }
             WindowsD3d11MediaCommand::ComposeScene {
@@ -4053,77 +4272,378 @@ mod runtime {
 
     fn start_capture_runtime(
         plan: WindowsD3d11CapturePlan,
+        reply: SyncSender<Result<WindowsD3d11CaptureSession, WindowsD3d11Error>>,
         device: &WindowsD3d11Device,
         media_runtime: &mut WindowsD3d11MediaRuntimeState,
-    ) -> Result<WindowsD3d11CaptureSession, WindowsD3d11Error> {
+    ) -> Result<(), WindowsD3d11Error> {
         if media_runtime.capture.is_some() {
-            return Err(WindowsD3d11Error::new(
-                WindowsD3d11ErrorCode::CaptureUnavailable,
-                "the media thread already owns an active capture runtime",
+            return Err(capture_unavailable(
+                "A capture owner is already opening or active",
             ));
         }
-        let capture = match plan.backend {
-            WindowsD3d11CaptureBackend::DesktopDuplication => {
-                WindowsD3d11CaptureRuntime::DesktopDuplication {
-                    plan,
-                    capture: WindowsD3d11DesktopDuplicationCapture::create(device, plan)
-                        .map_err(map_capture_error)?,
-                    state: WindowsD3d11DesktopDuplicationState::new(
-                        plan.generation,
-                        plan.cursor_requested,
-                    )
-                    .map_err(map_capture_error)?,
-                }
-            }
-            WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor => {
-                WindowsD3d11CaptureRuntime::WindowsGraphicsCapture {
-                    plan,
-                    capture: WindowsD3d11WgcMonitorCapture::create(device, plan)
-                        .map_err(map_capture_error)?,
-                    next_sequence: 1,
-                }
-            }
-        };
-        let kind = capture.kind();
-        let diagnostics = capture.diagnostics();
-        media_runtime
-            .contract
-            .start_capture(plan.generation, kind)?;
-        media_runtime.capture = Some(capture);
-        Ok(WindowsD3d11CaptureSession { plan, diagnostics })
+        static NEXT_CAPTURE_OWNER: AtomicU64 = AtomicU64::new(1);
+        let owner_generation = NEXT_CAPTURE_OWNER.fetch_add(1, AtomicOrdering::AcqRel);
+        let factory = device.capture_owner_factory();
+        let wake = media_runtime
+            .wake_event
+            .clone()
+            .ok_or_else(|| capture_unavailable("Media wake event is unavailable"))?;
+        let opened_diagnostics = Arc::new(Mutex::new(None));
+        let worker_diagnostics = opened_diagnostics.clone();
+        let owner = CaptureOwner::start_with_wake(
+            owner_generation,
+            crate::windows_capture_owner::platform_pool(),
+            move || {
+                let apartment = ComApartment::initialize()?;
+                let device = factory();
+                let capture = match plan.backend {
+                    WindowsD3d11CaptureBackend::DesktopDuplication => {
+                        WindowsD3d11CaptureRuntime::DesktopDuplication {
+                            plan,
+                            capture: WindowsD3d11DesktopDuplicationCapture::create(&device, plan)
+                                .map_err(map_capture_error)?,
+                            state: WindowsD3d11DesktopDuplicationState::new(
+                                plan.generation,
+                                plan.cursor_requested,
+                            )
+                            .map_err(map_capture_error)?,
+                        }
+                    }
+                    WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor => {
+                        WindowsD3d11CaptureRuntime::WindowsGraphicsCapture {
+                            plan,
+                            capture: WindowsD3d11WgcMonitorCapture::create(&device, plan)
+                                .map_err(map_capture_error)?,
+                            next_sequence: 1,
+                        }
+                    }
+                };
+
+                *worker_diagnostics.lock().unwrap_or_else(|p| p.into_inner()) =
+                    Some(capture.diagnostics());
+                Ok(CaptureWorker {
+                    capture,
+                    device,
+                    _apartment: apartment,
+                })
+            },
+            acquire_owned_capture,
+            move || {
+                let _ = wake.signal();
+            },
+        )
+        .map_err(|reason| capture_unavailable(&reason))?;
+        media_runtime.capture = Some(ManagedCapture {
+            plan,
+            owner,
+            diagnostics: WindowsD3d11CaptureDiagnostics::default(),
+            opened_diagnostics,
+            panic_notified: false,
+            starting: Some(reply),
+            started_at: Instant::now(),
+            pending: None,
+            stopped: None,
+        });
+        Ok(())
     }
 
-    fn acquire_capture_submission(
+    fn capture_unavailable(reason: &str) -> WindowsD3d11Error {
+        WindowsD3d11Error::new(WindowsD3d11ErrorCode::CaptureUnavailable, reason)
+    }
+
+    fn begin_capture_submission(
         generation: u64,
         timeout_ms: u32,
         consumers: Vec<WindowsD3d11MediaRole>,
+        reply: CaptureReply,
         device: &mut WindowsD3d11Device,
         texture_pool: &mut WindowsD3d11TexturePoolOwner,
         media_runtime: &mut WindowsD3d11MediaRuntimeState,
-    ) -> Result<Option<WindowsD3d11RawCaptureSubmission>, WindowsD3d11Error> {
+    ) -> Result<(), WindowsD3d11Error> {
         media_runtime.contract.require_capture(generation)?;
         if timeout_ms > MAX_CAPTURE_WAIT_MS {
-            return Err(WindowsD3d11Error::new(
-                WindowsD3d11ErrorCode::UnsupportedCapability,
-                "capture command exceeded the bounded wait contract",
+            return Err(capture_unavailable(
+                "Capture command exceeded its bounded wait contract",
             ));
         }
         validate_consumer_roles("captured BGRA", &consumers, false)?;
+        let capture = media_runtime
+            .capture
+            .as_mut()
+            .ok_or_else(|| capture_unavailable("No capture owner"))?;
+        if capture.pending.is_some() {
+            return Err(capture_unavailable(
+                "A capture acquisition is already in flight",
+            ));
+        }
         texture_pool.refresh_completed(device)?;
-        let dimensions = texture_pool.config.capture_bgra_dimensions();
-        let producer = texture_pool
-            .state
-            .acquire_for_write_dimensions(WindowsD3d11TextureFormat::Bgra8Unorm, dimensions)?;
-        let acquisition =
+        let producer = texture_pool.state.acquire_for_write_dimensions(
+            WindowsD3d11TextureFormat::Bgra8Unorm,
+            texture_pool.config.capture_bgra_dimensions(),
+        )?;
+        let destination = match texture_pool.texture_for_producer(producer) {
+            Ok(texture) => texture.clone(),
+            Err(error) => {
+                let _ = texture_pool.state.cancel_write(producer);
+                return Err(error);
+            }
+        };
+        if capture
+            .owner
+            .begin_acquire(CaptureInput {
+                destination,
+                timeout_ms,
+            })
+            .is_err()
+        {
+            texture_pool.state.cancel_write(producer)?;
+            return Err(capture_unavailable(
+                "Capture owner did not admit acquisition",
+            ));
+        }
+        capture.pending = Some(PendingCapture {
+            producer,
+            consumers,
+            reply,
+        });
+        Ok(())
+    }
+
+    /// An acquired destination may already contain queued GPU writes even when
+    /// no frame was published, or cancellation won. Keep it behind a real fence;
+    /// a native close receipt alone never makes this texture reusable.
+    fn retire_capture_destination(
+        producer: WindowsD3d11ProducerTextureLease,
+        device: &mut WindowsD3d11Device,
+        pool: &mut WindowsD3d11TexturePoolOwner,
+    ) -> Result<(), WindowsD3d11Error> {
+        pool.state
+            .retire_written_destination(producer, |fence| device.signal(fence))
+    }
+
+    fn complete_capture_submission(
+        capture: &mut ManagedCapture,
+        result: Result<CaptureOutput, WindowsD3d11Error>,
+        retired: bool,
+        compositor: &mut Result<WindowsD3d11Compositor, WindowsD3d11CompositorError>,
+        device: &mut WindowsD3d11Device,
+        pool: &mut WindowsD3d11TexturePoolOwner,
+    ) {
+        let Some(pending) = capture.pending.take() else {
+            return;
+        };
+        let response = (|| {
+            let output = match result {
+                Ok(output) => output,
+                Err(error) => {
+                    retire_capture_destination(pending.producer, device, pool)?;
+                    return Err(error);
+                }
+            };
+            capture.diagnostics = output.diagnostics;
+            let Some(metadata) = output.metadata.filter(|_| !retired) else {
+                retire_capture_destination(pending.producer, device, pool)?;
+                return if retired {
+                    Err(capture_unavailable("Capture generation retired"))
+                } else {
+                    Ok(None)
+                };
+            };
+            if let Some((decision, acquisition)) = output.pointer {
+                let destination = pool.texture_for_producer(pending.producer)?;
+                if decision.composite_pointer
+                    || decision.clear_previous_pointer
+                    || decision.use_cached_uncomposited_desktop
+                {
+                    let compositor = compositor
+                        .as_mut()
+                        .map_err(|error| map_compositor_error(error.clone()))?;
+                    compositor
+                        .composite_duplication_pointer(
+                            device,
+                            destination,
+                            acquisition.copied_before_release,
+                            decision.use_cached_uncomposited_desktop,
+                            acquisition.observation.pointer.visible,
+                            WindowsD3d11Point {
+                                x: acquisition.observation.pointer.x,
+                                y: acquisition.observation.pointer.y,
+                            },
+                            acquisition.rotation,
+                            acquisition.observation.pointer.shape_revision,
+                            acquisition.pointer_shape.as_ref(),
+                        )
+                        .map_err(map_compositor_error)?;
+                }
+            }
+            let lease = pool.state.publish(pending.producer, pending.consumers)?;
+            device.signal(lease.synchronization.fence_value)?;
+            Ok(Some(WindowsD3d11RawCaptureSubmission {
+                metadata,
+                lease,
+                dimensions: pending.producer.dimensions,
+            }))
+        })();
+        let response = response.map_err(|error| {
+            // Includes missing destination, compositor and pointer shader errors.
+            // A published-but-unsignaled lease remains quarantined; Signal
+            // recorded the actual device-loss HRESULT and held consumer roles.
+            pool.state
+                .retire_failed_capture_write(pending.producer, error, |fence| device.signal(fence))
+        });
+        // A timed-out caller cannot leak roles for a late acquired texture.
+        if let Err(
+            TrySendError::Disconnected(Ok(Some(frame))) | TrySendError::Full(Ok(Some(frame))),
+        ) = pending.reply.try_send(response)
+        {
+            for role in frame.lease.consumers {
+                let _ = pool.state.release_role(WindowsD3d11LeaseRelease {
+                    generation: frame.lease.generation,
+                    lease_id: frame.lease.lease_id,
+                    role,
+                });
+            }
+        }
+    }
+
+    fn poll_capture_owners(
+        generation: u64,
+        device: &mut WindowsD3d11Device,
+        pool: &mut WindowsD3d11TexturePoolOwner,
+        runtime: &mut WindowsD3d11MediaRuntimeState,
+    ) {
+        let mut retire = false;
+        if let Some(capture) = runtime.capture.as_mut() {
+            if let Some(opened) = capture.owner.take_open_result() {
+                if let Some(diagnostics) = capture
+                    .opened_diagnostics
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .take()
+                {
+                    capture.diagnostics = diagnostics;
+                }
+                let response = opened.and_then(|()| {
+                    let kind = match capture.plan.backend {
+                        WindowsD3d11CaptureBackend::DesktopDuplication => {
+                            WindowsD3d11CaptureAuthorityKind::DesktopDuplication
+                        }
+                        WindowsD3d11CaptureBackend::WindowsGraphicsCaptureMonitor => {
+                            WindowsD3d11CaptureAuthorityKind::WindowsGraphicsCapture
+                        }
+                    };
+                    runtime.contract.start_capture(generation, kind)?;
+                    Ok(WindowsD3d11CaptureSession {
+                        plan: capture.plan,
+                        diagnostics: capture.diagnostics,
+                    })
+                });
+                retire = response.is_err();
+                if let Some(reply) = capture.starting.take() {
+                    retire |= reply.try_send(response).is_err();
+                }
+            } else if capture.starting.is_some()
+                && capture.started_at.elapsed() >= Duration::from_secs(5)
+            {
+                if let Some(reply) = capture.starting.take() {
+                    let _ = reply.try_send(Err(capture_unavailable(
+                        "Capture opening timed out; owner remains quarantined until close",
+                    )));
+                }
+                retire = true;
+            }
+            if let Some(result) = capture.owner.take_acquired() {
+                complete_capture_submission(
+                    capture,
+                    result,
+                    false,
+                    &mut runtime.compositor,
+                    device,
+                    pool,
+                );
+            }
+            retire |= capture.owner.completion() != CaptureOwnerCompletion::Running;
+        }
+        if retire && let Some(capture) = runtime.capture.take() {
+            capture.owner.stop();
+            let _ = runtime.contract.stop_capture(generation);
+            runtime.retiring_captures.push(capture);
+        }
+        runtime.retiring_captures.retain_mut(|capture| {
+            if let Some(result) = capture.owner.take_acquired() {
+                complete_capture_submission(
+                    capture,
+                    result,
+                    true,
+                    &mut runtime.compositor,
+                    device,
+                    pool,
+                );
+            }
+            match capture.owner.completion() {
+                CaptureOwnerCompletion::Running => true,
+                CaptureOwnerCompletion::Panicked => {
+                    if let Some(reply) = capture.starting.take() {
+                        let _ = reply.try_send(Err(capture_unavailable(
+                            "Capture owner panicked while opening",
+                        )));
+                    }
+                    if !capture.panic_notified
+                        && let Some(pending) = capture.pending.as_ref()
+                    {
+                        let _ = pending.reply.try_send(Err(capture_unavailable(
+                            "Capture owner panicked during acquisition",
+                        )));
+                    }
+                    capture.panic_notified = true;
+                    // A panic cannot prove that the destination is no longer
+                    // being written. Keep its lease and platform permit charged.
+                    if let Some(reply) = capture.stopped.take() {
+                        let _ = reply.try_send(Err(capture_unavailable(
+                            "Capture owner panicked; destination remains quarantined",
+                        )));
+                    }
+                    true
+                }
+                CaptureOwnerCompletion::Closed => {
+                    // Stop may win before the owner dequeues its destination.
+                    // Conservatively fence it even when no result was produced.
+                    if capture.pending.is_some() {
+                        complete_capture_submission(
+                            capture,
+                            Err(capture_unavailable(
+                                "Capture stopped before acquisition completed",
+                            )),
+                            true,
+                            &mut runtime.compositor,
+                            device,
+                            pool,
+                        );
+                    }
+                    if let Some(reply) = capture.starting.take() {
+                        let _ = reply
+                            .try_send(Err(capture_unavailable("Capture stopped while opening")));
+                    }
+                    if let Some(reply) = capture.stopped.take() {
+                        let _ = reply.try_send(Ok(true));
+                    }
+                    false
+                }
+            }
+        });
+    }
+
+    fn acquire_owned_capture(
+        worker: &mut CaptureWorker,
+        input: CaptureInput,
+    ) -> Result<CaptureOutput, WindowsD3d11Error> {
+        let device = &mut worker.device;
+        let destination = &input.destination;
+        let timeout_ms = input.timeout_ms;
+        let mut pointer = None;
+        let metadata =
             (|| -> Result<Option<WindowsD3d11CaptureSubmissionMetadata>, WindowsD3d11Error> {
-                let destination = texture_pool.texture_for_producer(producer)?;
-                let capture = media_runtime.capture.as_mut().ok_or_else(|| {
-                    WindowsD3d11Error::new(
-                        WindowsD3d11ErrorCode::CaptureUnavailable,
-                        "capture authority exists without a runtime object",
-                    )
-                })?;
-                match capture {
+                match &mut worker.capture {
                     WindowsD3d11CaptureRuntime::DesktopDuplication {
                         plan,
                         capture,
@@ -4142,38 +4662,15 @@ mod runtime {
                             capture.record_decision(decision);
                             return Ok(None);
                         }
-                        if decision.composite_pointer
-                            || decision.clear_previous_pointer
-                            || decision.use_cached_uncomposited_desktop
-                        {
-                            let compositor = media_runtime
-                                .compositor
-                                .as_mut()
-                                .map_err(|error| map_compositor_error(error.clone()))?;
-                            compositor
-                                .composite_duplication_pointer(
-                                    device,
-                                    destination,
-                                    acquisition.copied_before_release,
-                                    decision.use_cached_uncomposited_desktop,
-                                    acquisition.observation.pointer.visible,
-                                    WindowsD3d11Point {
-                                        x: acquisition.observation.pointer.x,
-                                        y: acquisition.observation.pointer.y,
-                                    },
-                                    acquisition.rotation,
-                                    acquisition.observation.pointer.shape_revision,
-                                    acquisition.pointer_shape.as_ref(),
-                                )
-                                .map_err(map_compositor_error)?;
-                        }
                         capture.record_decision(decision);
-                        Ok(WindowsD3d11CaptureSubmissionMetadata::desktop_duplication(
+                        let metadata = WindowsD3d11CaptureSubmissionMetadata::desktop_duplication(
                             *plan,
                             decision,
                             acquisition.observation,
                             acquisition.rotation,
-                        ))
+                        );
+                        pointer = Some((decision, acquisition));
+                        Ok(metadata)
                     }
                     WindowsD3d11CaptureRuntime::WindowsGraphicsCapture {
                         plan,
@@ -4204,31 +4701,12 @@ mod runtime {
                         ))
                     }
                 }
-            })();
-        let acquisition = match acquisition {
-            Ok(acquisition) => acquisition,
-            Err(error) => {
-                let _ = texture_pool.state.cancel_write(producer);
-                return Err(error);
-            }
-        };
-        let Some(metadata) = acquisition else {
-            texture_pool.state.cancel_write(producer)?;
-            return Ok(None);
-        };
-        let published = match texture_pool.state.publish(producer, consumers) {
-            Ok(published) => published,
-            Err(error) => {
-                let _ = texture_pool.state.cancel_write(producer);
-                return Err(error);
-            }
-        };
-        device.signal(published.synchronization.fence_value)?;
-        Ok(Some(WindowsD3d11RawCaptureSubmission {
+            })()?;
+        Ok(CaptureOutput {
+            pointer,
             metadata,
-            lease: published,
-            dimensions,
-        }))
+            diagnostics: worker.capture.diagnostics(),
+        })
     }
 
     fn compose_scene_submission(
@@ -4516,7 +4994,7 @@ mod runtime {
 #[cfg(target_os = "windows")]
 #[allow(unused_imports)]
 pub(crate) use runtime::{
-    WindowsD3d11CaptureFrameSubmission, WindowsD3d11CaptureSession,
+    WindowsD3d11CaptureFrameSubmission, WindowsD3d11CapturePoll, WindowsD3d11CaptureSession,
     WindowsD3d11ComposedTextureKind, WindowsD3d11CompositionConsumers,
     WindowsD3d11CompositionSource, WindowsD3d11CompositionSubmission, WindowsD3d11Device,
     WindowsD3d11EncoderProgress, WindowsD3d11EncoderStatus, WindowsD3d11EncoderSubmissionFailure,
@@ -4536,6 +5014,73 @@ mod tests {
             nv12_slots,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn cancelled_capture_and_pointer_failure_wait_for_gpu_completion_before_reuse() {
+        for pointer_failed in [false, true] {
+            let mut pool = WindowsD3d11BoundedTexturePool::new(71, pool_config(1, 1)).unwrap();
+            let producer = pool
+                .acquire_for_write(WindowsD3d11TextureFormat::Bgra8Unorm)
+                .unwrap();
+            let mut submitted_fence = None;
+            if pointer_failed {
+                let injected = WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::CompositorUnavailable,
+                    "injected pointer shader failure after capture copy",
+                );
+                let error = pool.retire_failed_capture_write(producer, injected, |fence| {
+                    submitted_fence = Some(fence);
+                    Ok(())
+                });
+                assert_eq!(error.code, WindowsD3d11ErrorCode::CompositorUnavailable);
+            } else {
+                pool.retire_written_destination(producer, |fence| {
+                    submitted_fence = Some(fence);
+                    Ok(())
+                })
+                .unwrap();
+            }
+            let fence =
+                submitted_fence.expect("GPU fence submitted even after native close/cancel");
+            assert!(!pool.still_writing(producer));
+            assert!(
+                pool.acquire_for_write(WindowsD3d11TextureFormat::Bgra8Unorm)
+                    .is_err(),
+                "CPU owner completion is not GPU completion"
+            );
+            pool.observe_completed_fence(fence).unwrap();
+            let next = pool
+                .acquire_for_write(WindowsD3d11TextureFormat::Bgra8Unorm)
+                .unwrap();
+            assert_eq!(next.slot_id, producer.slot_id);
+            assert_ne!(next.lease_id, producer.lease_id);
+        }
+    }
+
+    #[test]
+    fn failed_capture_retirement_signal_quarantines_the_published_slot() {
+        let mut pool = WindowsD3d11BoundedTexturePool::new(72, pool_config(1, 1)).unwrap();
+        let producer = pool
+            .acquire_for_write(WindowsD3d11TextureFormat::Bgra8Unorm)
+            .unwrap();
+        let error = pool
+            .retire_written_destination(producer, |_| {
+                Err(WindowsD3d11Error::new(
+                    WindowsD3d11ErrorCode::DeviceLost,
+                    "injected Signal failure",
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(error.code, WindowsD3d11ErrorCode::DeviceLost);
+        assert!(!pool.still_writing(producer));
+        pool.observe_completed_fence(pool.last_signaled_fence())
+            .unwrap();
+        assert!(
+            pool.acquire_for_write(WindowsD3d11TextureFormat::Bgra8Unorm)
+                .is_err(),
+            "an unacknowledged signal keeps its internal role held"
+        );
     }
 
     #[test]

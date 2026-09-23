@@ -924,6 +924,8 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
     use crate::live_source_switch::{SourceKind, SourceSwitchParams};
     for case in [
         "stale-camera",
+        "native-authority",
+        "native-authority-gap",
         "empty-auxiliary",
         "missing-auxiliary",
         "layout-before-frame",
@@ -994,6 +996,20 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
                 camera: Some((SourceKey::camera("camera:B"), camera.generation())),
                 screen: None,
             });
+        }
+        let mut native_lease = if matches!(case, "native-authority" | "native-authority-gap") {
+            Some(
+                state
+                    .compositor
+                    .lock()
+                    .await
+                    .claim_native_source_output("proof-session", 7),
+            )
+        } else {
+            None
+        };
+        if case == "native-authority-gap" {
+            drop(native_lease.take());
         }
         if matches!(case, "layout-before-frame" | "layout-replaced-source") {
             let mut changed = scene.scene.clone().unwrap();
@@ -1068,6 +1084,71 @@ async fn source_edit_publication_refuses_stale_camera_and_failed_auxiliary_outpu
             snapshot.last_operation.unwrap().output_superseded,
             case == "layout-replaced-source"
         );
+        if matches!(case, "native-authority" | "native-authority-gap") {
+            let mut compositor = state.compositor.lock().await;
+            let recovered_lease = compositor.claim_native_source_output("proof-session", 8);
+            let edit = compositor.source_edit_snapshot().unwrap();
+            let mut coordinator = state.live_source_switch.lock().unwrap();
+            for (session, generation, both_legs) in [
+                ("old-session", 7, true),
+                ("proof-session", 6, true),
+                ("proof-session", 8, false),
+            ] {
+                compositor.observe_windows_source_publication(
+                    &mut coordinator,
+                    &edit,
+                    session,
+                    generation,
+                    camera.source_key().map(|key| (key, camera.generation())),
+                    None,
+                    true,
+                    false,
+                    both_legs,
+                );
+                assert!(
+                    !coordinator
+                        .snapshot("proof-session")
+                        .unwrap()
+                        .last_operation
+                        .unwrap()
+                        .output_observed
+                );
+            }
+            compositor.observe_windows_source_publication(
+                &mut coordinator,
+                &edit,
+                "proof-session",
+                8,
+                camera.source_key().map(|key| (key, camera.generation())),
+                None,
+                true,
+                false,
+                true,
+            );
+            assert!(
+                coordinator
+                    .snapshot("proof-session")
+                    .unwrap()
+                    .last_operation
+                    .unwrap()
+                    .output_observed
+            );
+            drop(native_lease); // guaranteed even while the compositor mutex is held
+            drop(recovered_lease);
+            assert!(
+                !compositor
+                    .native_source_output_authority
+                    .is_generic_for("proof-session")
+            );
+            compositor
+                .native_source_output_authority
+                .release_session("proof-session");
+            assert!(
+                compositor
+                    .native_source_output_authority
+                    .is_generic_for("proof-session")
+            );
+        }
         crate::preview_camera::stop_preview_camera(&state).await;
     }
 }
@@ -1199,4 +1280,78 @@ async fn source_edit_takeover_pixels_do_not_prove_hidden_capture_and_clear_revea
         }
     }
     crate::preview_screen::stop_preview_screen(&state).await;
+}
+
+#[tokio::test]
+async fn windows_source_binding_rejects_failed_cached_source_but_accepts_static_live_screen() {
+    let state = state();
+    install_screen(&state, "screen:fixture", 7, 40, [0, 255, 0, 255]).await;
+    let mut screen = state.preview_screen.lock().await;
+    screen.status.state = crate::protocol::PreviewScreenState::Live;
+    screen.status.frame_age_ms = Some(10_000);
+    assert!(
+        crate::preview_screen::available_frame_source_locked(&screen)
+            .unwrap()
+            .latest_frame_blocking()
+            .is_some()
+    );
+    screen.status.state = crate::protocol::PreviewScreenState::Failed;
+    assert!(
+        crate::preview_screen::frame_source_locked(&screen).is_some(),
+        "failed adapter retains cached frame store"
+    );
+    assert!(
+        crate::preview_screen::available_frame_source_locked(&screen).is_none(),
+        "failed store is not an on-air source"
+    );
+    drop(screen);
+    let scene = snapshot(SceneSourceKind::Camera);
+    crate::preview_camera::test_install_live_camera_for_layout(
+        &state,
+        "camera:B",
+        &scene.layout,
+        &video(),
+    )
+    .await;
+    let mut camera = state.preview_camera.lock().await;
+    assert!(crate::preview_camera::available_frame_source_locked(&camera).is_some());
+    camera.status.state = crate::protocol::PreviewCameraState::Failed;
+    assert!(crate::preview_camera::available_frame_source_locked(&camera).is_none());
+    drop(camera);
+    crate::preview_camera::stop_preview_camera(&state).await;
+}
+
+#[tokio::test]
+async fn windows_source_render_edit_samples_glide_without_mutating_committed_proof() {
+    let state = state();
+    let now = Instant::now();
+    let mut target = snapshot(SceneSourceKind::Camera);
+    target.scene.as_mut().unwrap().sources[0].transform.x = 0.5;
+    let mut from = target.scene.clone().unwrap();
+    from.sources[0].transform.x = 0.0;
+    let mut compositor = state.compositor.lock().await;
+    compositor.scene = Some(target.clone());
+    compositor.scene_transition = Some(SceneTransition {
+        from,
+        started_at: now,
+        duration: Duration::from_secs(2),
+    });
+    let committed = compositor.source_edit_snapshot().unwrap();
+    let rendered = compositor
+        .source_render_edit(now + Duration::from_secs(1))
+        .unwrap();
+    assert_eq!(
+        rendered.primary.scene.as_ref().unwrap().sources[0]
+            .transform
+            .x,
+        0.25
+    );
+    assert_eq!(
+        committed.primary.scene.as_ref().unwrap().sources[0]
+            .transform
+            .x,
+        0.5
+    );
+    assert!(compositor.source_edit_is_current(&committed));
+    assert!(!compositor.source_edit_is_current(&rendered));
 }

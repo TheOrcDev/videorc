@@ -1432,6 +1432,7 @@ export type WindowsD3d11MediaState =
   | 'failed'
 
 export type WindowsD3d11CaptureBackend =
+  | 'preview-bgra-upload'
   | 'desktop-duplication'
   | 'windows-graphics-capture-monitor'
   | 'legacy-ffmpeg'

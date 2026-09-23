@@ -1175,7 +1175,6 @@ recording, stream, or release was run during planning.
   denied (`s5-clippy-final-v2.log`). Clippy's three style findings were corrected
   without changing the transaction semantics.
 
-
 ### Independent frozen S5 checkpoint verification (1486eb26)
 
 A disposable detached worktree with independent build artifacts verified the
@@ -1200,7 +1199,7 @@ committed checkpoint while Windows implementation continued separately.
   (1,905 passed, one skipped); executor correction is pending commit.
 - Linux CI passed. JS CI failed the unchanged eager gzip budget: 387,599 bytes
   versus 385,000. Windows and macOS Rust CI were still running at this report.
-- Evidence logs are under /tmp/videorc-live-sources-evidence/s5-frozen-*.log.
+- Evidence logs are under /tmp/videorc-live-sources-evidence/s5-frozen-\*.log.
   Generated artifacts remain outside git; no final platform acceptance claimed.
 
 ### S5 asset-budget amendment
@@ -1236,3 +1235,55 @@ or weaken the shared controller's synchronous admission fence.
   desktop build passing (`s5-ui-fix-{lint,format,build}.log`). The QuickSettings
   experiment was fully discarded. The eager registry remains synchronous and
   tests retain late browser-stream disposal and confirmed-device reacquisition.
+
+### S5 Windows native source checkpoint
+
+- Native capture open/acquire/close now belongs to a bounded thread-affine owner.
+  The media actor polls completion and keeps servicing composition and encode;
+  the process-wide two-owner cap survives session/device recreation and remains
+  charged through actual driver close or panic quarantine. Destination leases
+  remain fenced through late completion, cancellation and queued GPU writes.
+  Cursor composition stays on the media actor, preserving D3D11 command batches.
+- The native pump adopts confirmed prepared screen/camera generations without
+  replacing encoders or resetting CFR output sequence. Replacement screens use
+  explicitly diagnosed BGRA upload; initial native capture keeps its existing
+  path. Failed inputs become black while established output continues. Same-ID
+  retries cannot adopt a prepared generation before its transaction commits.
+  Exact DirectShow video identity is resolved before retiring a healthy camera.
+- Primary and auxiliary scenes retain geometry, visibility, crop, background,
+  takeover and active transition geometry. Output confirmation requires the
+  actual encoder-owning pump, matching session/device/source generations and
+  usable frames on both legs. A session-level native claim survives the gap
+  between GPU recovery pumps; generic preview cannot confirm native output.
+  Recovery reads committed B/None before opening or publishing anything, and
+  never bootstraps retired A from an old recovery plan. Presenter liveness is
+  derived from effective required inputs, with intentional None distinguished
+  from failed capture.
+- The macOS CI audio regression was a test scheduling assumption: an unmute
+  issued after the switch reply could happen after its asserted fixed sample.
+  The integration test now observes the first complete non-silent B interval,
+  independently checks every sample's exact gain, and retains the initially
+  muted commit, ramp, old-source exclusion and None assertions.
+- Local default-profile Rust gate passed **2,271 backend + 80 helper + one wire
+  test**, with 10 explicitly ignored tests (`s5-native-rust-default-all.log`),
+  and macOS Clippy passed (`s5-native-macos-clippy.log`). Focused owner tests
+  passed 4/4, source binding 2/2, publication 7/7, and the observed audio-control
+  regression passed. Windows test cross-compilation and production Clippy
+  passed (`s5-windows-pump-cross-tests-v11.log`,
+  `s5-windows-native-clippy-production.log`). TS wire tests passed 26/26;
+  typecheck, lint and format passed. The final presenter-only test follows in
+  checkpoint evidence. These local checks do not replace Windows execution.
+- The Windows workflow repeats the new owner, binding, output authority,
+  publication, CFR, and GPU retirement filters 25 times before three full Rust
+  runs. The previous 1486eb26 Windows checkpoint completed all three Rust runs
+  (2,167 backend tests plus wire each) and affected 25x filters; its installer
+  passed. Its seven desktop mock failures are fixed in 6fe627d3, independently
+  verified by the reviewer with 1,917 passing desktop tests and unchanged asset
+  budget of 384,656 gzip bytes.
+- Status remains **IN PROGRESS**. Actual Windows execution for this new native
+  checkpoint, physical Windows device evidence, and the complete S6 decoded
+  visual/timed A/V/endurance matrix remain required. No local cross-compile or
+  earlier microphone-only artifact is represented as that acceptance.
+- Final presenter liveness regression passed 1/1
+  (`s5-windows-presenter-liveness.log`); final Windows test cross-check and
+  production Clippy passed (`s5-native-final-cross-{tests,clippy}.log`).
