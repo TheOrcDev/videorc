@@ -1,127 +1,296 @@
 ---
 name: videorc-design
-description: Videorc's UI design language — a Raycast-style dark glass command-palette aesthetic, built exclusively from shadcn/ui components. Use whenever building, styling, reviewing, or planning ANY Videorc UI (new components, screens, dialogs, lists, toolbars), when the user mentions "our design", "the design skill", "Raycast style", or asks how something should look.
+description: Videorc's UI design language — a native macOS desktop app on real window glass (vibrancy), built exclusively from shadcn/ui components: flush panes, toolbars, grouped lists, glass chips, and a Raycast-style ⌘K palette. Use whenever building, styling, reviewing, or planning ANY Videorc UI (new components, screens, dialogs, lists, toolbars, badges), when the user mentions "our design", "the design skill", "glass", "native look", or asks how something should look.
 ---
 
-# Videorc Design Language
+# Videorc Design Language (v2: the window family)
 
-The single source of truth for how Videorc looks and feels. Every UI task follows this skill. The reference is the Videorc logo: a glossy BLACK-GLASS orb with chrome/silver detail and one LED-red accent — expressed as a Raycast-style command surface: floating translucent black-glass panels, crisp chrome typography, muted gray metadata, hairline structure, vivid rounded-square icons, and keyboard-first affordances. Light mode is the porcelain-white twin of the same structure.
+The single source of truth for how Videorc looks and feels. Every UI task
+follows this skill. Videorc is a desktop app, not a web page: every window
+sits on the real macOS window material, panes are flush and split by
+hairlines, controls are desktop-sized, and colour is information. The
+reference is the Videorc logo: a glossy black-glass orb with chrome detail and
+one LED-red accent. Light mode is the porcelain twin of the same structure.
 
-**Status: shipped.** The renderer was migrated to this language 2026-06-24 (17 slices), retuned to the black-glass palette 2026-07-02, and moved onto real macOS window glass 2026-09-23 (plan 050). `styles.css` is the implementation of the token table below; every window (main, Chat, Captions, Notes, Preview) takes its material and title bar from `src/main/window-glass.ts`, and the Preview frame's data-URL document mirrors the coats via `src/main/window-palette.ts`. Do not restyle screens ad hoc: fix tokens, not components.
+**Status: shipped in plan 050 (2026-09-23).** `styles.css` implements the
+tokens below. `src/main/window-glass.ts` gives every window (main, Chat,
+Captions, Notes, Preview) its material and title bar. The Preview frame's
+data-URL document mirrors the coats through `src/main/window-palette.ts`, and
+a parity test fails when they drift. Fix tokens and primitives, never restyle
+a screen ad hoc.
 
 ## Hard rules
 
-1. **shadcn/ui only.** Every interface element is a shadcn/ui component (or a composition of them), installed and customized per the `shadcn` skill (`.agents/skills/shadcn/`, with reference docs in `~/.claude/skills/shadcn/`). No other component libraries, no hand-rolled widgets when a shadcn primitive exists. Tailwind utilities + shadcn CSS variables carry the theming.
-2. **Dark glass first, light glass supported.** Dark is the default and the reference expression of this language. Light mode STAYS as a first-class twin: identical structure, patterns, spacing, and rules, with the light token column below — never a separately-designed theme. Both themes remain reachable via the existing theme toggle.
-3. **Keyboard-first.** Every primary action has a visible shortcut, rendered as key chips (see Patterns). Footers advertise the current context's actions.
-4. **Color is information.** The chrome is monochrome (blacks, grays, white). Saturated color appears ONLY in app/source icons and small status accents (e.g. live/connected green, destructive red). Never tint panels, rows, or text decoratively.
+1. **shadcn/ui only.** Every element is a shadcn/ui component or a composition
+   of them, installed and customized per the `shadcn` skill. No other
+   component libraries and no hand-rolled widgets when a primitive exists.
+2. **Real glass, never fake glass.** The OS draws the blur. No CSS
+   `backdrop-filter` / `backdrop-blur` anywhere in the renderer: it wedged the
+   compositor in June, and a guard test fails on it. No wallpaper underlays,
+   no inline `color-scheme` on the root.
+3. **Dark first, light supported.** Dark is the reference. Light is the same
+   structure with the light token column, never a separately designed theme.
+4. **Colour is information.** Chrome is monochrome. Saturated colour appears
+   only in source/platform icons, status dots, and emphasis chips: red for
+   record, live, and destructive; green for healthy; amber for attention.
+   Never tint panels, rows, or text decoratively.
+5. **Keyboard-first, quietly.** Primary actions show their shortcut as a key
+   chip. Global hints live in the status bar, not on every surface.
+
+## The window family
+
+Every window uses one material and one title-bar recipe (`window-glass.ts`):
+
+- **Material.** `vibrancy: 'under-window'`, with the effect state pinned
+  to `active` so glass stays glass when the window is inactive.
+  `VIDEORC_GLASS=0` paints the solid palette instead.
+- **Title bar.** `titleBarStyle: 'hiddenInset'`. Traffic lights are centred
+  in the header row, which is 40 px (28 px for Preview). A header row shares
+  its line with the lights: it pads `pl-[88px]` through
+  `useTrafficLightGutter()`, which drops to `pl-3` in native fullscreen.
+  Header rows are drag regions, and their controls opt out with
+  `[-webkit-app-region:no-drag]`.
+- **Dark-always windows.** Chat, Captions, Notes, and Preview frame video or
+  sit beside it, so main pins their NSWindow appearance to `darkAqua` through
+  the native addon. A light main window never lightens them. If the pin is
+  unavailable, they fall back to solid dark.
+- **Coats.**
+  - `body` paints `--glass-window`, the one window coat.
+  - A content pane adds `--glass-content`, so the sidebar reads lighter than
+    content.
+  - Single-pane windows wrap their body in `WindowFrame`.
+  - Never stack a third coat.
+- **Accessibility.** `prefers-reduced-transparency` swaps both coats for
+  `--glass-solid`. `prefers-contrast: more` thickens the coat and strengthens
+  hairlines, chip rims, and the secondary text tier.
+- **Proof.** `pnpm probe:ui-glass --gate` measures every window over
+  stand-in backdrops: transmission (the glass is real), sharpness (nothing
+  behind is legible), contrast, pinned-dark luminance, and the native effect
+  view state. It runs in `smoke:local-gates`.
 
 ## Tokens
 
-Implemented as shadcn CSS variables in `apps/desktop/src/renderer/src/styles.css` (oklch; that file is the live source of truth). The Preview frame (a main-process data-URL document, dark-always because it frames video) mirrors the coats in `src/main/window-palette.ts`, and a parity test fails when they drift. Chat, Captions, Notes and Preview are dark-always: `window-glass.ts` pins their NSWindow appearance dark through the native addon, so a light main window never lightens their glass.
+Implemented as shadcn CSS variables in
+`apps/desktop/src/renderer/src/styles.css` (oklch; that file is the live
+source). Values below are dark · light.
 
-Surfaces (dark = black glass · light = porcelain)
-- Window/panel base, translucent over the wallpaper frost: dark `oklch(0.13 0.003 286 / 68%)` (solid `#0D0D0F`) · light `oklch(0.985 0.001 286 / 62%)` (solid `#FAFAFB`). Never pure #000 — it kills the glass depth. Card/popover float at 92%: dark `oklch(0.16)` (`#141417`) · light `#FFFFFF`.
-- Real window glass (plan 050, verified 2026-09-23 by `pnpm probe:ui-glass`): every window sits on an `under-window` NSVisualEffectView, `visualEffectState: 'active'`. The body paints one window coat (`--glass-window`) and a content pane adds `--glass-content`, so the sidebar reads lighter. `prefers-reduced-transparency` swaps both for `--glass-solid`. Never CSS `backdrop-filter` in a glass window (it wedged the compositor in June), and never an inline `color-scheme` on the root (in light theme it paints an opaque canvas over the material). `VIDEORC_GLASS=0` paints the solid palette. The June "materials paint opaque" note and the blurred-wallpaper underlay are retired.
-- Panels float: rounded corners `16–20px` (panel), layered shadow (`0 16px 70px rgba(0,0,0,0.55)` dark · `rgba(0,0,0,0.25)` light) + a tight `0 0 0 1px` hairline ring.
-- Hairlines and borders: dark white-10% (`rgba(255,255,255,0.10)`) — the polished edge of the black glass · light black-8% (`rgba(0,0,0,0.08)`); never solid gray borders.
+Coats and surfaces
 
-Text (three tiers, nothing else; dark · light)
-- Primary (chrome · ink): `#F4F4F5` · `#1C1C1E`, weight 500 for titles/labels.
-- Secondary: `#A1A1AA` · `#6E6E73`, weight 400 — inline context after a title, right-aligned metadata, placeholders.
-- Tertiary: `#71717A` · `#98989D` — section headers, footer hints, disabled.
+- Window coat `--glass-window`: black `oklch(0.13 0.003 286 / 42%)` ·
+  porcelain `oklch(0.985 0.001 286 / 60%)`.
+- Content coat `--glass-content`: 34% · 30% of the same base.
+- Solid `--glass-solid`: `#0D0D0F` · `#FAFAFB`.
+- Floating surfaces (`bg-popover`, `bg-card`): near-opaque, 92%. Only
+  dialogs, menus, selects, popovers, tooltips, toasts, and the palette float.
 
-Selection & interaction (dark · light)
-- Selected/hovered row: white-8% · black-6% overlay, radius `8–10px`, full-row block; no outlines, no color fills.
-- Pressed: white-12% · black-10%. Focus-visible: 2px ring (dark white-28% · light black-25%, keyboard only).
+Text (three tiers, nothing else)
 
-Brand red (the logo's LED-glow eyes)
-- ONE saturated accent, semantic only — record, LIVE, destructive: dark `oklch(0.60-0.62 0.23-0.24 27)` · light `oklch(0.55 0.24 27)` (`--destructive`/`--live`). Never chrome, never decorative: the logo has two red eyes, not a red face.
+- Primary `text-foreground`: titles and labels, weight 500–600.
+- Secondary `text-muted-foreground`: inline context, metadata, placeholders.
+- Tertiary `text-subtle`: section labels, hints, disabled.
 
-Geometry & rhythm
-- Radii: panel 16–20, rows/cards 8–10, key chips & small controls 6.
-- Row height: 44–48px; list rows are single-line.
-- Horizontal padding: 16–20px panel gutter; 12px between icon and title; 8px between title and inline context.
-- Section headers get 16px top spacing, 8px bottom.
+Hairlines and selection
 
-Type
-- System font stack (SF Pro on macOS). Sizes: search/title input 18–20, row title 14–15, metadata/section headers 12–13, key chips 11–12.
+- Hairlines `border-border`: white 10% · black 12%, always 1 px.
+- Hover/selected row `bg-accent`: white 8% · black 6%, a full-row block with
+  no outline. Pressed `bg-accent-pressed`: 12% · 10%.
+- Focus-visible: a 2–3 px ring, keyboard only.
 
-Icons
-- App/source icons: 24px rounded-square (radius ~6), vivid, full-color — they are the only large color on screen.
-- Inline/status icons: 16px, tinted secondary gray unless conveying status.
-- **Import every icon from `@/components/icons`, never from an icon package.** The
-  registry names icons by MEANING (`SourcesIcon`, `AlertIcon`, `RecordIcon`), and
-  `no-restricted-imports` enforces it. Before adding a slot, check whether one
-  already means the same thing — the set is licence-counted (100 glyphs) and it
-  once grew to three warning variants and two pins because nobody could see the
-  whole set at once. `docs/icon-set.md` holds the licence terms, the build
-  pipeline (`pnpm icons:build`) and the semantic audit.
+Colour
 
-Motion
-- Fast and subtle: 100–150ms ease-out. Panels fade+scale from 0.98; rows highlight instantly (no transition on selection). Nothing bounces.
+- `--live` / `--destructive`: the logo's LED red. Record, on air, failed,
+  destructive. Never chrome.
+- `--success`: healthy or connected. `--warning`: needs attention.
+  `--info`: rare.
+- Use them through the tone utilities (`tone-success`, `tone-warning`,
+  `tone-destructive`, `tone-live`, `tone-neutral`) and the chip utilities.
+  Never as text colour on status copy.
+
+## Desktop scale
+
+Everything except ⌘K uses the desktop scale.
+
+- **Layout.** There is no page column: content fills its pane edge to edge
+  with a 16 px gutter. Panes are flush and split by 1 px hairlines. Inside a
+  window there are no floating panels, no shadows, and no big cards.
+- **Toolbar** (`Toolbar`, 40 px): the page title on the left (14 px / 600)
+  and page actions on the right (28 px buttons, 28×28 icon buttons). The
+  toolbar never scrolls; only `PaneBody` does. The toolbar is a drag region.
+- **Sidebar.**
+  - The top row holds the traffic lights and the ⌘K button.
+  - Section labels are 11 px / 600, tertiary.
+  - Rows are 28 px, with 14 px text and 16 px icons.
+  - The account row sits at the bottom. The brand lives in About and the
+    Dock, not in the sidebar.
+- **Status bar** (`StatusBar`, 26 px): connection and record/live state on
+  the left. On the right, quiet 11 px shortcut hints, each still clickable:
+  `⌘K Search`, `⌘P Preview`, `⇧⌘N Notes`, `⇧⌘J Chat`.
+- **Sections** (`PanelSection`): flush. A 13 px / 600 header, a 12 px
+  secondary description, a hairline between sections, and 16 px padding. No
+  border, background, radius, or shadow.
+- **Lists, not card stacks.** Sets of like things (destinations, sources,
+  devices, settings) are one `GroupedList` of `ListRow`s: 32 px rows (28 px
+  compact) with hairline separators. Cards remain only for objects with a
+  picture (scene thumbnails, library items): 8 px radius, white 4% fill, a
+  1 px hairline, no shadow.
+- **Radii.** Tiers only, never ad-hoc radius values per screen:
+  - `rounded-panel`: 12 px. Containers and dialogs.
+  - `rounded-row`: 8 px. Rows and cards.
+  - `rounded-chip`: 6 px. Controls and key chips.
+  - Tags use 7 px. Status chips are round.
+  - Window corners belong to the OS.
+- **Controls.** The default height is 28 px for Button, Select trigger, and
+  Input. Retune it once in `components/ui`, never per screen. Segmented
+  choices use `Tabs`, a glass segmented control.
+- **Type.** The system stack (SF Pro). Body 14 px, metadata 12 px, section
+  labels 11 px. Density comes from structure, not from smaller text.
+
+## ⌘K palette scale
+
+The command palette alone keeps the Raycast scale:
+
+- `rounded-panel` glass on `bg-popover`.
+- An 18–20 px borderless search input with a leading 24 px icon.
+- 40 px rows: icon, title, secondary context, an optional alias key chip,
+  then right-aligned metadata.
+- A footer with the primary action and its key chip.
+
+Nothing else in the app uses this scale.
+
+## Glass chips
+
+Every badge, status pill, tag, and key chip is glass (`ui/badge.tsx`,
+`status-badge.tsx`, `ui/kbd.tsx`, `status-dot.tsx`). The chip utilities
+(`glass-chip`, `glass-chip-tinted`, `glass-dot`, `glass-keycap`) are defined
+once in `styles.css`.
+
+| Part          | Dark                               | Light           |
+| ------------- | ---------------------------------- | --------------- |
+| Fill          | vertical gradient white 10% → 3.5% | white 70% → 45% |
+| Rim           | 1 px white 13%                     | 1 px black 8%   |
+| Top highlight | `inset 0 1px 0` white 12%          | white 90%       |
+| Drop          | `0 1px 2px` black 30%              | black 6%        |
+
+- **Neutral** (`Badge` default/secondary): primary text.
+- **Tag** (`Badge` outline): 20 px, 7 px radius, 11 px, secondary text. For
+  `9:16`, counts, `Idle`, `beta`.
+- **Status** (`Badge` success/warning/neutral, `StatusBadge`,
+  `StatusDot`):
+  - Monochrome text. A 6 px dot in the tone colour carries the status, with
+    a 2 px halo and a soft glow.
+  - A leading icon replaces the dot and takes the tone.
+  - `StatusBadge` is 22 px and fully round.
+- **Emphasis** (`Badge` destructive/live, an error `StatusBadge`): tinted
+  glass, a tone gradient with a tone rim and tone-mixed text. Only for
+  failed, on air, and destructive.
+- **Key chip** (`Kbd`): a glass keycap with a brighter top edge and a dark
+  bottom edge.
+- No `backdrop-filter`, no motion, no ad-hoc pills. A rounded, bordered
+  `text-[10–12px]` span is a bug: use `Badge`.
+
+## Floating surfaces
+
+Dialogs, popovers, menus, selects, tooltips, toasts, and the palette are
+near-opaque `bg-popover` surfaces with one soft shadow and a hairline ring.
+
+- Dialogs: 12 px radius, `p-5`.
+- Menus, selects, and popovers: 10 px radius. Menu items are 28 px with a
+  6 px radius, concentric inside the 4 px inset.
+- Tooltips: a small glass popover (8 px radius, 12 px text), never an
+  inverted pill. They open after about 600 ms.
+- `Alert`: a flush inline status row (a faint tone tint, the icon in the
+  tone, monochrome text), never a card.
+- `Empty`: short tertiary text, centred, no dashed box and no illustration.
+
+## Native feel
+
+- `html` sets `user-select: none`, `cursor: default`, and
+  `overscroll-behavior: none`. Content opts back in with `select-text`:
+  chat messages, notes, transcripts, logs, and inputs. Images are not
+  draggable.
+- Editable fields get the native context menu (Cut, Copy, Paste, Select All,
+  spelling), which main builds on `context-menu`.
+- macOS overlay scrollbars: no custom scrollbar recipe. Radix `ScrollArea`
+  uses `type="scroll"`.
+- Rows highlight instantly. No `cursor-pointer`: desktop controls use the
+  arrow.
+
+## Windows
+
+- Windows 11 22H2+ (build ≥ 22621): `backgroundMaterial: 'mica'` on every
+  role, with the same coats at Windows-tuned alphas. Mica tints from the
+  wallpaper without a live blur, so it stays cheap on low-end iGPUs.
+- Windows 10 and older builds use the solid palette.
+- The D3D11 preview window and the proof surface stay opaque.
+
+## Icons
+
+- App/source icons: 24 px rounded-square (radius about 6), vivid, full
+  colour. They are the only large colour on screen.
+- Inline and status icons: 16 px, secondary gray unless conveying status.
+- **Import every icon from `@/components/icons`, never from an icon
+  package.** The registry names icons by meaning (`SourcesIcon`,
+  `AlertIcon`, `RecordIcon`), and `no-restricted-imports` enforces it.
+  Before adding a slot, check whether one already means the same thing: the
+  set is licence-counted (100 glyphs). `docs/icon-set.md` holds the licence
+  terms, the build pipeline (`pnpm icons:build`), and the semantic audit.
+
+## Motion
+
+Fast and subtle: 100–150 ms ease-out. Floating surfaces fade and scale from
+0.98. Rows highlight instantly. Nothing bounces, and chips never move.
+`prefers-reduced-motion` collapses motion.
 
 ## Toast discipline
 
-Toasts are for NEWS the interface does not already show — never for
+Toasts are for news the interface does not already show, never for
 confirming a routine interaction the user just watched succeed.
 
-- **Never toast success for scene/layout/source changes.** The stage/preview
-  IS the confirmation (owner call, 2026-07-16 — "no green popups on every
-  small thing"). This includes live layout applies, preset clicks, and
-  source device switches.
-- Success toasts are reserved for: async work finishing out of view
-  (recording saved, import complete, publish pack generated), destructive
-  confirmations (deleted), and account-level side effects (connected,
-  authorized).
-- Warnings/errors always surface — silence is only for the expected outcome.
+- **Never toast success for scene, layout, or source changes.** The
+  stage/preview is the confirmation (owner call, 2026-07-16: "no green
+  popups on every small thing"). This includes live layout applies, preset
+  clicks, and source device switches.
+- Success toasts are reserved for:
+  - async work that finishes out of view (recording saved, import complete,
+    publish pack generated)
+  - destructive confirmations (deleted)
+  - account-level side effects (connected, authorized)
+- Warnings and errors always surface. Silence is only for the expected
+  outcome.
 - When in doubt, don't toast. A user mid-flow reads every popup as an
   interruption.
 
-## Core patterns
-
-**Glass panel** — the universal container (windows, dialogs, palettes): translucent blurred black glass, hairline ring, big radius, floating shadow. Content sits directly on it; no nested cards-on-cards.
-
-**Search header** — borderless input on the panel itself: leading 24px icon, large placeholder in secondary gray, trailing hint (tertiary text + key chip). No input box outline; the panel IS the input surface. Use shadcn `Command` (cmdk) — this pattern is its native shape.
-
-**Sectioned list** — tertiary-gray section label ("Development", "Suggestions"), then rows. Row anatomy, left to right:
-1. 24px rounded-square icon
-2. Primary title
-3. Inline context in secondary gray on the same line (e.g. the owning app/platform)
-4. Optional alias key chip (e.g. `st`)
-5. Spring space
-6. Right-aligned: optional small status icons, then the kind/metadata label in secondary gray ("Command", "Quicklink")
-
-**Key chips (kbd)** — small rounded rect (radius 6), white 10% background, hairline border, secondary-gray glyph (`⌘`, `K`, `↵`, aliases). Build once as a `Kbd` composition of shadcn `Badge`/styled span and reuse everywhere.
-
-**Footer action bar** — hairline-separated strip at panel bottom: leading app glyph button (ghost), trailing primary action label + its key chip, hairline vertical divider, secondary action ("Actions ⌘K"). All shadcn `Button variant="ghost"` + Kbd chips + `Separator`.
-
-**Empty/hint states** — tertiary gray, centered, short; no illustrations.
-
 ## shadcn component mapping
 
-| Need | Use |
-|---|---|
-| Palette / searchable list | `Command` (+ `CommandDialog`) |
-| Modals & confirmations | `Dialog` themed as glass panel |
-| Lists / destination rows | `Command` rows or composed row primitive (one shared component) |
-| Buttons | `Button` ghost/outline; primary actions stay text+kbd, not big filled CTAs |
-| Shortcut hints | `Kbd` composition (Badge-based), shared |
-| Section/row dividers | `Separator` at white 8% |
-| Badges/status | `Badge` with monochrome variants; color only for live/error |
-| Scroll regions | `ScrollArea` |
-| Menus/popovers | `DropdownMenu`/`Popover` on the solid-fallback surface |
-| Toasts | sonner styled to the same glass tokens |
+| Need                      | Use                                             |
+| ------------------------- | ----------------------------------------------- |
+| Page chrome               | `Pane` + `Toolbar` + `PaneBody`                 |
+| Page sections             | `PanelSection` (flush)                          |
+| Sets of like things       | `GroupedList` + `ListRow`                       |
+| Objects with a picture    | Cards (8 px, hairline, no shadow)               |
+| Global state and hints    | `StatusBar`                                     |
+| Palette / searchable list | `Command` (+ `CommandDialog`), palette scale    |
+| Modals and confirmations  | `Dialog`                                        |
+| Segmented choice          | `Tabs` (glass segmented control)                |
+| Buttons                   | `Button` ghost/outline/secondary; 28 px default |
+| Status, tags, counts      | `Badge`, `StatusBadge`, `StatusDot`             |
+| Shortcut hints            | `Kbd`                                           |
+| Dividers                  | `Separator` or a `border-border` hairline       |
+| Scroll regions            | `PaneBody` or `ScrollArea type="scroll"`        |
+| Menus / popovers          | `DropdownMenu` / `Popover` on `bg-popover`      |
+| Toasts                    | sonner on the same popover tokens               |
 
-Missing a primitive? Install it via the shadcn CLI (see the shadcn skill) — do not hand-roll.
+Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
+do not hand-roll it.
 
 ## Do / Don't
 
-- DO keep chrome monochrome; let source icons and preview content provide the color.
-- DO show shortcuts next to actions; the UI should read like a command surface.
-- DO use one shared row component for every icon+title+meta list (destinations, sources, devices, recordings).
-- DON'T use solid opaque cards, colored section backgrounds, or borders heavier than 1px white/8%.
-- DON'T mix radii arbitrarily — panel/row/chip tiers only.
-- DON'T introduce new fonts or component libraries, and never import an icon
-  package directly — the icon set changes in `components/icons.tsx` alone.
-- DON'T restyle existing screens outside the migration plan.
+- DO keep chrome monochrome. Let source icons, status dots, and preview
+  content provide the colour.
+- DO build screens from panes, toolbars, sections, and grouped lists.
+- DO use one shared row component for every icon + title + meta list.
+- DON'T put cards on cards, shadows inside a window, or `rounded-panel`
+  boxes around page content.
+- DON'T use `backdrop-filter`, `cursor-pointer`, raw colour literals, or
+  ad-hoc radii and pills.
+- DON'T add a font, a component library, or a direct icon-package import.

@@ -3,18 +3,17 @@ import { cva, type VariantProps } from 'class-variance-authority'
 
 import { cn } from '@/lib/utils'
 
+// A flush inline status row (plan 050, D5), never a card: a faint tone tint,
+// the icon in the tone, and monochrome text.
 const alertVariants = cva(
-  "group/alert relative grid w-full gap-0.5 rounded-2xl border px-4 py-3 text-left text-sm has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-18 has-[>svg]:grid-cols-[auto_1fr] has-[>svg]:gap-x-2.5 *:[svg]:row-span-2 *:[svg]:translate-y-0.5 *:[svg]:text-current *:[svg:not([class*='size-'])]:size-4",
+  "group/alert relative grid w-full gap-0.5 rounded-row px-3 py-2.5 text-left text-sm text-foreground has-data-[slot=alert-action]:relative has-data-[slot=alert-action]:pr-18 has-[>svg]:grid-cols-[auto_1fr] has-[>svg]:gap-x-2.5 *:[svg]:row-span-2 *:[svg]:translate-y-0.5 *:[svg:not([class*='size-'])]:size-4",
   {
     variants: {
       variant: {
-        default: 'bg-card text-card-foreground',
-        destructive:
-          'bg-card text-destructive *:data-[slot=alert-description]:text-destructive/90 *:[svg]:text-current',
-        warning:
-          'border-warning/40 bg-warning/10 text-warning-foreground *:data-[slot=alert-description]:text-warning-foreground/90 *:[svg]:text-current dark:text-warning dark:*:data-[slot=alert-description]:text-warning/90',
-        success:
-          'border-success/40 bg-success/10 text-success *:data-[slot=alert-description]:text-success/90 *:[svg]:text-current'
+        default: 'bg-foreground/[0.04] *:[svg]:text-muted-foreground',
+        destructive: 'bg-destructive/10 *:[svg]:text-destructive',
+        warning: 'bg-warning/10 *:[svg]:text-warning',
+        success: 'bg-success/10 *:[svg]:text-success'
       }
     },
     defaultVariants: {

@@ -9,32 +9,31 @@
 @custom-variant data-vertical (&[data-orientation='vertical']);
 
 /*
- * Videorc design tokens — the glass language (.claude/skills/videorc-design).
+ * Videorc design tokens (.claude/skills/videorc-design, v2: the window family).
  * Two columns of the SAME design: dark is the default and reference
- * expression, light is its structural twin. Chrome is monochrome glass —
- * translucent panels over vibrancy, hairline borders at 8%, three text tiers.
- * Colour carries meaning only: live (red), success, warning, info, and the
- * vivid source icons. There is no coloured action accent; primary actions are
- * monochrome text + key chips.
+ * expression, light is its structural twin. Every window sits on the real OS
+ * material; the body wears one window coat and content panes add one content
+ * coat. Chrome is monochrome: hairlines, three text tiers, glass chips. Colour
+ * carries meaning only: live/destructive (red), success, warning, info, and
+ * the vivid source icons. There is no coloured action accent.
  *
- * Token contract — reach for these utilities, not raw values, so every screen
- * stays consistent:
- *   Surfaces   bg-background (the ONE translucent coat) · bg-card / bg-popover
- *              (opaque-92% float for nested popovers/menus). Never stack coats.
- *   Text tiers text-foreground (primary: titles/labels, weight 500) ·
- *              text-muted-foreground (secondary: inline context, metadata,
- *              placeholders) · text-subtle (tertiary: section headers, hints,
- *              disabled). Three tiers, nothing else.
- *   Radius     rounded-panel (18px: glass panels, dialogs, palette) ·
- *              rounded-row (10px: rows, cards) · rounded-chip (6px: key chips,
- *              small controls). Tiers only — no ad-hoc rounded-xl per screen.
- *   Hairlines  border (dark white-10% — the polished black-glass edge; light
- *              black-8%). Never >1px, never solid grey.
- *   Selection  bg-accent (hover/selected block: white/8% dark · black/6% light,
- *              no outline) · bg-accent-pressed (white/12% · black/10%).
+ * Token contract: reach for these utilities, not raw values:
+ *   Coats      bg-glass-window (body) · bg-glass-content (content panes) ·
+ *              bg-popover / bg-card (near-opaque floating surfaces only).
+ *              Never stack a third coat, never backdrop-filter.
+ *   Text tiers text-foreground (primary) · text-muted-foreground (secondary) ·
+ *              text-subtle (tertiary). Three tiers, nothing else.
+ *   Radius     rounded-panel (12px: containers, dialogs) · rounded-row (8px:
+ *              rows, cards) · rounded-chip (6px: controls, key chips). Tags
+ *              are 7px and status chips round. Window corners belong to the OS.
+ *   Sizes      h-toolbar (40px) · h-status-bar (26px) · h-row (32px) ·
+ *              h-row-compact (28px) · h-control (28px) · px-gutter (16px).
+ *   Hairlines  border (dark white-10% · light black-12%). Never >1px.
+ *   Selection  bg-accent (hover/selected block) · bg-accent-pressed.
+ *   Chips      glass-chip · glass-chip-tinted · glass-dot · glass-keycap, with
+ *              the tone-* utilities carrying colour.
  *   Focus      :focus-visible ring is wired in @layer base below.
  *   Motion     100–150ms ease-out; reduced-motion collapse wired below.
- *   Colour     only via text/bg live·success·warning·info + vivid source icons.
  */
 :root {
   --radius: 0.625rem;
@@ -132,6 +131,10 @@
   --keycap-rim: oklch(0 0 0 / 10%);
   --keycap-highlight: oklch(1 0 0);
   --keycap-base: oklch(0 0 0 / 12%);
+
+  /* Slider and switch knobs stay white in both themes, like AppKit's. */
+  --knob: oklch(1 0 0);
+  --knob-ring: oklch(0 0 0 / 12%);
 }
 
 .dark {
@@ -222,6 +225,9 @@
   --keycap-rim: oklch(1 0 0 / 13%);
   --keycap-highlight: oklch(1 0 0 / 14%);
   --keycap-base: oklch(0 0 0 / 30%);
+
+  --knob: oklch(1 0 0);
+  --knob-ring: oklch(0 0 0 / 35%);
 }
 
 /* Increase Contrast: hairlines strong enough to read on glass, and the
@@ -265,11 +271,20 @@
   --radius-3xl: calc(var(--radius) + 14px);
   --radius-4xl: calc(var(--radius) + 20px);
 
-  /* Semantic radius tiers — the design language's panel/row/chip vocabulary.
-     Use rounded-panel / rounded-row / rounded-chip at call sites. */
-  --radius-panel: calc(var(--radius) + 8px); /* 18px */
-  --radius-row: var(--radius); /* 10px */
+  /* Semantic radius tiers (plan 050, D4): containers 12, rows and cards 8,
+     controls and chips 6. Use rounded-panel / rounded-row / rounded-chip. */
+  --radius-panel: calc(var(--radius) + 2px); /* 12px */
+  --radius-row: calc(var(--radius) - 2px); /* 8px */
   --radius-chip: calc(var(--radius) - 4px); /* 6px */
+
+  /* The desktop scale (plan 050, D4): one toolbar, one status bar, one row,
+     and one control height for every screen. */
+  --spacing-toolbar: 2.5rem; /* 40px */
+  --spacing-status-bar: 1.625rem; /* 26px */
+  --spacing-row: 2rem; /* 32px */
+  --spacing-row-compact: 1.75rem; /* 28px */
+  --spacing-control: 1.75rem; /* 28px */
+  --spacing-gutter: 1rem; /* 16px */
 
   /* The reference font: the platform system stack (SF Pro / SF Mono on macOS). */
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
@@ -322,6 +337,8 @@
   --color-glass-window: var(--glass-window);
   --color-glass-content: var(--glass-content);
   --color-glass-solid: var(--glass-solid);
+  --color-knob: var(--knob);
+  --color-knob-ring: var(--knob-ring);
 }
 
 /*
