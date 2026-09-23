@@ -108,7 +108,7 @@ export function CohostSettingsSection(): ReactElement | null {
         </Alert>
       ) : null}
 
-      <FieldGroup>
+      <FieldGroup variant="grouped">
         <Field>
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-0.5">

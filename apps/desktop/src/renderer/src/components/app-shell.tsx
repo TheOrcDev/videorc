@@ -1,13 +1,4 @@
-import {
-  lazy,
-  Suspense,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type ReactElement,
-  type ReactNode
-} from 'react'
+import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 const CommandPalette = lazy(async () => ({
   default: (await import('@/components/command-palette')).CommandPalette
@@ -83,32 +74,6 @@ function WorkspaceTabFallback(): ReactElement {
       role="status"
     >
       Loading workspace…
-    </div>
-  )
-}
-
-// Screens move onto the flush pane layout one slice at a time (plan 050,
-// S12–S17). Until a screen is flush it keeps a 16 px gutter here; the last
-// screen slice deletes this frame.
-const FLUSH_TABS: ReadonlySet<WorkspaceTab> = new Set<WorkspaceTab>([
-  'studio',
-  'live',
-  'sources',
-  'layouts',
-  'assets',
-  'captions',
-  'recording',
-  'library',
-  'ai'
-])
-
-function TabFrame({ tab, children }: { tab: WorkspaceTab; children: ReactNode }): ReactElement {
-  if (FLUSH_TABS.has(tab)) {
-    return <>{children}</>
-  }
-  return (
-    <div className={tab === 'library' ? 'flex min-h-0 flex-1 flex-col p-gutter' : 'p-gutter'}>
-      {children}
     </div>
   )
 }
@@ -375,31 +340,29 @@ export function AppShell(): ReactElement {
                   only the table scrolls); every other tab scrolls as one. */}
             <PaneBody scroll={active !== 'library'}>
               <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
-                <TabFrame tab={active}>
-                  <Suspense fallback={<WorkspaceTabFallback />}>
-                    {active === 'studio' ? <StudioTab /> : null}
-                    {active === 'sources' ? <SourcesTab /> : null}
-                    {active === 'layouts' ? <LayoutTab /> : null}
-                    {active === 'assets' ? <AssetsTab /> : null}
-                    {active === 'live' ? <StreamingTab /> : null}
-                    {active === 'captions' ? <CaptionsTab /> : null}
-                    {active === 'recording' ? <RecordingTab /> : null}
-                    {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
-                    {active === 'ai' ? (
-                      <AiTab
-                        selectedSessionId={selectedSessionId}
-                        setSelectedSessionId={setSelectedSessionId}
-                      />
-                    ) : null}
-                    {active === 'diagnostics' ? <DiagnosticsTab /> : null}
-                    {active === 'settings' ? (
-                      <SettingsTab
-                        onOpenPermissionsSetup={openPermissionsSetup}
-                        onShowWhatsNew={whatsNew.showLatest}
-                      />
-                    ) : null}
-                  </Suspense>
-                </TabFrame>
+                <Suspense fallback={<WorkspaceTabFallback />}>
+                  {active === 'studio' ? <StudioTab /> : null}
+                  {active === 'sources' ? <SourcesTab /> : null}
+                  {active === 'layouts' ? <LayoutTab /> : null}
+                  {active === 'assets' ? <AssetsTab /> : null}
+                  {active === 'live' ? <StreamingTab /> : null}
+                  {active === 'captions' ? <CaptionsTab /> : null}
+                  {active === 'recording' ? <RecordingTab /> : null}
+                  {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
+                  {active === 'ai' ? (
+                    <AiTab
+                      selectedSessionId={selectedSessionId}
+                      setSelectedSessionId={setSelectedSessionId}
+                    />
+                  ) : null}
+                  {active === 'diagnostics' ? <DiagnosticsTab /> : null}
+                  {active === 'settings' ? (
+                    <SettingsTab
+                      onOpenPermissionsSetup={openPermissionsSetup}
+                      onShowWhatsNew={whatsNew.showLatest}
+                    />
+                  ) : null}
+                </Suspense>
               </StudioMicVisualProvider>
             </PaneBody>
           </Pane>

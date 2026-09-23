@@ -161,8 +161,8 @@ export function DiagnosticsTab(): ReactElement {
   const networkSummary = useMemo(() => networkSummaryCopy(streamTargets), [streamTargets])
 
   return (
-    <div className="grid gap-5 xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
-      <div className="flex flex-col gap-4">
+    <div className="grid xl:grid-cols-[minmax(0,0.95fr)_minmax(0,1.05fr)]">
+      <div className="flex min-w-0 flex-col xl:border-r">
         {/* Verdicts first (ux-ia plan, slice 8): the page answers "is anything
             wrong?" before offering the numbers. */}
         <PanelSection
@@ -668,11 +668,11 @@ export function DiagnosticsTab(): ReactElement {
 
         <PanelSection icon={HealthIcon} title="Pipeline">
           {recording.pipeline ? (
-            <div className="grid gap-2">
+            <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
               {recording.pipeline.stages.map((stage) => (
                 <div
                   key={stage.stage}
-                  className="flex items-center justify-between gap-3 rounded-row bg-muted/40 px-3 py-2"
+                  className="flex items-center justify-between gap-3 px-3 py-2"
                 >
                   <div className="min-w-0">
                     <div className="text-sm font-medium capitalize">
@@ -692,7 +692,7 @@ export function DiagnosticsTab(): ReactElement {
         </PanelSection>
       </div>
 
-      <div className="flex flex-col gap-4">
+      <div className="flex min-w-0 flex-col border-t xl:border-t-0">
         <PanelSection icon={TerminalIcon} title="Support bundle">
           <div className="flex items-center justify-between gap-3">
             <div className="min-w-0">
@@ -750,7 +750,7 @@ export function DiagnosticsTab(): ReactElement {
         <PanelSection icon={TerminalIcon} title="Backend logs">
           <LastBackendCrash record={latestBackendCrash(runtimeInfo?.backendCrashes)} />
           <ScrollArea className="h-64 pr-3">
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col">
               {logs.length ? (
                 logs
                   .slice(-80)
@@ -776,9 +776,9 @@ export function DiagnosticsTab(): ReactElement {
 
 function DiagnosticMetric({ label, value }: { label: string; value: string }): ReactElement {
   return (
-    <div className="rounded-row border bg-muted/40 px-3 py-2">
+    <div className="flex min-w-0 flex-col gap-0.5">
       <div className="text-xs text-muted-foreground">{label}</div>
-      <div className="break-words text-base font-semibold tabular-nums">{value}</div>
+      <div className="text-sm font-semibold break-words tabular-nums">{value}</div>
     </div>
   )
 }
@@ -794,7 +794,7 @@ function MetricGroup({ title, children }: { title: string; children: ReactNode }
         <span>{title}</span>
       </CollapsibleTrigger>
       <CollapsibleContent>
-        <div className="grid gap-2 pt-1.5 sm:grid-cols-2">{children}</div>
+        <div className="grid gap-x-4 gap-y-3 px-2 pt-2 pb-1 sm:grid-cols-2">{children}</div>
       </CollapsibleContent>
     </Collapsible>
   )
@@ -810,7 +810,7 @@ function ActionableWarning({
   onHandlePermission: (pane: SystemPermissionPane) => Promise<void>
 }): ReactElement {
   return (
-    <div className="flex items-start justify-between gap-3 rounded-row border bg-warning/10 px-3 py-2">
+    <div className="flex items-start justify-between gap-3 rounded-row bg-warning/10 px-3 py-2">
       <div className="min-w-0">
         <div className="flex items-center gap-2">
           <Badge variant="warning">{event.code}</Badge>
@@ -852,7 +852,7 @@ function LogList({ entries }: { entries: SessionLogEntry[] }): ReactElement {
   }
 
   return (
-    <div className="flex flex-col gap-1.5">
+    <div className="flex flex-col">
       {entries.slice(-120).map((entry) => (
         <LogRow
           key={entry.id}
@@ -876,7 +876,7 @@ function LastBackendCrash({ record }: { record: BackendCrashRecord | null }): Re
   }
   const view = backendCrashView(record)
   return (
-    <div className="mb-2 rounded-row border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs">
+    <div className="mb-2 rounded-row bg-destructive/10 px-3 py-2 text-xs">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <Badge variant="destructive">{view.intentional ? 'exit' : 'crash'}</Badge>
         <span className="font-medium">
@@ -910,7 +910,7 @@ function LogRow({
   sourceId?: string
 }): ReactElement {
   return (
-    <div className="rounded-row bg-muted/40 px-3 py-2 text-xs">
+    <div className="border-b border-border py-2 text-xs last:border-b-0">
       <div className="mb-1 flex flex-wrap items-center gap-2">
         <Badge variant={levelBadgeVariant(level)}>{level}</Badge>
         <span className="font-medium">{code}</span>

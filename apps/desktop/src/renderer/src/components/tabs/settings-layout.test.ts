@@ -20,7 +20,7 @@ function settingsColumns(): string[][] {
     settingsTabBody.indexOf('</ConfigGrid>')
   )
   const columns: string[][] = []
-  for (const chunk of region.split('<div className="flex flex-col gap-5">').slice(1)) {
+  for (const chunk of region.split('<div className="flex flex-col">').slice(1)) {
     // Component-rendered sections carry no title prop, so match them by tag —
     // and in the order they actually appear, since the collapsed reading order
     // is exactly this sequence.

@@ -38,12 +38,23 @@ function FieldLegend({
   )
 }
 
-function FieldGroup({ className, ...props }: React.ComponentProps<'div'>) {
+// Grouped (plan 050, D4): the macOS System Settings look. Fields become rows
+// in one inset group, split by hairlines.
+const FIELD_GROUP_GROUPED =
+  'gap-0 divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03] *:data-[slot=field]:px-3 *:data-[slot=field]:py-2.5'
+
+function FieldGroup({
+  className,
+  variant = 'default',
+  ...props
+}: React.ComponentProps<'div'> & { variant?: 'default' | 'grouped' }) {
   return (
     <div
       data-slot="field-group"
+      data-variant={variant}
       className={cn(
         'group/field-group @container/field-group flex w-full flex-col gap-6 data-[slot=checkbox-group]:gap-3 *:data-[slot=field-group]:gap-4',
+        variant === 'grouped' && FIELD_GROUP_GROUPED,
         className
       )}
       {...props}
