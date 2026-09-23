@@ -27,7 +27,13 @@ const MAX_DOWNLOAD_BYTES = Object.freeze({
   'validation-ffmpeg': 512 * 1024 * 1024,
   'validation-ffmpeg-license': 2 * 1024 * 1024,
   'validation-ffmpeg-source': 2 * 1024 * 1024,
-  'validation-ffprobe': 512 * 1024 * 1024
+  'validation-ffprobe': 512 * 1024 * 1024,
+  'validation-capture-worker': 128 * 1024 * 1024,
+  'validation-capture-manifest': 2 * 1024 * 1024,
+  'validation-capture-source': 2 * 1024 * 1024,
+  'validation-capture-license': 2 * 1024 * 1024,
+  'validation-capture-toolchain': 2 * 1024 * 1024,
+  'validation-capture-patch': 2 * 1024 * 1024
 })
 
 const CONTENT_TYPES = Object.freeze({
@@ -44,7 +50,13 @@ const CONTENT_TYPES = Object.freeze({
   'validation-ffmpeg': 'application/vnd.microsoft.portable-executable',
   'validation-ffmpeg-license': 'text/plain; charset=utf-8',
   'validation-ffmpeg-source': 'text/plain; charset=utf-8',
-  'validation-ffprobe': 'application/vnd.microsoft.portable-executable'
+  'validation-ffprobe': 'application/vnd.microsoft.portable-executable',
+  'validation-capture-worker': 'application/vnd.microsoft.portable-executable',
+  'validation-capture-manifest': 'application/json',
+  'validation-capture-source': 'text/plain; charset=utf-8',
+  'validation-capture-license': 'text/plain; charset=utf-8',
+  'validation-capture-toolchain': 'text/plain; charset=utf-8',
+  'validation-capture-patch': 'text/plain; charset=utf-8'
 })
 
 export class WindowsReleaseCandidateError extends Error {
@@ -214,6 +226,36 @@ export function windowsCandidateObjectDescriptors(manifest) {
       `${prefix}/win-unpacked/resources/ffmpeg/bin/ffprobe.exe`
     ),
     descriptor(
+      'validation-capture-worker',
+      'win-unpacked/resources/ffmpeg/bin/ffmpeg-capture.exe',
+      `${prefix}/win-unpacked/resources/ffmpeg/bin/ffmpeg-capture.exe`
+    ),
+    descriptor(
+      'validation-capture-manifest',
+      'win-unpacked/resources/ffmpeg/capture/MANIFEST.json',
+      `${prefix}/win-unpacked/resources/ffmpeg/capture/MANIFEST.json`
+    ),
+    descriptor(
+      'validation-capture-source',
+      'win-unpacked/resources/ffmpeg/capture/SOURCE.txt',
+      `${prefix}/win-unpacked/resources/ffmpeg/capture/SOURCE.txt`
+    ),
+    descriptor(
+      'validation-capture-license',
+      'win-unpacked/resources/ffmpeg/capture/LICENSE.txt',
+      `${prefix}/win-unpacked/resources/ffmpeg/capture/LICENSE.txt`
+    ),
+    descriptor(
+      'validation-capture-toolchain',
+      'win-unpacked/resources/ffmpeg/capture/TOOLCHAIN.txt',
+      `${prefix}/win-unpacked/resources/ffmpeg/capture/TOOLCHAIN.txt`
+    ),
+    descriptor(
+      'validation-capture-patch',
+      'win-unpacked/resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch',
+      `${prefix}/win-unpacked/resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch`
+    ),
+    descriptor(
       'validation-ffmpeg-license',
       'win-unpacked/resources/ffmpeg/LICENSE.txt',
       `${prefix}/win-unpacked/resources/ffmpeg/LICENSE.txt`
@@ -255,6 +297,36 @@ export async function buildWindowsCandidateStoragePlan({
     [
       'validation-ffprobe',
       join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg', 'bin', 'ffprobe.exe')
+    ],
+    [
+      'validation-capture-worker',
+      join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg', 'bin/ffmpeg-capture.exe')
+    ],
+    [
+      'validation-capture-manifest',
+      join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg', 'capture/MANIFEST.json')
+    ],
+    [
+      'validation-capture-source',
+      join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg', 'capture/SOURCE.txt')
+    ],
+    [
+      'validation-capture-license',
+      join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg', 'capture/LICENSE.txt')
+    ],
+    [
+      'validation-capture-toolchain',
+      join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg', 'capture/TOOLCHAIN.txt')
+    ],
+    [
+      'validation-capture-patch',
+      join(
+        releaseDir,
+        'win-unpacked',
+        'resources',
+        'ffmpeg',
+        'capture/source-patches/dshow-capture-clock.patch'
+      )
     ],
     [
       'validation-ffmpeg-license',

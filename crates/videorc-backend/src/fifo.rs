@@ -29,6 +29,48 @@ pub fn transport_path(file_name: &str) -> PathBuf {
     }
 }
 
+/// Session PCM has its own small transport budget. Video keeps its existing
+/// 16 MiB quota; applying that quota to audio would retain about 43 seconds.
+#[cfg(any(test, windows, target_os = "linux"))]
+pub(crate) const AUDIO_PIPE_BUFFER_BYTES: u32 = 8 * 1024;
+
+pub fn create_audio(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    {
+        create_with_capacity(path, AUDIO_PIPE_BUFFER_BYTES)
+    }
+    #[cfg(not(windows))]
+    {
+        create(path)
+    }
+}
+
+pub fn open_audio_writer(
+    path: &Path,
+    stop: &AtomicBool,
+    retry: Duration,
+    stopped_message: &str,
+) -> io::Result<File> {
+    let file = open_writer(path, stop, retry, false, stopped_message)?;
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::fd::AsRawFd;
+        // Linux permits an explicit quota. Darwin's small-write pipe uses the
+        // OS default; do not claim the Windows quota applies to that transport.
+        if unsafe {
+            libc::fcntl(
+                file.as_raw_fd(),
+                libc::F_SETPIPE_SZ,
+                AUDIO_PIPE_BUFFER_BYTES as libc::c_int,
+            )
+        } < 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(file)
+}
+
 /// Removes a stale transport endpoint (or the live one during session
 /// teardown). Missing endpoints are not an error: teardown paths call this
 /// unconditionally.
@@ -133,6 +175,11 @@ pub(crate) const PIPE_OUT_BUFFER_BYTES: u32 = 16 * 1024 * 1024;
 
 #[cfg(windows)]
 pub fn create(path: &Path) -> io::Result<()> {
+    create_with_capacity(path, PIPE_OUT_BUFFER_BYTES)
+}
+
+#[cfg(windows)]
+fn create_with_capacity(path: &Path, output_buffer_bytes: u32) -> io::Result<()> {
     use std::os::windows::io::{FromRawHandle, OwnedHandle};
     use windows::Win32::Storage::FileSystem::{
         FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_ACCESS_OUTBOUND,
@@ -171,7 +218,7 @@ pub fn create(path: &Path) -> io::Result<()> {
             PIPE_ACCESS_OUTBOUND | FILE_FLAG_FIRST_PIPE_INSTANCE,
             PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_NOWAIT,
             1,
-            PIPE_OUT_BUFFER_BYTES,
+            output_buffer_bytes,
             0,
             0,
             None,
@@ -310,6 +357,13 @@ fn unsupported() -> io::Error {
 #[cfg(test)]
 mod transport_path_tests {
     use super::*;
+
+    #[test]
+    fn audio_pipe_capacity_is_separate_from_video_and_bounded_in_pcm_time() {
+        assert_eq!(PIPE_OUT_BUFFER_BYTES, 16 * 1024 * 1024);
+        assert!(u64::from(AUDIO_PIPE_BUFFER_BYTES) * 1000 / (48_000 * 2 * 4) <= 22);
+        assert!(AUDIO_PIPE_BUFFER_BYTES < PIPE_OUT_BUFFER_BYTES);
+    }
 
     #[test]
     fn transport_path_keeps_the_file_name() {
@@ -456,6 +510,36 @@ mod windows_tests {
 
     fn test_pipe_path(name: &str) -> PathBuf {
         transport_path(&format!("videorc-fifo-test-{name}-{}", std::process::id()))
+    }
+
+    #[test]
+    fn session_audio_pipe_has_a_small_kernel_quota_and_releases_its_handle() {
+        use std::os::windows::io::AsRawHandle;
+        use windows::Win32::Foundation::HANDLE;
+        use windows::Win32::System::Pipes::GetNamedPipeInfo;
+        let path = test_pipe_path("audio-quota");
+        create_audio(&path).unwrap();
+        let mut quota = 0;
+        {
+            let registry = pipe_registry().lock().unwrap();
+            let handle = registry.get(&path).unwrap();
+            unsafe {
+                GetNamedPipeInfo(
+                    HANDLE(handle.as_raw_handle()),
+                    None,
+                    Some(&mut quota),
+                    None,
+                    None,
+                )
+            }
+            .unwrap();
+        }
+        cleanup(&path).unwrap();
+        assert!(!test_pipe_registry_contains(&path).unwrap());
+        assert!(
+            quota > 0 && quota <= AUDIO_PIPE_BUFFER_BYTES,
+            "actual audio pipe quota was {quota}"
+        );
     }
 
     #[test]

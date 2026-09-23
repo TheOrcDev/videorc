@@ -9,6 +9,11 @@ import { fileURLToPath } from 'node:url'
 import { sha256File, sha512File } from './lib/windows-alpha-release.mjs'
 import { validateDownloadedWindowsCandidate } from './lib/windows-release-candidate.mjs'
 
+import {
+  verifyWindowsCaptureManifest,
+  probeWindowsCaptureWorker
+} from './ffmpeg-capture-windows.mjs'
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const releaseDir = resolve(
   process.env.VIDEORC_RELEASE_DIR ?? join(repoRoot, 'apps', 'desktop', 'release')
@@ -23,6 +28,9 @@ async function main() {
   const manifest = JSON.parse(await readFile(join(releaseDir, 'release.json'), 'utf8'))
   const installerPath = join(releaseDir, manifest.filename)
   const unpackedAppPath = join(releaseDir, 'win-unpacked', 'Videorc.exe')
+  const captureBundle = join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg')
+  verifyWindowsCaptureManifest(captureBundle)
+  probeWindowsCaptureWorker(captureBundle)
   const result = validateDownloadedWindowsCandidate({
     actualInstallerSha256: await sha256File(installerPath),
     actualInstallerSha512: await sha512File(installerPath),
@@ -67,7 +75,6 @@ async function main() {
   })
   console.log(`windows-release-candidate-verify: PASS (${result.candidateIdentity})`)
 }
-
 
 async function requiredSize(path) {
   const size = (await stat(path)).size

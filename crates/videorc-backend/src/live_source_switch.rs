@@ -593,7 +593,7 @@ pub async fn switch(
     state: &AppState,
     request: SourceSwitchParams,
 ) -> Result<SessionSources, SwitchError> {
-    let (handle, existing) = {
+    let (handle, existing, ffmpeg_path) = {
         let recording = state.recording.lock().await;
         let active = recording
             .as_ref()
@@ -637,6 +637,7 @@ pub async fn switch(
                 .as_ref()
                 .map(|audio| audio.switch_handle()),
             existing,
+            active.ffmpeg_path.clone(),
         )
     };
     if let Some(existing) = existing {
@@ -664,7 +665,12 @@ pub async fn switch(
             .clone()
             .ok_or_else(|| anyhow::anyhow!("This session has no replaceable audio bus."))?;
         handle
-            .replace(request.clone(), state.live_source_switch.clone(), cancelled)
+            .replace(
+                request.clone(),
+                ffmpeg_path,
+                state.live_source_switch.clone(),
+                cancelled,
+            )
             .await
     }
     .await;

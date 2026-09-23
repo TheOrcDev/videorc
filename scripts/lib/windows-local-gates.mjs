@@ -1512,6 +1512,11 @@ export function buildWindowsLocalGateSteps({
           args: ['ffmpeg:fetch:windows']
         },
         {
+          label: 'build verified Windows capture worker',
+          command: 'pnpm',
+          args: ['ffmpeg:build:capture:windows']
+        },
+        {
           label: 'Windows package preflight',
           command: 'pnpm',
           args: ['package:preflight:windows']
@@ -1526,6 +1531,11 @@ export function buildWindowsLocalGateSteps({
   return [
     ...sourceAndProcessSteps,
     ...localPackageSteps,
+    {
+      label: 'verify packaged capture worker and source manifests',
+      command: 'node',
+      args: ['scripts/ffmpeg-capture-windows.mjs', join(packagedResources, 'ffmpeg')]
+    },
     {
       label: 'packaged recording and bundled-background smoke',
       command: 'pnpm',

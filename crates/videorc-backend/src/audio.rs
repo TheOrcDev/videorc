@@ -23,7 +23,9 @@ pub const AUDIO_COVERAGE_WARMUP_SECS: f64 = 3.0;
 // bounded multi-second packet cushion instead of dropping valid mic callbacks.
 const AUDIO_RING_CAPACITY_PACKETS: usize = 1024;
 const METER_SAMPLE_DURATION: Duration = Duration::from_millis(700);
-pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 1024;
+// Raw PCM demux packets are bounded, so four pending packets replace the
+// previous multi-second queue. The bus discards unpublished stale samples.
+pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 4;
 /// Once a warmed native microphone stops producing callbacks for this long,
 /// retire its producer as a source loss. The session bus keeps its FIFO open
 /// with paced silence and can accept an explicitly selected replacement.
@@ -610,7 +612,7 @@ pub fn create_native_audio_fifo(path: &Path) -> Result<()> {
     crate::fifo::cleanup(path)
         .with_context(|| format!("Could not remove stale audio FIFO {}", path.display()))?;
 
-    crate::fifo::create(path)
+    crate::fifo::create_audio(path)
         .with_context(|| format!("Could not create audio FIFO {}", path.display()))
 }
 

@@ -365,6 +365,7 @@ struct ProducerSource {
     receiver: mpsc::Receiver<AudioFrame>,
     stats: Arc<AudioCaptureStats>,
     _owner: Box<dyn Send>,
+    failure: Option<Arc<std::sync::Mutex<Option<String>>>>,
     #[cfg(debug_assertions)]
     caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
 }
@@ -381,7 +382,26 @@ impl ProducerSource {
             #[cfg(debug_assertions)]
             caption_injector: source.caption_contract_test_injector.clone(),
             _owner: Box::new(source),
+            failure: None,
         }
+    }
+    fn worker(device_id: String, source: crate::audio_capture_adapter::CapturedInput) -> Self {
+        Self {
+            device_id,
+            device_name: source.device_name,
+            receiver: source.receiver,
+            stats: source.stats,
+            _owner: source.owner,
+            failure: Some(source.failure),
+            #[cfg(debug_assertions)]
+            caption_injector: None,
+        }
+    }
+    fn failure_reason(&self, fallback: &str) -> String {
+        self.failure
+            .as_ref()
+            .and_then(|failure| failure.lock().unwrap_or_else(|p| p.into_inner()).clone())
+            .unwrap_or_else(|| fallback.into())
     }
     fn into_managed(
         self,
@@ -495,7 +515,7 @@ async fn prepare_producer_with(
             }
             if Instant::now() >= deadline {
                 let _ = ready_tx.send(Err(anyhow::anyhow!(
-                    "The microphone did not deliver fresh PCM within 2s."
+                    source.failure_reason("The microphone did not deliver fresh PCM within 2s.")
                 )));
                 return;
             }
@@ -504,7 +524,7 @@ async fn prepare_producer_with(
                 Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     let _ = ready_tx.send(Err(anyhow::anyhow!(
-                        "The microphone stopped before readiness."
+                        source.failure_reason("The microphone stopped before readiness.")
                     )));
                     return;
                 }
@@ -719,6 +739,43 @@ pub async fn prepare_initial_native(device_id: u32) -> anyhow::Result<InitialAud
     })
 }
 
+async fn prepare_adapter(
+    device_id: String,
+    ffmpeg_path: String,
+    cancelled: Arc<AtomicBool>,
+    count: Arc<AtomicU64>,
+) -> anyhow::Result<ManagedProducer> {
+    prepare_producer_with(
+        move || {
+            crate::audio_capture_adapter::open(&ffmpeg_path, &device_id)
+                .map(|source| ProducerSource::worker(device_id, source))
+        },
+        cancelled,
+        count,
+        spawn_owner,
+        |_| {},
+        true,
+    )
+    .await
+}
+
+pub async fn prepare_initial_adapter(
+    device_id: String,
+    ffmpeg_path: String,
+) -> anyhow::Result<InitialAudioSource> {
+    let count = Arc::new(AtomicU64::new(0));
+    let producer = prepare_adapter(
+        device_id,
+        ffmpeg_path,
+        Arc::new(AtomicBool::new(false)),
+        count.clone(),
+    )
+    .await?;
+    Ok(InitialAudioSource {
+        source: InitialInput::Owned { producer, count },
+    })
+}
+
 pub struct SessionAudio {
     pub fifo_path: PathBuf,
     handle: AudioSwitchHandle,
@@ -854,6 +911,7 @@ impl AudioSwitchHandle {
     pub async fn replace(
         &self,
         request: crate::live_source_switch::SourceSwitchParams,
+        ffmpeg_path: String,
         coordinator: Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
         cancelled: Arc<AtomicBool>,
     ) -> anyhow::Result<AudioCommitReceipt> {
@@ -876,22 +934,30 @@ impl AudioSwitchHandle {
         let candidate = match request.device_id.as_deref() {
             None => None,
             Some(id) => {
-                let device_id =
-                    crate::audio::parse_coreaudio_microphone_id(id).ok_or_else(|| {
-                        anyhow::anyhow!("This microphone adapter cannot prepare that device ID.")
-                    })?;
-                if id != format!("microphone:coreaudio:{device_id}") {
-                    anyhow::bail!("The microphone ID is not canonical.");
-                }
-                Some(
-                    prepare_native_with_readiness(
-                        device_id,
-                        cancelled.clone(),
-                        self.producer_count.clone(),
-                        true,
+                if let Some(device_id) = crate::audio::parse_coreaudio_microphone_id(id) {
+                    if id != format!("microphone:coreaudio:{device_id}") {
+                        anyhow::bail!("The microphone ID is not canonical.");
+                    }
+                    Some(
+                        prepare_native_with_readiness(
+                            device_id,
+                            cancelled.clone(),
+                            self.producer_count.clone(),
+                            true,
+                        )
+                        .await?,
                     )
-                    .await?,
-                )
+                } else {
+                    Some(
+                        prepare_adapter(
+                            id.into(),
+                            ffmpeg_path,
+                            cancelled.clone(),
+                            self.producer_count.clone(),
+                        )
+                        .await?,
+                    )
+                }
             }
         };
         if self.stop.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire) {
@@ -1414,11 +1480,10 @@ fn run_bus_owned(
         .unwrap_or_else(|p| p.into_inner())
         .stats
         .clone();
-    let mut file = crate::fifo::open_writer(
+    let mut file = crate::fifo::open_audio_writer(
         path,
         stop,
         Duration::from_millis(5),
-        false,
         "Session audio stopped before the reader opened",
     )?;
     let wait_started = Instant::now();
@@ -2308,6 +2373,7 @@ mod tests {
             receiver,
             stats: Arc::new(AudioCaptureStats::default()),
             _owner: Box::new(SignalDrop(closed)),
+            failure: None,
             #[cfg(debug_assertions)]
             caption_injector: None,
         }
@@ -2448,6 +2514,7 @@ mod tests {
                     device_name: id,
                     receiver,
                     stats: Arc::new(AudioCaptureStats::default()),
+                    failure: None,
                     _owner: Box::new(PcmTestOwner {
                         stop,
                         thread: Some(worker),

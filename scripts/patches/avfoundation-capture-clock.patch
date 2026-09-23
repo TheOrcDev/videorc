@@ -1,0 +1,106 @@
+--- a/libavdevice/avfoundation.m
++++ b/libavdevice/avfoundation.m
+@@ -107,6 +107,10 @@
+     int             video_stream_index;
+     int             audio_device_index;
+     int             audio_stream_index;
++    int             videorc_audio_clock;
++    CMTime          audio_clock_host;
++    CMTime          audio_clock_callback;
++    int             audio_clock_valid;
+ 
+     char            *url;
+     char            *video_filename;
+@@ -278,6 +282,24 @@
+     }
+ 
+     _context->current_audio_frame = (CMSampleBufferRef)CFRetain(audioFrame);
++    /* Replace the mapping under the same lock as the retained buffer. Never
++     * export metadata for an overwritten buffer as if it reached the reader. */
++    if (_context->videorc_audio_clock) {
++        CMItemCount count;
++        CMSampleTimingInfo timing;
++        CMClockRef session_clock = _context->capture_session.masterClock;
++        _context->audio_clock_valid = 0;
++        if (session_clock &&
++            CMSampleBufferGetOutputSampleTimingInfoArray(audioFrame, 1, &timing, &count) == noErr &&
++            CMTIME_IS_NUMERIC(timing.presentationTimeStamp)) {
++            CMClockRef host_clock = CMClockGetHostTimeClock();
++            _context->audio_clock_callback = CMClockGetTime(host_clock);
++            _context->audio_clock_host = CMSyncConvertTime(timing.presentationTimeStamp,
++                                                          session_clock, host_clock);
++            _context->audio_clock_valid = CMTIME_IS_NUMERIC(_context->audio_clock_host) &&
++                                         CMTIME_IS_NUMERIC(_context->audio_clock_callback);
++        }
++    }
+ 
+     unlock_frames(_context);
+ 
+@@ -1120,6 +1142,9 @@
+ {
+     AVFContext* ctx = (AVFContext*)s->priv_data;
+ 
++    int emit_audio_clock = 0;
++    int64_t clock_host_ns = 0, clock_callback_ns = 0, clock_frames = 0;
++    double clock_rate = 0;
+     do {
+         CVImageBufferRef image_buffer;
+         CMBlockBufferRef block_buffer;
+@@ -1249,6 +1274,36 @@
+                 }
+             }
+ 
++            if (ctx->videorc_audio_clock) {
++                const AudioStreamBasicDescription *format = CMAudioFormatDescriptionGetStreamBasicDescription(
++                    CMSampleBufferGetFormatDescription(ctx->current_audio_frame));
++                if (!ctx->audio_clock_valid || !format || !isfinite(format->mSampleRate) || format->mSampleRate <= 0 ||
++                    format->mSampleRate > 384000 || floor(format->mSampleRate) != format->mSampleRate ||
++                    CMSampleBufferGetNumSamples(ctx->current_audio_frame) <= 0 || pkt->pts == AV_NOPTS_VALUE) {
++                    av_packet_unref(pkt);
++                    unlock_frames(ctx);
++                    av_log(s, AV_LOG_ERROR, "VIDEORC_AVF_CLOCK_INVALID version=1\n");
++                    return AVERROR(EIO);
++                }
++                CMTime host = CMTimeConvertScale(ctx->audio_clock_host, 1000000000,
++                                                  kCMTimeRoundingMethod_RoundHalfAwayFromZero);
++                CMTime callback = CMTimeConvertScale(ctx->audio_clock_callback, 1000000000,
++                                                      kCMTimeRoundingMethod_RoundHalfAwayFromZero);
++                if (!CMTIME_IS_NUMERIC(host) || !CMTIME_IS_NUMERIC(callback) ||
++                    host.timescale != 1000000000 || callback.timescale != 1000000000 ||
++                    host.epoch != 0 || callback.epoch != 0 || host.value < 0 || callback.value < 0) {
++                    av_packet_unref(pkt);
++                    unlock_frames(ctx);
++                    av_log(s, AV_LOG_ERROR, "VIDEORC_AVF_CLOCK_INVALID version=1\n");
++                    return AVERROR(EIO);
++                }
++                emit_audio_clock = 1;
++                clock_host_ns = host.value;
++                clock_callback_ns = callback.value;
++                clock_frames = CMSampleBufferGetNumSamples(ctx->current_audio_frame);
++                clock_rate = format->mSampleRate;
++            }
++
+             CFRelease(ctx->current_audio_frame);
+             ctx->current_audio_frame = nil;
+         } else {
+@@ -1264,6 +1319,12 @@
+         unlock_frames(ctx);
+     } while (!pkt->data);
+ 
++    /* Logging may backpressure, but must never hold the capture callback lock. */
++    if (emit_audio_clock)
++        av_log(s, AV_LOG_INFO,
++               "VIDEORC_AVF_CLOCK version=1 pts_us=%lld host_ns=%lld callback_ns=%lld frames=%lld rate=%.0f\n",
++               (long long)pkt->pts, (long long)clock_host_ns, (long long)clock_callback_ns,
++               (long long)clock_frames, clock_rate);
+     return 0;
+ }
+ 
+@@ -1275,6 +1336,7 @@
+ }
+ 
+ static const AVOption options[] = {
++    { "videorc_audio_clock", "export exact packet capture clock metadata (Videorc AVF clock protocol 1)", offsetof(AVFContext, videorc_audio_clock), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+     { "list_devices", "list available devices", offsetof(AVFContext, list_devices), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
+     { "video_device_index", "select video device by index for devices with same name (starts at 0)", offsetof(AVFContext, video_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },
+     { "audio_device_index", "select audio device by index for devices with same name (starts at 0)", offsetof(AVFContext, audio_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },

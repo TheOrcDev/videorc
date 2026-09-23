@@ -2958,6 +2958,43 @@ async fn start_session_with_timeline(
         }
         let _ = crate::fifo::cleanup(&prepared.fifo_path);
     }
+    // Capture-only AVFoundation workers supply the same timestamped session bus.
+    // The output encoder never owns a replaceable device input.
+    if let Some(MicrophoneInput::AvFoundation { index }) = capture.microphone.as_ref() {
+        let id = format!("microphone:avfoundation:{index}");
+        let path = native_audio_fifo_path(&session_id);
+        let prepared = async {
+            create_native_audio_fifo(&path)?;
+            crate::session_audio::prepare_initial_adapter(id, ffmpeg_path.clone()).await
+        }
+        .await;
+        match prepared {
+            Ok(source) => {
+                capture.microphone = Some(MicrophoneInput::SessionPcm {
+                    fifo_path: path.clone(),
+                });
+                native_audio_source = Some(PreparedNativeAudioSource {
+                    source,
+                    fifo_path: path,
+                });
+            }
+            Err(error) => {
+                let _ = crate::fifo::cleanup(&path);
+                capture.microphone = None;
+                state.emit_log(
+                    "warn",
+                    format!("AVFoundation microphone unavailable: {error}"),
+                );
+                let _ = emit_health_event(
+                    &state,
+                    Some(&session_id),
+                    HealthLevel::Warn,
+                    "microphone-capture-worker-unavailable",
+                    &format!("The selected microphone could not supply timestamped audio: {error}"),
+                );
+            }
+        }
+    }
     timeline.mark(RecordingStartPhase::MicWarm);
     if let Some(prepared) = native_audio_source.as_ref() {
         startup_resources.track_fifo(&prepared.fifo_path);
@@ -4597,7 +4634,10 @@ async fn start_session_with_timeline(
             Some(format!("microphone:avfoundation:{index}"))
         }
         Some(MicrophoneInput::WindowsDshow { .. }) => params.sources.microphone_id.clone(),
-        Some(MicrophoneInput::SessionPcm { .. }) => None,
+        Some(MicrophoneInput::SessionPcm { .. }) => pending_active
+            .native_audio
+            .as_ref()
+            .and_then(|audio| audio.status().device_id),
         None => None,
     };
     let sources_snapshot = {
@@ -25613,7 +25653,7 @@ mod tests {
                 &audio_fifo_path.display().to_string(),
                 "-thread_queue_size"
             ),
-            Some("1024")
+            Some("4")
         );
         assert_eq!(
             input_arg_value(&args, &fifo_path.display().to_string(), "-f"),
@@ -29435,7 +29475,7 @@ mod tests {
         );
         assert_eq!(
             input_arg_value(&args, "/tmp/videorc-audio-test.f32le", "-thread_queue_size"),
-            Some("1024")
+            Some("4")
         );
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_eq!(

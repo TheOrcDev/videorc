@@ -14,6 +14,11 @@ import {
   validateWindowsReleaseFacts
 } from './lib/windows-release-artifact-validation.mjs'
 
+import {
+  verifyWindowsCaptureManifest,
+  probeWindowsCaptureWorker
+} from './ffmpeg-capture-windows.mjs'
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 const releaseDir = resolve(
   process.env.VIDEORC_RELEASE_DIR ?? join(repoRoot, 'apps', 'desktop', 'release')
@@ -32,6 +37,9 @@ async function main() {
   const unpackedResources = join(releaseDir, 'win-unpacked', 'resources')
   const unpackedApp = join(releaseDir, 'win-unpacked', 'Videorc.exe')
 
+  const captureBundle = join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg')
+  verifyWindowsCaptureManifest(captureBundle)
+  probeWindowsCaptureWorker(captureBundle)
   const result = validateWindowsReleaseFacts({
     actualSha256: await sha256File(installerPath),
     actualSha512: await sha512File(installerPath),
@@ -57,7 +65,6 @@ async function main() {
 
   console.log(formatWindowsReleaseValidationReport(result))
 }
-
 
 function currentCommit() {
   const result = spawnSync('git', ['rev-parse', 'HEAD'], {

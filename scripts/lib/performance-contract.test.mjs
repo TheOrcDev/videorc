@@ -531,12 +531,22 @@ describe('packaged performance provenance', () => {
     const resources = join(root, 'resources')
     try {
       await mkdir(join(resources, 'ffmpeg', 'bin'), { recursive: true })
+      await mkdir(join(resources, 'ffmpeg', 'capture', 'source-patches'), { recursive: true })
       await Promise.all([
         writeFile(executable, 'electron launcher'),
         writeFile(join(resources, 'app.asar'), 'renderer and main bytes'),
         writeFile(join(resources, 'videorc-backend.exe'), 'backend bytes'),
         writeFile(join(resources, 'ffmpeg', 'bin', 'ffmpeg.exe'), 'ffmpeg bytes'),
-        writeFile(join(resources, 'ffmpeg', 'bin', 'ffprobe.exe'), 'ffprobe bytes')
+        writeFile(join(resources, 'ffmpeg', 'bin', 'ffprobe.exe'), 'ffprobe bytes'),
+        writeFile(join(resources, 'ffmpeg', 'bin/ffmpeg-capture.exe'), 'capture bytes'),
+        writeFile(join(resources, 'ffmpeg', 'capture/MANIFEST.json'), 'capture bytes'),
+        writeFile(join(resources, 'ffmpeg', 'capture/SOURCE.txt'), 'capture bytes'),
+        writeFile(join(resources, 'ffmpeg', 'capture/LICENSE.txt'), 'capture bytes'),
+        writeFile(join(resources, 'ffmpeg', 'capture/TOOLCHAIN.txt'), 'capture bytes'),
+        writeFile(
+          join(resources, 'ffmpeg', 'capture/source-patches/dshow-capture-clock.patch'),
+          'capture bytes'
+        )
       ])
 
       const first = await packagedAppPayloadIdentity(executable, { osPlatform: 'win32' })
@@ -552,7 +562,13 @@ describe('packaged performance provenance', () => {
           'resources/app.asar',
           'resources/videorc-backend.exe',
           'resources/ffmpeg/bin/ffmpeg.exe',
-          'resources/ffmpeg/bin/ffprobe.exe'
+          'resources/ffmpeg/bin/ffprobe.exe',
+          'resources/ffmpeg/bin/ffmpeg-capture.exe',
+          'resources/ffmpeg/capture/MANIFEST.json',
+          'resources/ffmpeg/capture/SOURCE.txt',
+          'resources/ffmpeg/capture/LICENSE.txt',
+          'resources/ffmpeg/capture/TOOLCHAIN.txt',
+          'resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch'
         ]
       )
     } finally {

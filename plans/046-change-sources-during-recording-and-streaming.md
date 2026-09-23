@@ -621,7 +621,10 @@ Additional scope is limited to `scripts/build-ffmpeg-macos.sh`, a maintained
 patch under `scripts/patches/`, a focused capture-clock capability probe and its
 pure tests under `scripts/`, associated package/packaging preflight wiring, and
 generated bundle source/build metadata. No new native capture stack or runtime
-dependency is introduced.
+dependency is introduced. The existing D3 release-acceptance dependency and
+sensitive-path inventories in `scripts/lib/capture-decay-release-acceptance.mjs`
+may add the new probe and patch so these changes invalidate prior acceptance;
+no acceptance, signing, or promotion rule may be weakened.
 
 Requirements:
 
@@ -645,6 +648,113 @@ Requirements:
 - Rebuild the local bundle, run adapter/parser rejection tests and the capability
   probe, then verify signed-candidate fallback recording/stream artifacts and
   per-switch A/V timing. This amendment does not waive physical-device acceptance.
+
+## S4 implementation amendment: Windows capture-clock worker
+
+The pinned Windows output FFmpeg is a prebuilt binary. Its DirectShow verbose
+log samples wall time after reading the graph clock and after acquiring the
+logger lock. A constant logging delay cannot be bounded by stderr receive age
+or the smallest observed offset. Do not use those logs as a proven capture clock.
+
+Complete Windows source replacement with a separate, minimal
+`ffmpeg-capture.exe` worker built from maintained FFmpeg source. Preserve the
+existing pinned output `ffmpeg.exe`/`ffprobe.exe`; this worker only captures and
+normalizes microphone PCM. This is the already-planned FFmpeg adapter, not a new
+native audio stack. Until the worker is available and verified, preserve initial
+Windows recording and report live microphone replacement explicitly unsupported.
+
+### Additional bounded scope
+
+- Maintained `scripts/patches/dshow-capture-clock.patch`, a Windows capture-worker
+  source pin, build wrapper/recipe, and capability/manifest probes with tests.
+- `scripts/preflight-windows-package.mjs`, package commands, and unsigned build
+  preparation in `.github/workflows/windows.yml` and
+  `.github/workflows/release-windows-alpha.yml` solely to build/probe this input.
+- `apps/desktop/electron-builder.yml` resource filters, including the previously
+  required macOS `source-patches/**/*` and the Windows worker/source/license data.
+- Existing Windows staging/candidate/resource integrity helpers and their tests
+  only where their explicit required-file inventories must include the worker.
+  Preserve signature, publisher, hash, role, approval and promotion checks.
+- Adapter resolution, clock parser, bounded process ownership and existing
+  verification commands already in S4/S6 scope.
+
+No release, artifact publication, signing-service invocation, deployment,
+credential change, updater mutation, or replacement of the main Windows encoder
+is authorized by this amendment.
+
+### Capture metadata contract
+
+1. Add an opt-in, versioned DirectShow option (for example
+   `videorc_audio_clock`, capability text `Videorc DShow clock protocol 1`).
+   Patch the actual audio receive callback. Obtain wall-clock readings immediately
+   before and after `IReferenceClock::GetTime`; use the midpoint as the graph-clock
+   mapping and the bracket width plus clock resolution as its explicit uncertainty.
+   Logging occurs afterward and must not supply the timestamp. Record the real
+   sample PTS and graph time in their declared units, both wall readings, packet
+   byte/sample count and negotiated sample rate/format. Check HRESULTs, invalid
+   sample timestamps, arithmetic, duration and format before emitting valid data.
+2. Metadata must identify the same packet delivered to FFmpeg. Refuse fallback
+   graph timestamps masquerading as sample timestamps, missing/malformed metadata,
+   excessive sampling brackets, unsupported PCM formats, discontinuities and stale
+   intervals. Retain `-copyts`; match final `ashowinfo` PTS/sample count with exact
+   stdout byte intervals. Require initial sequence zero, sequential metadata,
+   non-overlapping intervals, finite samples and complete PCM reads.
+3. Map worker wall time to backend `Instant` using bounded paired samples and
+   detect wall-clock steps. Include both worker and backend sampling uncertainty;
+   a logger delay changes delivery freshness, not capture time. A noisy capture
+   clock must produce a bounded, explicit error rather than restart the session.
+4. Resolve the exact selected DirectShow device against actual DirectShow audio
+   enumeration. Refuse ambiguous friendly names or use the unique enumerated
+   DirectShow alternative name. MediaFoundation inventory uniqueness alone is
+   insufficient to establish DirectShow identity.
+
+### Build and distribution
+
+- Verified upstream source: `https://ffmpeg.org/releases/ffmpeg-8.1.2.tar.xz`,
+  SHA-256 `464beb5e7bf0c311e68b45ae2f04e9cc2af88851abb4082231742a74d97b524c`.
+  Keep this worker pin separate from `vendor/ffmpeg/windows-pin.json`.
+- Use the documented MSYS2 UCRT64/MinGW-w64 build route. Install only the needed
+  compiler/build tools in CI (make, pkgconf, diffutils/patch, GCC and NASM); record
+  toolchain versions. A maintained wrapper must locate the configured MSYS2 root
+  and provide an actionable error on local hosts without it. Do not auto-install
+  machine-wide tooling from ordinary recording startup.
+- Build a static LGPL-compatible capture executable with DirectShow, required
+  PCM decoders, `aresample`, `aformat`, `ashowinfo`, PCM-float encoding, raw f32le
+  output and pipe I/O. Include minimal lavfi tone/silence inputs if needed for
+  maintained normalization verification. Disable GPL/nonfree, ffplay, network and
+  unrelated third-party components. Inspect actual PE dependencies and reject
+  dependence on MSYS2, compiler-runtime or unbundled DLLs.
+- Stage `bin/ffmpeg-capture.exe`, separate capture source/build/license manifests,
+  and the exact patch alongside the current Windows bundle. Main FFmpeg fetch
+  runs before worker staging because it may recreate the bundle directory.
+  Source URL/hash, configure flags, patch hash, protocol and executable hash must
+  identify the worker. Cache reuse must validate these inputs and probe the actual
+  binary. Build/cache failure must not substitute an unpatched capture binary.
+- Package and verify the worker in unpacked app resources; extend existing
+  explicit resource/staging inventories without weakening their protections.
+  Preserve the existing treatment of FFmpeg licensing/signatures and include
+  corresponding source/patch information in future release artifacts.
+
+### Required gates
+
+- Pure parser/framing tests for delayed logs, wide/negative clock brackets,
+  wall jumps, missing first metadata, overlap/gaps, stale/partial/nonfinite PCM,
+  ambiguous names and missing/wrong protocol/manifests.
+- Build and actual capability/normalization/PE-dependency probes on Windows CI;
+  packaged worker presence and matching manifest/patch checks. Reuse refusal
+  tests must exercise old binaries and mismatched source/build fingerprints.
+- Owned child startup/cancellation/kill/reap tests, affected Windows filters
+  25 times with nonzero test counts, and the full Windows Rust suite three times
+  from PowerShell 7 as already required. The clock worker remains an input
+  producer; output process, bus epoch, tracks and stream connection stay stable.
+- Existing Windows packaged recording/preview/audio controls gates and S6 source
+  artifact tests still apply. Hosted CI compilation and synthetic normalization
+  do not replace the required real-device per-switch A/V and endurance evidence.
+
+Build references: [FFmpeg Windows platform instructions](https://ffmpeg.org/platform.html)
+and [MSYS2 setup action](https://github.com/msys2/setup-msys2). This amendment
+permits the build prerequisite needed to finish the original Windows scope;
+physical-device acceptance remains explicit and unchanged.
 
 ## Done criteria, stop conditions, and maintenance
 
@@ -770,3 +880,47 @@ recording, stream, or release was run during planning.
   Electron-main-only debug-method restriction; the harness now uses the existing
   authenticated main smoke command, without weakening backend authorization.
   Final clippy with warnings denied and TypeScript lint also passed.
+
+### S4 checkpoint — timestamped AVFoundation and Windows worker build inputs
+
+- AVFoundation fallback startup and live replacement now use a capture-only owned
+  FFmpeg worker feeding the persistent session bus. The maintained macOS patch
+  exports exact retained-buffer PTS→host clock metadata; the backend samples
+  host→Instant with at most 1 ms bracketing uncertainty. PCM framing requires
+  initial sequence zero, sequential non-overlapping intervals, 48 kHz float
+  stereo, finite samples and fresh capture times. Partial reads are assembled;
+  missing/truncated/stale/discontinuous metadata cannot satisfy readiness.
+- The rebuilt macOS 8.1.1 bundle passes actual clock protocol1, existing feature,
+  LGPL/linkage and reuse checks. Patch fingerprint:
+  `df5b99402a422c543f485b741bba3581467705733079e8217b45843aadb729f1`.
+  Packaging includes corresponding source patch and verifies its manifest hash.
+- Session audio gets a dedicated Windows 8 KiB named pipe and a four-packet
+  FFmpeg input queue; video pipe defaults remain independent. The macOS pipe
+  still uses the operating system's capacity. These configured bounds do not
+  substitute for downstream-pressure and final-artifact timing measurements.
+- Stock DirectShow verbose-log timestamps cannot bound constant logger delay.
+  Windows startup therefore retains its existing device input at this checkpoint;
+  live microphone replacement remains unsupported until the separate patched
+  worker is integrated. The approved amendment is implemented as build inputs:
+  pinned FFmpeg8.1.2 source, opt-in exact-packet callback metadata, MSYS2 UCRT64
+  static capture-only build, source/license/recipe/binary manifests, actual x64 PE
+  import inspection and decoded 997 Hz normalization proof at 48 kHz. CI builds
+  and packages this sibling worker without replacing the main output encoder.
+  This is not yet a completed Windows adapter or physical acceptance claim.
+- Required Windows ownership filters now repeat25 times (including real FIFO
+  tests); the full Windows Rust suite remains three passes. Zero-test filters
+  fail the gate. Actual Windows build/test evidence is pending CI.
+- Fixed the existing standalone live-control probe's progress/acknowledgement
+  pipe collision exposed by Windows CI. Progress is now stdout and complete
+  filter replies stderr, with `-nostats`; the production2s poll,5s deadline,
+  six replies and decoded two-output gain/mute/unmute gates are retained.
+- Verification under `/tmp/videorc-live-sources-evidence`: adapter6/6 plus owned
+  ignored child fixture (`s4-adapter-tests-v3.log`); default Rust2240 backend,
+  80helper,1wire pass,10ignored (`s4-avf-rust-all-v2.log`); clippy-Dwarnings pass
+  (`s4-avf-clippy-v2.log`); Windows build/probe/staging unit tests75/75 pass
+  (`s4-windows-staging-tests-v3.log`); actual standalone live-control probe pass
+  (`s4-live-audio-control-probe.log`,2003/2011/2008ms complete acknowledgements).
+- Signed local candidate device probing is in progress. S4 remains IN PROGRESS:
+  Windows adapter integration/build evidence, classified exclusive restoration,
+  actual downstream-pressure measurements and physical artifact gates remain.
+  S5/S6 and final full recording-studio gates are still required.

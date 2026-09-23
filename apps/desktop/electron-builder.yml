@@ -61,6 +61,7 @@ mac:
         - SOURCE.txt
         - BUILD-CONFIG.txt
         - licenses/**/*
+        - source-patches/**/*
   hardenedRuntime: true
   icon: build-resources/icon.icns
   entitlements: build-resources/entitlements.mac.plist
@@ -114,6 +115,8 @@ win:
         # The backend resolves ffprobe as a sibling of the bundled ffmpeg
         # (ffmpeg.rs); repair/import/probe break without it.
         - bin/ffprobe.exe
+        - bin/ffmpeg-capture.exe
+        - capture/**/*
         - LICENSE.txt
         - SOURCE.txt
   target:

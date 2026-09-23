@@ -1,0 +1,205 @@
+--- a/libavdevice/dshow_capture.h
++++ b/libavdevice/dshow_capture.h
+@@ -247,6 +247,14 @@
+ /*****************************************************************************
+  * DShowFilter
+  ****************************************************************************/
++/* Exact packet capture-clock metadata, opt-in protocol 1. */
++typedef struct VideorcAudioClock {
++    int valid;
++    int64_t sample_100ns, graph_100ns;
++    uint64_t wall_before_100ns, wall_after_100ns;
++    int bytes, frames, rate, channels, bits, format;
++} VideorcAudioClock;
++
+ struct DShowFilter {
+     IBaseFilterVtbl *vtbl;
+     long ref;
+@@ -259,7 +267,7 @@
+     void *priv_data;
+     int stream_index;
+     int64_t start_time;
+-    void (*callback)(void *priv_data, int index, uint8_t *buf, int buf_size, int64_t time, enum dshowDeviceType type);
++    void (*callback)(void *priv_data, int index, uint8_t *buf, int buf_size, int64_t time, enum dshowDeviceType type, const VideorcAudioClock *capture_clock);
+ };
+ 
+ long          WINAPI ff_dshow_filter_QueryInterface (DShowFilter *, const GUID *, void **);
+@@ -298,6 +306,7 @@
+     int   list_options;
+     int   list_devices;
+     int   audio_buffer_size;
++    int   videorc_audio_clock;
+     int   crossbar_video_input_pin_number;
+     int   crossbar_audio_input_pin_number;
+     char *video_pin_name;
+--- a/libavdevice/dshow_pin.c
++++ b/libavdevice/dshow_pin.c
+@@ -23,6 +23,10 @@
+ #include "dshow_capture.h"
+ 
+ #include <stddef.h>
++#include <mmreg.h>
++
++static const GUID videorc_pcm = {1, 0, 0x10, {0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71}};
++static const GUID videorc_float = {3, 0, 0x10, {0x80, 0, 0, 0xaa, 0, 0x38, 0x9b, 0x71}};
+ #define imemoffset offsetof(DShowPin, imemvtbl)
+ 
+ DECLARE_QUERYINTERFACE(pin, DShowPin,
+@@ -304,8 +308,9 @@
+     IReferenceClock *clock = pin->filter->clock;
+     int64_t dummy;
+     struct dshow_ctx *ctx;
+-    HRESULT hr;
+-
++    HRESULT hr, clock_hr;
++    VideorcAudioClock capture_clock = {0};
++    FILETIME wall_before, wall_after;
+ 
+     dshowdebug("ff_dshow_meminputpin_Receive(%p)\n", this);
+ 
+@@ -317,13 +322,17 @@
+     ctx = s->priv_data;
+ 
+     hr = IMediaSample_GetTime(sample, &sampletime, &dummy);
+-    IReferenceClock_GetTime(clock, &graphtime);
++    if (ctx->videorc_audio_clock && devtype == AudioDevice)
++        GetSystemTimePreciseAsFileTime(&wall_before);
++    clock_hr = IReferenceClock_GetTime(clock, &graphtime);
++    if (ctx->videorc_audio_clock && devtype == AudioDevice)
++        GetSystemTimePreciseAsFileTime(&wall_after);
+     if (devtype == VideoDevice && !ctx->use_video_device_timestamps) {
+         /* PTS from video devices is unreliable. */
+         chosentime = graphtime;
+         use_sample_time = 0;
+     } else {
+-        if (hr == VFW_E_SAMPLE_TIME_NOT_SET || sampletime == 0) {
++        if (hr == VFW_E_SAMPLE_TIME_NOT_SET || (sampletime == 0 && !(ctx->videorc_audio_clock && devtype == AudioDevice && (hr == S_OK || hr == VFW_S_NO_STOP_TIME)))) {
+             chosentime = graphtime;
+             use_sample_time = 0;
+             av_log(s, AV_LOG_DEBUG,
+@@ -339,19 +348,63 @@
+         } else
+             chosentime = sampletime;
+     }
++    if (ctx->videorc_audio_clock && devtype == AudioDevice &&
++        (clock_hr != S_OK || graphtime < 0 || (hr != S_OK && hr != VFW_S_NO_STOP_TIME) || sampletime < 0 || pin->filter->start_time < 0 || sampletime > INT64_MAX - pin->filter->start_time)) {
++        av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID\n");
++        return E_FAIL;
++    }
+     // media sample time is relative to graph start time
+     sampletime += pin->filter->start_time;
+     if (use_sample_time)
+         chosentime += pin->filter->start_time;
+ 
+     buf_size = IMediaSample_GetActualDataLength(sample);
+-    IMediaSample_GetPointer(sample, &buf);
++    HRESULT pointer_hr = IMediaSample_GetPointer(sample, &buf);
+     index = pin->filter->stream_index;
+ 
+     av_log(s, AV_LOG_VERBOSE, "passing through packet of type %s size %8d "
+         "timestamp %"PRId64" orig timestamp %"PRId64" graph timestamp %"PRId64" diff %"PRId64" %s\n",
+         devtypename, buf_size, chosentime, sampletime, graphtime, graphtime - sampletime, ctx->device_name[devtype]);
+-    pin->filter->callback(priv_data, index, buf, buf_size, chosentime, devtype);
++    if (ctx->videorc_audio_clock && devtype == AudioDevice) {
++        WAVEFORMATEX *wave = (void *)pin->type.pbFormat;
++        if (pointer_hr != S_OK || !buf || buf_size <= 0) {
++            av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID\n");
++            return E_FAIL;
++        }
++        uint64_t before = ((uint64_t)wall_before.dwHighDateTime << 32) | wall_before.dwLowDateTime;
++        uint64_t after = ((uint64_t)wall_after.dwHighDateTime << 32) | wall_after.dwLowDateTime;
++        int format = wave && pin->type.cbFormat >= sizeof(WAVEFORMATEX) ? wave->wFormatTag : 0;
++        if (format == WAVE_FORMAT_EXTENSIBLE && pin->type.cbFormat >= sizeof(WAVEFORMATEXTENSIBLE)) {
++            WAVEFORMATEXTENSIBLE *extended = (void *)wave;
++            if (IsEqualGUID(&extended->SubFormat, &videorc_pcm)) format = WAVE_FORMAT_PCM;
++            else if (IsEqualGUID(&extended->SubFormat, &videorc_float)) format = WAVE_FORMAT_IEEE_FLOAT;
++            else format = 0;
++        }
++        capture_clock.valid = (hr == S_OK || hr == VFW_S_NO_STOP_TIME) && clock_hr == S_OK && pointer_hr == S_OK && buf &&
++            use_sample_time && chosentime == sampletime && sampletime >= 0 && graphtime >= sampletime &&
++            graphtime - sampletime <= 1000000 && before >= 116444736000000000ULL && after >= before && after - before <= 10000 &&
++            wave && pin->type.cbFormat >= sizeof(WAVEFORMATEX) && wave->nSamplesPerSec >= 8000 && wave->nSamplesPerSec <= 384000 &&
++            wave->nChannels > 0 && wave->nChannels <= 32 &&
++            ((format == WAVE_FORMAT_PCM && (wave->wBitsPerSample == 8 || wave->wBitsPerSample == 16 || wave->wBitsPerSample == 24 || wave->wBitsPerSample == 32)) ||
++             (format == WAVE_FORMAT_IEEE_FLOAT && (wave->wBitsPerSample == 32 || wave->wBitsPerSample == 64))) &&
++            wave->nBlockAlign == wave->nChannels * (wave->wBitsPerSample / 8) &&
++            buf_size > 0 && buf_size % wave->nBlockAlign == 0;
++        if (capture_clock.valid) {
++            capture_clock.sample_100ns = sampletime;
++            capture_clock.graph_100ns = graphtime;
++            capture_clock.wall_before_100ns = before - 116444736000000000ULL;
++            capture_clock.wall_after_100ns = after - 116444736000000000ULL;
++            capture_clock.bytes = buf_size;
++            capture_clock.frames = buf_size / wave->nBlockAlign;
++            capture_clock.rate = wave->nSamplesPerSec;
++            capture_clock.channels = wave->nChannels;
++            capture_clock.bits = wave->wBitsPerSample;
++            capture_clock.format = format;
++            capture_clock.valid = (int64_t)capture_clock.frames * 10 <= capture_clock.rate;
++        }
++    }
++    pin->filter->callback(priv_data, index, buf, buf_size, chosentime, devtype,
++                         ctx->videorc_audio_clock && devtype == AudioDevice ? &capture_clock : NULL);
+ 
+     return S_OK;
+ }
+--- a/libavdevice/dshow.c
++++ b/libavdevice/dshow.c
+@@ -339,7 +339,7 @@
+ }
+ 
+ static void
+-callback(void *priv_data, int index, uint8_t *buf, int buf_size, int64_t time, enum dshowDeviceType devtype)
++callback(void *priv_data, int index, uint8_t *buf, int buf_size, int64_t time, enum dshowDeviceType devtype, const VideorcAudioClock *capture_clock)
+ {
+     AVFormatContext *s = priv_data;
+     struct dshow_ctx *ctx = s->priv_data;
+@@ -359,6 +359,16 @@
+     if(av_new_packet(&pktl_next->pkt, buf_size) < 0) {
+         av_free(pktl_next);
+         goto fail;
++    }
++
++    if (capture_clock) {
++        pktl_next->pkt.opaque_ref = av_buffer_alloc(sizeof(*capture_clock));
++        if (!pktl_next->pkt.opaque_ref) {
++            av_packet_unref(&pktl_next->pkt);
++            av_free(pktl_next);
++            goto fail;
++        }
++        memcpy(pktl_next->pkt.opaque_ref->data, capture_clock, sizeof(*capture_clock));
+     }
+ 
+     pktl_next->pkt.stream_index = index;
+@@ -1885,12 +1895,31 @@
+         }
+     }
+ 
++    /* Emit only metadata attached to the delivered packet, outside the queue lock. */
++    if (!ctx->eof && ctx->videorc_audio_clock &&
++        s->streams[pkt->stream_index]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
++        VideorcAudioClock *clock = pkt->opaque_ref ? (void *)pkt->opaque_ref->data : NULL;
++        if (!clock || !clock->valid || clock->sample_100ns != pkt->pts || clock->bytes != pkt->size) {
++            av_log(s, AV_LOG_ERROR, "VIDEORC_DSHOW_CLOCK_INVALID\n");
++            av_packet_unref(pkt);
++            return AVERROR_INVALIDDATA;
++        }
++        av_log(s, AV_LOG_INFO,
++               "VIDEORC_DSHOW_CLOCK version=1 sample_100ns=%"PRId64" graph_100ns=%"PRId64
++               " wall_before_100ns=%"PRIu64" wall_after_100ns=%"PRIu64
++               " bytes=%d frames=%d rate=%d channels=%d bits=%d format=%d\n",
++               clock->sample_100ns, clock->graph_100ns, clock->wall_before_100ns, clock->wall_after_100ns,
++               clock->bytes, clock->frames, clock->rate, clock->channels, clock->bits, clock->format);
++        av_buffer_unref(&pkt->opaque_ref);
++    }
++
+     return ctx->eof ? AVERROR(EIO) : pkt->size;
+ }
+ 
+ #define OFFSET(x) offsetof(struct dshow_ctx, x)
+ #define DEC AV_OPT_FLAG_DECODING_PARAM
+ static const AVOption options[] = {
++    { "videorc_audio_clock", "export exact packet capture clock metadata (Videorc DShow clock protocol 1)", OFFSET(videorc_audio_clock), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, DEC },
+     { "video_size", "set video size given a string such as 640x480 or hd720.", OFFSET(requested_width), AV_OPT_TYPE_IMAGE_SIZE, {.str = NULL}, 0, 0, DEC },
+     { "pixel_format", "set video pixel format", OFFSET(pixel_format), AV_OPT_TYPE_PIXEL_FMT, {.i64 = AV_PIX_FMT_NONE}, -1, INT_MAX, DEC },
+     { "framerate", "set video frame rate", OFFSET(framerate), AV_OPT_TYPE_STRING, {.str = NULL}, 0, 0, DEC },

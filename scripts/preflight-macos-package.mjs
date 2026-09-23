@@ -11,6 +11,7 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { probeMacosFfmpegCapabilities } from './lib/repair-encoder-capabilities.mjs'
+import { probeCaptureClock, verifyCaptureClockManifest } from './ffmpeg-capture-clock.mjs'
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..')
 
@@ -63,6 +64,11 @@ const ffmpegBin = join(repoRoot, 'vendor', 'ffmpeg', 'current', 'bin', 'ffmpeg')
 let capabilities
 try {
   capabilities = probeMacosFfmpegCapabilities(ffmpegBin, { execFileSync })
+  verifyCaptureClockManifest(
+    join(repoRoot, 'vendor', 'ffmpeg', 'current'),
+    join(repoRoot, 'scripts', 'patches', 'avfoundation-capture-clock.patch')
+  )
+  probeCaptureClock(ffmpegBin)
 } catch (error) {
   console.error(
     `preflight-macos-package: could not run ${ffmpegBin} to probe capabilities: ${

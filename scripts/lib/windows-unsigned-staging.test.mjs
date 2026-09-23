@@ -20,6 +20,12 @@ const requiredFiles = {
   'resources/ffmpeg/SOURCE.txt': 'source',
   'resources/ffmpeg/bin/ffmpeg.exe': 'ffmpeg',
   'resources/ffmpeg/bin/ffprobe.exe': 'ffprobe',
+  'resources/ffmpeg/bin/ffmpeg-capture.exe': 'worker',
+  'resources/ffmpeg/capture/MANIFEST.json': 'manifest',
+  'resources/ffmpeg/capture/SOURCE.txt': 'source',
+  'resources/ffmpeg/capture/LICENSE.txt': 'license',
+  'resources/ffmpeg/capture/TOOLCHAIN.txt': 'toolchain',
+  'resources/ffmpeg/capture/source-patches/dshow-capture-clock.patch': 'patch',
   'resources/videorc-backend.exe': 'backend'
 }
 

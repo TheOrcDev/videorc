@@ -21,7 +21,7 @@ jobs:
   gates:
     name: Windows gates (Rust + JS tests)
     runs-on: windows-latest
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -65,6 +65,21 @@ jobs:
             cargo test -p videorc-backend preview_surface::tests::superseded_bounds_reply_and_event_never_publish_captured_old_status -- --exact
             if ($LASTEXITCODE -ne 0) {
               exit $LASTEXITCODE
+            }
+          }
+
+      - name: Source and audio ownership (25 stability passes)
+        shell: pwsh
+        run: |
+          foreach ($pass in 1..25) {
+            foreach ($filter in @('audio_capture_adapter', 'live_source_switch', 'session_audio', 'fifo::windows_tests', 'warm_microphone')) {
+              Write-Host "Source ownership $filter pass $pass/25"
+              $result = cargo test -p videorc-backend $filter 2>&1 | Out-String
+              $status = $LASTEXITCODE
+              Write-Host $result
+              if ($status -ne 0 -or $result -notmatch 'test result: ok\. [1-9][0-9]* passed') {
+                throw "Source ownership failed or executed zero tests: $filter pass $pass"
+              }
             }
           }
 
@@ -123,12 +138,30 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Set up minimal Windows capture-worker toolchain
+        id: capture-msys2
+        # Pinned setup-msys2 v2; output encoder stays the separately pinned binary.
+        uses: msys2/setup-msys2@66cd2cce69caa17b53920067426061ca1de3a884
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            make diffutils patch curl tar xz
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-nasm
+
       - name: Build Windows installer
         # Backend release build + pinned LGPL ffmpeg fetch + fail-closed
         # preflight (runs the ffmpeg rtmps/tls/h264_mf capability probe on a
         # real Windows host) + electron-builder dir/nsis targets. Unsigned:
         # testers will see a SmartScreen warning until signing lands.
+        env:
+          VIDEORC_MSYS2_ROOT: ${{ steps.capture-msys2.outputs.msys2-location }}
         run: pnpm dist:desktop:windows
+
+      - name: Verify packaged capture-worker protocol, normalization and source manifests
+        run: node scripts/ffmpeg-capture-windows.mjs apps/desktop/release/win-unpacked/resources/ffmpeg
 
       - name: Verify bundled FFmpeg live microphone controls
         run: pnpm probe:live-audio-controls

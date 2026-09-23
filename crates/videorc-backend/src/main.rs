@@ -9,6 +9,7 @@ mod account;
 mod ai;
 mod atomic_file;
 mod audio;
+mod audio_capture_adapter;
 mod backend_authority;
 mod camera_capture;
 mod captions;
