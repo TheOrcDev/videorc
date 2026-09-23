@@ -352,6 +352,13 @@
   --color-video-ground: var(--video-ground);
   --color-video-ground-foreground: var(--video-ground-foreground);
   --color-video-ground-muted: var(--video-ground-muted);
+
+  /* Platform brand tints: with source icons, the only large saturated colour
+     in the chrome (videorc-design). Theme-invariant. */
+  --color-platform-youtube: #ff0033;
+  --color-platform-twitch: #9146ff;
+  --color-platform-twitch-ink: #a970ff;
+  --color-platform-instagram: #e1306c;
 }
 
 /*

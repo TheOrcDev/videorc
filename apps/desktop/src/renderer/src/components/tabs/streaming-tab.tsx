@@ -26,8 +26,10 @@ const ScheduledStreams = lazy(() =>
   import('@/components/scheduled-streams').then((m) => ({ default: m.ScheduledStreams }))
 )
 
-import { ListRow } from '@/components/list-row'
+import { GroupedList, ListRow } from '@/components/list-row'
+import { ToolbarActions } from '@/components/pane'
 import { PanelSection } from '@/components/panel-section'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { AvatarCircle } from '@/lib/chat-avatar'
 import { Button } from '@/components/ui/button'
@@ -118,11 +120,15 @@ export function StreamingTab(): ReactElement {
     return () => window.removeEventListener('videorc:upcoming', open)
   }, [])
   return (
-    <Tabs value={view} onValueChange={setView}>
-      <TabsList>
-        <TabsTrigger value="setup">Setup</TabsTrigger>
-        <TabsTrigger value="upcoming">Upcoming</TabsTrigger>
-      </TabsList>
+    <Tabs className="gap-0" value={view} onValueChange={setView}>
+      {/* Setup / Upcoming is the page's own segmented control, so it lives in
+          the toolbar (plan 050 S13). */}
+      <ToolbarActions>
+        <TabsList aria-label="Livestream view">
+          <TabsTrigger value="setup">Setup</TabsTrigger>
+          <TabsTrigger value="upcoming">Upcoming</TabsTrigger>
+        </TabsList>
+      </ToolbarActions>
       <TabsContent value="setup">
         <StreamingSetup />
       </TabsContent>
@@ -240,86 +246,101 @@ function StreamingSetup(): ReactElement {
     }
   }, [isSessionActive])
 
+  const scheduledTargets = streaming.targets.filter((target) => target.scheduledEventId)
+  const showNotices =
+    Boolean(livestreamingEntitlementReason && !isSessionActive) ||
+    (isSessionActive && problems.length > 0 && !dismissed) ||
+    isSessionActive ||
+    scheduledTargets.length > 0
+
   return (
-    <div className="grid gap-5 lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
-      <div className="flex flex-col gap-5">
-        {livestreamingEntitlementReason && !isSessionActive ? (
-          <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-            <AlertIcon className="mt-0.5 size-4 shrink-0" weight="fill" />
-            <span>{livestreamingEntitlementReason}</span>
+    <div className="grid lg:grid-cols-[minmax(0,1.5fr)_minmax(0,1fr)]">
+      <div className="flex min-w-0 flex-col lg:border-r">
+        {showNotices ? (
+          <div className="flex flex-col gap-2 border-b border-border p-gutter">
+            {livestreamingEntitlementReason && !isSessionActive ? (
+              <Alert variant="warning">
+                <AlertIcon weight="fill" />
+                <AlertDescription>{livestreamingEntitlementReason}</AlertDescription>
+              </Alert>
+            ) : null}
+            {isSessionActive && problems.length > 0 && !dismissed ? (
+              <StreamFailureBanner
+                problems={problems}
+                onDismiss={() => setDismissed(true)}
+                onStopAll={() => void stopSession()}
+              />
+            ) : null}
+            {isSessionActive ? (
+              <p className="text-xs text-muted-foreground">
+                Destination credentials are locked while a session is live.
+              </p>
+            ) : null}
+            {scheduledTargets.map((target) => (
+              <Alert key={`scheduled-${target.id}`}>
+                <AlertDescription className="flex flex-wrap items-center justify-between gap-2 text-foreground">
+                  <span className="min-w-0 truncate">
+                    {target.label}: {target.scheduledEventTitle}
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={isSessionActive}
+                    onClick={() =>
+                      patchStreamingTarget(target.id, {
+                        scheduledEventId: undefined,
+                        scheduledEventTitle: undefined,
+                        scheduledPrivacy: undefined,
+                        scheduledStartUtc: undefined
+                      })
+                    }
+                  >
+                    Use instant broadcast
+                  </Button>
+                </AlertDescription>
+              </Alert>
+            ))}
           </div>
         ) : null}
-        {isSessionActive && problems.length > 0 && !dismissed ? (
-          <StreamFailureBanner
-            problems={problems}
-            onDismiss={() => setDismissed(true)}
-            onStopAll={() => void stopSession()}
-          />
-        ) : null}
-        {isSessionActive ? (
-          <p className="text-sm text-muted-foreground">
-            Destination credentials are locked while a session is live.
-          </p>
-        ) : null}
-        {streaming.targets
-          .filter((target) => target.scheduledEventId)
-          .map((target) => (
-            <div
-              key={`scheduled-${target.id}`}
-              className="flex flex-wrap items-center justify-between gap-2 rounded-lg border p-3"
-            >
-              <p className="min-w-0 truncate text-sm">
-                {target.label}: {target.scheduledEventTitle}
-              </p>
-              <Button
-                size="sm"
-                variant="ghost"
-                disabled={isSessionActive}
-                onClick={() =>
-                  patchStreamingTarget(target.id, {
-                    scheduledEventId: undefined,
-                    scheduledEventTitle: undefined,
-                    scheduledPrivacy: undefined,
-                    scheduledStartUtc: undefined
-                  })
-                }
-              >
-                Use instant broadcast
-              </Button>
-            </div>
-          ))}
-        {streaming.targets.map((target) => (
-          <DestinationCard
-            account={accountByPlatform.get(target.platform)}
-            credentials={credentialsByPlatform.get(target.platform)}
-            disabled={streamingControlsDisabled}
-            enableGate={streamingDestinationEnableGate({
-              entitlements,
-              streaming,
-              targetId: target.id
-            })}
-            key={target.id}
-            runtime={runtimeById.get(target.id)}
-            target={target}
-            validation={validationByPlatform.get(target.platform)}
-            xNativeCapability={xNativeCapability}
-            xNativeCapabilityLoading={xNativeCapabilityLoading}
-            youtubeChannels={youtubeChannels}
-            youtubeChannelsLoading={youtubeChannelsLoading}
-            onConnect={connectPlatformAccount}
-            onDisconnect={disconnectPlatformAccount}
-            onPatch={patchStreamingTarget}
-            onSaveManualStreamKey={saveManualStreamKey}
-            onRestorePreviousStreamKey={restorePreviousStreamKey}
-            onRefreshYouTubeChannels={refreshYouTubeChannels}
-            onRefreshXNativeCapability={refreshXNativeCapability}
-            onAuthorizeXLive={authorizeXLive}
-            onSelectYouTubeChannel={selectYouTubeChannel}
-          />
-        ))}
-        {/* Broadcast info: its own section below the destination rows — the
-            rows own auth/credentials, this owns what the stream says
-            (ux-ia plan, slice 7). */}
+        <PanelSection
+          description="Where the stream goes. Expand a destination for its account or key."
+          title="Destinations"
+        >
+          <GroupedList>
+            {streaming.targets.map((target) => (
+              <DestinationCard
+                account={accountByPlatform.get(target.platform)}
+                credentials={credentialsByPlatform.get(target.platform)}
+                disabled={streamingControlsDisabled}
+                enableGate={streamingDestinationEnableGate({
+                  entitlements,
+                  streaming,
+                  targetId: target.id
+                })}
+                key={target.id}
+                runtime={runtimeById.get(target.id)}
+                target={target}
+                validation={validationByPlatform.get(target.platform)}
+                xNativeCapability={xNativeCapability}
+                xNativeCapabilityLoading={xNativeCapabilityLoading}
+                youtubeChannels={youtubeChannels}
+                youtubeChannelsLoading={youtubeChannelsLoading}
+                onConnect={connectPlatformAccount}
+                onDisconnect={disconnectPlatformAccount}
+                onPatch={patchStreamingTarget}
+                onSaveManualStreamKey={saveManualStreamKey}
+                onRestorePreviousStreamKey={restorePreviousStreamKey}
+                onRefreshYouTubeChannels={refreshYouTubeChannels}
+                onRefreshXNativeCapability={refreshXNativeCapability}
+                onAuthorizeXLive={authorizeXLive}
+                onSelectYouTubeChannel={selectYouTubeChannel}
+              />
+            ))}
+          </GroupedList>
+        </PanelSection>
+        {/* Broadcast info: its own section below the destinations; the rows
+            own auth/credentials, this owns what the stream says (ux-ia plan,
+            slice 7). */}
         <MetadataEditor
           disabled={streamingControlsDisabled}
           draft={streamMetadataDraft}
@@ -335,11 +356,13 @@ function StreamingSetup(): ReactElement {
         />
       </div>
 
-      <div className="flex flex-col gap-5">
+      <div className="flex min-w-0 flex-col border-t lg:border-t-0">
         {compatibilityMessage ? (
-          <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-            <AlertIcon className="mt-0.5 size-4 shrink-0" weight="fill" />
-            <span>{compatibilityMessage}</span>
+          <div className="border-b border-border p-gutter">
+            <Alert variant="warning">
+              <AlertIcon weight="fill" />
+              <AlertDescription>{compatibilityMessage}</AlertDescription>
+            </Alert>
           </div>
         ) : null}
         <LiveOutputHealth
@@ -378,39 +401,37 @@ function StreamFailureBanner({
   const skipped = problems.filter((target) => target.state === 'not-configured')
 
   return (
-    <div className="flex flex-col gap-3 rounded-row border border-warning/40 bg-warning/10 p-3">
-      <div className="flex items-start gap-2.5">
-        <AlertIcon className="size-5 shrink-0 text-warning" weight="fill" />
-        <div className="flex flex-col gap-1 text-sm">
-          <span className="font-medium">Some destinations aren’t live</span>
-          {failed.length ? (
-            <span className="text-muted-foreground">
-              Stopped: {failed.map((target) => target.label).join(', ')}. The other destinations
-              keep streaming.
-            </span>
-          ) : null}
-          {skipped.length ? (
-            <span className="text-muted-foreground">
-              Skipped:{' '}
-              {skipped
-                .map((target) =>
-                  target.message ? `${target.label} (${target.message})` : target.label
-                )
-                .join(', ')}
-              .
-            </span>
-          ) : null}
-        </div>
-      </div>
-      <div className="flex gap-2">
-        <Button size="sm" variant="destructive" onClick={onStopAll}>
-          Stop all
-        </Button>
-        <Button size="sm" variant="outline" onClick={onDismiss}>
-          Continue streaming
-        </Button>
-      </div>
-    </div>
+    <Alert variant="warning">
+      <AlertIcon weight="fill" />
+      <AlertTitle>Some destinations aren’t live</AlertTitle>
+      <AlertDescription className="flex flex-col gap-1">
+        {failed.length ? (
+          <span>
+            Stopped: {failed.map((target) => target.label).join(', ')}. The other destinations keep
+            streaming.
+          </span>
+        ) : null}
+        {skipped.length ? (
+          <span>
+            Skipped:{' '}
+            {skipped
+              .map((target) =>
+                target.message ? `${target.label} (${target.message})` : target.label
+              )
+              .join(', ')}
+            .
+          </span>
+        ) : null}
+        <span className="flex gap-2 pt-1.5">
+          <Button size="sm" variant="destructive" onClick={onStopAll}>
+            Stop all
+          </Button>
+          <Button size="sm" variant="outline" onClick={onDismiss}>
+            Continue streaming
+          </Button>
+        </span>
+      </AlertDescription>
+    </Alert>
   )
 }
 
@@ -580,15 +601,12 @@ function DestinationCard({
   }
 
   return (
-    <section
-      className="flex flex-col gap-4 rounded-panel border border-border p-4"
-      data-slot="destination-card"
-    >
+    <section className="flex flex-col" data-slot="destination-card">
       {/* The reference row anatomy: vivid platform tile · title · account
           context · spring · state meta · enable switch (videorc-design).
           Clicking the row toggles the auth/credentials detail. */}
       <ListRow
-        className="-mx-1 h-auto min-h-9 cursor-pointer px-1"
+        className="h-auto min-h-10 py-1"
         icon={<PlatformGlyph platform={target.platform} />}
         title={target.label}
         context={account?.accountLabel ?? (oauthMode ? undefined : 'Manual RTMP')}
@@ -618,181 +636,141 @@ function DestinationCard({
           )}
         />
       </ListRow>
-      {statusMessage ? (
-        <span className="-mt-2 text-xs text-muted-foreground">{statusMessage}</span>
-      ) : null}
-      {expanded && manualKeyGuidance(target.platform) ? (
-        <div className="-mt-1 flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
-          <span className="min-w-0">{manualKeyGuidance(target.platform)?.copy}</span>
-          <Button
-            className="h-auto px-0 text-xs"
-            size="xs"
-            variant="link"
-            onClick={() => openExternalUrl(manualKeyGuidance(target.platform)?.url ?? '')}
+      {/* Status, guidance, and the expanded auth detail sit under the row;
+          the block collapses when it has nothing to say. */}
+      <div className="flex flex-col gap-3 px-3 pb-3 empty:hidden">
+        {statusMessage ? (
+          <span className="text-xs text-muted-foreground">{statusMessage}</span>
+        ) : null}
+        {expanded && manualKeyGuidance(target.platform) ? (
+          <div className="flex flex-wrap items-center gap-1.5 text-xs text-muted-foreground">
+            <span className="min-w-0">{manualKeyGuidance(target.platform)?.copy}</span>
+            <Button
+              className="h-auto px-0 text-xs"
+              size="xs"
+              variant="link"
+              onClick={() => openExternalUrl(manualKeyGuidance(target.platform)?.url ?? '')}
+            >
+              {manualKeyGuidance(target.platform)?.linkLabel}
+            </Button>
+          </div>
+        ) : null}
+        {enableLockGate ? (
+          // Neutral limit strip: a pipeline cap, not a plan boundary, so no
+          // warning tint and no upgrade affordance.
+          <div
+            className="flex flex-wrap items-center gap-2 border-l-2 border-border pl-3 text-xs text-muted-foreground"
+            id={enableLockId}
           >
-            {manualKeyGuidance(target.platform)?.linkLabel}
-          </Button>
-        </div>
-      ) : null}
-      {enableLockGate ? (
-        // Neutral limit strip: a pipeline cap, not a plan boundary, so no
-        // warning tint and no upgrade affordance.
-        <div
-          className="-mt-2 flex flex-wrap items-center gap-2 border-l-2 border-border pl-3 text-xs text-muted-foreground"
-          id={enableLockId}
-        >
-          <AlertIcon className="size-3.5 shrink-0" weight="fill" />
-          <span className="min-w-0 flex-1">{enableLockGate.reason}</span>
-        </div>
-      ) : null}
+            <AlertIcon className="size-3.5 shrink-0" weight="fill" />
+            <span className="min-w-0 flex-1">{enableLockGate.reason}</span>
+          </div>
+        ) : null}
 
-      {!expanded ? null : (
-        <>
-          {target.platform === 'custom' ? (
-            <Field>
-              <FieldLabel>URL mode</FieldLabel>
-              <ToggleGroup
-                className="w-full"
-                disabled={disabled}
-                type="single"
-                value={target.urlMode ?? 'server-and-key'}
-                variant="outline"
-                onValueChange={(value) =>
-                  value && onPatch(target.id, { urlMode: value as StreamUrlMode })
-                }
-              >
-                <ToggleGroupItem value="server-and-key">Server + key</ToggleGroupItem>
-                <ToggleGroupItem value="full-url">Full URL</ToggleGroupItem>
-              </ToggleGroup>
-            </Field>
-          ) : null}
-
-          {nativeDestination ? (
-            <Field>
-              <FieldLabel>Auth mode</FieldLabel>
-              {oauthUnavailableMessage ? (
-                <div className="flex flex-col gap-2 rounded-row border bg-muted/30 px-3 py-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
-                  <span>{oauthUnavailableMessage}</span>
-                  <Badge className="w-fit" variant="outline">
-                    Manual RTMP
-                  </Badge>
-                </div>
-              ) : (
+        {!expanded ? null : (
+          <>
+            {target.platform === 'custom' ? (
+              <Field>
+                <FieldLabel>URL mode</FieldLabel>
                 <ToggleGroup
                   className="w-full"
                   disabled={disabled}
                   type="single"
-                  value={target.authMode}
+                  value={target.urlMode ?? 'server-and-key'}
                   variant="outline"
                   onValueChange={(value) =>
-                    value && onPatch(target.id, { authMode: value as StreamAuthMode })
+                    value && onPatch(target.id, { urlMode: value as StreamUrlMode })
                   }
                 >
-                  <ToggleGroupItem value="oauth">OAuth</ToggleGroupItem>
-                  <ToggleGroupItem value="manual-rtmp">Manual RTMP</ToggleGroupItem>
+                  <ToggleGroupItem value="server-and-key">Server + key</ToggleGroupItem>
+                  <ToggleGroupItem value="full-url">Full URL</ToggleGroupItem>
                 </ToggleGroup>
-              )}
-            </Field>
-          ) : null}
-
-          {oauthMode ? (
-            <OAuthAccountPanel
-              account={account}
-              credentials={credentials}
-              disabled={disabled}
-              platform={target.platform}
-              validation={validation}
-              xNativeCapability={xNativeCapability}
-              xNativeCapabilityLoading={xNativeCapabilityLoading}
-              youtubeChannels={youtubeChannels}
-              youtubeChannelsLoading={youtubeChannelsLoading}
-              onConnect={onConnect}
-              onDisconnect={onDisconnect}
-              onRefreshYouTubeChannels={onRefreshYouTubeChannels}
-              onRefreshXNativeCapability={onRefreshXNativeCapability}
-              onAuthorizeXLive={onAuthorizeXLive}
-              onSelectYouTubeChannel={onSelectYouTubeChannel}
-              onUseManualRtmp={() => onPatch(target.id, { authMode: 'manual-rtmp' })}
-            />
-          ) : (
-            <>
-              <Field>
-                <FieldLabel htmlFor={`${target.id}-server`}>
-                  {fullUrl ? 'Full RTMP URL' : 'RTMP server'}
-                </FieldLabel>
-                <div className="flex gap-2">
-                  <Input
-                    disabled={disabled}
-                    id={`${target.id}-server`}
-                    placeholder={
-                      fullUrl
-                        ? target.streamKeyPresent
-                          ? `URL saved · ends ${target.streamKeyHint ?? '••••'}. Paste to replace`
-                          : 'rtmp://server/app/key'
-                        : 'rtmp://server/app'
-                    }
-                    type={fullUrl ? 'password' : 'text'}
-                    value={fullUrl ? fullUrlDraft : target.serverUrl}
-                    onBlur={() => {
-                      if (fullUrl) {
-                        requestManualKeySave(fullUrlDraft, 'full-url')
-                      }
-                    }}
-                    onChange={(event) =>
-                      fullUrl
-                        ? setFullUrlDraft(event.target.value)
-                        : onPatch(target.id, { serverUrl: event.target.value })
-                    }
-                    onKeyDown={(event) => {
-                      if (fullUrl && event.key === 'Enter') {
-                        requestManualKeySave(fullUrlDraft, 'full-url')
-                      }
-                    }}
-                  />
-                  {fullUrl && target.streamKeyPresent ? (
-                    <Button
-                      disabled={disabled}
-                      size="sm"
-                      variant="outline"
-                      onClick={() => setConfirmingClear(true)}
-                    >
-                      Clear
-                    </Button>
-                  ) : null}
-                </div>
-                {fullUrl ? (
-                  <FieldDescription>
-                    {target.streamKeyPresent
-                      ? `URL saved securely · ends ${target.streamKeyHint ?? '••••'}. Pasting a new one asks before replacing it.`
-                      : 'Saved securely because full RTMP URLs can include the stream key.'}
-                  </FieldDescription>
-                ) : null}
               </Field>
+            ) : null}
 
-              {!fullUrl ? (
+            {nativeDestination ? (
+              <Field>
+                <FieldLabel>Auth mode</FieldLabel>
+                {oauthUnavailableMessage ? (
+                  <div className="flex flex-col gap-2 rounded-row border bg-muted/30 px-3 py-2 text-xs text-muted-foreground sm:flex-row sm:items-center sm:justify-between">
+                    <span>{oauthUnavailableMessage}</span>
+                    <Badge className="w-fit" variant="outline">
+                      Manual RTMP
+                    </Badge>
+                  </div>
+                ) : (
+                  <ToggleGroup
+                    className="w-full"
+                    disabled={disabled}
+                    type="single"
+                    value={target.authMode}
+                    variant="outline"
+                    onValueChange={(value) =>
+                      value && onPatch(target.id, { authMode: value as StreamAuthMode })
+                    }
+                  >
+                    <ToggleGroupItem value="oauth">OAuth</ToggleGroupItem>
+                    <ToggleGroupItem value="manual-rtmp">Manual RTMP</ToggleGroupItem>
+                  </ToggleGroup>
+                )}
+              </Field>
+            ) : null}
+
+            {oauthMode ? (
+              <OAuthAccountPanel
+                account={account}
+                credentials={credentials}
+                disabled={disabled}
+                platform={target.platform}
+                validation={validation}
+                xNativeCapability={xNativeCapability}
+                xNativeCapabilityLoading={xNativeCapabilityLoading}
+                youtubeChannels={youtubeChannels}
+                youtubeChannelsLoading={youtubeChannelsLoading}
+                onConnect={onConnect}
+                onDisconnect={onDisconnect}
+                onRefreshYouTubeChannels={onRefreshYouTubeChannels}
+                onRefreshXNativeCapability={onRefreshXNativeCapability}
+                onAuthorizeXLive={onAuthorizeXLive}
+                onSelectYouTubeChannel={onSelectYouTubeChannel}
+                onUseManualRtmp={() => onPatch(target.id, { authMode: 'manual-rtmp' })}
+              />
+            ) : (
+              <>
                 <Field>
-                  <FieldLabel htmlFor={`${target.id}-key`}>Stream key</FieldLabel>
+                  <FieldLabel htmlFor={`${target.id}-server`}>
+                    {fullUrl ? 'Full RTMP URL' : 'RTMP server'}
+                  </FieldLabel>
                   <div className="flex gap-2">
                     <Input
-                      autoComplete="off"
                       disabled={disabled}
-                      id={`${target.id}-key`}
+                      id={`${target.id}-server`}
                       placeholder={
-                        target.streamKeyPresent
-                          ? `Key saved · ends ${target.streamKeyHint ?? '••••'}. Paste to replace`
-                          : 'paste your stream key'
+                        fullUrl
+                          ? target.streamKeyPresent
+                            ? `URL saved · ends ${target.streamKeyHint ?? '••••'}. Paste to replace`
+                            : 'rtmp://server/app/key'
+                          : 'rtmp://server/app'
                       }
-                      type="password"
-                      value={manualStreamKeyDraft}
-                      onBlur={() => requestManualKeySave(manualStreamKeyDraft, 'key')}
-                      onChange={(event) => setManualStreamKeyDraft(event.target.value)}
+                      type={fullUrl ? 'password' : 'text'}
+                      value={fullUrl ? fullUrlDraft : target.serverUrl}
+                      onBlur={() => {
+                        if (fullUrl) {
+                          requestManualKeySave(fullUrlDraft, 'full-url')
+                        }
+                      }}
+                      onChange={(event) =>
+                        fullUrl
+                          ? setFullUrlDraft(event.target.value)
+                          : onPatch(target.id, { serverUrl: event.target.value })
+                      }
                       onKeyDown={(event) => {
-                        if (event.key === 'Enter') {
-                          requestManualKeySave(manualStreamKeyDraft, 'key')
+                        if (fullUrl && event.key === 'Enter') {
+                          requestManualKeySave(fullUrlDraft, 'full-url')
                         }
                       }}
                     />
-                    {target.streamKeyPresent ? (
+                    {fullUrl && target.streamKeyPresent ? (
                       <Button
                         disabled={disabled}
                         size="sm"
@@ -803,106 +781,150 @@ function DestinationCard({
                       </Button>
                     ) : null}
                   </div>
-                  <FieldDescription>
-                    {target.streamKeyPresent
-                      ? `Key saved securely · ends ${target.streamKeyHint ?? '••••'}. Pasting a new one asks before replacing it.`
-                      : 'Saved securely per platform. Switching platforms never overwrites another key.'}
-                  </FieldDescription>
+                  {fullUrl ? (
+                    <FieldDescription>
+                      {target.streamKeyPresent
+                        ? `URL saved securely · ends ${target.streamKeyHint ?? '••••'}. Pasting a new one asks before replacing it.`
+                        : 'Saved securely because full RTMP URLs can include the stream key.'}
+                    </FieldDescription>
+                  ) : null}
                 </Field>
-              ) : null}
 
-              {target.previousStreamKeyPresent ? (
-                <Button
-                  className="w-fit"
-                  disabled={disabled}
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => void onRestorePreviousStreamKey(target.id)}
-                >
-                  <ResetIcon />
-                  Restore previous {credentialLabel}
-                  {target.previousStreamKeyHint ? ` (ends ${target.previousStreamKeyHint})` : ''}
-                </Button>
-              ) : null}
-            </>
-          )}
+                {!fullUrl ? (
+                  <Field>
+                    <FieldLabel htmlFor={`${target.id}-key`}>Stream key</FieldLabel>
+                    <div className="flex gap-2">
+                      <Input
+                        autoComplete="off"
+                        disabled={disabled}
+                        id={`${target.id}-key`}
+                        placeholder={
+                          target.streamKeyPresent
+                            ? `Key saved · ends ${target.streamKeyHint ?? '••••'}. Paste to replace`
+                            : 'paste your stream key'
+                        }
+                        type="password"
+                        value={manualStreamKeyDraft}
+                        onBlur={() => requestManualKeySave(manualStreamKeyDraft, 'key')}
+                        onChange={(event) => setManualStreamKeyDraft(event.target.value)}
+                        onKeyDown={(event) => {
+                          if (event.key === 'Enter') {
+                            requestManualKeySave(manualStreamKeyDraft, 'key')
+                          }
+                        }}
+                      />
+                      {target.streamKeyPresent ? (
+                        <Button
+                          disabled={disabled}
+                          size="sm"
+                          variant="outline"
+                          onClick={() => setConfirmingClear(true)}
+                        >
+                          Clear
+                        </Button>
+                      ) : null}
+                    </div>
+                    <FieldDescription>
+                      {target.streamKeyPresent
+                        ? `Key saved securely · ends ${target.streamKeyHint ?? '••••'}. Pasting a new one asks before replacing it.`
+                        : 'Saved securely per platform. Switching platforms never overwrites another key.'}
+                    </FieldDescription>
+                  </Field>
+                ) : null}
 
-          <Dialog
-            open={pendingKeySave !== null}
-            onOpenChange={(open) => {
-              if (!open) {
-                setPendingKeySave(null)
-              }
-            }}
-          >
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>
-                  {target.streamKeyPresent
-                    ? `Replace the ${target.label} ${credentialLabel}?`
-                    : `Save this ${credentialLabel} to ${target.label}?`}
-                </DialogTitle>
-                <DialogDescription>
-                  {target.streamKeyPresent
-                    ? `The saved ${credentialLabel}${
-                        target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
-                      } will be replaced by the new one ending ${streamKeyTailHint(
-                        pendingKeySave?.value ?? ''
-                      )}. The old one is kept as your previous ${credentialLabel}, so you can restore it.`
-                    : `The key ending ${streamKeyTailHint(pendingKeySave?.value ?? '')} will be saved to ${target.label}.`}
-                </DialogDescription>
-              </DialogHeader>
-              {pendingKeySave?.warning ? (
-                <div className="flex items-start gap-2 rounded-row border border-warning/40 bg-warning/10 p-3 text-sm text-warning-foreground dark:text-warning">
-                  <WarningIcon className="mt-0.5 shrink-0" />
-                  <span>{pendingKeySave.warning}</span>
-                </div>
-              ) : null}
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setPendingKeySave(null)}>
-                  Cancel
-                </Button>
-                <Button
-                  variant={pendingKeySave?.warning ? 'destructive' : 'default'}
-                  onClick={confirmPendingKeySave}
-                >
-                  {target.streamKeyPresent
-                    ? `Replace ${credentialLabel}`
-                    : `Save ${credentialLabel}`}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+                {target.previousStreamKeyPresent ? (
+                  <Button
+                    className="w-fit"
+                    disabled={disabled}
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => void onRestorePreviousStreamKey(target.id)}
+                  >
+                    <ResetIcon />
+                    Restore previous {credentialLabel}
+                    {target.previousStreamKeyHint ? ` (ends ${target.previousStreamKeyHint})` : ''}
+                  </Button>
+                ) : null}
+              </>
+            )}
 
-          <Dialog open={confirmingClear} onOpenChange={setConfirmingClear}>
-            <DialogContent>
-              <DialogHeader>
-                <DialogTitle>{`Remove the ${target.label} ${credentialLabel}?`}</DialogTitle>
-                <DialogDescription>
-                  {`The saved ${credentialLabel}${
-                    target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
-                  } is kept as your previous ${credentialLabel} after removal, so you can restore it.`}
-                </DialogDescription>
-              </DialogHeader>
-              <DialogFooter>
-                <Button variant="outline" onClick={() => setConfirmingClear(false)}>
-                  Cancel
-                </Button>
-                <Button variant="destructive" onClick={confirmClearKey}>
-                  Remove {credentialLabel}
-                </Button>
-              </DialogFooter>
-            </DialogContent>
-          </Dialog>
+            <Dialog
+              open={pendingKeySave !== null}
+              onOpenChange={(open) => {
+                if (!open) {
+                  setPendingKeySave(null)
+                }
+              }}
+            >
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>
+                    {target.streamKeyPresent
+                      ? `Replace the ${target.label} ${credentialLabel}?`
+                      : `Save this ${credentialLabel} to ${target.label}?`}
+                  </DialogTitle>
+                  <DialogDescription>
+                    {target.streamKeyPresent
+                      ? `The saved ${credentialLabel}${
+                          target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
+                        } will be replaced by the new one ending ${streamKeyTailHint(
+                          pendingKeySave?.value ?? ''
+                        )}. The old one is kept as your previous ${credentialLabel}, so you can restore it.`
+                      : `The key ending ${streamKeyTailHint(pendingKeySave?.value ?? '')} will be saved to ${target.label}.`}
+                  </DialogDescription>
+                </DialogHeader>
+                {pendingKeySave?.warning ? (
+                  <Alert variant="warning">
+                    <WarningIcon />
+                    <AlertDescription>{pendingKeySave.warning}</AlertDescription>
+                  </Alert>
+                ) : null}
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setPendingKeySave(null)}>
+                    Cancel
+                  </Button>
+                  <Button
+                    variant={pendingKeySave?.warning ? 'destructive' : 'default'}
+                    onClick={confirmPendingKeySave}
+                  >
+                    {target.streamKeyPresent
+                      ? `Replace ${credentialLabel}`
+                      : `Save ${credentialLabel}`}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
 
-          {target.platform === 'x' && !oauthMode ? (
-            <p className="text-xs text-muted-foreground">
-              X needs Media Studio Producer access; copy the RTMP URL and key from a Producer
-              source.
-            </p>
-          ) : null}
-        </>
-      )}
+            <Dialog open={confirmingClear} onOpenChange={setConfirmingClear}>
+              <DialogContent>
+                <DialogHeader>
+                  <DialogTitle>{`Remove the ${target.label} ${credentialLabel}?`}</DialogTitle>
+                  <DialogDescription>
+                    {`The saved ${credentialLabel}${
+                      target.streamKeyHint ? ` ending ${target.streamKeyHint}` : ''
+                    } is kept as your previous ${credentialLabel} after removal, so you can restore it.`}
+                  </DialogDescription>
+                </DialogHeader>
+                <DialogFooter>
+                  <Button variant="outline" onClick={() => setConfirmingClear(false)}>
+                    Cancel
+                  </Button>
+                  <Button variant="destructive" onClick={confirmClearKey}>
+                    Remove {credentialLabel}
+                  </Button>
+                </DialogFooter>
+              </DialogContent>
+            </Dialog>
+
+            {target.platform === 'x' && !oauthMode ? (
+              <p className="text-xs text-muted-foreground">
+                X needs Media Studio Producer access; copy the RTMP URL and key from a Producer
+                source.
+              </p>
+            ) : null}
+          </>
+        )}
+      </div>
     </section>
   )
 }
@@ -920,11 +942,11 @@ function openExternalUrl(url: string): void {
 // The vivid 24px rounded-square platform tile — per the design skill, source
 // and platform icons are the ONLY large saturated color in the chrome.
 const PLATFORM_GLYPH_TINT: Record<StreamPlatform, string> = {
-  youtube: 'bg-[#ff0033]/15 text-[#ff0033]',
-  twitch: 'bg-[#9146ff]/15 text-[#a970ff]',
+  youtube: 'bg-platform-youtube/15 text-platform-youtube',
+  twitch: 'bg-platform-twitch/15 text-platform-twitch-ink',
   x: 'bg-foreground/10 text-foreground',
   tiktok: 'bg-foreground/10 text-foreground',
-  instagram: 'bg-[#e1306c]/15 text-[#e1306c]',
+  instagram: 'bg-platform-instagram/15 text-platform-instagram',
   custom: 'bg-foreground/10 text-muted-foreground'
 }
 
@@ -957,11 +979,11 @@ function PlatformGlyph({ platform }: { platform: StreamPlatform }): ReactElement
   return (
     <span
       className={cn(
-        'flex size-6 items-center justify-center rounded-[6px]',
+        'flex size-5 items-center justify-center rounded-[5px]',
         PLATFORM_GLYPH_TINT[platform]
       )}
     >
-      <AppIcon className="size-4" weight="fill" />
+      <AppIcon className="size-3.5" weight="fill" />
     </span>
   )
 }
@@ -1483,10 +1505,13 @@ function MetadataEditor({
           </div>
 
           {validation && !validation.valid ? (
-            <div className="rounded-row border border-warning/40 bg-warning/10 p-3 text-xs text-muted-foreground">
-              {validation.issues.length} metadata warning{validation.issues.length === 1 ? '' : 's'}{' '}
-              before Go Live.
-            </div>
+            <Alert variant="warning">
+              <AlertIcon weight="fill" />
+              <AlertDescription>
+                {validation.issues.length} metadata warning
+                {validation.issues.length === 1 ? '' : 's'} before Go Live.
+              </AlertDescription>
+            </Alert>
           ) : (
             <Badge className="w-fit" variant="success">
               Metadata ready
@@ -1827,13 +1852,11 @@ function LiveOutputHealth({
       title="Live output health"
     >
       <div className="flex items-center justify-between gap-3">
-        <span className="text-xs font-medium tracking-wide text-muted-foreground uppercase">
-          Classified stage
-        </span>
+        <span className="text-[11px] font-semibold text-subtle">Classified stage</span>
         <Badge variant={badge.tone}>{badge.label}</Badge>
       </div>
 
-      <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
+      <div className="grid grid-cols-2 gap-x-4 gap-y-3 sm:grid-cols-3">
         <OutputMetric
           label="Delivered FPS"
           value={liveOutputActive ? formatLiveFps(currentStreamHealth?.fps) : '-'}
@@ -1882,7 +1905,7 @@ function LiveOutputHealth({
         />
       </div>
 
-      <div className="flex flex-col gap-2 rounded-row border border-border bg-muted/30 p-3">
+      <div className="flex flex-col gap-1.5 border-t border-border pt-3">
         <ExactOutputPath
           label="Effective provider"
           value={effectiveProviders || 'No enabled destination'}
@@ -1994,8 +2017,8 @@ function streamHealthDescription(
 
 function OutputMetric({ label, value }: { label: string; value: string }): ReactElement {
   return (
-    <div className="rounded-row border border-border bg-muted/30 px-2.5 py-2">
-      <div className="text-[11px] text-muted-foreground">{label}</div>
+    <div className="flex min-w-0 flex-col gap-0.5">
+      <div className="truncate text-[11px] text-muted-foreground">{label}</div>
       <div className="text-sm font-medium tabular-nums">{value}</div>
     </div>
   )
@@ -2005,7 +2028,7 @@ function ExactOutputPath({ label, value }: { label: string; value?: string }): R
   return (
     <div className="flex items-start justify-between gap-3 text-xs">
       <span className="shrink-0 text-muted-foreground">{label}</span>
-      <code className="min-w-0 break-all text-right text-foreground">{value ?? 'unknown'}</code>
+      <code className="min-w-0 text-right break-words text-foreground">{value ?? 'unknown'}</code>
     </div>
   )
 }
