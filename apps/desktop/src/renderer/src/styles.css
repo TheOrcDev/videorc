@@ -135,6 +135,12 @@
   /* Slider and switch knobs stay white in both themes, like AppKit's. */
   --knob: oklch(1 0 0);
   --knob-ring: oklch(0 0 0 / 12%);
+
+  /* The video ground: the letterbox the docked preview sits on, with its
+     text. Dark in both themes, because it frames video. */
+  --video-ground: oklch(0.13 0.003 286);
+  --video-ground-foreground: oklch(0.97 0.001 286);
+  --video-ground-muted: oklch(0.71 0.01 286);
 }
 
 .dark {
@@ -228,6 +234,10 @@
 
   --knob: oklch(1 0 0);
   --knob-ring: oklch(0 0 0 / 35%);
+
+  --video-ground: oklch(0.13 0.003 286);
+  --video-ground-foreground: oklch(0.97 0.001 286);
+  --video-ground-muted: oklch(0.71 0.01 286);
 }
 
 /* Increase Contrast: hairlines strong enough to read on glass, and the
@@ -339,6 +349,9 @@
   --color-glass-solid: var(--glass-solid);
   --color-knob: var(--knob);
   --color-knob-ring: var(--knob-ring);
+  --color-video-ground: var(--video-ground);
+  --color-video-ground-foreground: var(--video-ground-foreground);
+  --color-video-ground-muted: var(--video-ground-muted);
 }
 
 /*

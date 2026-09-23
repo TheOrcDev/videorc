@@ -143,7 +143,7 @@ export function AudioMixer(): ReactElement {
       }
     >
       {/* Microphone */}
-      <div className="flex flex-col gap-2 rounded-row border bg-muted/20 p-3">
+      <div className="flex flex-col gap-2 rounded-row border bg-foreground/[0.03] p-3">
         <div className="flex items-center justify-between gap-2">
           <span className="flex min-w-0 items-center gap-2">
             <MicrophoneIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />

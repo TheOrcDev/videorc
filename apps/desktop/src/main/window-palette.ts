@@ -60,6 +60,14 @@ export function windowPalette(dark: boolean): WindowPalette {
 }
 
 /**
+ * The docked preview's corner radius, in points: the Studio slot's
+ * `rounded-panel` (styles.css --radius-panel, 12px). The native CAMetalLayer
+ * clips to it so the video and its CSS ground agree; window-palette.test.ts
+ * fails when the two drift.
+ */
+export const DOCKED_PREVIEW_CORNER_RADIUS = 12
+
+/**
  * The dark glass coats (styles.css `.dark` --glass-window / --glass-content)
  * for main-side documents that cannot read the stylesheet: the Preview frame
  * paints both over the OS material (plan 050). window-palette.test.ts fails

@@ -11,7 +11,7 @@ import { VerticalLegMonitor } from '@/components/studio/vertical-leg-monitor'
  */
 export function StudioDashboardBottomRow(): ReactElement {
   return (
-    <div className="grid gap-5 lg:grid-cols-2">
+    <div className="flex flex-col">
       <ScenesGallery />
       <VerticalLegMonitor />
       <AudioMixer />

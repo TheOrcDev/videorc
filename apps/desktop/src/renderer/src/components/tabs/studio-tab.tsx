@@ -2,13 +2,13 @@ import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
-import { PageStack } from '@/components/page'
+import { ToolbarActions } from '@/components/pane'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { StatusBadge } from '@/components/status-badge'
 import { QuickSettings } from '@/components/studio/quick-settings'
 import { SessionMicSliver } from '@/components/studio/session-mic-sliver'
-import { SessionPanel } from '@/components/studio/session-panel'
+import { SessionPanel, SessionTransport, TakeoverSection } from '@/components/studio/session-panel'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import type { StudioPanel, WorkspaceTab } from '@/components/workspace-nav'
@@ -149,85 +149,108 @@ export function StudioTab(): ReactElement {
         ? 'End livestream'
         : 'Stop recording'
 
-  return (
-    <div className="flex items-start gap-5">
-      <div className="min-w-0 flex-1">
-        <GoLiveConfirmationDialog
-          draft={streamMetadataDraft}
-          captionsReadiness={goLiveCaptionsReadiness}
-          entitlementGate={goLiveEntitlement}
-          open={goLiveConfirmationOpen}
-          pending={goLiveConfirmationPending || startRequestPending}
-          preflight={goLivePreflight}
-          partialSetup={goLivePartialSetup}
-          onCancel={cancelGoLiveConfirmation}
-          onConfirm={() => void confirmGoLive()}
-          onContinuePartial={() => void continueGoLiveWithReadyDestinations()}
-          onContinueWithoutCaptions={continueGoLiveWithoutCaptions}
-          onPatchDraft={patchStreamMetadataDraft}
-          onResolveBlocker={(targetId, resolution) =>
-            void resolveGoLiveBlocker(targetId, resolution)
-          }
+  // data hook: the backend-resilience and captions smokes read this badge.
+  // It rides the toolbar, so it exists in every preview mode, docked
+  // included, and the mic sliver shares its one home.
+  const sessionStatus = (
+    <span className="flex items-center gap-1.5">
+      <SessionMicSliver
+        deviceName={studio.selectedMicrophone?.name}
+        muted={captureConfig.audio.microphoneMuted}
+        sessionActive={active}
+      />
+      <span data-videorc-session-status>
+        <StatusBadge
+          tone={sessionStatusTone(recording.state, wsStatus)}
+          value={sessionStatusLabel(recording.state, wsStatus)}
         />
+      </span>
+    </span>
+  )
 
-        <PageStack>
-          {/* Fresh-profile OBS hint (O5): quiet, dismissible, gone forever once
-              a capture source exists — never a nag. */}
-          {/* Hard blocks surface INSIDE the Session panel next to the disabled
-              buttons (quiet inline line + jump link) — the yellow top banner
-              made the Studio read as broken (post-0.9.4 fix batch F8). */}
+  return (
+    <>
+      <GoLiveConfirmationDialog
+        draft={streamMetadataDraft}
+        captionsReadiness={goLiveCaptionsReadiness}
+        entitlementGate={goLiveEntitlement}
+        open={goLiveConfirmationOpen}
+        pending={goLiveConfirmationPending || startRequestPending}
+        preflight={goLivePreflight}
+        partialSetup={goLivePartialSetup}
+        onCancel={cancelGoLiveConfirmation}
+        onConfirm={() => void confirmGoLive()}
+        onContinuePartial={() => void continueGoLiveWithReadyDestinations()}
+        onContinueWithoutCaptions={continueGoLiveWithoutCaptions}
+        onPatchDraft={patchStreamMetadataDraft}
+        onResolveBlocker={(targetId, resolution) => void resolveGoLiveBlocker(targetId, resolution)}
+      />
 
-          {/* Preview (left, the hero) + Session facts & controls (right). */}
-          <div className="grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
-            <StudioPreviewPanel />
+      {/* Record, Stream, and the clock live in the Studio toolbar (plan 050
+          S12); Space still records. */}
+      <ToolbarActions>
+        <SessionTransport
+          active={active}
+          canStop={canStop}
+          liveStreamBlockedReason={liveStreamBlockedReason}
+          recordBlockedReason={recordBlockedReason}
+          startRequestPending={startRequestPending}
+          status={sessionStatus}
+          stopLabel={stopLabel}
+          onLiveStream={handleLiveStream}
+          onRecord={handleRecord}
+          onStop={handleStop}
+        />
+      </ToolbarActions>
 
-            <SessionPanel
-              active={active}
-              blockedJump={
-                banner?.jumpTo && banner.jumpLabel
-                  ? { label: banner.jumpLabel, to: banner.jumpTo }
-                  : null
-              }
-              blockedReason={visibleStartBlockedReason}
-              canStop={canStop}
-              liveStreamBlockedReason={liveStreamBlockedReason}
-              recordBlockedReason={recordBlockedReason}
-              startFailure={sessionStartFailure}
-              runtimeNotice={sessionRuntimeNotice}
-              startRequestPending={startRequestPending}
-              stopLabel={stopLabel}
-              onDismissStartFailure={dismissSessionStartFailure}
-              onDismissRuntimeNotice={dismissSessionRuntimeNotice}
-              onLiveStream={handleLiveStream}
-              onRecord={handleRecord}
-              onRetryStart={retrySessionStart}
-              onStop={handleStop}
-            />
-          </div>
-
-          {/* Quick Settings: compact mirrors of Source / Mic / Layout / Output,
-              each editing the same captureConfig and deep-linking to its page. */}
-          <QuickSettings />
-
-          {/* Scenes + Audio mixer — the dashboard's bottom row. Collapses to a
-              single column below lg. */}
+      {/* The Studio bench: the preview pane leads, and the inspector (session
+          facts, inputs, takeover) sits beside it, split by a hairline. Hard
+          blocks surface inside the Session section, never as a yellow top
+          banner (post-0.9.4 fix batch F8). */}
+      <div className="grid min-h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
+        <div className="min-w-0 lg:border-r">
+          <StudioPreviewPanel />
+          {/* Scenes, the vertical leg, and the mixer: deferred so the launch
+              surface paints its preview and transport first. */}
           <Suspense fallback={<StudioDashboardBottomRowFallback />}>
             <StudioDashboardBottomRow />
           </Suspense>
-        </PageStack>
+        </div>
+
+        <aside aria-label="Session inspector" className="min-w-0 border-t lg:border-t-0">
+          <SessionPanel
+            active={active}
+            blockedJump={
+              banner?.jumpTo && banner.jumpLabel
+                ? { label: banner.jumpLabel, to: banner.jumpTo }
+                : null
+            }
+            blockedReason={visibleStartBlockedReason}
+            runtimeNotice={sessionRuntimeNotice}
+            startFailure={sessionStartFailure}
+            startRequestPending={startRequestPending}
+            onDismissRuntimeNotice={dismissSessionRuntimeNotice}
+            onDismissStartFailure={dismissSessionStartFailure}
+            onRetryStart={retrySessionStart}
+          />
+          {/* Inputs: compact mirrors of Source / Mic / Output / Captions, each
+              editing the same captureConfig and deep-linking to its page. */}
+          <QuickSettings />
+          <TakeoverSection />
+        </aside>
       </div>
-    </div>
+    </>
   )
 }
 
 function StudioDashboardBottomRowFallback(): ReactElement {
   return (
-    <div className="grid gap-5 lg:grid-cols-2" aria-label="Loading Studio controls">
+    <div className="flex flex-col" aria-label="Loading Studio controls">
       <PanelSection title="Scenes">
-        <div className="h-24 rounded-row border bg-muted/20" />
+        <div className="h-24 rounded-row bg-foreground/[0.04]" />
       </PanelSection>
       <PanelSection title="Audio mixer">
-        <div className="h-24 rounded-row border bg-muted/20" />
+        <div className="h-24 rounded-row bg-foreground/[0.04]" />
       </PanelSection>
     </div>
   )
@@ -235,16 +258,13 @@ function StudioDashboardBottomRowFallback(): ReactElement {
 
 function StudioPreviewPanel(): ReactElement {
   const {
-    captureConfig,
     nativePreviewSurfaceEnabled,
     handleSystemPermission,
     openPreviewWindow,
     previewWindow,
     refreshPreview,
     runtimeInfo,
-    selectedMicrophone,
-    setPreviewWindowMode,
-    wsStatus
+    setPreviewWindowMode
   } = useStudioCore()
   const { recording } = useStudioRecordingState()
   const { previewLiveStatus } = useStudioPreview()
@@ -258,27 +278,6 @@ function StudioPreviewPanel(): ReactElement {
   )
   const docked =
     nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
-
-  // data hook: the backend-resilience smoke reads this badge (the old probe
-  // grepped for a "Status" text prefix that died with the session-panel
-  // declutter). It must exist in every preview mode, docked included. The mic
-  // sliver rides the same cluster so it has exactly one home wherever the
-  // status renders (panel header or docked control row).
-  const sessionStatusBadge = (
-    <span className="flex items-center gap-1.5">
-      <SessionMicSliver
-        deviceName={selectedMicrophone?.name}
-        muted={captureConfig.audio.microphoneMuted}
-        sessionActive={active}
-      />
-      <span data-videorc-session-status>
-        <StatusBadge
-          tone={sessionStatusTone(recording.state, wsStatus)}
-          value={sessionStatusLabel(recording.state, wsStatus)}
-        />
-      </span>
-    </span>
-  )
 
   const healthErrorRow =
     previewHealth.tone === 'error' && previewHealth.detail ? (
@@ -295,7 +294,6 @@ function StudioPreviewPanel(): ReactElement {
 
   const previewStage = (
     <PreviewStage
-      dockedFooterStart={sessionStatusBadge}
       nativePreviewSurfaceEnabled={nativePreviewSurfaceEnabled}
       previewLiveStatus={previewLiveStatus}
       previewSurfaceStatus={previewSurfaceStatus}
@@ -304,12 +302,12 @@ function StudioPreviewPanel(): ReactElement {
     />
   )
 
-  // Docked ("stick") mode: the preview stands alone — no glass card, no
-  // border, no panel header. The native surface and its black frame ARE the
-  // panel; the docked frame's own control row carries status and dock actions.
+  // Docked ("stick") mode: the preview stands alone, with no section header.
+  // The native surface and its black frame ARE the pane; the docked frame's
+  // own control row carries the dock actions.
   if (docked) {
     return (
-      <div className="flex min-w-0 flex-col gap-3">
+      <div className="flex min-w-0 flex-col gap-3 border-b border-border p-gutter">
         {previewStage}
         {healthErrorRow}
       </div>
@@ -321,11 +319,9 @@ function StudioPreviewPanel(): ReactElement {
       title="Preview"
       action={
         <div className="flex items-center gap-1.5">
-          {sessionStatusBadge}
           {previewWindow.open && previewWindow.mode === 'floating' ? (
             <Button
               aria-label="Stick preview into the app"
-              className="size-8"
               size="icon"
               title="Stick the preview into this panel"
               variant="ghost"
@@ -336,7 +332,6 @@ function StudioPreviewPanel(): ReactElement {
           ) : previewWindow.open ? (
             <Button
               aria-label="Pop preview out into its own window"
-              className="size-8"
               size="icon"
               title="Pop the preview out into its own window"
               variant="ghost"
@@ -347,7 +342,6 @@ function StudioPreviewPanel(): ReactElement {
           ) : (
             <Button
               aria-label="Open preview window"
-              className="size-8"
               size="icon"
               title="Open preview in its own window"
               variant="ghost"

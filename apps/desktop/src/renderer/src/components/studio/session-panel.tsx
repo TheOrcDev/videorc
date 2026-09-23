@@ -13,71 +13,137 @@ import {
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 
 import { CohostPresenceDot } from '@/components/cohost-status'
+import { GroupedList } from '@/components/list-row'
 import { PanelSection } from '@/components/panel-section'
 import { SessionRuntimeAlert } from '@/components/studio/session-runtime-alert'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Kbd } from '@/components/ui/kbd'
 import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudioChat, useStudioCore, useStudioShell } from '@/hooks/use-studio'
+import {
+  useStudioChat,
+  useStudioCore,
+  useStudioRecording,
+  useStudioShell
+} from '@/hooks/use-studio'
 import { cohostPresenceView } from '@/lib/cohost-presence'
 import type { SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
-import { outputSummary, streamingSummary } from '@/lib/studio-session-view'
-
-// The session's primary actions rendered as a matched pair of glassy hero
-// controls: taller, translucent, specular-shined (videorc-design glass tokens).
-// Record/Stop keep the brand-red record accent; Stream is neutral glass.
-const HERO_CONTROL = 'h-11 flex-1 rounded-lg border font-semibold shadow-soft'
+import { outputSummary, sessionClockLabel, streamingSummary } from '@/lib/studio-session-view'
 
 /**
- * Session panel (SD1): the glanceable session facts as a label→value list, plus
- * the Session Controls. Facts come straight from useStudio; the controls reuse
- * the transport handlers StudioTab owns (no second session state machine). The
- * Storage row is intentionally absent until F1 (disk-free space) lands — no
- * fake number. Navigable rows deep-link to the page that owns the setting.
+ * The session transport (plan 050 S12): status, clock, and Record / Stream /
+ * Stop, rendered into the Studio toolbar. The buttons reuse the transport
+ * handlers StudioTab owns (no second session state machine). Space still
+ * records: that shortcut lives in the Studio provider, not on this button.
+ */
+export function SessionTransport({
+  active,
+  canStop,
+  stopLabel,
+  startRequestPending,
+  recordBlockedReason,
+  liveStreamBlockedReason,
+  status,
+  onRecord,
+  onLiveStream,
+  onStop
+}: {
+  active: boolean
+  canStop: boolean
+  stopLabel: string
+  startRequestPending: boolean
+  recordBlockedReason: string | null
+  liveStreamBlockedReason: string | null
+  /** The session status chip (and the mic sliver that rides with it). */
+  status: ReactNode
+  onRecord: () => void
+  onLiveStream: () => void
+  onStop: () => void
+}): ReactElement {
+  return (
+    <div className="flex items-center gap-2" data-slot="session-transport">
+      {status}
+      {active ? <SessionClock /> : null}
+      {active ? (
+        <Button disabled={!canStop} size="sm" variant="destructive" onClick={onStop}>
+          <StopIcon data-icon="inline-start" weight="fill" />
+          {stopLabel}
+        </Button>
+      ) : (
+        <>
+          <Button
+            disabled={Boolean(recordBlockedReason) || startRequestPending}
+            size="sm"
+            title={recordBlockedReason ?? undefined}
+            variant="destructive"
+            onClick={onRecord}
+          >
+            <RecordIcon data-icon="inline-start" weight="fill" />
+            Record
+            <Kbd className="ml-0.5">␣</Kbd>
+          </Button>
+          <Button
+            disabled={Boolean(liveStreamBlockedReason) || startRequestPending}
+            size="sm"
+            title={liveStreamBlockedReason ?? undefined}
+            variant="outline"
+            onClick={onLiveStream}
+          >
+            <LivestreamIcon data-icon="inline-start" weight="fill" />
+            Stream
+          </Button>
+        </>
+      )}
+    </div>
+  )
+}
+
+function SessionClock(): ReactElement {
+  const { recording } = useStudioRecording()
+  return (
+    <span
+      className="min-w-11 text-right text-sm font-medium text-foreground tabular-nums"
+      data-slot="session-clock"
+    >
+      {sessionClockLabel(recording.durationMs)}
+    </span>
+  )
+}
+
+/**
+ * The Session inspector (SD1): the glanceable session facts as a grouped
+ * label→value list, why a start is blocked, the last refused start, and a
+ * mid-session notice. Facts come straight from useStudio. The Storage row is
+ * intentionally absent until F1 (disk-free space) lands; no fake number.
+ * Navigable rows deep-link to the page that owns the setting.
  */
 export function SessionPanel({
   active,
   startRequestPending,
-  recordBlockedReason,
-  liveStreamBlockedReason,
   blockedReason = null,
   blockedJump = null,
   startFailure = null,
   runtimeNotice = null,
-  canStop,
-  stopLabel,
-  onRecord,
-  onLiveStream,
-  onStop,
   onRetryStart,
   onDismissStartFailure,
   onDismissRuntimeNotice
 }: {
   active: boolean
   startRequestPending: boolean
-  recordBlockedReason: string | null
-  liveStreamBlockedReason: string | null
-  /** Why the session cannot start right now (hard block); rendered as a quiet
-   * inline line next to the disabled controls — the former yellow top banner
-   * (post-0.9.4 fix batch F8). */
+  /** Why the session cannot start right now (hard block): a quiet inline
+   * line, never the yellow top banner (post-0.9.4 fix batch F8). */
   blockedReason?: string | null
   blockedJump?: {
     label: string
     to: Parameters<ReturnType<typeof useWorkspaceNav>['setActive']>[0]
   } | null
-  /** The last refused Record / Go Live (B0): stays under the controls until
-   * the user starts again or dismisses it — a 4s toast was the only signal. */
+  /** The last refused Record / Go Live (B0): stays until the user starts
+   * again or dismisses it; a 4s toast was the only signal. */
   startFailure?: SessionStartFailure | null
   /** Mid-session recording failure/degradation: persists until dismissed or
    * the next session begins. */
   runtimeNotice?: SessionRuntimeNotice | null
-  canStop: boolean
-  stopLabel: string
-  onRecord: () => void
-  onLiveStream: () => void
-  onStop: () => void
   onRetryStart?: () => void
   onDismissStartFailure?: () => void
   onDismissRuntimeNotice?: () => void
@@ -87,8 +153,8 @@ export function SessionPanel({
   const video = captureConfig.video
 
   return (
-    <PanelSection>
-      <div className="flex flex-col gap-0.5">
+    <PanelSection title="Session">
+      <GroupedList>
         <SessionRow
           icon={LivestreamIcon}
           label="Streaming"
@@ -102,115 +168,72 @@ export function SessionPanel({
           onNavigate={() => openStudioPanel('recording')}
         />
         {/* Presence W3: while a session runs, whether the co-host is reading
-            chat is a session fact — knowable without the Comments window.
+            chat is a session fact, knowable without the Comments window.
             Streaming only: the co-host reads LIVE chat, so a record-only
-            session has no chat for it to read and the row would be an idle
-            status for a feature that is not part of what the user started. */}
+            session has no chat for it to read. */}
         {active && captureConfig.streamEnabled ? <CohostSessionRow /> : null}
-      </div>
-
-      <div className="flex flex-col gap-2 border-t border-border pt-4">
-        <div className="flex gap-2">
-          {active ? (
-            <Button
-              className={`${HERO_CONTROL} border-destructive/30`}
-              disabled={!canStop}
-              variant="destructive"
-              onClick={onStop}
+      </GroupedList>
+      {!active && blockedReason ? (
+        <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
+          <InfoIcon className="size-3.5 shrink-0" />
+          <span className="min-w-0">{blockedReason}</span>
+          {blockedJump ? (
+            <button
+              className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
+              type="button"
+              onClick={() => setActive(blockedJump.to)}
             >
-              <StopIcon data-icon="inline-start" weight="fill" />
-              {stopLabel}
-            </Button>
-          ) : (
-            <>
-              <Button
-                className={`${HERO_CONTROL} border-destructive/30`}
-                disabled={Boolean(recordBlockedReason) || startRequestPending}
-                title={recordBlockedReason ?? undefined}
-                variant="destructive"
-                onClick={onRecord}
-              >
-                <RecordIcon data-icon="inline-start" weight="fill" />
-                Record
-                <Kbd className="ml-1.5">␣</Kbd>
-              </Button>
-              <Button
-                className={`${HERO_CONTROL} border-border bg-card/60 hover:border-foreground/20 hover:bg-[color-mix(in_oklch,var(--card),var(--foreground)_8%)]`}
-                disabled={Boolean(liveStreamBlockedReason) || startRequestPending}
-                title={liveStreamBlockedReason ?? undefined}
-                variant="outline"
-                onClick={onLiveStream}
-              >
-                <LivestreamIcon data-icon="inline-start" weight="fill" />
-                Stream
-              </Button>
-            </>
-          )}
+              {blockedJump.label}
+            </button>
+          ) : null}
         </div>
-        {!active && blockedReason ? (
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <InfoIcon className="size-3.5 shrink-0" />
-            <span className="min-w-0">{blockedReason}</span>
-            {blockedJump ? (
-              <button
-                className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
-                type="button"
-                onClick={() => setActive(blockedJump.to)}
-              >
-                {blockedJump.label}
-              </button>
-            ) : null}
-          </div>
-        ) : null}
-        {/* A refused start is the ONE place destructive red is allowed on chrome:
-            it is status, it persists, and it carries the backend's reason
-            verbatim (the toast can be missed mid-stream; this line cannot). */}
-        {!active && startFailure ? (
-          <Alert data-testid="session-start-failure" key={startFailure.at} variant="destructive">
-            <AlertIcon weight="fill" />
-            <AlertTitle>Could not start.</AlertTitle>
-            <AlertDescription className="min-w-0">
-              <p className="line-clamp-3" title={startFailure.message}>
-                {startFailure.message}
-              </p>
-              <div className="flex flex-wrap gap-1 pt-2">
-                {onRetryStart ? (
-                  <Button
-                    disabled={startRequestPending}
-                    size="xs"
-                    type="button"
-                    variant="ghost"
-                    onClick={onRetryStart}
-                  >
-                    Retry
-                  </Button>
-                ) : null}
-                {onDismissStartFailure ? (
-                  <Button size="xs" type="button" variant="ghost" onClick={onDismissStartFailure}>
-                    Dismiss
-                  </Button>
-                ) : null}
-              </div>
-            </AlertDescription>
-          </Alert>
-        ) : null}
-        {runtimeNotice && onDismissRuntimeNotice ? (
-          <SessionRuntimeAlert
-            notice={runtimeNotice}
-            onDismiss={onDismissRuntimeNotice}
-            onOpenLibrary={() => setActive('library')}
-            onRevealOutput={
-              runtimeNotice.kind === 'recording-failed' &&
-              runtimeNotice.activity === 'recording' &&
-              runtimeNotice.sessionId
-                ? () => void window.videorc?.revealSession?.(runtimeNotice.sessionId!)
-                : undefined
-            }
-          />
-        ) : null}
-      </div>
-
-      <TakeoverControls onOpenAssets={() => setActive('assets')} />
+      ) : null}
+      {/* A refused start is the ONE place destructive red is allowed on chrome:
+          it is status, it persists, and it carries the backend's reason
+          verbatim (the toast can be missed mid-stream; this line cannot). */}
+      {!active && startFailure ? (
+        <Alert data-testid="session-start-failure" key={startFailure.at} variant="destructive">
+          <AlertIcon weight="fill" />
+          <AlertTitle>Could not start.</AlertTitle>
+          <AlertDescription className="min-w-0">
+            <p className="line-clamp-3" title={startFailure.message}>
+              {startFailure.message}
+            </p>
+            <div className="flex flex-wrap gap-1 pt-2">
+              {onRetryStart ? (
+                <Button
+                  disabled={startRequestPending}
+                  size="xs"
+                  type="button"
+                  variant="ghost"
+                  onClick={onRetryStart}
+                >
+                  Retry
+                </Button>
+              ) : null}
+              {onDismissStartFailure ? (
+                <Button size="xs" type="button" variant="ghost" onClick={onDismissStartFailure}>
+                  Dismiss
+                </Button>
+              ) : null}
+            </div>
+          </AlertDescription>
+        </Alert>
+      ) : null}
+      {runtimeNotice && onDismissRuntimeNotice ? (
+        <SessionRuntimeAlert
+          notice={runtimeNotice}
+          onDismiss={onDismissRuntimeNotice}
+          onOpenLibrary={() => setActive('library')}
+          onRevealOutput={
+            runtimeNotice.kind === 'recording-failed' &&
+            runtimeNotice.activity === 'recording' &&
+            runtimeNotice.sessionId
+              ? () => void window.videorc?.revealSession?.(runtimeNotice.sessionId!)
+              : undefined
+          }
+        />
+      ) : null}
     </PanelSection>
   )
 }
@@ -248,17 +271,19 @@ function CohostSessionRow(): ReactElement {
   )
 }
 
-// The takeover on-air switch (its ONE home — the Assets grid manages images,
-// this flips them). Live-safe: activation only needs the backend socket, so it
-// works mid-session; a takeover replaces the output regardless of scene.
-function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): ReactElement {
+/**
+ * The takeover on-air switch (its ONE home: the Assets grid manages images,
+ * this flips them). Live-safe: activation only needs the backend socket, so it
+ * works mid-session; a takeover replaces the output regardless of scene.
+ */
+export function TakeoverSection(): ReactElement {
   const { activateScreen, activeScreen, clearActiveScreen, screens, wsStatus } = useStudioCore()
+  const { setActive } = useWorkspaceNav()
   const ready = screens.filter((screen) => screen.status !== 'missing')
   const disconnected = wsStatus !== 'connected'
 
   return (
-    <div className="flex flex-col gap-2 border-t border-border pt-4">
-      <span className="text-xs font-medium text-muted-foreground">Takeover</span>
+    <PanelSection title="Takeover">
       {ready.length === 0 ? (
         <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
           <ImageIcon className="size-3.5 shrink-0" weight="duotone" />
@@ -266,7 +291,7 @@ function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): React
           <button
             className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
             type="button"
-            onClick={onOpenAssets}
+            onClick={() => setActive('assets')}
           >
             Add in Assets
           </button>
@@ -311,12 +336,13 @@ function TakeoverControls({ onOpenAssets }: { onOpenAssets: () => void }): React
           </span>
         </>
       )}
-    </div>
+    </PanelSection>
   )
 }
 
-// Label→value row. Navigable rows render as a button with a trailing caret and
-// deep-link to the owning page; static facts (Status, Mode) render as a div.
+// Label→value row in the Session group. Navigable rows render as a button with
+// a trailing caret and deep-link to the owning page; static facts render as a
+// div.
 function SessionRow({
   icon: RowIcon,
   label,
@@ -347,7 +373,7 @@ function SessionRow({
   if (onNavigate) {
     return (
       <button
-        className="flex items-center gap-3 rounded-row px-2.5 py-2 text-sm transition-colors hover:bg-accent"
+        className="flex h-row items-center gap-2.5 px-3 text-sm hover:bg-accent"
         title={title}
         type="button"
         onClick={onNavigate}
@@ -357,7 +383,7 @@ function SessionRow({
     )
   }
   return (
-    <div className="flex items-center gap-3 rounded-row px-2.5 py-2 text-sm" title={title}>
+    <div className="flex h-row items-center gap-2.5 px-3 text-sm" title={title}>
       {body}
     </div>
   )

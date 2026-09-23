@@ -251,7 +251,11 @@ import {
   redactAvatarFetchError,
   withAvatarFetchDeadline
 } from './avatar-cache'
-import { DARK_GLASS_COATS, DARK_WINDOW_PALETTE } from './window-palette'
+import {
+  DARK_GLASS_COATS,
+  DARK_WINDOW_PALETTE,
+  DOCKED_PREVIEW_CORNER_RADIUS
+} from './window-palette'
 import { loadWindowAppearanceBinding, pinWindowAppearance } from './window-appearance'
 import {
   appliedGlass,
@@ -3318,9 +3322,9 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
     scaleFactor: state.scaleFactor,
     screenHeight: state.screenHeight,
     visible,
-    // Docked previews clip to the studio slot's rounded panel (--radius-panel
-    // = 18pt); the floating window stays square. CALayer radii are in points.
-    cornerRadius: state.mode === 'docked' ? 18 : 0,
+    // Docked previews clip to the studio slot's rounded panel (--radius-panel,
+    // 12pt); the floating window stays square. CALayer radii are in points.
+    cornerRadius: state.mode === 'docked' ? DOCKED_PREVIEW_CORNER_RADIUS : 0,
     ...(orderAboveWindowId === undefined
       ? {}
       : {

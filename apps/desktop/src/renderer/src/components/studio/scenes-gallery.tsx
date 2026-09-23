@@ -144,8 +144,8 @@ export function ScenesGallery(): ReactElement {
               key={preset.id}
               aria-pressed={active}
               className={cn(
-                'group flex flex-col gap-2 rounded-row border p-2 text-left transition-colors',
-                active ? 'border-primary bg-primary/5' : 'hover:bg-accent',
+                'group flex flex-col gap-2 rounded-row border p-2 text-left',
+                active ? 'border-primary bg-primary/5' : 'bg-foreground/[0.04] hover:bg-accent',
                 disabled && 'cursor-not-allowed opacity-50'
               )}
               disabled={disabled}
