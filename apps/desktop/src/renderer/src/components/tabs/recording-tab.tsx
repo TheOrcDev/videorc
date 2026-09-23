@@ -50,7 +50,7 @@ export function RecordingTab(): ReactElement {
   })
 
   return (
-    <div className="grid gap-5">
+    <div className="flex flex-col">
       <PanelSection
         action={
           <Switch
@@ -161,7 +161,7 @@ export function RecordingTab(): ReactElement {
               {resolutionPresets.map((preset) => (
                 <button
                   aria-pressed={video.width === preset.width && video.height === preset.height}
-                  className="cursor-pointer rounded-row border border-border px-3 py-2 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                  className="rounded-row border border-border px-3 py-1.5 text-left text-sm font-medium hover:bg-accent aria-pressed:glass-chip disabled:cursor-not-allowed disabled:opacity-50"
                   disabled={isSessionActive}
                   key={preset.label}
                   type="button"

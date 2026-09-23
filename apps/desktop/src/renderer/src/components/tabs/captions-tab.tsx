@@ -5,9 +5,13 @@ import { CaptionsControls } from '@/components/captions/captions-controls'
 
 export function CaptionsTab(): ReactElement {
   return (
-    <div className="grid items-start gap-5 lg:grid-cols-[minmax(0,1.2fr)_minmax(380px,0.8fr)]">
-      <CaptionPreview />
-      <CaptionsControls />
+    <div className="grid lg:grid-cols-[minmax(0,1.2fr)_minmax(380px,0.8fr)]">
+      <div className="min-w-0">
+        <CaptionPreview />
+      </div>
+      <div className="min-w-0 border-t lg:border-t-0 lg:border-l">
+        <CaptionsControls />
+      </div>
     </div>
   )
 }
