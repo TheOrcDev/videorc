@@ -2674,6 +2674,11 @@ async fn start_session_with_timeline(
     // every uncommitted return publishes the exact-session terminal replacement
     // before another start can be admitted.
     let mut published_session_start = PublishedSessionStartGuard::unarmed();
+    if crate::session_audio::cleanup_pending() && state.recording.lock().await.is_none() {
+        bail!(
+            "The previous audio source is still closing. Wait for cleanup before starting another session."
+        );
+    }
     // This backend-owned edge closes the gap between Electron's last sampled
     // status and the first Starting event. A permission restart or updater
     // install that already owns the interruption lease rejects this start; a
@@ -2950,6 +2955,20 @@ async fn start_session_with_timeline(
     let has_native_audio = native_audio_source.is_some();
     let session_start_publication_permit =
         authorize_session_start_publication(&state, &session_id, &params, has_native_audio).await?;
+    // Input topology is fixed for the lifetime of this output process. An empty
+    // selection has a real paced zero-PCM producer, never a device or test tone.
+    let silent_audio_fifo = if capture.microphone.is_none() {
+        let path = native_audio_fifo_path(&session_id);
+        create_native_audio_fifo(&path)?;
+        startup_resources.track_fifo(&path);
+        capture.microphone = Some(MicrophoneInput::SessionPcm {
+            fifo_path: path.clone(),
+        });
+        Some(path)
+    } else {
+        None
+    };
+    let has_session_audio = has_native_audio || silent_audio_fifo.is_some();
     let audio_tracks = capture_audio_tracks(&capture);
     if matches!(capture.video, VideoInput::TestPattern) {
         let (code, message) = if matches!(params.layout.layout_preset, LayoutPreset::CameraOnly) {
@@ -4144,13 +4163,26 @@ async fn start_session_with_timeline(
     // await between construction and publication, synchronously signalling
     // FFmpeg before this active value joins its native-audio FIFO writer.
     let pending_active: ActiveRecording;
-    let attached_native_audio = native_audio_source.take().map(|prepared| {
-        attach_fifo_writer(
-            prepared.source,
-            prepared.fifo_path,
-            use_encoder_bridge.then(|| video_epoch.clone()),
-        )
-    });
+    let attached_native_audio = native_audio_source
+        .take()
+        .map(|prepared| {
+            attach_fifo_writer(
+                prepared.source,
+                prepared.fifo_path,
+                use_encoder_bridge.then(|| video_epoch.clone()),
+            )
+        })
+        .or_else(|| {
+            silent_audio_fifo.map(|path| {
+                crate::session_audio::attach(
+                    None,
+                    path,
+                    use_encoder_bridge.then(|| video_epoch.clone()),
+                    audio_processing_settings(&params),
+                    Duration::from_secs(1),
+                )
+            })
+        });
     // Declare the uncommitted process guard after every blocking FIFO writer.
     // Rust drops locals in reverse declaration order, so even cancellation or
     // a future unhandled early return starts terminating FFmpeg before native
@@ -4553,6 +4585,7 @@ async fn start_session_with_timeline(
             Some(format!("microphone:avfoundation:{index}"))
         }
         Some(MicrophoneInput::WindowsDshow { .. }) => params.sources.microphone_id.clone(),
+        Some(MicrophoneInput::SessionPcm { .. }) => None,
         None => None,
     };
     let sources_snapshot = {
@@ -4658,7 +4691,7 @@ async fn start_session_with_timeline(
             }
         });
     }
-    if has_native_audio {
+    if has_session_audio {
         tokio::spawn(sample_native_audio_during_recording(
             state.clone(),
             session_id.clone(),
@@ -7206,6 +7239,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             audio.recording_window_elapsed_secs(),
                             audio.input_state(),
                             audio.claim_source_loss_event(),
+                            audio.has_selected_input(),
                         )
                     })
                 }
@@ -7221,6 +7255,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             capture_elapsed_secs,
             input_state,
             source_loss_event_after_ms,
+            selected_input,
         )) = counters
         else {
             return;
@@ -7241,8 +7276,10 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
         // while stopping and fixing still saves the take. A TCC-unauthorized
         // process receives silent zeros (frames count, peak stays 0), so both
         // "no frames" and "all-silence" trip the check. Fires at most once.
-        if input_state != NativeAudioInputState::SourceLost
-            && !silent_mic_reported
+        if matches!(
+            input_state,
+            NativeAudioInputState::Starting | NativeAudioInputState::Live
+        ) && !silent_mic_reported
             && started_at.elapsed() >= MIC_SILENT_CHECK_AFTER
             && let Some(kind) = silent_mic_verdict(captured_frames, session_peak)
         {
@@ -7263,9 +7300,12 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                 &message,
             );
         }
-        let coverage = capture_elapsed_secs.and_then(|elapsed_secs| {
-            audio_capture_coverage(captured_frames, elapsed_secs, NATIVE_AUDIO_SAMPLE_RATE)
-        });
+        let coverage = selected_input
+            .then_some(capture_elapsed_secs)
+            .flatten()
+            .and_then(|elapsed_secs| {
+                audio_capture_coverage(captured_frames, elapsed_secs, NATIVE_AUDIO_SAMPLE_RATE)
+            });
         let diagnostic_stats = {
             let mut diagnostics = state.diagnostics.lock().await;
             let next = apply_audio_stats(
@@ -7613,6 +7653,7 @@ async fn monitor_session(
             let native_audio_stats = active.native_audio.as_ref().map(|audio| {
                 audio.finish_recording_window();
                 NativeAudioStats {
+                    selected_input: audio.has_selected_input(),
                     device_name: audio.device_name.clone(),
                     captured_frames: audio.captured_frames(),
                     dropped_frames: audio.dropped_frames(),
@@ -7895,12 +7936,7 @@ async fn monitor_session(
         }
         // Silent-mic verdict at finalize (plan 021 F3): the user must learn the
         // file has no sound from the app, not from playing it back.
-        if native_audio_stats.input_state != NativeAudioInputState::SourceLost
-            && let Some(kind) = silent_mic_verdict(
-                native_audio_stats.captured_frames,
-                native_audio_stats.session_peak,
-            )
-        {
+        if let Some(kind) = native_audio_stats.silence_verdict() {
             let message = match kind {
                 SilentMicKind::NoFrames => format!(
                     "Microphone \"{}\" captured no audio. This recording has a silent audio track. Check the input device in Settings.",
@@ -9850,6 +9886,7 @@ struct PublishedRecordingMp4 {
 
 #[derive(Debug)]
 struct NativeAudioStats {
+    selected_input: bool,
     device_name: String,
     captured_frames: u64,
     dropped_frames: u64,
@@ -9857,6 +9894,15 @@ struct NativeAudioStats {
     input_state: NativeAudioInputState,
     source_loss_after_ms: Option<u64>,
     unreported_source_loss_after_ms: Option<u64>,
+}
+
+impl NativeAudioStats {
+    fn silence_verdict(&self) -> Option<SilentMicKind> {
+        if !self.selected_input || self.input_state == NativeAudioInputState::SourceLost {
+            return None;
+        }
+        silent_mic_verdict(self.captured_frames, self.session_peak)
+    }
 }
 
 #[derive(Debug)]
@@ -19606,6 +19652,25 @@ mod tests {
     // recording audio"): the silent-mic verdict must catch BOTH failure shapes —
     // a device that never delivers frames, and CoreAudio's silent zeros for a
     // TCC-unauthorized process (frames advance, every sample is 0).
+    #[test]
+    fn finalization_does_not_report_intentional_none_as_a_broken_microphone() {
+        let mut stats = NativeAudioStats {
+            selected_input: false,
+            device_name: "No microphone".into(),
+            captured_frames: 0,
+            dropped_frames: 0,
+            session_peak: 0.0,
+            input_state: NativeAudioInputState::Stopped,
+            source_loss_after_ms: None,
+            unreported_source_loss_after_ms: None,
+        };
+        assert_eq!(stats.silence_verdict(), None);
+        stats.selected_input = true;
+        assert_eq!(stats.silence_verdict(), Some(SilentMicKind::NoFrames));
+        stats.input_state = NativeAudioInputState::SourceLost;
+        assert_eq!(stats.silence_verdict(), None);
+    }
+
     #[test]
     fn silent_mic_verdict_catches_no_frames_and_all_silence() {
         assert_eq!(silent_mic_verdict(0, 0.0), Some(SilentMicKind::NoFrames));

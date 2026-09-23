@@ -102,6 +102,7 @@ pub struct SessionSourceHealth {
 pub struct SessionSources {
     pub session_id: String,
     pub source_revision: u64,
+    pub audio: Option<crate::session_audio::AudioBusStatus>,
     pub confirmed: SourceSelection,
     pub health: Vec<SessionSourceHealth>,
     pub pending: Option<SourceSwitchOperation>,
@@ -196,6 +197,7 @@ impl SourceSwitchCoordinator {
             snapshot: Some(SessionSources {
                 session_id,
                 source_revision: 0,
+                audio: None,
                 health: [
                     (
                         SourceKind::Capture,
@@ -411,7 +413,7 @@ pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, S
     let camera = crate::preview_camera::preview_camera_status(state).await;
     let capture = crate::preview_screen::preview_screen_status(state).await;
     let recording = state.recording.lock().await;
-    let (stopping, audio_health) = recording
+    let (stopping, audio_health, audio_status) = recording
         .as_ref()
         .filter(|active| active.session_id == session_id)
         .map(|active| {
@@ -421,6 +423,7 @@ pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, S
                     .native_audio
                     .as_ref()
                     .map(|audio| audio.input_state()),
+                active.native_audio.as_ref().map(|audio| audio.status()),
             )
         })
         .ok_or(SwitchError::InactiveSession)?;
@@ -430,6 +433,7 @@ pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, S
         coordinator.stop(session_id);
     }
     let mut snapshot = coordinator.snapshot(session_id)?;
+    snapshot.audio = audio_status;
     for health in &mut snapshot.health {
         health.device_id = match health.kind {
             SourceKind::Camera => snapshot.confirmed.camera_id.clone(),

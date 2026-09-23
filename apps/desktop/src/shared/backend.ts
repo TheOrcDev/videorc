@@ -4499,6 +4499,16 @@ export interface SourceSwitchOperation {
   outputObserved: boolean
 }
 export interface SessionSources {
+  audio: {
+    sampleCursor: number
+    selectedInput: boolean
+    counters: {
+      capturedFrames: number
+      generatedFrames: number
+      discardedFrames: number
+      droppedFrames: number
+    }
+  } | null
   sessionId: string
   sourceRevision: number
   confirmed: SourceSelection

@@ -70,6 +70,7 @@ mod scheduled_streams_service;
 mod scheduled_youtube;
 mod screen_capture;
 mod secrets;
+mod session_audio;
 mod session_ops;
 mod source_mask;
 mod source_registry;

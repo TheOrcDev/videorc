@@ -48,6 +48,10 @@ pub enum WindowsScreenCaptureBackend {
 /// FIFO, or ffmpeg capturing the device directly as the fallback.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MicrophoneInput {
+    /// Session-owned PCM, including intentional silence when no device is selected.
+    SessionPcm {
+        fifo_path: PathBuf,
+    },
     CoreAudio {
         device_id: u32,
         fifo_path: Option<PathBuf>,
@@ -216,7 +220,8 @@ pub fn append_microphone_input(
         MicrophoneInput::CoreAudio {
             fifo_path: Some(fifo_path),
             ..
-        } => {
+        }
+        | MicrophoneInput::SessionPcm { fifo_path } => {
             args.extend([
                 "-f".to_string(),
                 "f32le".to_string(),
@@ -277,7 +282,9 @@ pub fn microphone_needs_graph_gain(microphone: Option<&MicrophoneInput>) -> bool
 
 pub fn microphone_channels(microphone: Option<&MicrophoneInput>) -> u16 {
     match microphone {
-        Some(MicrophoneInput::CoreAudio { .. }) => NATIVE_AUDIO_CHANNELS,
+        Some(MicrophoneInput::CoreAudio { .. } | MicrophoneInput::SessionPcm { .. }) => {
+            NATIVE_AUDIO_CHANNELS
+        }
         Some(MicrophoneInput::AvFoundation { .. }) => 1,
         Some(MicrophoneInput::WindowsDshow { .. }) => NATIVE_AUDIO_CHANNELS,
         None => 0,

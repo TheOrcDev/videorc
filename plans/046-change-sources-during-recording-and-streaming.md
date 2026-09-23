@@ -660,7 +660,7 @@ recording, stream, or release was run during planning.
   DirectShow remain main-FFmpeg inputs. Existing camera restart retires the
   previous native source before opening its replacement. New source transaction
   capabilities are explicitly unsupported until those lifetimes are migrated.
-- S1 implementation underway: session/revision admission, bounded duplicate
+- S1 implemented (commit `2d0f06eb`): session/revision admission, bounded duplicate
   cache with explicit New/Existing admission, stop/late-completion fencing,
   startup selection snapshot, renderer-only methods, reconnect snapshot,
   source-health observations, independent timeout reconciliation, and
@@ -674,3 +674,22 @@ recording, stream, or release was run during planning.
   BackendClient 27/27, TypeScript typecheck and lint passed.
 - Physical-device and output acceptance remain outstanding. Device inventory
   or passing protocol tests do not constitute encoded artifact acceptance.
+
+- S2 implemented: persistent paced 48 kHz stereo PCM bus with intentional None,
+  source-loss silence, bounded capture timeline, output-side gain/mute and caption
+  delivery, sample provenance, stale speech discard, and gradual device-clock
+  correction. Producer identity replacement is the next phase; capabilities
+  remain disabled. The downstream pipe/demux buffering bound remains S4 work.
+- S2 verification: default-profile Rust suite 2224 tests plus one wire integration
+  test passed (9 ignored); focused audio/bus suite 42/42; clippy with warnings
+  denied and TypeScript typecheck passed. Reviewer Node suite 1442/1442 passed.
+  `smoke:captions-contract`, `smoke:record-latency:gate`, and the full
+  `smoke:recording-studio` passed. The studio bundle included caption/mute/gain/
+  source-loss encoded artifacts, recording and RTMP scene artifacts, all-layout
+  recording, real ScreenCaptureKit recording, and preview reliability gates.
+  First latency run: cold Record 143 ms, warm Record p95 90 ms, Stop p95 99 ms,
+  final MP4 p95 226 ms. Evidence logs: `s2-rust-all.log`,
+  `s2-audio-tests-v3.log`, `s2-clippy-final.log`, `s2-typecheck.log`,
+  `reviewer-s2-scripts.log`, `s2-captions-contract.log`, `s2-record-latency.log`,
+  and `s2-recording-studio.log` in the evidence directory above. These are phase
+  regression gates, not final live-switch/device acceptance.
