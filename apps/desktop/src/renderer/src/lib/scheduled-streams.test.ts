@@ -107,6 +107,39 @@ describe('scheduled stream ownership', () => {
       selectScheduledStreamForTarget(config, target.id, { ...event, accountId: 'different' })
     ).toThrow('channel')
   })
+  it('binds an X broadcast only to an X OAuth destination of the same account', () => {
+    const xTarget = {
+      ...target,
+      id: 'x',
+      platform: 'x',
+      accountId: '123',
+      scheduledEventId: undefined
+    } satisfies StreamTargetSettings
+    const config = {
+      ...defaultCaptureConfig,
+      streaming: {
+        ...defaultCaptureConfig.streaming,
+        targets: [{ ...target, enabled: false }, xTarget],
+        enabledTargetIds: []
+      }
+    }
+    const event = {
+      id: eventId,
+      provider: 'x',
+      accountId: '123',
+      startUtc: '2035-01-01T12:00:00Z',
+      requested: { title: 'X launch', privacy: 'private' }
+    } as ScheduledStreamEvent
+    const result = selectScheduledStreamForTarget(config, 'x', event)
+    expect(result.streaming.targets[1]).toMatchObject({
+      platform: 'x',
+      enabled: true,
+      scheduledEventId: eventId,
+      streamKeyPresent: false
+    })
+    expect(result.streaming.enabledTargetIds).toEqual(['x'])
+    expect(() => selectScheduledStreamForTarget(config, target.id, event)).toThrow('X destination')
+  })
   it('deduplicates a supplied intent UUID and surfaces reconciliation rather than replaying', async () => {
     const request = vi.fn().mockResolvedValue({
       id: eventId,

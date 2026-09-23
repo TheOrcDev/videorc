@@ -1,6 +1,20 @@
 import type { CaptureConfig } from '@/lib/capture'
 import type { BackendClient } from '@/backendClient'
-import type { ScheduledStreamEvent, ScheduledStreamOperation } from '@/lib/backend'
+import type {
+  ScheduledStreamEvent,
+  ScheduledStreamOperation,
+  ScheduledStreamProvider,
+  StreamPlatform
+} from '@/lib/backend'
+
+export function scheduledProviderLabel(provider: ScheduledStreamProvider | StreamPlatform): string {
+  return provider === 'x' ? 'X' : 'YouTube'
+}
+
+/** Where the provider's own event page lives, for copy such as "Open on YouTube". */
+export function scheduledProviderSite(provider: ScheduledStreamProvider): string {
+  return provider === 'x' ? 'X' : 'YouTube Studio'
+}
 
 export async function runScheduledOperation<T = unknown>(
   client: Pick<BackendClient, 'request'>,
@@ -61,13 +75,18 @@ export function selectScheduledStreamForTarget(
   event: ScheduledStreamEvent
 ): CaptureConfig {
   const selected = config.streaming.targets.find((target) => target.id === targetId)
+  const provider = event.provider ?? 'youtube'
   if (
     !selected ||
-    selected.platform !== 'youtube' ||
+    selected.platform !== provider ||
     selected.authMode !== 'oauth' ||
     selected.accountId !== event.accountId
   ) {
-    throw new Error('Choose a YouTube destination connected to this event’s channel.')
+    throw new Error(
+      provider === 'x'
+        ? 'Choose an X destination connected to this broadcast’s account.'
+        : 'Choose a YouTube destination connected to this event’s channel.'
+    )
   }
   const targets = config.streaming.targets.map((target) =>
     target.id === targetId

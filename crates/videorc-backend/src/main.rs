@@ -68,6 +68,7 @@ mod scene;
 mod scene_geometry;
 mod scheduled_streams;
 mod scheduled_streams_service;
+mod scheduled_x;
 mod scheduled_youtube;
 mod screen_capture;
 mod secrets;
@@ -388,6 +389,19 @@ async fn run_backend() -> Result<()> {
             account_handle: None,
             avatar_url: None,
             scopes: vec!["https://www.googleapis.com/auth/youtube.force-ssl".into()],
+            token_secret_ref: Some("scheduled-smoke-fixture-only".into()),
+            refresh_token_secret_ref: None,
+            stream_key_secret_ref: None,
+            expires_at: None,
+            status: PlatformAccountStatus::Connected,
+        })?;
+        database.upsert_platform_account(UpsertPlatformAccount {
+            platform: StreamPlatform::X,
+            account_id: scheduled_streams_service::X_SMOKE_ACCOUNT_ID.into(),
+            account_label: "Local X scheduling fixture".into(),
+            account_handle: Some("videorc_fixture".into()),
+            avatar_url: None,
+            scopes: vec!["tweet.read".into()],
             token_secret_ref: Some("scheduled-smoke-fixture-only".into()),
             refresh_token_secret_ref: None,
             stream_key_secret_ref: None,
@@ -3242,6 +3256,26 @@ fn x_native_live_capability(
 ) -> anyhow::Result<XNativeLiveCapability> {
     let accounts = state.database.list_platform_accounts()?;
     let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
+    #[cfg(debug_assertions)]
+    if let Some(account) = account
+        && account.account_id == scheduled_streams_service::X_SMOKE_ACCOUNT_ID
+        && scheduled_streams_service::smoke_api_base()?.is_some()
+    {
+        return Ok(XNativeLiveCapability {
+            platform: StreamPlatform::X,
+            state: x_live::XNativeLiveCapabilityState::Ready,
+            native_available: true,
+            manual_rtmp_available: true,
+            oauth_connected: true,
+            account_id: Some(account.account_id.clone()),
+            account_label: Some(account.account_label.clone()),
+            credential_source: Some("fixture".into()),
+            message: "Local X scheduling fixture connected.".into(),
+            evidence: vec![],
+            docs_url: String::new(),
+            api_overview_url: String::new(),
+        });
+    }
     x_live::x_native_live_capability(account)
 }
 
@@ -3456,15 +3490,31 @@ async fn end_x_native_live(state: &AppState, params: XEndParams) -> anyhow::Resu
     let session_id = params.session_id.clone();
     let accounts = state.database.list_platform_accounts()?;
     let account = x_live::select_x_account(&accounts, params.account_id.as_deref())?;
-    let capability = x_live::x_native_live_capability(account)?;
-    x_live::ensure_x_native_live_available(&capability)?;
-    let credentials = x_live::x_livestream_credentials()?
-        .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?;
+    #[cfg(debug_assertions)]
+    let smoke = account
+        .is_some_and(|account| account.account_id == scheduled_streams_service::X_SMOKE_ACCOUNT_ID)
+        && scheduled_streams_service::smoke_api_base()?.is_some();
+    #[cfg(not(debug_assertions))]
+    let smoke = false;
+    let (credentials, api_base_url) = if smoke {
+        // The scheduling smoke ENDs against its loopback fixture, never x.com.
+        let api =
+            scheduled_streams_service::x_api(state, scheduled_streams_service::X_SMOKE_ACCOUNT_ID)?;
+        (api.credentials, Some(api.base))
+    } else {
+        let capability = x_live::x_native_live_capability(account)?;
+        x_live::ensure_x_native_live_available(&capability)?;
+        (
+            x_live::x_livestream_credentials()?
+                .context("X Livestream OAuth 1.0a credentials are not available. Run Authorize X Live from the Streaming tab.")?,
+            None,
+        )
+    };
     let result = x_live::end_x_broadcast(
         XEndRequest {
             credentials,
             broadcast_id: params.broadcast_id,
-            api_base_url: None,
+            api_base_url,
         },
         &reqwest::Client::new(),
     )

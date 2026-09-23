@@ -353,6 +353,7 @@ class StudioBackend {
     privacy: string
     startUtc: string
   } | null = null
+  scheduledConfirmationTargetId = 'youtube'
   sockets: TestWebSocket[] = []
   performanceCheck: PerformanceCheckState = { running: false, stale: false }
   commands: BackendCommand[] = []
@@ -961,13 +962,43 @@ class StudioBackend {
         return {
           valid: true,
           destinations: this.scheduledConfirmation
-            ? [{ targetId: 'youtube', platform: 'youtube', scheduled: this.scheduledConfirmation }]
+            ? [
+                {
+                  targetId: this.scheduledConfirmationTargetId,
+                  platform: this.scheduledConfirmationTargetId,
+                  scheduled: this.scheduledConfirmation
+                }
+              ]
             : [],
           issues: []
         }
       case 'scheduledStreams.get':
         return { id: params.eventId, revision: 1 }
       case 'scheduledStreams.prepareForGoLive':
+        if (params.targetId === 'x') {
+          return {
+            id: params.operationId,
+            eventId: params.eventId,
+            action: 'prepareForGoLive',
+            state: 'complete',
+            stage: 'prepared',
+            error: null,
+            result: {
+              platform: 'x',
+              accountId: String(params.accountId ?? 'x-account-1'),
+              accountLabel: 'X Test Account',
+              sourceId: 'x-scheduled-source',
+              region: 'x-scheduled-region',
+              serverUrl: 'rtmps://x.example.test/live',
+              streamKeySecretRef: `scheduled-event-key:${String(params.targetId)}`,
+              streamKeyPresent: true,
+              redactedUrl: 'rtmps://<x-ingest>/<stream-key>',
+              isStreamActive: false,
+              selection: 'created',
+              deletedRetiredSourceIds: []
+            }
+          }
+        }
         return {
           id: params.operationId,
           eventId: params.eventId,
@@ -994,6 +1025,34 @@ class StudioBackend {
         }
       case 'scheduledStreams.activate':
       case 'scheduledStreams.releasePreparation':
+        if (
+          command.method.endsWith('activate') &&
+          this.sentCommands.some(
+            (sent) =>
+              sent.method === 'scheduledStreams.prepareForGoLive' &&
+              (sent.params as { targetId?: string }).targetId === 'x' &&
+              (sent.params as { eventId?: string }).eventId === params.eventId
+          )
+        ) {
+          return {
+            id: params.operationId,
+            eventId: params.eventId,
+            action: command.method,
+            state: 'complete',
+            stage: 'live',
+            error: null,
+            result: {
+              platform: 'x',
+              accountId: 'x-account-1',
+              sourceId: 'x-scheduled-source',
+              broadcastId: 'advertised-x-scheduled-id',
+              mediaKey: 'x-scheduled-media-key',
+              shareUrl: 'https://x.com/i/broadcasts/advertised-x-scheduled-id',
+              state: 'RUNNING',
+              message: 'Scheduled X broadcast is live.'
+            }
+          }
+        }
         return {
           id: params.operationId,
           eventId: params.eventId,
@@ -7337,6 +7396,107 @@ describe('real StudioProvider lifecycle', () => {
         await act(async () => {
           await latest()!.core.stopSession()
         })
+        expect(
+          backend.sentCommands.filter(
+            (command) => command.method === 'scheduledStreams.releasePreparation'
+          )
+        ).toHaveLength(1)
+      }
+    }
+  )
+
+  it.each([false, true])(
+    'starts a saved X broadcast through its schedule and releases it on stop (start rejected: %s)',
+    async (rejectStart) => {
+      const backend = new StudioBackend()
+      enableXOauthForTest(backend)
+      backend.scheduledConfirmationTargetId = 'x'
+      backend.scheduledConfirmation = {
+        eventId: '22222222-2222-4222-8222-222222222222',
+        fingerprint: 'x-v1',
+        title: 'Saved X broadcast',
+        privacy: '',
+        startUtc: '2035-01-01T12:00:00Z'
+      }
+      if (rejectStart) backend.sessionStartError = 'The encoder rejected this start.'
+      TestWebSocket.backend = backend
+      vi.stubGlobal('WebSocket', TestWebSocket)
+      const api = createVideorcApi({
+        acknowledge: async () => true,
+        pending: async () => [],
+        acknowledgeProvider: async () => true,
+        pendingProvider: async () => []
+      })
+      const testDom = installProviderTestEnvironment(api)
+      restoreEnvironment = testDom.restore
+      const observations: StudioObservation[] = []
+      const latest = (): StudioObservation | undefined => observations.at(-1)
+      root = await mountStudioProvider(testDom.container, (value) => {
+        observations.push(value)
+      })
+      await waitForObservation(
+        () =>
+          latest()?.core.wsStatus === 'connected' &&
+          latest()?.core.captureConfig.sources.microphoneId === 'mic:1'
+      )
+      await openXGoLiveConfirmation(latest)
+      await act(async () => {
+        latest()!.core.patchStreamingTarget('x', {
+          scheduledEventId: '22222222-2222-4222-8222-222222222222',
+          scheduledEventTitle: 'Saved X broadcast'
+        })
+      })
+      await act(async () => {
+        await latest()!.core.confirmGoLive()
+      })
+      // The saved broadcast owns its source: no fresh session source, and no
+      // create+publish pair — the schedule itself goes live.
+      expect(backend.xPrepareCount).toBe(0)
+      expect(backend.xPublishCount).toBe(0)
+      expect(
+        backend.sentCommands.filter(
+          (command) => command.method === 'scheduledStreams.prepareForGoLive'
+        )
+      ).toHaveLength(1)
+      if (rejectStart) {
+        expect(
+          backend.sentCommands.filter((command) => command.method === 'scheduledStreams.activate')
+        ).toHaveLength(0)
+        expect(
+          backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+        ).toHaveLength(0)
+        expect(
+          backend.sentCommands.filter(
+            (command) => command.method === 'scheduledStreams.releasePreparation'
+          )
+        ).toHaveLength(1)
+      } else {
+        expect(
+          backend.sentCommands.filter((command) => command.method === 'scheduledStreams.activate')
+        ).toHaveLength(1)
+        const live = latest()?.core.captureConfig.streaming.targets.find(
+          (target) => target.id === 'x'
+        )
+        expect(live?.platformBroadcastId).toBe('advertised-x-scheduled-id')
+        expect(live?.platformStreamId).toBe('x-scheduled-media-key')
+        expect(
+          backend.sentCommands.filter((command) => command.method === 'liveChat.x.start')[0]?.params
+        ).toMatchObject({
+          broadcastId: 'advertised-x-scheduled-id',
+          mediaKey: 'x-scheduled-media-key'
+        })
+        await act(async () => {
+          await latest()!.core.stopSession()
+        })
+        // END goes to the exact advertised broadcast, then the schedule is
+        // released exactly once.
+        expect(
+          backend.sentCommands.filter((command) => command.method === 'streamTargets.x.end')
+        ).toEqual([
+          expect.objectContaining({
+            params: expect.objectContaining({ broadcastId: 'advertised-x-scheduled-id' })
+          })
+        ])
         expect(
           backend.sentCommands.filter(
             (command) => command.method === 'scheduledStreams.releasePreparation'

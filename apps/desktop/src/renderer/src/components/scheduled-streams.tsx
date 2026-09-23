@@ -25,7 +25,12 @@ import {
 import { GroupedList } from '@/components/list-row'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
-import { eventCanEdit, selectScheduledStreamForTarget } from '@/lib/scheduled-streams'
+import {
+  eventCanEdit,
+  scheduledProviderLabel,
+  scheduledProviderSite,
+  selectScheduledStreamForTarget
+} from '@/lib/scheduled-streams'
 import type { ScheduledStreamEvent, ScheduledStreamCandidate } from '@/lib/backend'
 
 type Candidate = ScheduledStreamCandidate
@@ -73,6 +78,10 @@ export function ScheduledStreams(): ReactElement {
   const visible = state.events.filter(
     (event) => history === ['completed', 'canceled'].includes(event.lifecycle)
   )
+  const providerAvailable = (provider: ScheduledStreamEvent['provider']) =>
+    state.capabilities?.providers?.find((item) => item.provider === provider)?.available ??
+    state.capabilities?.available ??
+    false
   return (
     <div className="flex flex-col gap-4 p-gutter">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -121,7 +130,7 @@ export function ScheduledStreams(): ReactElement {
           <EmptyHeader>
             <EmptyTitle>{history ? 'No past events' : 'No upcoming streams'}</EmptyTitle>
             <EmptyDescription>
-              Schedule a YouTube event and keep its link. You choose when to go live.
+              Schedule a YouTube or X broadcast and keep its link. You choose when to go live.
             </EmptyDescription>
           </EmptyHeader>
         </Empty>
@@ -141,10 +150,12 @@ export function ScheduledStreams(): ReactElement {
                   {event.requested.title}
                 </span>
                 <Badge variant="secondary">{event.lifecycle}</Badge>
-                <Badge variant="outline">{event.requested.privacy}</Badge>
+                {event.provider !== 'x' && (
+                  <Badge variant="outline">{event.requested.privacy}</Badge>
+                )}
               </div>
               <p className="text-sm text-muted-foreground">
-                YouTube · {event.accountLabel} ·{' '}
+                {scheduledProviderLabel(event.provider)} · {event.accountLabel} ·{' '}
                 {new Date(event.startUtc).toLocaleString(undefined, {
                   timeZone: event.requested.timeZone
                 })}{' '}
@@ -200,12 +211,14 @@ export function ScheduledStreams(): ReactElement {
                   <Button
                     size="sm"
                     variant="ghost"
-                    disabled={!state.capabilities?.available || state.pendingIds.includes(event.id)}
+                    disabled={
+                      !providerAvailable(event.provider) || state.pendingIds.includes(event.id)
+                    }
                     onClick={() => {
                       void perform('schedule', event)
                     }}
                   >
-                    Schedule on YouTube
+                    Schedule on {scheduledProviderLabel(event.provider)}
                   </Button>
                 )}
                 {event.thumbnailState === 'error' && (
@@ -240,7 +253,7 @@ export function ScheduledStreams(): ReactElement {
                         void window.videorc.openOAuthUrl(event.watchUrl!)
                       }}
                     >
-                      Open on YouTube
+                      Open on {scheduledProviderLabel(event.provider)}
                     </Button>
                   </>
                 )}
@@ -277,7 +290,11 @@ export function ScheduledStreams(): ReactElement {
                     disabled={state.pendingIds.includes(event.id)}
                     onClick={() => setCanceling(event)}
                   >
-                    {event.providerEventId ? 'Cancel event' : 'Delete draft'}
+                    {event.providerEventId
+                      ? event.provider === 'x'
+                        ? 'Cancel broadcast'
+                        : 'Cancel event'
+                      : 'Delete draft'}
                   </Button>
                 )}
               </div>
@@ -305,11 +322,13 @@ export function ScheduledStreams(): ReactElement {
         <DialogContent>
           <DialogHeader>
             <DialogTitle>
-              {canceling?.providerEventId ? 'Cancel this YouTube event?' : 'Delete local draft?'}
+              {canceling?.providerEventId
+                ? `Cancel this ${scheduledProviderLabel(canceling.provider)} ${canceling.provider === 'x' ? 'broadcast' : 'event'}?`
+                : 'Delete local draft?'}
             </DialogTitle>
             <DialogDescription>
               {canceling?.providerEventId
-                ? 'The upcoming broadcast will be deleted from YouTube and its watch link will stop working.'
+                ? `The upcoming broadcast will be deleted from ${scheduledProviderLabel(canceling.provider)} and its link will stop working.`
                 : 'This draft moves to history. No platform event is deleted.'}
             </DialogDescription>
           </DialogHeader>
@@ -348,7 +367,7 @@ export function ScheduledStreams(): ReactElement {
             <DialogDescription>
               {recovering?.preparation?.phase === 'creating-stream'
                 ? 'Choose the exact inactive encoder stream after checking it in YouTube Studio. Only compatible streams owned by this channel are listed. Your saved event keeps its link.'
-                : 'YouTube may already have created the event. Choose the exact owned upcoming event after checking it in YouTube Studio. No new event will be created.'}
+                : `${scheduledProviderLabel(recovering?.provider ?? 'youtube')} may already have created the event. Choose the exact owned upcoming event after checking it on ${scheduledProviderSite(recovering?.provider ?? 'youtube')}. No new event will be created.`}
             </DialogDescription>
           </DialogHeader>
           <Select value={candidateId} onValueChange={setCandidateId}>
@@ -413,14 +432,16 @@ export function ScheduledStreams(): ReactElement {
           </DialogHeader>
           <Select value={targetId} onValueChange={setTargetId}>
             <SelectTrigger aria-label="Livestream destination">
-              <SelectValue placeholder="Choose YouTube destination" />
+              <SelectValue
+                placeholder={`Choose ${scheduledProviderLabel(starting?.provider ?? 'youtube')} destination`}
+              />
             </SelectTrigger>
             <SelectContent>
               <SelectGroup>
                 {captureConfig.streaming.targets
                   .filter(
                     (target) =>
-                      target.platform === 'youtube' &&
+                      target.platform === (starting?.provider ?? 'youtube') &&
                       target.authMode === 'oauth' &&
                       target.accountId === starting?.accountId
                   )

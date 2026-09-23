@@ -117,17 +117,24 @@ export function GoLiveConfirmationDialog({
                     ?.title ?? target.scheduledEventTitle}
                 </p>
                 <p className="text-sm text-muted-foreground">
-                  {target.accountLabel} ·{' '}
-                  {preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
-                    ?.privacy ?? target.scheduledPrivacy}{' '}
-                  ·{' '}
-                  {(preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
-                    ?.startUtc ?? target.scheduledStartUtc)
-                    ? new Date(
-                        preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
-                          ?.startUtc ?? target.scheduledStartUtc!
-                      ).toLocaleString()
-                    : ''}
+                  {[
+                    platformLabel(target.platform),
+                    target.accountLabel,
+                    // X broadcasts carry no visibility; only YouTube shows one.
+                    target.platform === 'youtube'
+                      ? (preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
+                          ?.privacy ?? target.scheduledPrivacy)
+                      : undefined,
+                    (preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
+                      ?.startUtc ?? target.scheduledStartUtc)
+                      ? new Date(
+                          preflight?.destinations.find((d) => d.targetId === target.id)?.scheduled
+                            ?.startUtc ?? target.scheduledStartUtc!
+                        ).toLocaleString()
+                      : undefined
+                  ]
+                    .filter(Boolean)
+                    .join(' · ')}
                 </p>
                 <p className="text-sm">
                   This starts the saved event now, even if its scheduled time is earlier or later.

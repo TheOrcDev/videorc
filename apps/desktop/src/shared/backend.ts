@@ -4373,6 +4373,7 @@ export interface ObsDiscovery {
   currentProfile?: string
 }
 
+export type ScheduledStreamProvider = 'youtube' | 'x'
 export interface ScheduledEventMetadata {
   title: string
   description: string
@@ -4382,12 +4383,16 @@ export interface ScheduledEventMetadata {
   timeZone: string
   offsetChoice: 'earlier' | 'later' | null
   thumbnailAssetId: string | null
+  /** X only: planned end as a local wall time in `timeZone`. */
+  plannedEndLocal?: string | null
+  /** X only: keep the replay available after the broadcast ends. */
+  availableForReplay?: boolean | null
 }
 export interface ScheduledStreamEvent {
   id: string
   schemaVersion: number
   revision: number
-  provider: 'youtube'
+  provider: ScheduledStreamProvider
   accountId: string
   accountLabel: string
   requested: ScheduledEventMetadata
@@ -4424,7 +4429,17 @@ export interface ScheduledStreamOperation {
   error: { code: string; message: string } | null
   result: unknown
 }
+export interface ScheduledStreamProviderCapability {
+  provider: ScheduledStreamProvider
+  available: boolean
+  reason: string | null
+  accounts: PlatformAccount[]
+  fields: string[]
+  audienceEditable: false
+}
 export interface ScheduledStreamCapabilities {
+  /** One entry per provider; `available`/`accounts` below mirror YouTube for older callers. */
+  providers: ScheduledStreamProviderCapability[]
   available: boolean
   reason: string | null
   accounts: PlatformAccount[]
@@ -4443,6 +4458,8 @@ export interface ScheduledStreamMutation {
   eventId: string
   expectedRevision: number
   metadata?: ScheduledEventMetadata
+  /** Provider of a brand-new draft; YouTube when absent. */
+  provider?: ScheduledStreamProvider
   accountId?: string
   candidateId?: string
   candidateKind?: 'broadcast' | 'ingest'

@@ -16,10 +16,20 @@ pub struct EventMetadata {
     pub time_zone: String,
     pub offset_choice: Option<String>,
     pub thumbnail_asset_id: Option<String>,
+    /// X only: planned end as a local wall time in `time_zone`. X requires an
+    /// end on every update, so a schedule is never created open-ended.
+    #[serde(default)]
+    pub planned_end_local: Option<String>,
+    /// X only: keep the replay available after the broadcast ends.
+    #[serde(default)]
+    pub available_for_replay: Option<bool>,
 }
 
+/// Default planned length of an X broadcast when the form leaves it blank.
+pub const DEFAULT_PLANNED_DURATION_HOURS: i64 = 2;
+
 impl EventMetadata {
-    pub fn validate(&self, future: bool) -> Result<String> {
+    pub fn validate_for(&self, provider: &str, future: bool) -> Result<String> {
         if self.title.trim().is_empty()
             || self.title.chars().count() > 100
             || self.title.contains(['<', '>'])
@@ -43,8 +53,37 @@ impl EventMetadata {
         if future && utc <= Utc::now() {
             bail!("Choose a start time in the future.");
         }
+        if let Some(end) = self.planned_end_utc()?
+            && end <= utc
+        {
+            bail!("The planned end must be after the start.");
+        }
+        if provider == "x" && self.planned_end_local.is_none() {
+            bail!("Choose a planned end for the X broadcast.");
+        }
         Ok(utc.to_rfc3339_opts(SecondsFormat::Secs, true))
     }
+    /// Planned end resolved in the same zone as the start; `None` when unset.
+    pub fn planned_end_utc(&self) -> Result<Option<DateTime<Utc>>> {
+        match self.planned_end_local.as_deref() {
+            Some(end) if !end.trim().is_empty() => Ok(Some(
+                resolve_time(end, &self.time_zone, self.offset_choice.as_deref())
+                    .map_err(|error| anyhow::anyhow!("Planned end: {error}"))?,
+            )),
+            _ => Ok(None),
+        }
+    }
+}
+
+/// `%Y-%m-%dT%H:%M` wall time of a UTC instant in an IANA zone.
+pub fn local_wall_time(utc: DateTime<Utc>, zone: &str) -> Result<String> {
+    let zone: chrono_tz::Tz = zone
+        .parse()
+        .map_err(|_| anyhow::anyhow!("Choose a valid IANA time zone."))?;
+    Ok(utc
+        .with_timezone(&zone)
+        .format("%Y-%m-%dT%H:%M")
+        .to_string())
 }
 
 pub fn resolve_time(local: &str, zone: &str, choice: Option<&str>) -> Result<DateTime<Utc>> {
@@ -95,6 +134,34 @@ pub struct ScheduledStreamEvent {
     pub create_uncertain: bool,
     #[serde(default)]
     pub cancel_uncertain: bool,
+    /// X only: the dedicated ingest source this schedule is bound to. It is
+    /// created at schedule time and lives as long as the schedule does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingest: Option<ScheduledIngest>,
+    /// X only: provider media id of the last uploaded thumbnail, re-sent on
+    /// every full-replacement update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_media_id: Option<String>,
+    /// X only: the managed asset id that `thumbnail_media_id` was made from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thumbnail_uploaded_asset_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledIngest {
+    pub source_id: String,
+    pub region: String,
+    pub server_url: String,
+    pub stream_key_secret_ref: String,
+}
+
+/// Per-provider ingest credentials owned by one preparation attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PreparedIngest {
+    Youtube(crate::youtube::PreparedYouTubeBroadcast),
+    X(crate::x_live::PreparedXStreamSource),
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -108,7 +175,7 @@ pub struct Preparation {
     pub session_id: Option<String>,
     // Secret references and endpoint stay in backend persistence, not event DTOs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prepared: Option<crate::youtube::PreparedYouTubeBroadcast>,
+    pub prepared: Option<PreparedIngest>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,23 +214,36 @@ pub struct Mutation {
     pub video: Option<crate::protocol::VideoSettings>,
     pub session_id: Option<String>,
     pub confirmation_fingerprint: Option<String>,
+    /// Provider of a brand-new draft (`youtube` when absent).
+    #[serde(default)]
+    pub provider: Option<String>,
+}
+
+pub fn valid_provider(provider: &str) -> Result<&'static str> {
+    match provider {
+        "youtube" => Ok("youtube"),
+        "x" => Ok("x"),
+        _ => bail!("Unsupported scheduling provider."),
+    }
 }
 
 impl ScheduledStreamEvent {
     pub fn draft(
         id: String,
+        provider: &str,
         account_id: String,
         account_label: String,
         requested: EventMetadata,
     ) -> Result<Self> {
         Uuid::parse_str(&id)?;
-        let start_utc = requested.validate(false)?;
+        let provider = valid_provider(provider)?;
+        let start_utc = requested.validate_for(provider, false)?;
         let now = Utc::now().to_rfc3339();
         Ok(Self {
             id,
             schema_version: 1,
             revision: 0,
-            provider: "youtube".into(),
+            provider: provider.into(),
             account_id,
             account_label,
             requested,
@@ -183,7 +263,18 @@ impl ScheduledStreamEvent {
             retained_ingest: None,
             create_uncertain: false,
             cancel_uncertain: false,
+            ingest: None,
+            thumbnail_media_id: None,
+            thumbnail_uploaded_asset_id: None,
         })
+    }
+    /// Planned end instant: the requested one, else the default duration.
+    pub fn planned_end_utc(&self) -> Result<DateTime<Utc>> {
+        if let Some(end) = self.requested.planned_end_utc()? {
+            return Ok(end);
+        }
+        let start = DateTime::parse_from_rfc3339(&self.start_utc)?.with_timezone(&Utc);
+        Ok(start + chrono::Duration::hours(DEFAULT_PLANNED_DURATION_HOURS))
     }
     pub fn public(mut self) -> Self {
         self.retained_ingest = None;
@@ -208,11 +299,35 @@ impl ScheduledStreamEvent {
     }
 }
 
+/// Provider, HTTP status and bounded reason of a definite provider rejection.
+pub fn provider_rejection(error: &anyhow::Error) -> Option<(&'static str, u16, &str)> {
+    if let Some(rejection) = error.downcast_ref::<crate::scheduled_youtube::YouTubeRejection>() {
+        return Some(("youtube", rejection.status, rejection.reason.as_str()));
+    }
+    if let Some(rejection) = error.downcast_ref::<crate::scheduled_x::XRejection>() {
+        return Some(("x", rejection.status, rejection.reason.as_str()));
+    }
+    None
+}
+
+#[cfg(test)]
 pub fn sanitized_error(error: &anyhow::Error) -> ScheduleError {
+    sanitized_error_for("youtube", error)
+}
+
+/// Bounded, provider-worded error for the event journal. Raw provider bodies,
+/// URLs and credentials never reach it.
+pub fn sanitized_error_for(provider: &str, error: &anyhow::Error) -> ScheduleError {
     let raw = error.to_string();
-    let rejection = error.downcast_ref::<crate::scheduled_youtube::YouTubeRejection>();
-    let reason = rejection.map(|r| r.reason.as_str()).unwrap_or("");
-    let status = rejection.map(|r| r.status);
+    let rejection = provider_rejection(error);
+    if provider == "x"
+        || rejection.is_some_and(|(provider, _, _)| provider == "x")
+        || raw.starts_with("X ")
+    {
+        return sanitized_x_error(error);
+    }
+    let reason = rejection.map(|(_, _, reason)| reason).unwrap_or("");
+    let status = rejection.map(|(_, status, _)| status);
     let (code, message) = if reason == "liveStreamingNotEnabled" {
         (
             "enable-live",
@@ -293,9 +408,135 @@ pub fn sanitized_error(error: &anyhow::Error) -> ScheduleError {
     }
 }
 
+fn sanitized_x_error(error: &anyhow::Error) -> ScheduleError {
+    let raw = error.to_string();
+    let (status, reason) = provider_rejection(error)
+        .map(|(_, status, reason)| (Some(status), reason.to_ascii_lowercase()))
+        .unwrap_or((None, String::new()));
+    let (code, message): (&str, String) = if status == Some(404) || raw.contains("Event missing") {
+        (
+            "missing",
+            "This broadcast no longer exists on X. Refresh the list or schedule a new one.".into(),
+        )
+    } else if raw.contains("Thumbnail") || raw.contains("thumbnail") {
+        (
+            "thumbnail",
+            "Choose a valid JPEG or PNG under 2 MB. X did not accept the thumbnail upload.".into(),
+        )
+    } else if status == Some(401) || raw.contains("Authorize X Live") {
+        (
+            "reconnect",
+            "Re-run Authorize X Live for the account selected for this broadcast, then retry."
+                .into(),
+        )
+    } else if status == Some(429) {
+        (
+            "rate-limit",
+            "X rate limit reached. Wait before retrying.".into(),
+        )
+    } else if status == Some(403) {
+        (
+            "permission",
+            "X denied this action. Check that the Livestream Scheduling API is enabled for your account.".into(),
+        )
+    } else if status == Some(400)
+        && (reason.contains("time") || reason.contains("start") || reason.contains("end"))
+    {
+        (
+            "invalid-time",
+            "Choose a valid upcoming start and a later planned end, then retry.".into(),
+        )
+    } else if status == Some(400) && !reason.is_empty() {
+        ("rejected", format!("X rejected this request: {reason}."))
+    } else if raw.contains("external") {
+        (
+            "external-change",
+            "This broadcast changed on X. Reload and review the changes before editing.".into(),
+        )
+    } else if error.downcast_ref::<reqwest::Error>().is_some() || raw.contains("X response unknown")
+    {
+        (
+            "connection",
+            "X could not be reached. Check your connection, then refresh or recover the broadcast before retrying.".into(),
+        )
+    } else {
+        (
+            "needs-attention",
+            "The operation could not be confirmed. Refresh or recover the broadcast before retrying.".into(),
+        )
+    };
+    ScheduleError {
+        code: code.into(),
+        message,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn x_errors_map_to_the_same_bounded_codes() {
+        for (status, reason, expected) in [
+            (404, "not found", "missing"),
+            (401, "unauthorized", "reconnect"),
+            (429, "too many", "rate-limit"),
+            (403, "forbidden", "permission"),
+            (400, "invalid scheduled start time", "invalid-time"),
+            (400, "manual publish required", "rejected"),
+        ] {
+            let error: anyhow::Error = crate::scheduled_x::XRejection {
+                status,
+                reason: reason.into(),
+            }
+            .into();
+            assert_eq!(sanitized_error(&error).code, expected, "{status} {reason}");
+        }
+        let thumbnail: anyhow::Error = anyhow::Error::from(crate::scheduled_x::XRejection {
+            status: 400,
+            reason: "media".into(),
+        })
+        .context("Thumbnail upload failed");
+        assert_eq!(sanitized_error(&thumbnail).code, "thumbnail");
+    }
+    #[test]
+    fn x_metadata_requires_a_planned_end_after_start() {
+        let mut meta = EventMetadata {
+            title: "X".into(),
+            description: "".into(),
+            privacy: "private".into(),
+            made_for_kids: false,
+            local_start: "2035-01-01T12:00".into(),
+            time_zone: "Europe/Madrid".into(),
+            offset_choice: None,
+            thumbnail_asset_id: None,
+            planned_end_local: None,
+            available_for_replay: None,
+        };
+        assert!(meta.validate_for("x", false).is_err());
+        assert!(meta.validate_for("youtube", false).is_ok());
+        meta.planned_end_local = Some("2035-01-01T11:00".into());
+        assert!(meta.validate_for("x", false).is_err());
+        meta.planned_end_local = Some("2035-01-01T14:00".into());
+        assert!(meta.validate_for("x", false).is_ok());
+        let event = ScheduledStreamEvent::draft(
+            Uuid::new_v4().to_string(),
+            "x",
+            "123".into(),
+            "@videorc".into(),
+            meta.clone(),
+        )
+        .unwrap();
+        assert_eq!(event.provider, "x");
+        assert_eq!(
+            event.planned_end_utc().unwrap().to_rfc3339(),
+            "2035-01-01T13:00:00+00:00"
+        );
+        assert!(valid_provider("twitch").is_err());
+        assert_eq!(
+            local_wall_time(event.planned_end_utc().unwrap(), "Europe/Madrid").unwrap(),
+            "2035-01-01T14:00"
+        );
+    }
     #[test]
     fn actionable_errors_use_bounded_provider_reasons() {
         for (status, reason, expected) in [
@@ -345,12 +586,14 @@ mod tests {
             time_zone: "UTC".into(),
             offset_choice: None,
             thumbnail_asset_id: None,
+            planned_end_local: None,
+            available_for_replay: None,
         };
-        assert!(meta.validate(false).is_ok());
+        assert!(meta.validate_for("youtube", false).is_ok());
         meta.title.push('a');
-        assert!(meta.validate(false).is_err());
+        assert!(meta.validate_for("youtube", false).is_err());
         meta.title = "<unsafe>".into();
-        assert!(meta.validate(false).is_err());
+        assert!(meta.validate_for("youtube", false).is_err());
     }
 }
 
@@ -370,6 +613,7 @@ mod persistence_tests {
         let id = Uuid::new_v4().to_string();
         let event = ScheduledStreamEvent::draft(
             id.clone(),
+            "youtube",
             "channel".into(),
             "Channel".into(),
             EventMetadata {
@@ -381,6 +625,8 @@ mod persistence_tests {
                 time_zone: "Europe/Madrid".into(),
                 offset_choice: None,
                 thumbnail_asset_id: None,
+                planned_end_local: None,
+                available_for_replay: None,
             },
         )
         .unwrap();
@@ -397,6 +643,7 @@ mod persistence_tests {
             video: None,
             session_id: None,
             confirmation_fingerprint: None,
+            provider: None,
         };
         (event, mutation)
     }
@@ -514,14 +761,12 @@ pub struct ScheduledConfirmation {
     pub privacy: String,
     pub start_utc: String,
 }
-pub fn confirmation_fingerprint(remote: &Value) -> String {
+pub fn confirmation_fingerprint(provider: &str, remote: &Value) -> String {
     use sha2::{Digest, Sha256};
-    format!(
-        "{:x}",
-        Sha256::digest(
-            crate::scheduled_youtube::metadata_snapshot(remote)
-                .to_string()
-                .as_bytes()
-        )
-    )
+    let snapshot = if provider == "x" {
+        crate::scheduled_x::metadata_snapshot(remote)
+    } else {
+        crate::scheduled_youtube::metadata_snapshot(remote)
+    };
+    format!("{:x}", Sha256::digest(snapshot.to_string().as_bytes()))
 }
