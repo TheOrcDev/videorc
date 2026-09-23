@@ -33,9 +33,11 @@ import { outputSummary, sessionClockLabel, streamingSummary } from '@/lib/studio
 
 /**
  * The session transport (plan 050 S12): status, clock, and Record / Stream /
- * Stop, rendered into the Studio toolbar. The buttons reuse the transport
- * handlers StudioTab owns (no second session state machine). Space still
- * records: that shortcut lives in the Studio provider, not on this button.
+ * Stop at the top of the Studio inspector, right above Session (owner call,
+ * 2026-09-23: no buttons in the toolbar's top-right corner). The buttons
+ * reuse the transport handlers StudioTab owns (no second session state
+ * machine). Space still records: that shortcut lives in the Studio provider,
+ * not on this button.
  */
 export function SessionTransport({
   active,
@@ -62,40 +64,56 @@ export function SessionTransport({
   onStop: () => void
 }): ReactElement {
   return (
-    <div className="flex items-center gap-2" data-slot="session-transport">
-      {status}
-      {active ? <SessionClock /> : null}
-      {active ? (
-        <Button disabled={!canStop} size="sm" variant="destructive" onClick={onStop}>
-          <StopIcon data-icon="inline-start" weight="fill" />
-          {stopLabel}
-        </Button>
-      ) : (
-        <>
+    <section
+      aria-label="Session controls"
+      className="flex flex-col gap-3 border-b border-border p-gutter"
+      data-slot="session-transport"
+    >
+      <div className="flex min-h-6 items-center justify-between gap-2">
+        {status}
+        {active ? <SessionClock /> : null}
+      </div>
+      <div className="flex gap-2">
+        {active ? (
           <Button
-            disabled={Boolean(recordBlockedReason) || startRequestPending}
-            size="sm"
-            title={recordBlockedReason ?? undefined}
+            className="flex-1"
+            disabled={!canStop}
+            size="lg"
             variant="destructive"
-            onClick={onRecord}
+            onClick={onStop}
           >
-            <RecordIcon data-icon="inline-start" weight="fill" />
-            Record
-            <Kbd className="ml-0.5">␣</Kbd>
+            <StopIcon data-icon="inline-start" weight="fill" />
+            {stopLabel}
           </Button>
-          <Button
-            disabled={Boolean(liveStreamBlockedReason) || startRequestPending}
-            size="sm"
-            title={liveStreamBlockedReason ?? undefined}
-            variant="outline"
-            onClick={onLiveStream}
-          >
-            <LivestreamIcon data-icon="inline-start" weight="fill" />
-            Stream
-          </Button>
-        </>
-      )}
-    </div>
+        ) : (
+          <>
+            <Button
+              className="flex-1"
+              disabled={Boolean(recordBlockedReason) || startRequestPending}
+              size="lg"
+              title={recordBlockedReason ?? undefined}
+              variant="destructive"
+              onClick={onRecord}
+            >
+              <RecordIcon data-icon="inline-start" weight="fill" />
+              Record
+              <Kbd className="ml-0.5">␣</Kbd>
+            </Button>
+            <Button
+              className="flex-1"
+              disabled={Boolean(liveStreamBlockedReason) || startRequestPending}
+              size="lg"
+              title={liveStreamBlockedReason ?? undefined}
+              variant="outline"
+              onClick={onLiveStream}
+            >
+              <LivestreamIcon data-icon="inline-start" weight="fill" />
+              Stream
+            </Button>
+          </>
+        )}
+      </div>
+    </section>
   )
 }
 

@@ -27,7 +27,6 @@ const ScheduledStreams = lazy(() =>
 )
 
 import { GroupedList, ListRow } from '@/components/list-row'
-import { ToolbarActions } from '@/components/pane'
 import { PanelSection } from '@/components/panel-section'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
@@ -121,14 +120,14 @@ export function StreamingTab(): ReactElement {
   }, [])
   return (
     <Tabs className="gap-0" value={view} onValueChange={setView}>
-      {/* Setup / Upcoming is the page's own segmented control, so it lives in
-          the toolbar (plan 050 S13). */}
-      <ToolbarActions>
+      {/* Setup / Upcoming leads the page body; the toolbar carries only the
+          title (owner call, 2026-09-23: no buttons in its top-right corner). */}
+      <div className="border-b border-border px-gutter py-2">
         <TabsList aria-label="Livestream view">
           <TabsTrigger value="setup">Setup</TabsTrigger>
           <TabsTrigger value="upcoming">Upcoming</TabsTrigger>
         </TabsList>
-      </ToolbarActions>
+      </div>
       <TabsContent value="setup">
         <StreamingSetup />
       </TabsContent>

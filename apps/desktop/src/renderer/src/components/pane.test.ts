@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { GroupedList, ListRow } from './list-row'
 import { ConfigGrid, PageHeader } from './page'
-import { Pane, PaneBody, Toolbar, ToolbarActions, ToolbarSlotProvider } from './pane'
+import { Pane, PaneBody, Toolbar } from './pane'
 import { PanelSection } from './panel-section'
 import { StatusBar, StatusBarHint } from './status-bar'
 
@@ -28,52 +28,29 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-describe('Toolbar and ToolbarActions', () => {
-  it('portals page actions into the toolbar above the page', () => {
+describe('Toolbar', () => {
+  it('carries only the page title: no buttons in its top-right corner', () => {
+    // Owner call, 2026-09-23: actions live with the content they act on.
     act(() =>
       root.render(
         createElement(
-          ToolbarSlotProvider,
+          Pane,
           null,
-          createElement(
-            Pane,
-            null,
-            createElement(Toolbar, { title: 'Library' }),
-            createElement(
-              PaneBody,
-              null,
-              createElement(
-                ToolbarActions,
-                null,
-                createElement('button', { type: 'button' }, 'New recording')
-              ),
-              createElement('p', null, 'body')
-            )
-          )
+          createElement(Toolbar, { title: 'Library' }),
+          createElement(PaneBody, null, createElement('button', { type: 'button' }, 'Import'))
         )
       )
     )
     const toolbar = container.querySelector('[data-slot=toolbar]')
     expect(toolbar?.querySelector('h1')?.textContent).toBe('Library')
-    // The action lives in the toolbar's slot, not in the scrolling body.
-    expect(toolbar?.querySelector('[data-slot=toolbar-actions] button')?.textContent).toBe(
-      'New recording'
-    )
-    expect(container.querySelector('[data-slot=pane-body] button')).toBeNull()
+    expect(toolbar?.querySelector('button')).toBeNull()
+    expect(container.querySelector('[data-slot=pane-body] button')?.textContent).toBe('Import')
   })
 
-  it('renders actions in place outside a toolbar', () => {
-    act(() =>
-      root.render(createElement(ToolbarActions, null, createElement('button', null, 'Import')))
-    )
-    expect(container.querySelector('button')?.textContent).toBe('Import')
-  })
-
-  it('makes the toolbar a 40 px drag region whose controls opt out', () => {
+  it('makes the toolbar a 40 px drag region', () => {
     const markup = renderToStaticMarkup(createElement(Toolbar, { title: 'Studio' }))
     expect(markup).toContain('h-toolbar')
     expect(markup).toContain('[-webkit-app-region:drag]')
-    expect(markup).toContain('[-webkit-app-region:no-drag]')
   })
 
   it('scrolls only the pane body, unless the body owns its scroll', () => {
@@ -108,27 +85,17 @@ describe('flush sections', () => {
     expect(markup).toContain('lg:[&amp;&gt;*:nth-child(odd)]:border-r')
   })
 
-  it('keeps the PageHeader title for assistive tech and moves the action out of the body', () => {
-    act(() =>
-      root.render(
-        createElement(
-          ToolbarSlotProvider,
-          null,
-          createElement(Toolbar, { title: 'Library' }),
-          createElement(PageHeader, {
-            title: 'Library',
-            description: 'Every recording becomes a session.',
-            action: createElement('button', null, 'New recording')
-          })
-        )
-      )
+  it('keeps the PageHeader title for assistive tech and its action in its own row', () => {
+    const markup = renderToStaticMarkup(
+      createElement(PageHeader, {
+        title: 'Library',
+        description: 'Every recording becomes a session.',
+        action: createElement('button', null, 'New recording')
+      })
     )
-    const header = container.querySelector('[data-slot=page-header]')
-    expect(header?.querySelector('h2.sr-only')?.textContent).toBe('Library')
-    expect(header?.querySelector('button')).toBeNull()
-    expect(container.querySelector('[data-slot=toolbar-actions] button')?.textContent).toBe(
-      'New recording'
-    )
+    expect(markup).toContain('<h2 class="sr-only">Library</h2>')
+    expect(markup).toContain('Every recording becomes a session.')
+    expect(markup).toContain('<button>New recording</button>')
   })
 })
 

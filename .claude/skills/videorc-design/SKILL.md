@@ -113,9 +113,13 @@ Everything except ⌘K uses the desktop scale.
 - **Layout.** There is no page column: content fills its pane edge to edge
   with a 16 px gutter. Panes are flush and split by 1 px hairlines. Inside a
   window there are no floating panels, no shadows, and no big cards.
-- **Toolbar** (`Toolbar`, 40 px): the page title on the left (14 px / 600)
-  and page actions on the right (28 px buttons, 28×28 icon buttons). The
-  toolbar never scrolls; only `PaneBody` does. The toolbar is a drag region.
+- **Toolbar** (`Toolbar`, 40 px): the page title (14 px / 600) on the
+  window's drag band, and nothing else. No buttons in the toolbar's top-right
+  corner (owner call, 2026-09-23): actions live with the content they act
+  on. The Studio's Record / Stream / Stop and clock sit at the top of its
+  inspector, right above Session; a page's own actions sit in its body (a
+  filter bar, a section header, or the PageHeader row). The toolbar never
+  scrolls; only `PaneBody` does.
 - **Sidebar.**
   - The top row holds the traffic lights and the ⌘K button.
   - Section labels are 11 px / 600, tertiary.
@@ -264,7 +268,7 @@ confirming a routine interaction the user just watched succeed.
 
 | Need                      | Use                                             |
 | ------------------------- | ----------------------------------------------- |
-| Page chrome               | `Pane` + `Toolbar` + `PaneBody`                 |
+| Page chrome               | `Pane` + `Toolbar` (title only) + `PaneBody`    |
 | Page sections             | `PanelSection` (flush)                          |
 | Sets of like things       | `GroupedList` + `ListRow`                       |
 | Objects with a picture    | Cards (8 px, hairline, no shadow)               |

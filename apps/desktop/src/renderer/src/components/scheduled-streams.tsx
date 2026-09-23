@@ -23,7 +23,6 @@ import {
   SelectValue
 } from '@/components/ui/select'
 import { GroupedList } from '@/components/list-row'
-import { ToolbarActions } from '@/components/pane'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { eventCanEdit, selectScheduledStreamForTarget } from '@/lib/scheduled-streams'
@@ -76,21 +75,22 @@ export function ScheduledStreams(): ReactElement {
   )
   return (
     <div className="flex flex-col gap-4 p-gutter">
-      {/* Page actions join the Livestream toolbar, beside Setup / Upcoming. */}
-      <ToolbarActions>
-        <Button
-          size="sm"
-          variant="ghost"
-          disabled={state.busy}
-          onClick={() => {
-            void refresh().catch(() => undefined)
-          }}
-        >
-          Refresh
-        </Button>
-        <Button size="sm" variant="ghost" onClick={() => setHistory(!history)}>
-          {history ? 'Upcoming' : 'History'}
-        </Button>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex gap-2">
+          <Button
+            size="sm"
+            variant="ghost"
+            disabled={state.busy}
+            onClick={() => {
+              void refresh().catch(() => undefined)
+            }}
+          >
+            Refresh
+          </Button>
+          <Button size="sm" variant="ghost" onClick={() => setHistory(!history)}>
+            {history ? 'Upcoming' : 'History'}
+          </Button>
+        </div>
         <Button
           size="sm"
           variant="outline"
@@ -101,7 +101,7 @@ export function ScheduledStreams(): ReactElement {
         >
           Schedule stream
         </Button>
-      </ToolbarActions>
+      </div>
       {state.error && (
         <Alert variant="destructive">
           <AlertDescription>{state.error}</AlertDescription>

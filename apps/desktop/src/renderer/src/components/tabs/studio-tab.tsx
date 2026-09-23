@@ -2,7 +2,6 @@ import { AlertIcon, ExternalLinkIcon, PinIcon } from '@/components/icons'
 import { lazy, Suspense, useEffect, useState, type ReactElement } from 'react'
 
 import { GoLiveConfirmationDialog } from '@/components/go-live-dialog'
-import { ToolbarActions } from '@/components/pane'
 import { PanelSection } from '@/components/panel-section'
 import { PreviewStage } from '@/components/preview-stage'
 import { StatusBadge } from '@/components/status-badge'
@@ -150,8 +149,8 @@ export function StudioTab(): ReactElement {
         : 'Stop recording'
 
   // data hook: the backend-resilience and captions smokes read this badge.
-  // It rides the toolbar, so it exists in every preview mode, docked
-  // included, and the mic sliver shares its one home.
+  // It rides the inspector's transport block, so it exists in every preview
+  // mode, docked included, and the mic sliver shares its one home.
   const sessionStatus = (
     <span className="flex items-center gap-1.5">
       <SessionMicSliver
@@ -186,25 +185,9 @@ export function StudioTab(): ReactElement {
         onResolveBlocker={(targetId, resolution) => void resolveGoLiveBlocker(targetId, resolution)}
       />
 
-      {/* Record, Stream, and the clock live in the Studio toolbar (plan 050
-          S12); Space still records. */}
-      <ToolbarActions>
-        <SessionTransport
-          active={active}
-          canStop={canStop}
-          liveStreamBlockedReason={liveStreamBlockedReason}
-          recordBlockedReason={recordBlockedReason}
-          startRequestPending={startRequestPending}
-          status={sessionStatus}
-          stopLabel={stopLabel}
-          onLiveStream={handleLiveStream}
-          onRecord={handleRecord}
-          onStop={handleStop}
-        />
-      </ToolbarActions>
-
-      {/* The Studio bench: the preview pane leads, and the inspector (session
-          facts, inputs, takeover) sits beside it, split by a hairline. Hard
+      {/* The Studio bench: the preview pane leads, and the inspector (the
+          transport, session facts, inputs, takeover) sits beside it, split by
+          a hairline. Hard
           blocks surface inside the Session section, never as a yellow top
           banner (post-0.9.4 fix batch F8). */}
       <div className="grid min-h-full lg:grid-cols-[minmax(0,1fr)_minmax(0,20rem)]">
@@ -218,6 +201,21 @@ export function StudioTab(): ReactElement {
         </div>
 
         <aside aria-label="Session inspector" className="min-w-0 border-t lg:border-t-0">
+          {/* Record, Stream, and the clock sit at the top of the inspector,
+              right above Session (owner call, 2026-09-23); Space still
+              records. */}
+          <SessionTransport
+            active={active}
+            canStop={canStop}
+            liveStreamBlockedReason={liveStreamBlockedReason}
+            recordBlockedReason={recordBlockedReason}
+            startRequestPending={startRequestPending}
+            status={sessionStatus}
+            stopLabel={stopLabel}
+            onLiveStream={handleLiveStream}
+            onRecord={handleRecord}
+            onStop={handleStop}
+          />
           <SessionPanel
             active={active}
             blockedJump={

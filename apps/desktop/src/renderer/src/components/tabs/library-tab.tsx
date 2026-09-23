@@ -250,12 +250,6 @@ export function LibraryTab({
       <PageHeader
         description="Every recording and stream becomes a local session. Files stay on disk; AI work happens in Publish."
         title="Library"
-        action={
-          <Button size="sm" onClick={() => setActive('studio')}>
-            <CameraIcon data-icon="inline-start" weight="fill" />
-            New Recording
-          </Button>
-        }
       />
 
       {/* Filter bar: filter · sort · search. */}
@@ -298,6 +292,10 @@ export function LibraryTab({
         <Button disabled={importing} size="sm" variant="outline" onClick={() => void runImport()}>
           <UploadIcon data-icon="inline-start" />
           {importing ? 'Importing…' : 'Import'}
+        </Button>
+        <Button size="sm" onClick={() => setActive('studio')}>
+          <CameraIcon data-icon="inline-start" weight="fill" />
+          New Recording
         </Button>
       </div>
 

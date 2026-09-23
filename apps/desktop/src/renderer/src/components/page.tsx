@@ -1,6 +1,5 @@
 import type { ReactElement, ReactNode } from 'react'
 
-import { ToolbarActions } from '@/components/pane'
 import { cn } from '@/lib/utils'
 
 /**
@@ -21,8 +20,8 @@ import { cn } from '@/lib/utils'
 
 /**
  * A page's intro: the toolbar already names the page, so the title is for
- * assistive tech; the description is a flush intro line and the action joins
- * the toolbar.
+ * assistive tech; the description is a flush intro line, with any action at
+ * its end (never in the toolbar's corner).
  */
 export function PageHeader({
   title,
@@ -36,10 +35,13 @@ export function PageHeader({
   className?: string
 }): ReactElement {
   return (
-    <div className={cn('px-gutter pt-3 pb-1', className)} data-slot="page-header">
+    <div
+      className={cn('flex items-center gap-3 px-gutter pt-3 pb-1', className)}
+      data-slot="page-header"
+    >
       <h2 className="sr-only">{title}</h2>
-      {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
-      {action ? <ToolbarActions>{action}</ToolbarActions> : null}
+      <p className="min-w-0 flex-1 text-xs text-muted-foreground">{description}</p>
+      {action ? <div className="flex shrink-0 items-center gap-2">{action}</div> : null}
     </div>
   )
 }

@@ -12,7 +12,7 @@ import {
 const CommandPalette = lazy(async () => ({
   default: (await import('@/components/command-palette')).CommandPalette
 }))
-import { Pane, PaneBody, Toolbar, ToolbarSlotProvider } from '@/components/pane'
+import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { Sidebar } from '@/components/sidebar'
 import { StatusBar, StatusBarHint } from '@/components/status-bar'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
@@ -351,117 +351,111 @@ export function AppShell(): ReactElement {
           window coat, the content pane adds --glass-content, and both share
           one 40 px header band with the traffic lights. Only PaneBody
           scrolls. */}
-      <ToolbarSlotProvider>
-        <div
-          className="flex h-screen overflow-hidden text-foreground"
-          data-videorc-active-tab={active}
-        >
-          <Sidebar
-            active={active}
-            activeStudioPanel={isStudioPanel(active) ? active : null}
-            accountTier={entitlementTier}
-            onSelect={setActive}
-            onSelectStudioPanel={openStudioPanel}
-            statusTone={statusTone}
-            statusLabel={statusLabel}
-            live={live}
-            onOpenCommand={() => setCommandOpen(true)}
-            platform={runtimeInfo?.platform}
-          />
+      <div
+        className="flex h-screen overflow-hidden text-foreground"
+        data-videorc-active-tab={active}
+      >
+        <Sidebar
+          active={active}
+          activeStudioPanel={isStudioPanel(active) ? active : null}
+          accountTier={entitlementTier}
+          onSelect={setActive}
+          onSelectStudioPanel={openStudioPanel}
+          statusTone={statusTone}
+          statusLabel={statusLabel}
+          live={live}
+          onOpenCommand={() => setCommandOpen(true)}
+          platform={runtimeInfo?.platform}
+        />
 
-          <main className="flex min-w-0 flex-1 flex-col bg-glass-content">
-            <Pane>
-              <Toolbar title={workspaceTabLabel(active)} />
-              {/* Library manages its own scroll (pinned header and toolbar,
+        <main className="flex min-w-0 flex-1 flex-col bg-glass-content">
+          <Pane>
+            <Toolbar title={workspaceTabLabel(active)} />
+            {/* Library manages its own scroll (pinned header and toolbar,
                   only the table scrolls); every other tab scrolls as one. */}
-              <PaneBody scroll={active !== 'library'}>
-                <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
-                  <TabFrame tab={active}>
-                    <Suspense fallback={<WorkspaceTabFallback />}>
-                      {active === 'studio' ? <StudioTab /> : null}
-                      {active === 'sources' ? <SourcesTab /> : null}
-                      {active === 'layouts' ? <LayoutTab /> : null}
-                      {active === 'assets' ? <AssetsTab /> : null}
-                      {active === 'live' ? <StreamingTab /> : null}
-                      {active === 'captions' ? <CaptionsTab /> : null}
-                      {active === 'recording' ? <RecordingTab /> : null}
-                      {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
-                      {active === 'ai' ? (
-                        <AiTab
-                          selectedSessionId={selectedSessionId}
-                          setSelectedSessionId={setSelectedSessionId}
-                        />
-                      ) : null}
-                      {active === 'diagnostics' ? <DiagnosticsTab /> : null}
-                      {active === 'settings' ? (
-                        <SettingsTab
-                          onOpenPermissionsSetup={openPermissionsSetup}
-                          onShowWhatsNew={whatsNew.showLatest}
-                        />
-                      ) : null}
-                    </Suspense>
-                  </TabFrame>
-                </StudioMicVisualProvider>
-              </PaneBody>
-            </Pane>
-            {/* State on the left, the shell's real shortcuts on the right:
+            <PaneBody scroll={active !== 'library'}>
+              <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
+                <TabFrame tab={active}>
+                  <Suspense fallback={<WorkspaceTabFallback />}>
+                    {active === 'studio' ? <StudioTab /> : null}
+                    {active === 'sources' ? <SourcesTab /> : null}
+                    {active === 'layouts' ? <LayoutTab /> : null}
+                    {active === 'assets' ? <AssetsTab /> : null}
+                    {active === 'live' ? <StreamingTab /> : null}
+                    {active === 'captions' ? <CaptionsTab /> : null}
+                    {active === 'recording' ? <RecordingTab /> : null}
+                    {active === 'library' ? <LibraryTab onOpenInAi={openInAi} /> : null}
+                    {active === 'ai' ? (
+                      <AiTab
+                        selectedSessionId={selectedSessionId}
+                        setSelectedSessionId={setSelectedSessionId}
+                      />
+                    ) : null}
+                    {active === 'diagnostics' ? <DiagnosticsTab /> : null}
+                    {active === 'settings' ? (
+                      <SettingsTab
+                        onOpenPermissionsSetup={openPermissionsSetup}
+                        onShowWhatsNew={whatsNew.showLatest}
+                      />
+                    ) : null}
+                  </Suspense>
+                </TabFrame>
+              </StudioMicVisualProvider>
+            </PaneBody>
+          </Pane>
+          {/* State on the left, the shell's real shortcuts on the right:
                 keyboard-first, only quieter than the old footer bar. */}
-            <StatusBar leading={<StatusDot label={statusLabel} pulse={live} tone={statusTone} />}>
-              <StatusBarHint
-                keys={`${modKey}K`}
-                label="Search"
-                onClick={() => setCommandOpen(true)}
-              />
-              <StatusBarHint
-                keys={`${modKey}P`}
-                label="Preview"
-                pressed={previewWindowOpen}
-                onClick={() => void togglePreviewWindow()}
-              />
-              {/* Flags default ON and runtimeInfo lands async: treating null as
+          <StatusBar leading={<StatusDot label={statusLabel} pulse={live} tone={statusTone} />}>
+            <StatusBarHint
+              keys={`${modKey}K`}
+              label="Search"
+              onClick={() => setCommandOpen(true)}
+            />
+            <StatusBarHint
+              keys={`${modKey}P`}
+              label="Preview"
+              pressed={previewWindowOpen}
+              onClick={() => void togglePreviewWindow()}
+            />
+            {/* Flags default ON and runtimeInfo lands async: treating null as
                   enabled keeps the bar at its final width from the first paint. */}
-              {runtimeInfo?.notesWindowEnabled !== false ? (
-                <StatusBarHint
-                  keys={`${shiftKey}${modKey}N`}
-                  label="Notes"
-                  pressed={notesWindowOpen}
-                  onClick={() =>
-                    notesWindowOpen ? void closeNotesWindow() : void openNotesWindow()
-                  }
-                />
-              ) : null}
-              {runtimeInfo?.commentsWindowEnabled !== false ? (
-                <StatusBarHint
-                  keys={`${shiftKey}${modKey}J`}
-                  label="Chat"
-                  pressed={commentsWindowOpen}
-                  onClick={() =>
-                    commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
-                  }
-                />
-              ) : null}
-            </StatusBar>
-          </main>
+            {runtimeInfo?.notesWindowEnabled !== false ? (
+              <StatusBarHint
+                keys={`${shiftKey}${modKey}N`}
+                label="Notes"
+                pressed={notesWindowOpen}
+                onClick={() => (notesWindowOpen ? void closeNotesWindow() : void openNotesWindow())}
+              />
+            ) : null}
+            {runtimeInfo?.commentsWindowEnabled !== false ? (
+              <StatusBarHint
+                keys={`${shiftKey}${modKey}J`}
+                label="Chat"
+                pressed={commentsWindowOpen}
+                onClick={() =>
+                  commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
+                }
+              />
+            ) : null}
+          </StatusBar>
+        </main>
 
-          <Suspense fallback={null}>
-            {commandOpen ? (
-              <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} />
-            ) : null}
-          </Suspense>
-          <PermissionsOnboardingGate
-            open={onboardingOpen}
-            onOpen={openPermissionsSetup}
-            onComplete={completeOnboarding}
-          />
-          {/* Post-update highlights; suppressed behind onboarding on first run
+        <Suspense fallback={null}>
+          {commandOpen ? <CommandPalette open={commandOpen} onOpenChange={setCommandOpen} /> : null}
+        </Suspense>
+        <PermissionsOnboardingGate
+          open={onboardingOpen}
+          onOpen={openPermissionsSetup}
+          onComplete={completeOnboarding}
+        />
+        {/* Post-update highlights; suppressed behind onboarding on first run
             (first run initializes the last-seen version silently). */}
-          <Suspense fallback={null}>
-            {whatsNew.open && !onboardingOpen ? (
-              <WhatsNewDialog entry={whatsNew.entry} open onClose={whatsNew.dismiss} />
-            ) : null}
-          </Suspense>
-        </div>
-      </ToolbarSlotProvider>
+        <Suspense fallback={null}>
+          {whatsNew.open && !onboardingOpen ? (
+            <WhatsNewDialog entry={whatsNew.entry} open onClose={whatsNew.dismiss} />
+          ) : null}
+        </Suspense>
+      </div>
     </WorkspaceNavContext.Provider>
   )
 }

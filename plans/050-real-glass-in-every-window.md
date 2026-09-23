@@ -364,10 +364,11 @@ skill, and the owner signs off on captures.
 - **Layout:** no page column. Content fills its pane edge to edge with a 16 px
   gutter. Panes are flush and split by 1 px hairlines. Inside a window there
   are no floating panels, no shadows, and no 18 px cards.
-- **Toolbar row per pane** (40 px): page title on the left (14 px / 600), page
-  actions on the right (28 px buttons, 28×28 icon buttons). The toolbar never
-  scrolls; only the pane body does. Toolbar rows are drag regions, and their
-  controls opt out.
+- **Toolbar row per pane** (40 px): the page title (14 px / 600). The toolbar
+  never scrolls; only the pane body does. Toolbar rows are drag regions.
+  - Owner call during execution (2026-09-23): no buttons in the toolbar's
+    top-right corner. Page actions stay in the page body, and the Studio
+    transport sits at the top of its inspector, above Session.
 - **Sidebar:** the top row holds the traffic lights and the ⌘K search button.
   The logo/beta block goes; the brand lives in About and the Dock. Section
   labels are 11 px / 600 tertiary. Rows are 28 px, with 14 px text and 16 px
@@ -862,8 +863,9 @@ Files:
 
 Direction:
 
-- Record, Stream, and the timer move into the Studio toolbar; Space still
-  records.
+- Record, Stream, and the timer sit at the top of the Studio inspector, right
+  above Session (owner call, 2026-09-23; the first cut put them in the
+  toolbar's top-right corner). Space still records.
 - The preview pane leads.
 - The inputs (source, mic, layout, output, captions) become a grouped
   inspector.
