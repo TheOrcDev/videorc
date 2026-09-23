@@ -30,22 +30,28 @@ export function StatusBar({
   )
 }
 
-/** One clickable hint: the shortcut in the secondary tier, the action in the tertiary. */
+/**
+ * One clickable hint: the shortcut in the secondary tier, the action in the
+ * tertiary. `pressed` marks a window that is open (the action then closes it).
+ */
 export function StatusBarHint({
   keys,
   label,
+  pressed,
   onClick,
   className
 }: {
   keys: string
   label: string
+  pressed?: boolean
   onClick: () => void
   className?: string
 }): ReactElement {
   return (
     <button
+      aria-pressed={pressed}
       className={cn(
-        'flex h-5 shrink-0 items-center gap-1 rounded-chip px-1.5 text-[11px] text-subtle transition-colors duration-100 hover:bg-accent hover:text-foreground',
+        'flex h-5 shrink-0 items-center gap-1 rounded-chip px-1.5 text-[11px] text-subtle transition-colors duration-100 hover:bg-accent hover:text-foreground aria-pressed:text-foreground',
         className
       )}
       data-slot="status-bar-hint"

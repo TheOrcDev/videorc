@@ -38,9 +38,9 @@ export function App(): ReactElement {
         <BackgroundAssetsProvider>
           <StudioProvider>
             <AppShell />
-            {/* Inset above the footer action bar (min-h-11): toasts must never
-                cover Search/Preview/Notes/Comments (plan 022 Q3, QA sweep). */}
-            <Toaster offset={{ bottom: 60, right: 16 }} position="bottom-right" richColors />
+            {/* Inset above the 26 px status bar: toasts must never cover its
+                Search/Preview/Notes/Chat hints (plan 022 Q3, plan 050 S11). */}
+            <Toaster offset={{ bottom: 38, right: 16 }} position="bottom-right" richColors />
           </StudioProvider>
         </BackgroundAssetsProvider>
       </TooltipProvider>
