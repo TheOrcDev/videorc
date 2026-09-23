@@ -81,7 +81,9 @@ pub(crate) fn parse_device_pin(value: Option<&str>) -> Result<Option<PathBuf>, S
         return Ok(None);
     };
     let path = Path::new(value);
-    let node_ok = path.is_absolute()
+    // A Linux device path: a leading slash rather than `Path::is_absolute`,
+    // which is false for `/dev/dri/...` on Windows test builds of this module.
+    let node_ok = value.starts_with('/')
         && path
             .file_name()
             .and_then(|name| name.to_str())
