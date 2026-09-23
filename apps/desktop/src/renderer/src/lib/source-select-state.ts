@@ -27,12 +27,16 @@ export interface MissingSelection {
  */
 export function missingSelection(
   devices: Pick<Device, 'id'>[],
-  value: string | undefined
+  value: string | undefined,
+  selectedName?: string
 ): MissingSelection | null {
   if (!value || devices.some((device) => device.id === value)) {
     return null
   }
-  return { value, label: 'Saved device unavailable. Pick another' }
+  return {
+    value,
+    label: selectedName ? `${selectedName} (unavailable)` : 'Saved device unavailable. Pick another'
+  }
 }
 
 /** Match visible source metadata, never opaque capture IDs. */

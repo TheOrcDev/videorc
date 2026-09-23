@@ -72,7 +72,7 @@ jobs:
         shell: pwsh
         run: |
           foreach ($pass in 1..25) {
-            foreach ($filter in @('audio_capture_adapter', 'live_source_switch', 'session_audio', 'fifo::windows_tests', 'warm_microphone')) {
+            foreach ($filter in @('audio_capture_adapter', 'live_source_switch', 'session_audio', 'fifo::windows_tests', 'warm_microphone', 'partial_raw_fifo_bytes_refresh_full_recording_queue_liveness', 'abandoned_live_candidate_cleanup_is_generation_and_latest_intent_fenced', 'auxiliary_edit_uses_intent_before_scene_fence_and_cancels_retired_source_honestly', 'abandoned_screen_stop_admission_does_not_wait_for_native_transition', 'source_edit')) {
               Write-Host "Source ownership $filter pass $pass/25"
               $result = cargo test -p videorc-backend $filter 2>&1 | Out-String
               $status = $LASTEXITCODE

@@ -471,6 +471,19 @@ async fn prepare_native_with_readiness(
     .await
 }
 
+#[derive(Debug)]
+struct PreparationCleanupPending(String);
+impl std::fmt::Display for PreparationCleanupPending {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} Capture cleanup remains quarantined; retry after it closes.",
+            self.0
+        )
+    }
+}
+impl std::error::Error for PreparationCleanupPending {}
+
 async fn prepare_producer_with(
     open: impl FnOnce() -> anyhow::Result<ProducerSource> + Send + 'static,
     operation_cancelled: Arc<AtomicBool>,
@@ -485,6 +498,7 @@ async fn prepare_producer_with(
     let (opened_tx, opened_rx) = tokio::sync::oneshot::channel();
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let (completion_guard, completion) = completion_channel();
+    let mut closed = completion.state.clone();
     spawn(Box::new(move || {
         let _completion = completion_guard;
         let _permit = permit;
@@ -539,16 +553,51 @@ async fn prepare_producer_with(
         let _ = stop_rx.recv();
         drop(owner);
     }))?;
-    tokio::time::timeout(Duration::from_secs(5), opened_rx)
-        .await
-        .map_err(|_| {
-            anyhow::anyhow!(
-                "Microphone opening exceeded 5s; its owner is still responsible for cleanup."
-            )
-        })???;
-    let producer = tokio::time::timeout(Duration::from_secs(2), ready_rx)
-        .await
-        .map_err(|_| anyhow::anyhow!("Microphone readiness exceeded 2s."))???;
+    let result: anyhow::Result<ManagedProducer> = async {
+        tokio::time::timeout(Duration::from_secs(5), opened_rx)
+            .await
+            .map_err(|_| {
+                anyhow::anyhow!(
+                    "Microphone opening exceeded 5s; its owner is still responsible for cleanup."
+                )
+            })???;
+        let producer = tokio::time::timeout(Duration::from_secs(2), ready_rx)
+            .await
+            .map_err(|_| anyhow::anyhow!("Microphone readiness exceeded 2s."))???;
+        Ok(producer)
+    }
+    .await;
+    let producer = match result {
+        Ok(producer) => producer,
+        Err(error) => {
+            cancellation
+                .0
+                .as_ref()
+                .expect("armed cancellation")
+                .store(true, Ordering::Release);
+            // A failed readiness response precedes driver Drop. Do not let a
+            // sequential restore race that still-owned capture lease.
+            let cleanup = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let state = *closed.borrow();
+                    match state {
+                        ProducerCompletion::Closed => return true,
+                        ProducerCompletion::Panicked => return false,
+                        ProducerCompletion::Running => {}
+                    }
+                    if closed.changed().await.is_err() {
+                        return false;
+                    }
+                }
+            })
+            .await;
+            return if cleanup == Ok(true) {
+                Err(error)
+            } else {
+                Err(PreparationCleanupPending(error.to_string()).into())
+            };
+        }
+    };
     cancellation.disarm();
     Ok(producer)
 }
@@ -626,6 +675,8 @@ pub struct AudioObservation {
 }
 
 struct AudioShared {
+    owner_present: bool,
+    retiring: Vec<(String, tokio::sync::watch::Receiver<ProducerCompletion>)>,
     status: AudioBusStatus,
     stats: Arc<AudioCaptureStats>,
     totals: Arc<AudioCaptureStats>,
@@ -646,7 +697,39 @@ pub struct AudioSwitchHandle {
     stop: Arc<AtomicBool>,
 }
 
+enum HandoffPurpose {
+    Commit,
+    Release {
+        closed: tokio::sync::oneshot::Sender<Vec<tokio::sync::watch::Receiver<ProducerCompletion>>>,
+    },
+    Restore {
+        failure: String,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplacementDisposition {
+    Concurrent,
+    KnownSelfOwnedExclusive,
+}
+
+fn replacement_disposition(shared: &AudioShared, target: Option<&str>) -> ReplacementDisposition {
+    if target.is_some()
+        && ((shared.owner_present
+            && shared.status.device_id.as_deref() == target
+            && shared.stats.input_state() != NativeAudioInputState::Live)
+            || shared.retiring.iter().any(|(id, completion)| {
+                Some(id.as_str()) == target && *completion.borrow() != ProducerCompletion::Closed
+            }))
+    {
+        ReplacementDisposition::KnownSelfOwnedExclusive
+    } else {
+        ReplacementDisposition::Concurrent
+    }
+}
+
 struct AudioSwitchCommand {
+    purpose: HandoffPurpose,
     request: crate::live_source_switch::SourceSwitchParams,
     coordinator: Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
     cancelled: Arc<AtomicBool>,
@@ -915,61 +998,181 @@ impl AudioSwitchHandle {
         coordinator: Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
         cancelled: Arc<AtomicBool>,
     ) -> anyhow::Result<AudioCommitReceipt> {
-        let _cancel_on_drop = OpenCancellation(Some(cancelled.clone()));
-        if self.stop.load(Ordering::Acquire) {
-            anyhow::bail!("Session stopping");
-        }
-        if self
-            .shared
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
-            .losses
-            .len()
-            >= 32
-        {
-            anyhow::bail!(
-                "Microphone loss events are awaiting delivery; retry after status refresh."
-            );
-        }
-        let candidate = match request.device_id.as_deref() {
-            None => None,
-            Some(id) => {
-                if let Some(device_id) = crate::audio::parse_coreaudio_microphone_id(id) {
+        let count = self.producer_count.clone();
+        let opening_cancelled = cancelled.clone();
+        self.replace_with(request, coordinator, cancelled, move |id: String| {
+            let count = count.clone();
+            let cancelled = opening_cancelled.clone();
+            let ffmpeg_path = ffmpeg_path.clone();
+            async move {
+                if let Some(device_id) = crate::audio::parse_coreaudio_microphone_id(&id) {
                     if id != format!("microphone:coreaudio:{device_id}") {
                         anyhow::bail!("The microphone ID is not canonical.");
                     }
-                    Some(
-                        prepare_native_with_readiness(
-                            device_id,
-                            cancelled.clone(),
-                            self.producer_count.clone(),
-                            true,
-                        )
-                        .await?,
-                    )
+                    prepare_native_with_readiness(device_id, cancelled, count, true).await
                 } else {
-                    Some(
-                        prepare_adapter(
-                            id.into(),
-                            ffmpeg_path,
-                            cancelled.clone(),
-                            self.producer_count.clone(),
-                        )
-                        .await?,
-                    )
+                    prepare_adapter(id, ffmpeg_path, cancelled, count).await
                 }
             }
+        })
+        .await
+    }
+
+    async fn replace_with<F, Fut>(
+        &self,
+        request: crate::live_source_switch::SourceSwitchParams,
+        coordinator: Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
+        cancelled: Arc<AtomicBool>,
+        mut open: F,
+    ) -> anyhow::Result<AudioCommitReceipt>
+    where
+        F: FnMut(String) -> Fut,
+        Fut: std::future::Future<Output = anyhow::Result<ManagedProducer>>,
+    {
+        let _cancel_on_drop = OpenCancellation(Some(cancelled.clone()));
+        let (disposition, previous_id) = {
+            let shared = self.shared.lock().unwrap_or_else(|p| p.into_inner());
+            if shared.losses.len() >= 32 {
+                anyhow::bail!(
+                    "Microphone loss events are awaiting delivery; retry after status refresh."
+                );
+            }
+            (
+                replacement_disposition(&shared, request.device_id.as_deref()),
+                shared.status.device_id.clone(),
+            )
         };
+        self.ensure_switch_current(&request, &coordinator, &cancelled)?;
+        if disposition == ReplacementDisposition::KnownSelfOwnedExclusive {
+            // This classification is ownership evidence, not an interpretation
+            // of an arbitrary permission/busy error from a different device.
+            let (closed_tx, closed_rx) = tokio::sync::oneshot::channel();
+            self.cutover(
+                &request,
+                &coordinator,
+                &cancelled,
+                None,
+                HandoffPurpose::Release { closed: closed_tx },
+            )
+            .await?;
+            let receipts = tokio::time::timeout(Duration::from_secs(1), closed_rx)
+                .await
+                .map_err(|_| {
+                    anyhow::anyhow!("Previous microphone release was not acknowledged.")
+                })??;
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            for mut receipt in receipts {
+                loop {
+                    self.ensure_switch_current(&request, &coordinator, &cancelled)?;
+                    match *receipt.borrow() {
+                        ProducerCompletion::Closed => break,
+                        ProducerCompletion::Panicked => anyhow::bail!(
+                            "Previous microphone owner failed during cleanup; capture remains unavailable."
+                        ),
+                        ProducerCompletion::Running => {}
+                    }
+                    tokio::select! {
+                        changed = receipt.changed() => { changed.map_err(|_| anyhow::anyhow!("Previous microphone cleanup receipt closed unexpectedly."))?; },
+                        _ = tokio::time::sleep_until(deadline) => anyhow::bail!("Previous microphone did not close within 5s; its owner remains quarantined."),
+                        _ = tokio::time::sleep(Duration::from_millis(10)) => {},
+                    }
+                }
+            }
+        }
+        let prepared = match request.device_id.clone() {
+            None => Ok(None),
+            Some(id) => open(id).await.map(Some),
+        };
+        self.ensure_switch_current(&request, &coordinator, &cancelled)?;
+        let result = match prepared {
+            Ok(candidate) => {
+                self.cutover(
+                    &request,
+                    &coordinator,
+                    &cancelled,
+                    candidate,
+                    HandoffPurpose::Commit,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        };
+        if result.is_ok() || disposition == ReplacementDisposition::Concurrent {
+            return result;
+        }
+        // The bus receipt wins a response timeout; never restore over an
+        // already committed target or a superseding Stop/layout intent.
+        self.ensure_switch_current(&request, &coordinator, &cancelled)?;
+        let failure = result.unwrap_err();
+        if failure.is::<PreparationCleanupPending>() {
+            return Err(failure);
+        }
+        let target_failure = failure.to_string();
+        coordinator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .set_stage(&request, crate::live_source_switch::SwitchStage::Restoring)
+            .map_err(|error| anyhow::anyhow!(error.message()))?;
+        let previous = previous_id
+            .ok_or_else(|| anyhow::anyhow!("Previous microphone identity is unavailable."))?;
+        let restored = open(previous).await;
+        self.ensure_switch_current(&request, &coordinator, &cancelled)?;
+        match restored {
+            Ok(candidate) => {
+                self.cutover(
+                    &request,
+                    &coordinator,
+                    &cancelled,
+                    Some(candidate),
+                    HandoffPurpose::Restore {
+                        failure: target_failure.clone(),
+                    },
+                )
+                .await?;
+                Err(anyhow::anyhow!(
+                    "{target_failure} The previous microphone was restored."
+                ))
+            }
+            Err(error) => Err(anyhow::anyhow!(
+                "{target_failure} Restoring the previous microphone also failed: {error}"
+            )),
+        }
+    }
+
+    fn ensure_switch_current(
+        &self,
+        request: &crate::live_source_switch::SourceSwitchParams,
+        coordinator: &Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
+        cancelled: &AtomicBool,
+    ) -> anyhow::Result<()> {
         if self.stop.load(Ordering::Acquire) || cancelled.load(Ordering::Acquire) {
             anyhow::bail!("Source change cancelled");
         }
+        coordinator
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .validate_commit(request)
+            .map_err(|error| anyhow::anyhow!(error.message()))
+    }
+
+    async fn cutover(
+        &self,
+        request: &crate::live_source_switch::SourceSwitchParams,
+        coordinator: &Arc<std::sync::Mutex<crate::live_source_switch::SourceSwitchCoordinator>>,
+        cancelled: &Arc<AtomicBool>,
+        candidate: Option<ManagedProducer>,
+        purpose: HandoffPurpose,
+    ) -> anyhow::Result<AudioCommitReceipt> {
+        self.ensure_switch_current(request, coordinator, cancelled)?;
+        let release = matches!(&purpose, HandoffPurpose::Release { .. });
         let (acknowledgement, receipt) = tokio::sync::oneshot::channel();
         self.commands
             .try_send(AudioSwitchCommand {
                 request: request.clone(),
-                coordinator,
-                cancelled,
+                coordinator: coordinator.clone(),
+                cancelled: cancelled.clone(),
                 candidate,
+                purpose,
                 admitted_at: Instant::now(),
                 acknowledgement,
             })
@@ -979,9 +1182,8 @@ impl AudioSwitchHandle {
                 )
             })?;
         let result = tokio::time::timeout(Duration::from_secs(1), receipt).await;
-        // The bus owns the terminal receipt. Response loss after cutover never
-        // turns an audible committed selection back into a failed old source.
-        if let Some(receipt) = self.status().last_commit
+        if !release
+            && let Some(receipt) = self.status().last_commit
             && receipt.session_id == request.session_id
             && receipt.request_id == request.request_id
         {
@@ -1048,6 +1250,8 @@ pub fn attach_prepared(
 ) -> SessionAudio {
     let stats = Arc::new(AudioCaptureStats::default());
     let shared = Arc::new(std::sync::Mutex::new(AudioShared {
+        owner_present: source.is_some(),
+        retiring: Vec::new(),
         status: AudioBusStatus {
             selected_input: source.is_some(),
             device_id: source.as_ref().map(InitialAudioSource::device_id),
@@ -1585,11 +1789,18 @@ fn run_bus_owned(
         }
         if source_lost {
             receiver = None;
-            if let Some(old) = producer.take() {
-                retired.push(old.retire());
+            {
+                let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
+                shared.owner_present = false;
+                if let Some(old) = producer.take() {
+                    let id = old.device_id.clone();
+                    let completion = old.retire();
+                    shared.retiring.push((id, completion.state.clone()));
+                    retired.push(completion);
+                }
+                stats.mark_source_lost_at(Instant::now());
             }
             producer_stats = None;
-            stats.mark_source_lost_at(Instant::now());
             if let Some(after_ms) = stats.claim_source_loss_event() {
                 let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
                 let device_name = shared.status.device_name.clone();
@@ -1645,7 +1856,23 @@ fn run_bus_owned(
                         .coordinator
                         .lock()
                         .unwrap_or_else(|p| p.into_inner());
-                    if let Err(error) = coordinator.validate_commit(&handoff.command.request) {
+                    let validated = coordinator
+                        .validate_commit(&handoff.command.request)
+                        .and_then(|()| {
+                            if matches!(handoff.command.purpose, HandoffPurpose::Restore { .. }) {
+                                coordinator.validate_microphone_restoration(
+                                    &handoff.command.request,
+                                    handoff
+                                        .command
+                                        .candidate
+                                        .as_ref()
+                                        .map(|candidate| candidate.device_id.as_str()),
+                                )
+                            } else {
+                                Ok(())
+                            }
+                        });
+                    if let Err(error) = validated {
                         ramp_in = handoff.old_ramped_down;
                         let _ = handoff
                             .command
@@ -1655,13 +1882,23 @@ fn run_bus_owned(
                         let mut shared = shared.lock().unwrap_or_else(|p| p.into_inner());
                         // Selection, route and receipt share this linearization
                         // point with Stop. No write or native close under locks.
+                        let previous_identity = (
+                            shared.status.device_id.clone(),
+                            shared.status.device_name.clone(),
+                        );
                         generation = handoff.generation;
                         timeline.select_generation(generation);
                         timeline.counters.discarded_frames += handoff.pcm.counters.discarded_frames;
                         timeline.counters.dropped_frames += handoff.pcm.counters.dropped_frames;
                         timeline.packets = std::mem::take(&mut handoff.pcm.packets);
+                        shared.retiring.retain(|(_, completion)| {
+                            *completion.borrow() != ProducerCompletion::Closed
+                        });
                         if let Some(old) = producer.take() {
-                            retired.push(old.retire());
+                            let id = old.device_id.clone();
+                            let completion = old.retire();
+                            shared.retiring.push((id, completion.state.clone()));
+                            retired.push(completion);
                         }
                         *producer = handoff.command.candidate.take();
                         receiver = producer
@@ -1686,6 +1923,7 @@ fn run_bus_owned(
                             shared.last_selected_name = producer.device_name.clone();
                         }
                         shared.status.generation = generation;
+                        shared.owner_present = producer.is_some();
                         shared.status.selected_input = producer.is_some();
                         shared.status.device_id =
                             producer.as_ref().map(|producer| producer.device_id.clone());
@@ -1699,22 +1937,54 @@ fn run_bus_owned(
                                 .as_ref()
                                 .and_then(|producer| producer.caption_injector.clone());
                         }
-                        shared.status.last_commit = Some(AudioCommitReceipt {
+                        let mut receipt = AudioCommitReceipt {
                             session_id: handoff.command.request.session_id.clone(),
                             request_id: handoff.command.request.request_id.clone(),
                             generation,
                             cutover_sample: timeline.cursor(),
                             device_id: shared.status.device_id.clone(),
                             output_observed: false,
-                        });
-                        coordinator
-                            .commit_microphone(&handoff.command.request)
-                            .expect("validated under same mutex");
-                        observe = Some(OutputObservation {
-                            request: handoff.command.request.clone(),
-                            coordinator: handoff.command.coordinator.clone(),
-                            acknowledgement: Some(handoff.command.acknowledgement),
-                        });
+                        };
+                        match handoff.command.purpose {
+                            HandoffPurpose::Release { closed } => {
+                                shared.status.device_id = previous_identity.0;
+                                shared.status.device_name = previous_identity.1;
+                                stats.mark_source_lost_at(Instant::now());
+                                let _ = stats.claim_source_loss_event();
+                                coordinator.previous_unavailable(&handoff.command.request);
+                                receipt.device_id = shared.status.device_id.clone();
+                                observe = None;
+                                let _ = closed.send(
+                                    retired.iter().map(|ticket| ticket.state.clone()).collect(),
+                                );
+                                let _ = handoff.command.acknowledgement.send(Ok(receipt));
+                            }
+                            purpose => {
+                                shared.status.last_commit = Some(receipt);
+                                match purpose {
+                                    HandoffPurpose::Commit => {
+                                        coordinator
+                                            .commit_microphone(&handoff.command.request)
+                                            .expect("validated under same mutex");
+                                    }
+                                    HandoffPurpose::Restore { failure } => {
+                                        coordinator
+                                            .restore_microphone(
+                                                &handoff.command.request,
+                                                shared.status.device_id.as_deref(),
+                                                failure,
+                                            )
+                                            .expect("validated restore under same mutex");
+                                    }
+                                    HandoffPurpose::Release { .. } => unreachable!(),
+                                }
+                                observe = Some(OutputObservation {
+                                    request: handoff.command.request.clone(),
+                                    coordinator: handoff.command.coordinator.clone(),
+                                    acknowledgement: Some(handoff.command.acknowledgement),
+                                });
+                            }
+                        }
                         ramp_in = true;
                     }
                 }
@@ -2257,6 +2527,7 @@ mod tests {
         let cancelled = coordinator.lock().unwrap().cancellation(&request).unwrap();
         let (acknowledgement, _) = tokio::sync::oneshot::channel();
         let command = AudioSwitchCommand {
+            purpose: HandoffPurpose::Commit,
             request,
             coordinator,
             cancelled,
@@ -2585,6 +2856,7 @@ mod tests {
             .handle
             .commands
             .try_send(AudioSwitchCommand {
+                purpose: HandoffPurpose::Commit,
                 request: request.clone(),
                 coordinator: coordinator.clone(),
                 cancelled,
@@ -2818,6 +3090,272 @@ mod tests {
                 .all(|sample| *sample == 0.0)
         );
     }
+    struct HeldClose {
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+    impl Drop for HeldClose {
+        fn drop(&mut self) {
+            if let Some(started) = self.started.take() {
+                let _ = started.send(());
+            }
+            // A deterministic driver-close barrier, with its own failure bound.
+            let _ = self.release.recv_timeout(Duration::from_secs(3));
+        }
+    }
+
+    #[tokio::test]
+    async fn real_lost_owner_closes_before_exclusive_retry_restore_or_stop() {
+        use std::io::Read;
+        for outcome in ["retry", "restored", "unavailable", "stop"] {
+            let count = Arc::new(AtomicU64::new(0));
+            let (pcm_tx, pcm_rx) = mpsc::channel();
+            let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = mpsc::channel();
+            let initial = prepare_producer_with(
+                move || {
+                    Ok(ProducerSource {
+                        device_id: "microphone:coreaudio:7".into(),
+                        device_name: "A".into(),
+                        receiver: pcm_rx,
+                        stats: Arc::new(AudioCaptureStats::default()),
+                        failure: None,
+                        _owner: Box::new(HeldClose {
+                            started: Some(close_tx),
+                            release: release_rx,
+                        }),
+                        #[cfg(debug_assertions)]
+                        caption_injector: None,
+                    })
+                },
+                Arc::new(AtomicBool::new(false)),
+                count.clone(),
+                spawn_owner,
+                |_| {},
+                false,
+            )
+            .await
+            .unwrap();
+            let path = crate::audio::native_audio_fifo_path(&format!(
+                "exclusive-bus-{}",
+                uuid::Uuid::new_v4()
+            ));
+            crate::audio::create_native_audio_fifo(&path).unwrap();
+            let reader_path = path.clone();
+            let (progress_tx, mut progress_rx) = tokio::sync::mpsc::unbounded_channel();
+            let reader = thread::spawn(move || {
+                let mut file = std::fs::File::open(reader_path).unwrap();
+                let mut samples = Vec::new();
+                let mut chunk = [0u8; 3840];
+                while file.read_exact(&mut chunk).is_ok() {
+                    samples.extend(
+                        chunk
+                            .chunks_exact(8)
+                            .map(|bytes| f32::from_le_bytes(bytes[..4].try_into().unwrap())),
+                    );
+                    let _ = progress_tx.send(samples.len());
+                }
+                samples
+            });
+            let session = attach_prepared(
+                Some(InitialAudioSource {
+                    source: InitialInput::Owned {
+                        producer: initial,
+                        count: count.clone(),
+                    },
+                }),
+                path,
+                None,
+                AudioProcessingSettings::default(),
+                Duration::from_millis(200),
+            );
+            tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
+                .await
+                .unwrap()
+                .unwrap();
+            // EOF is real bus input loss. The owner then blocks inside Drop.
+            drop(pcm_tx);
+            tokio::time::timeout(Duration::from_secs(2), close_rx)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(session.input_state(), NativeAudioInputState::SourceLost);
+            assert_eq!(count.load(Ordering::Acquire), 1);
+            let request = source_request("exclusive", Some("microphone:coreaudio:7"));
+            let coordinator = source_coordinator(&request);
+            // Initial session selection is A, even after actual input loss.
+            {
+                let mut coord = coordinator.lock().unwrap();
+                coord.stop("test-session");
+                coord.start(
+                    "test-session".into(),
+                    crate::protocol::SourceSelection {
+                        microphone_id: request.device_id.clone(),
+                        screen_id: None,
+                        window_id: None,
+                        camera_id: None,
+                        test_pattern: false,
+                    },
+                );
+                coord.enable_microphone();
+                coord.admit(&request).unwrap();
+            }
+            let cancellation = coordinator.lock().unwrap().cancellation(&request).unwrap();
+            let calls = Arc::new(AtomicU64::new(0));
+            let opened = calls.clone();
+            let handle = session.switch_handle();
+            let task_coord = coordinator.clone();
+            let task_count = count.clone();
+            let (restore_tx, restore_rx) = tokio::sync::oneshot::channel();
+            let restore_tx = Arc::new(std::sync::Mutex::new(Some(restore_tx)));
+            let (continue_tx, continue_rx) = tokio::sync::watch::channel(false);
+            let task = tokio::spawn(async move {
+                handle
+                    .replace_with(request, task_coord, cancellation, move |id| {
+                        let attempt = opened.fetch_add(1, Ordering::AcqRel);
+                        let count = task_count.clone();
+                        let restore_tx = restore_tx.clone();
+                        let mut continue_rx = continue_rx.clone();
+                        async move {
+                            assert_eq!(
+                                count.load(Ordering::Acquire),
+                                0,
+                                "no open while the exact prior owner is closing"
+                            );
+                            if outcome != "retry" && attempt == 0 {
+                                anyhow::bail!("Target open refused");
+                            }
+                            if outcome == "unavailable" {
+                                anyhow::bail!("Restore refused");
+                            }
+                            if outcome == "stop" {
+                                if let Some(sender) = restore_tx.lock().unwrap().take() {
+                                    let _ = sender.send(());
+                                }
+                                while !*continue_rx.borrow() {
+                                    continue_rx.changed().await.unwrap();
+                                }
+                            }
+                            Ok(paced_test_producer(&id, 0.65, count, None).await)
+                        }
+                    })
+                    .await
+            });
+            // Observe the release generation through actual PCM progress, not a sleep.
+            while session.status().generation == 0 {
+                tokio::time::timeout(Duration::from_secs(2), progress_rx.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            }
+            assert_eq!(calls.load(Ordering::Acquire), 0);
+            release_tx.send(()).unwrap();
+            if outcome == "stop" {
+                tokio::time::timeout(Duration::from_secs(2), restore_rx)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                coordinator.lock().unwrap().stop("test-session");
+                session.request_stop();
+                continue_tx.send(true).unwrap();
+            }
+            let result = tokio::time::timeout(Duration::from_secs(3), task)
+                .await
+                .unwrap()
+                .unwrap();
+            let status = session.status();
+            if outcome == "retry" {
+                assert!(result.is_ok());
+            } else {
+                assert!(result.is_err());
+            }
+            if outcome == "restored" {
+                let snapshot = coordinator
+                    .lock()
+                    .unwrap()
+                    .snapshot("test-session")
+                    .unwrap();
+                let operation = snapshot.last_operation.unwrap();
+                assert_eq!(
+                    operation.previous_source,
+                    crate::live_source_switch::SourcePreservation::Restored
+                );
+                assert_eq!(
+                    operation.stage,
+                    crate::live_source_switch::SwitchStage::Failed
+                );
+            }
+            if outcome == "retry" || outcome == "restored" {
+                assert!(status.selected_input);
+                assert_eq!(session.input_state(), NativeAudioInputState::Live);
+                assert!(status.last_commit.as_ref().unwrap().output_observed);
+            } else {
+                assert!(!status.selected_input);
+            }
+            session.request_stop();
+            drop(session);
+            let samples = reader.join().unwrap();
+            assert_eq!(count.load(Ordering::Acquire), 0);
+            if outcome == "retry" || outcome == "restored" {
+                let boundary = status.last_commit.unwrap().cutover_sample as usize;
+                assert!(samples[..boundary].iter().all(|sample| *sample == 0.0));
+                assert!((samples[boundary + 240] - 0.65).abs() < 0.001);
+            } else {
+                assert!(samples.iter().all(|sample| *sample == 0.0));
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn failed_readiness_waits_for_actual_owner_close_before_returning() {
+        let count = Arc::new(AtomicU64::new(0));
+        let (close_tx, close_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let task_count = count.clone();
+        let task = tokio::spawn(async move {
+            prepare_producer_with(
+                move || {
+                    let (tx, rx) = mpsc::channel();
+                    drop(tx);
+                    Ok(ProducerSource {
+                        device_id: "A".into(),
+                        device_name: "A".into(),
+                        receiver: rx,
+                        stats: Arc::new(AudioCaptureStats::default()),
+                        failure: None,
+                        _owner: Box::new(HeldClose {
+                            started: Some(close_tx),
+                            release: release_rx,
+                        }),
+                        #[cfg(debug_assertions)]
+                        caption_injector: None,
+                    })
+                },
+                Arc::new(AtomicBool::new(false)),
+                task_count,
+                spawn_owner,
+                |_| {},
+                true,
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), close_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!task.is_finished());
+        assert_eq!(count.load(Ordering::Acquire), 1);
+        release_tx.send(()).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), task)
+                .await
+                .unwrap()
+                .unwrap()
+                .is_err()
+        );
+        assert_eq!(count.load(Ordering::Acquire), 0);
+    }
+
     #[test]
     fn failed_initial_open_cannot_escape_platform_capacity_via_a_silence_bus_pool() {
         let platform = Arc::new(AtomicU64::new(0));

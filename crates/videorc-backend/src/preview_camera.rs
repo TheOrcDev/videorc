@@ -2491,7 +2491,7 @@ pub async fn stop_preview_camera(state: &AppState) -> PreviewCameraStatus {
 }
 
 pub(crate) async fn begin_preview_camera_stop(state: &AppState) -> PreviewCameraStop {
-    try_begin_preview_camera_stop_supervised(state, false, None)
+    try_begin_preview_camera_stop_supervised(state, false, None, None)
         .await
         .expect("unconditional camera stop admission")
 }
@@ -2504,7 +2504,7 @@ pub(crate) async fn begin_preview_camera_stop_if_starting(
     state: &AppState,
     expected: &PreviewCameraStartingIdentity,
 ) -> Option<PreviewCameraStop> {
-    try_begin_preview_camera_stop_supervised(state, false, Some(expected)).await
+    try_begin_preview_camera_stop_supervised(state, false, Some(expected), None).await
 }
 
 fn camera_starting_identity_from_slot(
@@ -2547,16 +2547,32 @@ pub(crate) async fn acquire_preview_camera_transition(
     transition_gate.lock_owned().await
 }
 
+/// Release only an abandoned, already-live source generation. A replacement
+/// owner can never be stopped by a late transaction cleanup.
+pub(crate) async fn stop_abandoned_camera_generation(
+    state: &AppState,
+    expected: &(SourceKey, u64),
+) -> Option<PreviewCameraStop> {
+    try_begin_preview_camera_stop_supervised(state, false, None, Some(expected)).await
+}
+
 async fn try_begin_preview_camera_stop_supervised(
     state: &AppState,
     force_shutdown: bool,
     expected_starting: Option<&PreviewCameraStartingIdentity>,
+    expected_active: Option<&(SourceKey, u64)>,
 ) -> Option<PreviewCameraStop> {
     let (status, generation, poll_task, explicit_mutation) = {
         // Same preview-runtime -> source-registry order as start admission.
         // No mutation precedes the registry await, and there is no suspension
         // between consumer release and desired-generation invalidation.
         let mut slot = state.preview_camera.lock().await;
+        if expected_active
+            .is_some_and(|expected| source_identity_locked(&slot).as_ref() != Some(expected))
+        {
+            return None;
+        }
+
         if let Some(expected) = expected_starting
             && camera_starting_identity_from_slot(&slot).as_ref() != Some(expected)
         {
@@ -2720,7 +2736,7 @@ pub(crate) async fn shutdown_preview_camera(state: &AppState) -> bool {
 }
 
 async fn shutdown_preview_camera_with_timeout(state: &AppState, timeout: Duration) -> bool {
-    let mut stop = try_begin_preview_camera_stop_supervised(state, true, None)
+    let mut stop = try_begin_preview_camera_stop_supervised(state, true, None, None)
         .await
         .expect("unconditional camera shutdown admission");
     let Some(mut completion) = stop.completion.take() else {
@@ -2785,6 +2801,11 @@ pub async fn preview_camera_latest_frame_info(state: &AppState) -> Option<Previe
         height: frame.height,
         frame_age_ms: frame.captured_at.elapsed().as_millis() as u64,
     })
+}
+
+pub(crate) fn source_identity_locked(slot: &PreviewCameraRuntime) -> Option<(SourceKey, u64)> {
+    slot.active.as_ref()?;
+    Some((slot.source_key.clone()?, slot.active_generation?))
 }
 
 pub async fn preview_camera_frame_source(state: &AppState) -> Option<PreviewCameraFrameSource> {

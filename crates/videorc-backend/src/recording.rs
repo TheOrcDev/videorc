@@ -4664,6 +4664,15 @@ async fn start_session_with_timeline(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         sources.start(session_id.clone(), confirmed_sources);
         sources.set_output_process_id(pending_active.pid);
+        #[cfg(target_os = "windows")]
+        // Windows video capability is enabled with the generation-fenced pump
+        // and exact camera adapter in the following implementation checkpoint.
+        let replaceable_video = false;
+        #[cfg(not(target_os = "windows"))]
+        let replaceable_video = pending_active.encoder_bridge.is_some();
+        if replaceable_video {
+            sources.enable_video();
+        }
         if pending_active.native_audio.is_some()
             && (cfg!(target_os = "macos")
                 || (cfg!(target_os = "windows")
@@ -5233,6 +5242,7 @@ async fn stop_recording_serialized(state: AppState) -> Result<RecordingStatus> {
             let _ = stop_intent_sender.send(());
         }
         active.stop_requested = true;
+        state.invalidate_layout_source_work();
         state
             .live_source_switch
             .lock()
@@ -7771,6 +7781,7 @@ async fn monitor_session(
         .then(|| guard.take())
         .flatten();
     if monitored_recording.is_some() {
+        state.invalidate_layout_source_work();
         state
             .live_source_switch
             .lock()

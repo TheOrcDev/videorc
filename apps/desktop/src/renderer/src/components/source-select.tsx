@@ -19,6 +19,7 @@ export function SourceSelect({
   label,
   devices,
   value,
+  selectedName,
   onChange,
   allowNone = false,
   placeholder,
@@ -30,6 +31,7 @@ export function SourceSelect({
   label: string
   devices: Device[]
   value?: string
+  selectedName?: string
   onChange: (value: string | undefined) => void
   allowNone?: boolean
   placeholder?: string
@@ -43,7 +45,7 @@ export function SourceSelect({
   // Q6 (plan 022): the select must never render a blank surface. A saved id
   // with no matching device gets a synthetic disabled item (so the trigger
   // has words), and the placeholder names loading/none-found explicitly.
-  const missing = missingSelection(devices, value)
+  const missing = missingSelection(devices, value, selectedName)
 
   if (searchable) {
     return (
@@ -69,6 +71,7 @@ export function SourceSelect({
           label={label}
           devices={devices}
           value={value}
+          selectedName={selectedName}
           onChange={onChange}
           allowNone={allowNone}
           placeholder={placeholder}
@@ -114,7 +117,7 @@ export function SourceSelect({
           </SelectGroup>
         </SelectContent>
       </Select>
-      {description ? <FieldDescription>{description}</FieldDescription> : null}
+      {description ? <FieldDescription aria-live="polite">{description}</FieldDescription> : null}
     </Field>
   )
 }

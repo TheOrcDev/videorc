@@ -9,6 +9,7 @@ import {
   type ReactNode
 } from 'react'
 
+import { subscribeVisualMicrophoneEpoch, visualMicrophoneEpoch } from '@/lib/mic-stream'
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore } from '@/hooks/use-studio'
 import { micVisualAnalyserEnabled } from '@/lib/mic-visual-gate'
@@ -68,6 +69,7 @@ export function StudioMicVisualProvider({
   const {
     captureConfig,
     selectedMicrophone,
+    sourceSelectionState,
     mediaAccess,
     isSessionActive,
     settings,
@@ -75,6 +77,11 @@ export function StudioMicVisualProvider({
     disarmWarmMicrophone
   } = useStudioCore()
   const documentVisible = useDocumentVisible()
+  const resumeEpoch = useSyncExternalStore(
+    subscribeVisualMicrophoneEpoch,
+    visualMicrophoneEpoch,
+    visualMicrophoneEpoch
+  )
   const [pipeline, setPipeline] = useState<MicVisualPipeline | null>(null)
   const selectionKey = selectedMicrophone?.id
   const deviceName = selectedMicrophone?.name
@@ -112,13 +119,18 @@ export function StudioMicVisualProvider({
     selectionKey,
     deviceName,
     permissionStatus,
-    enabled: micVisualAnalyserEnabled({
-      workspaceVisible: enabled,
-      documentVisible,
-      microphoneSelected: Boolean(selectionKey),
-      muted: captureConfig.audio.microphoneMuted,
-      sessionActive: isSessionActive
-    })
+    strictDevice: true,
+    resumeEpoch,
+    enabled:
+      !sourceSelectionState.pending &&
+      !sourceSelectionState.checking &&
+      micVisualAnalyserEnabled({
+        workspaceVisible: enabled,
+        documentVisible,
+        microphoneSelected: Boolean(selectionKey),
+        muted: captureConfig.audio.microphoneMuted,
+        sessionActive: isSessionActive
+      })
   }
   useEffect(() => {
     if (pipeline || !source.enabled) {
@@ -157,15 +169,22 @@ export function MicVisualPipelineProvider({
   source: MicVisualSource
   children?: ReactNode
 }): ReactElement {
-  const { deviceName, enabled, permissionStatus, selectionKey } = source
+  const { deviceName, enabled, permissionStatus, selectionKey, strictDevice, resumeEpoch } = source
 
   useEffect(() => {
-    const configuredSource = { deviceName, enabled, permissionStatus, selectionKey }
+    const configuredSource = {
+      deviceName,
+      enabled,
+      permissionStatus,
+      selectionKey,
+      strictDevice,
+      resumeEpoch
+    }
     pipeline.configure(configuredSource)
     // configure(false) releases in a microtask: a StrictMode cleanup followed
     // immediately by the same setup cancels that release and keeps one open.
     return () => pipeline.configure({ ...configuredSource, enabled: false })
-  }, [deviceName, enabled, permissionStatus, pipeline, selectionKey])
+  }, [deviceName, enabled, permissionStatus, pipeline, selectionKey, strictDevice, resumeEpoch])
 
   return (
     <StudioMicVisualContext.Provider value={pipeline}>{children}</StudioMicVisualContext.Provider>

@@ -2382,7 +2382,7 @@ pub(crate) async fn begin_preview_screen_stop_with_transition(
     state: &AppState,
     transition_guard: PreviewScreenTransitionGuard,
 ) -> PreviewScreenStop {
-    let mut stop = try_begin_preview_screen_stop_serialized(state, false, None)
+    let mut stop = try_begin_preview_screen_stop_serialized(state, false, None, None)
         .await
         .expect("unconditional screen stop admission");
     stop._transition_guard = Some(transition_guard);
@@ -2398,7 +2398,8 @@ pub(crate) async fn begin_preview_screen_stop_if_starting_with_transition(
     transition_guard: PreviewScreenTransitionGuard,
     expected: &PreviewScreenStartingIdentity,
 ) -> Option<PreviewScreenStop> {
-    let mut stop = try_begin_preview_screen_stop_serialized(state, false, Some(expected)).await?;
+    let mut stop =
+        try_begin_preview_screen_stop_serialized(state, false, Some(expected), None).await?;
     stop._transition_guard = Some(transition_guard);
     Some(stop)
 }
@@ -2425,10 +2426,23 @@ pub(crate) async fn preview_screen_status_and_starting_identity(
     )
 }
 
+/// Release only an abandoned, already-live source generation. A replacement
+/// owner can never be stopped by a late transaction cleanup.
+pub(crate) async fn stop_abandoned_screen_generation(
+    state: &AppState,
+    expected: &(SourceKey, u64),
+) -> Option<PreviewScreenStop> {
+    // Exact-generation CAS registers the supervisor ticket immediately. Do
+    // not wait for the public transition gate: it may belong to native close.
+    // The process-owned supervisor still serializes actual driver teardown.
+    try_begin_preview_screen_stop_serialized(state, false, None, Some(expected)).await
+}
+
 async fn try_begin_preview_screen_stop_serialized(
     state: &AppState,
     force_shutdown: bool,
     expected_starting: Option<&PreviewScreenStartingIdentity>,
+    expected_active: Option<&(SourceKey, u64)>,
 ) -> Option<PreviewScreenStop> {
     // Keep runtime intent and the Preview consumer transfer on one admission
     // edge. Cancellation while waiting for the registry occurs before either is
@@ -2436,6 +2450,12 @@ async fn try_begin_preview_screen_stop_serialized(
     // stop ticket is registered.
     let (status, poll_task, generation, transition) = {
         let mut slot = state.preview_screen.lock().await;
+        if expected_active
+            .is_some_and(|expected| source_identity_locked(&slot).as_ref() != Some(expected))
+        {
+            return None;
+        }
+
         if let Some(expected) = expected_starting
             && screen_starting_identity_from_slot(&slot).as_ref() != Some(expected)
         {
@@ -2531,7 +2551,7 @@ pub(crate) async fn shutdown_preview_screen(state: &AppState) -> bool {
 
 async fn shutdown_preview_screen_with_timeout(state: &AppState, timeout: Duration) -> bool {
     let transition_guard = acquire_preview_screen_transition(state).await;
-    let mut stop = try_begin_preview_screen_stop_serialized(state, true, None)
+    let mut stop = try_begin_preview_screen_stop_serialized(state, true, None, None)
         .await
         .expect("unconditional screen shutdown admission");
     stop._transition_guard = Some(transition_guard);
@@ -2678,6 +2698,11 @@ pub async fn preview_screen_latest_frame_info(state: &AppState) -> Option<Previe
         height: frame.height,
         frame_age_ms: frame.captured_at.elapsed().as_millis() as u64,
     })
+}
+
+pub(crate) fn source_identity_locked(slot: &PreviewScreenRuntime) -> Option<(SourceKey, u64)> {
+    slot.active.as_ref()?;
+    Some((slot.source_key.clone()?, slot.active_generation?))
 }
 
 pub async fn preview_screen_frame_source(state: &AppState) -> Option<PreviewScreenFrameSource> {

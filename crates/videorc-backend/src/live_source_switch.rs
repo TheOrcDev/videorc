@@ -70,6 +70,8 @@ pub struct SourceSwitchOperation {
     pub previous_source: SourcePreservation,
     /// A selection commit is not proof that every output has consumed it.
     pub output_observed: bool,
+    #[serde(default)]
+    pub output_superseded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -77,6 +79,7 @@ pub struct SourceSwitchOperation {
 pub struct SourceSwitchCapability {
     pub kind: SourceKind,
     pub supported: bool,
+    pub allows_none: bool,
     pub reason: Option<String>,
 }
 
@@ -188,6 +191,10 @@ impl Admission {
 #[derive(Debug, Default)]
 pub struct SourceSwitchCoordinator {
     snapshot: Option<SessionSources>,
+    /// Last backend enumeration; native exact-ID open/readiness still proves
+    /// presence. devices.list replaces this before replying, including newly
+    /// attached sources, without spawning uncancellable per-switch enumerators.
+    inventory: Vec<crate::protocol::Device>,
     pending_request: Option<SourceSwitchParams>,
     completed: VecDeque<(SourceSwitchParams, SourceSwitchOperation)>,
     stopping: bool,
@@ -200,7 +207,9 @@ impl SourceSwitchCoordinator {
         if let Some(cancelled) = self.cancellation.take() {
             cancelled.store(true, std::sync::atomic::Ordering::Release);
         }
+        let inventory = std::mem::take(&mut self.inventory);
         *self = Self {
+            inventory,
             snapshot: Some(SessionSources {
                 session_id,
                 source_revision: 0,
@@ -237,6 +246,7 @@ impl SourceSwitchCoordinator {
                 .map(|kind| SourceSwitchCapability {
                     kind,
                     supported: false,
+                    allows_none: kind != SourceKind::Capture,
                     reason: Some(
                         "The running capture adapter does not support session source transactions."
                             .into(),
@@ -246,6 +256,30 @@ impl SourceSwitchCoordinator {
             }),
             ..Self::default()
         };
+    }
+
+    pub fn observe_devices(&mut self, devices: &[crate::protocol::Device]) {
+        self.inventory = devices.to_vec();
+    }
+
+    pub fn validate_video_target(&self, request: &SourceSwitchParams) -> Result<(), String> {
+        use crate::protocol::{DeviceKind, DeviceStatus};
+        let Some(id) = request.device_id.as_deref() else {
+            return Ok(());
+        };
+        let mut matches = self.inventory.iter().filter(|device| device.id == id);
+        let Some(device) = matches.next() else {
+            return Err("The selected source is no longer in the device list. Refresh devices and choose an available source.".into());
+        };
+        let kind_matches = match request.kind {
+            SourceKind::Camera => device.kind == DeviceKind::Camera,
+            SourceKind::Capture => matches!(device.kind, DeviceKind::Screen | DeviceKind::Window),
+            SourceKind::Microphone => false,
+        };
+        if matches.next().is_some() || !kind_matches || device.status != DeviceStatus::Available {
+            return Err("The selected source is unavailable or its identity is ambiguous. Refresh devices and choose an available source.".into());
+        }
+        Ok(())
     }
 
     pub fn set_output_process_id(&mut self, pid: u32) {
@@ -263,6 +297,90 @@ impl SourceSwitchCoordinator {
         {
             capability.supported = false;
             capability.reason = Some(reason.into());
+        }
+    }
+
+    pub fn enable_video(&mut self) {
+        if let Some(snapshot) = self.snapshot.as_mut() {
+            for capability in &mut snapshot.capabilities {
+                if capability.kind != SourceKind::Microphone {
+                    capability.supported = true;
+                    capability.reason = None;
+                }
+            }
+        }
+    }
+    pub fn supersede_with_video_health(
+        &mut self,
+        camera: &crate::protocol::PreviewCameraStatus,
+        capture: &crate::protocol::PreviewScreenStatus,
+    ) -> Option<SourceSelection> {
+        let request = self.pending_request.clone()?;
+        let confirmed = self.snapshot.as_ref()?.confirmed.clone();
+        let available = match request.kind {
+            SourceKind::Camera => {
+                confirmed.camera_id.is_none()
+                    || (camera.camera_id == confirmed.camera_id
+                        && camera.state == crate::protocol::PreviewCameraState::Live
+                        && camera.frame_age_ms.is_some_and(|age| age <= 1500))
+            }
+            SourceKind::Capture => {
+                let id = confirmed
+                    .window_id
+                    .as_deref()
+                    .or(confirmed.screen_id.as_deref());
+                id.is_none() || screen_health(capture, id) == SourceHealth::Ready
+            }
+            SourceKind::Microphone => true,
+        };
+        if !available {
+            self.previous_unavailable(&request);
+        }
+        self.supersede_for_layout();
+        (request.kind != SourceKind::Microphone).then_some(confirmed)
+    }
+
+    pub fn supersede_for_layout(&mut self) {
+        if let Some(request) = self.pending_request.clone() {
+            let _ = self.finish(
+                &request,
+                SwitchStage::Cancelled,
+                Some("A newer scene intent superseded this source change.".into()),
+            );
+        }
+    }
+    pub fn commit_video(
+        &mut self,
+        request: &SourceSwitchParams,
+    ) -> Result<SessionSources, SwitchError> {
+        self.validate_commit(request)?;
+        let snapshot = self.snapshot.as_mut().expect("validated session");
+        match request.kind {
+            SourceKind::Camera => snapshot.confirmed.camera_id = request.device_id.clone(),
+            SourceKind::Capture => {
+                snapshot.confirmed.window_id = request
+                    .device_id
+                    .clone()
+                    .filter(|id| id.starts_with("window:"));
+                snapshot.confirmed.screen_id = request
+                    .device_id
+                    .clone()
+                    .filter(|id| id.starts_with("screen:"));
+                snapshot.confirmed.test_pattern = false;
+            }
+            SourceKind::Microphone => return Err(SwitchError::InvalidRequest),
+        }
+        snapshot.source_revision = snapshot.source_revision.saturating_add(1);
+        self.finish(request, SwitchStage::Applied, None)
+    }
+    pub fn previous_restored(&mut self, request: &SourceSwitchParams) {
+        if self.pending_request.as_ref() == Some(request)
+            && let Some(operation) = self
+                .snapshot
+                .as_mut()
+                .and_then(|snapshot| snapshot.pending.as_mut())
+        {
+            operation.previous_source = SourcePreservation::Restored;
         }
     }
 
@@ -285,7 +403,11 @@ impl SourceSwitchCoordinator {
             .ok_or(SwitchError::InactiveSession)
     }
 
-    pub fn reconcile_scene(&mut self, session_id: &str, scene: &Scene) -> Option<SessionSources> {
+    pub fn reconcile_scenes<'a>(
+        &mut self,
+        session_id: &str,
+        scenes: impl IntoIterator<Item = &'a Scene>,
+    ) -> Option<SessionSources> {
         if self.stopping {
             return None;
         }
@@ -294,18 +416,29 @@ impl SourceSwitchCoordinator {
             .as_mut()
             .filter(|snapshot| snapshot.session_id == session_id)?;
         let mut confirmed = snapshot.confirmed.clone();
-        for source in &scene.sources {
-            match source.kind {
-                SceneSourceKind::Camera => confirmed.camera_id = source.device_id.clone(),
-                SceneSourceKind::Screen => {
-                    confirmed.screen_id = source.device_id.clone();
-                    confirmed.window_id = None;
+        confirmed.camera_id = None;
+        confirmed.screen_id = None;
+        confirmed.window_id = None;
+        confirmed.test_pattern = false;
+        for scene in scenes {
+            for source in scene.sources.iter().filter(|source| source.visible) {
+                match source.kind {
+                    SceneSourceKind::Camera if confirmed.camera_id.is_none() => {
+                        confirmed.camera_id = source.device_id.clone()
+                    }
+                    SceneSourceKind::Screen
+                        if confirmed.screen_id.is_none() && confirmed.window_id.is_none() =>
+                    {
+                        confirmed.screen_id = source.device_id.clone()
+                    }
+                    SceneSourceKind::Window
+                        if confirmed.screen_id.is_none() && confirmed.window_id.is_none() =>
+                    {
+                        confirmed.window_id = source.device_id.clone()
+                    }
+                    SceneSourceKind::TestPattern => confirmed.test_pattern = true,
+                    _ => {}
                 }
-                SceneSourceKind::Window => {
-                    confirmed.window_id = source.device_id.clone();
-                    confirmed.screen_id = None;
-                }
-                SceneSourceKind::TestPattern => {}
             }
         }
         if snapshot.confirmed == confirmed {
@@ -322,6 +455,9 @@ impl SourceSwitchCoordinator {
         }
         self.stopping = true;
         if let Some(request) = self.pending_request.clone() {
+            // Stop retires the entire capture session; its cancellation must not
+            // promise that the previous source remains available on air.
+            self.previous_unavailable(&request);
             let _ = self.finish(
                 &request,
                 SwitchStage::Cancelled,
@@ -382,6 +518,7 @@ impl SourceSwitchCoordinator {
             reason: None,
             previous_source: SourcePreservation::Preserved,
             output_observed: false,
+            output_superseded: false,
         };
         self.cancellation = Some(std::sync::Arc::new(std::sync::atomic::AtomicBool::new(
             false,
@@ -406,6 +543,9 @@ impl SourceSwitchCoordinator {
             return Err(SwitchError::Stopping);
         }
         if self.pending_request.as_ref() != Some(request)
+            || self
+                .deadline
+                .is_some_and(|deadline| Instant::now() >= deadline)
             || snapshot.source_revision != request.expected_source_revision
             || self
                 .cancellation
@@ -457,12 +597,68 @@ impl SourceSwitchCoordinator {
         self.finish(request, SwitchStage::Applied, None)
     }
 
+    pub fn validate_microphone_restoration(
+        &self,
+        request: &SourceSwitchParams,
+        device_id: Option<&str>,
+    ) -> Result<(), SwitchError> {
+        self.validate_commit(request)?;
+        if self
+            .snapshot
+            .as_ref()
+            .expect("validated session")
+            .confirmed
+            .microphone_id
+            .as_deref()
+            != device_id
+        {
+            return Err(SwitchError::InvalidRequest);
+        }
+        Ok(())
+    }
+
+    pub fn restore_microphone(
+        &mut self,
+        request: &SourceSwitchParams,
+        device_id: Option<&str>,
+        failure: String,
+    ) -> Result<SessionSources, SwitchError> {
+        self.validate_microphone_restoration(request, device_id)?;
+        let snapshot = self.snapshot.as_mut().expect("validated session");
+        snapshot
+            .pending
+            .as_mut()
+            .expect("pending restore")
+            .previous_source = SourcePreservation::Restored;
+        self.finish(request, SwitchStage::Failed, Some(failure))
+    }
+
+    pub fn supersede_output(&mut self, session_id: &str, request_id: &str) {
+        if self.snapshot(session_id).is_err() {
+            return;
+        }
+        for (request, operation) in &mut self.completed {
+            if request.request_id == request_id && !operation.output_observed {
+                operation.output_superseded = true;
+            }
+        }
+        if let Some(operation) = self
+            .snapshot
+            .as_mut()
+            .and_then(|snapshot| snapshot.last_operation.as_mut())
+            && operation.request_id == request_id
+            && !operation.output_observed
+        {
+            operation.output_superseded = true;
+        }
+    }
+
     pub fn observe_output(&mut self, session_id: &str, request_id: &str) {
         if self.snapshot(session_id).is_err() {
             return;
         }
         for (request, operation) in &mut self.completed {
-            if request.request_id == request_id {
+            if request.request_id == request_id && !operation.output_superseded {
                 operation.output_observed = true;
             }
         }
@@ -471,6 +667,7 @@ impl SourceSwitchCoordinator {
             .as_mut()
             .and_then(|snapshot| snapshot.last_operation.as_mut())
             && operation.request_id == request_id
+            && !operation.output_superseded
         {
             operation.output_observed = true;
         }
@@ -537,8 +734,6 @@ fn screen_health(
 
 pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, SwitchError> {
     // Preview reads do not hold the recording mutex or block Stop behind native work.
-    let camera = crate::preview_camera::preview_camera_status(state).await;
-    let capture = crate::preview_screen::preview_screen_status(state).await;
     let recording = state.recording.lock().await;
     let (stopping, audio_handle) = recording
         .as_ref()
@@ -553,6 +748,15 @@ pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, S
             )
         })
         .ok_or(SwitchError::InactiveSession)?;
+    let camera_slot = state.preview_camera.lock().await;
+    let capture_slot = state.preview_screen.lock().await;
+    let compositor = state.compositor.lock().await;
+    let camera = &camera_slot.status;
+    let capture = &capture_slot.status;
+    let allows_capture_none = compositor.source_edit_snapshot().is_some_and(|edit| {
+        edit.scenes()
+            .all(|scene| !crate::live_layout::required_scene_sources(scene).screen)
+    });
     let mut coordinator = state
         .live_source_switch
         .lock()
@@ -562,6 +766,11 @@ pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, S
         coordinator.stop(session_id);
     }
     let mut snapshot = coordinator.snapshot(session_id)?;
+    for capability in &mut snapshot.capabilities {
+        if capability.kind == SourceKind::Capture {
+            capability.allows_none = allows_capture_none;
+        }
+    }
     snapshot.audio = audio_handle.as_ref().map(|audio| audio.status());
     let audio_health = audio_handle.as_ref().map(|audio| audio.input_state());
     for health in &mut snapshot.health {
@@ -587,7 +796,7 @@ pub async fn get(state: &AppState, session_id: &str) -> Result<SessionSources, S
                     crate::protocol::PreviewCameraState::Starting => SourceHealth::Starting,
                     _ => SourceHealth::Unavailable,
                 },
-                SourceKind::Capture => screen_health(&capture, health.device_id.as_deref()),
+                SourceKind::Capture => screen_health(capture, health.device_id.as_deref()),
                 SourceKind::Microphone => match audio_health {
                     Some(crate::audio::NativeAudioInputState::Live) => SourceHealth::Ready,
                     Some(crate::audio::NativeAudioInputState::Starting) => SourceHealth::Starting,
@@ -671,7 +880,7 @@ pub async fn switch(
     };
     let result = async {
         if request.kind != SourceKind::Microphone {
-            anyhow::bail!("This source adapter is not ready for replacement.");
+            return crate::live_layout::switch_session_video_source(state, &request).await;
         }
         let handle = handle
             .clone()
@@ -684,6 +893,7 @@ pub async fn switch(
                 cancelled,
             )
             .await
+            .map(|_| ())
     }
     .await;
     let snapshot = {
@@ -691,7 +901,8 @@ pub async fn switch(
             .live_source_switch
             .lock()
             .unwrap_or_else(|p| p.into_inner());
-        if result.is_err()
+        if request.kind == SourceKind::Microphone
+            && result.is_err()
             && handle.as_ref().is_some_and(|audio| {
                 matches!(
                     audio.input_state(),
@@ -755,6 +966,51 @@ mod tests {
     }
 
     #[test]
+    fn video_preflight_requires_unique_available_inventory_and_survives_session_reset() {
+        use crate::protocol::{Device, DeviceKind, DeviceStatus};
+        let mut coordinator = coordinator();
+        let mut request = request("video");
+        request.kind = SourceKind::Camera;
+        request.device_id = Some("camera:stable".into());
+        let device = Device {
+            id: "camera:stable".into(),
+            name: "Camera".into(),
+            kind: DeviceKind::Camera,
+            status: DeviceStatus::Available,
+            detail: None,
+            width: None,
+            height: None,
+        };
+        assert!(coordinator.validate_video_target(&request).is_err());
+        coordinator.observe_devices(std::slice::from_ref(&device));
+        assert!(coordinator.validate_video_target(&request).is_ok());
+        let sources = coordinator.snapshot("session").unwrap().confirmed;
+        coordinator.start("next-session".into(), sources);
+        assert!(coordinator.validate_video_target(&request).is_ok());
+        coordinator.observe_devices(&[device.clone(), device.clone()]);
+        assert!(coordinator.validate_video_target(&request).is_err());
+        coordinator.observe_devices(&[Device {
+            status: DeviceStatus::PermissionRequired,
+            ..device.clone()
+        }]);
+        assert!(coordinator.validate_video_target(&request).is_err());
+        coordinator.observe_devices(&[Device {
+            kind: DeviceKind::Screen,
+            ..device.clone()
+        }]);
+        assert!(coordinator.validate_video_target(&request).is_err());
+        coordinator.observe_devices(&[]);
+        assert!(coordinator.validate_video_target(&request).is_err());
+        coordinator.observe_devices(&[device]);
+        assert!(
+            coordinator.validate_video_target(&request).is_ok(),
+            "refresh admits reattached source"
+        );
+        request.device_id = None;
+        assert!(coordinator.validate_video_target(&request).is_ok());
+    }
+
+    #[test]
     fn duplicate_admission_and_lost_response_are_idempotent() {
         let mut coordinator = coordinator();
         let request = request("one");
@@ -801,6 +1057,15 @@ mod tests {
         let request = request("one");
         coordinator.admit(&request).unwrap();
         coordinator.stop("session");
+        assert_eq!(
+            coordinator
+                .snapshot("session")
+                .unwrap()
+                .last_operation
+                .unwrap()
+                .previous_source,
+            SourcePreservation::Unavailable
+        );
         assert_eq!(
             coordinator
                 .snapshot("session")

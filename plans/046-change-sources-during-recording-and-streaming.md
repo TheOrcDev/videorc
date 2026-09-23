@@ -591,6 +591,13 @@ Expected source changes, with adjacent tests allowed:
   `captions.rs`, `windows_d3d11_session.rs`, `session_ops.rs` where necessary for
   source adoption, stop priority, bus timestamps, or current output capability.
   Do not rewrite those systems or weaken their regression contracts.
+- `scene.rs` is included only for explicit CameraOnly/VerticalCameraOnly camera
+  absence: retain an empty camera slot so camera None cannot reveal a previously
+  selected screen through the legacy base-source fallback. Preserve intentional
+  Freeform layers and explicit diagnostic stimuli; keep artifact cadence gates.
+  The adjacent FIFO progress test in `encoder_bridge.rs` may replace its flaky
+  wall-clock sleeps with explicit readiness/release channels and controlled
+  elapsed-time assertions; its production stall contract stays unchanged.
 - Desktop: `src/shared/backend.ts`, `renderer/src/backendClient.ts`,
   `hooks/use-studio.tsx`, its integration tests, new
   `lib/live-source-selection.ts`/tests, `lib/capture.ts`,
@@ -761,6 +768,97 @@ Build references: [FFmpeg Windows platform instructions](https://ffmpeg.org/plat
 and [MSYS2 setup action](https://github.com/msys2/setup-msys2). This amendment
 permits the build prerequisite needed to finish the original Windows scope;
 physical-device acceptance remains explicit and unchanged.
+
+## S5 implementation amendment: Windows source adoption inside the D3D11 pump
+
+Inspection at checkpoint `d9811f16` confirms that
+`windows_d3d11_session.rs::run_pump` owns an immutable startup
+`WindowsD3d11SessionPlan` and camera input. Its `build_scene_plan` does not consume
+later generic compositor scene commits. In addition,
+`windows_d3d11_device.rs::WindowsD3d11MediaClient::start_capture` binds capture to
+the startup adapter and output. A generic scene change therefore cannot prove
+that a new source reached this production output. This is required work under
+the existing Windows consumer audit, not grounds for claiming Windows video
+switching complete through a configuration-only update.
+
+The bounded scope now explicitly includes source-change commands and receipts
+in `windows_d3d11_session.rs`, `windows_d3d11_device.rs`, and
+`windows_d3d11_capture.rs`; adjacent contract tests in
+`windows_d3d11_compositor.rs`/`windows_d3d11_encoder_contract.rs`; and the existing
+state, recording, preview-camera/screen and source coordinator integration.
+A small pure source-switch contract helper is allowed if it keeps platform
+behavior independently testable. Extend maintained Windows media/native-screen
+smokes and their gate helpers only as needed to verify these transactions.
+No new capture framework, native dependency, encoder implementation, release
+workflow, or production presenter is authorized by this amendment.
+
+Required behavior and boundaries:
+
+1. Feed a bounded, session/request/revision-bound source command into the running
+   pump. Consume it at a render boundary; snapshot all affected primary and
+   auxiliary scene geometry and source bindings. Camera None must remove its
+   contribution and cached pixels without resetting retained slot geometry.
+2. Keep existing encoder roles/instances, dimensions, codecs, muxer processes,
+   output stores/connections and continuous CFR/sample timelines. Replacing a
+   capture source must not become device-loss recovery that recreates encoders.
+   Treat source binding generation separately from GPU/encoder generation.
+3. Reuse current platform capture owners and import/upload paths. Clear retained
+   old capture tickets/camera uploads at the source boundary. Prove requested
+   identity and generation in actual composed frames for every affected output.
+   Preview success alone is insufficient. Preserve the documented Windows
+   production presenter identity and surface any actual fallback reason.
+4. Screen selection currently binds output and adapter. Review same-adapter,
+   cross-adapter, dimensions, and supported window capture explicitly. Reuse an
+   existing supported capture/upload path where it preserves the encoder. If a
+   particular target cannot be adopted under that contract, refuse it before
+   retiring a healthy old source with a precise capability reason; do not
+   reinterpret another display as the requested target. Report the remaining
+   supported-target boundary in acceptance, rather than declaring all Windows
+   video switching unavailable to avoid implementing its command path.
+5. Bound target start and restoration separately, keep unrelated layers/audio
+   advancing with black for unavailable video, and make Stop/recovery/newer
+   intent win before installation. Retire old source leases using the union of
+   output consumers. Source/presenter teardown must not tear down the encoder.
+
+### Windows capture ownership refinement
+
+Further inspection shows that `StartCapture` constructs capture on the same
+media actor that composes and encodes, and `StopCapture` synchronously drops it.
+The WGC destructor removes callbacks and closes the session/frame pool/item on
+that actor. A caller timeout cannot keep encoding responsive while that native
+close is blocked. Capture objects deliberately carry `PhantomData<Rc<()>>` to
+keep their thread affinity; do not remove that marker or move an existing owner.
+
+The amendment therefore permits one dedicated capture owner from initial
+startup, constructed on its own thread using permitted clones of the existing
+D3D COM interfaces. The existing device enables multithread protection. Preserve
+the current zero-readback startup path and keep texture pools, composition and
+encoder authority on the media actor. Use bounded commands and at most one
+in-flight destination lease; retain that lease until a late acquire completes,
+so a timed-out write can neither publish stale pixels nor touch recycled memory.
+Capture close stays on its owning thread and produces an exact-generation
+receipt; blocked native work is quarantined under a bounded owner limit.
+
+Prepared replacements may use the existing preview BGRA capture/upload path
+with explicit transport diagnostics. Device/encoder generation and output CFR
+must survive ordinary source changes. Shared GPU driver loss retains the
+existing fatal/recovery semantics and must not be disguised as an ordinary
+source-switch retry. Add tests proving blocked open/acquire/close does not stall
+composition/encoding command service, late acquire cannot publish/recycle its
+lease, close runs on the owner thread, and repeated failure does not grow owner
+counts. Include the affected filters in the Windows 25-pass gate and rerun the
+three full suites and native artifact smokes. This refinement adds no capture
+framework, dependency, encoder implementation, or release action.
+
+Verification adds pure tests for command admission, stale generation/receipt,
+old-ticket rejection, both-leg proof, camera None roundtrip and unchanged
+encoder/CFR identity. Exercise actual camera/display changes in the Windows
+media smoke where hardware is available and inspect finished local/received
+artifacts. Run affected Windows async/process filters at least 25 times and
+three complete Rust suites under PowerShell 7, plus existing native-screen,
+D3D11 media, preview-during-recording and source-switch gates. Compile-only
+results or synthetic contract tests do not replace physical device evidence.
+Missing Windows hardware remains an explicit final acceptance blocker.
 
 ## Done criteria, stop conditions, and maintenance
 
@@ -989,3 +1087,90 @@ recording, stream, or release was run during planning.
   (`s4-worker-final-clippy-v2.log`).
   Classified exclusive release/restoration, downstream-pressure measurement,
   S5 visual/UI integration, S6 strict A/V gates and final platform gates remain.
+
+### S5 checkpoint — confirmed UI, transactional visual sources and restoration
+
+- Both source pickers now share one synchronous controller for active sessions.
+  They retain backend-confirmed selections/names, show the pending target and
+  preparation/restoration stage, fence stale reads and RPC replies, reconcile
+  uncertain outcomes with the same request identity, and provide bounded output
+  observation checks and explicit retry. Stop/new-session/unmount invalidate late
+  callbacks. Failed operations produce one Sonner error toast; success and normal
+  supersession do not. Real Rust null-valued confirmed IDs have a dedicated wire
+  schema and normalize only when merging renderer preferences.
+- Browser microphone visuals require an exact unique selected-device match and
+  are synchronously suspended before microphone replacement, including pending
+  getUserMedia acquisitions. Terminal confirmed state reacquires the correct
+  visual stream even after batched same-ID/no-op or failed-target operations.
+  Gain/mute remain session controls through missing devices, None and preparation.
+- Generic compositor sessions clone existing primary/auxiliary scenes and patch
+  only the selected source binding. Geometry, order, crop, effects, background,
+  hidden camera slots and both leg needs survive changes. Camera-only None is
+  black even with a saved screen ID; explicit diagnostic test-pattern scenes
+  retain their fixture behavior. Required capture slots reject None before
+  retiring a healthy source. Admission uses the exact, unique available backend
+  device inventory most recently published by devices.list; a refresh exposes
+  newly attached devices, and native identity/readiness still verifies opening.
+- Visual commits and late cleanup are fenced by session, source request, layout
+  intent and native generation. Auxiliary edits use the same lock order and
+  invalidate pending source admission without blocking Stop on native teardown.
+  Cancellation reports unavailable when the old owner has already retired.
+  Output observation requires an actual valid published frame on each configured
+  leg, fresh matching camera pixels or valid static screen pixels, and the
+  selected native generation. Takeover images cannot falsely prove source pixels.
+  Compatible newer scenes carry pending proof forward; incompatible scenes mark
+  it superseded without claiming observation.
+- Classified microphone recovery covers exact self-owned unhealthy/retiring
+  same-device contention: bounded release and actual close, target retry, then
+  separately bounded previous-source restoration on failure. Unclassified open
+  failures preserve the healthy old producer. Failed readiness must complete
+  owner close before restoration; stuck close remains quarantined/unavailable.
+  Tests cover live bus loss, blocked close, restoration success/failure, Stop
+  during restoration and decoded gain/ramp/identity boundaries. This does not
+  claim generic third-party exclusive-device recovery.
+- Windows video capability remains explicitly unavailable at this checkpoint,
+  including the generic fallback, pending the approved thread-affine capture
+  owner/pump and exact camera adapter integration. Windows microphone replacement
+  is implemented. The Windows video work and S6 acceptance remain required.
+- Focused evidence: `s5-exclusive-bus-tests-v2.log` (21),
+  `s5-source-edit-tests-v7.log` (7), `s5-abandoned-final.log` (4),
+  `s5-auxiliary-fence-v2.log` (1), `s5-fifo-final.log` (1),
+  `s5-coordinator-final.log` (10), `s5-ui-wire-toast-v2.log` (147),
+  `s5-typecheck-final-v2.log`, `s5-lint-final.log`, and
+  `s5-format-check-final.log` all pass. The existing FIFO timing regression now
+  uses explicit blocked/release channels and controlled progress age; affected
+  async filters are included in the maintained Windows 25-pass gate.
+- Broader checkpoint evidence: temporary opt0 Rust full suite passed 2,256 backend
+  tests plus wire (`s5-rust-draft-all-v4.log`); an earlier independent default
+  profile passed 2,252 backend, 80 helper and wire tests
+  (`s5-reviewer-rust-default.log`), with desktop build/typecheck. The independent
+  combined recording/streaming source smoke passed decoded A/B/None, loss,
+  recovery, duplicate fencing and one encoder/RTMP connection
+  (`s5-reviewer-combined/live-source-switch-evidence.json`). Its
+  completePlanAcceptance remains false. Twelve actual signed SessionSources
+  snapshots pass both GET and switch validation (24 checks,
+  `s5-reviewer-real-wire-schema-fixed.json`). Final-tree broad gates remain due.
+
+### Additional platform evidence through S4
+
+- Windows commit d9811f16 passed actual worker protocol/normalization, packaged
+  installer smokes, 25 repeated ownership filters and three full Rust runs
+  (2,153 backend tests per run plus wire), desktop/Node gates. Logs:
+  `s4-ci-windows-gates-pass.log`, `s4-ci-windows-installer-pass.log`. New S5
+  async work still requires its own Windows repeats and full runs.
+- Signed macOS microphone endurance passed 69 switches over 634,538 ms, 23 cycles
+  of CoreAudio/UID AVFoundation/None, with unchanged encoder identity. All 46
+  live eight-second windows delivered exactly the bus cursor's frame count,
+  with zero native overwrites, PTS/PCM gaps, drops or input-loss events. Backend
+  RSS was 59→55 MiB; sampled owned processes were gone after bounded cleanup.
+  Final MP4 analysis passed, including strictly increasing DTS for 29,727 audio
+  and 19,025 video packets, one 48 kHz stereo track, and all 23 four-second None
+  interiors decoding to RMS zero. Evidence:
+  `s4-signed-avf-endurance-uid-v1/endurance-summary.json`,
+  `artifact-continuity.json`, and `artifact-analysis/` under the temporary evidence
+  directory. This is microphone ownership/capture continuity endurance, not the
+  S6 measured flash/tone A/V drift gate, two physical microphones or video switching.
+- Final checkpoint checks also passed Stop cancellation disposition (1 test,
+  `s5-stop-disposition-final-v2.log`), Rust formatting and clippy with warnings
+  denied (`s5-clippy-final-v2.log`). Clippy's three style findings were corrected
+  without changing the transaction semantics.

@@ -137,14 +137,24 @@ pub fn scene_from_capture_config(params: SceneConfigParams) -> Scene {
             // The camera is the full-frame source: no screen base, no overlay.
             // The vertical variant is the identical arrangement on the
             // portrait canvas (covering, per the vertical fill law).
-            if let Some(camera_id) = params.sources.camera_id.clone() {
-                let mut camera =
-                    camera_source(camera_id, &params.layout, output_width, output_height);
-                place_camera_keeping_crop(&mut camera, full_frame_transform());
-                scene.sources.push(camera);
-            } else {
+            if params.sources.camera_id.is_none()
+                && params.sources.test_pattern
+                && params.sources.screen_id.is_none()
+                && params.sources.window_id.is_none()
+            {
+                // Explicit diagnostic source; never substitute a real saved display.
                 scene.sources.push(base_source(&params.sources));
+                return scene;
             }
+            let mut camera = camera_source(
+                params.sources.camera_id.clone().unwrap_or_default(),
+                &params.layout,
+                output_width,
+                output_height,
+            );
+            camera.device_id = params.sources.camera_id.clone();
+            place_camera_keeping_crop(&mut camera, full_frame_transform());
+            scene.sources.push(camera);
         }
         LayoutPreset::ScreenOnly | LayoutPreset::VerticalScreenOnly => {
             // Screen-only never composites the camera; the vertical variant is

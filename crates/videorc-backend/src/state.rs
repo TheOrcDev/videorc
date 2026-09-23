@@ -366,6 +366,7 @@ pub struct LayoutIntentState {
     pub latest_intent_id: u64,
     pub latest_needs_camera: bool,
     pub latest_needs_screen: bool,
+    pub latest_sources: Option<crate::protocol::SourceSelection>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1262,6 +1263,11 @@ impl AppState {
     pub(crate) fn publish_latest_layout_intent_id(&self, intent_id: u64) {
         self.latest_layout_intent_id
             .store(intent_id, Ordering::Release);
+    }
+
+    pub(crate) fn invalidate_layout_source_work(&self) {
+        let _admission = self.lock_layout_source_admission();
+        self.latest_layout_intent_id.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(crate) fn latest_layout_intent_id(&self) -> u64 {

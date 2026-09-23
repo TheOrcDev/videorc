@@ -4497,6 +4497,7 @@ export interface SourceSwitchOperation {
   reason: string | null
   previousSource: 'preserved' | 'restored' | 'unavailable'
   outputObserved: boolean
+  outputSuperseded?: boolean
 }
 export interface SessionSources {
   audio: {
@@ -4523,7 +4524,13 @@ export interface SessionSources {
   sessionId: string
   sourceRevision: number
   outputProcessId: number | null
-  confirmed: SourceSelection
+  confirmed: {
+    screenId?: string | null
+    windowId?: string | null
+    cameraId?: string | null
+    microphoneId?: string | null
+    testPattern?: boolean
+  }
   health: Array<{
     kind: SessionSourceKind
     deviceId: string | null
@@ -4531,5 +4538,10 @@ export interface SessionSources {
   }>
   pending: SourceSwitchOperation | null
   lastOperation: SourceSwitchOperation | null
-  capabilities: Array<{ kind: SessionSourceKind; supported: boolean; reason: string | null }>
+  capabilities: Array<{
+    kind: SessionSourceKind
+    supported: boolean
+    allowsNone?: boolean
+    reason: string | null
+  }>
 }

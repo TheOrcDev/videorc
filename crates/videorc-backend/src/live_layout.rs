@@ -167,7 +167,11 @@ pub struct LiveLayoutApplyStatus {
 
 pub fn required_scene_sources(scene: &Scene) -> SceneSourceNeeds {
     let mut needs = SceneSourceNeeds::default();
-    for source in scene.sources.iter().filter(|source| source.visible) {
+    for source in scene
+        .sources
+        .iter()
+        .filter(|source| source.visible && source.device_id.is_some())
+    {
         match source.kind {
             SceneSourceKind::Camera => needs.camera = true,
             SceneSourceKind::Screen | SceneSourceKind::Window => needs.screen = true,
@@ -438,6 +442,71 @@ pub async fn apply_source_device_switch_live(
     state: &AppState,
     params: SceneConfigParams,
 ) -> Result<LiveLayoutApplyStatus> {
+    let session_id = state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .map(|active| active.session_id.clone());
+    if let Some(session_id) = session_id {
+        let current = crate::live_source_switch::get(state, &session_id)
+            .await
+            .map_err(|error| anyhow::anyhow!(error.message()))?;
+        if params.sources.microphone_id != current.confirmed.microphone_id {
+            bail!("Use session.source.switch for microphone replacement.");
+        }
+        let camera_changed = params.sources.camera_id != current.confirmed.camera_id;
+        let capture_changed = params.sources.screen_id != current.confirmed.screen_id
+            || params.sources.window_id != current.confirmed.window_id;
+        if camera_changed && capture_changed {
+            bail!("Change one live source at a time.");
+        }
+        let kind = if camera_changed {
+            crate::live_source_switch::SourceKind::Camera
+        } else {
+            crate::live_source_switch::SourceKind::Capture
+        };
+        let device_id = if camera_changed {
+            params.sources.camera_id
+        } else {
+            params.sources.window_id.or(params.sources.screen_id)
+        };
+        let result = crate::live_source_switch::switch(
+            state,
+            crate::live_source_switch::SourceSwitchParams {
+                session_id,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                expected_source_revision: current.source_revision,
+                kind,
+                device_id,
+                protected_overlay_window_ids: params.protected_overlay_window_ids,
+            },
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.message()))?;
+        let operation = result
+            .last_operation
+            .ok_or_else(|| anyhow::anyhow!("Source change has no terminal receipt."))?;
+        if operation.stage != crate::live_source_switch::SwitchStage::Applied {
+            bail!(
+                operation
+                    .reason
+                    .unwrap_or_else(|| "Source change was not applied.".into())
+            );
+        }
+        let scene = state.scene.lock().await.clone();
+        let status = state.compositor.lock().await.status.clone();
+        return Ok(LiveLayoutApplyStatus {
+            applied: true,
+            mode: "hot".into(),
+            scene_revision: status.scene_revision.unwrap_or(0),
+            scene,
+            intent_id: state.latest_layout_intent_id(),
+            compositor_status: status,
+            presentation_proven: operation.output_observed,
+            message: None,
+        });
+    }
     apply_scene_transaction(
         state,
         params,
@@ -447,6 +516,415 @@ pub async fn apply_source_device_switch_live(
         None,
     )
     .await
+}
+
+fn edit_source_selection(
+    current: &SourceSelection,
+    request: &crate::live_source_switch::SourceSwitchParams,
+) -> SourceSelection {
+    let mut sources = current.clone();
+    match request.kind {
+        crate::live_source_switch::SourceKind::Camera => {
+            sources.camera_id = request.device_id.clone()
+        }
+        crate::live_source_switch::SourceKind::Capture => {
+            sources.screen_id = request
+                .device_id
+                .clone()
+                .filter(|id| id.starts_with("screen:"));
+            sources.window_id = request
+                .device_id
+                .clone()
+                .filter(|id| id.starts_with("window:"));
+            sources.test_pattern = false;
+        }
+        crate::live_source_switch::SourceKind::Microphone => {}
+    }
+    sources
+}
+
+fn source_edit_needs(edit: &crate::compositor::CompositorSourceEdit) -> SceneSourceNeeds {
+    edit.scenes()
+        .fold(SceneSourceNeeds::default(), |needs, scene| {
+            let scene_needs = required_scene_sources(scene);
+            SceneSourceNeeds {
+                camera: needs.camera || scene_needs.camera,
+                screen: needs.screen || scene_needs.screen,
+            }
+        })
+}
+
+pub(crate) async fn switch_session_video_source(
+    state: &AppState,
+    request: &crate::live_source_switch::SourceSwitchParams,
+) -> Result<()> {
+    use crate::live_source_switch::{SourceKind, SwitchStage};
+    if request.device_id.as_deref().is_some_and(|id| {
+        id.is_empty()
+            || match request.kind {
+                SourceKind::Camera => !id.starts_with("camera:"),
+                SourceKind::Capture => !id.starts_with("screen:") && !id.starts_with("window:"),
+                SourceKind::Microphone => true,
+            }
+    }) {
+        bail!("The selected source identity does not match its source kind.");
+    }
+    state
+        .live_source_switch
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .validate_video_target(request)
+        .map_err(anyhow::Error::msg)?;
+    let original = state
+        .compositor
+        .lock()
+        .await
+        .source_edit_snapshot()
+        .ok_or_else(|| anyhow::anyhow!("The running session has no editable compositor scene."))?;
+    if request.kind == SourceKind::Capture
+        && request.device_id.is_none()
+        && source_edit_needs(&original).screen
+    {
+        bail!(
+            "This layout requires a screen or window. Choose a replacement or change the layout first."
+        );
+    }
+    let previous = state
+        .live_source_switch
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .snapshot(&request.session_id)
+        .map_err(|error| anyhow::anyhow!(error.message()))?
+        .confirmed;
+    let target_sources = edit_source_selection(&previous, request);
+    let mut edit = original.clone();
+    edit.patch(request.kind, request.device_id.as_deref(), &target_sources);
+    let needs = source_edit_needs(&edit);
+    let mut preparation_needs = needs;
+    match request.kind {
+        SourceKind::Camera => preparation_needs.camera |= request.device_id.is_some(),
+        SourceKind::Capture => preparation_needs.screen |= request.device_id.is_some(),
+        SourceKind::Microphone => unreachable!(),
+    }
+    let output = original.primary().outputs.iter().find(|output| {
+        matches!(
+            output.kind,
+            crate::protocol::SceneOutputKind::Recording | crate::protocol::SceneOutputKind::Stream
+        )
+    });
+    let video = output.map(|output| VideoSettings {
+        width: output.width,
+        height: output.height,
+        fps: output.fps,
+        ..fallback_video_settings()
+    });
+    let params = SceneConfigParams {
+        sources: target_sources.clone(),
+        layout: original.layout().clone(),
+        video,
+        background: original.primary().background.clone(),
+        protected_overlay_window_ids: request.protected_overlay_window_ids.clone(),
+        transition_ms: None,
+    };
+    let intent_id = begin_layout_intent_owned(
+        state,
+        None,
+        preparation_needs,
+        Some(request),
+        Some(&target_sources),
+    )
+    .await?;
+    let mut prepared_identity = None;
+    let result = run_explicit_camera_configuration_transaction(state, async {
+        let live = source_liveness(state, &target_sources).await;
+        let missing = missing_sources(preparation_needs, live);
+        let prepared = async {
+            let deadlines = start_missing_sources(
+                state,
+                intent_id,
+                &params,
+                preparation_needs,
+                &missing,
+                "source change",
+            )
+            .await?;
+            prepared_identity = match request.kind {
+                SourceKind::Camera => deadlines
+                    .camera_admission
+                    .as_ref()
+                    .map(|identity| (identity.source_key.clone(), identity.generation)),
+                SourceKind::Capture => deadlines
+                    .screen_admission
+                    .as_ref()
+                    .map(|identity| (identity.source_key.clone(), identity.generation)),
+                SourceKind::Microphone => None,
+            };
+            wait_for_sources_ready(
+                state,
+                intent_id,
+                deadlines,
+                preparation_needs,
+                &target_sources,
+                "source change",
+            )
+            .await
+        }
+        .await;
+        if let Err(error) = prepared {
+            // Single-owner native video adapters may have retired A to open B.
+            // Re-open A only while this exact source/layout intent still owns the request.
+            ensure_layout_intent_current(state, intent_id).await?;
+            state
+                .live_source_switch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .validate_commit(request)
+                .map_err(|error| anyhow::anyhow!(error.message()))?;
+            let mut previous_needs = source_edit_needs(&original);
+            match request.kind {
+                SourceKind::Camera => previous_needs.camera |= previous.camera_id.is_some(),
+                SourceKind::Capture => {
+                    previous_needs.screen |=
+                        previous.screen_id.is_some() || previous.window_id.is_some()
+                }
+                SourceKind::Microphone => {}
+            }
+            let previous_live = source_liveness(state, &previous).await;
+            let missing_previous = missing_sources(previous_needs, previous_live);
+            if !missing_previous.is_empty() {
+                {
+                    let mut coordinator = state
+                        .live_source_switch
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
+                    coordinator.previous_unavailable(request);
+                    let snapshot = coordinator
+                        .set_stage(request, SwitchStage::Restoring)
+                        .map_err(|error| anyhow::anyhow!(error.message()))?;
+                    state.emit_event("session.sources.changed", snapshot);
+                }
+                let restore = SceneConfigParams {
+                    sources: previous.clone(),
+                    ..params.clone()
+                };
+                let restored = async {
+                    let deadlines = start_missing_sources(
+                        state,
+                        intent_id,
+                        &restore,
+                        previous_needs,
+                        &missing_previous,
+                        "previous source restoration",
+                    )
+                    .await?;
+                    wait_for_sources_ready(
+                        state,
+                        intent_id,
+                        deadlines,
+                        previous_needs,
+                        &previous,
+                        "previous source restoration",
+                    )
+                    .await
+                }
+                .await;
+                if let Err(restore_error) = restored {
+                    bail!("{error} Previous source restoration failed: {restore_error}");
+                }
+                state
+                    .live_source_switch
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .previous_restored(request);
+            }
+            return Err(error);
+        }
+        let intents = state.layout_intents.lock().await;
+        if intents.latest_intent_id != intent_id || state.latest_layout_intent_id() != intent_id {
+            bail!("Source change was superseded by a newer scene intent.");
+        }
+        let _commit = state.scene_commit.lock().await;
+        let recording = state.recording.lock().await;
+        if !recording
+            .as_ref()
+            .is_some_and(|active| active.session_id == request.session_id && !active.stop_requested)
+        {
+            bail!("The session stopped before source publication.");
+        }
+        let mut scene = state.scene.lock().await;
+        let camera = state.preview_camera.lock().await;
+        let screen = state.preview_screen.lock().await;
+        let mut compositor = state.compositor.lock().await;
+        let camera_identity = crate::preview_camera::source_identity_locked(&camera);
+        let screen_identity = crate::preview_screen::source_identity_locked(&screen);
+        if preparation_needs.camera
+            && camera_identity
+                .as_ref()
+                .is_none_or(|(key, _)| Some(key.id.as_str()) != target_sources.camera_id.as_deref())
+        {
+            bail!("The prepared camera generation was superseded.");
+        }
+        if preparation_needs.screen
+            && screen_identity.as_ref().is_none_or(|(key, _)| {
+                Some(key.id.as_str())
+                    != target_sources
+                        .window_id
+                        .as_deref()
+                        .or(target_sources.screen_id.as_deref())
+            })
+        {
+            bail!("The prepared capture generation was superseded.");
+        }
+        if !compositor.source_edit_is_current(&original) {
+            bail!("The scene changed while this source was preparing.");
+        }
+        let (status, snapshot) = {
+            let mut coordinator = state
+                .live_source_switch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            coordinator
+                .validate_commit(request)
+                .map_err(|error| anyhow::anyhow!(error.message()))?;
+            let unchanged = target_sources == previous && edit == original;
+            let revision = if unchanged {
+                compositor.status.scene_revision.unwrap_or(0)
+            } else {
+                next_scene_revision(
+                    compositor.status.scene_revision,
+                    u64::try_from(Utc::now().timestamp_millis()).unwrap_or(0),
+                )
+            };
+            *scene = edit.primary().clone();
+            let status = compositor.commit_source_edit(
+                edit,
+                revision,
+                request,
+                camera_identity,
+                screen_identity,
+            );
+            let snapshot = if unchanged {
+                coordinator.finish(request, SwitchStage::Applied, None)
+            } else {
+                coordinator.commit_video(request)
+            }
+            .expect("validated under same source mutex");
+            (status, snapshot)
+        };
+        let committed_scene = scene.clone();
+        drop(compositor);
+        drop(screen);
+        drop(camera);
+        drop(scene);
+        drop(recording);
+        drop(_commit);
+        drop(intents);
+        state.emit_event("scene.changed", committed_scene);
+        state.emit_event("compositor.status", status);
+        state.emit_event("session.sources.changed", snapshot);
+        // Retirement consults union needs for both output scenes.
+        {
+            let mut intents = state.layout_intents.lock().await;
+            if intents.latest_intent_id == intent_id {
+                intents.latest_needs_camera = needs.camera;
+                intents.latest_needs_screen = needs.screen;
+            }
+        }
+        retire_unused_sources_after_commit(state, intent_id, needs).await;
+        Ok(())
+    })
+    .await;
+    if result.is_err()
+        && let Some(identity) = prepared_identity
+    {
+        cleanup_abandoned_source_candidate(state, intent_id, request, &identity).await;
+    }
+    result
+}
+
+async fn cleanup_abandoned_source_candidate(
+    state: &AppState,
+    intent_id: u64,
+    request: &crate::live_source_switch::SourceSwitchParams,
+    identity: &(crate::source_registry::SourceKey, u64),
+) {
+    use crate::live_source_switch::SourceKind;
+    // Same intent -> scene-commit order as publication. No newer layout can
+    // adopt this generation between checking its consumers and the stop CAS.
+    let intents = state.layout_intents.lock().await;
+    let _commit = state.scene_commit.lock().await;
+    if intents.latest_intent_id > intent_id {
+        let latest_id = intents
+            .latest_sources
+            .as_ref()
+            .and_then(|sources| match request.kind {
+                SourceKind::Camera => sources.camera_id.as_deref(),
+                SourceKind::Capture => selected_screen_source_id(sources),
+                SourceKind::Microphone => None,
+            });
+        if latest_id == Some(identity.0.id.as_str()) {
+            return;
+        }
+        if intents.latest_sources.is_none()
+            && match request.kind {
+                SourceKind::Camera => intents.latest_needs_camera,
+                SourceKind::Capture => intents.latest_needs_screen,
+                SourceKind::Microphone => false,
+            }
+        {
+            return;
+        }
+    }
+    let used = state
+        .compositor
+        .lock()
+        .await
+        .source_edit_snapshot()
+        .is_some_and(|edit| {
+            edit.scenes().any(|scene| {
+                scene.sources.iter().any(|source| {
+                    source.visible && source.device_id.as_deref() == Some(identity.0.id.as_str())
+                })
+            })
+        });
+    if used {
+        return;
+    }
+    {
+        let coordinator = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Ok(snapshot) = coordinator.snapshot(&request.session_id)
+            && snapshot.pending.as_ref().is_some_and(|pending| {
+                pending.request_id != request.request_id
+                    && pending.device_id.as_deref() == Some(identity.0.id.as_str())
+            })
+        {
+            return;
+        }
+    }
+    match request.kind {
+        SourceKind::Camera => {
+            let stop =
+                crate::preview_camera::stop_abandoned_camera_generation(state, identity).await;
+            drop(_commit);
+            drop(intents);
+            if let Some(stop) = stop {
+                crate::preview_camera::finish_preview_camera_stop(stop).await;
+            }
+        }
+        SourceKind::Capture => {
+            let stop =
+                crate::preview_screen::stop_abandoned_screen_generation(state, identity).await;
+            drop(_commit);
+            drop(intents);
+            if let Some(stop) = stop {
+                crate::preview_screen::finish_preview_screen_stop(stop).await;
+            }
+        }
+        SourceKind::Microphone => {}
+    }
 }
 
 async fn apply_scene_transaction(
@@ -499,7 +977,14 @@ async fn apply_scene_transaction(
         }
     }
 
-    let intent_id = begin_layout_intent(state, requested_intent_id, needs).await?;
+    let intent_id = begin_layout_intent_owned(
+        state,
+        requested_intent_id,
+        needs,
+        None,
+        Some(&params.sources),
+    )
+    .await?;
     let session_active = state.recording.lock().await.is_some();
 
     // This explicit scene/config intent owns camera-recovery supersession from
@@ -633,10 +1118,31 @@ async fn apply_simulcast_leg_scene(
     scene: Scene,
     requested_intent_id: Option<u64>,
 ) -> Result<LiveLayoutApplyStatus> {
-    let intent_id = match requested_intent_id {
-        Some(intent_id) => intent_id,
-        None => state.layout_intents.lock().await.latest_intent_id,
-    };
+    let mut intents = state.layout_intents.lock().await;
+    let intent_id = requested_intent_id.unwrap_or(intents.latest_intent_id);
+    let _commit = state.scene_commit.lock().await;
+    {
+        let camera = state.preview_camera.lock().await;
+        let screen = state.preview_screen.lock().await;
+        let _admission = state.lock_layout_source_admission();
+        let mut coordinator = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(confirmed) =
+            coordinator.supersede_with_video_health(&camera.status, &screen.status)
+        {
+            // Only a source transaction owns both legs. Fence its late native
+            // publication while retaining the independently selected primary.
+            let next = intents
+                .latest_intent_id
+                .max(state.latest_layout_intent_id())
+                .saturating_add(1);
+            intents.latest_intent_id = next;
+            intents.latest_sources = Some(confirmed);
+            state.publish_latest_layout_intent_id(next);
+        }
+    }
     let revision = {
         let compositor = state.compositor.lock().await;
         compositor.status.scene_revision
@@ -656,8 +1162,26 @@ async fn apply_simulcast_leg_scene(
         },
     )
     .await;
+    let session_id = state
+        .recording
+        .lock()
+        .await
+        .as_ref()
+        .filter(|active| !active.stop_requested)
+        .map(|active| active.session_id.clone());
     let compositor_status = {
         let compositor = state.compositor.lock().await;
+        if let Some(edit) = compositor.source_edit_snapshot()
+            && let Some(session_id) = session_id
+        {
+            let mut coordinator = state
+                .live_source_switch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner());
+            if let Some(snapshot) = coordinator.reconcile_scenes(&session_id, edit.scenes()) {
+                state.emit_event("session.sources.changed", snapshot);
+            }
+        }
         compositor.status.clone()
     };
     let status = SceneCommitStatus {
@@ -679,24 +1203,68 @@ async fn apply_simulcast_leg_scene(
     Ok(layout_apply_status(intent_id, "hot", scene, status, None))
 }
 
+#[cfg(test)]
 async fn begin_layout_intent(
     state: &AppState,
     requested_intent_id: Option<u64>,
     needs: SceneSourceNeeds,
 ) -> Result<u64> {
+    begin_layout_intent_owned(state, requested_intent_id, needs, None, None).await
+}
+
+async fn begin_layout_intent_owned(
+    state: &AppState,
+    requested_intent_id: Option<u64>,
+    needs: SceneSourceNeeds,
+    source_request: Option<&crate::live_source_switch::SourceSwitchParams>,
+    target_sources: Option<&SourceSelection>,
+) -> Result<u64> {
+    let mut needs = needs;
+    if let Some(edit) = state.compositor.lock().await.source_edit_snapshot() {
+        for scene in edit.scenes().skip(1) {
+            let auxiliary = required_scene_sources(scene);
+            needs.camera |= auxiliary.camera;
+            needs.screen |= auxiliary.screen;
+        }
+    }
     let mut intents = state.layout_intents.lock().await;
-    let intent_id =
-        requested_intent_id.unwrap_or_else(|| intents.latest_intent_id.saturating_add(1).max(1));
-    if intent_id <= intents.latest_intent_id {
+    let intent_id = requested_intent_id.unwrap_or_else(|| {
+        intents
+            .latest_intent_id
+            .max(state.latest_layout_intent_id())
+            .saturating_add(1)
+            .max(1)
+    });
+    if intent_id
+        <= intents
+            .latest_intent_id
+            .max(state.latest_layout_intent_id())
+    {
         bail!(
             "Layout intent {intent_id} was superseded by newer intent {}.",
             intents.latest_intent_id
         );
     }
+    let camera = state.preview_camera.lock().await;
+    let screen = state.preview_screen.lock().await;
     let _source_admission = state.lock_layout_source_admission();
+    {
+        let mut coordinator = state
+            .live_source_switch
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        if let Some(request) = source_request {
+            coordinator
+                .validate_commit(request)
+                .map_err(|error| anyhow::anyhow!(error.message()))?;
+        } else {
+            coordinator.supersede_with_video_health(&camera.status, &screen.status);
+        }
+    }
     intents.latest_intent_id = intent_id;
     intents.latest_needs_camera = needs.camera;
     intents.latest_needs_screen = needs.screen;
+    intents.latest_sources = target_sources.cloned();
     // Publish the registration linearization point before releasing the
     // mutex. Detached source workers use this mirror to reject an older
     // intent without taking the intent mutex under a preview-runtime lock.
@@ -705,7 +1273,12 @@ async fn begin_layout_intent(
 }
 
 async fn ensure_layout_intent_current(state: &AppState, intent_id: u64) -> Result<()> {
-    let latest = state.layout_intents.lock().await.latest_intent_id;
+    let latest = state
+        .layout_intents
+        .lock()
+        .await
+        .latest_intent_id
+        .max(state.latest_layout_intent_id());
     if latest != intent_id {
         bail!("Layout intent {intent_id} was superseded by newer intent {latest}.");
     }
@@ -714,7 +1287,12 @@ async fn ensure_layout_intent_current(state: &AppState, intent_id: u64) -> Resul
 
 async fn wait_for_layout_intent_superseded(state: &AppState, intent_id: u64) -> u64 {
     loop {
-        let latest = state.layout_intents.lock().await.latest_intent_id;
+        let latest = state
+            .layout_intents
+            .lock()
+            .await
+            .latest_intent_id
+            .max(state.latest_layout_intent_id());
         if latest != intent_id {
             return latest;
         }
@@ -999,7 +1577,9 @@ async fn cancel_pending_source_start_for_intent(
             };
             let stop = {
                 let intents = state.layout_intents.lock().await;
-                if intents.latest_intent_id != intent_id {
+                if intents.latest_intent_id != intent_id
+                    || state.latest_layout_intent_id() != intent_id
+                {
                     None
                 } else {
                     begin_preview_camera_stop_if_starting(state, expected_camera).await
@@ -1019,7 +1599,9 @@ async fn cancel_pending_source_start_for_intent(
             let transition = acquire_preview_screen_transition(state).await;
             let stop = {
                 let intents = state.layout_intents.lock().await;
-                if intents.latest_intent_id != intent_id {
+                if intents.latest_intent_id != intent_id
+                    || state.latest_layout_intent_id() != intent_id
+                {
                     None
                 } else {
                     begin_preview_screen_stop_if_starting_with_transition(
@@ -1069,7 +1651,7 @@ async fn commit_scene_for_intent(
     // Keep registration and the commit edge mutually exclusive. Warm-up never holds
     // this guard, so a new request can supersede an older waiter immediately.
     let intents = state.layout_intents.lock().await;
-    if intents.latest_intent_id != intent_id {
+    if intents.latest_intent_id != intent_id || state.latest_layout_intent_id() != intent_id {
         bail!(
             "Layout intent {intent_id} was superseded by newer intent {}.",
             intents.latest_intent_id
@@ -1319,7 +1901,7 @@ async fn wait_for_sources_ready(
             let still_missing =
                 missing_readiness_messages(needs, &readiness, Some(target_sources)).join("; ");
             bail!(
-                "Live {action_label} blocked after {} exceeded its source-start/readiness budget: {still_missing}. The previous layout is still live.",
+                "Live {action_label} blocked after {} exceeded its source-start/readiness budget: {still_missing}.",
                 expired.join(" + ")
             );
         }
@@ -1376,7 +1958,9 @@ async fn resync_camera_capture_geometry_after_commit(
         sleep(CAMERA_GEOMETRY_RESYNC_SETTLE).await;
         let still_current = {
             let intents = resync_state.layout_intents.lock().await;
-            intents.latest_intent_id == intent_id && intents.latest_needs_camera
+            intents.latest_intent_id == intent_id
+                && resync_state.latest_layout_intent_id() == intent_id
+                && intents.latest_needs_camera
         };
         if !still_current {
             return;
@@ -1452,11 +2036,20 @@ async fn retire_unused_sources_after_commit(
     intent_id: u64,
     needs: SceneSourceNeeds,
 ) {
+    let mut needs = needs;
+    if let Some(edit) = state.compositor.lock().await.source_edit_snapshot() {
+        let current = source_edit_needs(&edit);
+        needs.camera |= current.camera;
+        needs.screen |= current.screen;
+    }
     if !needs.screen {
         let transition = acquire_preview_screen_transition(state).await;
         let stop = {
             let intents = state.layout_intents.lock().await;
-            if intents.latest_intent_id == intent_id && !intents.latest_needs_screen {
+            if intents.latest_intent_id == intent_id
+                && state.latest_layout_intent_id() == intent_id
+                && !intents.latest_needs_screen
+            {
                 Some(begin_preview_screen_stop_with_transition(state, transition).await)
             } else {
                 None
@@ -1475,7 +2068,10 @@ async fn retire_unused_sources_after_commit(
         sleep(UNUSED_CAMERA_STOP_GRACE).await;
         let stop = {
             let intents = grace_state.layout_intents.lock().await;
-            if intents.latest_intent_id == intent_id && !intents.latest_needs_camera {
+            if intents.latest_intent_id == intent_id
+                && grace_state.latest_layout_intent_id() == intent_id
+                && !intents.latest_needs_camera
+            {
                 Some(begin_preview_camera_stop(&grace_state).await)
             } else {
                 None
@@ -1751,12 +2347,21 @@ async fn commit_scene_with_layout_at_time_with_policy(
             .as_ref()
             .filter(|active| !active.stop_requested)
             .map(|active| active.session_id.clone());
+        let committed_scenes = state.compositor.lock().await.source_edit_snapshot();
         if let Some(session_id) = session_id
             && let Some(sources) = state
                 .live_source_switch
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .reconcile_scene(&session_id, scene)
+                .reconcile_scenes(
+                    &session_id,
+                    std::iter::once(scene).chain(
+                        committed_scenes
+                            .as_ref()
+                            .into_iter()
+                            .flat_map(|edit| edit.scenes().skip(1)),
+                    ),
+                )
         {
             state.emit_event("session.sources.changed", sources);
         }
@@ -1794,6 +2399,180 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn abandoned_live_candidate_cleanup_is_generation_and_latest_intent_fenced() {
+        use crate::live_source_switch::{SourceKind, SourceSwitchParams};
+        for case in ["stopped", "new-generation", "adopted-by-new-intent"] {
+            let state = test_state();
+            let layout = crate::protocol::default_layout_settings();
+            let video = fallback_video_settings();
+            crate::preview_camera::test_install_live_camera_for_layout(
+                &state, "camera:B", &layout, &video,
+            )
+            .await;
+            let identity =
+                crate::preview_camera::source_identity_locked(&*state.preview_camera.lock().await)
+                    .unwrap();
+            if case == "new-generation" {
+                crate::preview_camera::test_install_live_camera_for_layout(
+                    &state, "camera:C", &layout, &video,
+                )
+                .await;
+            }
+            if case == "adopted-by-new-intent" {
+                let mut intents = state.layout_intents.lock().await;
+                intents.latest_intent_id = 2;
+                intents.latest_needs_camera = true;
+                intents.latest_sources = Some(SourceSelection {
+                    camera_id: Some("camera:B".into()),
+                    screen_id: None,
+                    window_id: None,
+                    microphone_id: None,
+                    test_pattern: false,
+                });
+            }
+            state.invalidate_layout_source_work();
+            cleanup_abandoned_source_candidate(
+                &state,
+                1,
+                &SourceSwitchParams {
+                    session_id: "stopped-session".into(),
+                    request_id: "cancelled".into(),
+                    expected_source_revision: 0,
+                    kind: SourceKind::Camera,
+                    device_id: Some("camera:B".into()),
+                    protected_overlay_window_ids: vec![],
+                },
+                &identity,
+            )
+            .await;
+            let remaining =
+                crate::preview_camera::source_identity_locked(&*state.preview_camera.lock().await);
+            match case {
+                "stopped" => assert!(remaining.is_none()),
+                "new-generation" => assert_eq!(remaining.unwrap().0.id, "camera:C"),
+                _ => assert_eq!(remaining, Some(identity)),
+            }
+            crate::preview_camera::stop_preview_camera(&state).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn auxiliary_edit_uses_intent_before_scene_fence_and_cancels_retired_source_honestly() {
+        use crate::live_source_switch::{
+            SourceKind, SourcePreservation, SourceSwitchParams, SwitchStage,
+        };
+        use std::future::Future;
+        use std::task::{Context, Poll, Waker};
+        let state = test_state();
+        let params = config(LayoutPreset::VerticalScreenOnly, false, true);
+        let scene = scene_from_capture_config(params.clone());
+        let intent_guard = state.layout_intents.lock().await;
+        let scene_guard = state.scene_commit.lock().await;
+        let mut auxiliary = std::pin::pin!(apply_simulcast_leg_scene(&state, &params, scene, None));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(auxiliary.as_mut().poll(&mut context).is_pending());
+        drop(scene_guard);
+        assert!(auxiliary.as_mut().poll(&mut context).is_pending());
+        // The source transaction already owns intent_guard. It must be able
+        // to take scene_commit while the auxiliary caller waits for that intent.
+        // Reacquiring the fair intent mutex here would queue behind the unpolled
+        // auxiliary future and test executor scheduling rather than lock order.
+        let source_scene_guard = state
+            .scene_commit
+            .try_lock()
+            .expect("auxiliary did not invert the source fence");
+        drop(source_scene_guard);
+        drop(intent_guard);
+        assert!(matches!(
+            auxiliary.as_mut().poll(&mut context),
+            Poll::Ready(Ok(_))
+        ));
+
+        let request = SourceSwitchParams {
+            session_id: "session".into(),
+            request_id: "camera-B".into(),
+            expected_source_revision: 0,
+            kind: SourceKind::Camera,
+            device_id: Some("camera:B".into()),
+            protected_overlay_window_ids: vec![],
+        };
+        {
+            let mut coordinator = state.live_source_switch.lock().unwrap();
+            coordinator.start(
+                "session".into(),
+                SourceSelection {
+                    camera_id: Some("camera:A".into()),
+                    screen_id: None,
+                    window_id: None,
+                    microphone_id: None,
+                    test_pattern: false,
+                },
+            );
+            coordinator.enable_video();
+            coordinator.admit(&request).unwrap();
+        }
+        crate::preview_camera::test_install_live_camera_for_layout(
+            &state,
+            "camera:B",
+            &params.layout,
+            &fallback_video_settings(),
+        )
+        .await;
+        let prior_intent = state.latest_layout_intent_id();
+        apply_simulcast_leg_scene(
+            &state,
+            &params,
+            scene_from_capture_config(params.clone()),
+            None,
+        )
+        .await
+        .unwrap();
+        assert!(state.latest_layout_intent_id() > prior_intent);
+        let operation = state
+            .live_source_switch
+            .lock()
+            .unwrap()
+            .snapshot("session")
+            .unwrap()
+            .last_operation
+            .unwrap();
+        assert_eq!(operation.stage, SwitchStage::Cancelled);
+        assert_eq!(operation.previous_source, SourcePreservation::Unavailable);
+        crate::preview_camera::stop_preview_camera(&state).await;
+    }
+
+    #[tokio::test]
+    async fn abandoned_screen_stop_admission_does_not_wait_for_native_transition() {
+        let state = test_state();
+        crate::preview_screen::test_install_live_screen_generation(
+            &state,
+            "screen:B",
+            7,
+            3,
+            &fallback_video_settings(),
+        )
+        .await;
+        let identity =
+            crate::preview_screen::source_identity_locked(&*state.preview_screen.lock().await)
+                .unwrap();
+        let held_native_transition =
+            crate::preview_screen::acquire_preview_screen_transition(&state).await;
+        let stop = tokio::time::timeout(
+            Duration::from_secs(1),
+            crate::preview_screen::stop_abandoned_screen_generation(&state, &identity),
+        )
+        .await
+        .expect("stop admission cannot wait for native close")
+        .expect("exact generation admitted");
+        assert!(
+            crate::preview_screen::source_identity_locked(&*state.preview_screen.lock().await)
+                .is_none()
+        );
+        drop(held_native_transition);
+        crate::preview_screen::finish_preview_screen_stop(stop).await;
     }
 
     struct DropFlag(Arc<AtomicBool>);

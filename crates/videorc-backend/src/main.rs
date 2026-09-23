@@ -8359,6 +8359,11 @@ async fn handle_text_message_with_role(
                 state.smoke_rpc_enabled,
             );
             let devices = devices::list_devices(&ffmpeg_path).await;
+            state
+                .live_source_switch
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .observe_devices(&devices.devices);
             state.emit_event("devices.changed", &devices);
             ServerResponse::ok(command.id, devices)
         }

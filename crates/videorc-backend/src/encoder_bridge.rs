@@ -8476,10 +8476,13 @@ mod tests {
         });
         let no_progress_timeout = Duration::from_millis(20);
         let stop = Arc::new(AtomicBool::new(false));
+        let (blocked_tx, blocked_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
         let mut writer = RawVideoFifoWriter::start_with_sink(
             ProgressThenPauseSink {
                 writes: 0,
-                pause: Duration::from_millis(100),
+                blocked: blocked_tx,
+                release: release_rx,
             },
             policy,
             stop,
@@ -8490,10 +8493,12 @@ mod tests {
             .enqueue_startup(QueuedRawVideoFrame::synthetic(vec![7; 3]))
             .expect("queue progressing raw frame");
 
-        let deadline = Instant::now() + Duration::from_secs(1);
-        while writer.write_progress_epoch() == 0 && Instant::now() < deadline {
-            thread::yield_now();
+        let blocked = blocked_rx.recv_timeout(Duration::from_secs(2));
+        if blocked.is_err() {
+            let _ = release_tx.send(());
+            writer.close_and_join();
         }
+        blocked.expect("second write reached its explicit blocking boundary");
         assert!(
             writer.write_progress_epoch() > 0,
             "the first positive byte write must publish progress before frame completion"
@@ -8505,24 +8510,30 @@ mod tests {
 
         let mut observed_epoch = 0;
         let mut last_output_progress_at = Instant::now() - no_progress_timeout;
+        let refresh_started_at = Instant::now();
         refresh_raw_fifo_write_progress(
             Some(&writer),
             &mut observed_epoch,
             &mut last_output_progress_at,
         );
+        assert!(last_output_progress_at >= refresh_started_at);
+        assert_eq!(observed_epoch, writer.write_progress_epoch());
         assert_eq!(
             encoder_bridge_progress_aware_pre_encode_admission(
                 policy,
                 policy.max_frames as u64,
                 Some(Duration::from_millis(528)),
-                last_output_progress_at.elapsed(),
+                Duration::ZERO,
                 no_progress_timeout,
             ),
             EncoderBridgePreEncodeAdmission::PauseRecordingFrame,
             "partial FIFO bytes must keep a full recording queue alive"
         );
 
-        thread::sleep(no_progress_timeout + Duration::from_millis(5));
+        // Advance the admission clock while the sink is explicitly blocked.
+        // A scheduler pause cannot create another byte-progress event here.
+        let stopped_progress_at = Instant::now() - no_progress_timeout;
+        last_output_progress_at = stopped_progress_at;
         refresh_raw_fifo_write_progress(
             Some(&writer),
             &mut observed_epoch,
@@ -8540,6 +8551,8 @@ mod tests {
             "a full queue must fail after actual byte progress stops"
         );
 
+        assert_eq!(last_output_progress_at, stopped_progress_at);
+        release_tx.send(()).expect("release owned writer");
         writer.close_and_join();
     }
 
@@ -11119,7 +11132,8 @@ mod tests {
 
     struct ProgressThenPauseSink {
         writes: usize,
-        pause: Duration,
+        blocked: std::sync::mpsc::SyncSender<()>,
+        release: std::sync::mpsc::Receiver<()>,
     }
 
     #[derive(Clone, Copy)]
@@ -11176,7 +11190,10 @@ mod tests {
         fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
             self.writes = self.writes.saturating_add(1);
             if self.writes == 2 {
-                thread::sleep(self.pause);
+                self.blocked.send(()).map_err(io::Error::other)?;
+                self.release
+                    .recv_timeout(Duration::from_secs(5))
+                    .map_err(io::Error::other)?;
             }
             Ok(bytes.len().min(1))
         }

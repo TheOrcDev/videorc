@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { closeVisualMicrophoneStreams } from './mic-stream'
 import { dbToMeterLevel } from './mic-meter'
 import {
   advanceBandLevelsInto,
@@ -181,6 +182,30 @@ describe('createMicVisualPipeline', () => {
     expect(harness.getUserMedia).toHaveBeenCalledTimes(1)
     expect(harness.frames).toHaveLength(1)
     expect(pipeline.getLifecycleSnapshot()).toEqual({ status: 'active', active: true })
+  })
+
+  it('suspends synchronously and reacquires the same confirmed source after a batched noop or failed change', async () => {
+    const harness = pipelineHarness()
+    const pipeline = retainedPipeline(harness.dependencies)
+    const source = {
+      selectionKey: 'mic-A',
+      deviceName: 'Studio microphone',
+      enabled: true,
+      permissionStatus: 'granted' as const
+    }
+    pipeline.configure(source)
+    await vi.waitFor(() => expect(pipeline.getLifecycleSnapshot().active).toBe(true))
+    for (const outcome of ['same-id', 'failed-target']) {
+      closeVisualMicrophoneStreams()
+      expect(pipeline.getLifecycleSnapshot()).toEqual({ status: 'idle', active: false })
+      expect(harness.stoppedTracks).toHaveBeenCalledTimes(outcome === 'same-id' ? 1 : 2)
+      // The provider's operation epoch configures the confirmed source even
+      // when React batches pending and terminal into one render.
+      pipeline.configure({ ...source, resumeEpoch: outcome === 'same-id' ? 1 : 2 })
+      await vi.waitFor(() => expect(pipeline.getLifecycleSnapshot().active).toBe(true))
+    }
+    expect(harness.getUserMedia).toHaveBeenCalledTimes(3)
+    pipeline.dispose()
   })
 
   it('keeps the same resources across a StrictMode cleanup and immediate setup', async () => {

@@ -9,6 +9,31 @@
 import type { MediaAccessStatus } from './backend'
 import { matchMicrophoneDeviceId } from './mic-meter'
 
+const visualOwners = new Set<() => void>()
+const visualPipelines = new Set<() => void>()
+const visualEpochListeners = new Set<() => void>()
+let visualEpoch = 0
+export const visualMicrophoneEpoch = (): number => visualEpoch
+export function subscribeVisualMicrophoneEpoch(listener: () => void): () => void {
+  visualEpochListeners.add(listener)
+  return () => {
+    visualEpochListeners.delete(listener)
+  }
+}
+export function registerVisualMicrophoneSuspension(suspend: () => void): () => void {
+  visualPipelines.add(suspend)
+  return () => {
+    visualPipelines.delete(suspend)
+  }
+}
+/** Release owned visual leases before the backend starts a microphone transaction. */
+export function closeVisualMicrophoneStreams(): void {
+  for (const suspend of visualPipelines) suspend()
+  for (const close of visualOwners) close()
+  visualEpoch += 1
+  for (const listener of visualEpochListeners) listener()
+}
+
 type MicTrackLike = { stop: () => void }
 
 export type MicMediaStreamLike = { getTracks: () => MicTrackLike[] }
@@ -47,7 +72,7 @@ export type MicStreamController<S extends MicMediaStreamLike> = {
    * are unavailable, permission is denied, or the controller closed while
    * acquiring (the racing stream's tracks are stopped).
    */
-  open: (deviceName: string | undefined) => Promise<S | null>
+  open: (deviceName: string | undefined, strict?: boolean) => Promise<S | null>
   /** Stop every open track; the controller cannot be reused afterwards. */
   close: () => void
 }
@@ -74,11 +99,18 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
     stream?.getTracks().forEach((track) => track.stop())
   }
 
+  const close = (): void => {
+    closed = true
+    stopTracks(current)
+    current = null
+    visualOwners.delete(close)
+  }
   return {
-    async open(deviceName) {
+    async open(deviceName, strict = false) {
       if (closed || !media?.getUserMedia) {
         return null
       }
+      visualOwners.add(close)
       try {
         const inputs = ((await media.enumerateDevices?.().catch(() => [])) ?? [])
           .filter((device) => device.kind === 'audioinput')
@@ -86,7 +118,21 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
         if (closed) {
           return null
         }
-        const deviceId = matchMicrophoneDeviceId(deviceName, inputs)
+        const normalize = (value: string): string =>
+          value.trim().toLocaleLowerCase().replace(/\s+/g, ' ')
+        const exact = inputs.filter(
+          (input) =>
+            input.deviceId !== 'default' &&
+            input.deviceId !== 'communications' &&
+            deviceName &&
+            normalize(input.label) === normalize(deviceName)
+        )
+        const deviceId = strict
+          ? exact.length === 1
+            ? exact[0].deviceId
+            : undefined
+          : matchMicrophoneDeviceId(deviceName, inputs)
+        if (strict && !deviceId) return null
         const stream = await media.getUserMedia({
           audio: deviceId
             ? { ...MIC_METER_STREAM_PROCESSING, deviceId: { exact: deviceId } }
@@ -103,10 +149,6 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
         return null
       }
     },
-    close() {
-      closed = true
-      stopTracks(current)
-      current = null
-    }
+    close
   }
 }

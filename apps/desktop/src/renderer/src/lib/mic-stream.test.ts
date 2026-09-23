@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   createMicStreamController,
+  closeVisualMicrophoneStreams,
   microphoneStreamAcquisitionEnabled,
   type MicStreamConstraints
 } from './mic-stream'
@@ -57,6 +58,41 @@ describe('createMicStreamController', () => {
         video: false
       }
     ])
+  })
+
+  it('never opens an unrelated default or ambiguous device in strict live mode', async () => {
+    for (const labels of [[], ['Other'], ['Studio', 'Studio'], [''], ['Studio Plus']]) {
+      const getUserMedia = vi.fn(async () => fakeStream().stream)
+      const controller = createMicStreamController({
+        enumerateDevices: async () =>
+          labels.map((label, index) => ({ kind: 'audioinput', deviceId: `mic-${index}`, label })),
+        getUserMedia
+      })
+      expect(await controller.open('Studio', true)).toBeNull()
+      expect(getUserMedia).not.toHaveBeenCalled()
+      controller.close()
+    }
+  })
+
+  it('releases active and pending visual acquisitions before a live replacement', async () => {
+    const active = fakeStream(),
+      late = fakeStream()
+    const first = createMicStreamController({ getUserMedia: async () => active.stream })
+    await first.open(undefined)
+    let resolve!: (stream: typeof late.stream) => void
+    const second = createMicStreamController({
+      getUserMedia: () =>
+        new Promise<typeof late.stream>((yes) => {
+          resolve = yes
+        })
+    })
+    const opening = second.open(undefined)
+    await Promise.resolve()
+    closeVisualMicrophoneStreams()
+    expect(active.stopped).toEqual([0, 1])
+    resolve(late.stream)
+    expect(await opening).toBeNull()
+    expect(late.stopped).toEqual([0, 1])
   })
 
   it('falls back to the default input when the name cannot be matched', async () => {
