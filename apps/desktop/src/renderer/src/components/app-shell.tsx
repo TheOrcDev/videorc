@@ -319,8 +319,9 @@ export function AppShell(): ReactElement {
       {/* hiddenInset hides the OS title bar; this strip is the window's drag
           handle (the traffic lights sit inside it) and the shell pads below. */}
       <div aria-hidden className="fixed inset-x-0 top-0 z-50 h-9 [-webkit-app-region:drag]" />
-      {/* No bg here: body already wears the one translucent glass coat, and a
-          second 75% layer would stack to near-opaque and hide the vibrancy. */}
+      {/* Body wears the window coat; the content pane adds --glass-content
+          (plan 050 D3) and extends under the drag strip so the pane reads as
+          one surface. The sidebar stays on the window coat alone. */}
       <div className="flex min-h-screen pt-9 text-foreground" data-videorc-active-tab={active}>
         <Sidebar
           active={active}
@@ -335,7 +336,7 @@ export function AppShell(): ReactElement {
           platform={runtimeInfo?.platform}
         />
 
-        <main className="flex h-[calc(100vh-2.25rem)] flex-1 flex-col">
+        <main className="-mt-9 flex h-screen flex-1 flex-col bg-glass-content pt-9">
           {/* Library manages its own scroll (pinned header/toolbar, only the
               table scrolls), so it fills the bounded height instead of the
               shell scrolling the whole tab. Every other tab scrolls as one. */}

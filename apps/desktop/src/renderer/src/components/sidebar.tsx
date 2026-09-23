@@ -171,7 +171,10 @@ export function Sidebar({
   const reducedMotion = usePrefersReducedMotion()
 
   return (
-    <aside className="-mt-9 flex w-48 shrink-0 flex-col border-r bg-sidebar pt-9 text-sidebar-foreground backdrop-blur-2xl">
+    // No fill of its own: the sidebar sits on the window coat alone, which is
+    // what makes it read lighter than the content pane (plan 050 D3). A white
+    // tint here dropped secondary text under 4.5:1 over a bright desktop.
+    <aside className="-mt-9 flex w-48 shrink-0 flex-col border-r pt-9 text-sidebar-foreground">
       <div className="flex select-none items-center gap-3 px-4 py-3">
         {/* The PNG bakes a ~4% transparent margin around the tile; the scaled
             overflow-hidden wrapper crops it so the hairline ring hugs the art. */}

@@ -2,7 +2,6 @@ import { ThemeProvider, useTheme } from 'next-themes'
 import { useEffect, type ReactElement } from 'react'
 
 import { AppShell } from '@/components/app-shell'
-import { GlassWallpaperUnderlay } from '@/components/glass-wallpaper'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { BackgroundAssetsProvider } from '@/hooks/use-background-assets'
@@ -29,13 +28,12 @@ export function App(): ReactElement {
       // away as its structural twin (videorc-design skill).
       defaultTheme="dark"
       enableSystem
+      // color-scheme lives on body (styles.css); on the root it makes Chromium
+      // paint an opaque canvas over the window glass in light theme.
+      enableColorScheme={false}
       storageKey={STORAGE_KEYS.theme}
     >
       <NativeThemeSync />
-      <GlassWallpaperUnderlay />
-      {/* The window's glass reflection: a specular sweep + top rim light over
-          the whole pane (pointer-transparent), like light catching the orb. */}
-      <div aria-hidden className="glass-shine pointer-events-none fixed inset-0 z-50" />
       <TooltipProvider>
         <BackgroundAssetsProvider>
           <StudioProvider>

@@ -17,7 +17,6 @@ import {
   session,
   shell,
   systemPreferences,
-  type BrowserWindowConstructorOptions,
   type NativeImage
 } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -252,7 +251,14 @@ import {
   redactAvatarFetchError,
   withAvatarFetchDeadline
 } from './avatar-cache'
-import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
+import { DARK_WINDOW_PALETTE } from './window-palette'
+import {
+  DEFAULT_GLASS_MATERIAL,
+  recordAppliedGlass,
+  resolveGlassMode,
+  solidWindowBase,
+  windowGlassOptions
+} from './window-glass'
 import {
   applyVideorcWindowCaptureProtection,
   type VideorcWindowRole,
@@ -662,8 +668,8 @@ const notesWindowSmokeMarkerEnabled =
 app.setName('Videorc')
 // Dark glass is the default theme; the renderer re-syncs this on toggle.
 nativeTheme.themeSource = 'dark'
-// True vibrancy is the default glass; =0 opts out, and any other value picks
-// the macOS material by name (e.g. hud, popover, menu, under-window).
+// Window glass is real macOS vibrancy (window-glass.ts, plan 050). VIDEORC_GLASS=0
+// paints the solid palette; a material name overrides the material.
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
@@ -740,12 +746,14 @@ function smokeNativeWindowIdentity(window: BrowserWindow | null): {
   }
 }
 
-const glassVibrancyEnabled = process.env.VIDEORC_GLASS_VIBRANCY !== '0'
-const glassVibrancyRaw = process.env.VIDEORC_GLASS_VIBRANCY
+const glassMode = resolveGlassMode({
+  platform: process.platform,
+  glass: process.env.VIDEORC_GLASS,
+  legacyVibrancy: process.env.VIDEORC_GLASS_VIBRANCY
+})
+const glassVibrancyEnabled = glassMode.kind === 'material'
 const glassVibrancyMaterial: GlassVibrancyMaterial =
-  glassVibrancyRaw && glassVibrancyRaw !== '0' && glassVibrancyRaw !== '1'
-    ? (glassVibrancyRaw as GlassVibrancyMaterial)
-    : 'under-window'
+  glassMode.kind === 'material' ? glassMode.material : DEFAULT_GLASS_MATERIAL
 
 // Blurred-wallpaper underlay (the glassmorphism frost): the renderer blurs
 // the actual wallpaper as its bottom layer since the OS material cannot do
@@ -1581,62 +1589,6 @@ type NativePreviewMainSceneMismatchFields = Pick<
   | 'nativePreviewMainLastSkippedFrameSceneRevision'
 >
 
-// The platform-specific window chrome (translucency, frame, title-bar style).
-// macOS is the reference glass expression below; off macOS we ship a solid
-// themed base with the native frame in chrome v1 — no OS material or window
-// transparency is wired yet (the frameless Windows glass is Phase 4).
-function platformWindowChromeOptions(): BrowserWindowConstructorOptions {
-  if (!isMac) {
-    // Solid themed base so the 75%-alpha glass tokens don't composite over
-    // default white; the standard native frame is guaranteed movable and
-    // carries native min/max/close without renderer drag regions.
-    return { backgroundColor: windowPalette(nativeTheme.shouldUseDarkColors).base }
-  }
-
-  return {
-    // Glass shell. The reference translucency comes from the OS material —
-    // CSS alone cannot blur the desktop behind the window — so under-window
-    // vibrancy is the default and VIDEORC_GLASS_VIBRANCY=0 opts out to the
-    // solid fallback. The 2026-06-12 wedge bisects implicated the synthetic
-    // CDP palette keypress (reproduced without vibrancy too) and an explicit
-    // transparent backgroundColor on reload (left unset here) — not the
-    // material itself. The opt-out paints a theme-matched opaque base so the
-    // 75%-alpha glass tokens don't composite over default white.
-    // A transparent backing is REQUIRED for vibrancy: without it Chromium
-    // paints an opaque layer in front of the material and no alpha in the CSS
-    // can show the desktop through (verified with a material matrix probe).
-    // And alpha in backgroundColor is only honored when the window is created
-    // `transparent` — '#00000000' alone is silently opaque (Electron docs).
-    // The working glass stack on this Electron/macOS combo (bisected with
-    // ui-glass-bisect-probe): transparent window + alpha tokens, NO vibrancy.
-    // The NSVisualEffectView materials paint fully OPAQUE here (dark and
-    // light alike) and wall off the desktop that the transparent contents
-    // would otherwise show. VIDEORC_GLASS_VIBRANCY=<material> re-adds the
-    // material for experiments on stacks where it transmits; =0 opts out to
-    // the solid themed base.
-    ...(glassVibrancyEnabled
-      ? {
-          transparent: true,
-          backgroundColor: '#00000000',
-          ...(glassVibrancyRaw && glassVibrancyRaw !== '1'
-            ? { vibrancy: glassVibrancyMaterial }
-            : {})
-        }
-      : { backgroundColor: windowPalette(nativeTheme.shouldUseDarkColors).base }),
-    visualEffectState: 'active',
-    // Probe knob: which window frame the glass uses. hiddenInset keeps the
-    // framed NSWindow; transparency may require the frameless styles.
-    ...(process.env.VIDEORC_GLASS_FRAME === 'frameless'
-      ? { frame: false as const }
-      : {
-          titleBarStyle: (process.env.VIDEORC_GLASS_FRAME === 'hidden'
-            ? 'hidden'
-            : 'hiddenInset') as 'hidden' | 'hiddenInset',
-          trafficLightPosition: { x: 14, y: 13 }
-        })
-  }
-}
-
 // Detached Chat/Captions windows: same black-glass backing as the main window
 // on macOS (transparent + the renderer's wallpaper underlay), solid palette
 // base everywhere else and when glass is opted out. The traffic lights are
@@ -1683,7 +1635,11 @@ function createWindow(): void {
     // frame — showing it at create time put an empty pane on screen that then
     // visibly filled in piece by piece.
     show: false,
-    ...platformWindowChromeOptions(),
+    ...windowGlassOptions('main', {
+      platform: process.platform,
+      mode: glassMode,
+      dark: nativeTheme.shouldUseDarkColors
+    }),
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -1691,6 +1647,7 @@ function createWindow(): void {
       backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy)
     }
   })
+  recordAppliedGlass(mainWindow, { role: 'main', mode: glassMode, appearance: 'follows-app' })
   applyVideorcWindowCaptureProtection(mainWindow, 'main', {
     onFailure: (reason) =>
       safeConsole.warn(`Main window content protection could not be enabled: ${reason}`)
@@ -13032,10 +12989,10 @@ app.whenReady().then(async () => {
   // the blur material always matches the in-app theme (videorc-design).
   secureIpcHandle('app:set-native-theme', (_event, theme: string) => {
     nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
-    // The solid base must follow the theme wherever a solid base is painted:
-    // always off macOS, and on macOS when vibrancy is opted out.
-    if (!isMac || !glassVibrancyEnabled) {
-      mainWindow?.setBackgroundColor(theme === 'light' ? '#F5F5F7' : '#1C1C1F')
+    // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
+    // with the theme; the glass windows' material follows nativeTheme itself.
+    if (glassMode.kind === 'solid') {
+      mainWindow?.setBackgroundColor(solidWindowBase('main', theme !== 'light'))
     }
   })
   secureIpcHandle('glass:wallpaper:get', (event) => {

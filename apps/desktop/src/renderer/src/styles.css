@@ -114,6 +114,14 @@
      denied): the transparent window must never show other apps through the
      translucent coat. Matches the porcelain solid (#FAFAFB). */
   --glass-fallback-base: oklch(0.985 0.001 286);
+  /* Window glass (plan 050): real macOS vibrancy under every window. The body
+     wears --glass-window (the one window coat), content panes add
+     --glass-content so the sidebar reads lighter, and --glass-solid replaces
+     both when the OS asks for reduced transparency. Light glass needs a
+     heavier coat than dark: the light material turns gray over dark content. */
+  --glass-window: oklch(0.985 0.001 286 / 60%);
+  --glass-content: oklch(0.985 0.001 286 / 30%);
+  --glass-solid: oklch(0.985 0.001 286);
   --glass-underlay-filter: blur(70px) saturate(1.4) brightness(1.05);
   /* A whisper of true translucency. What bleeds through the transparent
      window is other apps' windows, UNBLURRED (backdrop blur cannot see
@@ -198,6 +206,12 @@
   /* Solid degradation base for when no wallpaper is available (Automation
      denied): matches the black-glass solid (#0D0D0F). */
   --glass-fallback-base: oklch(0.13 0.003 286);
+  /* Dark window glass: over pure white the dark under-window material reads
+     #4A4B49, so these coats keep secondary text at 4.5:1 or better on any
+     desktop (probe:ui-glass contrast check). */
+  --glass-window: oklch(0.13 0.003 286 / 42%);
+  --glass-content: oklch(0.13 0.003 286 / 34%);
+  --glass-solid: oklch(0.13 0.003 286);
   /* Black glass: the frost itself goes dark — the wallpaper is dimmed into a
      smoky texture (the translucent coat alone cannot make a bright wallpaper
      read black; this can). */
@@ -216,6 +230,16 @@
     oklch(1 0 0 / 2.5%) 22%,
     transparent 45%
   );
+}
+
+/* The OS paints the material solid under Reduce Transparency; the coats go
+   solid with it so text contrast never depends on what sits behind. */
+@media (prefers-reduced-transparency: reduce) {
+  :root,
+  .dark {
+    --glass-window: var(--glass-solid);
+    --glass-content: transparent;
+  }
 }
 
 @theme inline {
@@ -281,6 +305,9 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+  --color-glass-window: var(--glass-window);
+  --color-glass-content: var(--glass-content);
+  --color-glass-solid: var(--glass-solid);
 }
 
 @layer components {
@@ -332,8 +359,15 @@
   * {
     @apply border-border outline-ring/50;
   }
+  /* The window coat sits on the OS material. color-scheme lives on body, never
+     inline on the root: a root color-scheme of light makes Chromium paint an
+     opaque canvas over the material (plan 050, P5.3). */
   body {
-    @apply bg-background text-foreground;
+    @apply bg-glass-window text-foreground;
+    color-scheme: light;
+  }
+  .dark body {
+    color-scheme: dark;
   }
   html {
     @apply font-sans;
