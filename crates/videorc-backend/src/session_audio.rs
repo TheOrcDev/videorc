@@ -685,6 +685,8 @@ struct AudioShared {
     losses: VecDeque<SourceLoss>,
     #[cfg(test)]
     after_ramp: Option<Arc<dyn Fn(u64) + Send + Sync>>,
+    #[cfg(test)]
+    cancellation_input: Option<(u64, fn(&mut AudioTimeline))>,
     #[cfg(debug_assertions)]
     caption_injector: Option<crate::audio::CaptionContractTestAudioInjector>,
 }
@@ -1269,6 +1271,8 @@ pub fn attach_prepared(
         losses: VecDeque::new(),
         #[cfg(test)]
         after_ramp: None,
+        #[cfg(test)]
+        cancellation_input: None,
         #[cfg(debug_assertions)]
         caption_injector: source.as_ref().and_then(|source| source.caption_injector()),
     }));
@@ -1989,6 +1993,24 @@ fn run_bus_owned(
                     }
                 }
             }
+        }
+        #[cfg(test)]
+        if (ramp_old || ramp_in)
+            && let Some((expected_generation, prepare_input)) = shared
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .cancellation_input
+        {
+            assert_eq!(
+                timeline.generation, expected_generation,
+                "cancellation must retain old timeline"
+            );
+            assert_eq!(
+                producer.as_ref().map(|owner| owner.device_id.as_str()),
+                Some("microphone:coreaudio:7"),
+                "cancellation must retain old physical owner"
+            );
+            prepare_input(&mut timeline);
         }
         let start = timeline.cursor();
         let mut raw = timeline.render_with_provenance();
@@ -3009,6 +3031,27 @@ mod tests {
         .await
         .0
         .unwrap();
+        // Only this exact-envelope subcase controls producer input availability.
+        // Ordinary A/B/None above uses the paced native producer unchanged. An
+        // OS-thread scheduling gap is valid silence, but is not an envelope oracle.
+        session.handle.shared.lock().unwrap().cancellation_input = Some((
+            a2.generation,
+            |timeline| {
+                eprintln!(
+                    "cancellation input boundary={} queued={} captured={} generated={} discarded={}",
+                    timeline.cursor(),
+                    timeline.packets.len(),
+                    timeline.counters.captured_frames,
+                    timeline.counters.generated_frames,
+                    timeline.counters.discarded_frames
+                );
+                timeline.packets.clear();
+                timeline.packets.push_back(QueuedPcm {
+                    start: timeline.cursor(),
+                    samples: vec![0.4; CHUNK_FRAMES * 2],
+                });
+            },
+        ));
         let (cancelled, boundary) = send_test_switch(
             &session,
             &coordinator,
@@ -3030,6 +3073,7 @@ mod tests {
                 break;
             }
         }
+        session.handle.shared.lock().unwrap().cancellation_input = None;
         assert_eq!(
             session.status().device_id.as_deref(),
             Some("microphone:coreaudio:7")

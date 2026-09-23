@@ -113,6 +113,8 @@ pub type PreviewCameraSlot = Arc<tokio::sync::Mutex<PreviewCameraRuntime>>;
 
 #[derive(Debug)]
 pub struct PreviewCameraRuntime {
+    #[cfg(all(test, target_os = "windows"))]
+    test_dshow_inventory: Option<String>,
     pub status: PreviewCameraStatus,
     /// Source-level ownership keeps surface-backed frames observable while a
     /// capture session replaces its per-session `FrameStore`.
@@ -771,6 +773,8 @@ fn log_camera_generation(
 
 pub fn initial_preview_camera_state() -> PreviewCameraRuntime {
     PreviewCameraRuntime {
+        #[cfg(all(test, target_os = "windows"))]
+        test_dshow_inventory: None,
         status: idle_status(Some("Native camera preview is not running.".to_string())),
         surface_backing_tracker: SurfaceBackingTrackerHandle::default(),
         run_id: None,
@@ -879,7 +883,24 @@ pub(crate) async fn start_preview_camera_for_layout_until_transition_complete(
 }
 
 #[cfg(target_os = "windows")]
-async fn resolve_windows_camera_target(ffmpeg: &str, selected: &str) -> Result<String, String> {
+async fn resolve_windows_camera_target(
+    state: &AppState,
+    ffmpeg: &str,
+    selected: &str,
+) -> Result<String, String> {
+    #[cfg(test)]
+    if let Some(inventory) = state
+        .preview_camera
+        .lock()
+        .await
+        .test_dshow_inventory
+        .clone()
+    {
+        return crate::audio_capture_adapter::resolve_dshow_video_name(&inventory, selected)
+            .map_err(|error| error.to_string());
+    }
+    #[cfg(not(test))]
+    let _ = state;
     static INVENTORY_OWNERS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
     let permit = INVENTORY_OWNERS
@@ -971,7 +992,7 @@ async fn start_preview_camera_with_owner(
     let unique_id = camera_source.device_unique_id().to_string();
     let ffmpeg_path = resolve_ffmpeg_path(params.ffmpeg_path.clone());
     #[cfg(target_os = "windows")]
-    let unique_id = match resolve_windows_camera_target(&ffmpeg_path, &unique_id).await {
+    let unique_id = match resolve_windows_camera_target(&state, &ffmpeg_path, &unique_id).await {
         Ok(target) => target,
         Err(error) => {
             // Inventory admission precedes old-owner retirement. A missing or
@@ -6281,6 +6302,16 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn fenced_layout_join_waits_past_command_timeout_and_starting_clear() {
         let state = test_state();
+        // This ownership test seeds a known in-flight generation. Its exact
+        // inventory is scoped to this AppState, never real host hardware or a
+        // process-global bypass; production still resolves before retirement.
+        #[cfg(target_os = "windows")]
+        {
+            state.preview_camera.lock().await.test_dshow_inventory = Some(
+                "[dshow] \"abc\" (video)\n[dshow]   Alternative name \"@device_cm_test_abc\"\n"
+                    .into(),
+            );
+        }
         let video = test_video();
         let layout = test_layout(false);
         let source_key = SourceKey::camera("camera:avfoundation-native:616263");
