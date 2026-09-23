@@ -251,7 +251,7 @@ import {
   redactAvatarFetchError,
   withAvatarFetchDeadline
 } from './avatar-cache'
-import { DARK_WINDOW_PALETTE } from './window-palette'
+import { DARK_GLASS_COATS, DARK_WINDOW_PALETTE } from './window-palette'
 import { loadWindowAppearanceBinding, pinWindowAppearance } from './window-appearance'
 import {
   appliedGlass,
@@ -261,6 +261,7 @@ import {
   recordAppliedGlass,
   resolveGlassMode,
   solidWindowBase,
+  WINDOW_HEADER_HEIGHT,
   windowGlassOptions,
   type GlassMode,
   type GlassWindowRole
@@ -1944,7 +1945,9 @@ function flushPreviewWindowMotionReconcile(): void {
 }
 // The visible drag bar at the top of the preview window; the native video covers
 // the content BELOW it, and the aspect lock applies to that video region only.
-const PREVIEW_WINDOW_BAR_HEIGHT = 28
+// The strip the traffic lights centre on (window-glass.ts); it also drives the
+// aspect lock and where the native video sits, so it has one source.
+const PREVIEW_WINDOW_BAR_HEIGHT = WINDOW_HEADER_HEIGHT.preview
 // Output aspect ratio (from the renderer's video settings); the window is locked
 // to it so the preview can never be squeezed or stretched.
 let previewWindowAspect = { width: 16, height: 9 }
@@ -3521,38 +3524,37 @@ async function reconcileNativePreviewSurfaceForPreviewWindow(
 
 const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   /* The whole window is a drag surface: the native video floats above the area
-     below the bar and ignores mouse events, so every grab lands here. The bar
-     stays visible above the video as the obvious handle. Edge-resize is handled
-     by the real window frame (hiddenInset) and is aspect-locked by main. */
-  /* Glass tokens (videorc-design): the preview window frames video, so it
-     stays dark in both themes: charcoal surface, white-8% hairline,
-     tertiary-gray label. */
-  html, body { margin: 0; height: 100%; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textSecondary};
-    font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden;
+     below the strip and ignores mouse events, so every grab lands here. The
+     strip stays visible above the video as the obvious handle. Edge-resize is
+     handled by the real window frame (hiddenInset) and is aspect-locked by main. */
+  /* Real glass (plan 050): the Preview frame sits on the OS material like every
+     other window, pinned dark because it frames video. Both coats paint on
+     body; the native video layer covers everything below the strip, so the
+     glass shows in the strip and in the waiting state. */
+  /* html keeps its full height: everything below is position: fixed, and a
+     zero-height root sizes the propagated coat gradient to nothing. */
+  html { height: 100%; background: transparent; }
+  body { margin: 0; height: 100%; color: ${DARK_WINDOW_PALETTE.textSecondary};
+    background: linear-gradient(${DARK_GLASS_COATS.content}, ${DARK_GLASS_COATS.content}), ${DARK_GLASS_COATS.window};
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; cursor: default;
     user-select: none; -webkit-user-select: none; -webkit-app-region: drag; }
-  .drag-bar { position: fixed; top: 0; left: 0; right: 0; height: 28px;
-    display: flex; align-items: center; gap: 10px; cursor: grab;
-    padding: 0 12px 0 78px; /* traffic lights live in the left inset */
-    background: ${DARK_WINDOW_PALETTE.panel}; border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline};
-    box-sizing: border-box; }
-  .drag-bar:active { cursor: grabbing; }
-  .drag-bar .label { color: ${DARK_WINDOW_PALETTE.textTertiary}; font-size: 11px; letter-spacing: 0.08em;
-    text-transform: uppercase; white-space: nowrap; }
-  .drag-bar .grip { flex: 1; height: 8px; background-image:
-    radial-gradient(circle, rgba(255, 255, 255, 0.18) 1px, transparent 1.2px);
-    background-size: 6px 4px; background-position: center; }
-  .hint { position: fixed; top: 28px; left: 0; right: 0; bottom: 0; display: flex;
+  .drag-bar { position: fixed; top: 0; left: 0; right: 0; height: ${WINDOW_HEADER_HEIGHT.preview}px;
+    display: flex; align-items: center; padding: 0 12px 0 88px; /* the shared traffic-light gutter */
+    border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline}; box-sizing: border-box; }
+  .drag-bar .label { color: ${DARK_WINDOW_PALETTE.textSecondary}; font-size: 12px; font-weight: 600;
+    white-space: nowrap; }
+  .hint { position: fixed; top: ${WINDOW_HEADER_HEIGHT.preview}px; left: 0; right: 0; bottom: 0; display: flex;
     align-items: center; justify-content: center; flex-direction: column; gap: 6px; }
-  .hint .title { color: ${DARK_WINDOW_PALETTE.textPrimary}; font-size: 13px; }
+  .hint .title { color: ${DARK_WINDOW_PALETTE.textPrimary}; font-size: 13px; font-weight: 600; }
   /* Docked ("stick") variant: the window is immovable inside the Studio slot,
-     so the drag bar disappears and the hint fills the whole content rect. */
+     so the strip disappears and the hint fills the whole content rect. */
   body.docked { -webkit-app-region: no-drag; }
   body.docked .drag-bar { display: none; }
   body.docked .hint { top: 0; }
 </style></head><body>
   <div class="hint"><div class="title">Waiting for preview</div>
   <div id="videorc-wait-detail">The native surface appears here as soon as the compositor presents.</div></div>
-  <div class="drag-bar"><span class="label">Videorc Preview</span><span class="grip"></span></div>
+  <div class="drag-bar"><span class="label">Preview</span></div>
 </body></html>`
 
 async function openPreviewWindow(): Promise<PreviewWindowState> {
@@ -3596,6 +3598,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   const docked = mode === 'docked'
   const rememberedFrame = previewWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const previewChrome = glassWindowChrome('preview')
   const window = new BrowserWindow({
     width: frame?.width ?? 960,
     height: frame?.height ?? 568,
@@ -3603,13 +3606,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     minWidth: docked ? 1 : 320,
     minHeight: docked ? 1 : 208,
     title: 'Videorc Preview',
-    // hiddenInset is macOS-only; off macOS the standard frame keeps the
-    // preview window draggable without renderer drag regions (Phase 4 owns
-    // the frameless Windows chrome). Traffic lights center in the 28px bar.
-    ...(isMac
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 8 } }
-      : {}),
-    backgroundColor: DARK_WINDOW_PALETTE.base,
+    // window-glass.ts: real material pinned dark and the traffic lights centred
+    // on the 28px strip on macOS; off macOS the standard frame and solid base
+    // keep the window draggable without renderer drag regions.
+    ...previewChrome.options,
     // A docked window stays hidden until the renderer answers the dock epoch
     // with a slot rect; showing it at the remembered FLOATING frame first would
     // flash a mis-placed preview.
@@ -3622,6 +3622,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       backgroundThrottling: backgroundThrottlingFor('preview', electronBackgroundPolicy)
     }
   })
+  finishGlassWindow(window, 'preview', previewChrome.mode)
   applyVideorcWindowCaptureProtection(window, 'preview', {
     onFailure: (reason) =>
       safeConsole.warn(`Preview window content protection could not be enabled: ${reason}`)

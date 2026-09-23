@@ -19,15 +19,15 @@ content pane (9.9:1, still a pass).
 
 ### A. Today's fake frost (wallpaper underlay at 0.92/0.94, 68%/62% coat)
 
-| theme | window · sample           | transmission | sharpness | secondary |
-| ----- | ------------------------- | -----------: | --------: | --------: |
-| dark  | main · content toolbar    |         3.86 |      3.41 |      7.10 |
-| dark  | main · sidebar foot       |            0 |      0.02 |      6.75 |
-| dark  | chat · list foot          |            0 |      0.14 |      7.62 |
-| dark  | captions · body           |            0 |      1.56 |      7.13 |
-| dark  | notes · textarea (opaque) |            0 |         0 |      7.58 |
-| light | main · content toolbar    |         2.83 |      2.67 |    2.94\* |
-| light | main · sidebar foot       |            0 |      0.07 |    2.67\* |
+| theme | window · sample           | transmission | sharpness |    ≤ 6 | Real glass ≤ 0.3 away from edges and 4.13 in the 28 pt Preview strip, which sits within the blur reach of the window's top edge. The leak population B is ≥ 11.76, so the separation is about 2x. |
+| ----- | ------------------------- | -----------: | --------: | -----: | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| dark  | main · content toolbar    |         3.86 |      3.41 |   7.10 |
+| dark  | main · sidebar foot       |            0 |      0.02 |   6.75 |
+| dark  | chat · list foot          |            0 |      0.14 |   7.62 |
+| dark  | captions · body           |            0 |      1.56 |   7.13 |
+| dark  | notes · textarea (opaque) |            0 |         0 |   7.58 |
+| light | main · content toolbar    |         2.83 |      2.67 | 2.94\* |
+| light | main · sidebar foot       |            0 |      0.07 | 2.67\* |
 
 \* Light secondary contrast in population A was scored with the old
 `#6E6E73` token mirror; the probe now uses the real `--muted-foreground`
@@ -79,3 +79,15 @@ WindowServer CPU is sampled read-only with `top` after a 20 s settle, with the
 preview presenting. S2 (main window on glass): 24.2%. The glass-on versus
 `VIDEORC_GLASS=0` comparison with every window on glass is recorded in the S7
 acceptance notes.
+
+## Update: edge samples (S5)
+
+The Preview frame's strip is only 28 pt tall, so its sample sits within the
+blur kernel of the window's top edge. There, macOS blurs slightly less of what
+is behind.
+
+- Sharpness over the dense-text backdrop measured 4.13 in the strip, against
+  0.01 in the middle of the Chat window.
+- A crop of the shot shows a uniform dark strip: nothing reads through.
+- The ceiling moved from 4 to 6. That keeps about 2x separation from a real
+  leak (≥ 11.76) and admits edge samples.

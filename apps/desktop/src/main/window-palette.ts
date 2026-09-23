@@ -60,3 +60,14 @@ export const LIGHT_WINDOW_PALETTE: WindowPalette = {
 export function windowPalette(dark: boolean): WindowPalette {
   return dark ? DARK_WINDOW_PALETTE : LIGHT_WINDOW_PALETTE
 }
+
+/**
+ * The dark glass coats (styles.css `.dark` --glass-window / --glass-content)
+ * for main-side documents that cannot read the stylesheet: the Preview frame
+ * paints both over the OS material (plan 050). window-palette.test.ts fails
+ * when these drift from styles.css.
+ */
+export const DARK_GLASS_COATS = Object.freeze({
+  window: 'oklch(0.13 0.003 286 / 42%)',
+  content: 'oklch(0.13 0.003 286 / 34%)'
+})

@@ -50,11 +50,13 @@ import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
 
 // Calibrated on macOS 26.5.1 / Electron 39.8.10; the raw populations live in
 // docs/acceptance/2026-09-23-real-glass-calibration.md. Transmission: the fake
-// frost measured <= 3.9, real glass >= 9.8. Sharpness: real glass <= 0.3, a
-// transparent window without the material (text readable behind) >= 11.8.
+// frost measured <= 3.9, real glass >= 9.8. Sharpness: real glass <= 0.3 away
+// from edges and <= 4.2 within the blur reach of a window edge (the 28pt
+// Preview strip), a transparent window without the material (text readable
+// behind) >= 11.8.
 export const GLASS_THRESHOLDS = Object.freeze({
   minTransmission: 8,
-  maxSharpness: 4,
+  maxSharpness: 6,
   minPrimaryContrast: 7,
   minSecondaryContrast: 4.5,
   maxPinnedLuminance: 0.12
@@ -265,11 +267,27 @@ async function shoot(smoke, theme, role, variant) {
   return { raised, file: capture(raised.bounds, `${theme}-${role}-${variant}`) }
 }
 
+// Windows open asynchronously (the preview through its supervisor): wait for
+// each role instead of failing on the first raise, asking once more midway.
+async function waitForWindow(smoke, role) {
+  const deadline = Date.now() + 20_000
+  let reopened = false
+  for (;;) {
+    try {
+      return await requestSmokeCommand(smoke, 'raise-window', { role, focus: false })
+    } catch (error) {
+      if (!/No open window/.test(String(error?.message)) || Date.now() > deadline) throw error
+      if (!reopened && OPEN_COMMAND[role] && Date.now() > deadline - 12_000) {
+        reopened = true
+        await requestSmokeCommand(smoke, OPEN_COMMAND[role], {}, { timeoutMs: 20_000 })
+      }
+      await sleep(500)
+    }
+  }
+}
+
 async function placeOnPrimaryDisplay(smoke, role, index) {
-  const { bounds, primaryWorkArea } = await requestSmokeCommand(smoke, 'raise-window', {
-    role,
-    focus: false
-  })
+  const { bounds, primaryWorkArea } = await waitForWindow(smoke, role)
   const width = Math.min(bounds.width, primaryWorkArea.width - 80)
   const height = Math.min(bounds.height, primaryWorkArea.height - 80)
   await requestSmokeCommand(smoke, SET_BOUNDS_COMMAND[role], {
