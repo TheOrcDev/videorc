@@ -246,7 +246,7 @@ export function LibraryTab({
   }, [settings.outputDirectoryHandle, sessions.length])
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
+    <div className="flex min-h-0 flex-1 flex-col">
       <PageHeader
         description="Every recording and stream becomes a local session. Files stay on disk; AI work happens in Publish."
         title="Library"
@@ -258,10 +258,10 @@ export function LibraryTab({
         }
       />
 
-      {/* Toolbar: filter · sort · search. */}
-      <div className="flex flex-wrap items-center gap-2">
+      {/* Filter bar: filter · sort · search. */}
+      <div className="flex flex-wrap items-center gap-2 border-b border-border px-gutter py-2">
         <Select value={filter} onValueChange={(value) => setFilter(value as LibraryFilter)}>
-          <SelectTrigger className="h-8 w-40" size="sm">
+          <SelectTrigger className="w-40">
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
@@ -289,7 +289,7 @@ export function LibraryTab({
           <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input
             aria-label="Search recordings"
-            className="h-8 pl-8"
+            className="pl-8"
             placeholder="Search recordings…"
             value={query}
             onChange={(event) => setQuery(event.target.value)}
@@ -303,7 +303,7 @@ export function LibraryTab({
 
       {/* Selection bar: the checkbox column's one bulk action. */}
       {selected.length > 0 ? (
-        <div className="flex items-center gap-3 rounded-row border bg-muted/20 px-3 py-1.5 text-sm">
+        <div className="flex items-center gap-3 border-b border-border bg-accent/50 px-gutter py-1.5 text-sm">
           <span className="text-muted-foreground">{selected.length} selected</span>
           <Button
             disabled={captureProtected || selectedCleanupActive}
@@ -326,7 +326,7 @@ export function LibraryTab({
       ) : null}
 
       {sessions.length === 0 ? (
-        <Empty className="rounded-panel border py-16">
+        <Empty className="py-16">
           <EmptyMedia variant="icon">
             <VideoFileIcon weight="duotone" />
           </EmptyMedia>
@@ -336,7 +336,7 @@ export function LibraryTab({
           </EmptyDescription>
         </Empty>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded-panel border">
+        <div className="flex min-h-0 flex-1 flex-col">
           {/* Header row */}
           <div className="grid grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_8rem] items-center gap-2 border-b px-3 py-2 text-[12.5px] font-medium text-subtle min-[1280px]:grid-cols-[2rem_minmax(0,1fr)_8rem_5.5rem_5.5rem_4.5rem_13rem]">
             <Checkbox

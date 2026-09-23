@@ -97,7 +97,9 @@ const FLUSH_TABS: ReadonlySet<WorkspaceTab> = new Set<WorkspaceTab>([
   'layouts',
   'assets',
   'captions',
-  'recording'
+  'recording',
+  'library',
+  'ai'
 ])
 
 function TabFrame({ tab, children }: { tab: WorkspaceTab; children: ReactNode }): ReactElement {
