@@ -254,6 +254,18 @@ impl SourceSwitchCoordinator {
         }
     }
 
+    pub fn microphone_unavailable(&mut self, reason: &str) {
+        if let Some(snapshot) = self.snapshot.as_mut()
+            && let Some(capability) = snapshot
+                .capabilities
+                .iter_mut()
+                .find(|capability| capability.kind == SourceKind::Microphone)
+        {
+            capability.supported = false;
+            capability.reason = Some(reason.into());
+        }
+    }
+
     pub fn enable_microphone(&mut self) {
         if let Some(snapshot) = self.snapshot.as_mut() {
             for capability in &mut snapshot.capabilities {

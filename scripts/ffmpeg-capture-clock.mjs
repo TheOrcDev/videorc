@@ -5,7 +5,10 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 export function hasCaptureClockProtocol(help) {
-  return /^\s*-videorc_audio_clock\s+<boolean>.*Videorc AVF clock protocol 1\).*$/m.test(help)
+  return (
+    /^\s*-videorc_audio_clock\s+<boolean>.*Videorc AVF clock protocol 1\).*$/m.test(help) &&
+    /^\s*-videorc_audio_uid\s+<string>/m.test(help)
+  )
 }
 
 export function probeCaptureClock(binary, run = execFileSync) {

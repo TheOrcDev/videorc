@@ -12,14 +12,15 @@ import {
 
 test('the actual binary must expose the exact capture-clock protocol', () => {
   const help =
-    '  -videorc_audio_clock <boolean> .D......... export exact packet capture clock metadata (Videorc AVF clock protocol 1) (default false)'
+    '  -videorc_audio_clock <boolean> .D......... export exact packet capture clock metadata (Videorc AVF clock protocol 1) (default false)\n  -videorc_audio_uid <string> .D......... select exact stable audio UID'
   assert.equal(hasCaptureClockProtocol(help), true)
   for (const invalid of [
     '',
     help.replace('protocol 1', 'protocol 0'),
     help.replace('protocol 1', 'protocol 10'),
     help.replace('protocol 1', 'protocol 11'),
-    help.replace('-videorc_audio_clock', '-something_else')
+    help.replace('-videorc_audio_clock', '-something_else'),
+    help.replace('-videorc_audio_uid', '-something_else')
   ]) {
     assert.equal(hasCaptureClockProtocol(invalid), false)
     assert.throws(() => probeCaptureClock('fixture', () => invalid), /lacks/)

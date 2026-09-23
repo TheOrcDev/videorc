@@ -1,7 +1,7 @@
 //! Timestamp metadata framing for capture-only FFmpeg workers.
 use anyhow::{Context, Result, bail};
 use std::collections::VecDeque;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_METADATA_BYTES: usize = 4096;
 const MAX_ANCHORS: usize = 64;
@@ -15,15 +15,59 @@ struct PcmDescription {
 }
 
 fn word_after<'a>(line: &'a str, marker: &str) -> Result<&'a str> {
-    line.split_once(marker)
-        .and_then(|(_, tail)| tail.split_whitespace().next())
-        .context("Capture worker timestamp metadata is incomplete")
+    line.split_whitespace()
+        .find_map(|word| word.strip_prefix(marker.trim()))
+        .filter(|word| !word.is_empty())
+        .with_context(|| {
+            format!(
+                "Capture metadata is missing field {marker:?}: {}",
+                line.chars().take(1024).collect::<String>()
+            )
+        })
 }
 fn integer(line: &str, marker: &str) -> Result<i64> {
-    word_after(line, marker)?
-        .parse()
-        .context("Capture worker timestamp metadata is malformed")
+    let word = word_after(line, marker)?;
+    word.parse().with_context(|| {
+        format!(
+            "Capture metadata field {marker:?} has malformed token {:?}: {}",
+            word.chars().take(80).collect::<String>(),
+            line.chars().take(1024).collect::<String>()
+        )
+    })
 }
+
+// ashowinfo emits its header and checksum tail in separate log calls. A
+// capture-clock record may therefore share that physical line. Retain both
+// records in their emitted order; never let a stats substring become a field.
+fn metadata_records(line: &str) -> Vec<String> {
+    let mut starts: Vec<(usize, bool)> = Vec::new();
+    for (index, _) in line.char_indices() {
+        if index != 0 && !line.as_bytes()[index - 1].is_ascii_whitespace() {
+            continue;
+        }
+        let tail = &line[index..];
+        if tail.starts_with("VIDEORC_AVF_CLOCK") || tail.starts_with("VIDEORC_DSHOW_CLOCK") {
+            starts.push((index, false));
+        } else if tail.starts_with("n:") && line.contains("fmt:") && line.contains("nb_samples:") {
+            starts.push((index, true));
+        }
+    }
+    starts
+        .iter()
+        .enumerate()
+        .map(|(position, (start, pcm))| {
+            let end = starts
+                .get(position + 1)
+                .map_or(line.len(), |(index, _)| *index);
+            if *pcm {
+                format!("ashowinfo {}", &line[*start..end])
+            } else {
+                line[*start..end].to_string()
+            }
+        })
+        .collect()
+}
+
 fn parse_pcm_description(line: &str) -> Result<PcmDescription> {
     if line.len() > MAX_METADATA_BYTES || !line.contains("ashowinfo") {
         bail!("Unexpected PCM metadata");
@@ -52,14 +96,35 @@ struct CaptureAnchor {
     pts_us: i64,
     captured_start: Instant,
     input_duration: Option<Duration>,
+    uncertainty: Duration,
 }
 
 struct ClockPair {
     monotonic: Instant,
     host_ns: Option<u64>,
+    wall_ns: i128,
     uncertainty: Duration,
 }
 impl ClockPair {
+    fn validate_wall(&self, now: Instant, wall: SystemTime) -> Result<()> {
+        let actual = wall.duration_since(UNIX_EPOCH)?.as_nanos() as i128;
+        let expected =
+            self.wall_ns + now.saturating_duration_since(self.monotonic).as_nanos() as i128;
+        if (actual - expected).unsigned_abs() > 5_000_000 {
+            bail!("The capture wall clock changed; select the microphone again");
+        }
+        Ok(())
+    }
+    fn instant_from_wall(&self, wall_ns: i128) -> Result<Instant> {
+        let delta = wall_ns - self.wall_ns;
+        let duration = Duration::from_nanos(u64::try_from(delta.unsigned_abs())?);
+        if delta >= 0 {
+            self.monotonic.checked_add(duration)
+        } else {
+            self.monotonic.checked_sub(duration)
+        }
+        .context("Capture wall clock is outside the monotonic range")
+    }
     fn instant_from_host(&self, host_ns: u64) -> Result<Instant> {
         let origin = self.host_ns.context("Host clock mapping unavailable")?;
         if host_ns >= origin {
@@ -98,6 +163,59 @@ fn avf_anchor(line: &str, clock: &ClockPair) -> Result<CaptureAnchor> {
         pts_us,
         captured_start: clock.instant_from_host(host)?,
         input_duration: Some(duration),
+        uncertainty: clock.uncertainty,
+    })
+}
+
+fn dshow_anchor(line: &str, clock: &ClockPair) -> Result<CaptureAnchor> {
+    if line.len() > MAX_METADATA_BYTES || integer(line, "version=")? != 1 {
+        bail!("Unsupported DirectShow capture clock metadata");
+    }
+    let sample = integer(line, "sample_100ns=")?;
+    let graph = integer(line, "graph_100ns=")?;
+    let before = integer(line, "wall_before_100ns=")?;
+    let after = integer(line, "wall_after_100ns=")?;
+    let bytes = integer(line, "bytes=")?;
+    let frames = integer(line, "frames=")?;
+    let rate = integer(line, "rate=")?;
+    let channels = integer(line, "channels=")?;
+    let bits = integer(line, "bits=")?;
+    let format = integer(line, "format=")?;
+    if sample < 0
+        || graph < sample
+        || graph - sample > 1_000_000
+        || before <= 0
+        || after < before
+        || after - before > 10_000
+        || !(8000..=384000).contains(&rate)
+        || !(1..=32).contains(&channels)
+        || frames <= 0
+        || frames > rate / 10
+        || !((format == 1 && [8, 16, 24, 32].contains(&bits))
+            || (format == 3 && [32, 64].contains(&bits)))
+        || bytes != frames * channels * (bits / 8)
+    {
+        bail!("DirectShow capture clock or PCM shape is invalid");
+    }
+    // The worker brackets the graph read before logging; log/pipe delay never
+    // enters the mapping. Include both sampling brackets and a conservative
+    // one-microsecond PreciseFileTime resolution allowance.
+    let uncertainty = clock.uncertainty
+        + Duration::from_nanos((after - before) as u64 * 100)
+        + Duration::from_micros(1);
+    if uncertainty > Duration::from_millis(2) {
+        bail!("DirectShow clock mapping exceeds its two-millisecond uncertainty budget");
+    }
+    let midpoint_ns = (i128::from(before) + i128::from(after)) * 50;
+    let callback = clock.instant_from_wall(midpoint_ns)?;
+    let captured_start = callback
+        .checked_sub(Duration::from_nanos((graph - sample) as u64 * 100))
+        .context("DirectShow clock offset overflow")?;
+    Ok(CaptureAnchor {
+        pts_us: sample / 10,
+        captured_start,
+        input_duration: Some(Duration::from_secs_f64(frames as f64 / rate as f64)),
+        uncertainty,
     })
 }
 
@@ -171,7 +289,7 @@ impl CaptureClock {
         let end = start
             .checked_add(Duration::from_secs_f64(packet.frames as f64 / 48000.0))
             .context("PCM capture timestamp overflow")?;
-        if end > now + Duration::from_millis(1) {
+        if end > now + anchor.uncertainty + Duration::from_micros(25) {
             bail!("PCM is ahead of its capture clock");
         }
         self.last_sequence = Some(packet.sequence);
@@ -226,7 +344,7 @@ impl Drop for Worker {
     }
 }
 
-fn capture_command(ffmpeg: &str, device: &str) -> Command {
+fn capture_command(ffmpeg: &str, device: &str, dshow: bool) -> Command {
     let mut command = Command::new(ffmpeg);
     #[cfg(windows)]
     {
@@ -236,6 +354,7 @@ fn capture_command(ffmpeg: &str, device: &str) -> Command {
     command.env("TZ", "UTC0").args([
         "-hide_banner",
         "-nostdin",
+        "-nostats",
         "-loglevel",
         "repeat+datetime+verbose",
         "-copyts",
@@ -246,14 +365,31 @@ fn capture_command(ffmpeg: &str, device: &str) -> Command {
         "-analyzeduration",
         "0",
     ]);
-    command.args([
-        "-f",
-        "avfoundation",
-        "-videorc_audio_clock",
-        "1",
-        "-i",
-        &format!("none:{device}"),
-    ]);
+    if dshow {
+        command.args([
+            "-f",
+            "dshow",
+            "-videorc_audio_clock",
+            "1",
+            "-audio_buffer_size",
+            "20",
+            "-rtbufsize",
+            "65536",
+            "-i",
+            &format!("audio={device}"),
+        ]);
+    } else {
+        command.args([
+            "-f",
+            "avfoundation",
+            "-videorc_audio_clock",
+            "1",
+            "-videorc_audio_uid",
+            device,
+            "-i",
+            "none:none",
+        ]);
+    }
     command.args([
         "-map",
         "0:a:0",
@@ -274,22 +410,23 @@ fn capture_command(ffmpeg: &str, device: &str) -> Command {
 }
 
 fn resolve_target(ffmpeg: &str, id: &str) -> Result<(String, String)> {
-    if let Some(index) = id.strip_prefix("microphone:avfoundation:") {
+    if id.starts_with("microphone:avfoundation:") {
+        bail!(
+            "This saved AVFoundation microphone uses an unbound device index. Select the microphone again to confirm its stable identity"
+        );
+    }
+    if let Some(uid) = crate::devices::parse_avfoundation_microphone_uid(id) {
         if !cfg!(target_os = "macos") {
             bail!("AVFoundation microphones require macOS");
-        }
-        let parsed: usize = index
-            .parse()
-            .context("Invalid AVFoundation microphone identity")?;
-        if index != parsed.to_string() {
-            bail!("Microphone identity is not canonical");
         }
         let help = output_owned_std_with_timeout(
             Command::new(ffmpeg).args(["-hide_banner", "-h", "demuxer=avfoundation"]),
             Duration::from_secs(1),
         )?;
         let help = String::from_utf8_lossy(&help.stdout);
-        if !help.contains("-videorc_audio_clock") || !help.contains("Videorc AVF clock protocol 1)")
+        if !help.contains("-videorc_audio_clock")
+            || !help.contains("Videorc AVF clock protocol 1)")
+            || !help.contains("-videorc_audio_uid")
         {
             bail!("This FFmpeg build lacks the required AVFoundation capture clock protocol");
         }
@@ -311,20 +448,89 @@ fn resolve_target(ffmpeg: &str, id: &str) -> Result<(String, String)> {
             .iter()
             .filter(|device| {
                 device.kind == crate::devices::AvFoundationDeviceKind::Audio
-                    && device.index == parsed
+                    && device.uid_hex.as_deref() == Some(uid)
             })
             .collect();
         if matching.len() != 1 {
             bail!("The selected AVFoundation microphone is missing or ambiguous");
         }
-        return Ok((index.to_string(), matching[0].name.clone()));
+        return Ok((uid.to_string(), matching[0].name.clone()));
     }
-    if crate::audio::parse_windows_dshow_microphone_id(id).is_some() {
-        bail!(
-            "Live DirectShow replacement requires a verified capture-clock mapping; this build supports the existing session-start microphone path only"
-        );
+    if let Some(name) = crate::audio::parse_windows_dshow_microphone_id(id) {
+        if !cfg!(target_os = "windows") {
+            bail!("DirectShow microphones require Windows");
+        }
+        if name.is_empty() || name.contains(['\0', '\r', '\n']) {
+            bail!("Invalid DirectShow device identity");
+        }
+        let help = output_owned_std_with_timeout(
+            Command::new(ffmpeg).args(["-hide_banner", "-h", "demuxer=dshow"]),
+            Duration::from_secs(1),
+        )?;
+        let help = String::from_utf8_lossy(&help.stdout);
+        if !help.contains("-videorc_audio_clock")
+            || !help.contains("Videorc DShow clock protocol 1)")
+        {
+            bail!("The capture worker lacks DirectShow clock protocol 1");
+        }
+        let output = output_owned_std_with_timeout(
+            Command::new(ffmpeg).args([
+                "-hide_banner",
+                "-list_devices",
+                "true",
+                "-f",
+                "dshow",
+                "-i",
+                "dummy",
+            ]),
+            Duration::from_secs(2),
+        )?;
+        let target = resolve_dshow_name(&String::from_utf8_lossy(&output.stderr), &name)?;
+        return Ok((target, name));
     }
     bail!("This microphone capture adapter does not recognize the device identity")
+}
+
+pub(crate) fn windows_worker_path(output_ffmpeg: &str) -> std::path::PathBuf {
+    std::path::Path::new(output_ffmpeg).with_file_name("ffmpeg-capture.exe")
+}
+
+fn resolve_dshow_name(inventory: &str, selected: &str) -> Result<String> {
+    let mut audio: Vec<(String, Option<String>)> = Vec::new();
+    let mut current_audio = false;
+    for line in inventory.lines() {
+        if line.contains("Alternative name") {
+            if current_audio && let Some((_, alternate)) = audio.last_mut() {
+                *alternate = quoted_name(line);
+            }
+        } else if line.contains("(audio)") || line.contains("(video)") {
+            current_audio = line.contains("(audio)");
+            if current_audio && let Some(name) = quoted_name(line) {
+                audio.push((name, None));
+            }
+        }
+    }
+    let matching: Vec<_> = audio.iter().filter(|(name, _)| name == selected).collect();
+    if matching.len() != 1 {
+        bail!("The selected DirectShow microphone is missing or its friendly name is ambiguous");
+    }
+    let target = matching[0].1.as_deref().unwrap_or(selected);
+    if target.is_empty()
+        || target.contains(['\0', '\r', '\n', ':', '='])
+        || audio
+            .iter()
+            .filter(|(_, alternate)| alternate.as_deref() == Some(target))
+            .count()
+            > 1
+    {
+        bail!("The selected DirectShow alternative name is ambiguous");
+    }
+    Ok(target.into())
+}
+fn quoted_name(line: &str) -> Option<String> {
+    let first = line.find('"')?;
+    let last = line.rfind('"')?;
+    (last > first).then(|| line[first + 1..last].to_string())
 }
 
 #[cfg(target_os = "macos")]
@@ -344,6 +550,7 @@ impl ClockPair {
     fn sample() -> Result<Self> {
         for _ in 0..3 {
             let before = Instant::now();
+            let wall_ns = SystemTime::now().duration_since(UNIX_EPOCH)?.as_nanos() as i128;
             #[cfg(target_os = "macos")]
             let host_ns = {
                 let mut scale = host_clock::Timebase { numer: 0, denom: 0 };
@@ -365,6 +572,7 @@ impl ClockPair {
                 return Ok(Self {
                     monotonic: before + uncertainty / 2,
                     host_ns,
+                    wall_ns,
                     uncertainty,
                 });
             }
@@ -383,13 +591,19 @@ fn fail(failure: &Failure, message: impl Into<String>) {
 }
 
 pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
-    let (device, device_name) = resolve_target(ffmpeg, device_id)?;
+    let dshow = crate::audio::parse_windows_dshow_microphone_id(device_id).is_some();
+    let worker = if dshow {
+        windows_worker_path(ffmpeg).to_string_lossy().into_owned()
+    } else {
+        ffmpeg.into()
+    };
+    let (device, device_name) = resolve_target(&worker, device_id)?;
     let clock_pair = ClockPair::sample()?;
     tracing::debug!(
         uncertainty_us = clock_pair.uncertainty.as_micros(),
         "Mapped capture worker clock"
     );
-    let child = spawn_owned_std(&mut capture_command(ffmpeg, &device))?;
+    let child = spawn_owned_std(&mut capture_command(&worker, &device, dshow))?;
     let stop = Arc::new(AtomicBool::new(false));
     let failure: Failure = Arc::new(Mutex::new(None));
     let stats = Arc::new(AudioCaptureStats::default());
@@ -452,17 +666,17 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
                         Err(_) => break,
                     };
                     for byte in &bytes[..count] {
-                        if *byte == b'\n' {
+                        if *byte == b'\n' || *byte == b'\r' {
                             let text = String::from_utf8_lossy(&line).into_owned();
                             line.clear();
-                            let relevant = text.contains("VIDEORC_AVF_CLOCK")
-                                || (text.contains("ashowinfo") && text.contains(" n:"));
-                            if relevant && metadata_tx.try_send(text.clone()).is_err() {
-                                fail(
-                                    &read_failure,
-                                    "Capture timestamp metadata exceeded its bounded queue",
-                                );
-                                return;
+                            for record in metadata_records(&text) {
+                                if metadata_tx.try_send(record).is_err() {
+                                    fail(
+                                        &read_failure,
+                                        "Capture timestamp metadata exceeded its bounded queue",
+                                    );
+                                    return;
+                                }
                             }
                             if text.contains("Error")
                                 || text.contains("error")
@@ -500,7 +714,9 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
                     &assemble_stop,
                     &assemble_stats,
                 );
-                if let Err(error) = result {
+                if let Err(error) = result
+                    && !assemble_stop.load(Ordering::Acquire)
+                {
                     fail(&assemble_failure, error.to_string());
                 }
                 assemble_stop.store(true, Ordering::Release);
@@ -513,6 +729,52 @@ pub(crate) fn open(ffmpeg: &str, device_id: &str) -> Result<CapturedInput> {
         owner: Box::new(owner),
         failure,
     })
+}
+
+/// Cumulative interval evidence; logs contain no audio, device name, or path.
+#[derive(Default)]
+struct CaptureDiagnostics {
+    packets: u64,
+    input_frames: u64,
+    input_rate: u64,
+    native_overwritten: Option<u64>,
+    last_input_end_us: Option<i64>,
+    input_gap_us: u64,
+    max_input_gap_us: u64,
+    pcm_frames: u64,
+    pcm_gap_frames: u64,
+    max_pcm_gap_frames: u64,
+}
+impl CaptureDiagnostics {
+    fn input(&mut self, line: &str, anchor: CaptureAnchor) -> Result<()> {
+        let frames = u64::try_from(integer(line, "frames=")?)?;
+        let rate = u64::try_from(integer(line, "rate=")?)?;
+        if let Some(end) = self.last_input_end_us {
+            // Microsecond export rounds sub-sample intervals; ignore <=1us.
+            let gap = anchor.pts_us.saturating_sub(end).max(0) as u64;
+            if gap > 1 {
+                self.input_gap_us += gap;
+                self.max_input_gap_us = self.max_input_gap_us.max(gap);
+            }
+        }
+        self.last_input_end_us = Some(anchor.pts_us + (frames * 1_000_000 / rate) as i64);
+        self.packets += 1;
+        self.input_frames += frames;
+        self.input_rate = rate;
+        // Older protocol-v1 binaries predate this optional diagnostic field.
+        if word_after(line, "overwritten=").is_ok() {
+            self.native_overwritten = Some(u64::try_from(integer(line, "overwritten=")?)?);
+        }
+        Ok(())
+    }
+    fn pcm(&mut self, packet: PcmDescription, previous_end: Option<i64>) {
+        self.pcm_frames += packet.frames as u64;
+        if let Some(end) = previous_end {
+            let gap = packet.pts.saturating_sub(end).max(0) as u64;
+            self.pcm_gap_frames += gap;
+            self.max_pcm_gap_frames = self.max_pcm_gap_frames.max(gap);
+        }
+    }
 }
 
 fn assemble_pcm(
@@ -530,6 +792,8 @@ fn assemble_pcm(
         last_end_pts: None,
     };
     let mut queued = VecDeque::<u8>::new();
+    let mut diagnostics = CaptureDiagnostics::default();
+    let mut last_diagnostic = Instant::now();
     while !stop.load(Ordering::Acquire) {
         let line = match metadata.recv_timeout(Duration::from_millis(10)) {
             Ok(line) => line,
@@ -538,11 +802,21 @@ fn assemble_pcm(
                 bail!("The capture worker stopped producing timestamped PCM")
             }
         };
+        if line.contains("VIDEORC_DSHOW_CLOCK_INVALID") {
+            bail!("DirectShow could not map the selected device capture clock");
+        }
+        if line.contains("VIDEORC_DSHOW_CLOCK version=") {
+            clock_pair.validate_wall(Instant::now(), SystemTime::now())?;
+            clock.push(dshow_anchor(&line, &clock_pair)?)?;
+            continue;
+        }
         if line.contains("VIDEORC_AVF_CLOCK_INVALID") {
             bail!("AVFoundation could not convert the selected device capture clock");
         }
         if line.contains("VIDEORC_AVF_CLOCK version=") {
-            clock.push(avf_anchor(&line, &clock_pair)?)?;
+            let anchor = avf_anchor(&line, &clock_pair)?;
+            diagnostics.input(&line, anchor)?;
+            clock.push(anchor)?;
             continue;
         }
         let packet = parse_pcm_description(&line)?;
@@ -571,7 +845,23 @@ fn assemble_pcm(
         if samples.iter().any(|sample| !sample.is_finite()) {
             bail!("Capture PCM contains a non-finite sample");
         }
+        diagnostics.pcm(packet, clock.last_end_pts);
         let (timestamp_micros, captured_at) = clock.interval(packet, Instant::now())?;
+        if last_diagnostic.elapsed() >= Duration::from_secs(5) {
+            tracing::info!(
+                packets = diagnostics.packets,
+                input_frames = diagnostics.input_frames,
+                input_rate = diagnostics.input_rate,
+                native_overwritten = diagnostics.native_overwritten,
+                input_gap_us = diagnostics.input_gap_us,
+                max_input_gap_us = diagnostics.max_input_gap_us,
+                pcm_frames = diagnostics.pcm_frames,
+                pcm_gap_frames = diagnostics.pcm_gap_frames,
+                max_pcm_gap_frames = diagnostics.max_pcm_gap_frames,
+                "Capture worker interval diagnostics"
+            );
+            last_diagnostic = Instant::now();
+        }
         if captured_at > Instant::now() {
             thread::sleep(captured_at.saturating_duration_since(Instant::now()));
         }
@@ -600,10 +890,73 @@ fn assemble_pcm(
 mod tests {
     use super::*;
 
+    #[test]
+    fn future_pcm_validation_uses_accepted_clock_uncertainty() {
+        let now = Instant::now();
+        for (ahead, accepted) in [(1_900, true), (2_100, false)] {
+            let mut clock = CaptureClock {
+                anchors: VecDeque::from([CaptureAnchor {
+                    pts_us: 0,
+                    captured_start: now - Duration::from_millis(10) + Duration::from_micros(ahead),
+                    input_duration: Some(Duration::from_millis(10)),
+                    uncertainty: Duration::from_millis(2),
+                }]),
+                last_sequence: None,
+                first_pts: None,
+                last_end_pts: None,
+            };
+            let result = clock.interval(
+                PcmDescription {
+                    sequence: 0,
+                    pts: 0,
+                    frames: 480,
+                },
+                now,
+            );
+            assert_eq!(result.is_ok(), accepted);
+        }
+    }
+
+    #[test]
+    fn interval_diagnostics_distinguish_native_overwrite_and_pcm_gaps() {
+        let now = Instant::now();
+        let mut diagnostics = CaptureDiagnostics::default();
+        for (pts, overwritten) in [(0, 0), (10_667, 0), (32_000, 1)] {
+            let anchor = CaptureAnchor {
+                pts_us: pts,
+                captured_start: now,
+                input_duration: Some(Duration::from_secs_f64(512.0 / 48_000.0)),
+                uncertainty: Duration::ZERO,
+            };
+            diagnostics
+                .input(
+                    &format!("frames=512 rate=48000 overwritten={overwritten}"),
+                    anchor,
+                )
+                .unwrap();
+        }
+        assert_eq!(diagnostics.packets, 3);
+        assert_eq!(diagnostics.input_frames, 1536);
+        assert_eq!(diagnostics.native_overwritten, Some(1));
+        assert_eq!(diagnostics.input_gap_us, 10667);
+        assert_eq!(diagnostics.max_input_gap_us, 10667);
+        diagnostics.pcm(
+            PcmDescription {
+                sequence: 2,
+                pts: 1536,
+                frames: 512,
+            },
+            Some(1024),
+        );
+        assert_eq!(diagnostics.pcm_gap_frames, 512);
+        assert_eq!(diagnostics.max_pcm_gap_frames, 512);
+    }
+
     fn pair(now: Instant) -> ClockPair {
         ClockPair {
             monotonic: now,
             host_ns: Some(1_000_000_000),
+            wall_ns: 1_000_000_000,
             uncertainty: Duration::ZERO,
         }
     }
@@ -613,6 +966,7 @@ mod tests {
                 pts_us: 0,
                 captured_start: now - Duration::from_millis(40),
                 input_duration: Some(Duration::from_millis(40)),
+                uncertainty: Duration::ZERO,
             }]),
             last_sequence: None,
             first_pts: None,
@@ -710,7 +1064,8 @@ mod tests {
                 .push(CaptureAnchor {
                     pts_us: 10_000,
                     captured_start: now + Duration::from_millis(50),
-                    input_duration: None
+                    input_duration: None,
+                    uncertainty: Duration::ZERO,
                 })
                 .is_err()
         );
@@ -806,12 +1161,16 @@ mod tests {
 
     #[test]
     fn worker_command_is_capture_only_and_preserves_source_clock() {
-        let command = capture_command("ffmpeg", "3");
+        let command = capture_command("ffmpeg", "6465736b", false);
         let args: Vec<_> = command
             .get_args()
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
-        assert!(args.windows(2).any(|pair| pair == ["-i", "none:3"]));
+        assert!(args.windows(2).any(|pair| pair == ["-i", "none:none"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["-videorc_audio_uid", "6465736b"])
+        );
         assert!(
             args.windows(2)
                 .any(|pair| pair == ["-videorc_audio_clock", "1"])
@@ -830,6 +1189,116 @@ mod tests {
                 .any(|arg| arg.contains("volume") || arg.contains("rtmp") || arg.contains("amix"))
         );
     }
+
+    #[test]
+    fn capture_metadata_refuses_stats_substrings_and_keeps_interleaved_log_records() {
+        let now = Instant::now();
+        let with_stats = format!("size=0 bitrate=N/A rate=48000 {}", metadata());
+        assert!(avf_anchor(&with_stats, &pair(now)).is_ok());
+        let clock_line = format!("size=0 bitrate=N/A {}", metadata());
+        assert!(avf_anchor(&clock_line, &pair(now)).is_ok());
+        let audio = pcm(0, 0, 480);
+        for combined in [
+            format!("{audio} {}", metadata()),
+            format!("{} {audio}", metadata()),
+        ] {
+            let records = metadata_records(&combined);
+            assert_eq!(records.len(), 2);
+            let clock = records
+                .iter()
+                .find(|line| line.contains("VIDEORC_AVF_CLOCK"))
+                .unwrap();
+            let pcm = records
+                .iter()
+                .find(|line| line.starts_with("ashowinfo"))
+                .unwrap();
+            assert!(avf_anchor(clock, &pair(now)).is_ok());
+            assert_eq!(parse_pcm_description(pcm).unwrap().frames, 480);
+        }
+        let malformed = metadata().replace("rate=48000", "rate=oops");
+        let error = avf_anchor(&malformed, &pair(now)).unwrap_err().to_string();
+        assert!(error.contains("rate="));
+        assert!(error.contains("oops"));
+        assert!(metadata_records("bitrate=N/A progress=continue").is_empty());
+    }
+
+    fn dshow_metadata() -> String {
+        "VIDEORC_DSHOW_CLOCK version=1 sample_100ns=100000 graph_100ns=200000 wall_before_100ns=9900000 wall_after_100ns=9900100 bytes=1920 frames=480 rate=48000 channels=2 bits=16 format=1".into()
+    }
+
+    #[test]
+    fn dshow_mapping_uses_capture_bracket_not_log_delivery_and_rejects_clock_errors() {
+        let now = Instant::now();
+        let mapping = pair(now);
+        let anchor = dshow_anchor(&dshow_metadata(), &mapping).unwrap();
+        // The packet starts10ms before callback; callback UTC is~10ms before
+        // backend paired sample. No stderr-arrival argument enters this mapping.
+        assert_eq!(
+            now.duration_since(anchor.captured_start),
+            Duration::from_micros(19_995)
+        );
+        for bad in [
+            dshow_metadata().replace("wall_after_100ns=9900100", "wall_after_100ns=9899999"),
+            dshow_metadata().replace("wall_after_100ns=9900100", "wall_after_100ns=9920000"),
+            dshow_metadata().replace("graph_100ns=200000", "graph_100ns=1"),
+            dshow_metadata().replace("frames=480", "frames=481"),
+            dshow_metadata().replace("format=1", "format=6"),
+            dshow_metadata().replace("bits=16", "bits=12"),
+            dshow_metadata().replace("sample_100ns=100000", "sample_100ns=-1"),
+        ] {
+            assert!(dshow_anchor(&bad, &mapping).is_err());
+        }
+        assert!(
+            mapping
+                .validate_wall(now, UNIX_EPOCH + Duration::from_secs(1))
+                .is_ok()
+        );
+        assert!(
+            mapping
+                .validate_wall(now, UNIX_EPOCH + Duration::from_secs(2))
+                .is_err()
+        );
+        let uncertain = ClockPair {
+            uncertainty: Duration::from_millis(3),
+            ..mapping
+        };
+        assert!(dshow_anchor(&dshow_metadata(), &uncertain).is_err());
+    }
+
+    #[test]
+    fn dshow_identity_is_resolved_in_actual_audio_inventory_and_never_by_arbitrary_name() {
+        let inventory = "[dshow] \"Camera\" (video)\n[dshow] Alternative name \"@video\"\n[dshow] \"Microphone\" (audio)\n[dshow] Alternative name \"@audio-1\"\n";
+        assert_eq!(
+            resolve_dshow_name(inventory, "Microphone").unwrap(),
+            "@audio-1"
+        );
+        assert!(resolve_dshow_name(inventory, "Camera").is_err());
+        assert!(resolve_dshow_name(inventory, "Missing").is_err());
+        let duplicate = format!(
+            "{inventory}[dshow] \"Microphone\" (audio)\n[dshow] Alternative name \"@audio-2\"\n"
+        );
+        assert!(resolve_dshow_name(&duplicate, "Microphone").is_err());
+        let aliased = format!(
+            "{inventory}[dshow] \"Other\" (audio)\n[dshow] Alternative name \"@audio-1\"\n"
+        );
+        assert!(resolve_dshow_name(&aliased, "Microphone").is_err());
+        for target in [
+            "@audio:video=Camera",
+            "Microphone=Other",
+            "Microphone:Other",
+        ] {
+            let injected =
+                format!("[dshow] \"Microphone\" (audio)\n[dshow] Alternative name \"{target}\"\n");
+            assert!(resolve_dshow_name(&injected, "Microphone").is_err());
+        }
+        assert!(
+            resolve_target("must-not-spawn", "microphone:avfoundation:1")
+                .unwrap_err()
+                .to_string()
+                .contains("unbound device index")
+        );
+    }
+
     #[test]
     #[ignore = "owned child fixture launched explicitly by the lifecycle test"]
     fn capture_worker_child() {

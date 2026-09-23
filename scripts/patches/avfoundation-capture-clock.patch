@@ -1,20 +1,49 @@
 --- a/libavdevice/avfoundation.m
 +++ b/libavdevice/avfoundation.m
-@@ -107,6 +107,10 @@
+@@ -35,6 +35,7 @@
+ #include "libavutil/avstring.h"
+ #include "libavformat/demux.h"
+ #include "libavformat/internal.h"
++#include "libavformat/url.h"
+ #include "libavutil/internal.h"
+ #include "libavutil/parseutils.h"
+ #include "libavutil/time.h"
+@@ -89,6 +90,11 @@
+     int             frames_captured;
+     int             audio_frames_captured;
+     pthread_mutex_t frame_lock;
++    pthread_cond_t  audio_ready;
++    int             frame_lock_initialized;
++    int             audio_ready_initialized;
++    dispatch_queue_t audio_delegate_queue;
++    int             audio_closing;
+     id              avf_delegate;
+     id              avf_audio_delegate;
+ 
+@@ -107,6 +113,12 @@
      int             video_stream_index;
      int             audio_device_index;
      int             audio_stream_index;
 +    int             videorc_audio_clock;
++    char            *videorc_audio_uid;
 +    CMTime          audio_clock_host;
 +    CMTime          audio_clock_callback;
 +    int             audio_clock_valid;
++    uint64_t        audio_clock_overwritten;
  
      char            *url;
      char            *video_filename;
-@@ -278,6 +282,24 @@
+@@ -274,11 +286,32 @@
+     lock_frames(_context);
+ 
+     if (_context->current_audio_frame != nil) {
++        if (_context->videorc_audio_clock)
++            ++_context->audio_clock_overwritten;
+         CFRelease(_context->current_audio_frame);
      }
  
      _context->current_audio_frame = (CMSampleBufferRef)CFRetain(audioFrame);
+-
 +    /* Replace the mapping under the same lock as the retained buffer. Never
 +     * export metadata for an overwritten buffer as if it reached the reader. */
 +    if (_context->videorc_audio_clock) {
@@ -33,20 +62,192 @@
 +                                         CMTIME_IS_NUMERIC(_context->audio_clock_callback);
 +        }
 +    }
- 
++
++    pthread_cond_signal(&_context->audio_ready);
      unlock_frames(_context);
  
-@@ -1120,6 +1142,9 @@
+     ++_context->audio_frames_captured;
+@@ -288,7 +321,22 @@
+ 
+ static void destroy_context(AVFContext* ctx)
+ {
++    if (ctx->frame_lock_initialized) {
++        lock_frames(ctx);
++        ctx->audio_closing = 1;
++        if (ctx->audio_ready_initialized)
++            pthread_cond_broadcast(&ctx->audio_ready);
++        unlock_frames(ctx);
++    }
++    /* Stop accepting callbacks, then drain the exact serial delegate queue.
++     * Never hold frame_lock while waiting for a queued callback to finish. */
++    [ctx->audio_output setSampleBufferDelegate:nil queue:NULL];
+     [ctx->capture_session stopRunning];
++    if (ctx->audio_delegate_queue) {
++        dispatch_sync(ctx->audio_delegate_queue, ^{});
++        dispatch_release(ctx->audio_delegate_queue);
++        ctx->audio_delegate_queue = NULL;
++    }
+ 
+     [ctx->capture_session release];
+     [ctx->video_output    release];
+@@ -305,10 +353,21 @@
+     av_freep(&ctx->url);
+     av_freep(&ctx->audio_buffer);
+ 
+-    pthread_mutex_destroy(&ctx->frame_lock);
++    if (ctx->audio_ready_initialized) {
++        pthread_cond_destroy(&ctx->audio_ready);
++        ctx->audio_ready_initialized = 0;
++    }
++    if (ctx->frame_lock_initialized) {
++        pthread_mutex_destroy(&ctx->frame_lock);
++        ctx->frame_lock_initialized = 0;
++    }
+ 
+     if (ctx->current_frame) {
+         CFRelease(ctx->current_frame);
++    }
++    if (ctx->current_audio_frame) {
++        CFRelease(ctx->current_audio_frame);
++        ctx->current_audio_frame = nil;
+     }
+ }
+ 
+@@ -615,8 +674,10 @@
+     ctx->avf_audio_delegate = [[AVFAudioReceiver alloc] initWithContext:ctx];
+ 
+     queue = dispatch_queue_create("avf_audio_queue", NULL);
++    if (!queue)
++        return 1;
++    ctx->audio_delegate_queue = queue;
+     [ctx->audio_output setSampleBufferDelegate:ctx->avf_audio_delegate queue:queue];
+-    dispatch_release(queue);
+ 
+     if ([ctx->capture_session canAddOutput:ctx->audio_output]) {
+         [ctx->capture_session addOutput:ctx->audio_output];
+@@ -821,6 +882,25 @@
+ #endif
+ }
+ 
++static char *videorc_audio_uid_hex(AVCaptureDevice *device)
++{
++    const unsigned char *uid = (const unsigned char *)[[device uniqueID] UTF8String];
++    static const char hex[] = "0123456789abcdef";
++    size_t length = uid ? strlen((const char *)uid) : 0;
++    char *encoded;
++    if (!length || length > 1024)
++        return NULL;
++    encoded = av_malloc(length * 2 + 1);
++    if (!encoded)
++        return NULL;
++    for (size_t i = 0; i < length; ++i) {
++        encoded[2 * i] = hex[uid[i] >> 4];
++        encoded[2 * i + 1] = hex[uid[i] & 15];
++    }
++    encoded[length * 2] = 0;
++    return encoded;
++}
++
+ static int avf_read_header(AVFormatContext *s)
+ {
+     int ret = 0;
+@@ -835,7 +915,12 @@
+ 
+     ctx->num_video_devices = [devices count] + [devices_muxed count];
+ 
+-    pthread_mutex_init(&ctx->frame_lock, NULL);
++    ret = pthread_mutex_init(&ctx->frame_lock, NULL);
++    if (ret) { ret = AVERROR(ret); goto fail; }
++    ctx->frame_lock_initialized = 1;
++    ret = pthread_cond_init(&ctx->audio_ready, NULL);
++    if (ret) { ret = AVERROR(ret); goto fail; }
++    ctx->audio_ready_initialized = 1;
+ 
+ #if !TARGET_OS_IPHONE && __MAC_OS_X_VERSION_MIN_REQUIRED >= 1070
+     CGGetActiveDisplayList(0, NULL, &num_screens);
+@@ -871,6 +956,11 @@
+             const char *name = [[device localizedName] UTF8String];
+             int index  = [devices indexOfObject:device];
+             av_log(ctx, AV_LOG_INFO, "[%d] %s\n", index, name);
++            char *uid = videorc_audio_uid_hex(device);
++            if (uid) {
++                av_log(ctx, AV_LOG_INFO, "VIDEORC_AVF_DEVICE index=%d uid_hex=%s\n", index, uid);
++                av_free(uid);
++            }
+         }
+          goto fail;
+     }
+@@ -988,8 +1078,25 @@
+         }
+     }
+ 
++    // Resolve a stable identity in the same enumeration that supplies the
++    // actual AVCaptureDevice. Never reinterpret an old index as a new device.
++    if (ctx->videorc_audio_uid) {
++        int matches = 0;
++        for (AVCaptureDevice *device in getDevicesWithMediaType(AVMediaTypeAudio)) {
++            char *uid = videorc_audio_uid_hex(device);
++            if (uid && !strcmp(uid, ctx->videorc_audio_uid)) {
++                audio_device = device;
++                ++matches;
++            }
++            av_free(uid);
++        }
++        if (matches != 1) {
++            av_log(ctx, AV_LOG_ERROR, "Requested audio identity is missing or ambiguous\n");
++            ret = AVERROR(ENODEV);
++            goto fail;
++        }
+     // get audio device
+-    if (ctx->audio_device_index >= 0) {
++    } else if (ctx->audio_device_index >= 0) {
+         NSArray *devices = getDevicesWithMediaType(AVMediaTypeAudio);
+ 
+         if (ctx->audio_device_index >= [devices count]) {
+@@ -1120,10 +1227,42 @@
  {
      AVFContext* ctx = (AVFContext*)s->priv_data;
  
 +    int emit_audio_clock = 0;
 +    int64_t clock_host_ns = 0, clock_callback_ns = 0, clock_frames = 0;
 +    double clock_rate = 0;
++    uint64_t clock_overwritten = 0;
      do {
          CVImageBufferRef image_buffer;
          CMBlockBufferRef block_buffer;
-@@ -1249,6 +1274,36 @@
+         lock_frames(ctx);
++
++        /* This capture-only protocol needs callback wakeup. Returning EAGAIN
++         * makes ffmpeg_demux sleep 10ms and overwrite a 10.67ms audio callback.
++         * Keep one bounded latest frame; callback never waits for the reader.
++         * Relative timeout uses Darwin monotonic time, independent of wall jumps. */
++        if (ctx->videorc_audio_clock && !ctx->video_output) {
++            const int64_t deadline = av_gettime_relative() + 100000;
++            while (!ctx->current_audio_frame && !ctx->audio_closing && !ctx->observed_quit) {
++                const int64_t remaining_us = deadline - av_gettime_relative();
++                if (ff_check_interrupt(&s->interrupt_callback)) {
++                    unlock_frames(ctx);
++                    return AVERROR_EXIT;
++                }
++                if (remaining_us <= 0)
++                    break;
++                const struct timespec wait = { .tv_sec = 0, .tv_nsec = remaining_us * 1000 };
++                int wait_result = pthread_cond_timedwait_relative_np(&ctx->audio_ready,
++                                                                   &ctx->frame_lock, &wait);
++                if (wait_result && wait_result != ETIMEDOUT) {
++                    unlock_frames(ctx);
++                    return AVERROR(wait_result);
++                }
++            }
++            if (ctx->audio_closing || ff_check_interrupt(&s->interrupt_callback)) {
++                unlock_frames(ctx);
++                return AVERROR_EXIT;
++            }
++        }
+ 
+         if (ctx->current_frame != nil) {
+             int status;
+@@ -1249,6 +1388,37 @@
                  }
              }
  
@@ -78,28 +279,30 @@
 +                clock_callback_ns = callback.value;
 +                clock_frames = CMSampleBufferGetNumSamples(ctx->current_audio_frame);
 +                clock_rate = format->mSampleRate;
++                clock_overwritten = ctx->audio_clock_overwritten;
 +            }
 +
              CFRelease(ctx->current_audio_frame);
              ctx->current_audio_frame = nil;
          } else {
-@@ -1264,6 +1319,12 @@
+@@ -1264,6 +1434,12 @@
          unlock_frames(ctx);
      } while (!pkt->data);
  
 +    /* Logging may backpressure, but must never hold the capture callback lock. */
 +    if (emit_audio_clock)
 +        av_log(s, AV_LOG_INFO,
-+               "VIDEORC_AVF_CLOCK version=1 pts_us=%lld host_ns=%lld callback_ns=%lld frames=%lld rate=%.0f\n",
++               "VIDEORC_AVF_CLOCK version=1 pts_us=%lld host_ns=%lld callback_ns=%lld frames=%lld rate=%.0f overwritten=%llu\n",
 +               (long long)pkt->pts, (long long)clock_host_ns, (long long)clock_callback_ns,
-+               (long long)clock_frames, clock_rate);
++               (long long)clock_frames, clock_rate, (unsigned long long)clock_overwritten);
      return 0;
  }
  
-@@ -1275,6 +1336,7 @@
+@@ -1275,6 +1451,8 @@
  }
  
  static const AVOption options[] = {
++    { "videorc_audio_uid", "select exact stable audio UID (lowercase UTF-8 hex)", offsetof(AVFContext, videorc_audio_uid), AV_OPT_TYPE_STRING, {.str=NULL}, 0, 0, AV_OPT_FLAG_DECODING_PARAM },
 +    { "videorc_audio_clock", "export exact packet capture clock metadata (Videorc AVF clock protocol 1)", offsetof(AVFContext, videorc_audio_clock), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
      { "list_devices", "list available devices", offsetof(AVFContext, list_devices), AV_OPT_TYPE_BOOL, {.i64=0}, 0, 1, AV_OPT_FLAG_DECODING_PARAM },
      { "video_device_index", "select video device by index for devices with same name (starts at 0)", offsetof(AVFContext, video_device_index), AV_OPT_TYPE_INT, {.i64 = -1}, -1, INT_MAX, AV_OPT_FLAG_DECODING_PARAM },

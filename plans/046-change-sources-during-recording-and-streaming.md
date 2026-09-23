@@ -642,6 +642,12 @@ Requirements:
   protocol version in source/build manifests, retain the patch with the bundle's
   source information, and refuse reuse of a bundle without the required
   capability. A capability probe must check the actual binary.
+- Bind AVFoundation selection to the exact capture device. The patched worker
+  may export/pin the AVCaptureDevice unique ID and require it before opening.
+  `devices.rs` discovery, adapter identity parsing, and their focused tests may
+  use stable UID-backed IDs for patched fallback rows. Legacy numeric IDs must
+  not silently bind to a different index occupant after device inventory changes.
+  This narrow amendment addresses the enumeration/open race found in review.
 - Preserve existing FFmpeg licensing, TLS, dynamic-library and packaging gates.
   Record the exact upstream archive and modifications needed to reproduce the
   binary; future public source distribution must include the patch.
@@ -924,3 +930,62 @@ recording, stream, or release was run during planning.
   Windows adapter integration/build evidence, classified exclusive restoration,
   actual downstream-pressure measurements and physical artifact gates remain.
   S5/S6 and final full recording-studio gates are still required.
+
+### S4 follow-up — exact worker identity and sustained captured intervals
+
+- The Windows adapter now selects the separately packaged capture worker, checks
+  actual DirectShow inventory (rejecting duplicate friendly names and ambiguous
+  or separator-containing targets), and maps exact packet PCM through callback
+  sample/graph/UTC brackets. Backend wall-clock jumps and mapping uncertainty
+  above 2 ms are refused; accepted uncertainty bounds future-frame pacing.
+  Older development bundles without the sibling worker retain legacy startup
+  and explicitly disable live microphone replacement. Physical Windows device
+  acceptance remains outstanding.
+- Actual Windows CI compiled and linked the worker and passed protocol/PE checks,
+  then exposed an incorrect configure component name. Commit `f25b5389` enables
+  `pcm_f32le` (runtime format remains `f32le`) and refuses unmatched explicit
+  configure components before compilation. Its five unit tests passed; the next
+  actual installer build is pending. CI also exposed a quota-test access-rights
+  error: the test now reads GetNamedPipeInfo from the connected read-side handle,
+  releases resources before assertions, and never holds the registry mutex while
+  calling Win32. Production pipe permissions are unchanged.
+- A signed macOS probe exposed two real AVFoundation defects. Metadata parsing
+  now handles CR/LF stats delimiters, exact field tokens and interleaved logging
+  records, with bounded field diagnostics. Instrumentation then proved 86 native
+  callback overwrites matched exactly 44,032 missing PCM frames over five seconds.
+  The maintained opt-in patch now wakes the reader from the callback with one
+  bounded monotonic 100 ms condition deadline, handles spurious wakes/interrupts,
+  and detaches/drains its owned callback queue before synchronization teardown.
+  It does not retimestamp missing intervals or invent captured PCM.
+- Patched discovery emits stable UTF-8 hex device identities. Newly discovered
+  fallback microphones use UID-backed IDs; the worker selects the exact UID in
+  its own enumeration and refuses missing/duplicate identities. Numeric legacy
+  IDs without a retained identity binding are explicitly refused for live
+  replacement rather than rebound to another index occupant. Native fallback
+  resolves one exact microphone name to its UID; initial capture, bus confirmation
+  and microphone metering preserve that UID. No shared Device schema changed.
+- The maintained clean macOS bundle passed build, capability, manifest and signed
+  package gates with patch fingerprint
+  `e6a7c9a31d0b87cda1dee0262609bfad604de82b321a60fe1d5e97e4380d562b`.
+  `s4-signed-avf-wake-uid-v1` and `s4-signed-avf-initial-uid-v1` passed actual
+  native→AVFoundation→None replacements and initial-AVFoundation startup. Both
+  eight-second replacement windows delivered exactly 384,000 captured frames
+  for 384,000 cursor frames; startup AVFoundation delivered 384,480/384,480.
+  Diagnostics showed zero callback overwrites, input PTS gaps and normalized PCM
+  gaps; encoder PID/session stayed constant and cleanup completed.
+- Both signed-probe final MP4s passed structural artifact analysis (start skew
+  0 ms, stop tail 46 ms). Additional `artifact-continuity.json` verifies one 48 kHz
+  stereo track, strictly increasing DTS on every track and four seconds of final
+  None decoded as 384,000 stereo samples with RMS 0. These are structural and
+  source-continuity checks, not measured lip-sync, two-physical-device, or final
+  S6 A/V endurance acceptance. Evidence is under the shared temporary evidence
+  directory; generated media/private device data are not committed.
+- Focused adapter tests passed 11/11 plus its explicitly invoked child fixture;
+  device identity tests passed 12/12; Node suite passed 1454/1454 (253 suites).
+  Logs: `s4-uid-adapter-final-tests.log`, `s4-uid-devices-tests.log`,
+  `s4-worker-final-scripts.log`. Default Rust passed 2245 backend tests, 80
+  helper tests and one wire test (10 ignored): `s4-worker-final-rust.log`.
+  Clippy with warnings denied passed after its one collapsible-if style correction
+  (`s4-worker-final-clippy-v2.log`).
+  Classified exclusive release/restoration, downstream-pressure measurement,
+  S5 visual/UI integration, S6 strict A/V gates and final platform gates remain.

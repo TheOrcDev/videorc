@@ -56,6 +56,9 @@ pub enum MicrophoneInput {
         device_id: u32,
         fifo_path: Option<PathBuf>,
     },
+    AvFoundationUid {
+        uid_hex: String,
+    },
     AvFoundation {
         index: usize,
     },
@@ -240,6 +243,18 @@ pub fn append_microphone_input(
         MicrophoneInput::CoreAudio {
             fifo_path: None, ..
         } => false,
+        MicrophoneInput::AvFoundationUid { uid_hex } => {
+            args.extend([
+                "-f".into(),
+                "avfoundation".into(),
+                "-videorc_audio_uid".into(),
+                uid_hex.clone(),
+                "-i".into(),
+                "none:none".into(),
+            ]);
+            *next_input_index += 1;
+            true
+        }
         MicrophoneInput::AvFoundation { index } => {
             args.extend([
                 "-f".to_string(),
@@ -285,7 +300,7 @@ pub fn microphone_channels(microphone: Option<&MicrophoneInput>) -> u16 {
         Some(MicrophoneInput::CoreAudio { .. } | MicrophoneInput::SessionPcm { .. }) => {
             NATIVE_AUDIO_CHANNELS
         }
-        Some(MicrophoneInput::AvFoundation { .. }) => 1,
+        Some(MicrophoneInput::AvFoundation { .. } | MicrophoneInput::AvFoundationUid { .. }) => 1,
         Some(MicrophoneInput::WindowsDshow { .. }) => NATIVE_AUDIO_CHANNELS,
         None => 0,
     }

@@ -519,22 +519,29 @@ mod windows_tests {
         use windows::Win32::System::Pipes::GetNamedPipeInfo;
         let path = test_pipe_path("audio-quota");
         create_audio(&path).unwrap();
-        let mut quota = 0;
-        {
-            let registry = pipe_registry().lock().unwrap();
-            let handle = registry.get(&path).unwrap();
+        // A read-side client has FILE_READ_ATTRIBUTES; the production server
+        // remains write-only. CreateFile attaches to this exact existing pipe
+        // or fails immediately (no WaitNamedPipe/unbounded lifecycle worker).
+        let observed = (|| -> io::Result<u32> {
+            let reader = std::fs::File::open(&path)?;
+            let mut quota = 0;
             unsafe {
                 GetNamedPipeInfo(
-                    HANDLE(handle.as_raw_handle()),
+                    HANDLE(reader.as_raw_handle()),
                     None,
                     Some(&mut quota),
                     None,
                     None,
                 )
             }
-            .unwrap();
-        }
-        cleanup(&path).unwrap();
+            .map_err(io::Error::other)?;
+            Ok(quota)
+        })();
+        // Cleanup precedes every assertion and no registry mutex is held while
+        // querying Win32 or panicking, so failure cannot poison other tests.
+        let cleaned = cleanup(&path);
+        cleaned.unwrap();
+        let quota = observed.unwrap();
         assert!(!test_pipe_registry_contains(&path).unwrap());
         assert!(
             quota > 0 && quota <= AUDIO_PIPE_BUFFER_BYTES,

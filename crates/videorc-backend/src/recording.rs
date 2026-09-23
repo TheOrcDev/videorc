@@ -43,7 +43,7 @@ use crate::compositor::{
     update_compositor_scene, wait_for_compositor_startup_frames,
 };
 use crate::devices::{
-    find_avfoundation_camera_index, find_avfoundation_microphone_index_for_native_name,
+    find_avfoundation_camera_index, find_avfoundation_microphone_uid_for_native_name,
     find_avfoundation_screen_index, find_avfoundation_screen_index_for_native_display_id,
 };
 use crate::diagnostics::{
@@ -2927,8 +2927,8 @@ async fn start_session_with_timeline(
                 &message,
             );
             capture.microphone = None;
-        } else if let Some(index) =
-            find_avfoundation_microphone_index_for_native_name(&ffmpeg_path, &device_name).await
+        } else if let Some(uid_hex) =
+            find_avfoundation_microphone_uid_for_native_name(&ffmpeg_path, &device_name).await
         {
             let message = format!(
                 "Native microphone {device_name} did not deliver warmup frames; switching this session to the FFmpeg avfoundation fallback input."
@@ -2941,7 +2941,7 @@ async fn start_session_with_timeline(
                 "microphone-fallback-selected",
                 &message,
             );
-            capture.microphone = Some(MicrophoneInput::AvFoundation { index });
+            capture.microphone = Some(MicrophoneInput::AvFoundationUid { uid_hex });
         } else {
             let message = format!(
                 "Native microphone {device_name} did not deliver warmup frames and no matching fallback input was found; omitting the mic FIFO so FFmpeg can finalize video instead of blocking on an empty audio input."
@@ -2958,10 +2958,24 @@ async fn start_session_with_timeline(
         }
         let _ = crate::fifo::cleanup(&prepared.fifo_path);
     }
-    // Capture-only AVFoundation workers supply the same timestamped session bus.
-    // The output encoder never owns a replaceable device input.
-    if let Some(MicrophoneInput::AvFoundation { index }) = capture.microphone.as_ref() {
-        let id = format!("microphone:avfoundation:{index}");
+    // Capture-only workers own replaceable device inputs; the encoder reads
+    // one persistent PCM track. Older Windows development bundles keep their
+    // initial DirectShow path until the separately verified worker is present.
+    let worker_device = match capture.microphone.as_ref() {
+        Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
+            Some(format!("microphone:avfoundation-uid:{uid_hex}"))
+        }
+        Some(MicrophoneInput::AvFoundation { index }) => {
+            Some(format!("microphone:avfoundation:{index}"))
+        }
+        Some(MicrophoneInput::WindowsDshow { .. })
+            if crate::audio_capture_adapter::windows_worker_path(&ffmpeg_path).is_file() =>
+        {
+            params.sources.microphone_id.clone()
+        }
+        _ => None,
+    };
+    if let Some(id) = worker_device {
         let path = native_audio_fifo_path(&session_id);
         let prepared = async {
             create_native_audio_fifo(&path)?;
@@ -2983,7 +2997,7 @@ async fn start_session_with_timeline(
                 capture.microphone = None;
                 state.emit_log(
                     "warn",
-                    format!("AVFoundation microphone unavailable: {error}"),
+                    format!("Capture-worker microphone unavailable: {error}"),
                 );
                 let _ = emit_health_event(
                     &state,
@@ -4627,6 +4641,9 @@ async fn start_session_with_timeline(
     let mut recording = state.recording.lock().await;
     let mut confirmed_sources = params.sources.clone();
     confirmed_sources.microphone_id = match capture.microphone.as_ref() {
+        Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
+            Some(format!("microphone:avfoundation-uid:{uid_hex}"))
+        }
         Some(MicrophoneInput::CoreAudio { device_id, .. }) => {
             Some(format!("microphone:coreaudio:{device_id}"))
         }
@@ -4647,8 +4664,14 @@ async fn start_session_with_timeline(
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         sources.start(session_id.clone(), confirmed_sources);
         sources.set_output_process_id(pending_active.pid);
-        if cfg!(target_os = "macos") && pending_active.native_audio.is_some() {
+        if pending_active.native_audio.is_some()
+            && (cfg!(target_os = "macos")
+                || (cfg!(target_os = "windows")
+                    && crate::audio_capture_adapter::windows_worker_path(&ffmpeg_path).is_file()))
+        {
             sources.enable_microphone();
+        } else if cfg!(target_os = "windows") {
+            sources.microphone_unavailable("Live microphone replacement requires the verified capture worker. This session keeps its initial microphone input.");
         }
         sources
             .snapshot(&session_id)
@@ -10222,6 +10245,11 @@ fn duplicate_capture_source_label(kind: &str, source_id: &str) -> String {
 
 fn resolve_microphone_input(microphone_id: Option<&str>) -> Option<MicrophoneInput> {
     let microphone_id = microphone_id?;
+    if let Some(uid) = crate::devices::parse_avfoundation_microphone_uid(microphone_id) {
+        return Some(MicrophoneInput::AvFoundationUid {
+            uid_hex: uid.to_owned(),
+        });
+    }
     parse_coreaudio_microphone_id(microphone_id)
         .map(|device_id| MicrophoneInput::CoreAudio {
             device_id,

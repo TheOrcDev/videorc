@@ -20,6 +20,7 @@ use crate::screen_capture::{list_native_capture_sources, parse_screencapturekit_
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvFoundationDevice {
+    pub uid_hex: Option<String>,
     pub index: usize,
     pub name: String,
     pub kind: AvFoundationDeviceKind,
@@ -381,37 +382,6 @@ pub async fn find_avfoundation_camera_index(ffmpeg_path: &str, camera_name: &str
         .map(|device| device.index)
 }
 
-pub async fn find_avfoundation_microphone_index_for_native_name(
-    ffmpeg_path: &str,
-    microphone_name: &str,
-) -> Option<usize> {
-    let devices = probe_avfoundation_devices(ffmpeg_path).await.ok()?;
-    find_avfoundation_microphone_index_for_name(&devices, microphone_name)
-}
-
-pub fn find_avfoundation_microphone_index_for_name(
-    av_devices: &[AvFoundationDevice],
-    microphone_name: &str,
-) -> Option<usize> {
-    let normalized_microphone_name = normalize_device_name(microphone_name);
-    let audio_devices = av_devices
-        .iter()
-        .filter(|device| device.kind == AvFoundationDeviceKind::Audio)
-        .collect::<Vec<_>>();
-
-    audio_devices
-        .iter()
-        .find(|device| normalize_device_name(&device.name) == normalized_microphone_name)
-        .or_else(|| {
-            audio_devices.iter().find(|device| {
-                let normalized_name = normalize_device_name(&device.name);
-                normalized_name.contains(&normalized_microphone_name)
-                    || normalized_microphone_name.contains(&normalized_name)
-            })
-        })
-        .map(|device| device.index)
-}
-
 fn normalize_device_name(name: &str) -> String {
     let trimmed = name.trim();
     trimmed
@@ -453,15 +423,14 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
         );
     }
 
-    let Some(index) = parse_avfoundation_id(microphone_id) else {
+    let Some(uid) = parse_avfoundation_microphone_uid(microphone_id) else {
         return AudioMeterResult {
             status: AudioMeterStatus::Unavailable,
             level: None,
             peak_db: None,
             mean_db: None,
             message: Some(
-                "Selected microphone is not a native CoreAudio or FFmpeg avfoundation input."
-                    .to_string(),
+                "Select the microphone again to confirm its stable device identity.".to_string(),
             ),
         };
     };
@@ -473,10 +442,12 @@ pub async fn sample_audio_meter(params: AudioMeterParams) -> AudioMeterResult {
             "-hide_banner",
             "-f",
             "avfoundation",
+            "-videorc_audio_uid",
+            uid,
             "-t",
             "1",
             "-i",
-            &format!(":{index}"),
+            "none:none",
             "-af",
             "volumedetect",
             "-f",
@@ -722,14 +693,6 @@ pub async fn probe_avfoundation_devices_uncached(
     }
 }
 
-fn parse_avfoundation_id(id: &str) -> Option<usize> {
-    id.strip_prefix("microphone:avfoundation:")
-        .or_else(|| id.strip_prefix("camera:avfoundation:"))
-        .or_else(|| id.strip_prefix("screen:avfoundation:"))?
-        .parse()
-        .ok()
-}
-
 fn parse_volume_db(text: &str, label: &str) -> Option<f64> {
     text.lines().find_map(|line| {
         let (_, value) = line.split_once(label)?;
@@ -744,7 +707,7 @@ fn db_to_level(db: f64) -> f64 {
 
 // FFmpeg avfoundation microphones duplicate every CoreAudio input and exist
 // as the internal silent-mic retry path: recording resolves their index by
-// name at session time (find_avfoundation_microphone_index_for_native_name),
+// exact name to stable identity at session time,
 // never through picker rows. Publishing them while a native input was
 // available doubled every microphone in the picker and made a broken
 // "Fallback - X" row the fresh-profile default, so they are listed only when
@@ -765,7 +728,7 @@ fn avfoundation_microphone_picker_devices(
 
 fn avfoundation_microphone_device(device: &AvFoundationDevice) -> Device {
     Device {
-        id: format!("microphone:avfoundation:{}", device.index),
+        id: device.uid_hex.as_ref().map(|uid| format!("microphone:avfoundation-uid:{uid}")).unwrap_or_else(|| format!("microphone:avfoundation:{}", device.index)),
         name: device.name.clone(),
         kind: DeviceKind::Microphone,
         status: DeviceStatus::Available,
@@ -788,8 +751,23 @@ fn first_nonempty_line(text: &str) -> Option<String> {
 pub fn parse_avfoundation_devices(text: &str) -> Vec<AvFoundationDevice> {
     let mut section: Option<AvFoundationDeviceKind> = None;
     let mut devices = Vec::new();
+    let mut identities = std::collections::BTreeMap::<usize, Vec<String>>::new();
 
     for line in text.lines() {
+        if let Some((_, fields)) = line.split_once("VIDEORC_AVF_DEVICE ") {
+            let index = fields
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("index="))
+                .and_then(|value| value.parse::<usize>().ok());
+            let uid = fields
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("uid_hex="))
+                .filter(|uid| valid_avfoundation_uid_hex(uid));
+            if let (Some(index), Some(uid)) = (index, uid) {
+                identities.entry(index).or_default().push(uid.into());
+            }
+            continue;
+        }
         if line.contains("AVFoundation video devices") {
             section = Some(AvFoundationDeviceKind::Video);
             continue;
@@ -805,11 +783,63 @@ pub fn parse_avfoundation_devices(text: &str) -> Vec<AvFoundationDevice> {
         };
 
         if let Some((index, name)) = parse_indexed_device_line(line) {
-            devices.push(AvFoundationDevice { index, name, kind });
+            devices.push(AvFoundationDevice {
+                index,
+                name,
+                kind,
+                uid_hex: None,
+            });
         }
     }
 
+    for device in &mut devices {
+        if device.kind == AvFoundationDeviceKind::Audio
+            && let Some(identities) = identities.get(&device.index)
+            && identities.len() == 1
+        {
+            device.uid_hex = Some(identities[0].clone());
+        }
+    }
     devices
+}
+
+pub(crate) fn valid_avfoundation_uid_hex(uid: &str) -> bool {
+    !uid.is_empty()
+        && uid.len() <= 2048
+        && uid.len().is_multiple_of(2)
+        && uid
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+pub(crate) fn parse_avfoundation_microphone_uid(id: &str) -> Option<&str> {
+    id.strip_prefix("microphone:avfoundation-uid:")
+        .filter(|uid| valid_avfoundation_uid_hex(uid))
+}
+
+pub(crate) async fn find_avfoundation_microphone_uid_for_native_name(
+    ffmpeg: &str,
+    name: &str,
+) -> Option<String> {
+    let devices = probe_avfoundation_devices_uncached(ffmpeg).await.ok()?;
+    avfoundation_microphone_uid_for_name(&devices, name)
+}
+
+fn avfoundation_microphone_uid_for_name(
+    devices: &[AvFoundationDevice],
+    name: &str,
+) -> Option<String> {
+    let matches: Vec<_> = devices
+        .iter()
+        .filter(|device| {
+            device.kind == AvFoundationDeviceKind::Audio
+                && normalize_device_name(&device.name) == normalize_device_name(name)
+        })
+        .collect();
+    if matches.len() != 1 {
+        return None;
+    }
+    matches[0].uid_hex.clone()
 }
 
 fn parse_indexed_device_line(line: &str) -> Option<(usize, String)> {
@@ -832,6 +862,7 @@ mod tests {
 
     fn probe_fixture() -> Vec<AvFoundationDevice> {
         vec![AvFoundationDevice {
+            uid_hex: None,
             index: 0,
             name: "FaceTime HD Camera".to_string(),
             kind: AvFoundationDeviceKind::Video,
@@ -900,16 +931,19 @@ mod tests {
             devices,
             vec![
                 AvFoundationDevice {
+                    uid_hex: None,
                     index: 0,
                     name: "FaceTime HD Camera".to_string(),
                     kind: AvFoundationDeviceKind::Video,
                 },
                 AvFoundationDevice {
+                    uid_hex: None,
                     index: 1,
                     name: "Capture screen 0".to_string(),
                     kind: AvFoundationDeviceKind::Video,
                 },
                 AvFoundationDevice {
+                    uid_hex: None,
                     index: 0,
                     name: "MacBook Pro Microphone".to_string(),
                     kind: AvFoundationDeviceKind::Audio,
@@ -922,11 +956,13 @@ mod tests {
     fn avfoundation_microphones_are_hidden_from_picker_when_native_exists() {
         let av_devices = vec![
             AvFoundationDevice {
+                uid_hex: None,
                 index: 0,
                 name: "FaceTime HD Camera".to_string(),
                 kind: AvFoundationDeviceKind::Video,
             },
             AvFoundationDevice {
+                uid_hex: None,
                 index: 2,
                 name: "MacBook Pro Microphone".to_string(),
                 kind: AvFoundationDeviceKind::Audio,
@@ -943,11 +979,13 @@ mod tests {
     fn avfoundation_microphones_are_listed_plain_when_native_is_unavailable() {
         let av_devices = vec![
             AvFoundationDevice {
+                uid_hex: None,
                 index: 0,
                 name: "FaceTime HD Camera".to_string(),
                 kind: AvFoundationDeviceKind::Video,
             },
             AvFoundationDevice {
+                uid_hex: None,
                 index: 2,
                 name: "MacBook Pro Microphone".to_string(),
                 kind: AvFoundationDeviceKind::Audio,
@@ -969,31 +1007,41 @@ mod tests {
     }
 
     #[test]
-    fn finds_avfoundation_microphone_by_native_name() {
-        let devices = vec![
-            AvFoundationDevice {
-                index: 0,
-                name: "FaceTime HD Camera".to_string(),
-                kind: AvFoundationDeviceKind::Video,
-            },
-            AvFoundationDevice {
-                index: 4,
-                name: "MacBook Pro Microphone".to_string(),
-                kind: AvFoundationDeviceKind::Audio,
-            },
-        ];
-
-        assert_eq!(
-            find_avfoundation_microphone_index_for_name(&devices, "MacBook Pro Microphone"),
-            Some(4)
+    fn stable_microphone_identity_survives_index_reorder_and_rejects_ambiguous_names() {
+        let listing = "[avf] AVFoundation audio devices:\n[avf] [1] Desk microphone\n[avf] VIDEORC_AVF_DEVICE index=1 uid_hex=6465736b\n";
+        let original = parse_avfoundation_devices(listing);
+        let reordered = parse_avfoundation_devices(
+            &listing.replace("[1]", "[3]").replace("index=1", "index=3"),
         );
         assert_eq!(
-            find_avfoundation_microphone_index_for_name(
-                &devices,
-                "Fallback - MacBook Pro Microphone"
-            ),
-            Some(4)
+            avfoundation_microphone_device(&original[0]).id,
+            "microphone:avfoundation-uid:6465736b"
         );
+        assert_eq!(
+            avfoundation_microphone_device(&original[0]).id,
+            avfoundation_microphone_device(&reordered[0]).id
+        );
+        assert_eq!(
+            avfoundation_microphone_uid_for_name(&original, "Desk microphone"),
+            Some("6465736b".into())
+        );
+        assert_eq!(
+            avfoundation_microphone_uid_for_name(&original, "Desk"),
+            None
+        );
+        let mut duplicate = original.clone();
+        duplicate.extend(reordered);
+        assert_eq!(
+            avfoundation_microphone_uid_for_name(&duplicate, "Desk microphone"),
+            None
+        );
+        let ambiguous = parse_avfoundation_devices(&format!(
+            "{listing}[avf] VIDEORC_AVF_DEVICE index=1 uid_hex=6f74686572\n"
+        ));
+        assert_eq!(ambiguous[0].uid_hex, None);
+        for invalid in ["", "a", "AA", "zz", "aa:video=1"] {
+            assert!(!valid_avfoundation_uid_hex(invalid));
+        }
     }
 
     #[test]
@@ -1102,11 +1150,13 @@ mod tests {
         let devices = avfoundation_screen_devices(
             &[
                 AvFoundationDevice {
+                    uid_hex: None,
                     index: 1,
                     name: "Capture screen 0".to_string(),
                     kind: AvFoundationDeviceKind::Video,
                 },
                 AvFoundationDevice {
+                    uid_hex: None,
                     index: 2,
                     name: "FaceTime HD Camera".to_string(),
                     kind: AvFoundationDeviceKind::Video,
@@ -1124,6 +1174,7 @@ mod tests {
     fn avfoundation_screen_sources_require_screen_recording_permission_too() {
         let devices = avfoundation_screen_devices(
             &[AvFoundationDevice {
+                uid_hex: None,
                 index: 1,
                 name: "Capture screen 0".to_string(),
                 kind: AvFoundationDeviceKind::Video,
@@ -1167,11 +1218,13 @@ mod tests {
         ];
         let av_devices = vec![
             AvFoundationDevice {
+                uid_hex: None,
                 index: 3,
                 name: "Capture screen 0".to_string(),
                 kind: AvFoundationDeviceKind::Video,
             },
             AvFoundationDevice {
+                uid_hex: None,
                 index: 7,
                 name: "Capture screen 1".to_string(),
                 kind: AvFoundationDeviceKind::Video,
