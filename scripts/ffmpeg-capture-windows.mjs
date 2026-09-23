@@ -147,14 +147,26 @@ export function expectedManifest(root = repo) {
   }
 }
 
-export function verifyWindowsCaptureManifest(bundle, expected = expectedManifest()) {
+/**
+ * `executableSha256` pins the worker as built. Release signing rewrites the
+ * executable (Authenticode), so a signed bundle cannot match it: pass
+ * `{ signed: true }` there, and prove the worker by its signature instead
+ * (the release validators check it like Videorc.exe). The unsigned bytes are
+ * still proven before signing, by the packaging preflight and the signed
+ * handoff's file digests; every other manifest field is checked either way.
+ */
+export function verifyWindowsCaptureManifest(
+  bundle,
+  expected = expectedManifest(),
+  { signed = false } = {}
+) {
   const manifest = JSON.parse(readFileSync(join(bundle, 'capture/MANIFEST.json'), 'utf8'))
   for (const [key, value] of Object.entries(expected)) {
     if (JSON.stringify(manifest[key]) !== JSON.stringify(value))
       throw new Error(`Capture worker ${key} does not match the maintained build.`)
   }
   const binary = readFileSync(join(bundle, 'bin/ffmpeg-capture.exe'))
-  if (manifest.executableSha256 !== sha(binary))
+  if (!signed && manifest.executableSha256 !== sha(binary))
     throw new Error('Capture executable hash does not match its manifest.')
   if (
     sha(readFileSync(join(bundle, 'capture/source-patches/dshow-capture-clock.patch'))) !==

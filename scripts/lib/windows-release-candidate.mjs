@@ -385,6 +385,7 @@ export function validateDownloadedWindowsCandidate({
   actualInstallerSizeBytes,
   appUpdateYml,
   appSignature,
+  captureSignature,
   expectedInstallerSha256,
   expectedPublisher,
   expectedReleaseId,
@@ -445,6 +446,21 @@ export function validateDownloadedWindowsCandidate({
     'app-signature-timestamp',
     appSignature?.timestampPresent === true,
     'Packaged Videorc.exe Authenticode signature must include a timestamp countersignature.'
+  )
+  requireCheck(
+    'capture-signature-status',
+    captureSignature?.status === 'Valid',
+    `Packaged ffmpeg-capture.exe Authenticode status must be Valid, got ${captureSignature?.status ?? 'missing'}.`
+  )
+  requireCheck(
+    'capture-signature-publisher',
+    captureSignature?.publisher === expectedPublisher,
+    'Packaged ffmpeg-capture.exe Authenticode publisher does not match the expected publisher.'
+  )
+  requireCheck(
+    'capture-signature-timestamp',
+    captureSignature?.timestampPresent === true,
+    'Packaged ffmpeg-capture.exe Authenticode signature must include a timestamp countersignature.'
   )
   requireCheck(
     'installer-sha256',

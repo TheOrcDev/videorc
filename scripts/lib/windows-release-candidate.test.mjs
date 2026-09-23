@@ -208,6 +208,7 @@ describe('downloaded Windows candidate validation', () => {
       appUpdateYml:
         'provider: generic\nurl: https://www.videorc.com/api/updates/\npublisherName: Videorc Test Publisher\n',
       appSignature: { publisher, status: 'Valid', timestampPresent: true },
+      captureSignature: { publisher, status: 'Valid', timestampPresent: true },
       expectedInstallerSha256: paths.manifest.sha256,
       expectedPublisher: publisher,
       expectedReleaseId: paths.manifest.releaseId,
@@ -240,6 +241,7 @@ describe('downloaded Windows candidate validation', () => {
       appUpdateYml:
         'provider: generic\nurl: https://www.videorc.com/api/updates/\npublisherName: Videorc Test Publisher\n',
       appSignature: { publisher, status: 'Valid', timestampPresent: true },
+      captureSignature: { publisher, status: 'Valid', timestampPresent: true },
       expectedInstallerSha256: paths.manifest.sha256,
       expectedPublisher: publisher,
       expectedReleaseId: paths.manifest.releaseId,
@@ -271,6 +273,14 @@ describe('downloaded Windows candidate validation', () => {
       [
         { appSignature: { publisher: 'Other', status: 'Valid', timestampPresent: true } },
         'app-signature-publisher'
+      ],
+      [
+        { captureSignature: { publisher: 'Other', status: 'Valid', timestampPresent: true } },
+        'capture-signature-publisher'
+      ],
+      [
+        { captureSignature: { publisher, status: 'NotSigned', timestampPresent: true } },
+        'capture-signature-status'
       ],
       [{ feedYml: 'version: 0.10.0\npath: stale.exe\n' }, 'candidate-feed-artifact-mismatch'],
       [

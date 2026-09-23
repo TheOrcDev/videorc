@@ -20,6 +20,7 @@ export function validateWindowsReleaseFacts({
   actualSizeBytes,
   appSignature,
   appUpdateYml,
+  captureSignature,
   expectedPublisher,
   expectedSourceCommit,
   feedYml,
@@ -69,6 +70,13 @@ export function validateWindowsReleaseFacts({
       appSignature?.publisher === expectedPublisher &&
       appSignature?.timestampPresent === true,
     'Packaged Videorc.exe must have a valid timestamped signature from the exact expected publisher.'
+  )
+  requireCheck(
+    'capture-signature',
+    captureSignature?.status === 'Valid' &&
+      captureSignature?.publisher === expectedPublisher &&
+      captureSignature?.timestampPresent === true,
+    'Packaged ffmpeg-capture.exe must have a valid timestamped signature from the exact expected publisher.'
   )
   requireCheck(
     'artifact-sha256',
