@@ -1,5 +1,5 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join, relative } from 'node:path'
+import { join, relative, sep } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 // Plan 050 (D5, D6, S20): the renderer stays on real glass and native feel.
@@ -52,8 +52,9 @@ function withoutComments(source: string): string {
   return source.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:'"`])\/\/.*$/gm, '$1')
 }
 
+// Forward slashes on every platform, so the allowlist matches on Windows too.
 const files = rendererFiles().map((path) => ({
-  path: relative(RENDERER_ROOT, path),
+  path: relative(RENDERER_ROOT, path).split(sep).join('/'),
   code: withoutComments(readFileSync(path, 'utf8'))
 }))
 
