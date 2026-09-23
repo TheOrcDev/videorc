@@ -1,12 +1,10 @@
 // Main-side palette for surfaces that CANNOT read the renderer's CSS tokens:
-// the data-URL windows (Notes, Preview — dark-always by design, they frame
-// video) and BrowserWindow backgroundColor fallbacks. The detached Chat and
-// Captions windows are black glass on macOS (transparent + the renderer's
-// wallpaper underlay) and fall back to this solid base off macOS or when glass
-// is opted out. Values are the
-// solid equivalents of styles.css (the black-glass / porcelain columns) —
-// styles.css is the source of truth; change them together.
-// (.claude/skills/videorc-design documents both.)
+// the Preview frame's data-URL document (dark-always, it frames video) and the
+// BrowserWindow solid bases used off macOS, with VIDEORC_GLASS=0, or when a
+// dark-always window cannot pin its appearance (window-glass.ts). Values are
+// the solid equivalents of styles.css (the black-glass / porcelain columns);
+// styles.css is the source of truth. window-palette.test.ts pins the glass
+// coats to it. (.claude/skills/videorc-design documents both.)
 
 export interface WindowPalette {
   /** Window/body background — solid fallback of the theme's glass base. */
@@ -60,3 +58,22 @@ export const LIGHT_WINDOW_PALETTE: WindowPalette = {
 export function windowPalette(dark: boolean): WindowPalette {
   return dark ? DARK_WINDOW_PALETTE : LIGHT_WINDOW_PALETTE
 }
+
+/**
+ * The docked preview's corner radius, in points: the Studio slot's
+ * `rounded-panel` (styles.css --radius-panel, 12px). The native CAMetalLayer
+ * clips to it so the video and its CSS ground agree; window-palette.test.ts
+ * fails when the two drift.
+ */
+export const DOCKED_PREVIEW_CORNER_RADIUS = 12
+
+/**
+ * The dark glass coats (styles.css `.dark` --glass-window / --glass-content)
+ * for main-side documents that cannot read the stylesheet: the Preview frame
+ * paints both over the OS material (plan 050). window-palette.test.ts fails
+ * when these drift from styles.css.
+ */
+export const DARK_GLASS_COATS = Object.freeze({
+  window: 'oklch(0.13 0.003 286 / 42%)',
+  content: 'oklch(0.13 0.003 286 / 34%)'
+})

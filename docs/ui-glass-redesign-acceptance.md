@@ -1,5 +1,10 @@
 # UI Glass Redesign — Acceptance (Slice 11)
 
+> **Superseded 2026-09-23 (plan 050).** Real macOS vibrancy works on this
+> stack. Every window now sits on an `under-window` material, and the
+> blurred-wallpaper underlay is retired. See
+> `docs/acceptance/2026-09-23-real-glass-calibration.md` and `pnpm probe:ui-glass`.
+
 Executed 2026-06-12 against [ui-glass-redesign-slices.md](./ui-glass-redesign-slices.md). Eleven slices, one commit each, on `main` from `192f48f5` (slice 1) through `440ee3a6` (slice 10).
 
 ## Gates
@@ -9,13 +14,13 @@ Executed 2026-06-12 against [ui-glass-redesign-slices.md](./ui-glass-redesign-sl
 
 ## Performance vs pre-migration baseline (same probe, same synthetic workload)
 
-| Metric | Baseline (pre-slice) | Acceptance | Verdict |
-|---|---|---|---|
-| Renderer CPU | 17.8% | 10.5% | better |
-| Main CPU | 2.3% | 2.2% | unchanged |
-| GPU process CPU | 0.9% | 0.9% | unchanged |
-| Presents | ≈62/s, native-surface | 62.0/s, `probe PASSED` | unchanged |
-| Renderer allocator growth (100s, no-preview mode) | ≈137 MB | 120.9 MB | not worse |
+| Metric                                            | Baseline (pre-slice)  | Acceptance             | Verdict   |
+| ------------------------------------------------- | --------------------- | ---------------------- | --------- |
+| Renderer CPU                                      | 17.8%                 | 10.5%                  | better    |
+| Main CPU                                          | 2.3%                  | 2.2%                   | unchanged |
+| GPU process CPU                                   | 0.9%                  | 0.9%                   | unchanged |
+| Presents                                          | ≈62/s, native-surface | 62.0/s, `probe PASSED` | unchanged |
+| Renderer allocator growth (100s, no-preview mode) | ≈137 MB               | 120.9 MB               | not worse |
 
 The glass theme costs nothing measurable. (The renderer allocator growth is the pre-existing leak under separate investigation — unchanged by the redesign.)
 

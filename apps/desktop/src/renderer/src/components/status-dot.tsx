@@ -5,13 +5,16 @@ import { cn } from '@/lib/utils'
 export type StatusDotTone = 'good' | 'warn' | 'error' | 'neutral'
 
 const toneClass: Record<StatusDotTone, string> = {
-  good: 'bg-success',
-  warn: 'bg-warning',
-  error: 'bg-live',
-  neutral: 'bg-muted-foreground'
+  good: 'tone-success',
+  warn: 'tone-warning',
+  error: 'tone-live',
+  neutral: 'tone-neutral'
 }
 
-/** Ambient status: a small dot (optionally pulsing) + label. Replaces the loud header badges. */
+/**
+ * Ambient status: the glass status dot (plan 050, D9), optionally pulsing,
+ * and a monochrome label. Replaces the loud header badges.
+ */
 export function StatusDot({
   tone = 'neutral',
   label,
@@ -25,18 +28,19 @@ export function StatusDot({
 }): ReactElement {
   return (
     <span
-      className={cn('inline-flex items-center gap-1.5 text-xs text-muted-foreground', className)}
+      className={cn(
+        'inline-flex items-center gap-1.5 text-xs text-muted-foreground',
+        toneClass[tone],
+        className
+      )}
+      data-slot="status-dot"
+      data-tone={tone}
     >
-      <span className="relative flex size-2 shrink-0">
+      <span className="relative flex size-1.5 shrink-0">
         {pulse ? (
-          <span
-            className={cn(
-              'absolute inline-flex size-full animate-ping rounded-full opacity-60',
-              toneClass[tone]
-            )}
-          />
+          <span className="absolute inline-flex size-full rounded-full bg-(--chip-tone) opacity-60 motion-safe:animate-ping" />
         ) : null}
-        <span className={cn('relative inline-flex size-2 rounded-full', toneClass[tone])} />
+        <span className="relative inline-flex size-1.5 rounded-full glass-dot" />
       </span>
       {label ? <span className="truncate capitalize">{label}</span> : null}
     </span>

@@ -20,6 +20,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'capture-page',
   'set-page-zoom',
   'capture-page-alpha',
+  'close-backdrop-window',
   'comments-window-authority-probe',
   'comments-window-capture-page',
   'comments-window-click-message',
@@ -97,6 +98,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'preview-window-state',
   'preview-window-toggle',
   'proof-window-state',
+  'raise-window',
   'resize-window',
   'restore-window',
   'resume-native-preview-surface',
@@ -108,6 +110,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'set-vibrancy',
   'suspend-native-preview-surface',
   'window-bounds-storm',
+  'window-glass-state',
   'windows-preview-os-input-probe',
   'windows-live-audio-harness'
 ])

@@ -341,7 +341,7 @@ export function SceneStage({
       : undefined
   return (
     <div
-      className="flex min-w-0 flex-col rounded-panel border border-border bg-card/40"
+      className="flex min-w-0 flex-col rounded-row border border-border"
       data-videorc-stage-phase={phase}
     >
       <div
@@ -478,7 +478,7 @@ export function SceneStage({
                   className={
                     dragEnabled && editable(source)
                       ? 'cursor-grab active:cursor-grabbing'
-                      : 'cursor-pointer'
+                      : 'cursor-default'
                   }
                   onClick={(event) => {
                     if (

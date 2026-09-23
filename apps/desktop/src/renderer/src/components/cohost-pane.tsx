@@ -274,12 +274,12 @@ export function CohostPane({
   return (
     <Collapsible
       ref={paneRef}
-      className="@container/cohost-pane shrink-0 rounded-row border border-border/60 bg-card/30"
+      className="@container/cohost-pane shrink-0"
       data-slot="cohost-pane"
       open={open}
       onOpenChange={setOpen}
     >
-      <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 overflow-hidden rounded-row px-2.5 py-1.5 text-left transition-colors hover:bg-accent/60 @max-[400px]/cohost-pane:gap-1.5">
+      <CollapsibleTrigger className="group flex w-full min-w-0 items-center gap-2 overflow-hidden px-3 py-1.5 text-left hover:bg-accent/60 @max-[400px]/cohost-pane:gap-1.5">
         <ChevronDownIcon
           aria-hidden
           className="size-3.5 shrink-0 text-muted-foreground transition-transform group-data-[state=closed]:-rotate-90"
@@ -534,7 +534,7 @@ const PANE_NARROW_HIDDEN = '@max-[400px]/cohost-pane:hidden'
 function CohostNotice({ label, children }: { label: string; children: ReactNode }): ReactElement {
   return (
     <div
-      className="flex shrink-0 items-center gap-2 rounded-row border border-border/60 bg-card/30 px-2.5 py-1.5 text-[11px] text-muted-foreground"
+      className="flex shrink-0 items-center gap-2 rounded-row bg-foreground/[0.04] px-2.5 py-1.5 text-[11px] text-muted-foreground"
       data-slot="cohost-notice"
     >
       <CohostIcon aria-hidden className="size-4 shrink-0" weight="duotone" />

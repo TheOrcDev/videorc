@@ -3,8 +3,8 @@ import ReactDOM from 'react-dom/client'
 import { toast } from 'sonner'
 
 import { CommentsReader } from '@/components/comments-reader'
-import { GlassWallpaperUnderlay } from '@/components/glass-wallpaper'
 import { AppErrorBoundary } from '@/components/error-boundary'
+import { WindowFrame } from '@/components/window-frame'
 import type {
   CohostQuestion,
   CohostWindowState,
@@ -303,11 +303,9 @@ function CommentsWindowApp(): ReactElement {
     live && cohost.enabled && cohost.entitled && cohost.consented && cohost.state.status === 'off'
 
   return (
-    <>
-      {/* Same black glass as the main window: blurred wallpaper under the
-          body's single translucent coat, plus the specular sweep. */}
-      <GlassWallpaperUnderlay />
-      <div aria-hidden className="glass-shine pointer-events-none fixed inset-0 z-50" />
+    // Real glass: the OS material under the body's window coat, and the
+    // frame's content coat on top (plan 050), like every other window.
+    <WindowFrame>
       <CommentsReader
         viewerSample={view.mode.kind === 'live' ? viewerSample : null}
         snapshot={snapshot}
@@ -431,7 +429,7 @@ function CommentsWindowApp(): ReactElement {
       {/* The Comments window frames video and is dark-always; sonner needs its
           own host here because this is a separate React root. */}
       <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" theme="dark" />
-    </>
+    </WindowFrame>
   )
 }
 

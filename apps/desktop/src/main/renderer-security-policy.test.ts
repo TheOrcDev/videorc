@@ -8,7 +8,6 @@ import {
   IPC_INVOKE_ROLES,
   RENDERER_DOCUMENT_CSP,
   RendererSecurityRegistry,
-  inlineRendererDocumentCsp,
   nativePreviewSurfaceDocumentCsp,
   rendererDocumentCspWithScriptHash,
   rendererRoleFromArguments,
@@ -277,19 +276,15 @@ describe('renderer security policy', () => {
     expect(AUXILIARY_API_KEYS.captions).not.toContain('cacheChatAvatar')
   })
 
-  it('shares the glass wallpaper feed with the Chat and Captions windows but not Notes', () => {
-    // Chat and Captions draw the same black-glass underlay as the main window.
-    // Notes is a main-built data-URL window and never asks for the wallpaper.
-    for (const role of ['main', 'comments', 'captions'] as const) {
-      expect(roleCanInvokeChannel(role, 'glass:wallpaper:get')).toBe(true)
+  it('keeps the retired glass wallpaper feed out of every window (plan 050)', () => {
+    // Real vibrancy replaced the blurred-wallpaper underlay; no window may
+    // reach the old System Events wallpaper feed.
+    for (const role of ['main', 'comments', 'captions', 'notes'] as const) {
+      expect(roleCanInvokeChannel(role, 'glass:wallpaper:get')).toBe(false)
     }
-    expect(roleCanInvokeChannel('notes', 'glass:wallpaper:get')).toBe(false)
-    for (const role of ['comments', 'captions'] as const) {
-      expect(AUXILIARY_API_KEYS[role]).toEqual(
-        expect.arrayContaining(['getGlassWallpaper', 'onGlassWallpaper', 'onGlassGeometry'])
-      )
+    for (const keys of Object.values(AUXILIARY_API_KEYS)) {
+      expect(keys).not.toContain('getGlassWallpaper')
     }
-    expect(AUXILIARY_API_KEYS.notes).not.toContain('getGlassWallpaper')
   })
 
   it('lets only main and the Chat window pick the highlight corner', () => {
@@ -315,11 +310,12 @@ describe('renderer security policy', () => {
     }
   })
 
-  it('applies a restrictive CSP to every bundled renderer and a nonce to Notes', () => {
+  it('applies a restrictive CSP to every bundled renderer, Notes included', () => {
     for (const document of [
       '../renderer/index.html',
       '../renderer/comments.html',
-      '../renderer/captions.html'
+      '../renderer/captions.html',
+      '../renderer/notes.html'
     ]) {
       const html = source(document)
       expect(html).toContain('http-equiv="Content-Security-Policy"')
@@ -351,12 +347,14 @@ describe('renderer security policy', () => {
       'html.replace(RENDERER_DOCUMENT_CSP, rendererDevelopmentCsp)'
     )
 
-    const nonce = 'abcdefghijklmnopqrstuvwxyz_123456'
-    const inlineCsp = inlineRendererDocumentCsp(nonce)
-    expect(inlineCsp).toContain(`script-src 'nonce-${nonce}'`)
-    expect(inlineCsp).not.toContain("script-src 'unsafe-inline'")
+    // Notes is a bundled renderer (plan 050): no inline document, no nonce.
     const mainSource = source('./index.ts')
-    expect(mainSource).toContain('inlineRendererDocumentCsp(scriptNonce)')
+    expect(mainSource).not.toContain(
+      'data:text/html;charset=utf-8,${encodeURIComponent(\n    notesWindowHtml'
+    )
+    expect(mainSource).toContain("new URL('notes.html', rendererUrl)")
+    // The native preview surface is the one inline document left.
+    const nonce = 'abcdefghijklmnopqrstuvwxyz_123456'
     expect(mainSource).toContain('<script nonce="${scriptNonce}">')
 
     const nativePreviewCsp = nativePreviewSurfaceDocumentCsp(nonce)
@@ -389,7 +387,10 @@ describe('renderer security policy', () => {
     expect(mainSource).toContain(
       "sendElectronEvent(window.webContents, 'notes-window:flush-request'"
     )
-    expect(mainSource).toContain('maxlength="${MAX_NOTES_TEXT_LENGTH}"')
+    // The Notes renderer (plan 050 S4) bounds the text and answers the flush.
+    const notesWindow = source('../renderer/src/components/notes-window.tsx')
+    expect(notesWindow).toContain('maxLength = MAX_NOTES_TEXT_LENGTH')
+    expect(notesWindow).toContain('onNotesFlushRequest?.(() => void save())')
     expect(preload).toContain("subscribe('notes-window:flush-request'")
     expect(apiPolicy).toContain("'onNotesFlushRequest'")
   })

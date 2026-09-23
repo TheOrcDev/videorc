@@ -30,11 +30,11 @@ const CHAT_PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
 }
 
 const CHAT_PLATFORM_TINT: Record<StreamPlatform, string> = {
-  youtube: 'text-[#ff0033]',
-  twitch: 'text-[#a970ff]',
+  youtube: 'text-platform-youtube',
+  twitch: 'text-platform-twitch-ink',
   x: 'text-foreground',
   tiktok: 'text-foreground',
-  instagram: 'text-[#e1306c]',
+  instagram: 'text-platform-instagram',
   custom: 'text-muted-foreground'
 }
 

@@ -69,7 +69,8 @@ describe('CohostStatus', () => {
     const markup = renderStatus({ state: listening({ questions: [question()] }) })
     expect(markup).toContain('data-state-kind="listening"')
     expect(markup).toContain('data-tone="live"')
-    expect(markup).toContain('bg-success')
+    expect(markup).toContain('tone-success')
+    expect(markup).toContain('glass-dot')
     expect(markup).toContain('Orcle · 1 q')
     expect(markup).not.toContain('cohost-typing-dots')
   })
@@ -110,7 +111,7 @@ describe('CohostStatus', () => {
     })
     expect(markup).toContain('Orcle paused · quota')
     expect(markup).toContain('data-tone="muted"')
-    expect(markup).not.toContain('bg-destructive')
+    expect(markup).not.toContain('tone-destructive')
   })
 
   it('flashes the grouped delta in place of the label', () => {

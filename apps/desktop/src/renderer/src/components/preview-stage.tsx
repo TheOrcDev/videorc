@@ -1,7 +1,8 @@
 import { CameraIcon, ExternalLinkIcon, PinIcon, WarningIcon } from '@/components/icons'
-import type { ReactElement, ReactNode } from 'react'
+import type { ReactElement } from 'react'
 
 import { Button } from '@/components/ui/button'
+import { Kbd } from '@/components/ui/kbd'
 import { Switch } from '@/components/ui/switch'
 import { useDockSlotReporter } from '@/hooks/use-dock-slot'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -26,10 +27,6 @@ type PreviewStageProps = {
   previewLiveStatus?: PreviewLiveStatus
   previewSurfaceStatus?: PreviewSurfaceStatus
   nativePreviewSurfaceEnabled?: boolean
-  /** Rendered at the left of the docked frame's control row (session status
-   * badge) — the docked preview stands alone, without the Studio panel header
-   * that normally carries it. */
-  dockedFooterStart?: ReactNode
   onRetry?: () => void
   onOpenPermissions?: (pane: SystemPermissionPane) => void
   className?: string
@@ -44,7 +41,6 @@ export function PreviewStage({
   previewLiveStatus,
   previewSurfaceStatus,
   nativePreviewSurfaceEnabled = false,
-  dockedFooterStart,
   onRetry,
   onOpenPermissions,
   className
@@ -97,7 +93,6 @@ export function PreviewStage({
           height: captureConfig.video.height
         }}
         className={className}
-        footerStart={dockedFooterStart}
         previewSurfaceStatus={previewSurfaceStatus}
         previewWindow={previewWindow}
         permissionAccess={permissionAccess}
@@ -163,7 +158,6 @@ function DockedPreviewFrame({
   previewSurfaceStatus,
   aspect,
   slotRef,
-  footerStart,
   onPopOut,
   onClose,
   permissionAccess,
@@ -174,7 +168,6 @@ function DockedPreviewFrame({
   previewSurfaceStatus?: PreviewSurfaceStatus
   aspect: { width: number; height: number }
   slotRef: (element: HTMLElement | null) => void
-  footerStart?: ReactNode
   onPopOut: () => void
   onClose: () => void
   permissionAccess: PreviewPermissionAccess | null
@@ -206,23 +199,24 @@ function DockedPreviewFrame({
           surface aspect always matches the slot, so it can never be
           squeezed or stretched. */}
       <div
-        className="flex w-full items-center justify-center overflow-hidden rounded-panel bg-[#0D0D0F]"
+        className="flex w-full items-center justify-center overflow-hidden rounded-panel bg-video-ground"
         data-videorc-dock-strip
         style={{ aspectRatio: footprintRatio }}
       >
         <div
           ref={slotRef}
-          /* rounded-panel (18pt) matches the cornerRadius main sends with the
-             docked surface bounds — the native CAMetalLayer now clips itself
-             to the same radius, so the CSS ground and the video agree. */
+          /* rounded-panel (12pt) matches the cornerRadius main sends with the
+             docked surface bounds (DOCKED_PREVIEW_CORNER_RADIUS): the native
+             CAMetalLayer clips itself to the same radius, so the CSS ground
+             and the video agree. A parity test pins the two. */
           className="relative h-full overflow-hidden rounded-panel"
           data-videorc-dock-slot
           style={{ aspectRatio: slotRatio }}
         >
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
             <CameraIcon className="size-8 text-muted-foreground" weight="duotone" />
-            <span className="text-sm font-medium text-[#F4F4F5]">{status.title}</span>
-            <span className="text-xs text-[#A1A1AA]">{status.detail}</span>
+            <span className="text-sm font-medium text-video-ground-foreground">{status.title}</span>
+            <span className="text-xs text-video-ground-muted">{status.detail}</span>
           </div>
         </div>
       </div>
@@ -230,7 +224,6 @@ function DockedPreviewFrame({
           panel around it): session status left, dock controls right, flush
           with the video edges. */}
       <div className="flex items-center justify-end gap-1.5 pt-2">
-        {footerStart ? <div className="mr-auto flex items-center">{footerStart}</div> : null}
         {permissionPane && permissionAccess?.action && onOpenPermissions ? (
           <Button size="sm" variant="outline" onClick={() => onOpenPermissions(permissionPane)}>
             Resolve permission
@@ -345,7 +338,7 @@ function DetachedPreviewCard({
       className={cn(
         // Output-aspect rect (same as the open/docked preview) so the layout
         // never jumps when the preview opens, docks, or closes.
-        'flex w-full flex-col items-center justify-center gap-3 rounded-panel border border-dashed bg-muted/20 px-6 text-center',
+        'flex w-full flex-col items-center justify-center gap-3 rounded-panel bg-foreground/[0.03] px-6 text-center',
         className
       )}
       data-videorc-preview-card
@@ -402,9 +395,7 @@ function DetachedPreviewCard({
             </div>
             <Button data-videorc-open-preview-window size="sm" onClick={onOpen}>
               Open preview
-              <kbd className="ml-2 rounded bg-background/40 px-1.5 font-mono text-[10px]">
-                {displayAccelerator('Cmd+P')}
-              </kbd>
+              <Kbd className="ml-1">{displayAccelerator('Cmd+P')}</Kbd>
             </Button>
           </>
         )

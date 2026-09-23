@@ -77,6 +77,23 @@ export function isSessionTransportActive(state: string): boolean {
   )
 }
 
+/**
+ * The toolbar's session clock (plan 050 S12): m:ss under an hour, h:mm:ss
+ * after, from the backend's recording.durationMs. Missing reads 0:00.
+ */
+export function sessionClockLabel(durationMs?: number): string {
+  const total =
+    typeof durationMs === 'number' && Number.isFinite(durationMs)
+      ? Math.max(0, Math.floor(durationMs / 1000))
+      : 0
+  const hours = Math.floor(total / 3600)
+  const minutes = Math.floor((total % 3600) / 60)
+  const seconds = String(total % 60).padStart(2, '0')
+  return hours > 0
+    ? `${hours}:${String(minutes).padStart(2, '0')}:${seconds}`
+    : `${minutes}:${seconds}`
+}
+
 export function sessionStatusLabel(state: string, wsStatus?: string): string {
   // F-014: never report Ready over a dead backend socket — the app used to
   // zombie with a green Ready badge after a backend crash. Boot-time

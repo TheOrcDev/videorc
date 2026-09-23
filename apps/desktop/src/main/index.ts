@@ -17,7 +17,6 @@ import {
   session,
   shell,
   systemPreferences,
-  type BrowserWindowConstructorOptions,
   type NativeImage
 } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -49,7 +48,7 @@ import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
 import {
   OwnedProcessRegistry,
@@ -252,7 +251,27 @@ import {
   redactAvatarFetchError,
   withAvatarFetchDeadline
 } from './avatar-cache'
-import { DARK_WINDOW_PALETTE, windowPalette } from './window-palette'
+import { installContextMenu } from './context-menu'
+import {
+  DARK_GLASS_COATS,
+  DARK_WINDOW_PALETTE,
+  DOCKED_PREVIEW_CORNER_RADIUS
+} from './window-palette'
+import { loadWindowAppearanceBinding, pinWindowAppearance } from './window-appearance'
+import {
+  appliedGlass,
+  DARK_ALWAYS_ROLES,
+  DEFAULT_GLASS_MATERIAL,
+  glassModeForRole,
+  recordAppliedGlass,
+  resolveGlassMode,
+  solidWindowBase,
+  WINDOW_HEADER_HEIGHT,
+  windowGlassOptions,
+  type GlassMode,
+  type GlassWindowRole,
+  windowsBuildFromRelease
+} from './window-glass'
 import {
   applyVideorcWindowCaptureProtection,
   type VideorcWindowRole,
@@ -302,7 +321,6 @@ import {
 } from './release-authority-env'
 import { secureIpcHandle, sendElectronEvent } from './secure-ipc'
 import {
-  MAX_NOTES_TEXT_LENGTH,
   type ElectronEventChannel,
   type ElectronIpcEventMap
 } from '../shared/electron-ipc-contract'
@@ -314,7 +332,6 @@ import {
   trustRendererDocument
 } from './web-contents-security'
 import {
-  inlineRendererDocumentCsp,
   nativePreviewSurfaceDocumentCsp,
   trustedRendererDevServerUrl
 } from '../shared/renderer-security-policy'
@@ -662,8 +679,11 @@ const notesWindowSmokeMarkerEnabled =
 app.setName('Videorc')
 // Dark glass is the default theme; the renderer re-syncs this on toggle.
 nativeTheme.themeSource = 'dark'
-// True vibrancy is the default glass; =0 opts out, and any other value picks
-// the macOS material by name (e.g. hud, popover, menu, under-window).
+// An OS appearance change (or any themeSource write) resets per-window
+// appearances; keep the dark-always windows pinned.
+nativeTheme.on('updated', () => repinDarkAlwaysWindows())
+// Window glass is real macOS vibrancy (window-glass.ts, plan 050). VIDEORC_GLASS=0
+// paints the solid palette; a material name overrides the material.
 type GlassVibrancyMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>[0]>
 const isMac = process.platform === 'darwin'
 const isWindows = process.platform === 'win32'
@@ -740,109 +760,15 @@ function smokeNativeWindowIdentity(window: BrowserWindow | null): {
   }
 }
 
-const glassVibrancyEnabled = process.env.VIDEORC_GLASS_VIBRANCY !== '0'
-const glassVibrancyRaw = process.env.VIDEORC_GLASS_VIBRANCY
+const glassMode = resolveGlassMode({
+  platform: process.platform,
+  glass: process.env.VIDEORC_GLASS,
+  legacyVibrancy: process.env.VIDEORC_GLASS_VIBRANCY,
+  windowsBuild: process.platform === 'win32' ? windowsBuildFromRelease(release()) : undefined
+})
 const glassVibrancyMaterial: GlassVibrancyMaterial =
-  glassVibrancyRaw && glassVibrancyRaw !== '0' && glassVibrancyRaw !== '1'
-    ? (glassVibrancyRaw as GlassVibrancyMaterial)
-    : 'under-window'
+  glassMode.kind === 'material' ? glassMode.material : DEFAULT_GLASS_MATERIAL
 
-// Blurred-wallpaper underlay (the glassmorphism frost): the renderer blurs
-// the actual wallpaper as its bottom layer since the OS material cannot do
-// it here. Fetching uses System Events — the one-time Automation prompt, if
-// denied, degrades cleanly to the plain translucent glass.
-// macOS-only today: the underlay is fetched through System Events (osascript),
-// so gating on isMac keeps the move/resize/focus listeners from shelling out on
-// Windows. The Windows wallpaper underlay (a registry read, no prompt) is Phase 4.
-const glassWallpaperEnabled =
-  isMac && glassVibrancyEnabled && process.env.VIDEORC_GLASS_WALLPAPER !== '0'
-let glassWallpaperDataUrl: string | null = null
-let glassWallpaperSourcePath: string | null = null
-let glassGeometryTimer: ReturnType<typeof setTimeout> | null = null
-
-// The underlay is drawn per window (each one offsets the same wallpaper by its
-// own bounds), so geometry is always asked for a specific window.
-function glassGeometry(
-  target: BrowserWindow | null = mainWindow
-): { window: Electron.Rectangle; display: Electron.Rectangle } | null {
-  if (!target || target.isDestroyed()) {
-    return null
-  }
-  const bounds = target.getBounds()
-  return { window: bounds, display: screen.getDisplayMatching(bounds).bounds }
-}
-
-// Main plus the detached Chat and Captions windows: they share the black-glass
-// material, so they share the wallpaper underlay feed.
-function glassWindows(): BrowserWindow[] {
-  return [mainWindow, commentsWindow, captionsWindow].filter(
-    (window): window is BrowserWindow =>
-      Boolean(window) && !window!.isDestroyed() && !window!.webContents.isDestroyed()
-  )
-}
-
-function queueGlassGeometryBroadcast(): void {
-  if (!glassWallpaperEnabled || glassGeometryTimer) {
-    return
-  }
-  glassGeometryTimer = setTimeout(() => {
-    glassGeometryTimer = null
-    if (!glassWallpaperDataUrl) {
-      return
-    }
-    for (const window of glassWindows()) {
-      const geometry = glassGeometry(window)
-      if (geometry) {
-        sendElectronEvent(window.webContents, 'glass:geometry', geometry)
-      }
-    }
-  }, 40)
-}
-
-function currentWallpaperPath(): Promise<string | null> {
-  return new Promise((resolve) => {
-    execFile(
-      'osascript',
-      ['-e', 'tell application "System Events" to get picture of current desktop'],
-      { timeout: 3000 },
-      (error, stdout) => resolve(error ? null : stdout.trim() || null)
-    )
-  })
-}
-
-async function refreshGlassWallpaper(): Promise<void> {
-  if (!glassWallpaperEnabled) {
-    return
-  }
-  const wallpaperPath = await currentWallpaperPath()
-  if (!wallpaperPath || (wallpaperPath === glassWallpaperSourcePath && glassWallpaperDataUrl)) {
-    return
-  }
-  try {
-    let image = nativeImage.createFromPath(wallpaperPath)
-    if (image.isEmpty()) {
-      return
-    }
-    // The layer gets a 70px blur anyway; 1800px wide is plenty of detail and
-    // keeps the data URL a few hundred KB instead of tens of MB.
-    if (image.getSize().width > 1800) {
-      image = image.resize({ width: 1800 })
-    }
-    glassWallpaperDataUrl = `data:image/jpeg;base64,${image.toJPEG(72).toString('base64')}`
-    glassWallpaperSourcePath = wallpaperPath
-    for (const window of glassWindows()) {
-      const geometry = glassGeometry(window)
-      if (geometry) {
-        sendElectronEvent(window.webContents, 'glass:wallpaper', {
-          imageDataUrl: glassWallpaperDataUrl,
-          ...geometry
-        })
-      }
-    }
-  } catch {
-    /* unreadable wallpaper: stay on the plain translucent glass */
-  }
-}
 // Lifecycle smokes can isolate the app-level backend ledger without touching
 // the developer's real app data.
 if (app.isPackaged) {
@@ -1011,6 +937,18 @@ const nativePreviewInProcessModuleResolution = resolveNativePreviewInProcessModu
   workspaceRoot: workspaceRoot(),
   exists: existsSync
 })
+// Per-window appearance pins (plan 050): the same addon, loaded on its own so a
+// preview-driver fallback never costs the dark-always windows their pin.
+const windowAppearanceLoad = loadWindowAppearanceBinding({
+  platform: process.platform,
+  resolution: nativePreviewInProcessModuleResolution,
+  loadModule: (modulePath) => requireNativePreviewRealSurfaceModule(modulePath)
+})
+if (windowAppearanceLoad.unavailableReason && process.platform === 'darwin') {
+  safeConsole.warn(
+    `Window appearance pin unavailable; Chat, Captions, Notes and Preview paint the solid palette: ${windowAppearanceLoad.unavailableReason}`
+  )
+}
 type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
 const nativePreviewRealSurfaceDriverLoad = loadNativePreviewPrimaryDriver()
 const NATIVE_PREVIEW_HANDOFF_SAMPLE_LIMIT = 900
@@ -1581,95 +1519,88 @@ type NativePreviewMainSceneMismatchFields = Pick<
   | 'nativePreviewMainLastSkippedFrameSceneRevision'
 >
 
-// The platform-specific window chrome (translucency, frame, title-bar style).
-// macOS is the reference glass expression below; off macOS we ship a solid
-// themed base with the native frame in chrome v1 — no OS material or window
-// transparency is wired yet (the frameless Windows glass is Phase 4).
-function platformWindowChromeOptions(): BrowserWindowConstructorOptions {
-  if (!isMac) {
-    // Solid themed base so the 75%-alpha glass tokens don't composite over
-    // default white; the standard native frame is guaranteed movable and
-    // carries native min/max/close without renderer drag regions.
-    return { backgroundColor: windowPalette(nativeTheme.shouldUseDarkColors).base }
-  }
-
+// Every window's chrome comes from window-glass.ts (plan 050): one material,
+// the traffic lights centred on the role's header. A dark-always window that
+// cannot pin its appearance paints the solid palette instead.
+function glassWindowChrome(role: GlassWindowRole): {
+  mode: GlassMode
+  options: Electron.BrowserWindowConstructorOptions
+} {
+  const mode = glassModeForRole(role, glassMode, windowAppearanceLoad.binding !== null)
   return {
-    // Glass shell. The reference translucency comes from the OS material —
-    // CSS alone cannot blur the desktop behind the window — so under-window
-    // vibrancy is the default and VIDEORC_GLASS_VIBRANCY=0 opts out to the
-    // solid fallback. The 2026-06-12 wedge bisects implicated the synthetic
-    // CDP palette keypress (reproduced without vibrancy too) and an explicit
-    // transparent backgroundColor on reload (left unset here) — not the
-    // material itself. The opt-out paints a theme-matched opaque base so the
-    // 75%-alpha glass tokens don't composite over default white.
-    // A transparent backing is REQUIRED for vibrancy: without it Chromium
-    // paints an opaque layer in front of the material and no alpha in the CSS
-    // can show the desktop through (verified with a material matrix probe).
-    // And alpha in backgroundColor is only honored when the window is created
-    // `transparent` — '#00000000' alone is silently opaque (Electron docs).
-    // The working glass stack on this Electron/macOS combo (bisected with
-    // ui-glass-bisect-probe): transparent window + alpha tokens, NO vibrancy.
-    // The NSVisualEffectView materials paint fully OPAQUE here (dark and
-    // light alike) and wall off the desktop that the transparent contents
-    // would otherwise show. VIDEORC_GLASS_VIBRANCY=<material> re-adds the
-    // material for experiments on stacks where it transmits; =0 opts out to
-    // the solid themed base.
-    ...(glassVibrancyEnabled
-      ? {
-          transparent: true,
-          backgroundColor: '#00000000',
-          ...(glassVibrancyRaw && glassVibrancyRaw !== '1'
-            ? { vibrancy: glassVibrancyMaterial }
-            : {})
-        }
-      : { backgroundColor: windowPalette(nativeTheme.shouldUseDarkColors).base }),
-    visualEffectState: 'active',
-    // Probe knob: which window frame the glass uses. hiddenInset keeps the
-    // framed NSWindow; transparency may require the frameless styles.
-    ...(process.env.VIDEORC_GLASS_FRAME === 'frameless'
-      ? { frame: false as const }
-      : {
-          titleBarStyle: (process.env.VIDEORC_GLASS_FRAME === 'hidden'
-            ? 'hidden'
-            : 'hiddenInset') as 'hidden' | 'hiddenInset',
-          trafficLightPosition: { x: 14, y: 13 }
-        })
+    mode,
+    options: windowGlassOptions(role, {
+      platform: process.platform,
+      mode,
+      dark: role === 'main' ? nativeTheme.shouldUseDarkColors : true
+    })
   }
 }
 
-// Detached Chat/Captions windows: same black-glass backing as the main window
-// on macOS (transparent + the renderer's wallpaper underlay), solid palette
-// base everywhere else and when glass is opted out. The traffic lights are
-// centred on the renderer's fixed 40px header from ONE constant so the title
-// row cannot drift off their centre line again.
-const AUX_WINDOW_HEADER_HEIGHT = 40
-const MAC_TRAFFIC_LIGHT_DIAMETER = 14
-
-function auxWindowChromeOptions(): Electron.BrowserWindowConstructorOptions {
-  const glass = isMac && glassVibrancyEnabled
-  return {
-    ...(isMac
-      ? {
-          titleBarStyle: 'hiddenInset' as const,
-          trafficLightPosition: {
-            x: 14,
-            y: Math.round((AUX_WINDOW_HEADER_HEIGHT - MAC_TRAFFIC_LIGHT_DIAMETER) / 2)
-          }
-        }
-      : {}),
-    ...(glass
-      ? { transparent: true, backgroundColor: '#00000000', visualEffectState: 'active' as const }
-      : { backgroundColor: DARK_WINDOW_PALETTE.base })
-  }
-}
-
-function watchAuxWindowGlass(window: BrowserWindow): void {
-  if (!glassWallpaperEnabled) {
+// Pins a dark-always window dark and records what every window got. A pin that
+// fails at runtime drops the material rather than leave dark text tokens on a
+// light material.
+function finishGlassWindow(window: BrowserWindow, role: GlassWindowRole, mode: GlassMode): void {
+  if (!DARK_ALWAYS_ROLES.has(role)) {
+    recordAppliedGlass(window, { role, mode, appearance: 'follows-app' })
     return
   }
-  window.on('move', queueGlassGeometryBroadcast)
-  window.on('resize', queueGlassGeometryBroadcast)
-  window.webContents.once('did-finish-load', () => void refreshGlassWallpaper())
+  if (mode.kind === 'solid') {
+    recordAppliedGlass(window, {
+      role,
+      mode,
+      appearance: mode.reason === 'appearance-unpinned' ? 'pin-unavailable' : 'follows-app',
+      ...(mode.reason === 'appearance-unpinned'
+        ? { appearanceNote: windowAppearanceLoad.unavailableReason ?? undefined }
+        : {})
+    })
+    return
+  }
+  if (mode.kind === 'mica') {
+    // Not reached today: glassModeForRole keeps the dark-always windows solid
+    // on Windows, which has no per-window appearance pin.
+    recordAppliedGlass(window, { role, mode, appearance: 'follows-app' })
+    return
+  }
+  const pin = pinWindowAppearance(
+    windowAppearanceLoad,
+    () => window.getNativeWindowHandle(),
+    'dark'
+  )
+  if (pin.pinned) {
+    recordAppliedGlass(window, { role, mode, appearance: 'pinned-dark' })
+    return
+  }
+  window.setVibrancy(null)
+  window.setBackgroundColor(solidWindowBase(role, true))
+  safeConsole.warn(
+    `${role} window appearance pin failed; painting the solid palette: ${pin.reason}`
+  )
+  recordAppliedGlass(window, {
+    role,
+    mode: { kind: 'solid', reason: 'appearance-unpinned' },
+    appearance: 'pin-unavailable',
+    appearanceNote: pin.reason
+  })
+}
+
+// Electron re-applies every window's appearance when nativeTheme.themeSource
+// changes, which drops the per-window pin (a light theme would lighten the
+// dark-always glass). Re-pin them after every theme change.
+function repinDarkAlwaysWindows(): void {
+  for (const window of [commentsWindow, captionsWindow, notesWindow, previewWindow]) {
+    if (!window || window.isDestroyed() || appliedGlass(window)?.appearance !== 'pinned-dark') {
+      continue
+    }
+    const pin = pinWindowAppearance(
+      windowAppearanceLoad,
+      () => window.getNativeWindowHandle(),
+      'dark'
+    )
+    if (!pin.pinned) {
+      safeConsole.warn(`Re-pinning a dark window after a theme change failed: ${pin.reason}`)
+    }
+  }
 }
 
 function createWindow(): void {
@@ -1683,7 +1614,7 @@ function createWindow(): void {
     // frame — showing it at create time put an empty pane on screen that then
     // visibly filled in piece by piece.
     show: false,
-    ...platformWindowChromeOptions(),
+    ...glassWindowChrome('main').options,
     ...appWindowIconOptions(),
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -1691,6 +1622,8 @@ function createWindow(): void {
       backgroundThrottling: backgroundThrottlingFor('main', electronBackgroundPolicy)
     }
   })
+  finishGlassWindow(mainWindow, 'main', glassMode)
+  installContextMenu(mainWindow.webContents)
   applyVideorcWindowCaptureProtection(mainWindow, 'main', {
     onFailure: (reason) =>
       safeConsole.warn(`Main window content protection could not be enabled: ${reason}`)
@@ -1843,15 +1776,6 @@ function createWindow(): void {
     })
   }
 
-  if (glassWallpaperEnabled) {
-    mainWindow.on('move', queueGlassGeometryBroadcast)
-    mainWindow.on('resize', queueGlassGeometryBroadcast)
-    // Wallpaper changes have no event; refresh on focus (cheap no-op when the
-    // path is unchanged) and once the renderer is ready to receive it.
-    mainWindow.on('focus', () => void refreshGlassWallpaper())
-    mainWindow.webContents.once('did-finish-load', () => void refreshGlassWallpaper())
-  }
-
   if (backendConnection) {
     mainWindow.webContents.once('did-finish-load', () => {
       void backendAuthorityReady.then(() => {
@@ -1929,7 +1853,9 @@ function flushPreviewWindowMotionReconcile(): void {
 }
 // The visible drag bar at the top of the preview window; the native video covers
 // the content BELOW it, and the aspect lock applies to that video region only.
-const PREVIEW_WINDOW_BAR_HEIGHT = 28
+// The strip the traffic lights centre on (window-glass.ts); it also drives the
+// aspect lock and where the native video sits, so it has one source.
+const PREVIEW_WINDOW_BAR_HEIGHT = WINDOW_HEADER_HEIGHT.preview
 // Output aspect ratio (from the renderer's video settings); the window is locked
 // to it so the preview can never be squeezed or stretched.
 let previewWindowAspect = { width: 16, height: 9 }
@@ -2237,200 +2163,6 @@ function saveNotesDocument(patch: Partial<NotesDocument>): NotesDocument {
   return next
 }
 
-function notesWindowHtml(document: NotesDocument): string {
-  const scriptNonce = randomBytes(24).toString('base64url')
-  const contentSecurityPolicy = inlineRendererDocumentCsp(scriptNonce)
-  const initialDocumentJson = jsonForInlineScript(document)
-  const initialAlwaysOnTopJson = jsonForInlineScript(notesWindowAlwaysOnTop)
-  const smokeMarkerCss = notesWindowSmokeMarkerEnabled
-    ? `
-    body[data-smoke-marker="true"], body[data-smoke-marker="true"] textarea {
-      background: #ff0000; color: #ffffff;
-    }
-    body[data-smoke-marker="true"] .drag-bar,
-    body[data-smoke-marker="true"] .footer {
-      background: #ff0000; color: #ffffff; border-color: #ff0000;
-    }
-    body[data-smoke-marker="true"] .title,
-    body[data-smoke-marker="true"] .footer {
-      color: #ffffff;
-    }
-    body[data-smoke-marker="true"] button {
-      background: #ff0000; color: #ffffff; border-color: #ff0000;
-    }
-    body[data-smoke-marker="true"] textarea {
-      font-size: 64px !important; line-height: 1.05; font-weight: 900;
-      letter-spacing: 0; text-transform: uppercase;
-    }`
-    : ''
-  return `<!doctype html><html><head><meta charset="utf-8">
-    <meta http-equiv="Content-Security-Policy" content="${contentSecurityPolicy}">
-    <style>
-    html, body { margin: 0; height: 100%; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textPrimary};
-      font: 13px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      overflow: hidden; user-select: none; -webkit-user-select: none; }
-    body { display: flex; flex-direction: column; }
-    /* Same scrollbar recipe as the app (styles.css): no track, a barely-there
-       thumb inset inside its hit area. This window is a data-URL document, so
-       it cannot inherit the app stylesheet; keep the two in step by hand. */
-    ::-webkit-scrollbar { width: 10px; height: 10px; background: transparent; }
-    ::-webkit-scrollbar-track, ::-webkit-scrollbar-corner { background: transparent; }
-    ::-webkit-scrollbar-button { display: none; }
-    ::-webkit-scrollbar-thumb { background-color: rgba(255,255,255,0.12); border: 3px solid transparent;
-      background-clip: content-box; border-radius: 999px; box-shadow: inset 0 0 0 1px rgba(255,255,255,0.08); }
-    ::-webkit-scrollbar-thumb:hover { background-color: rgba(255,255,255,0.22); }
-    .drag-bar { height: 34px; display: flex; align-items: center; gap: 10px;
-      padding: 0 12px 0 78px; box-sizing: border-box; background: ${DARK_WINDOW_PALETTE.panel};
-      border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline}; -webkit-app-region: drag; }
-    .title { color: ${DARK_WINDOW_PALETTE.textSecondary}; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
-    .spacer { flex: 1; }
-    button { -webkit-app-region: no-drag; border: 1px solid ${DARK_WINDOW_PALETTE.controlBorder};
-      border-radius: 6px; background: ${DARK_WINDOW_PALETTE.controlBg}; color: ${DARK_WINDOW_PALETTE.textPrimary};
-      height: 22px; padding: 0 8px; font: inherit; font-size: 11px; cursor: default; }
-    button[aria-pressed="true"] { background: ${DARK_WINDOW_PALETTE.chromeFill}; color: ${DARK_WINDOW_PALETTE.chromeFillText}; border-color: ${DARK_WINDOW_PALETTE.chromeFill}; }
-    .icon-button { width: 24px; padding: 0; display: inline-flex; align-items: center;
-      justify-content: center; }
-    .icon-button svg { width: 14px; height: 14px; stroke: currentColor; stroke-width: 2;
-      fill: none; stroke-linecap: round; stroke-linejoin: round; }
-    textarea { flex: 1; resize: none; border: 0; outline: none; padding: 20px 22px;
-      box-sizing: border-box; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textPrimary}; caret-color: ${DARK_WINDOW_PALETTE.textPrimary};
-      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-      line-height: 1.45; -webkit-app-region: no-drag;
-      /* Keep the arrow cursor: the window is capture-protected but the OS
-         composites the pointer separately, so an I-beam over "empty" space
-         would betray the hidden notes to viewers. */
-      cursor: default; }
-    body[data-font-scale="sm"] textarea { font-size: 18px; }
-    body[data-font-scale="md"] textarea { font-size: 24px; }
-    body[data-font-scale="lg"] textarea { font-size: 32px; }
-    textarea::placeholder { color: ${DARK_WINDOW_PALETTE.textTertiary}; }
-    .footer { height: 28px; display: flex; align-items: center; gap: 12px; padding: 0 12px;
-      border-top: 1px solid ${DARK_WINDOW_PALETTE.hairline}; color: ${DARK_WINDOW_PALETTE.textTertiary}; font-size: 11px; }
-    ${smokeMarkerCss}
-  </style></head><body data-smoke-marker="${notesWindowSmokeMarkerEnabled ? 'true' : 'false'}">
-    <div class="drag-bar"><span class="title">Videorc Notes</span><span class="spacer"></span>
-      <button type="button" class="icon-button" data-sticky aria-label="Keep notes in front of all apps" title="Keep notes in front of all apps" aria-pressed="false">
-        <svg aria-hidden="true" viewBox="0 0 24 24">
-          <path d="M12 17v5"></path>
-          <path d="M5 17h14"></path>
-          <path d="M17 9.5V5.7a2 2 0 0 0-.59-1.41l-.7-.7A2 2 0 0 0 14.3 3H9.7a2 2 0 0 0-1.41.59l-.7.7A2 2 0 0 0 7 5.7v3.8L5 12v2h14v-2z"></path>
-        </svg>
-      </button>
-      <button type="button" data-scale="sm">Sm</button>
-      <button type="button" data-scale="md">Md</button>
-      <button type="button" data-scale="lg">Lg</button>
-    </div>
-    <textarea maxlength="${MAX_NOTES_TEXT_LENGTH}" spellcheck="false" placeholder="Notes for this recording..."></textarea>
-    <div class="footer"><span id="word-count">0 words</span><span id="save-state">Saved</span></div>
-    <script nonce="${scriptNonce}">
-      (() => {
-        const initialDocument = ${initialDocumentJson};
-        const initialAlwaysOnTop = ${initialAlwaysOnTopJson};
-        const textarea = document.querySelector('textarea');
-        const saveState = document.getElementById('save-state');
-        const wordCount = document.getElementById('word-count');
-        const buttons = Array.from(document.querySelectorAll('button[data-scale]'));
-        const stickyButton = document.querySelector('button[data-sticky]');
-        let fontScale = initialDocument.fontScale || 'md';
-        let alwaysOnTop = Boolean(initialAlwaysOnTop);
-        let saveTimer = null;
-
-        textarea.value = initialDocument.text || '';
-        document.body.dataset.fontScale = fontScale;
-
-        function words(text) {
-          const trimmed = text.trim();
-          return trimmed ? trimmed.split(/\\s+/).length : 0;
-        }
-
-        function render() {
-          wordCount.textContent = words(textarea.value) + ' words';
-          for (const button of buttons) {
-            button.setAttribute('aria-pressed', button.dataset.scale === fontScale ? 'true' : 'false');
-          }
-          if (stickyButton) {
-            const title = alwaysOnTop ? 'Allow notes behind other apps' : 'Keep notes in front of all apps';
-            stickyButton.setAttribute('aria-pressed', alwaysOnTop ? 'true' : 'false');
-            stickyButton.setAttribute('aria-label', title);
-            stickyButton.setAttribute('title', title);
-          }
-        }
-
-        function applyNotesWindowState(state) {
-          if (state && typeof state.alwaysOnTop === 'boolean') {
-            alwaysOnTop = state.alwaysOnTop;
-            render();
-          }
-        }
-
-        async function save() {
-          window.clearTimeout(saveTimer);
-          saveTimer = null;
-          saveState.textContent = 'Saving';
-          try {
-            await window.videorc?.saveNotesDocument?.({ text: textarea.value, fontScale });
-            saveState.textContent = 'Saved';
-          } catch {
-            saveState.textContent = 'Save failed';
-          }
-        }
-
-        function queueSave() {
-          saveState.textContent = 'Unsaved';
-          window.clearTimeout(saveTimer);
-          saveTimer = window.setTimeout(save, 120);
-        }
-
-        textarea.addEventListener('input', () => {
-          render();
-          queueSave();
-        });
-        textarea.addEventListener('blur', save);
-        textarea.addEventListener('keydown', (event) => {
-          if (event.key === 'Escape') textarea.blur();
-        });
-        stickyButton?.addEventListener('click', () => {
-          if (!window.videorc?.setNotesWindowAlwaysOnTop) {
-            saveState.textContent = 'Pin unavailable';
-            return;
-          }
-          const next = !alwaysOnTop;
-          alwaysOnTop = next;
-          render();
-          window.videorc.setNotesWindowAlwaysOnTop(next)
-            .then(applyNotesWindowState)
-            .catch(() => {
-              alwaysOnTop = !next;
-              render();
-              saveState.textContent = 'Pin failed';
-            });
-          textarea.focus();
-        });
-        for (const button of buttons) {
-          button.addEventListener('click', () => {
-            fontScale = button.dataset.scale || 'md';
-            document.body.dataset.fontScale = fontScale;
-            render();
-            queueSave();
-            textarea.focus();
-          });
-        }
-        const unsubscribeNotesWindowState = window.videorc?.onNotesWindowState?.(applyNotesWindowState);
-        const unsubscribeNotesFlushRequest = window.videorc?.onNotesFlushRequest?.(() => {
-          void save();
-        });
-        window.videorc?.getNotesWindowState?.().then(applyNotesWindowState).catch(() => {});
-        window.addEventListener('beforeunload', () => {
-          unsubscribeNotesWindowState?.();
-          unsubscribeNotesFlushRequest?.();
-        });
-        render();
-        textarea.focus();
-      })();
-    </script>
-  </body></html>`
-}
-
 // FX6: app shortcuts died while an aux window (Notes/Comments) held key focus
 // — the forwarding above only listens on the main window. Aux windows forward
 // the exact same chords: ⌘1–9/⌘, focus main and navigate; ⌘⇧N/⌘⇧J/⌘⇧C toggle
@@ -2502,6 +2234,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
   const prefs = loadNotesWindowPrefs()
   const rememberedFrame = notesWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const chrome = glassWindowChrome('notes')
   const window = new BrowserWindow({
     width: frame?.width ?? 640,
     height: frame?.height ?? 420,
@@ -2509,11 +2242,7 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     minWidth: 360,
     minHeight: 240,
     title: 'Videorc Notes',
-    // Center the traffic lights in the 34px drag bar so they align with the title.
-    ...(isMac
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 11 } }
-      : {}),
-    backgroundColor: DARK_WINDOW_PALETTE.base,
+    ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
     webPreferences: {
@@ -2523,15 +2252,28 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     }
   })
   registerRendererWindow(window, 'notes')
+  finishGlassWindow(window, 'notes', chrome.mode)
   notesWindowClosing = false
   notesWindowCloseFlushReady = false
   notesWindow = window
   attachAuxWindowShortcuts(window)
   notesWindowAlwaysOnTop = notesWindowAlwaysOnTopPreference(prefs)
-  notesWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'notes', {
-    onFailure: (reason) =>
-      safeConsole.warn(`Notes window content protection could not be enabled: ${reason}`)
-  }).protected
+  // probe:ui-glass has to photograph the Notes glass, and screencapture
+  // honours the capture exclusion. Only an unpackaged smoke run that asks for
+  // it explicitly waives it; `notes-window-state` then reports protected:false.
+  const notesCaptureExclusionWaived =
+    !app.isPackaged &&
+    smokeCommandServerEnabled &&
+    process.env.VIDEORC_SMOKE_GLASS_PROBE_NOTES_VISIBLE === '1'
+  if (notesCaptureExclusionWaived) {
+    safeConsole.warn('Notes capture exclusion waived for probe:ui-glass (unpackaged smoke run).')
+    notesWindowContentProtected = false
+  } else {
+    notesWindowContentProtected = applyVideorcWindowCaptureProtection(window, 'notes', {
+      onFailure: (reason) =>
+        safeConsole.warn(`Notes window content protection could not be enabled: ${reason}`)
+    }).protected
+  }
   installCaptureProtectionSmokeMarker(window, 'notes')
   if (notesWindowAlwaysOnTop) {
     applyNotesWindowAlwaysOnTop(window, true)
@@ -2571,11 +2313,22 @@ async function openNotesWindow(): Promise<NotesWindowState> {
     }
   })
 
-  const notesDocumentUrl = `data:text/html;charset=utf-8,${encodeURIComponent(
-    notesWindowHtml(defaultNotesDocument(prefs))
-  )}`
-  trustRendererDocument(window, notesDocumentUrl)
-  await window.loadURL(notesDocumentUrl)
+  // A bundled renderer like Chat and Captions (plan 050 S4). The smoke marker
+  // rides in the URL: the sandboxed renderer cannot read env.
+  const smokeMarkerQuery = notesWindowSmokeMarkerEnabled ? { smokeMarker: '1' } : undefined
+  const rendererUrl = trustedRendererDevServerUrl(process.env.ELECTRON_RENDERER_URL, app.isPackaged)
+  if (rendererUrl) {
+    const notesUrl = new URL('notes.html', rendererUrl)
+    if (smokeMarkerQuery) {
+      notesUrl.search = new URLSearchParams(smokeMarkerQuery).toString()
+    }
+    trustRendererDocument(window, notesUrl.toString())
+    await window.loadURL(notesUrl.toString())
+  } else {
+    const notesPath = join(__dirname, '../renderer/notes.html')
+    trustRendererDocument(window, pathToFileURL(notesPath).toString())
+    await window.loadFile(notesPath, smokeMarkerQuery ? { query: smokeMarkerQuery } : undefined)
+  }
   window.show()
   window.focus()
   emitNotesWindowState()
@@ -3090,6 +2843,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   const prefs = loadCommentsWindowPrefs()
   const rememberedFrame = commentsWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const chrome = glassWindowChrome('chat')
   const window = new BrowserWindow({
     width: frame?.width ?? 420,
     height: frame?.height ?? 640,
@@ -3097,7 +2851,7 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     minWidth: 320,
     minHeight: 360,
     title: 'Videorc Chat',
-    ...auxWindowChromeOptions(),
+    ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
     webPreferences: {
@@ -3107,7 +2861,8 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
     }
   })
   registerRendererWindow(window, 'comments')
-  watchAuxWindowGlass(window)
+  finishGlassWindow(window, 'chat', chrome.mode)
+  installContextMenu(window.webContents)
   commentsWindowClosing = false
   commentsWindow = window
   attachAuxWindowShortcuts(window)
@@ -3307,6 +3062,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
   const prefs = loadCaptionsWindowPrefs()
   const rememberedFrame = captionsWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const chrome = glassWindowChrome('captions')
   const window = new BrowserWindow({
     width: frame?.width ?? 640,
     height: frame?.height ?? 320,
@@ -3314,7 +3070,7 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
     minWidth: 360,
     minHeight: 200,
     title: 'Videorc Captions',
-    ...auxWindowChromeOptions(),
+    ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
     webPreferences: {
@@ -3329,7 +3085,8 @@ async function openCaptionsWindow(): Promise<CaptionsWindowState> {
   })
   installCaptureProtectionSmokeMarker(window, 'captions')
   registerRendererWindow(window, 'captions')
-  watchAuxWindowGlass(window)
+  finishGlassWindow(window, 'captions', chrome.mode)
+  installContextMenu(window.webContents)
   captionsWindowClosing = false
   captionsWindow = window
   captionsWindowAlwaysOnTop = captionsWindowAlwaysOnTopPreference(prefs)
@@ -3577,9 +3334,9 @@ function previewWindowSurfaceBounds(visibleOverride?: boolean): PreviewSurfaceBo
     scaleFactor: state.scaleFactor,
     screenHeight: state.screenHeight,
     visible,
-    // Docked previews clip to the studio slot's rounded panel (--radius-panel
-    // = 18pt); the floating window stays square. CALayer radii are in points.
-    cornerRadius: state.mode === 'docked' ? 18 : 0,
+    // Docked previews clip to the studio slot's rounded panel (--radius-panel,
+    // 12pt); the floating window stays square. CALayer radii are in points.
+    cornerRadius: state.mode === 'docked' ? DOCKED_PREVIEW_CORNER_RADIUS : 0,
     ...(orderAboveWindowId === undefined
       ? {}
       : {
@@ -3677,38 +3434,37 @@ async function reconcileNativePreviewSurfaceForPreviewWindow(
 
 const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   /* The whole window is a drag surface: the native video floats above the area
-     below the bar and ignores mouse events, so every grab lands here. The bar
-     stays visible above the video as the obvious handle. Edge-resize is handled
-     by the real window frame (hiddenInset) and is aspect-locked by main. */
-  /* Glass tokens (videorc-design): the preview window frames video, so it
-     stays dark in both themes: charcoal surface, white-8% hairline,
-     tertiary-gray label. */
-  html, body { margin: 0; height: 100%; background: ${DARK_WINDOW_PALETTE.base}; color: ${DARK_WINDOW_PALETTE.textSecondary};
-    font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden;
+     below the strip and ignores mouse events, so every grab lands here. The
+     strip stays visible above the video as the obvious handle. Edge-resize is
+     handled by the real window frame (hiddenInset) and is aspect-locked by main. */
+  /* Real glass (plan 050): the Preview frame sits on the OS material like every
+     other window, pinned dark because it frames video. Both coats paint on
+     body; the native video layer covers everything below the strip, so the
+     glass shows in the strip and in the waiting state. */
+  /* html keeps its full height: everything below is position: fixed, and a
+     zero-height root sizes the propagated coat gradient to nothing. */
+  html { height: 100%; background: transparent; }
+  body { margin: 0; height: 100%; color: ${DARK_WINDOW_PALETTE.textSecondary};
+    background: linear-gradient(${DARK_GLASS_COATS.content}, ${DARK_GLASS_COATS.content}), ${DARK_GLASS_COATS.window};
+    font: 12px/1.4 -apple-system, BlinkMacSystemFont, sans-serif; overflow: hidden; cursor: default;
     user-select: none; -webkit-user-select: none; -webkit-app-region: drag; }
-  .drag-bar { position: fixed; top: 0; left: 0; right: 0; height: 28px;
-    display: flex; align-items: center; gap: 10px; cursor: grab;
-    padding: 0 12px 0 78px; /* traffic lights live in the left inset */
-    background: ${DARK_WINDOW_PALETTE.panel}; border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline};
-    box-sizing: border-box; }
-  .drag-bar:active { cursor: grabbing; }
-  .drag-bar .label { color: ${DARK_WINDOW_PALETTE.textTertiary}; font-size: 11px; letter-spacing: 0.08em;
-    text-transform: uppercase; white-space: nowrap; }
-  .drag-bar .grip { flex: 1; height: 8px; background-image:
-    radial-gradient(circle, rgba(255, 255, 255, 0.18) 1px, transparent 1.2px);
-    background-size: 6px 4px; background-position: center; }
-  .hint { position: fixed; top: 28px; left: 0; right: 0; bottom: 0; display: flex;
+  .drag-bar { position: fixed; top: 0; left: 0; right: 0; height: ${WINDOW_HEADER_HEIGHT.preview}px;
+    display: flex; align-items: center; padding: 0 12px 0 88px; /* the shared traffic-light gutter */
+    border-bottom: 1px solid ${DARK_WINDOW_PALETTE.hairline}; box-sizing: border-box; }
+  .drag-bar .label { color: ${DARK_WINDOW_PALETTE.textSecondary}; font-size: 12px; font-weight: 600;
+    white-space: nowrap; }
+  .hint { position: fixed; top: ${WINDOW_HEADER_HEIGHT.preview}px; left: 0; right: 0; bottom: 0; display: flex;
     align-items: center; justify-content: center; flex-direction: column; gap: 6px; }
-  .hint .title { color: ${DARK_WINDOW_PALETTE.textPrimary}; font-size: 13px; }
+  .hint .title { color: ${DARK_WINDOW_PALETTE.textPrimary}; font-size: 13px; font-weight: 600; }
   /* Docked ("stick") variant: the window is immovable inside the Studio slot,
-     so the drag bar disappears and the hint fills the whole content rect. */
+     so the strip disappears and the hint fills the whole content rect. */
   body.docked { -webkit-app-region: no-drag; }
   body.docked .drag-bar { display: none; }
   body.docked .hint { top: 0; }
 </style></head><body>
   <div class="hint"><div class="title">Waiting for preview</div>
   <div id="videorc-wait-detail">The native surface appears here as soon as the compositor presents.</div></div>
-  <div class="drag-bar"><span class="label">Videorc Preview</span><span class="grip"></span></div>
+  <div class="drag-bar"><span class="label">Preview</span></div>
 </body></html>`
 
 async function openPreviewWindow(): Promise<PreviewWindowState> {
@@ -3752,6 +3508,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   const docked = mode === 'docked'
   const rememberedFrame = previewWindowLastFrame ?? prefs.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
+  const previewChrome = glassWindowChrome('preview')
   const window = new BrowserWindow({
     width: frame?.width ?? 960,
     height: frame?.height ?? 568,
@@ -3759,13 +3516,10 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     minWidth: docked ? 1 : 320,
     minHeight: docked ? 1 : 208,
     title: 'Videorc Preview',
-    // hiddenInset is macOS-only; off macOS the standard frame keeps the
-    // preview window draggable without renderer drag regions (Phase 4 owns
-    // the frameless Windows chrome). Traffic lights center in the 28px bar.
-    ...(isMac
-      ? { titleBarStyle: 'hiddenInset' as const, trafficLightPosition: { x: 14, y: 8 } }
-      : {}),
-    backgroundColor: DARK_WINDOW_PALETTE.base,
+    // window-glass.ts: real material pinned dark and the traffic lights centred
+    // on the 28px strip on macOS; off macOS the standard frame and solid base
+    // keep the window draggable without renderer drag regions.
+    ...previewChrome.options,
     // A docked window stays hidden until the renderer answers the dock epoch
     // with a slot rect; showing it at the remembered FLOATING frame first would
     // flash a mis-placed preview.
@@ -3778,6 +3532,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
       backgroundThrottling: backgroundThrottlingFor('preview', electronBackgroundPolicy)
     }
   })
+  finishGlassWindow(window, 'preview', previewChrome.mode)
   applyVideorcWindowCaptureProtection(window, 'preview', {
     onFailure: (reason) =>
       safeConsole.warn(`Preview window content protection could not be enabled: ${reason}`)
@@ -7545,9 +7300,9 @@ function setDockIcon(): void {
   }
 }
 
-// Videorc targets Windows 11 only (build 22000+): it unlocks Mica/acrylic,
-// mature Windows.Graphics.Capture, and per-monitor wallpaper for the glass
-// underlay. The installer can't enforce an OS floor, so we check at startup.
+// Videorc targets Windows 11 only (build 22000+): it unlocks Mica/acrylic
+// window materials and mature Windows.Graphics.Capture. The installer can't
+// enforce an OS floor, so we check at startup.
 // Returns true if the app should stop launching.
 function enforceWindowsVersionFloor(): boolean {
   if (!isWindows) {
@@ -9112,6 +8867,102 @@ async function handleSmokePreviewMotionRequest(
   })
 }
 
+// probe:ui-glass backdrop (dev-only smoke commands; never in a packaged app).
+let smokeBackdropWindow: BrowserWindow | null = null
+const SMOKE_BACKDROP_PHOTO_PATH = '/Library/Desktop Pictures/Mojave Day.jpg'
+
+function smokeBackdropBody(variant: string): { html: string; photo: boolean } | null {
+  const page = (style: string, content = ''): string =>
+    `<body style="margin:0;height:100vh;overflow:hidden;${style}">${content}</body>`
+  if (variant === 'stripes') {
+    return {
+      html: page(
+        'background:linear-gradient(90deg,#ffffff 0 30%,#ff8a00 30% 50%,#2f6bff 50% 70%,#ffffff 70%);font:700 80px -apple-system;color:#000',
+        'BACKDROP BACKDROP BACKDROP BACKDROP'
+      ),
+      photo: false
+    }
+  }
+  const solids: Record<string, string> = {
+    red: '#ff0000',
+    blue: '#0000ff',
+    white: '#ffffff',
+    black: '#000000'
+  }
+  if (solids[variant]) {
+    return { html: page(`background:${solids[variant]}`), photo: false }
+  }
+  if (variant === 'text') {
+    // Dense, high-contrast body text: if any of it reads through a window,
+    // the probe's sharpness metric sees the glyph edges.
+    const line = 'Private text behind the window must never be readable 0123456789 '
+    return {
+      html: page(
+        'background:#ffffff;color:#000000;font:700 26px/1.15 -apple-system;padding:6px;word-break:break-all',
+        line.repeat(160)
+      ),
+      photo: false
+    }
+  }
+  if (variant === 'photo') {
+    const image = existsSync(SMOKE_BACKDROP_PHOTO_PATH)
+      ? nativeImage.createFromPath(SMOKE_BACKDROP_PHOTO_PATH)
+      : null
+    if (!image || image.isEmpty()) {
+      // No system wallpaper on this host: a warm two-tone stand-in.
+      return {
+        html: page('background:linear-gradient(160deg,#c98b4b 0%,#6b3f2a 45%,#1e2a44 100%)'),
+        photo: false
+      }
+    }
+    // JPEG keeps the data URL far under Chromium's 2 MB URL limit.
+    const url = `data:image/jpeg;base64,${image.resize({ width: 1600 }).toJPEG(72).toString('base64')}`
+    return {
+      html: page(`background:#000 url('${url}') center/cover no-repeat`),
+      photo: true
+    }
+  }
+  return null
+}
+
+const SMOKE_WINDOW_ROLES = ['main', 'chat', 'captions', 'notes', 'preview'] as const
+
+function smokeWindowForRole(role: string): BrowserWindow | null {
+  if (role === 'main') return mainWindow
+  if (role === 'chat') return commentsWindow
+  if (role === 'captions') return captionsWindow
+  if (role === 'notes') return notesWindow
+  if (role === 'preview') return previewWindow
+  return null
+}
+
+// Windows raise-window re-levelled (lifted above the backdrop or dropped below
+// it), restored to their own keep-on-top preference when the backdrop closes.
+const smokeRaisedWindowRoles = new Map<BrowserWindow, string>()
+
+function restoreSmokeRaisedWindowLevels(): void {
+  for (const [window, role] of smokeRaisedWindowRoles) {
+    if (window.isDestroyed()) {
+      continue
+    }
+    if (role === 'chat') {
+      applyNotesWindowAlwaysOnTop(window, commentsWindowAlwaysOnTop)
+    } else if (role === 'captions') {
+      applyNotesWindowAlwaysOnTop(window, captionsWindowAlwaysOnTop)
+    } else if (role === 'notes') {
+      applyNotesWindowAlwaysOnTop(window, notesWindowAlwaysOnTop)
+    } else if (role === 'preview') {
+      window.setAlwaysOnTop(
+        previewWindowAlwaysOnTop && currentPreviewWindowMode() !== 'docked',
+        'floating'
+      )
+    } else {
+      window.setAlwaysOnTop(false)
+    }
+  }
+  smokeRaisedWindowRoles.clear()
+}
+
 async function runSmokePreviewMotionCommand(
   command: string,
   params: Record<string, unknown>
@@ -10239,11 +10090,7 @@ async function runSmokePreviewMotionCommand(
           headerTitle: document.querySelector('header span')?.textContent ?? '',
           highlightPositionControl:
             document.querySelector('button[aria-label="Highlight position"]')?.getAttribute('title') ?? null,
-          glassUnderlay: document.querySelector('[data-glass-underlay]')
-            ? 'wallpaper'
-            : document.querySelector('[data-glass-underlay-fallback]')
-              ? 'fallback'
-              : 'missing',
+          windowFrame: document.querySelector('[data-slot="window-frame"]') !== null,
           highlightActionCount: document.querySelectorAll('button[aria-label^="Show "][aria-label$=" on the stream"]').length,
           destinationStatus: document.querySelector('[data-slot="comments-destination-status"]')?.textContent ?? '',
           deliveryStatus: document.querySelector('[aria-label="Latest message delivery"]')?.textContent ?? '',
@@ -10259,7 +10106,7 @@ async function runSmokePreviewMotionCommand(
       })()`,
       true
     )
-    return rendered
+    return { ...rendered, glass: appliedGlass(window) }
   }
 
   if (command === 'comments-window-capture-page') {
@@ -10735,7 +10582,11 @@ async function runSmokePreviewMotionCommand(
   // a composited material × token-alpha matrix without relaunching per cell.
   if (command === 'set-vibrancy') {
     const material = typeof params.material === 'string' ? params.material : null
-    mainWindow.setVibrancy((material as Parameters<BrowserWindow['setVibrancy']>[0]) ?? null)
+    const target = smokeWindowForRole(typeof params.role === 'string' ? params.role : 'main')
+    if (!target || target.isDestroyed()) {
+      throw new Error('No open window for that role.')
+    }
+    target.setVibrancy((material as Parameters<BrowserWindow['setVibrancy']>[0]) ?? null)
     return { material }
   }
 
@@ -10759,25 +10610,112 @@ async function runSmokePreviewMotionCommand(
     }
   }
 
-  // Glass tuning: a deliberately loud backdrop window behind the main window
-  // so composited captures can SHOW how much desktop the glass passes —
-  // dark-on-dark shots cannot distinguish translucent from solid.
+  // Glass probes: a stand-in wallpaper behind the app windows so REGION
+  // captures show what the glass passes (and never the user's own desktop).
+  // `stripes` is the historic loud backdrop; red/blue measure transmission,
+  // white/black bound the coat's contrast, `text` measures legibility of what
+  // sits behind a window, `photo` is a real wallpaper for the owner's sheet.
   if (command === 'open-backdrop-window') {
+    const variant = typeof params.variant === 'string' ? params.variant : 'stripes'
+    const body = smokeBackdropBody(variant)
+    if (!body) {
+      throw new Error(`Unknown backdrop variant: ${variant}`)
+    }
     const area = screen.getPrimaryDisplay().workArea
-    const backdrop = new BrowserWindow({
-      ...area,
-      frame: false,
-      webPreferences: { sandbox: true }
-    })
-    await backdrop.loadURL(
-      'data:text/html,' +
-        encodeURIComponent(
-          '<body style="margin:0;height:100vh;background:linear-gradient(90deg,#ffffff 0 30%,#ff8a00 30% 50%,#2f6bff 50% 70%,#ffffff 70%);font:700 80px -apple-system;color:#000;overflow:hidden">BACKDROP BACKDROP BACKDROP BACKDROP</body>'
-        )
-    )
-    mainWindow.moveTop()
-    mainWindow.focus()
-    return { opened: true }
+    if (!smokeBackdropWindow || smokeBackdropWindow.isDestroyed()) {
+      smokeBackdropWindow = new BrowserWindow({
+        ...area,
+        frame: false,
+        hasShadow: false,
+        show: false,
+        webPreferences: { sandbox: true }
+      })
+    }
+    const backdrop = smokeBackdropWindow
+    await backdrop.loadURL(`data:text/html,${encodeURIComponent(body.html)}`)
+    if (params.raise === false) {
+      // probe:ui-glass: float the backdrop without activating the app, so the
+      // run never takes key focus (or the user's keystrokes) from them.
+      backdrop.setAlwaysOnTop(true, 'floating')
+      backdrop.showInactive()
+    } else {
+      backdrop.showInactive()
+      mainWindow.moveTop()
+      mainWindow.focus()
+    }
+    return { opened: true, variant, photo: body.photo }
+  }
+
+  if (command === 'close-backdrop-window') {
+    const closed = Boolean(smokeBackdropWindow && !smokeBackdropWindow.isDestroyed())
+    if (closed) {
+      smokeBackdropWindow?.destroy()
+    }
+    smokeBackdropWindow = null
+    restoreSmokeRaisedWindowLevels()
+    return { closed }
+  }
+
+  // What window-glass.ts applied to one window: material or solid (and why),
+  // and whether its appearance is pinned.
+  if (command === 'window-glass-state') {
+    const role = typeof params.role === 'string' ? params.role : ''
+    const target = smokeWindowForRole(role)
+    if (!target || target.isDestroyed()) {
+      throw new Error(`No open window for role: ${role}`)
+    }
+    return {
+      role,
+      applied: appliedGlass(target),
+      appearancePin: windowAppearanceLoad.binding
+        ? 'available'
+        : windowAppearanceLoad.unavailableReason,
+      // What AppKit actually paints: the probe asserts `active`, never a
+      // material that follows window focus.
+      effectViews:
+        windowAppearanceLoad.binding?.windowEffectViews?.(target.getNativeWindowHandle()) ?? null
+    }
+  }
+
+  // Lifts one app window just above the floating backdrop and reports where it
+  // is, so a probe can shoot exactly its rect. `focus: true` also makes it key;
+  // probes leave it off so the run never steals the user's focus.
+  // close-backdrop-window restores every lifted window's own level.
+  if (command === 'raise-window') {
+    const role = typeof params.role === 'string' ? params.role : ''
+    const target = smokeWindowForRole(role)
+    if (!target || target.isDestroyed()) {
+      throw new Error(`No open window for role: ${role}`)
+    }
+    // Every other app window drops below the floating backdrop: a window's
+    // glass blurs whatever sits directly behind it, so an overlapping app
+    // window would be measured instead of the backdrop.
+    for (const otherRole of SMOKE_WINDOW_ROLES) {
+      const other = smokeWindowForRole(otherRole)
+      if (other && other !== target && !other.isDestroyed()) {
+        smokeRaisedWindowRoles.set(other, otherRole)
+        other.setAlwaysOnTop(false)
+      }
+    }
+    smokeRaisedWindowRoles.set(target, role)
+    target.setAlwaysOnTop(true, 'floating', 1)
+    if (params.focus === true) {
+      target.show()
+      target.focus()
+    } else {
+      target.showInactive()
+    }
+    target.moveTop()
+    const match = /^window:(\d+):/.exec(target.getMediaSourceId())
+    return {
+      role,
+      bounds: target.getBounds(),
+      windowId: match ? Number(match[1]) : null,
+      focused: target.isFocused(),
+      // The backdrop covers the primary display only; probes move every
+      // window onto it so no capture can include the user's real desktop.
+      primaryWorkArea: screen.getPrimaryDisplay().workArea
+    }
   }
 
   // Wedge research: candidate levers for recovering frame production after a
@@ -12734,12 +12672,6 @@ app.whenReady().then(async () => {
 
   installRendererSessionPermissions(session.defaultSession)
 
-  // Warm the glass-wallpaper cache while Electron/renderer boot: the underlay
-  // then finds it on first mount instead of swapping the whole background in
-  // a beat after the window shows. Fire-and-forget — osascript can stall on
-  // an Automation prompt and must never delay the window.
-  void refreshGlassWallpaper()
-
   registerOAuthCallbackProtocol()
   const initialCallbackUrl = process.argv.find((argument) =>
     argument.startsWith(`${OAUTH_CALLBACK_PROTOCOL}://`)
@@ -12870,19 +12802,12 @@ app.whenReady().then(async () => {
   // the blur material always matches the in-app theme (videorc-design).
   secureIpcHandle('app:set-native-theme', (_event, theme: string) => {
     nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
-    // The solid base must follow the theme wherever a solid base is painted:
-    // always off macOS, and on macOS when vibrancy is opted out.
-    if (!isMac || !glassVibrancyEnabled) {
-      mainWindow?.setBackgroundColor(theme === 'light' ? '#F5F5F7' : '#1C1C1F')
+    repinDarkAlwaysWindows()
+    // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
+    // with the theme; the glass windows' material follows nativeTheme itself.
+    if (glassMode.kind === 'solid') {
+      mainWindow?.setBackgroundColor(solidWindowBase('main', theme !== 'light'))
     }
-  })
-  secureIpcHandle('glass:wallpaper:get', (event) => {
-    // Each glass window asks for ITS OWN offset into the shared wallpaper.
-    const geometry = glassGeometry(BrowserWindow.fromWebContents(event.sender))
-    if (!glassWallpaperDataUrl || !geometry) {
-      return null
-    }
-    return { imageDataUrl: glassWallpaperDataUrl, ...geometry }
   })
   secureIpcHandle('preview-window:open', () => openPreviewWindow())
   secureIpcHandle('preview-window:close', () => closePreviewWindow())

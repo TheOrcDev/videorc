@@ -4,21 +4,32 @@ import { Slot } from 'radix-ui'
 
 import { cn } from '@/lib/utils'
 
+// Glass chips (plan 050, D9): every badge is a small piece of the window glass
+// (the glass-chip utilities in styles.css). The text stays monochrome. A status
+// chip carries its tone in a glowing dot, or in its leading icon when it has
+// one, and an emphasis chip (failed, on air) tints the glass itself.
+const STATUS_DOT =
+  'gap-1.5 before:size-1.5 before:shrink-0 before:rounded-full before:glass-dot has-data-[icon=inline-start]:before:hidden [&>[data-icon=inline-start]]:text-(--chip-tone)'
+
 const badgeVariants = cva(
-  'group/badge inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-md border border-transparent px-2 py-0.5 text-xs font-medium whitespace-nowrap transition-all focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 has-data-[icon=inline-end]:pr-1.5 has-data-[icon=inline-start]:pl-1.5 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&>svg]:pointer-events-none [&>svg]:size-3!',
+  'group/badge inline-flex h-5 w-fit shrink-0 items-center justify-center gap-1 overflow-hidden rounded-[7px] border px-1.5 text-[11px] leading-none font-medium whitespace-nowrap focus-visible:border-ring focus-visible:ring-[3px] focus-visible:ring-ring/50 has-data-[icon=inline-end]:pr-1 has-data-[icon=inline-start]:pl-1 aria-invalid:border-destructive aria-invalid:ring-destructive/20 dark:aria-invalid:ring-destructive/40 [&>svg]:pointer-events-none [&>svg]:size-3!',
   {
     variants: {
       variant: {
-        default: 'bg-primary text-primary-foreground [a]:hover:bg-primary/80',
-        secondary: 'bg-secondary text-secondary-foreground [a]:hover:bg-secondary/80',
-        destructive:
-          'bg-destructive/10 text-destructive focus-visible:ring-destructive/20 dark:bg-destructive/20 dark:focus-visible:ring-destructive/40 [a]:hover:bg-destructive/20',
-        success: 'bg-success/15 text-success [a]:hover:bg-success/25 dark:bg-success/20',
-        warning:
-          'bg-warning/25 text-warning-foreground [a]:hover:bg-warning/35 dark:bg-warning/25 dark:text-warning',
-        outline: 'border-border text-foreground [a]:hover:bg-muted [a]:hover:text-muted-foreground',
-        ghost: 'hover:bg-muted hover:text-muted-foreground dark:hover:bg-muted/50',
-        link: 'text-primary underline-offset-4 hover:underline'
+        // Neutral glass.
+        default: 'glass-chip text-foreground',
+        secondary: 'glass-chip text-foreground',
+        // Tag: the same glass with secondary text (9:16, beta, counts, Idle).
+        outline: 'glass-chip text-muted-foreground',
+        // Status: the tone lives in the dot, never in the text.
+        success: `glass-chip tone-success text-foreground ${STATUS_DOT}`,
+        warning: `glass-chip tone-warning text-foreground ${STATUS_DOT}`,
+        neutral: `glass-chip tone-neutral text-muted-foreground ${STATUS_DOT}`,
+        // Emphasis: tinted glass for what must interrupt.
+        destructive: 'glass-chip-tinted tone-destructive',
+        live: 'glass-chip-tinted tone-live',
+        ghost: 'border-transparent text-muted-foreground',
+        link: 'border-transparent text-foreground underline-offset-4 hover:underline'
       }
     },
     defaultVariants: {

@@ -17,7 +17,6 @@ import type {
   CommentsSnapshotDelta,
   CommentsViewSnapshot,
   CommentsWindowState,
-  GlassWallpaperState,
   GlobalShortcutsConfig,
   NotesDocument,
   NotesWindowState,
@@ -155,7 +154,6 @@ export const electronInvokeApiMethods = {
   'obs:discover': 'obsDiscover',
   'obs:read': 'obsRead',
   'obs:read-stream-key': 'obsReadStreamKey',
-  'glass:wallpaper:get': 'getGlassWallpaper',
   'updates:check': 'checkForUpdates',
   'updates:download': 'downloadUpdate',
   'updates:install': 'installUpdate',
@@ -207,8 +205,6 @@ export interface ElectronIpcEventMap {
   'global-shortcuts:triggered': GlobalShortcutAction
   'preview-surface:pump-mode': boolean
   'preview-surface:resync-scene': undefined
-  'glass:wallpaper': GlassWallpaperState
-  'glass:geometry': Pick<GlassWallpaperState, 'window' | 'display'>
   'app:update-status': UpdateStatus
 }
 
@@ -244,8 +240,6 @@ export const electronEventChannels = [
   'global-shortcuts:triggered',
   'preview-surface:pump-mode',
   'preview-surface:resync-scene',
-  'glass:wallpaper',
-  'glass:geometry',
   'app:update-status'
 ] as const satisfies readonly ElectronEventChannel[]
 
@@ -267,7 +261,8 @@ const MAX_IPC_ARRAY_ITEMS = 10_000
 const MAX_IPC_OBJECT_KEYS = 10_000
 const MAX_IPC_KEY_LENGTH = 256
 const MAX_IPC_STRING_CHARACTERS = 32 * 1024 * 1024
-export const MAX_NOTES_TEXT_LENGTH = 1_000_000
+import { MAX_NOTES_TEXT_LENGTH } from './notes-limits'
+export { MAX_NOTES_TEXT_LENGTH }
 
 type IpcValueBudget = {
   nodes: number
@@ -1040,7 +1035,6 @@ export const boundedPassthroughElectronInvokeChannels = [
   'obs:discover',
   'obs:read',
   'obs:read-stream-key',
-  'glass:wallpaper:get',
   'updates:check',
   'updates:download',
   'updates:get-status'
@@ -1148,8 +1142,6 @@ export const boundedPassthroughElectronEventChannels = [
   'comments-window:cohost-enable-request',
   'captions-window:state',
   'captions-window:snapshot',
-  'glass:wallpaper',
-  'glass:geometry',
   'app:update-status'
 ] as const satisfies readonly ElectronEventChannel[]
 

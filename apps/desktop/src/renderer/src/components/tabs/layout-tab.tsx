@@ -171,9 +171,9 @@ export function LayoutTab(): ReactElement {
       : HORIZONTAL_LAYOUT_TAB_PRESETS
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="grid gap-5 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
-        <div className="flex min-w-0 flex-col gap-5">
+    <div className="flex flex-col">
+      <div className="grid lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)]">
+        <div className="flex min-w-0 flex-col lg:border-r">
           <PanelSection
             description="Pick how the screen and camera are composed."
             icon={LayoutIcon}
@@ -191,19 +191,15 @@ export function LayoutTab(): ReactElement {
                 return (
                   <button
                     aria-pressed={layout.layoutPreset === preset.id && !isFreeform}
-                    className="cursor-pointer rounded-row border border-border p-3 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                    className="inline-flex h-control items-center gap-1.5 rounded-chip border border-border px-3 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground aria-pressed:text-foreground aria-pressed:glass-chip disabled:cursor-not-allowed disabled:opacity-50"
                     disabled={disabled || stageBusy}
                     key={preset.id}
                     data-videorc-layout-preset={preset.id}
                     type="button"
                     onClick={() => applyCameraPreset({ layoutPreset: preset.id })}
                   >
-                    <div>{switching ? 'Switching…' : preset.label}</div>
-                    {!preset.enabled ? (
-                      <Badge className="mt-1.5" variant="outline">
-                        Soon
-                      </Badge>
-                    ) : null}
+                    {switching ? 'Switching…' : preset.label}
+                    {!preset.enabled ? <Badge variant="outline">Soon</Badge> : null}
                   </button>
                 )
               })}
@@ -211,13 +207,13 @@ export function LayoutTab(): ReactElement {
                   user's per-source overrides (plan phase 4). */}
               <button
                 aria-pressed={isFreeform}
-                className="cursor-pointer rounded-row border border-border p-3 text-left text-sm font-medium transition-colors duration-100 hover:bg-accent aria-pressed:border-ring aria-pressed:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                className="inline-flex h-control items-center gap-1.5 rounded-chip border border-border px-3 text-sm font-medium text-muted-foreground hover:bg-accent hover:text-foreground aria-pressed:text-foreground aria-pressed:glass-chip disabled:cursor-not-allowed disabled:opacity-50"
                 data-videorc-layout-preset="freeform"
                 disabled={!scene || stageBusy}
                 type="button"
                 onClick={enterFreeform}
               >
-                <div>{layoutSwitchPending && isFreeform ? 'Switching…' : 'Freeform'}</div>
+                {layoutSwitchPending && isFreeform ? 'Switching…' : 'Freeform'}
               </button>
             </div>
             {isSessionActive ? (
@@ -240,55 +236,59 @@ export function LayoutTab(): ReactElement {
           {/* SC1: schematic stage — the committed composition rendered from the
               real normalized transforms (pure SVG, zero idle IPC). Live pixels
               stay in the detached preview window. */}
-          <ScenePresetControls toolbar />
-          <SceneStage
-            aspectLocked={aspectLocked}
-            externalPending={preciseEditPending}
-            onBusyChange={handleStageBusyChange}
-            // The camera's box aspect is owned by the mask law (circle boxes
-            // are square by construction; square/portrait force the crop), so
-            // resize gestures must not free it.
-            cameraAspectLocked={layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'}
-            cameraCornerRadiusPct={layout.cameraCornerRadiusPct}
-            // WYSIWYG: only the inset scenes mask the camera bubble (backend
-            // camera_mask policy) — side-by-side and the vertical bands render
-            // a plain rectangle, so the schematic must too.
-            cameraShape={effectiveCameraMaskShape(layout)}
-            background={scene?.background ?? null}
-            dragEnabled={
-              (showOverlayControls || isFreeform) &&
-              !isSessionActive &&
-              !preciseEditPending &&
-              !sceneSwitchPending
-            }
-            freeform={isFreeform}
-            outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
-            previewOpen={previewWindow.open}
-            // Free resize: the backend honors custom camera width/height
-            // (aspect law permitting) since plan phase 3.
-            resizeEnabled={
-              (showOverlayControls || isFreeform) &&
-              !isSessionActive &&
-              !preciseEditPending &&
-              !sceneSwitchPending
-            }
-            scene={scene}
-            selectedSourceId={selectedSceneSourceId}
-            onCommitTransform={setSceneSourceTransform}
-            onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
-            onSelectSource={(sourceId) => {
-              setSelectedSceneSourceId(sourceId)
-              if (!sceneEditMode) {
-                setSceneEditMode(true)
+          <div className="flex flex-col gap-3 border-b border-border p-gutter">
+            <ScenePresetControls toolbar />
+            <SceneStage
+              aspectLocked={aspectLocked}
+              externalPending={preciseEditPending}
+              onBusyChange={handleStageBusyChange}
+              // The camera's box aspect is owned by the mask law (circle boxes
+              // are square by construction; square/portrait force the crop), so
+              // resize gestures must not free it.
+              cameraAspectLocked={
+                layout.cameraShape === 'circle' || layout.cameraAspect !== 'source'
               }
-            }}
-            // Corner release re-enters a preset corner; in freeform a corner
-            // drop is just a position.
-            onSnapCorner={
-              isFreeform ? undefined : (cameraCorner) => applyCameraPreset({ cameraCorner })
-            }
-            onTogglePreview={() => void togglePreviewWindow()}
-          />
+              cameraCornerRadiusPct={layout.cameraCornerRadiusPct}
+              // WYSIWYG: only the inset scenes mask the camera bubble (backend
+              // camera_mask policy) — side-by-side and the vertical bands render
+              // a plain rectangle, so the schematic must too.
+              cameraShape={effectiveCameraMaskShape(layout)}
+              background={scene?.background ?? null}
+              dragEnabled={
+                (showOverlayControls || isFreeform) &&
+                !isSessionActive &&
+                !preciseEditPending &&
+                !sceneSwitchPending
+              }
+              freeform={isFreeform}
+              outputAspect={captureConfig.video.width / Math.max(1, captureConfig.video.height)}
+              previewOpen={previewWindow.open}
+              // Free resize: the backend honors custom camera width/height
+              // (aspect law permitting) since plan phase 3.
+              resizeEnabled={
+                (showOverlayControls || isFreeform) &&
+                !isSessionActive &&
+                !preciseEditPending &&
+                !sceneSwitchPending
+              }
+              scene={scene}
+              selectedSourceId={selectedSceneSourceId}
+              onCommitTransform={setSceneSourceTransform}
+              onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
+              onSelectSource={(sourceId) => {
+                setSelectedSceneSourceId(sourceId)
+                if (!sceneEditMode) {
+                  setSceneEditMode(true)
+                }
+              }}
+              // Corner release re-enters a preset corner; in freeform a corner
+              // drop is just a position.
+              onSnapCorner={
+                isFreeform ? undefined : (cameraCorner) => applyCameraPreset({ cameraCorner })
+              }
+              onTogglePreview={() => void togglePreviewWindow()}
+            />
+          </div>
 
           {/* The old "Scene sources" panel is gone (post-0.9.4 fix batch F3):
               it duplicated the stage — the stage's rects and legend chips ARE

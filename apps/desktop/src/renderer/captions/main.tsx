@@ -3,7 +3,7 @@ import ReactDOM from 'react-dom/client'
 
 import { CaptionsReader } from '@/components/captions-reader'
 import { AppErrorBoundary } from '@/components/error-boundary'
-import { GlassWallpaperUnderlay } from '@/components/glass-wallpaper'
+import { WindowFrame } from '@/components/window-frame'
 import type { CaptionWindowSnapshot } from '@/lib/backend'
 import '@/styles.css'
 
@@ -55,9 +55,7 @@ function CaptionsWindowApp(): ReactElement {
     }
   }, [])
   return (
-    <>
-      <GlassWallpaperUnderlay />
-      <div aria-hidden className="glass-shine pointer-events-none fixed inset-0 z-50" />
+    <WindowFrame>
       <CaptionsReader
         lines={snapshot.lines}
         position={snapshot.position}
@@ -69,7 +67,7 @@ function CaptionsWindowApp(): ReactElement {
           void window.videorc?.setCaptionsWindowAlwaysOnTop?.(!alwaysOnTop)
         }
       />
-    </>
+    </WindowFrame>
   )
 }
 

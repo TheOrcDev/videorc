@@ -9,6 +9,7 @@ import {
 import { useEffect, useState, type ReactElement } from 'react'
 
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { Badge } from '@/components/ui/badge'
 import { AvatarCircle } from '@/lib/chat-avatar'
 import {
   DropdownMenu,
@@ -82,7 +83,7 @@ export function AccountMenu({
       <DropdownMenuTrigger asChild>
         <button
           type="button"
-          aria-label={`Open account menu (backend ${statusLabel})`}
+          aria-label="Open account menu"
           className="flex min-w-0 items-center gap-1.5 rounded-row px-1.5 py-1 text-sm transition-colors hover:bg-sidebar-accent/60"
         >
           {/* The web account's avatar (uploaded on videorc.com or the Google
@@ -98,9 +99,6 @@ export function AccountMenu({
             <AccountIcon className="size-4 shrink-0 text-muted-foreground" weight="regular" />
           )}
           <span className="truncate text-xs font-medium">{displayName}</span>
-          {/* Secondary backend status: a small dot only — the label lives in the
-              menu so changing connection states never resize/jitter the footer. */}
-          <StatusDot tone={statusTone} pulse={live} />
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="start" side="top" className="w-56">
@@ -113,9 +111,7 @@ export function AccountMenu({
               {signedIn ? displayName : 'Not signed in'}
             </span>
           </span>
-          <span className="shrink-0 rounded-chip border px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
-            {tierLabel}
-          </span>
+          <Badge variant="outline">{tierLabel}</Badge>
         </DropdownMenuLabel>
 
         <DropdownMenuSeparator />

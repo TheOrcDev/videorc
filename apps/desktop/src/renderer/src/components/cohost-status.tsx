@@ -1,6 +1,7 @@
 import { CohostIcon } from '@/components/icons'
 import { useState, type ReactElement } from 'react'
 
+import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Label } from '@/components/ui/label'
 import {
@@ -188,12 +189,9 @@ function CohostStatusBody({
         <CohostTypingDots className={CHAT_HEADER_TIGHT_HIDDEN} fast={view.kind === 'thinking'} />
       ) : null}
       {view.unreadBadge ? (
-        <span
-          aria-label={`${view.unreadBadge} new questions`}
-          className="shrink-0 rounded-chip bg-foreground/10 px-1 text-[10px] font-medium tabular-nums text-foreground"
-        >
+        <Badge aria-label={`${view.unreadBadge} new questions`} className="tabular-nums">
           {view.unreadBadge}
-        </span>
+        </Badge>
       ) : null}
     </>
   )
@@ -215,12 +213,12 @@ export function CohostPresenceDot({
     <span
       aria-hidden
       className={cn(
-        'size-1.5 shrink-0 rounded-full',
+        'size-1.5 shrink-0 rounded-full glass-dot',
         view.dotTone === 'live'
-          ? 'bg-success'
+          ? 'tone-success'
           : view.dotTone === 'destructive'
-            ? 'bg-destructive'
-            : 'bg-muted-foreground',
+            ? 'tone-destructive'
+            : 'tone-neutral',
         view.pulse && 'animate-pulse',
         className
       )}

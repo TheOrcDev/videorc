@@ -111,9 +111,9 @@ function CohostMarks({
     return (
       <span className="flex min-w-0 items-center gap-1" data-slot="cohost-comment-flag">
         <Badge
-          className={cn('max-w-40', flag.severity === 'high' ? 'text-destructive' : 'text-subtle')}
+          className={cn('max-w-40', flag.severity !== 'high' && 'text-subtle')}
           title={cohostFlagDetail(flag)}
-          variant="outline"
+          variant={flag.severity === 'high' ? 'destructive' : 'outline'}
         >
           <span className="truncate">{cohostFlagChipLabel(flag)}</span>
         </Badge>
@@ -194,7 +194,7 @@ function CommentContent({
         </span>
         <span
           className={cn(
-            'text-left text-foreground',
+            'text-left text-foreground select-text',
             density === 'comfortable' ? 'text-[15px] leading-snug' : 'text-xs leading-relaxed',
             message.eventType === 'system' && 'italic text-muted-foreground',
             message.eventType === 'moderation' && 'italic text-muted-foreground',
