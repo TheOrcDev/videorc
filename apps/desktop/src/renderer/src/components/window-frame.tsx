@@ -15,10 +15,26 @@ const MAC_RENDERER = typeof navigator !== 'undefined' && /Mac/i.test(navigator.p
  */
 export const TRAFFIC_LIGHT_GUTTER_CLASS = 'pl-[88px]'
 
+/**
+ * Native fullscreen covers the whole screen, menu bar included; a zoomed
+ * window never does. No IPC needed.
+ */
+export function isNativeFullscreenSize(size: {
+  outerWidth: number
+  outerHeight: number
+  screenWidth: number
+  screenHeight: number
+}): boolean {
+  return size.outerWidth >= size.screenWidth && size.outerHeight >= size.screenHeight
+}
+
 function nativeFullscreen(): boolean {
-  // Native fullscreen covers the whole screen, menu bar included; a zoomed
-  // window never does. No IPC needed.
-  return window.outerWidth >= window.screen.width && window.outerHeight >= window.screen.height
+  return isNativeFullscreenSize({
+    outerWidth: window.outerWidth,
+    outerHeight: window.outerHeight,
+    screenWidth: window.screen.width,
+    screenHeight: window.screen.height
+  })
 }
 
 function subscribeToResize(onChange: () => void): () => void {

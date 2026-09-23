@@ -77,8 +77,8 @@ secondary text holds 5.5–5.7:1 over a black desktop.
 
 WindowServer CPU is sampled read-only with `top` after a 20 s settle, with the
 preview presenting. S2 (main window on glass): 24.2%. The glass-on versus
-`VIDEORC_GLASS=0` comparison with every window on glass is recorded in the S7
-acceptance notes.
+`VIDEORC_GLASS=0` comparison with every window on glass is in
+`2026-09-23-real-glass-accessibility-and-capture.md` (S7).
 
 ## Update: edge samples (S5)
 
