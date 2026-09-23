@@ -1,9 +1,7 @@
-import { closeVisualMicrophoneStreams } from '@/lib/mic-stream'
-import {
-  LiveSourceSelectionController,
-  confirmedSourceSelection,
-  type LiveSourceSelectionState
-} from '@/lib/live-source-selection'
+import { closeVisualMicrophoneStreams } from '@/lib/mic-visual-ownership'
+import { LazyLiveSourceSelectionController } from '@/lib/live-source-selection-loader'
+import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
+import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
@@ -3385,7 +3383,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   })
   const [sourceSelectionController] = useState(
     () =>
-      new LiveSourceSelectionController({
+      new LazyLiveSourceSelectionController({
         get: async (sessionId) => {
           if (!clientRef.current) throw new Error('Backend socket is not connected.')
           return clientRef.current.requestTyped('session.sources.get', { sessionId })

@@ -9,7 +9,7 @@ import {
   type ReactNode
 } from 'react'
 
-import { subscribeVisualMicrophoneEpoch, visualMicrophoneEpoch } from '@/lib/mic-stream'
+import { subscribeVisualMicrophoneEpoch, visualMicrophoneEpoch } from '@/lib/mic-visual-ownership'
 import { useDocumentVisible } from '@/hooks/use-document-visible'
 import { useStudioCore } from '@/hooks/use-studio'
 import { micVisualAnalyserEnabled } from '@/lib/mic-visual-gate'

@@ -1174,3 +1174,65 @@ recording, stream, or release was run during planning.
   `s5-stop-disposition-final-v2.log`), Rust formatting and clippy with warnings
   denied (`s5-clippy-final-v2.log`). Clippy's three style findings were corrected
   without changing the transaction semantics.
+
+
+### Independent frozen S5 checkpoint verification (1486eb26)
+
+A disposable detached worktree with independent build artifacts verified the
+committed checkpoint while Windows implementation continued separately.
+
+- Desktop/backend builds passed. All-layout recording smoke passed every preset,
+  decoded artifact checks, the asset-background border, and poster generation.
+- Scene-commit and 100-cycle preview-lifecycle probes passed. Remote-control
+  discovery, allowlist/filter lock, confirmed mute/scene changes, debounce and
+  credential regeneration passed.
+- Live-layout recording and combined-session artifacts passed. Independent
+  received-FLV analysis passed 372/372 unique frames, 30 fps, BT.709/video-range,
+  no freeze and one continuous intentionally silent audio track. This is
+  structural continuity evidence, not measured lip-sync.
+- Three-mode microphone matrix passed distinct decoded inputs, None silence,
+  loss/failure/recovery, duplicate fencing and unchanged session/encoder/RTMP
+  connection. Its existing DTS check and completePlanAcceptance:false scope
+  still require the stricter S6 work.
+- Real ScreenCaptureKit recording passed final-file/startup/screen gates: native
+  preview 30 fps, no blank/CPU-fallback frames, no repeated output frames.
+- Full desktop tests found seven old microphone-visual mock fixture failures
+  (1,905 passed, one skipped); executor correction is pending commit.
+- Linux CI passed. JS CI failed the unchanged eager gzip budget: 387,599 bytes
+  versus 385,000. Windows and macOS Rust CI were still running at this report.
+- Evidence logs are under /tmp/videorc-live-sources-evidence/s5-frozen-*.log.
+  Generated artifacts remain outside git; no final platform acceptance claimed.
+
+### S5 asset-budget amendment
+
+The synchronous microphone-release import also made the visual WebAudio/meter
+module eager. Extract only its small ownership/suspension registry into
+apps/desktop/src/renderer/src/lib/mic-visual-ownership.ts, preserving synchronous
+source admission. This reduced eager gzip to 386,086 bytes but remained 1,086
+bytes over budget. A QuickSettings lazy chunk was measured and discarded: its
+parent StudioTab was already lazy, so this saved no eager bytes. A small loader
+facade for the existing source controller may be added instead, with confirmed
+selection merging kept in a separate pure module. Active/starting pickers must
+remain synchronously disabled until the controller is ready; selection must
+never wait for loading and later admit a stale click. Preserve session identity,
+fence load success/failure/disposal by generation, expose retry on chunk failure,
+and test failure-to-idle plus disposal/revival races. Retain only after measured
+budget savings and loader/provider regressions pass. Do not raise asset budgets
+or weaken the shared controller's synchronous admission fence.
+
+- Loader implementation retains the synchronous admission class in its own lazy
+  module. The eager facade refuses active source actions while loading, keeps
+  latest session authority, fences late initialization/rejection after disposal,
+  clears a load error on idle, and exposes retry. The visual provider's mock
+  now includes source authority and tests pending/checking close and resume.
+  Focused controller/provider/microphone tests passed 158/158, then four final
+  loader lifecycle tests passed; typecheck passed. Evidence:
+  `s5-loader-ui-tests-v1.log`, `s5-loader-unit-v2.log`,
+  `s5-loader-typecheck.log`. Measured eager gzip fell from 387,599 to 384,528
+  bytes before the final idle-reset refinement (`s5-asset-budget-v3.log`);
+  the unchanged limit is 385,000 bytes. Final measurement follows below.
+- Final loader/ownership build passed the unchanged eager budget at 1,986,914 raw
+  and 384,656 gzip bytes (`s5-ui-fix-budget.log`), with lint, format check and
+  desktop build passing (`s5-ui-fix-{lint,format,build}.log`). The QuickSettings
+  experiment was fully discarded. The eager registry remains synchronous and
+  tests retain late browser-stream disposal and confirmed-device reacquisition.

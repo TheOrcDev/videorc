@@ -9,30 +9,13 @@
 import type { MediaAccessStatus } from './backend'
 import { matchMicrophoneDeviceId } from './mic-meter'
 
-const visualOwners = new Set<() => void>()
-const visualPipelines = new Set<() => void>()
-const visualEpochListeners = new Set<() => void>()
-let visualEpoch = 0
-export const visualMicrophoneEpoch = (): number => visualEpoch
-export function subscribeVisualMicrophoneEpoch(listener: () => void): () => void {
-  visualEpochListeners.add(listener)
-  return () => {
-    visualEpochListeners.delete(listener)
-  }
-}
-export function registerVisualMicrophoneSuspension(suspend: () => void): () => void {
-  visualPipelines.add(suspend)
-  return () => {
-    visualPipelines.delete(suspend)
-  }
-}
-/** Release owned visual leases before the backend starts a microphone transaction. */
-export function closeVisualMicrophoneStreams(): void {
-  for (const suspend of visualPipelines) suspend()
-  for (const close of visualOwners) close()
-  visualEpoch += 1
-  for (const listener of visualEpochListeners) listener()
-}
+import { registerVisualMicrophoneOwner } from './mic-visual-ownership'
+export {
+  closeVisualMicrophoneStreams,
+  registerVisualMicrophoneSuspension,
+  subscribeVisualMicrophoneEpoch,
+  visualMicrophoneEpoch
+} from './mic-visual-ownership'
 
 type MicTrackLike = { stop: () => void }
 
@@ -94,6 +77,7 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
 ): MicStreamController<S> {
   let current: S | null = null
   let closed = false
+  let unregisterOwner: (() => void) | undefined
 
   const stopTracks = (stream: S | null): void => {
     stream?.getTracks().forEach((track) => track.stop())
@@ -103,14 +87,15 @@ export function createMicStreamController<S extends MicMediaStreamLike>(
     closed = true
     stopTracks(current)
     current = null
-    visualOwners.delete(close)
+    unregisterOwner?.()
+    unregisterOwner = undefined
   }
   return {
     async open(deviceName, strict = false) {
       if (closed || !media?.getUserMedia) {
         return null
       }
-      visualOwners.add(close)
+      unregisterOwner ??= registerVisualMicrophoneOwner(close)
       try {
         const inputs = ((await media.enumerateDevices?.().catch(() => [])) ?? [])
           .filter((device) => device.kind === 'audioinput')
