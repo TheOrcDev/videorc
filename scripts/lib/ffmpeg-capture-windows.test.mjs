@@ -126,6 +126,22 @@ test('capture manifests bind source recipe patch executable license and actual s
       )
       assert.throws(() => verifyWindowsCaptureManifest(bundle, expected), /match/)
     }
+    // A signed release bundle: Authenticode rewrote the executable, so only its
+    // hash may differ; every other field is still enforced.
+    writeFileSync(
+      join(bundle, 'capture/MANIFEST.json'),
+      JSON.stringify({ ...manifest, executableSha256: 'signed-bytes' })
+    )
+    assert.throws(() => verifyWindowsCaptureManifest(bundle, expected), /hash/)
+    assert.deepEqual(
+      verifyWindowsCaptureManifest(bundle, expected, { signed: true }).dependencies,
+      ['kernel32.dll']
+    )
+    writeFileSync(
+      join(bundle, 'capture/MANIFEST.json'),
+      JSON.stringify({ ...manifest, executableSha256: 'signed-bytes', recipeSha256: 'wrong' })
+    )
+    assert.throws(() => verifyWindowsCaptureManifest(bundle, expected, { signed: true }), /match/)
     writeFileSync(join(bundle, 'capture/MANIFEST.json'), JSON.stringify(manifest))
     writeFileSync(join(bundle, 'capture/source-patches/dshow-capture-clock.patch'), 'wrong patch')
     assert.throws(() => verifyWindowsCaptureManifest(bundle, expected), /patch/)

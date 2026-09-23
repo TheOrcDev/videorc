@@ -39,6 +39,7 @@ function facts(overrides = {}) {
     actualSha512: sha512,
     actualSizeBytes: manifest.sizeBytes,
     appSignature: { publisher, status: 'Valid', timestampPresent: true },
+    captureSignature: { publisher, status: 'Valid', timestampPresent: true },
     appUpdateYml:
       'provider: generic\nurl: https://www.videorc.com/api/updates/\npublisherName:\n  - Videorc Test Publisher\n',
     expectedPublisher: publisher,
@@ -100,6 +101,10 @@ describe('Windows release artifact validation', () => {
           }
         },
         'app-signature'
+      ],
+      [
+        { captureSignature: { publisher, status: 'NotSigned', timestampPresent: false } },
+        'capture-signature'
       ],
       [{ actualSha256: 'c'.repeat(64) }, 'artifact-sha256'],
       [{ actualSizeBytes: 1 }, 'artifact-size'],

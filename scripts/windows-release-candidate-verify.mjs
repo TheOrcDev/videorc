@@ -29,7 +29,8 @@ async function main() {
   const installerPath = join(releaseDir, manifest.filename)
   const unpackedAppPath = join(releaseDir, 'win-unpacked', 'Videorc.exe')
   const captureBundle = join(releaseDir, 'win-unpacked', 'resources', 'ffmpeg')
-  verifyWindowsCaptureManifest(captureBundle)
+  // Signing rewrote ffmpeg-capture.exe: its signature proves it here.
+  verifyWindowsCaptureManifest(captureBundle, undefined, { signed: true })
   probeWindowsCaptureWorker(captureBundle)
   const result = validateDownloadedWindowsCandidate({
     actualInstallerSha256: await sha256File(installerPath),
@@ -40,6 +41,7 @@ async function main() {
       'utf8'
     ),
     appSignature: readAuthenticodeSignature(unpackedAppPath),
+    captureSignature: readAuthenticodeSignature(join(captureBundle, 'bin', 'ffmpeg-capture.exe')),
     expectedInstallerSha256: requiredEnv('VIDEORC_RELEASE_EXPECTED_SHA256'),
     expectedPublisher: requiredEnv('VIDEORC_WINDOWS_PUBLISHER_NAME'),
     expectedReleaseId: requiredEnv('VIDEORC_RELEASE_ID'),
