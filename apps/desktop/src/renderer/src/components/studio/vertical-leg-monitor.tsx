@@ -47,7 +47,7 @@ export function VerticalLegMonitor(): ReactElement | null {
     <PanelSection
       action={
         isSessionActive ? (
-          <Badge variant="success">Live</Badge>
+          <Badge variant="live">Live</Badge>
         ) : (
           <Badge variant="outline">Armed</Badge>
         )

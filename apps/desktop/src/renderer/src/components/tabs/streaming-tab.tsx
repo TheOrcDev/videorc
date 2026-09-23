@@ -96,7 +96,7 @@ import {
 import { cn } from '@/lib/utils'
 import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
-type BadgeTone = 'success' | 'warning' | 'destructive' | 'outline'
+type BadgeTone = 'success' | 'warning' | 'destructive' | 'live' | 'outline'
 
 const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
   youtube: YoutubeIcon,
@@ -424,7 +424,7 @@ function configuredBadge(enabled: boolean, ready: boolean): { tone: BadgeTone; l
 function runtimeBadge(runtime: StreamTargetRuntime): { tone: BadgeTone; label: string } {
   switch (runtime.state) {
     case 'live':
-      return { tone: 'success', label: 'On air' }
+      return { tone: 'live', label: 'On air' }
     case 'connecting':
       return { tone: 'warning', label: 'Connecting' }
     case 'failed':
@@ -976,7 +976,7 @@ function streamTargetStatusBadge(state: NonNullable<StreamTargetSettings['status
     case 'connecting':
       return { tone: 'warning', label: 'Updating' }
     case 'live':
-      return { tone: 'success', label: 'On air' }
+      return { tone: 'live', label: 'On air' }
     case 'warning':
       return { tone: 'warning', label: 'Review' }
     case 'failed':

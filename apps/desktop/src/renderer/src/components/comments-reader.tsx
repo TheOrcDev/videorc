@@ -344,7 +344,7 @@ export function CommentsReader({
           Chat
         </span>
         <Badge
-          className="h-4 shrink-0 px-1.5 text-[10px]"
+          className="shrink-0"
           title={
             viewMode?.kind === 'history'
               ? `${viewMode.title} · ${new Date(viewMode.startedAt).toLocaleDateString()}`

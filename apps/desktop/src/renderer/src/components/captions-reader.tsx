@@ -62,11 +62,10 @@ export function CaptionsReader({
           Live captions
           <span className="flex items-center gap-1.5 text-muted-foreground">
             <span
+              aria-hidden
               className={cn(
-                'size-1.5 rounded-full bg-muted-foreground',
-                (status.state === 'listening' || status.state === 'live') && 'bg-success',
-                (status.state === 'reconnecting' || status.state === 'degraded') && 'bg-warning',
-                (status.state === 'blocked' || status.state === 'error') && 'bg-destructive'
+                'size-1.5 rounded-full glass-dot',
+                captionStatusToneClass(status.state)
               )}
             />
             {statusLabel}
@@ -160,6 +159,23 @@ export function captionReaderAppearance(styleId: CaptionStyleId): {
           ? `${Math.max(1, definition.strokeWidthFactor * 14)}px ${definition.strokeColor}`
           : undefined
     }
+  }
+}
+
+/** The header dot's glass tone: colour only where the state means something. */
+export function captionStatusToneClass(state: CaptionsStatus['state']): string {
+  switch (state) {
+    case 'listening':
+    case 'live':
+      return 'tone-success'
+    case 'reconnecting':
+    case 'degraded':
+      return 'tone-warning'
+    case 'blocked':
+    case 'error':
+      return 'tone-destructive'
+    default:
+      return 'tone-neutral'
   }
 }
 

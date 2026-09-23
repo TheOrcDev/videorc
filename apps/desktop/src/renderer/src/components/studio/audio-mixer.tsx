@@ -342,7 +342,7 @@ function MicSignalReadoutValue({
         )}
         data-videorc-mic-clip={clipping || undefined}
       >
-        <span className="size-1.5 rounded-full bg-warning" />
+        <span className="size-1.5 rounded-full glass-dot tone-warning" />
         Clip
       </span>
       <span className="text-xs tabular-nums text-muted-foreground">{dbLabel}</span>

@@ -9,6 +9,7 @@ import {
 import { useEffect, useState, type ReactElement } from 'react'
 
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
+import { Badge } from '@/components/ui/badge'
 import { AvatarCircle } from '@/lib/chat-avatar'
 import {
   DropdownMenu,
@@ -113,9 +114,7 @@ export function AccountMenu({
               {signedIn ? displayName : 'Not signed in'}
             </span>
           </span>
-          <span className="shrink-0 rounded-chip border px-1.5 py-0.5 text-[11px] font-medium text-muted-foreground">
-            {tierLabel}
-          </span>
+          <Badge variant="outline">{tierLabel}</Badge>
         </DropdownMenuLabel>
 
         <DropdownMenuSeparator />

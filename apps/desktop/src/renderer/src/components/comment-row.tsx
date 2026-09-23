@@ -111,9 +111,9 @@ function CohostMarks({
     return (
       <span className="flex min-w-0 items-center gap-1" data-slot="cohost-comment-flag">
         <Badge
-          className={cn('max-w-40', flag.severity === 'high' ? 'text-destructive' : 'text-subtle')}
+          className={cn('max-w-40', flag.severity !== 'high' && 'text-subtle')}
           title={cohostFlagDetail(flag)}
-          variant="outline"
+          variant={flag.severity === 'high' ? 'destructive' : 'outline'}
         >
           <span className="truncate">{cohostFlagChipLabel(flag)}</span>
         </Badge>

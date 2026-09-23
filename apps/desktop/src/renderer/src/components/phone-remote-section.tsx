@@ -262,7 +262,7 @@ export function PhoneRemoteSection(): ReactElement {
                   <span className="flex-1" />
                   <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     {device.connected ? (
-                      <span aria-hidden className="size-1.5 rounded-full bg-success" />
+                      <span aria-hidden className="size-1.5 rounded-full glass-dot tone-success" />
                     ) : null}
                     {deviceActivityLabel(device, now)}
                   </span>

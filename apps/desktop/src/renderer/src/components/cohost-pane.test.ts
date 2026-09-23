@@ -143,9 +143,10 @@ describe('CohostFlagRow', () => {
     expect(markup).toContain('Toxicity')
     expect(markup).toContain('Insult aimed at another viewer.')
     expect(markup).not.toContain('text-destructive')
+    expect(markup).not.toContain('data-variant="destructive"')
   })
 
-  it('gives only high severity the destructive accent', () => {
+  it('gives only high severity the destructive emphasis chip', () => {
     const markup = renderRow(
       createElement(CohostFlagRow, {
         flag: flag({ severity: 'high' }),
@@ -155,7 +156,9 @@ describe('CohostFlagRow', () => {
         onSelect: () => undefined
       })
     )
-    expect(markup).toContain('text-destructive')
+    // Tinted glass (plan 050, D9), not red text on a tag.
+    expect(markup).toContain('data-variant="destructive"')
+    expect(markup).toContain('glass-chip-tinted')
   })
 })
 

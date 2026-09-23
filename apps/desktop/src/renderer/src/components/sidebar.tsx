@@ -127,7 +127,7 @@ function SidebarUpdateChip({
           >
             <span className="relative flex size-4 shrink-0 items-center justify-center">
               <SyncIcon className="size-4 text-muted-foreground" />
-              <span className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full bg-[oklch(0.72_0.19_150)]" />
+              <span className="absolute -right-0.5 -top-0.5 size-1.5 rounded-full glass-dot tone-success" />
             </span>
             <span className="min-w-0 flex-1 truncate">{chip.label}</span>
           </button>
@@ -187,12 +187,7 @@ export function Sidebar({
           </span>
           {/* Monochrome: the channel is not a status, and colour in this app
               means live or broken. */}
-          <Badge
-            variant="outline"
-            className="h-4 rounded-chip px-1.5 py-0 text-[10px] leading-none font-medium tracking-wide text-muted-foreground"
-          >
-            beta
-          </Badge>
+          <Badge variant="outline">beta</Badge>
         </div>
       </div>
       <div

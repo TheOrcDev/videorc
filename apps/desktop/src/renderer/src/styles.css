@@ -114,6 +114,24 @@
   --glass-window: oklch(0.985 0.001 286 / 60%);
   --glass-content: oklch(0.985 0.001 286 / 30%);
   --glass-solid: oklch(0.985 0.001 286);
+
+  /* Glass chips (plan 050, D9): the porcelain twin of the dark chip glass. */
+  --chip-fill-top: oklch(1 0 0 / 70%);
+  --chip-fill-bottom: oklch(1 0 0 / 45%);
+  --chip-rim: oklch(0 0 0 / 8%);
+  --chip-highlight: oklch(1 0 0 / 90%);
+  --chip-drop: oklch(0 0 0 / 6%);
+  --chip-tint-top: 16%;
+  --chip-tint-bottom: 6%;
+  --chip-tint-rim: 32%;
+  --chip-tint-ink: 80%;
+  --chip-tint-ink-base: var(--foreground);
+  --chip-dot-glow: 45%;
+  --keycap-fill-top: oklch(1 0 0 / 95%);
+  --keycap-fill-bottom: oklch(1 0 0 / 70%);
+  --keycap-rim: oklch(0 0 0 / 10%);
+  --keycap-highlight: oklch(1 0 0);
+  --keycap-base: oklch(0 0 0 / 12%);
 }
 
 .dark {
@@ -184,6 +202,26 @@
   --glass-window: oklch(0.13 0.003 286 / 42%);
   --glass-content: oklch(0.13 0.003 286 / 34%);
   --glass-solid: oklch(0.13 0.003 286);
+
+  /* Glass chips (plan 050, D9): white 10% to 3.5% with a 13% rim, a 12% top
+     highlight and a soft drop. Emphasis chips tint the same glass with their
+     tone; the status dot glows in it. */
+  --chip-fill-top: oklch(1 0 0 / 10%);
+  --chip-fill-bottom: oklch(1 0 0 / 3.5%);
+  --chip-rim: oklch(1 0 0 / 13%);
+  --chip-highlight: oklch(1 0 0 / 12%);
+  --chip-drop: oklch(0 0 0 / 30%);
+  --chip-tint-top: 30%;
+  --chip-tint-bottom: 12%;
+  --chip-tint-rim: 45%;
+  --chip-tint-ink: 35%;
+  --chip-tint-ink-base: oklch(1 0 0);
+  --chip-dot-glow: 75%;
+  --keycap-fill-top: oklch(1 0 0 / 12%);
+  --keycap-fill-bottom: oklch(1 0 0 / 4%);
+  --keycap-rim: oklch(1 0 0 / 13%);
+  --keycap-highlight: oklch(1 0 0 / 14%);
+  --keycap-base: oklch(0 0 0 / 30%);
 }
 
 /* Increase Contrast: hairlines strong enough to read on glass, and the
@@ -194,12 +232,16 @@
     --input: oklch(0 0 0 / 28%);
     --muted-foreground: oklch(0.38 0.006 286);
     --glass-window: oklch(0.985 0.001 286 / 75%);
+    --chip-rim: oklch(0 0 0 / 24%);
+    --keycap-rim: oklch(0 0 0 / 28%);
   }
   .dark {
     --border: oklch(1 0 0 / 24%);
     --input: oklch(1 0 0 / 24%);
     --muted-foreground: oklch(0.8 0.01 286);
     --glass-window: oklch(0.13 0.003 286 / 60%);
+    --chip-rim: oklch(1 0 0 / 30%);
+    --keycap-rim: oklch(1 0 0 / 30%);
   }
 }
 
@@ -280,6 +322,85 @@
   --color-glass-window: var(--glass-window);
   --color-glass-content: var(--glass-content);
   --color-glass-solid: var(--glass-solid);
+}
+
+/*
+ * Glass chips (plan 050, D9). Badges, status pills, tags and key chips are
+ * small pieces of the window glass: a gradient fill, a 1 px rim (the element
+ * brings the `border` width), a top highlight and a soft drop. Never
+ * backdrop-filter (the June compositor wedge) and never motion.
+ *
+ * Colour is information, so it rides in --chip-tone (the tone-* utilities):
+ * a status chip keeps monochrome text and glows its tone in a 6 px dot, and an
+ * emphasis chip (failed, on air) tints the glass itself.
+ */
+@utility glass-chip {
+  border-color: var(--chip-rim);
+  background-image: linear-gradient(to bottom, var(--chip-fill-top), var(--chip-fill-bottom));
+  box-shadow:
+    inset 0 1px 0 var(--chip-highlight),
+    0 1px 2px var(--chip-drop);
+}
+
+@utility glass-chip-tinted {
+  border-color: color-mix(in oklch, var(--chip-tone) var(--chip-tint-rim), transparent);
+  background-image: linear-gradient(
+    to bottom,
+    color-mix(in oklch, var(--chip-tone) var(--chip-tint-top), transparent),
+    color-mix(in oklch, var(--chip-tone) var(--chip-tint-bottom), transparent)
+  );
+  box-shadow:
+    inset 0 1px 0 var(--chip-highlight),
+    0 1px 2px var(--chip-drop);
+  color: color-mix(in oklch, var(--chip-tone) var(--chip-tint-ink), var(--chip-tint-ink-base));
+}
+
+/* The status dot: the tone, a 2 px halo at 22% and an 8 px glow. */
+@utility glass-dot {
+  background-color: var(--chip-tone, var(--muted-foreground));
+  box-shadow:
+    0 0 0 2px color-mix(in oklch, var(--chip-tone, var(--muted-foreground)) 22%, transparent),
+    0 0 8px
+      color-mix(
+        in oklch,
+        var(--chip-tone, var(--muted-foreground)) var(--chip-dot-glow),
+        transparent
+      );
+}
+
+/* A key, not a tag: a brighter top edge and a dark bottom edge. */
+@utility glass-keycap {
+  border-color: var(--keycap-rim);
+  background-image: linear-gradient(to bottom, var(--keycap-fill-top), var(--keycap-fill-bottom));
+  box-shadow:
+    inset 0 1px 0 var(--keycap-highlight),
+    inset 0 -1px 0 var(--keycap-base);
+}
+
+@utility tone-success {
+  --chip-tone: var(--success);
+}
+
+@utility tone-warning {
+  --chip-tone: var(--warning);
+}
+
+@utility tone-destructive {
+  --chip-tone: var(--destructive);
+}
+
+@utility tone-live {
+  --chip-tone: var(--live);
+}
+
+@utility tone-info {
+  --chip-tone: var(--info);
+}
+
+/* Neutral status: a gray dot that does not glow. */
+@utility tone-neutral {
+  --chip-tone: var(--muted-foreground);
+  --chip-dot-glow: 0%;
 }
 
 @layer components {
