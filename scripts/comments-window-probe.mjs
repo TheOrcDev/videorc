@@ -42,6 +42,14 @@ const DELAYED_SEND_ACK_MS =
   COMMENTS_SEND_TIMING_CONTRACT.reconciliationMs +
   2_000
 
+// Plan 047: the Chat window stays whole at every width it allows (320px
+// minimum). The header's container-query tiers follow its content box — the
+// window minus the 88px traffic-light gutter and 12px right gutter:
+//   Full ≥ 560px window, Compact 430–559px, Tight < 430px.
+const FULL_TIER_MIN_WIDTH = 560
+const TIGHT_TIER_MAX_WIDTH = 429
+const NARROW_PROBE_WIDTHS = [320, 380, 420, 429, 430, 480, 559, 560, 900]
+
 let launched
 let smoke
 const failures = []
@@ -537,6 +545,8 @@ async function main() {
     JSON.stringify(nextSessionReader.last)
   )
 
+  await probeNarrowWidths()
+
   const closed = await smokeCommand('comments-window-toggle')
   assertProbe(
     closed.open === false,
@@ -584,19 +594,262 @@ async function main() {
   return 1
 }
 
-async function captureState(name, label) {
+async function captureState(name, label, width = 420, height = 640) {
   // Let React layout + the scroll viewport settle after badges/composer rows
   // change height. Immediate capturePage calls can otherwise catch a transient
   // compositor texture with the old scroll offset on Retina displays.
   await sleep(350)
-  const capture = await smokeCommand('comments-window-capture-page', { name })
+  const capture = await smokeCommand('comments-window-capture-page', { name, width, height })
   captures.push({ ...capture, label })
   assertProbe(
-    capture.size?.width === 420 && capture.size?.height === 640 && capture.headerSignal > 25,
-    `capture: ${label} is a complete 420x640 frame`,
+    capture.size?.width === width && capture.size?.height === height && capture.headerSignal > 25,
+    `capture: ${label} is a complete ${width}x${height} frame`,
     JSON.stringify(capture)
   )
   return capture
+}
+
+async function probeNarrowWidths() {
+  await smokeCommand('comments-window-seed-viewers', { sample: viewerSampleFixture() })
+  await smokeCommand('comments-window-seed-cohost', { state: cohostListeningFixture() })
+
+  for (const width of NARROW_PROBE_WIDTHS) {
+    const metrics = await layoutAt(width, { openMoreMenu: true })
+    const tag = `narrow ${width}px live`
+    assertHeaderFits(metrics, tag)
+    assertProbe(
+      metrics.viewer?.visible === true &&
+        metrics.viewer.visibleNumber === '1.2k' &&
+        metrics.viewer.height <= 20,
+      `${tag}: viewer count is visible, one line`,
+      JSON.stringify(metrics.viewer)
+    )
+    assertProbe(
+      metrics.watchingVisible === width > TIGHT_TIER_MAX_WIDTH &&
+        metrics.cohostLabelVisible === width > TIGHT_TIER_MAX_WIDTH,
+      `${tag}: "watching" and the Orcle label show only above the Tight tier`,
+      JSON.stringify({ watching: metrics.watchingVisible, cohost: metrics.cohostLabelVisible })
+    )
+    if (width >= FULL_TIER_MIN_WIDTH) {
+      assertProbe(
+        metrics.highlightPosition.visible &&
+          metrics.keepOnTop.visible &&
+          metrics.clearViewVisible &&
+          !metrics.moreMenu.visible,
+        `${tag}: Full tier keeps every control inline and no ⋯`,
+        JSON.stringify(metrics)
+      )
+    } else {
+      assertProbe(
+        metrics.moreMenu.visible &&
+          !metrics.highlightPosition.visible &&
+          !metrics.keepOnTop.visible &&
+          !metrics.clearViewVisible,
+        `${tag}: controls fold into ⋯`,
+        JSON.stringify(metrics)
+      )
+      assertProbe(
+        ['Highlight position', 'Keep on top', 'Clear view'].every((label) =>
+          metrics.moreMenuItems?.some((item) => item.startsWith(label))
+        ) && metrics.menuOpenAfter === false,
+        `${tag}: ⋯ offers highlight position, keep on top and Clear view, then closes`,
+        JSON.stringify({ items: metrics.moreMenuItems, openAfter: metrics.menuOpenAfter })
+      )
+    }
+    assertBoxFits(metrics.actions, metrics.actionItems, `${tag}: Orcle action bar`)
+    assertBoxFits(metrics.paneTrigger, metrics.paneTriggerItems, `${tag}: Orcle pane header`)
+    if (width === 320) await captureState('narrow-320-live', 'narrow 320px live', 320, 640)
+    if (width === 900) await captureState('wide-900-live', 'wide 900px live', 900, 640)
+  }
+
+  // The longest header label Orcle can show: paused with a reason.
+  await smokeCommand('comments-window-seed-cohost', { state: cohostPausedFixture() })
+  for (const width of [320, 430, 480, 560]) {
+    const metrics = await layoutAt(width)
+    assertHeaderFits(metrics, `narrow ${width}px Orcle paused`)
+    assertProbe(
+      metrics.viewer?.visible === true && metrics.viewer.height <= 20,
+      `narrow ${width}px Orcle paused: viewer count keeps its line`,
+      JSON.stringify(metrics.viewer)
+    )
+  }
+
+  // History: Back to live is the primary action and never folds.
+  await smokeCommand('comments-window-push-snapshot', {
+    mode: HISTORY_MODE,
+    snapshot: historySnapshot()
+  })
+  await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) => s.text.includes('Back to live'),
+    5000
+  )
+  for (const width of [320, 380, 480, 900]) {
+    const metrics = await layoutAt(width)
+    assertHeaderFits(metrics, `narrow ${width}px history`)
+    assertProbe(
+      metrics.backToLiveVisible === true,
+      `narrow ${width}px history: Back to live stays visible`,
+      JSON.stringify(metrics)
+    )
+  }
+  await captureState('narrow-320-history', 'narrow 320px history', 320, 640)
+  await smokeCommand('comments-window-set-view-mode', { mode: { kind: 'live' } })
+  await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) => !s.text.includes('Back to live'),
+    5000
+  )
+
+  // Leave the rest of the probe exactly as it found the window: its frame is
+  // persisted and asserted after reopen.
+  await smokeCommand('comments-window-seed-viewers', { sample: null })
+  await smokeCommand('comments-window-seed-cohost', { state: cohostOffFixture() })
+  await smokeCommand('comments-window-set-bounds', { width: 420, height: 640 })
+  await waitFor(
+    () => smokeCommand('comments-window-state'),
+    (s) => s.bounds && Math.abs(s.bounds.width - 420) <= 6,
+    5000
+  )
+}
+
+async function layoutAt(width, options = {}) {
+  await smokeCommand('comments-window-set-bounds', { width, height: 640 })
+  await waitFor(
+    () => smokeCommand('comments-window-state'),
+    (s) => s.bounds && Math.abs(s.bounds.width - width) <= 1,
+    5000
+  )
+  // One layout pass after the resize event, then measure.
+  await sleep(250)
+  const metrics = await smokeCommand('comments-window-layout-metrics', options)
+  assertProbe(
+    Math.abs(metrics.windowWidth - width) <= 1,
+    `narrow ${width}px: renderer laid out at the requested width`,
+    String(metrics.windowWidth)
+  )
+  return metrics
+}
+
+function assertHeaderFits(metrics, tag) {
+  const header = metrics.header
+  assertProbe(
+    header && header.scrollWidth <= header.clientWidth,
+    `${tag}: header does not overflow`,
+    JSON.stringify(header)
+  )
+  if (!header) return
+  const clipped = metrics.headerItems.filter(
+    (item) =>
+      item.right > header.right - header.paddingRight + 0.5 ||
+      item.left < header.left + header.paddingLeft - 0.5
+  )
+  assertProbe(
+    clipped.length === 0,
+    `${tag}: every visible header item sits inside the gutters`,
+    JSON.stringify({ header, clipped })
+  )
+}
+
+function assertBoxFits(box, items, label) {
+  if (!box) return
+  const clipped = items.filter((item) => item.right > box.right + 0.5 || item.left < box.left - 0.5)
+  assertProbe(
+    box.scrollWidth <= box.clientWidth && clipped.length === 0,
+    `${label} fits without clipping`,
+    JSON.stringify({ box, clipped })
+  )
+}
+
+function viewerSampleFixture() {
+  return {
+    sessionId: NEXT_LIVE_SESSION_ID,
+    platforms: [
+      { platform: 'youtube', count: 900 },
+      { platform: 'twitch', count: 334 }
+    ],
+    total: 1234,
+    at: new Date().toISOString()
+  }
+}
+
+function cohostStateFixture(overrides = {}) {
+  return {
+    sessionId: NEXT_LIVE_SESSION_ID,
+    status: 'listening',
+    reason: null,
+    detail: null,
+    questions: [],
+    flags: [],
+    mood: null,
+    lastTickAt: new Date().toISOString(),
+    tickSeq: 3,
+    partial: false,
+    tickInFlight: false,
+    pendingMessages: 0,
+    nextTickAt: null,
+    messagesSeen: 42,
+    questionsTotal: 1,
+    ...overrides
+  }
+}
+
+function cohostWindowFixture(state) {
+  return {
+    state,
+    entitled: true,
+    entitlementReason: null,
+    upgradeUrl: null,
+    consented: true,
+    enabled: true
+  }
+}
+
+function cohostListeningFixture() {
+  const now = new Date().toISOString()
+  return cohostWindowFixture(
+    cohostStateFixture({
+      mood: 'hype',
+      partial: true,
+      alerts: [{ kind: 'audio', viewers: 3, lastSeenAt: now, active: true }],
+      questions: [
+        {
+          id: 'probe-question-1',
+          text: 'Which microphone are you using on stream today?',
+          messageIds: [`${NEXT_LIVE_SESSION_ID}:youtube:probe-1`],
+          askers: ['Ada', 'Bo', 'Cy'],
+          platforms: ['youtube', 'twitch'],
+          priority: 'high',
+          suggestedReply: 'A Shure SM7B.',
+          fromNotes: false,
+          firstSeenAt: now,
+          updatedAt: now
+        }
+      ]
+    })
+  )
+}
+
+function cohostPausedFixture() {
+  return cohostWindowFixture(cohostStateFixture({ status: 'paused', reason: 'session-expired' }))
+}
+
+function cohostOffFixture() {
+  return {
+    state: cohostStateFixture({
+      sessionId: null,
+      status: 'off',
+      lastTickAt: null,
+      tickSeq: 0,
+      messagesSeen: 0,
+      questionsTotal: 0
+    }),
+    entitled: false,
+    entitlementReason: null,
+    upgradeUrl: null,
+    consented: false,
+    enabled: false
+  }
 }
 
 function assertCorrelatedTrace(command, label, includeOperation = false) {
