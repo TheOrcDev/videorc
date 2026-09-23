@@ -438,6 +438,9 @@ mod tests {
         assert!(parse_device_pin(Some("/dev/dri/renderD")).is_err());
     }
 
+    // The sysfs driver link is a symlink; Windows test builds of this module
+    // (it is cfg(test) everywhere) have no std::os::unix.
+    #[cfg(unix)]
     #[test]
     fn candidates_list_numbered_render_nodes_with_their_sysfs_driver() {
         let dri = fixture_directory("dri");
