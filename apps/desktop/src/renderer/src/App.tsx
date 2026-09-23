@@ -2,7 +2,6 @@ import { ThemeProvider, useTheme } from 'next-themes'
 import { useEffect, type ReactElement } from 'react'
 
 import { AppShell } from '@/components/app-shell'
-import { GlassWallpaperUnderlay } from '@/components/glass-wallpaper'
 import { Toaster } from '@/components/ui/sonner'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { BackgroundAssetsProvider } from '@/hooks/use-background-assets'
@@ -29,20 +28,19 @@ export function App(): ReactElement {
       // away as its structural twin (videorc-design skill).
       defaultTheme="dark"
       enableSystem
+      // color-scheme lives on body (styles.css); on the root it makes Chromium
+      // paint an opaque canvas over the window glass in light theme.
+      enableColorScheme={false}
       storageKey={STORAGE_KEYS.theme}
     >
       <NativeThemeSync />
-      <GlassWallpaperUnderlay />
-      {/* The window's glass reflection: a specular sweep + top rim light over
-          the whole pane (pointer-transparent), like light catching the orb. */}
-      <div aria-hidden className="glass-shine pointer-events-none fixed inset-0 z-50" />
       <TooltipProvider>
         <BackgroundAssetsProvider>
           <StudioProvider>
             <AppShell />
-            {/* Inset above the footer action bar (min-h-11): toasts must never
-                cover Search/Preview/Notes/Comments (plan 022 Q3, QA sweep). */}
-            <Toaster offset={{ bottom: 60, right: 16 }} position="bottom-right" richColors />
+            {/* Inset above the 26 px status bar: toasts must never cover its
+                Search/Preview/Notes/Chat hints (plan 022 Q3, plan 050 S11). */}
+            <Toaster offset={{ bottom: 38, right: 16 }} position="bottom-right" richColors />
           </StudioProvider>
         </BackgroundAssetsProvider>
       </TooltipProvider>

@@ -3447,24 +3447,6 @@ export interface CommentsWindowState {
   message?: string
 }
 
-// Blurred-wallpaper glass underlay: real window-backdrop blur is unavailable
-// (Electron's vibrancy material renders opaque on current macOS), so the
-// renderer blurs the actual wallpaper as its own bottom layer instead, with
-// main feeding the image and the window/display geometry that keeps it
-// aligned to where the window really sits.
-export interface GlassRect {
-  x: number
-  y: number
-  width: number
-  height: number
-}
-
-export interface GlassWallpaperState {
-  imageDataUrl: string
-  window: GlassRect
-  display: GlassRect
-}
-
 /**
  * App self-update lifecycle (electron-updater), surfaced in Settings →
  * About & updates. `phase` drives the UI; the renderer subscribes via
@@ -3479,7 +3461,9 @@ export type UpdateStatus =
   | { phase: 'downloaded'; version: string }
   | { phase: 'not-available'; currentVersion: string }
   | { phase: 'error'; message: string }
-  | { phase: 'unsupported' }
+  // `windows-feed-unpublished`: a Windows build found no update published for
+  // it (no public Alpha feed, and no signed-in pilot access). Rechecked.
+  | { phase: 'unsupported'; reason?: 'windows-feed-unpublished' }
 
 export type AccountCallbackEnvelope = {
   id: string
@@ -3737,11 +3721,6 @@ export interface VideorcApi {
   onBackendConnection: (callback: (connection: BackendConnection) => void) => () => void
   onBackendLifecycle: (callback: (event: BackendLifecycleEvent) => void) => () => void
   onBackendLog: (callback: (log: BackendLogEvent) => void) => () => void
-  getGlassWallpaper: () => Promise<GlassWallpaperState | null>
-  onGlassWallpaper: (callback: (state: GlassWallpaperState) => void) => () => void
-  onGlassGeometry: (
-    callback: (geometry: Pick<GlassWallpaperState, 'window' | 'display'>) => void
-  ) => () => void
   // App self-update (electron-updater) — Settings → About & updates. Packaged
   // builds also check automatically on every launch (silent background flow,
   // opt out via VIDEORC_DISABLE_AUTO_UPDATE=1); the manual button shares the

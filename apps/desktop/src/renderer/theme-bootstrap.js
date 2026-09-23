@@ -8,9 +8,16 @@
       stored === 'system'
         ? window.matchMedia('(prefers-color-scheme: dark)').matches
         : stored !== 'light'
+    // No inline color-scheme on the root: in light theme it makes Chromium
+    // paint an opaque canvas over the window glass (styles.css sets it on body).
     document.documentElement.classList.add(dark ? 'dark' : 'light')
-    document.documentElement.style.colorScheme = dark ? 'dark' : 'light'
   } catch {
     document.documentElement.classList.add('dark')
   }
+  // The platform before first paint: Windows (Mica) takes its own coats.
+  document.documentElement.dataset.platform = /Win/i.test(navigator.platform)
+    ? 'win32'
+    : /Mac/i.test(navigator.platform)
+      ? 'darwin'
+      : 'linux'
 })()

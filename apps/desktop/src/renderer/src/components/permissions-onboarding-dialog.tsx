@@ -153,7 +153,7 @@ function PermissionRow({
     ) : null
 
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row border bg-muted/30 px-3 py-2.5 text-sm">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row border border-border bg-foreground/[0.03] px-3 py-2.5 text-sm">
       <span className="w-36 shrink-0 font-medium">{row.label}</span>
       <StatusBadge
         tone={

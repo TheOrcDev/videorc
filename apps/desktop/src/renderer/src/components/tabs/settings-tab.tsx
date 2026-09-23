@@ -30,6 +30,7 @@ import { ConfigGrid } from '@/components/page'
 import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PhoneRemoteSection } from '@/components/phone-remote-section'
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
@@ -154,7 +155,7 @@ export function SettingsTab({
   })
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col">
       {/* ONE grid, two continuous columns. A grid row is as tall as its tallest
         column and a second grid could not start until the first ended, so when
         the taller column outgrew the other, the short one stopped early and a
@@ -167,19 +168,19 @@ export function SettingsTab({
         reference. The window can be resized to 960px, under the `lg`
         breakpoint, so this order ships. */}
       <ConfigGrid>
-        <div className="flex flex-col gap-5">
+        <div className="flex flex-col">
           <PanelSection
             description="Where recordings are written and what new sessions use."
             icon={SettingsIcon}
             title="Recording & storage"
           >
-            <FieldGroup>
+            <FieldGroup variant="grouped">
               <Field>
                 <FieldLabel htmlFor="output-directory">Output directory</FieldLabel>
                 <div className="flex gap-2">
                   <div
                     id="output-directory"
-                    className="min-w-0 flex-1 truncate rounded-md border bg-muted/30 px-3 py-2 text-sm text-muted-foreground"
+                    className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-foreground/[0.03] px-2.5 text-sm text-muted-foreground"
                   >
                     {outputDirectory || 'Videorc default recordings folder'}
                   </div>
@@ -286,7 +287,7 @@ export function SettingsTab({
               </Field>
             </FieldGroup>
 
-            <div className="flex flex-col gap-0.5">
+            <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
               <NavigableRow
                 icon={ClapperboardIcon}
                 label="Recording preset"
@@ -315,17 +316,15 @@ export function SettingsTab({
                 </span>
               </div>
             ) : health ? (
-              <div className="flex flex-col gap-2 rounded-row border border-warning/40 bg-warning/10 p-3">
-                <div className="flex items-center gap-2 text-sm font-medium text-warning-foreground dark:text-warning">
-                  <WarningIcon className="size-4 shrink-0" weight="fill" />
-                  Recording needs FFmpeg
-                </div>
-                <p className="text-xs text-muted-foreground">
+              <Alert variant="warning">
+                <WarningIcon weight="fill" />
+                <AlertTitle>Recording needs FFmpeg</AlertTitle>
+                <AlertDescription>
                   {import.meta.env.DEV
                     ? 'For local development, install it with \u201cbrew install ffmpeg\u201d.'
                     : 'FFmpeg ships with Videorc, so this usually means the install is damaged. Reinstall Videorc.'}
-                </p>
-              </div>
+                </AlertDescription>
+              </Alert>
             ) : (
               <p className="text-xs text-muted-foreground">Checking for FFmpeg\u2026</p>
             )}
@@ -336,7 +335,7 @@ export function SettingsTab({
                 <span>Advanced</span>
               </CollapsibleTrigger>
               <CollapsibleContent className="flex flex-col gap-3 pt-2">
-                <div className="flex items-center gap-2 rounded-row border bg-muted/40 px-3 py-2 text-xs">
+                <div className="flex items-center gap-2 rounded-row border border-border bg-foreground/[0.03] px-3 py-2 text-xs">
                   <span className="shrink-0 font-medium">Session database</span>
                   <span className="min-w-0 flex-1 truncate text-muted-foreground">
                     Managed privately in Videorc app data
@@ -357,7 +356,7 @@ export function SettingsTab({
               </Button>
             }
           >
-            <div className="flex flex-col gap-1">
+            <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
               {accessRows.map((row) => {
                 const action = systemAccessAction({
                   pane: row.id,
@@ -371,7 +370,7 @@ export function SettingsTab({
                 return (
                   <div
                     key={row.id}
-                    className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-row px-2.5 py-2 text-sm"
+                    className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm"
                   >
                     <span className="w-32 shrink-0 font-medium">{row.label}</span>
                     {/* Q4 (plan 022): the permission TARGET is the actionable part —
@@ -447,7 +446,7 @@ export function SettingsTab({
             icon={SettingsIcon}
             title="Global shortcuts"
           >
-            <FieldGroup>
+            <FieldGroup variant="grouped">
               {(
                 [
                   ['recordToggle', 'Start / stop recording', 'Cmd+Shift+R'],
@@ -531,13 +530,13 @@ export function SettingsTab({
             title="Remote control"
           >
             {remoteStatus?.enabled ? (
-              <FieldGroup>
+              <FieldGroup variant="grouped">
                 <Field>
                   <FieldLabel htmlFor="remote-token">Pairing token</FieldLabel>
                   <div className="flex gap-2">
                     <div
                       id="remote-token"
-                      className="min-w-0 flex-1 truncate rounded-md border bg-muted/30 px-3 py-2 font-mono text-xs text-muted-foreground"
+                      className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-foreground/[0.03] px-2.5 font-mono text-xs text-muted-foreground"
                     >
                       {remoteStatus.token
                         ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`
@@ -580,13 +579,13 @@ export function SettingsTab({
           <PhoneRemoteSection />
         </div>
 
-        <div className="flex flex-col gap-5">
+        <div className="flex flex-col">
           <PanelSection
             description="How Videorc looks and behaves on this device."
             icon={ThemeIcon}
             title="Appearance & behavior"
           >
-            <FieldGroup>
+            <FieldGroup variant="grouped">
               <Field>
                 <FieldLabel>Theme</FieldLabel>
                 <ToggleGroup
@@ -792,8 +791,9 @@ function UpdateControl({
     case 'unsupported':
       return (
         <p className="text-xs text-muted-foreground">
-          Automatic updates aren’t available for this build yet. Grab new versions from the
-          downloads page.
+          {status.reason === 'windows-feed-unpublished'
+            ? 'No Windows update is published for you yet. Sign in to get Windows Alpha pilot updates automatically, or download the newest build from your account page.'
+            : 'Automatic updates aren’t available for this build yet. Grab new versions from the downloads page.'}
         </p>
       )
     case 'checking':

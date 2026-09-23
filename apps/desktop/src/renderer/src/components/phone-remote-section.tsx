@@ -52,6 +52,10 @@ function useNow(): number {
   return useSyncExternalStore(subscribeClock, () => clockNow)
 }
 
+// A QR code is content, not chrome: dark modules on light paper in both
+// themes, because scanners need the contrast (the style guard allowlists it).
+const QR_INK = '#000'
+
 function PairingCode({ url }: { url: string }): ReactElement {
   const { path, size } = qrCodePath(url)
   return (
@@ -63,7 +67,7 @@ function PairingCode({ url }: { url: string }): ReactElement {
       shapeRendering="crispEdges"
       viewBox={`0 0 ${size} ${size}`}
     >
-      <path d={path} fill="#000" />
+      <path d={path} fill={QR_INK} />
     </svg>
   )
 }
@@ -108,7 +112,7 @@ function PairingDialog({
             <PairingCode url={pairing.url} />
           ) : (
             <button
-              className="flex size-56 flex-col items-center justify-center gap-2 rounded-row border border-border bg-muted/30 px-6 text-center text-[13px] text-muted-foreground transition-colors duration-100 hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
+              className="flex size-56 flex-col items-center justify-center gap-2 rounded-row border border-border bg-foreground/[0.03] px-6 text-center text-[13px] text-muted-foreground transition-colors duration-100 hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none"
               type="button"
               onClick={() => setRevealed(true)}
             >
@@ -157,7 +161,7 @@ function PairingDialog({
           ) : null}
 
           {showTrouble ? (
-            <div className="flex w-full gap-2 rounded-row border border-border bg-muted/30 p-3 text-xs text-muted-foreground">
+            <div className="flex w-full gap-2 rounded-row border border-border bg-foreground/[0.03] p-3 text-xs text-muted-foreground">
               <WarningIcon className="mt-0.5 size-4 shrink-0" />
               <p>
                 Nothing connected yet. Check that the phone is on the same Wi-Fi (guest and office
@@ -262,7 +266,7 @@ export function PhoneRemoteSection(): ReactElement {
                   <span className="flex-1" />
                   <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
                     {device.connected ? (
-                      <span aria-hidden className="size-1.5 rounded-full bg-success" />
+                      <span aria-hidden className="size-1.5 rounded-full glass-dot tone-success" />
                     ) : null}
                     {deviceActivityLabel(device, now)}
                   </span>

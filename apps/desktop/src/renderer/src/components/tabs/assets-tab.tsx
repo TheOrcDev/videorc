@@ -15,7 +15,7 @@ import { useState, type ComponentProps, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
 import { KebabMenu } from '@/components/kebab-menu'
-import { Gallery } from '@/components/page'
+import { Gallery, PageHeader } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { PowerSlider } from '@/components/power-slider'
 import { Badge } from '@/components/ui/badge'
@@ -158,14 +158,11 @@ export function AssetsTab(): ReactElement {
   }
 
   return (
-    <div className="flex flex-col gap-5">
-      <div className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold tracking-tight">Assets</h1>
-        <p className="max-w-2xl text-sm text-muted-foreground">
-          Backgrounds for your scenes and takeover screens for the output. Click a preset to apply
-          it, then tune it with Adjust style on its tile.
-        </p>
-      </div>
+    <div className="flex flex-col">
+      <PageHeader
+        description="Backgrounds for your scenes and takeover screens for the output. Click a preset to apply it, then tune it with Adjust style on its tile."
+        title="Assets"
+      />
 
       <PanelSection
         title="Background presets"
@@ -349,7 +346,7 @@ function PresetTile({
               ? `Remove ${name} from the scene`
               : `Apply ${name} to the scene`
         }
-        className="absolute inset-0 cursor-pointer"
+        className="absolute inset-0"
         onClick={onActivate}
         onDoubleClick={() => asset && onStartRename()}
       >
@@ -402,7 +399,7 @@ function PresetTile({
           {active ? <BackgroundStylePopover asset={asset} name={name} onStyle={onStyle} /> : null}
           <KebabMenu
             label={`Actions for ${name}`}
-            className="bg-background/70 backdrop-blur-sm"
+            className="bg-popover"
             items={[
               { id: 'rename', label: 'Rename', icon: EditIcon, onSelect: onStartRename },
               {
@@ -490,7 +487,7 @@ function BackgroundStylePopover({
       <PopoverTrigger asChild>
         <Button
           aria-label={`Adjust style for ${name}`}
-          className="bg-background/70 backdrop-blur-sm"
+          className="bg-popover"
           size="icon-sm"
           title="Adjust style"
           variant="ghost"

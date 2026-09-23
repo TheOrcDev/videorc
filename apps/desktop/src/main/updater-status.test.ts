@@ -50,6 +50,9 @@ describe('updater status mapping', () => {
       message: 'nope'
     })
     expect(updateStatusFromEvent({ type: 'unsupported' })).toEqual({ phase: 'unsupported' })
+    expect(
+      updateStatusFromEvent({ type: 'unsupported', reason: 'windows-feed-unpublished' })
+    ).toEqual({ phase: 'unsupported', reason: 'windows-feed-unpublished' })
   })
 
   it('clamps and rounds download progress into 0–100', () => {
@@ -78,6 +81,11 @@ describe('updater status mapping', () => {
     expect(shouldBackgroundRecheck({ phase: 'downloading', percent: 40 })).toBe(false)
     expect(shouldBackgroundRecheck({ phase: 'downloaded', version: '1.2.3' })).toBe(false)
     expect(shouldBackgroundRecheck({ phase: 'unsupported' })).toBe(false)
+    // A Windows build with no feed yet keeps checking: signing in or a public
+    // Alpha can open one while the app stays open.
+    expect(
+      shouldBackgroundRecheck({ phase: 'unsupported', reason: 'windows-feed-unpublished' })
+    ).toBe(true)
 
     expect(BACKGROUND_RECHECK_INTERVAL_MS).toBe(30 * 60 * 1000)
   })

@@ -1,5 +1,5 @@
 import { PreviewIcon } from '@/components/icons'
-import { useEffect, useMemo, useState, type ReactElement } from 'react'
+import { useEffect, useState, type ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
 import { Badge } from '@/components/ui/badge'
@@ -44,22 +44,14 @@ export function CaptionPreview(): ReactElement {
     }
   }, [captureConfig.captions, previewHeight, text])
 
-  const backdropClass = useMemo(
-    () =>
-      backdrop === 'light'
-        ? 'bg-[linear-gradient(135deg,#f4f4f5_0%,#d4d4d8_45%,#a1a1aa_100%)]'
-        : backdrop === 'dark'
-          ? 'bg-[linear-gradient(135deg,#09090b_0%,#27272a_55%,#18181b_100%)]'
-          : 'bg-[radial-gradient(circle_at_25%_20%,#64748b_0%,transparent_32%),radial-gradient(circle_at_78%_70%,#7c3aed_0%,transparent_30%),linear-gradient(135deg,#0f172a,#334155)]',
-    [backdrop]
-  )
+  const backdropClass = CAPTION_PREVIEW_BACKDROPS[backdrop]
 
   return (
     <PanelSection
       action={
         <Badge variant={isSample ? 'secondary' : 'success'}>{isSample ? 'Sample' : 'Live'}</Badge>
       }
-      className="lg:sticky lg:top-4"
+      className="lg:sticky lg:top-0"
       description="The selected style at your current video aspect ratio."
       icon={PreviewIcon}
       title="Caption preview"
@@ -67,7 +59,7 @@ export function CaptionPreview(): ReactElement {
       <div
         aria-label={`${captionStyleLabel(captureConfig.captions.styleId)} caption preview: ${text}`}
         className={cn(
-          'relative aspect-video w-full overflow-hidden rounded-panel border border-border shadow-inner',
+          'relative aspect-video w-full overflow-hidden rounded-row border border-border',
           backdropClass
         )}
         role="img"
@@ -75,7 +67,10 @@ export function CaptionPreview(): ReactElement {
       >
         <div
           aria-hidden
-          className="absolute inset-0 opacity-35 [background-image:linear-gradient(90deg,transparent_49%,rgba(255,255,255,0.08)_50%,transparent_51%)] [background-size:8rem_100%]"
+          className={cn(
+            'absolute inset-0 opacity-35 [background-size:8rem_100%]',
+            CAPTION_PREVIEW_GRID
+          )}
         />
         {overlayUrl ? (
           <img alt="" aria-hidden className="absolute inset-0 size-full" src={overlayUrl} />
@@ -108,6 +103,20 @@ export function CaptionPreview(): ReactElement {
     </PanelSection>
   )
 }
+
+// The preview shows captions over stand-in VIDEO, so these backdrops are
+// content, not chrome: fixed colours in both themes (plan 050 S15; the style
+// guard allowlists this file).
+const CAPTION_PREVIEW_BACKDROPS: Record<'dark' | 'light' | 'motion', string> = {
+  light: 'bg-[linear-gradient(135deg,#f4f4f5_0%,#d4d4d8_45%,#a1a1aa_100%)]',
+  dark: 'bg-[linear-gradient(135deg,#09090b_0%,#27272a_55%,#18181b_100%)]',
+  motion:
+    'bg-[radial-gradient(circle_at_25%_20%,#64748b_0%,transparent_32%),radial-gradient(circle_at_78%_70%,#7c3aed_0%,transparent_30%),linear-gradient(135deg,#0f172a,#334155)]'
+}
+
+// Faint safe-area columns over the stand-in video.
+const CAPTION_PREVIEW_GRID =
+  '[background-image:linear-gradient(90deg,transparent_49%,rgba(255,255,255,0.08)_50%,transparent_51%)]'
 
 function captionStyleLabel(styleId: string): string {
   switch (styleId) {

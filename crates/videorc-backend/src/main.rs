@@ -4795,6 +4795,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
 
         "account.complete_sign_in"
         | "account.refresh"
+        | "account.windows_pilot_update_token"
         | "entitlements.refresh"
         | "diagnostics.supportBundle.export"
         | "sessions.poster"
@@ -4938,6 +4939,7 @@ fn websocket_isolated_command_lane(text: &str) -> Option<WebSocketIsolatedComman
     let command = serde_json::from_str::<ClientCommand>(text).ok()?;
     match command.method.as_str() {
         "account.refresh"
+        | "account.windows_pilot_update_token"
         | "entitlements.refresh"
         | "platformAccounts.refresh"
         | "platformAccounts.validate"
@@ -8072,6 +8074,29 @@ async fn handle_text_message_with_role(
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
             }
+        }
+        "account.windows_pilot_update_token" => {
+            // Main's updater asks for a short-lived token that reads only the
+            // Windows pilot feed. The account session never leaves the backend;
+            // `null` means signed out, pilot closed, or the web was unreachable
+            // (the updater then simply stays on the public feed).
+            let token = match account::stored_session_token() {
+                None => None,
+                Some(session) => match videorc_api::VideorcApiClient::new() {
+                    Ok(client) => client
+                        .mint_windows_pilot_update_token(&session)
+                        .await
+                        .unwrap_or_else(|error| {
+                            tracing::warn!("Windows pilot update token unavailable: {error:#}");
+                            None
+                        }),
+                    Err(error) => {
+                        tracing::warn!("Windows pilot update token client failed: {error:#}");
+                        None
+                    }
+                },
+            };
+            ServerResponse::ok(command.id, token)
         }
         "account.refresh" => {
             // Capture generation + token atomically with account transitions,

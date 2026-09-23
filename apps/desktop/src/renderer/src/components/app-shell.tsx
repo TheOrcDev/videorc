@@ -1,15 +1,12 @@
-import { ChatIcon } from '@/components/icons'
 import { lazy, Suspense, useCallback, useEffect, useRef, useState, type ReactElement } from 'react'
 
 const CommandPalette = lazy(async () => ({
   default: (await import('@/components/command-palette')).CommandPalette
 }))
-import { FooterActionBar, FooterActionDivider } from '@/components/footer-action-bar'
+import { Pane, PaneBody, Toolbar } from '@/components/pane'
 import { Sidebar } from '@/components/sidebar'
-import { Button } from '@/components/ui/button'
-import { Kbd, KbdGroup } from '@/components/ui/kbd'
-
-import type { StatusDotTone } from '@/components/status-dot'
+import { StatusBar, StatusBarHint } from '@/components/status-bar'
+import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import {
   WORKSPACE_SHORTCUTS,
   WorkspaceNavContext,
@@ -30,7 +27,6 @@ import {
   shouldShowPermissionsOnboarding,
   systemAccessRows
 } from '@/lib/system-access'
-import { cn } from '@/lib/utils'
 
 // Workspace views are loaded only on first navigation, then retained by the
 // browser module cache. Studio remains the launch surface, but its dashboard and
@@ -316,12 +312,14 @@ export function AppShell(): ReactElement {
         closeStudioPanel
       }}
     >
-      {/* hiddenInset hides the OS title bar; this strip is the window's drag
-          handle (the traffic lights sit inside it) and the shell pads below. */}
-      <div aria-hidden className="fixed inset-x-0 top-0 z-50 h-9 [-webkit-app-region:drag]" />
-      {/* No bg here: body already wears the one translucent glass coat, and a
-          second 75% layer would stack to near-opaque and hide the vibrancy. */}
-      <div className="flex min-h-screen pt-9 text-foreground" data-videorc-active-tab={active}>
+      {/* The window family's shell (plan 050, D4): the sidebar sits on the
+          window coat, the content pane adds --glass-content, and both share
+          one 40 px header band with the traffic lights. Only PaneBody
+          scrolls. */}
+      <div
+        className="flex h-screen overflow-hidden text-foreground"
+        data-videorc-active-tab={active}
+      >
         <Sidebar
           active={active}
           activeStudioPanel={isStudioPanel(active) ? active : null}
@@ -335,24 +333,12 @@ export function AppShell(): ReactElement {
           platform={runtimeInfo?.platform}
         />
 
-        <main className="flex h-[calc(100vh-2.25rem)] flex-1 flex-col">
-          {/* Library manages its own scroll (pinned header/toolbar, only the
-              table scrolls), so it fills the bounded height instead of the
-              shell scrolling the whole tab. Every other tab scrolls as one. */}
-          <div
-            className={cn(
-              'min-h-0 flex-1',
-              active === 'library' ? 'flex flex-col' : 'overflow-y-auto'
-            )}
-          >
-            {/* pt-4 matches the sidebar header's py-4 so every tab's content
-                top-aligns with the start of the sidebar. */}
-            <div
-              className={cn(
-                'mx-auto w-full max-w-[1600px] px-10 pt-4',
-                active === 'library' ? 'flex min-h-0 flex-1 flex-col pb-4' : 'pb-8'
-              )}
-            >
+        <main className="flex min-w-0 flex-1 flex-col bg-glass-content">
+          <Pane>
+            <Toolbar title={workspaceTabLabel(active)} />
+            {/* Library manages its own scroll (pinned header and toolbar,
+                  only the table scrolls); every other tab scrolls as one. */}
+            <PaneBody scroll={active !== 'library'}>
               <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
                 <Suspense fallback={<WorkspaceTabFallback />}>
                   {active === 'studio' ? <StudioTab /> : null}
@@ -378,72 +364,43 @@ export function AppShell(): ReactElement {
                   ) : null}
                 </Suspense>
               </StudioMicVisualProvider>
-            </div>
-          </div>
-          {/* Global footer action bar: the shell's real shortcuts, always
-              advertised (videorc-design keyboard-first rule). */}
-          <FooterActionBar
-            leading={<span>{workspaceTabLabel(active)}</span>}
-            className="bg-background/60"
-          >
-            <Button size="sm" variant="ghost" onClick={() => setCommandOpen(true)}>
-              Search
-              <KbdGroup>
-                <Kbd>{modKey}</Kbd>
-                <Kbd>K</Kbd>
-              </KbdGroup>
-            </Button>
-            <FooterActionDivider />
-            <Button size="sm" variant="ghost" onClick={() => void togglePreviewWindow()}>
-              {previewWindowOpen ? 'Close Preview' : 'Open Preview'}
-              <KbdGroup>
-                <Kbd>{modKey}</Kbd>
-                <Kbd>P</Kbd>
-              </KbdGroup>
-            </Button>
-            {/* Flags default ON and runtimeInfo lands async — treating null
-                as enabled keeps the footer at its final width from the first
-                paint instead of growing when the fetch resolves. */}
+            </PaneBody>
+          </Pane>
+          {/* State on the left, the shell's real shortcuts on the right:
+                keyboard-first, only quieter than the old footer bar. */}
+          <StatusBar leading={<StatusDot label={statusLabel} pulse={live} tone={statusTone} />}>
+            <StatusBarHint
+              keys={`${modKey}K`}
+              label="Search"
+              onClick={() => setCommandOpen(true)}
+            />
+            <StatusBarHint
+              keys={`${modKey}P`}
+              label="Preview"
+              pressed={previewWindowOpen}
+              onClick={() => void togglePreviewWindow()}
+            />
+            {/* Flags default ON and runtimeInfo lands async: treating null as
+                  enabled keeps the bar at its final width from the first paint. */}
             {runtimeInfo?.notesWindowEnabled !== false ? (
-              <>
-                <FooterActionDivider />
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() =>
-                    notesWindowOpen ? void closeNotesWindow() : void openNotesWindow()
-                  }
-                >
-                  {notesWindowOpen ? 'Close Notes' : 'Open Notes'}
-                  <KbdGroup>
-                    <Kbd>{modKey}</Kbd>
-                    <Kbd>{shiftKey}</Kbd>
-                    <Kbd>N</Kbd>
-                  </KbdGroup>
-                </Button>
-              </>
+              <StatusBarHint
+                keys={`${shiftKey}${modKey}N`}
+                label="Notes"
+                pressed={notesWindowOpen}
+                onClick={() => (notesWindowOpen ? void closeNotesWindow() : void openNotesWindow())}
+              />
             ) : null}
             {runtimeInfo?.commentsWindowEnabled !== false ? (
-              <>
-                <FooterActionDivider />
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() =>
-                    commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
-                  }
-                >
-                  <ChatIcon data-icon="inline-start" />
-                  {commentsWindowOpen ? 'Close Chat' : 'Open Chat'}
-                  <KbdGroup>
-                    <Kbd>{modKey}</Kbd>
-                    <Kbd>{shiftKey}</Kbd>
-                    <Kbd>J</Kbd>
-                  </KbdGroup>
-                </Button>
-              </>
+              <StatusBarHint
+                keys={`${shiftKey}${modKey}J`}
+                label="Chat"
+                pressed={commentsWindowOpen}
+                onClick={() =>
+                  commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()
+                }
+              />
             ) : null}
-          </FooterActionBar>
+          </StatusBar>
         </main>
 
         <Suspense fallback={null}>

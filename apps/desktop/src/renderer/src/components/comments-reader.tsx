@@ -21,6 +21,7 @@ import {
 import { Kbd } from '@/components/ui/kbd'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { Separator } from '@/components/ui/separator'
+import { useTrafficLightGutter } from '@/components/window-frame'
 import type {
   CohostFlag,
   CohostQuestion,
@@ -150,6 +151,7 @@ export function CommentsReader({
   onCohostEnableConsent?: () => void
   onCohostUpgrade?: (url: string) => void
 }): ReactElement {
+  const trafficLightGutter = useTrafficLightGutter()
   const messages = sortMessagesChronological(snapshot.messages)
   const live = Boolean(snapshot.sessionId)
   const mode =
@@ -314,21 +316,22 @@ export function CommentsReader({
   }
 
   return (
-    // No bg-background here: the body paints the one translucent coat over the
-    // wallpaper underlay. A second coat is what made this window read flat black.
+    // No bg here: the window frame paints the content coat over the body's
+    // window coat and the OS material (plan 050). A third coat reads flat black.
     <div className="relative flex h-screen flex-col text-foreground">
       {/* Fixed height, not min-height: the macOS traffic lights are centred on
           this exact strip from main (AUX_WINDOW_HEADER_HEIGHT), so a child that
           grew the row would silently pull the title off their centre line.
-          Gutter: on current macOS the three 14px lights end 74px in (measured
-          on a real window), so 88px leaves the title a clear 14px of air.
+          Gutter: the shared traffic-light gutter (window-frame.tsx), 88px on
+          macOS, collapsing in native fullscreen where the lights hide.
           The header is also a container: its tiers (comments-header.tsx)
           follow its own width, so the viewer count keeps one line and every
           control stays reachable down to the 320px window minimum. */}
       <header
         className={cn(
           CHAT_HEADER_CONTAINER,
-          'flex h-10 shrink-0 items-center gap-2 overflow-hidden pl-[88px] pr-3 [-webkit-app-region:drag]'
+          'flex h-10 shrink-0 items-center gap-2 overflow-hidden pr-3 [-webkit-app-region:drag]',
+          trafficLightGutter
         )}
         data-slot="chat-header"
       >
@@ -341,7 +344,7 @@ export function CommentsReader({
           Chat
         </span>
         <Badge
-          className="h-4 shrink-0 px-1.5 text-[10px]"
+          className="shrink-0"
           title={
             viewMode?.kind === 'history'
               ? `${viewMode.title} · ${new Date(viewMode.startedAt).toLocaleDateString()}`
@@ -394,7 +397,7 @@ export function CommentsReader({
       <Separator />
 
       {cohostVisible ? (
-        <div className="shrink-0 px-3 pt-2">
+        <div className="shrink-0 border-b border-border">
           <CohostPane
             actionPending={cohostActionPending}
             consented={cohostConsented}
@@ -455,12 +458,13 @@ export function CommentsReader({
       {unread > 0 ? (
         <Button
           className={cn(
-            'absolute inset-x-0 mx-auto w-fit shadow-soft',
-            onSend && mode === 'Live' ? 'bottom-16' : 'bottom-3'
+            // A glass chip (plan 050, D9), not a floating button.
+            'absolute inset-x-0 mx-auto h-6 w-fit rounded-full px-2.5 text-xs text-foreground glass-chip hover:text-foreground',
+            onSend && mode === 'Live' ? 'bottom-20' : 'bottom-3'
           )}
           size="sm"
           type="button"
-          variant="secondary"
+          variant="ghost"
           onClick={jumpToLatest}
         >
           {unread} new {unread === 1 ? 'comment' : 'comments'} ↓
@@ -543,111 +547,115 @@ function SendRow({
   }
 
   return (
-    <div className="shrink-0 px-3 py-2">
-      <Separator className="mb-2" />
-      <InputGroup>
-        <InputGroupInput
-          ref={inputRef}
-          aria-label="Send a message to all writable destinations"
-          disabled={targets.length === 0}
-          maxLength={maxChars}
-          placeholder={
-            targets.length > 0 ? 'Message writable destinations…' : 'No writable destinations'
-          }
-          value={draft}
-          onChange={(event) => {
-            setDraft(event.target.value)
-            if (event.target.value.trim().length === 0) setReplyToQuestionId(null)
-          }}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter') {
-              event.preventDefault()
-              submit()
+    // The composer is the window's one card (plan 050 S19): 12 px, a hairline,
+    // no shadow.
+    <div className="shrink-0 px-2 pt-1 pb-2">
+      <div className="flex flex-col rounded-panel border border-border bg-foreground/[0.04] p-2">
+        <InputGroup>
+          <InputGroupInput
+            ref={inputRef}
+            aria-label="Send a message to all writable destinations"
+            disabled={targets.length === 0}
+            maxLength={maxChars}
+            placeholder={
+              targets.length > 0 ? 'Message writable destinations…' : 'No writable destinations'
             }
-          }}
-        />
-        <InputGroupAddon align="inline-end">
-          {draft.length > 0 ? (
-            <span
-              className={cn(
-                'text-[11px] tabular-nums',
-                draft.trim().length > maxChars ? 'text-destructive' : 'text-subtle'
-              )}
-            >
-              {draft.trim().length}/{maxChars}
-            </span>
-          ) : null}
-          <Kbd aria-label="Enter">↵</Kbd>
-          <InputGroupButton
-            aria-label={pending ? 'Sending message' : 'Send message to all writable destinations'}
-            disabled={!canSend || !validateChatDraft(draft, maxChars)}
-            size="icon-xs"
-            onClick={submit}
-          >
-            <SendIcon data-icon="inline-end" weight="fill" />
-          </InputGroupButton>
-        </InputGroupAddon>
-      </InputGroup>
-      {replyToQuestionId ? (
-        <p className="mt-1 text-[11px] text-subtle">
-          Replying to a question Orcle found. Edit freely, nothing sends until you do.
-        </p>
-      ) : null}
-      <div className="mt-1.5">
-        <CommentsDestinationStatus
-          cohostState={cohostState}
-          failures={failures}
-          mode="composer"
-          providers={providers}
-          sendTargets={targets}
-        />
-        {cohostNudge ? (
-          <CohostNudge onDismiss={onCohostNudgeDismiss} onTurnOn={onCohostNudgeTurnOn} />
-        ) : null}
-        {operation ? (
-          <div className="mt-1.5 flex flex-col gap-1" aria-label="Latest message delivery">
-            <Badge
-              className="max-w-full truncate"
-              title={operation.text}
-              variant={
-                operation.phase === 'sent'
-                  ? 'success'
-                  : operation.phase === 'failed' || operation.phase === 'delivery-unknown'
-                    ? 'destructive'
-                    : 'secondary'
+            value={draft}
+            onChange={(event) => {
+              setDraft(event.target.value)
+              if (event.target.value.trim().length === 0) setReplyToQuestionId(null)
+            }}
+            onKeyDown={(event) => {
+              if (event.key === 'Enter') {
+                event.preventDefault()
+                submit()
               }
+            }}
+          />
+          <InputGroupAddon align="inline-end">
+            {draft.length > 0 ? (
+              <span
+                className={cn(
+                  'text-[11px] tabular-nums',
+                  draft.trim().length > maxChars ? 'text-destructive' : 'text-subtle'
+                )}
+              >
+                {draft.trim().length}/{maxChars}
+              </span>
+            ) : null}
+            <Kbd aria-label="Enter">↵</Kbd>
+            <InputGroupButton
+              aria-label={pending ? 'Sending message' : 'Send message to all writable destinations'}
+              disabled={!canSend || !validateChatDraft(draft, maxChars)}
+              size="icon-xs"
+              onClick={submit}
             >
-              You · {operation.text} · {operation.phase.replace('-', ' ')}
-            </Badge>
-            <div className="flex flex-wrap gap-1">
-              {operation.destinations.map((destination) => (
-                <Badge
-                  key={destination.destinationId}
-                  title={destination.reason}
-                  variant={
-                    destination.phase === 'sent'
-                      ? 'success'
-                      : destination.phase === 'failed' || destination.phase === 'timed-out-unknown'
-                        ? 'destructive'
-                        : destination.phase === 'pending'
-                          ? 'warning'
-                          : 'outline'
-                  }
-                >
-                  <ChatPlatformIcon decorative platform={destination.platform} />
-                  {CHAT_PLATFORM_LABELS[destination.platform]} ·{' '}
-                  {destination.phase === 'timed-out-unknown'
-                    ? 'Unknown'
-                    : destination.phase === 'read-only'
-                      ? 'Receive-only'
-                      : destination.phase === 'pending'
-                        ? 'Sending…'
-                        : destination.phase.charAt(0).toUpperCase() + destination.phase.slice(1)}
-                </Badge>
-              ))}
-            </div>
-          </div>
+              <SendIcon data-icon="inline-end" weight="fill" />
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
+        {replyToQuestionId ? (
+          <p className="mt-1 text-[11px] text-subtle">
+            Replying to a question Orcle found. Edit freely, nothing sends until you do.
+          </p>
         ) : null}
+        <div className="mt-1.5">
+          <CommentsDestinationStatus
+            cohostState={cohostState}
+            failures={failures}
+            mode="composer"
+            providers={providers}
+            sendTargets={targets}
+          />
+          {cohostNudge ? (
+            <CohostNudge onDismiss={onCohostNudgeDismiss} onTurnOn={onCohostNudgeTurnOn} />
+          ) : null}
+          {operation ? (
+            <div className="mt-1.5 flex flex-col gap-1" aria-label="Latest message delivery">
+              <Badge
+                className="max-w-full truncate"
+                title={operation.text}
+                variant={
+                  operation.phase === 'sent'
+                    ? 'success'
+                    : operation.phase === 'failed' || operation.phase === 'delivery-unknown'
+                      ? 'destructive'
+                      : 'secondary'
+                }
+              >
+                You · {operation.text} · {operation.phase.replace('-', ' ')}
+              </Badge>
+              <div className="flex flex-wrap gap-1">
+                {operation.destinations.map((destination) => (
+                  <Badge
+                    key={destination.destinationId}
+                    title={destination.reason}
+                    variant={
+                      destination.phase === 'sent'
+                        ? 'success'
+                        : destination.phase === 'failed' ||
+                            destination.phase === 'timed-out-unknown'
+                          ? 'destructive'
+                          : destination.phase === 'pending'
+                            ? 'warning'
+                            : 'outline'
+                    }
+                  >
+                    <ChatPlatformIcon decorative platform={destination.platform} />
+                    {CHAT_PLATFORM_LABELS[destination.platform]} ·{' '}
+                    {destination.phase === 'timed-out-unknown'
+                      ? 'Unknown'
+                      : destination.phase === 'read-only'
+                        ? 'Receive-only'
+                        : destination.phase === 'pending'
+                          ? 'Sending…'
+                          : destination.phase.charAt(0).toUpperCase() + destination.phase.slice(1)}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          ) : null}
+        </div>
       </div>
     </div>
   )

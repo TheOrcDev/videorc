@@ -9,41 +9,38 @@
 @custom-variant data-vertical (&[data-orientation='vertical']);
 
 /*
- * Videorc design tokens — the glass language (.claude/skills/videorc-design).
+ * Videorc design tokens (.claude/skills/videorc-design, v2: the window family).
  * Two columns of the SAME design: dark is the default and reference
- * expression, light is its structural twin. Chrome is monochrome glass —
- * translucent panels over vibrancy, hairline borders at 8%, three text tiers.
- * Colour carries meaning only: live (red), success, warning, info, and the
- * vivid source icons. There is no coloured action accent; primary actions are
- * monochrome text + key chips.
+ * expression, light is its structural twin. Every window sits on the real OS
+ * material; the body wears one window coat and content panes add one content
+ * coat. Chrome is monochrome: hairlines, three text tiers, glass chips. Colour
+ * carries meaning only: live/destructive (red), success, warning, info, and
+ * the vivid source icons. There is no coloured action accent.
  *
- * Token contract — reach for these utilities, not raw values, so every screen
- * stays consistent:
- *   Surfaces   bg-background (the ONE translucent coat) · bg-card / bg-popover
- *              (opaque-92% float for nested popovers/menus). Never stack coats.
- *   Text tiers text-foreground (primary: titles/labels, weight 500) ·
- *              text-muted-foreground (secondary: inline context, metadata,
- *              placeholders) · text-subtle (tertiary: section headers, hints,
- *              disabled). Three tiers, nothing else.
- *   Radius     rounded-panel (18px: glass panels, dialogs, palette) ·
- *              rounded-row (10px: rows, cards) · rounded-chip (6px: key chips,
- *              small controls). Tiers only — no ad-hoc rounded-xl per screen.
- *   Hairlines  border (dark white-10% — the polished black-glass edge; light
- *              black-8%). Never >1px, never solid grey.
- *   Selection  bg-accent (hover/selected block: white/8% dark · black/6% light,
- *              no outline) · bg-accent-pressed (white/12% · black/10%).
+ * Token contract: reach for these utilities, not raw values:
+ *   Coats      bg-glass-window (body) · bg-glass-content (content panes) ·
+ *              bg-popover / bg-card (near-opaque floating surfaces only).
+ *              Never stack a third coat, never backdrop-filter.
+ *   Text tiers text-foreground (primary) · text-muted-foreground (secondary) ·
+ *              text-subtle (tertiary). Three tiers, nothing else.
+ *   Radius     rounded-panel (12px: containers, dialogs) · rounded-row (8px:
+ *              rows, cards) · rounded-chip (6px: controls, key chips). Tags
+ *              are 7px and status chips round. Window corners belong to the OS.
+ *   Sizes      h-toolbar (40px) · h-status-bar (26px) · h-row (32px) ·
+ *              h-row-compact (28px) · h-control (28px) · px-gutter (16px).
+ *   Hairlines  border (dark white-10% · light black-12%). Never >1px.
+ *   Selection  bg-accent (hover/selected block) · bg-accent-pressed.
+ *   Chips      glass-chip · glass-chip-tinted · glass-dot · glass-keycap, with
+ *              the tone-* utilities carrying colour.
  *   Focus      :focus-visible ring is wired in @layer base below.
  *   Motion     100–150ms ease-out; reduced-motion collapse wired below.
- *   Colour     only via text/bg live·success·warning·info + vivid source icons.
  */
 :root {
   --radius: 0.625rem;
 
-  /* Scrollbars carry no track at all — only a thumb, and barely that. Glass
-     here means what it means everywhere else in this app: translucency plus a
-     hairline, never a real backdrop blur (unreachable in this Electron setup;
-     see the design language's wallpaper-underlay note). Light mode needs a
-     darker thumb to register on porcelain. */
+  /* The Radix ScrollArea thumb (native scrollers are the macOS overlay
+     scrollbars): no track, only a thumb. Light mode needs a darker thumb to
+     register on porcelain. */
   --scrollbar-thumb: oklch(0 0 0 / 15%);
   --scrollbar-thumb-hover: oklch(0 0 0 / 28%);
   --scrollbar-thumb-ring: oklch(0 0 0 / 6%);
@@ -108,29 +105,42 @@
   /* Floating glass panel shadow + hairline ring. */
   --shadow-glass-panel: 0 16px 70px oklch(0 0 0 / 25%), 0 0 0 1px oklch(0 0 0 / 12%);
 
-  /* The wallpaper frost (GlassWallpaperUnderlay img filter). Light keeps the
-     airy porcelain frost. */
-  /* Solid degradation base for when no wallpaper is available (Automation
-     denied): the transparent window must never show other apps through the
-     translucent coat. Matches the porcelain solid (#FAFAFB). */
-  --glass-fallback-base: oklch(0.985 0.001 286);
-  --glass-underlay-filter: blur(70px) saturate(1.4) brightness(1.05);
-  /* A whisper of true translucency. What bleeds through the transparent
-     window is other apps' windows, UNBLURRED (backdrop blur cannot see
-     behind the window), so this is a privacy dial: at the old 0.86, sharp
-     text behind the app was faintly readable through the glass. 0.94 keeps
-     the glass feeling alive without legible bleed — do not lower it. */
-  --glass-underlay-opacity: 0.94;
+  /* Window glass (plan 050): real macOS vibrancy under every window. The body
+     wears --glass-window (the one window coat), content panes add
+     --glass-content so the sidebar reads lighter, and --glass-solid replaces
+     both when the OS asks for reduced transparency. Light glass needs a
+     heavier coat than dark: the light material turns gray over dark content. */
+  --glass-window: oklch(0.985 0.001 286 / 60%);
+  --glass-content: oklch(0.985 0.001 286 / 30%);
+  --glass-solid: oklch(0.985 0.001 286);
 
-  /* Glass reflection (the .glass-shine utility): a specular sweep from the
-     upper-left + a bright top rim where light catches the edge. */
-  --glass-shine-rim: inset 0 1px 0 oklch(1 0 0 / 85%);
-  --glass-shine-sweep: linear-gradient(
-    160deg,
-    oklch(1 0 0 / 50%) 0%,
-    oklch(1 0 0 / 18%) 20%,
-    transparent 45%
-  );
+  /* Glass chips (plan 050, D9): the porcelain twin of the dark chip glass. */
+  --chip-fill-top: oklch(1 0 0 / 70%);
+  --chip-fill-bottom: oklch(1 0 0 / 45%);
+  --chip-rim: oklch(0 0 0 / 8%);
+  --chip-highlight: oklch(1 0 0 / 90%);
+  --chip-drop: oklch(0 0 0 / 6%);
+  --chip-tint-top: 16%;
+  --chip-tint-bottom: 6%;
+  --chip-tint-rim: 32%;
+  --chip-tint-ink: 80%;
+  --chip-tint-ink-base: var(--foreground);
+  --chip-dot-glow: 45%;
+  --keycap-fill-top: oklch(1 0 0 / 95%);
+  --keycap-fill-bottom: oklch(1 0 0 / 70%);
+  --keycap-rim: oklch(0 0 0 / 10%);
+  --keycap-highlight: oklch(1 0 0);
+  --keycap-base: oklch(0 0 0 / 12%);
+
+  /* Slider and switch knobs stay white in both themes, like AppKit's. */
+  --knob: oklch(1 0 0);
+  --knob-ring: oklch(0 0 0 / 12%);
+
+  /* The video ground: the letterbox the docked preview sits on, with its
+     text. Dark in both themes, because it frames video. */
+  --video-ground: oklch(0.13 0.003 286);
+  --video-ground-foreground: oklch(0.97 0.001 286);
+  --video-ground-muted: oklch(0.71 0.01 286);
 }
 
 .dark {
@@ -195,27 +205,87 @@
 
   --shadow-glass-panel: 0 16px 70px oklch(0 0 0 / 60%), 0 0 0 1px oklch(1 0 0 / 10%);
 
-  /* Solid degradation base for when no wallpaper is available (Automation
-     denied): matches the black-glass solid (#0D0D0F). */
-  --glass-fallback-base: oklch(0.13 0.003 286);
-  /* Black glass: the frost itself goes dark — the wallpaper is dimmed into a
-     smoky texture (the translucent coat alone cannot make a bright wallpaper
-     read black; this can). */
-  --glass-underlay-filter: blur(70px) saturate(1.1) brightness(0.35);
-  /* A whisper of true translucency — see the light-theme note: this is a
-     privacy dial (bleed-through is unblurred); was 0.82, which let text
-     behind the app read through. Do not lower it. */
-  --glass-underlay-opacity: 0.92;
+  /* Dark window glass: over pure white the dark under-window material reads
+     #4A4B49, so these coats keep secondary text at 4.5:1 or better on any
+     desktop (probe:ui-glass contrast check). */
+  --glass-window: oklch(0.13 0.003 286 / 42%);
+  --glass-content: oklch(0.13 0.003 286 / 34%);
+  --glass-solid: oklch(0.13 0.003 286);
 
-  /* Glass reflection: the orb's specular highlight — subtle white sweep from
-     the upper-left + a glinting top rim on the black glass. */
-  --glass-shine-rim: inset 0 1px 0 oklch(1 0 0 / 14%);
-  --glass-shine-sweep: linear-gradient(
-    160deg,
-    oklch(1 0 0 / 7%) 0%,
-    oklch(1 0 0 / 2.5%) 22%,
-    transparent 45%
-  );
+  /* Glass chips (plan 050, D9): white 10% to 3.5% with a 13% rim, a 12% top
+     highlight and a soft drop. Emphasis chips tint the same glass with their
+     tone; the status dot glows in it. */
+  --chip-fill-top: oklch(1 0 0 / 10%);
+  --chip-fill-bottom: oklch(1 0 0 / 3.5%);
+  --chip-rim: oklch(1 0 0 / 13%);
+  --chip-highlight: oklch(1 0 0 / 12%);
+  --chip-drop: oklch(0 0 0 / 30%);
+  --chip-tint-top: 30%;
+  --chip-tint-bottom: 12%;
+  --chip-tint-rim: 45%;
+  --chip-tint-ink: 35%;
+  --chip-tint-ink-base: oklch(1 0 0);
+  --chip-dot-glow: 75%;
+  --keycap-fill-top: oklch(1 0 0 / 12%);
+  --keycap-fill-bottom: oklch(1 0 0 / 4%);
+  --keycap-rim: oklch(1 0 0 / 13%);
+  --keycap-highlight: oklch(1 0 0 / 14%);
+  --keycap-base: oklch(0 0 0 / 30%);
+
+  --knob: oklch(1 0 0);
+  --knob-ring: oklch(0 0 0 / 35%);
+
+  --video-ground: oklch(0.13 0.003 286);
+  --video-ground-foreground: oklch(0.97 0.001 286);
+  --video-ground-muted: oklch(0.71 0.01 286);
+}
+
+/* Windows 11 Mica (plan 050, D7): Mica tints from the wallpaper and never
+   shows what is behind the window, so the coats only carry the tone.
+   Starting values; the Windows box tunes them (S21 acceptance). */
+:root[data-platform='win32'] {
+  --glass-window: oklch(0.985 0.001 286 / 50%);
+  --glass-content: oklch(0.985 0.001 286 / 24%);
+}
+:root[data-platform='win32'].dark {
+  --glass-window: oklch(0.13 0.003 286 / 34%);
+  --glass-content: oklch(0.13 0.003 286 / 26%);
+}
+
+/* Increase Contrast: hairlines strong enough to read on glass, and the
+   secondary tier one step closer to the primary. */
+@media (prefers-contrast: more) {
+  :root,
+  :root[data-platform='win32'] {
+    --border: oklch(0 0 0 / 28%);
+    --input: oklch(0 0 0 / 28%);
+    --muted-foreground: oklch(0.38 0.006 286);
+    --glass-window: oklch(0.985 0.001 286 / 75%);
+    --chip-rim: oklch(0 0 0 / 24%);
+    --keycap-rim: oklch(0 0 0 / 28%);
+  }
+  .dark,
+  :root[data-platform='win32'].dark {
+    --border: oklch(1 0 0 / 24%);
+    --input: oklch(1 0 0 / 24%);
+    --muted-foreground: oklch(0.8 0.01 286);
+    --glass-window: oklch(0.13 0.003 286 / 60%);
+    --chip-rim: oklch(1 0 0 / 30%);
+    --keycap-rim: oklch(1 0 0 / 30%);
+  }
+}
+
+/* After Increase Contrast, so it wins when both are on. The OS paints the
+   material solid under Reduce Transparency; the coats go solid with it so
+   text contrast never depends on what sits behind. */
+@media (prefers-reduced-transparency: reduce) {
+  :root,
+  .dark,
+  :root[data-platform='win32'],
+  :root[data-platform='win32'].dark {
+    --glass-window: var(--glass-solid);
+    --glass-content: transparent;
+  }
 }
 
 @theme inline {
@@ -227,11 +297,20 @@
   --radius-3xl: calc(var(--radius) + 14px);
   --radius-4xl: calc(var(--radius) + 20px);
 
-  /* Semantic radius tiers — the design language's panel/row/chip vocabulary.
-     Use rounded-panel / rounded-row / rounded-chip at call sites. */
-  --radius-panel: calc(var(--radius) + 8px); /* 18px */
-  --radius-row: var(--radius); /* 10px */
+  /* Semantic radius tiers (plan 050, D4): containers 12, rows and cards 8,
+     controls and chips 6. Use rounded-panel / rounded-row / rounded-chip. */
+  --radius-panel: calc(var(--radius) + 2px); /* 12px */
+  --radius-row: calc(var(--radius) - 2px); /* 8px */
   --radius-chip: calc(var(--radius) - 4px); /* 6px */
+
+  /* The desktop scale (plan 050, D4): one toolbar, one status bar, one row,
+     and one control height for every screen. */
+  --spacing-toolbar: 2.5rem; /* 40px */
+  --spacing-status-bar: 1.625rem; /* 26px */
+  --spacing-row: 2rem; /* 32px */
+  --spacing-row-compact: 1.75rem; /* 28px */
+  --spacing-control: 1.75rem; /* 28px */
+  --spacing-gutter: 1rem; /* 16px */
 
   /* The reference font: the platform system stack (SF Pro / SF Mono on macOS). */
   --font-sans: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, sans-serif;
@@ -281,24 +360,103 @@
   --color-card: var(--card);
   --color-foreground: var(--foreground);
   --color-background: var(--background);
+  --color-glass-window: var(--glass-window);
+  --color-glass-content: var(--glass-content);
+  --color-glass-solid: var(--glass-solid);
+  --color-knob: var(--knob);
+  --color-knob-ring: var(--knob-ring);
+  --color-video-ground: var(--video-ground);
+  --color-video-ground-foreground: var(--video-ground-foreground);
+  --color-video-ground-muted: var(--video-ground-muted);
+
+  /* Platform brand tints: with source icons, the only large saturated colour
+     in the chrome (videorc-design). Theme-invariant. */
+  --color-platform-youtube: #ff0033;
+  --color-platform-twitch: #9146ff;
+  --color-platform-twitch-ink: #a970ff;
+  --color-platform-instagram: #e1306c;
+}
+
+/*
+ * Glass chips (plan 050, D9). Badges, status pills, tags and key chips are
+ * small pieces of the window glass: a gradient fill, a 1 px rim (the element
+ * brings the `border` width), a top highlight and a soft drop. Never
+ * backdrop-filter (the June compositor wedge) and never motion.
+ *
+ * Colour is information, so it rides in --chip-tone (the tone-* utilities):
+ * a status chip keeps monochrome text and glows its tone in a 6 px dot, and an
+ * emphasis chip (failed, on air) tints the glass itself.
+ */
+@utility glass-chip {
+  border-color: var(--chip-rim);
+  background-image: linear-gradient(to bottom, var(--chip-fill-top), var(--chip-fill-bottom));
+  box-shadow:
+    inset 0 1px 0 var(--chip-highlight),
+    0 1px 2px var(--chip-drop);
+}
+
+@utility glass-chip-tinted {
+  border-color: color-mix(in oklch, var(--chip-tone) var(--chip-tint-rim), transparent);
+  background-image: linear-gradient(
+    to bottom,
+    color-mix(in oklch, var(--chip-tone) var(--chip-tint-top), transparent),
+    color-mix(in oklch, var(--chip-tone) var(--chip-tint-bottom), transparent)
+  );
+  box-shadow:
+    inset 0 1px 0 var(--chip-highlight),
+    0 1px 2px var(--chip-drop);
+  color: color-mix(in oklch, var(--chip-tone) var(--chip-tint-ink), var(--chip-tint-ink-base));
+}
+
+/* The status dot: the tone, a 2 px halo at 22% and an 8 px glow. */
+@utility glass-dot {
+  background-color: var(--chip-tone, var(--muted-foreground));
+  box-shadow:
+    0 0 0 2px color-mix(in oklch, var(--chip-tone, var(--muted-foreground)) 22%, transparent),
+    0 0 8px
+      color-mix(
+        in oklch,
+        var(--chip-tone, var(--muted-foreground)) var(--chip-dot-glow),
+        transparent
+      );
+}
+
+/* A key, not a tag: a brighter top edge and a dark bottom edge. */
+@utility glass-keycap {
+  border-color: var(--keycap-rim);
+  background-image: linear-gradient(to bottom, var(--keycap-fill-top), var(--keycap-fill-bottom));
+  box-shadow:
+    inset 0 1px 0 var(--keycap-highlight),
+    inset 0 -1px 0 var(--keycap-base);
+}
+
+@utility tone-success {
+  --chip-tone: var(--success);
+}
+
+@utility tone-warning {
+  --chip-tone: var(--warning);
+}
+
+@utility tone-destructive {
+  --chip-tone: var(--destructive);
+}
+
+@utility tone-live {
+  --chip-tone: var(--live);
+}
+
+@utility tone-info {
+  --chip-tone: var(--info);
+}
+
+/* Neutral status: a gray dot that does not glow. */
+@utility tone-neutral {
+  --chip-tone: var(--muted-foreground);
+  --chip-dot-glow: 0%;
 }
 
 @layer components {
-  /* Glass reflection overlay — apply to any glass surface (window frame,
-     panels, dialogs). Token-driven per theme; pure chrome, no color. */
-  .glass-shine {
-    position: relative;
-  }
-  .glass-shine::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    border-radius: inherit;
-    pointer-events: none;
-    background: var(--glass-shine-sweep);
-    box-shadow: var(--glass-shine-rim);
-  }
-
   /* Co-host "working on it" shimmer — the chat-app typing affordance. Opacity
      only: nothing bounces, nothing moves, nothing reflows the toolbar row. The
      dots inherit currentColor so they stay monochrome chrome. */
@@ -332,44 +490,42 @@
   * {
     @apply border-border outline-ring/50;
   }
+  /* The window coat sits on the OS material. color-scheme lives on body, never
+     inline on the root: a root color-scheme of light makes Chromium paint an
+     opaque canvas over the material (plan 050, P5.3). */
   body {
-    @apply bg-background text-foreground;
+    @apply bg-glass-window text-foreground;
+    color-scheme: light;
+  }
+  .dark body {
+    color-scheme: dark;
   }
   html {
     @apply font-sans;
+    /* A desktop app, not a page (plan 050, D6): chrome text does not select,
+       the arrow is the pointer, and the window does not rubber-band. Content
+       people copy (chat, notes, transcripts, logs) opts back in with
+       select-text, and fields always select. */
+    user-select: none;
+    -webkit-user-select: none;
+    cursor: default;
+    overscroll-behavior: none;
+  }
+  input,
+  textarea,
+  [contenteditable='true'] {
+    user-select: text;
+    -webkit-user-select: text;
+  }
+  img {
+    -webkit-user-drag: none;
   }
   /* Visible keyboard focus for any interactive element that doesn't set its own ring. */
   :focus-visible {
     @apply outline-2 outline-offset-2 outline-ring/70;
   }
-  /* No track, no arrows, no corner — just a thumb floating over the content.
-     The transparent border plus background-clip insets the painted thumb to
-     ~4px inside a 10px hit area: barely visible to look at, still easy to
-     grab. Applies to native overflow scrollers everywhere; the Radix
-     ScrollArea mirrors the same tokens in its own component. */
-  ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-    background: transparent;
-  }
-  ::-webkit-scrollbar-track,
-  ::-webkit-scrollbar-track-piece,
-  ::-webkit-scrollbar-corner {
-    background: transparent;
-  }
-  ::-webkit-scrollbar-button {
-    display: none;
-  }
-  ::-webkit-scrollbar-thumb {
-    background-color: var(--scrollbar-thumb);
-    border: 3px solid transparent;
-    background-clip: content-box;
-    border-radius: 999px;
-    box-shadow: inset 0 0 0 1px var(--scrollbar-thumb-ring);
-  }
-  ::-webkit-scrollbar-thumb:hover {
-    background-color: var(--scrollbar-thumb-hover);
-  }
+  /* Native scrollers use the macOS overlay scrollbars and honour the system
+     "Show scroll bars" setting (plan 050, D6): no custom recipe here. */
 
   /* Honour reduced-motion: collapse transitions/animations, keep behaviour. */
   @media (prefers-reduced-motion: reduce) {

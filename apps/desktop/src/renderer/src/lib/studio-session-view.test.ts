@@ -6,6 +6,7 @@ import {
   recordingQuality,
   sessionMode,
   isSessionTransportActive,
+  sessionClockLabel,
   sessionStatusLabel,
   sessionStatusTone,
   streamingSummary
@@ -99,5 +100,17 @@ describe('isSessionTransportActive', () => {
     for (const state of ['idle', 'failed', 'unknown']) {
       expect(isSessionTransportActive(state)).toBe(false)
     }
+  })
+})
+
+describe('sessionClockLabel', () => {
+  it('counts m:ss under an hour and h:mm:ss after (plan 050 S12)', () => {
+    expect(sessionClockLabel(undefined)).toBe('0:00')
+    expect(sessionClockLabel(Number.NaN)).toBe('0:00')
+    expect(sessionClockLabel(-500)).toBe('0:00')
+    expect(sessionClockLabel(999)).toBe('0:00')
+    expect(sessionClockLabel(61_000)).toBe('1:01')
+    expect(sessionClockLabel(59 * 60_000 + 59_999)).toBe('59:59')
+    expect(sessionClockLabel(3_600_000 + 2 * 60_000 + 3_000)).toBe('1:02:03')
   })
 })

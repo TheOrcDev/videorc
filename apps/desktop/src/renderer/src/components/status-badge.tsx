@@ -1,18 +1,21 @@
 import { AppIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
-import { Badge } from '@/components/ui/badge'
 import { cn } from '@/lib/utils'
 
 export type StatusTone = 'good' | 'warn' | 'error' | 'neutral'
 
-const toneToVariant: Record<StatusTone, 'success' | 'warning' | 'destructive' | 'secondary'> = {
-  good: 'success',
-  warn: 'warning',
-  error: 'destructive',
-  neutral: 'secondary'
+const toneClass: Record<Exclude<StatusTone, 'error'>, string> = {
+  good: 'tone-success',
+  warn: 'tone-warning',
+  neutral: 'tone-neutral'
 }
 
+/**
+ * The status pill (plan 050, D9): a round glass chip. The label and value stay
+ * monochrome; the tone glows in the dot, or in the leading icon when there is
+ * one. An error tints the whole chip instead: it has to interrupt.
+ */
 export function StatusBadge({
   label,
   value,
@@ -24,15 +27,33 @@ export function StatusBadge({
   tone?: StatusTone
   icon?: AppIcon
 }): ReactElement {
+  const emphasis = tone === 'error'
   return (
-    <Badge variant={toneToVariant[tone]} className="h-6 gap-1.5 rounded-chip px-2.5">
-      {LeadingIcon ? (
-        <LeadingIcon data-icon="inline-start" weight="fill" />
-      ) : (
-        <span className="size-1.5 shrink-0 rounded-full bg-current" />
+    <span
+      data-slot="status-badge"
+      data-tone={tone}
+      className={cn(
+        'inline-flex h-[22px] w-fit shrink-0 items-center gap-1.5 overflow-hidden rounded-full border px-2.5 text-xs leading-none font-medium whitespace-nowrap',
+        emphasis
+          ? 'glass-chip-tinted tone-destructive'
+          : `glass-chip text-foreground ${toneClass[tone]}`
       )}
-      {label ? <span className="font-normal opacity-70">{label}</span> : null}
-      <span className={cn('max-w-40 truncate font-semibold capitalize')}>{value}</span>
-    </Badge>
+    >
+      {LeadingIcon ? (
+        <LeadingIcon
+          aria-hidden
+          className={cn('size-3.5 shrink-0', !emphasis && 'text-(--chip-tone)')}
+          weight="fill"
+        />
+      ) : emphasis ? null : (
+        <span aria-hidden className="size-1.5 shrink-0 rounded-full glass-dot" />
+      )}
+      {label ? (
+        <span className={cn('font-normal', emphasis ? 'opacity-80' : 'text-muted-foreground')}>
+          {label}
+        </span>
+      ) : null}
+      <span className="max-w-40 truncate capitalize">{value}</span>
+    </span>
   )
 }

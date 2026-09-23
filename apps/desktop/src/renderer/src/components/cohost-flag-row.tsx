@@ -48,11 +48,8 @@ export function CohostFlagRow({
       onPointerDown={() => onSelect(key)}
     >
       <Badge
-        className={cn(
-          'max-w-[55%] shrink-0',
-          flag.severity === 'high' ? 'text-destructive' : 'text-subtle'
-        )}
-        variant="outline"
+        className={cn('max-w-[55%] shrink-0', flag.severity !== 'high' && 'text-subtle')}
+        variant={flag.severity === 'high' ? 'destructive' : 'outline'}
       >
         <span className="truncate">{cohostFlagChipLabel(flag)}</span>
       </Badge>

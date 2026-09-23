@@ -40,7 +40,7 @@ function providerStateLabel(state: LiveChatProviderConnectionState): string {
 
 function providerBadgeVariant(
   state: LiveChatProviderConnectionState
-): 'success' | 'warning' | 'destructive' | 'outline' {
+): 'success' | 'warning' | 'destructive' | 'neutral' {
   switch (state) {
     case 'connected':
       return 'success'
@@ -51,7 +51,7 @@ function providerBadgeVariant(
     case 'failed':
       return 'destructive'
     default:
-      return 'outline'
+      return 'neutral'
   }
 }
 
@@ -139,8 +139,7 @@ export function CohostStatusChip({ state }: { state: CohostState | null }): Reac
   const chip = cohostChipView(state)
   if (!chip) return null
   return (
-    <Badge data-slot="cohost-status-chip" variant={chip.tone === 'live' ? 'success' : 'outline'}>
-      <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" />
+    <Badge data-slot="cohost-status-chip" variant={chip.tone === 'live' ? 'success' : 'neutral'}>
       {chip.label}
     </Badge>
   )
@@ -208,7 +207,6 @@ export function CommentsDestinationStatus({
           title={providerBadgeTitle(provider)}
           variant={providerBadgeVariant(provider.state)}
         >
-          <span aria-hidden className="size-1.5 shrink-0 rounded-full bg-current" />
           <ChatPlatformIcon decorative platform={provider.platform} />
           {CHAT_PLATFORM_LABELS[provider.platform]}
           <span aria-hidden>·</span>

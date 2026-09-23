@@ -15,6 +15,7 @@ import {
 import { useEffect, useState, type ReactElement, type ReactNode } from 'react'
 import { toast } from 'sonner'
 
+import { PageHeader } from '@/components/page'
 import { PanelSection } from '@/components/panel-section'
 import { SessionPoster } from '@/components/tabs/library-tab'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
@@ -23,7 +24,6 @@ import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Empty, EmptyDescription, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import { Field, FieldContent, FieldLabel } from '@/components/ui/field'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { Switch } from '@/components/ui/switch'
 import { useVideorcAccount } from '@/hooks/use-account'
 import { useStudioCore } from '@/hooks/use-studio'
@@ -116,9 +116,9 @@ export function AiTab({
 
   if (sessions.length === 0) {
     return (
-      <div className="flex flex-col gap-5">
+      <div className="flex flex-col gap-4 pb-gutter">
         <AiHeader />
-        <Empty className="rounded-panel border py-10">
+        <Empty className="py-10">
           <EmptyMedia variant="icon">
             <BrainIcon weight="duotone" />
           </EmptyMedia>
@@ -127,9 +127,12 @@ export function AiTab({
             Every recording can become a publishable upload. Here is what each step makes:
           </EmptyDescription>
         </Empty>
-        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+        <div className="grid gap-3 px-gutter sm:grid-cols-2 lg:grid-cols-5">
           {PUBLISH_PIPELINE.map((step, index) => (
-            <div key={step.kind} className="flex flex-col gap-1.5 rounded-panel border p-3">
+            <div
+              key={step.kind}
+              className="flex flex-col gap-1.5 rounded-row border border-border bg-foreground/[0.03] p-3"
+            >
               <span className="text-xs font-medium text-muted-foreground">{index + 1}</span>
               <span className="text-sm font-semibold">{step.name}</span>
               <p className="text-xs text-muted-foreground">{step.valueProp}</p>
@@ -142,10 +145,10 @@ export function AiTab({
   }
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col">
       <AiHeader />
-      <div className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
-        <div className="flex flex-col gap-4">
+      <div className="grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1.4fr)]">
+        <div className="flex min-w-0 flex-col lg:border-r">
           <PanelSection
             description="Pick a recording, then run or review its AI artifacts."
             icon={SparkleIcon}
@@ -163,10 +166,8 @@ export function AiTab({
                     key={session.id}
                     aria-pressed={selectedRow}
                     className={
-                      'flex items-center gap-3 rounded-row border px-2.5 py-2 text-left transition-colors ' +
-                      (selectedRow
-                        ? 'border-ring bg-accent'
-                        : 'border-transparent hover:bg-accent/60') +
+                      'flex items-center gap-3 rounded-row px-2.5 py-2 text-left ' +
+                      (selectedRow ? 'bg-accent' : 'hover:bg-accent/60') +
                       (failed ? ' opacity-50' : '')
                     }
                     title={failed ? 'This session failed. Nothing to publish.' : session.title}
@@ -215,7 +216,7 @@ export function AiTab({
                 'flex flex-col gap-2 rounded-row border p-3 ' +
                 (cloudAi.ready && aiConsent
                   ? 'border-success/40 bg-success/5'
-                  : 'border-border bg-muted/20')
+                  : 'border-border bg-foreground/[0.03]')
               }
             >
               <div className="flex items-center gap-2">
@@ -262,7 +263,7 @@ export function AiTab({
           </PanelSection>
         </div>
 
-        <PanelSection icon={BrainIcon} title="Publish & intelligence">
+        <PanelSection className="min-w-0" icon={BrainIcon} title="Publish & intelligence">
           {selected ? (
             <ArtifactView
               cloudReady={cloudAi.ready}
@@ -292,14 +293,12 @@ export function AiTab({
   )
 
   function AiHeader(): ReactElement {
+    // The toolbar names the page; this is its intro line.
     return (
-      <div className="flex flex-col gap-1">
-        <h1 className="text-xl font-semibold tracking-tight">Publish</h1>
-        <p className="max-w-2xl text-sm text-muted-foreground">
-          Turn a finished recording into a publishable upload: transcript, title, summary, chapters,
-          and highlights, bundled as a publish pack.
-        </p>
-      </div>
+      <PageHeader
+        description="Turn a finished recording into a publishable upload: transcript, title, summary, chapters, and highlights, bundled as a publish pack."
+        title="Publish"
+      />
     )
   }
 
@@ -536,298 +535,300 @@ function ArtifactView({
   )
 
   return (
-    <ScrollArea className="h-[calc(100vh-15rem)] pr-3">
-      <div className="flex flex-col gap-2">
-        {problemArtifact ? <ArtifactProblem artifact={problemArtifact} /> : null}
+    // Everything Publish generates is meant to be copied out.
+    <div className="flex flex-col gap-2 select-text">
+      {problemArtifact ? <ArtifactProblem artifact={problemArtifact} /> : null}
 
-        {/* What the last run PRODUCED, even when it was local-only: the audio
+      {/* What the last run PRODUCED, even when it was local-only: the audio
             extract is the run's tangible output — show it, name it, reveal it. */}
-        {audioExtract ? (
-          <div className="flex items-center gap-2 rounded-row border border-success/30 bg-success/5 px-3 py-2">
-            <WaveformIcon className="size-4 shrink-0 text-success" weight="duotone" />
-            <span className="min-w-0 flex-1 truncate text-xs">
-              Audio extracted
-              {audioExtract.filePath ? (
-                <span className="text-muted-foreground">
-                  {' '}
-                  · {audioExtract.filePath.split('/').at(-1)}
-                </span>
-              ) : null}
-            </span>
+      {audioExtract ? (
+        <div className="flex items-center gap-2 rounded-row border border-success/30 bg-success/5 px-3 py-2">
+          <WaveformIcon className="size-4 shrink-0 text-success" weight="duotone" />
+          <span className="min-w-0 flex-1 truncate text-xs">
+            Audio extracted
             {audioExtract.filePath ? (
-              <Button
-                size="xs"
-                variant="outline"
-                onClick={() => void window.videorc?.revealSession?.(session.id)}
-              >
-                Reveal in Finder
-              </Button>
+              <span className="text-muted-foreground">
+                {' '}
+                · {audioExtract.filePath.split('/').at(-1)}
+              </span>
             ) : null}
-          </div>
-        ) : null}
+          </span>
+          {audioExtract.filePath ? (
+            <Button
+              size="xs"
+              variant="outline"
+              onClick={() => void window.videorc?.revealSession?.(session.id)}
+            >
+              Reveal in Finder
+            </Button>
+          ) : null}
+        </div>
+      ) : null}
 
-        {/* The five pipeline steps, in order — a card TEACHES until a run
+      {/* The five pipeline steps, in order — a card TEACHES until a run
             happens, then shows what that run produced for it: content,
             waiting-for-consent, or the failure. "Not run" after a finished
             run was the lie that made the pipeline feel dead. */}
-        {PUBLISH_PIPELINE.map((step, index) => {
-          const content = pipelineContent[step.kind]
-          const stepArtifact = latestArtifactAnyStatus(session, step.kind)
-          const waitingForConsent =
-            !content && (stepArtifact?.status === 'pending-consent' || sessionWaitingForConsent)
-          const stepFailed = !content && !waitingForConsent && stepArtifact?.status === 'failed'
-          return (
-            <div key={step.kind} className="flex flex-col gap-2 rounded-panel border p-3">
-              <div className="flex items-center gap-2">
-                <span className="grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground">
-                  {index + 1}
-                </span>
-                <span className="flex-1 text-sm font-semibold">{step.name}</span>
-                <Badge
-                  variant={
-                    content
-                      ? 'success'
-                      : waitingForConsent
-                        ? 'warning'
-                        : stepFailed
-                          ? 'destructive'
-                          : 'outline'
-                  }
-                >
-                  {content
-                    ? 'Ready'
+      {PUBLISH_PIPELINE.map((step, index) => {
+        const content = pipelineContent[step.kind]
+        const stepArtifact = latestArtifactAnyStatus(session, step.kind)
+        const waitingForConsent =
+          !content && (stepArtifact?.status === 'pending-consent' || sessionWaitingForConsent)
+        const stepFailed = !content && !waitingForConsent && stepArtifact?.status === 'failed'
+        return (
+          <div
+            key={step.kind}
+            className="flex flex-col gap-2 rounded-row border border-border bg-foreground/[0.03] p-3"
+          >
+            <div className="flex items-center gap-2">
+              <span className="grid size-5 shrink-0 place-items-center rounded-full bg-muted text-[11px] font-semibold text-muted-foreground">
+                {index + 1}
+              </span>
+              <span className="flex-1 text-sm font-semibold">{step.name}</span>
+              <Badge
+                variant={
+                  content
+                    ? 'success'
                     : waitingForConsent
-                      ? 'Waiting for consent'
+                      ? 'warning'
                       : stepFailed
-                        ? 'Failed'
-                        : 'Not run'}
-                </Badge>
-              </div>
-              {content ?? (
-                <div className="flex flex-col gap-1.5">
-                  {waitingForConsent ? (
-                    // Never point at a switch the user cannot flip: when cloud
-                    // AI is unreachable/blocked, step 0 explains WHY — send
-                    // them to the reason, not to a disabled control.
-                    <p className="text-xs text-muted-foreground">
-                      {cloudReady
-                        ? 'This step runs in the cloud. Flip “Allow cloud upload” in step 0, then run the pipeline again.'
-                        : 'This step runs in the cloud, which is unavailable right now. The Cloud AI card (step 0) says why. Your audio is already extracted; once cloud AI is reachable, allow upload and run again.'}
-                    </p>
-                  ) : stepFailed ? (
-                    <p className="text-xs text-muted-foreground">
-                      The last run failed for this step. See the alert above, then run again.
-                    </p>
-                  ) : (
-                    <>
-                      <p className="text-xs text-muted-foreground">{step.valueProp}</p>
-                      <p className="text-xs italic text-muted-foreground/60">{step.example}</p>
-                    </>
-                  )}
-                  <Button
-                    className="w-fit"
-                    disabled={running}
-                    size="xs"
-                    title={
-                      perKind && CARD_OUTPUT_GROUP[step.kind]
-                        ? undefined
-                        : 'Artifacts are generated together in one workflow run'
+                        ? 'destructive'
+                        : 'outline'
+                }
+              >
+                {content
+                  ? 'Ready'
+                  : waitingForConsent
+                    ? 'Waiting for consent'
+                    : stepFailed
+                      ? 'Failed'
+                      : 'Not run'}
+              </Badge>
+            </div>
+            {content ?? (
+              <div className="flex flex-col gap-1.5">
+                {waitingForConsent ? (
+                  // Never point at a switch the user cannot flip: when cloud
+                  // AI is unreachable/blocked, step 0 explains WHY — send
+                  // them to the reason, not to a disabled control.
+                  <p className="text-xs text-muted-foreground">
+                    {cloudReady
+                      ? 'This step runs in the cloud. Flip “Allow cloud upload” in step 0, then run the pipeline again.'
+                      : 'This step runs in the cloud, which is unavailable right now. The Cloud AI card (step 0) says why. Your audio is already extracted; once cloud AI is reachable, allow upload and run again.'}
+                  </p>
+                ) : stepFailed ? (
+                  <p className="text-xs text-muted-foreground">
+                    The last run failed for this step. See the alert above, then run again.
+                  </p>
+                ) : (
+                  <>
+                    <p className="text-xs text-muted-foreground">{step.valueProp}</p>
+                    <p className="text-xs italic text-muted-foreground/60">{step.example}</p>
+                  </>
+                )}
+                <Button
+                  className="w-fit"
+                  disabled={running}
+                  size="xs"
+                  title={
+                    perKind && CARD_OUTPUT_GROUP[step.kind]
+                      ? undefined
+                      : 'Artifacts are generated together in one workflow run'
+                  }
+                  variant="outline"
+                  onClick={() => {
+                    const group = perKind ? CARD_OUTPUT_GROUP[step.kind] : undefined
+                    if (group) {
+                      onRunOutputs(group, supportsTone ? tone : undefined)
+                    } else {
+                      onRun()
                     }
+                  }}
+                >
+                  <FastIcon data-icon="inline-start" weight="fill" />
+                  {running
+                    ? 'Running…'
+                    : perKind && CARD_OUTPUT_GROUP[step.kind]
+                      ? 'Generate'
+                      : 'Run pipeline'}
+                </Button>
+              </div>
+            )}
+            {content ? (
+              <div className="flex flex-wrap items-center gap-1.5">
+                {copyActionsFor(step.kind).map((action) => (
+                  <Button
+                    key={action.label}
+                    size="xs"
                     variant="outline"
-                    onClick={() => {
-                      const group = perKind ? CARD_OUTPUT_GROUP[step.kind] : undefined
-                      if (group) {
-                        onRunOutputs(group, supportsTone ? tone : undefined)
-                      } else {
-                        onRun()
-                      }
-                    }}
+                    onClick={() => void copyToClipboard(action.text(), action.label)}
                   >
-                    <FastIcon data-icon="inline-start" weight="fill" />
-                    {running
-                      ? 'Running…'
-                      : perKind && CARD_OUTPUT_GROUP[step.kind]
-                        ? 'Generate'
-                        : 'Run pipeline'}
+                    <CopyIcon data-icon="inline-start" />
+                    {action.label}
                   </Button>
-                </div>
-              )}
-              {content ? (
-                <div className="flex flex-wrap items-center gap-1.5">
-                  {copyActionsFor(step.kind).map((action) => (
+                ))}
+                {perKind && CARD_OUTPUT_GROUP[step.kind] ? (
+                  <>
+                    {step.kind === 'title-description' && supportsTone ? (
+                      <span className="flex items-center gap-0.5 rounded-row border p-0.5">
+                        {TONES.map((option) => (
+                          <Button
+                            key={option}
+                            size="xs"
+                            variant={tone === option ? 'secondary' : 'ghost'}
+                            onClick={() => setTone(option)}
+                          >
+                            {option}
+                          </Button>
+                        ))}
+                      </span>
+                    ) : null}
                     <Button
-                      key={action.label}
+                      disabled={running}
                       size="xs"
                       variant="outline"
-                      onClick={() => void copyToClipboard(action.text(), action.label)}
+                      onClick={() =>
+                        onRunOutputs(
+                          CARD_OUTPUT_GROUP[step.kind] ?? [],
+                          supportsTone ? tone : undefined
+                        )
+                      }
                     >
-                      <CopyIcon data-icon="inline-start" />
-                      {action.label}
+                      <FastIcon data-icon="inline-start" weight="fill" />
+                      {running ? 'Running…' : 'Regenerate'}
                     </Button>
-                  ))}
-                  {perKind && CARD_OUTPUT_GROUP[step.kind] ? (
-                    <>
-                      {step.kind === 'title-description' && supportsTone ? (
-                        <span className="flex items-center gap-0.5 rounded-row border p-0.5">
-                          {TONES.map((option) => (
-                            <Button
-                              key={option}
-                              size="xs"
-                              variant={tone === option ? 'secondary' : 'ghost'}
-                              onClick={() => setTone(option)}
-                            >
-                              {option}
-                            </Button>
-                          ))}
-                        </span>
-                      ) : null}
-                      <Button
-                        disabled={running}
-                        size="xs"
-                        variant="outline"
-                        onClick={() =>
-                          onRunOutputs(
-                            CARD_OUTPUT_GROUP[step.kind] ?? [],
-                            supportsTone ? tone : undefined
-                          )
-                        }
-                      >
-                        <FastIcon data-icon="inline-start" weight="fill" />
-                        {running ? 'Running…' : 'Regenerate'}
-                      </Button>
-                    </>
-                  ) : null}
-                </div>
-              ) : null}
-            </div>
-          )
-        })}
+                  </>
+                ) : null}
+              </div>
+            ) : null}
+          </div>
+        )
+      })}
 
-        <SocialPostsSection
-          available={Boolean(workflow?.supportsSocialPosts)}
-          running={running}
-          session={session}
-          onGenerate={() => onRunOutputs(['social_posts'], supportsTone ? tone : undefined)}
-        />
+      <SocialPostsSection
+        available={Boolean(workflow?.supportsSocialPosts)}
+        running={running}
+        session={session}
+        onGenerate={() => onRunOutputs(['social_posts'], supportsTone ? tone : undefined)}
+      />
 
-        <ClipsSection highlightItems={highlightItems} session={session} />
+      <ClipsSection highlightItems={highlightItems} session={session} />
 
-        {/* Everything experimental lives in ONE collapsed Lab section. */}
-        <Collapsible className="rounded-panel border border-dashed">
-          <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2.5 text-sm font-medium">
-            <span className="flex-1 text-left">Lab</span>
-            <Badge variant="outline">Experimental</Badge>
-          </CollapsibleTrigger>
-          <CollapsibleContent className="flex flex-col gap-2 px-3 pb-3">
-            <p className="text-xs text-muted-foreground">
-              Suggestions only. Nothing here edits your recording.
+      {/* Everything experimental lives in ONE collapsed Lab section. */}
+      <Collapsible className="rounded-row border border-border">
+        <CollapsibleTrigger className="flex w-full items-center gap-2 px-3 py-2.5 text-sm font-medium">
+          <span className="flex-1 text-left">Lab</span>
+          <Badge variant="outline">Experimental</Badge>
+        </CollapsibleTrigger>
+        <CollapsibleContent className="flex flex-col gap-2 px-3 pb-3">
+          <p className="text-xs text-muted-foreground">
+            Suggestions only. Nothing here edits your recording.
+          </p>
+          {!labHasContent ? (
+            <p className="text-xs text-muted-foreground/70">
+              Zoom, cleanup, and health suggestions appear here after a workflow run.
             </p>
-            {!labHasContent ? (
-              <p className="text-xs text-muted-foreground/70">
-                Zoom, cleanup, and health suggestions appear here after a workflow run.
-              </p>
-            ) : null}
-            {smartZoomItems.length ? (
-              <ArtifactSection title="Smart zoom">
-                <InsightList
-                  badgeField="timestamp"
-                  details={[
-                    ['subject', 'Subject'],
-                    ['reason', 'Why']
-                  ]}
-                  icon={CrosshairIcon}
-                  items={smartZoomItems}
-                  primaryField="action"
-                />
-              </ArtifactSection>
-            ) : null}
-            {noiseCleanupItems.length || silenceRemovalItems.length ? (
-              <ArtifactSection title="Cleanup suggestions">
-                <div className="flex flex-col gap-3">
-                  {noiseCleanupItems.length ? (
-                    <InsightList
-                      details={[
-                        ['suggestion', 'Suggestion'],
-                        ['confidence', 'Confidence']
-                      ]}
-                      icon={WaveformIcon}
-                      items={noiseCleanupItems}
-                      primaryField="issue"
-                    />
-                  ) : null}
-                  {silenceRemovalItems.length ? (
-                    <InsightList
-                      badgeField="timestamp"
-                      details={[
-                        ['reason', 'Reason'],
-                        ['editSuggestion', 'Edit']
-                      ]}
-                      icon={ClipIcon}
-                      items={silenceRemovalItems}
-                      primaryField="reason"
-                    />
-                  ) : null}
-                </div>
-              </ArtifactSection>
-            ) : null}
-            {healthItems.length ? (
-              <ArtifactSection title="Health assistant">
-                <InsightList
-                  badgeField="level"
-                  details={[
-                    ['explanation', 'Explanation'],
-                    ['action', 'Action']
-                  ]}
-                  icon={WarningIcon}
-                  items={healthItems}
-                  primaryField="issue"
-                />
-              </ArtifactSection>
-            ) : null}
-          </CollapsibleContent>
-        </Collapsible>
+          ) : null}
+          {smartZoomItems.length ? (
+            <ArtifactSection title="Smart zoom">
+              <InsightList
+                badgeField="timestamp"
+                details={[
+                  ['subject', 'Subject'],
+                  ['reason', 'Why']
+                ]}
+                icon={CrosshairIcon}
+                items={smartZoomItems}
+                primaryField="action"
+              />
+            </ArtifactSection>
+          ) : null}
+          {noiseCleanupItems.length || silenceRemovalItems.length ? (
+            <ArtifactSection title="Cleanup suggestions">
+              <div className="flex flex-col gap-3">
+                {noiseCleanupItems.length ? (
+                  <InsightList
+                    details={[
+                      ['suggestion', 'Suggestion'],
+                      ['confidence', 'Confidence']
+                    ]}
+                    icon={WaveformIcon}
+                    items={noiseCleanupItems}
+                    primaryField="issue"
+                  />
+                ) : null}
+                {silenceRemovalItems.length ? (
+                  <InsightList
+                    badgeField="timestamp"
+                    details={[
+                      ['reason', 'Reason'],
+                      ['editSuggestion', 'Edit']
+                    ]}
+                    icon={ClipIcon}
+                    items={silenceRemovalItems}
+                    primaryField="reason"
+                  />
+                ) : null}
+              </div>
+            </ArtifactSection>
+          ) : null}
+          {healthItems.length ? (
+            <ArtifactSection title="Health assistant">
+              <InsightList
+                badgeField="level"
+                details={[
+                  ['explanation', 'Explanation'],
+                  ['action', 'Action']
+                ]}
+                icon={WarningIcon}
+                items={healthItems}
+                primaryField="issue"
+              />
+            </ArtifactSection>
+          ) : null}
+        </CollapsibleContent>
+      </Collapsible>
 
-        {/* D4: the finale — what the pack bundles, plus the single most useful
+      {/* D4: the finale — what the pack bundles, plus the single most useful
             one-click in the tab. */}
-        <div className="flex flex-col gap-2 rounded-panel border border-primary/30 bg-primary/5 p-3">
-          <div className="flex items-center gap-2">
-            <DownloadIcon className="text-primary" weight="duotone" />
-            <span className="flex-1 text-sm font-semibold">Publish pack</span>
-          </div>
-          <div className="flex flex-wrap gap-x-3 gap-y-1">
-            {PUBLISH_PACK_CONTENTS.map((entry) => {
-              const present = Boolean(latestArtifact(session, entry.kind))
-              return (
-                <span
-                  key={entry.file}
-                  className={
-                    'flex items-center gap-1 text-xs ' +
-                    (present ? 'text-foreground' : 'text-muted-foreground/50')
-                  }
-                >
-                  {present ? '✓' : '·'} {entry.file}
-                </span>
+      <div className="flex flex-col gap-2 rounded-row border border-border bg-foreground/[0.05] p-3">
+        <div className="flex items-center gap-2">
+          <DownloadIcon className="text-primary" weight="duotone" />
+          <span className="flex-1 text-sm font-semibold">Publish pack</span>
+        </div>
+        <div className="flex flex-wrap gap-x-3 gap-y-1">
+          {PUBLISH_PACK_CONTENTS.map((entry) => {
+            const present = Boolean(latestArtifact(session, entry.kind))
+            return (
+              <span
+                key={entry.file}
+                className={
+                  'flex items-center gap-1 text-xs ' +
+                  (present ? 'text-foreground' : 'text-muted-foreground/50')
+                }
+              >
+                {present ? '✓' : '·'} {entry.file}
+              </span>
+            )
+          })}
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <Button
+            disabled={!title && !description && !chapterItems.length}
+            size="sm"
+            onClick={() =>
+              void copyToClipboard(
+                composeYouTubeDescription({ description, chapters: chapterItems }),
+                'YouTube description'
               )
-            })}
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              disabled={!title && !description && !chapterItems.length}
-              size="sm"
-              onClick={() =>
-                void copyToClipboard(
-                  composeYouTubeDescription({ description, chapters: chapterItems }),
-                  'YouTube description'
-                )
-              }
-            >
-              <CopyIcon data-icon="inline-start" />
-              Copy YouTube description
-            </Button>
-          </div>
+            }
+          >
+            <CopyIcon data-icon="inline-start" />
+            Copy YouTube description
+          </Button>
         </div>
       </div>
-    </ScrollArea>
+    </div>
   )
 }
 
@@ -898,7 +899,7 @@ function SocialPostsSection({
   const hasContent = Boolean(xPost || twitchTitle || xThread.length)
 
   return (
-    <div className="flex flex-col gap-2 rounded-panel border p-3">
+    <div className="flex flex-col gap-2 rounded-row border border-border bg-foreground/[0.03] p-3">
       <div className="flex items-center gap-2">
         <span className="flex-1 text-sm font-semibold">Social posts</span>
         <Badge variant={hasContent ? 'success' : 'outline'}>
@@ -1009,7 +1010,7 @@ function ClipsSection({
   ]
 
   return (
-    <div className="flex flex-col gap-2 rounded-panel border p-3">
+    <div className="flex flex-col gap-2 rounded-row border border-border bg-foreground/[0.03] p-3">
       <div className="flex items-center gap-2">
         <ClipIcon className="size-4 shrink-0 text-muted-foreground" weight="duotone" />
         <span className="flex-1 text-sm font-semibold">Clips</span>
@@ -1127,7 +1128,7 @@ function InsightList({
 
         return (
           <li
-            className="flex gap-3 rounded-row border bg-muted/30 px-3 py-2"
+            className="flex gap-3 rounded-row border border-border bg-foreground/[0.03] px-3 py-2"
             key={`${title}-${index}`}
           >
             <LeadingIcon className="mt-0.5 shrink-0 text-muted-foreground" weight="duotone" />
@@ -1162,7 +1163,7 @@ function ArtifactSection({
   children: ReactNode
 }): ReactElement {
   return (
-    <Collapsible className="rounded-panel border border-border" defaultOpen={defaultOpen}>
+    <Collapsible className="rounded-row border border-border" defaultOpen={defaultOpen}>
       <CollapsibleTrigger className="flex w-full items-center justify-between px-3 py-2.5 text-sm font-medium">
         {title}
       </CollapsibleTrigger>

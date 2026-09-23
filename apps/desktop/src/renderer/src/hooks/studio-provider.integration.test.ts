@@ -10462,7 +10462,6 @@ function createVideorcApi(options: {
       pushChatSendResult: options.pushChatSendResult ?? (async () => true),
       getCaptionSnapshot: async () => null,
       getCaptionLines: async () => null,
-      getGlassWallpaper: async () => null,
       openSession: options.openSession ?? (async () => ''),
       revealSession: options.revealSession ?? (async () => {}),
       getUpdateStatus: async () => ({ phase: 'unsupported' }),

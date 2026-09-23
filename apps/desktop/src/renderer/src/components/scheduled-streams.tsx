@@ -22,6 +22,7 @@ import {
   SelectTrigger,
   SelectValue
 } from '@/components/ui/select'
+import { GroupedList } from '@/components/list-row'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Empty, EmptyDescription, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import {
@@ -82,10 +83,11 @@ export function ScheduledStreams(): ReactElement {
     state.capabilities?.available ??
     false
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-4 p-gutter">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex gap-2">
           <Button
+            size="sm"
             variant="ghost"
             disabled={state.busy}
             onClick={() => {
@@ -94,11 +96,12 @@ export function ScheduledStreams(): ReactElement {
           >
             Refresh
           </Button>
-          <Button variant="ghost" onClick={() => setHistory(!history)}>
+          <Button size="sm" variant="ghost" onClick={() => setHistory(!history)}>
             {history ? 'Upcoming' : 'History'}
           </Button>
         </div>
         <Button
+          size="sm"
           variant="outline"
           onClick={(event) => {
             formTrigger.current = event.currentTarget
@@ -132,168 +135,172 @@ export function ScheduledStreams(): ReactElement {
           </EmptyHeader>
         </Empty>
       ) : (
-        visible.map((event) => (
-          <div key={event.id} className="flex flex-col gap-2 rounded-lg border p-3">
-            <div className="flex min-w-0 flex-wrap items-center gap-2">
-              {event.requested.thumbnailAssetId && (
-                <img
-                  src={`videorc-asset://scheduled-thumbnail/${event.requested.thumbnailAssetId}`}
-                  alt="Stream thumbnail"
-                  className="aspect-video h-12 rounded-md object-cover"
-                />
-              )}
-              <span className="min-w-0 flex-1 truncate font-medium" title={event.requested.title}>
-                {event.requested.title}
-              </span>
-              <Badge variant="secondary">{event.lifecycle}</Badge>
-              {event.provider !== 'x' && <Badge variant="outline">{event.requested.privacy}</Badge>}
-            </div>
-            <p className="text-sm text-muted-foreground">
-              {scheduledProviderLabel(event.provider)} · {event.accountLabel} ·{' '}
-              {new Date(event.startUtc).toLocaleString(undefined, {
-                timeZone: event.requested.timeZone
-              })}{' '}
-              · {event.requested.timeZone}
-            </p>
-            {event.lastSyncedAt && (
-              <p className="text-xs text-muted-foreground">
-                Last checked {new Date(event.lastSyncedAt).toLocaleString()}
+        <GroupedList>
+          {visible.map((event) => (
+            <div key={event.id} className="flex flex-col gap-2 px-3 py-2.5">
+              <div className="flex min-w-0 flex-wrap items-center gap-2">
+                {event.requested.thumbnailAssetId && (
+                  <img
+                    src={`videorc-asset://scheduled-thumbnail/${event.requested.thumbnailAssetId}`}
+                    alt="Stream thumbnail"
+                    className="aspect-video h-12 rounded-md object-cover"
+                  />
+                )}
+                <span className="min-w-0 flex-1 truncate font-medium" title={event.requested.title}>
+                  {event.requested.title}
+                </span>
+                <Badge variant="secondary">{event.lifecycle}</Badge>
+                {event.provider !== 'x' && (
+                  <Badge variant="outline">{event.requested.privacy}</Badge>
+                )}
+              </div>
+              <p className="text-sm text-muted-foreground">
+                {scheduledProviderLabel(event.provider)} · {event.accountLabel} ·{' '}
+                {new Date(event.startUtc).toLocaleString(undefined, {
+                  timeZone: event.requested.timeZone
+                })}{' '}
+                · {event.requested.timeZone}
               </p>
-            )}
-            {event.error && (
-              <Alert>
-                <AlertDescription>
-                  {event.thumbnailState === 'error'
-                    ? 'Event created; thumbnail upload failed. '
-                    : ''}
-                  {event.error.message}
-                </AlertDescription>
-              </Alert>
-            )}
-            {event.operationState === 'pending' && <p role="status">Updating event…</p>}
-            <div className="flex flex-wrap gap-1">
-              {event.lifecycle === 'scheduled' && (
-                <Button
-                  size="sm"
-                  disabled={
-                    isSessionActive ||
-                    state.pendingIds.includes(event.id) ||
-                    Boolean(event.preparation)
-                  }
-                  onClick={() => {
-                    setStarting(event)
-                    setTargetId('')
-                  }}
-                >
-                  Go Live…
-                </Button>
+              {event.lastSyncedAt && (
+                <p className="text-xs text-muted-foreground">
+                  Last checked {new Date(event.lastSyncedAt).toLocaleString()}
+                </p>
               )}
-              {eventCanEdit(event) && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={state.pendingIds.includes(event.id)}
-                  onClick={(click) => {
-                    formTrigger.current = click.currentTarget
-                    void edit(event).catch(() => undefined)
-                  }}
-                >
-                  Edit
-                </Button>
+              {event.error && (
+                <Alert>
+                  <AlertDescription>
+                    {event.thumbnailState === 'error'
+                      ? 'Event created; thumbnail upload failed. '
+                      : ''}
+                    {event.error.message}
+                  </AlertDescription>
+                </Alert>
               )}
-              {event.lifecycle === 'draft' && !event.createUncertain && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={
-                    !providerAvailable(event.provider) || state.pendingIds.includes(event.id)
-                  }
-                  onClick={() => {
-                    void perform('schedule', event)
-                  }}
-                >
-                  Schedule on {scheduledProviderLabel(event.provider)}
-                </Button>
-              )}
-              {event.thumbnailState === 'error' && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={state.pendingIds.includes(event.id)}
-                  onClick={() => {
-                    void perform('schedule', event)
-                  }}
-                >
-                  Retry thumbnail
-                </Button>
-              )}
-              {event.watchUrl && (
-                <>
+              {event.operationState === 'pending' && <p role="status">Updating event…</p>}
+              <div className="flex flex-wrap gap-1">
+                {event.lifecycle === 'scheduled' && (
+                  <Button
+                    size="sm"
+                    disabled={
+                      isSessionActive ||
+                      state.pendingIds.includes(event.id) ||
+                      Boolean(event.preparation)
+                    }
+                    onClick={() => {
+                      setStarting(event)
+                      setTargetId('')
+                    }}
+                  >
+                    Go Live…
+                  </Button>
+                )}
+                {eventCanEdit(event) && (
                   <Button
                     size="sm"
                     variant="ghost"
-                    onClick={() => {
-                      void navigator.clipboard
-                        .writeText(event.watchUrl!)
-                        .then(() => toast.success('Event link copied.'))
+                    disabled={state.pendingIds.includes(event.id)}
+                    onClick={(click) => {
+                      formTrigger.current = click.currentTarget
+                      void edit(event).catch(() => undefined)
                     }}
                   >
-                    Copy link
+                    Edit
                   </Button>
+                )}
+                {event.lifecycle === 'draft' && !event.createUncertain && (
                   <Button
                     size="sm"
                     variant="ghost"
+                    disabled={
+                      !providerAvailable(event.provider) || state.pendingIds.includes(event.id)
+                    }
                     onClick={() => {
-                      void window.videorc.openOAuthUrl(event.watchUrl!)
+                      void perform('schedule', event)
                     }}
                   >
-                    Open on {scheduledProviderLabel(event.provider)}
+                    Schedule on {scheduledProviderLabel(event.provider)}
                   </Button>
-                </>
-              )}
-              {eventCanEdit(event) && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={state.pendingIds.includes(event.id)}
-                  onClick={() => {
-                    void perform('duplicate', event)
-                  }}
-                >
-                  Duplicate
-                </Button>
-              )}
-              {(event.createUncertain ||
-                event.preparation ||
-                event.operationState === 'needs-reconciliation') && (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={state.pendingIds.includes(event.id)}
-                  onClick={() => {
-                    void recover(event)
-                  }}
-                >
-                  Recover
-                </Button>
-              )}
-              {eventCanEdit(event) && (
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  disabled={state.pendingIds.includes(event.id)}
-                  onClick={() => setCanceling(event)}
-                >
-                  {event.providerEventId
-                    ? event.provider === 'x'
-                      ? 'Cancel broadcast'
-                      : 'Cancel event'
-                    : 'Delete draft'}
-                </Button>
-              )}
+                )}
+                {event.thumbnailState === 'error' && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={state.pendingIds.includes(event.id)}
+                    onClick={() => {
+                      void perform('schedule', event)
+                    }}
+                  >
+                    Retry thumbnail
+                  </Button>
+                )}
+                {event.watchUrl && (
+                  <>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        void navigator.clipboard
+                          .writeText(event.watchUrl!)
+                          .then(() => toast.success('Event link copied.'))
+                      }}
+                    >
+                      Copy link
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      onClick={() => {
+                        void window.videorc.openOAuthUrl(event.watchUrl!)
+                      }}
+                    >
+                      Open on {scheduledProviderLabel(event.provider)}
+                    </Button>
+                  </>
+                )}
+                {eventCanEdit(event) && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={state.pendingIds.includes(event.id)}
+                    onClick={() => {
+                      void perform('duplicate', event)
+                    }}
+                  >
+                    Duplicate
+                  </Button>
+                )}
+                {(event.createUncertain ||
+                  event.preparation ||
+                  event.operationState === 'needs-reconciliation') && (
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={state.pendingIds.includes(event.id)}
+                    onClick={() => {
+                      void recover(event)
+                    }}
+                  >
+                    Recover
+                  </Button>
+                )}
+                {eventCanEdit(event) && (
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={state.pendingIds.includes(event.id)}
+                    onClick={() => setCanceling(event)}
+                  >
+                    {event.providerEventId
+                      ? event.provider === 'x'
+                        ? 'Cancel broadcast'
+                        : 'Cancel event'
+                      : 'Delete draft'}
+                  </Button>
+                )}
+              </div>
             </div>
-          </div>
-        ))
+          ))}
+        </GroupedList>
       )}
       {editing !== undefined && (
         <ScheduleStreamDialog

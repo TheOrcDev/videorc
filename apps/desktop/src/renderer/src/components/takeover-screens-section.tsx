@@ -143,7 +143,7 @@ function ScreenTile({
   return (
     <div
       className={cn(
-        'flex min-w-0 flex-col overflow-hidden rounded-row border bg-background transition-opacity',
+        'flex min-w-0 flex-col overflow-hidden rounded-row border bg-foreground/[0.04] transition-opacity',
         !disabled && 'cursor-grab active:cursor-grabbing',
         dragging && 'opacity-40',
         dropTarget && 'ring-2 ring-ring'

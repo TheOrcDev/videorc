@@ -331,7 +331,6 @@ async function main() {
       VIDEORC_DISABLE_AUTO_PREVIEW: '1',
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_PREVIEW_LIFECYCLE_PROBE: '1',
-      VIDEORC_GLASS_WALLPAPER: '0',
       ...(windowsPreviewMode === 'windows-d3d11'
         ? {
             VIDEORC_WINDOWS_D3D11_MEDIA: '1',

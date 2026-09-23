@@ -215,14 +215,18 @@ async function main() {
     JSON.stringify(authority)
   )
 
-  // Chat chrome: renamed title, the corner picker, and the glass underlay (the
-  // wallpaper itself needs the Automation grant, so its solid fallback counts).
+  // Chat chrome: renamed title, the corner picker, and real glass (plan 050):
+  // the shared window frame, and on macOS the OS material pinned dark through
+  // the native addon (the dev launch builds it first).
   const chrome = await smokeCommand('comments-window-reader-state')
   assertProbe(chrome.headerTitle === 'Chat', 'chrome: header title reads Chat', chrome.headerTitle)
+  assertProbe(chrome.windowFrame === true, 'chrome: the shared glass window frame is mounted')
   assertProbe(
-    chrome.glassUnderlay === 'wallpaper' || chrome.glassUnderlay === 'fallback',
-    'chrome: glass underlay is mounted',
-    chrome.glassUnderlay
+    process.platform === 'darwin'
+      ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'pinned-dark'
+      : chrome.glass?.mode?.kind === 'solid',
+    'chrome: Chat sits on real vibrancy pinned dark (solid palette off macOS)',
+    JSON.stringify(chrome.glass)
   )
   assertProbe(
     chrome.highlightPositionControl === 'Highlight position: Bottom left',
