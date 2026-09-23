@@ -1,4 +1,4 @@
-import { ChatIcon, FrameIcon, PinIcon, PreviewIcon, SendIcon } from '@/components/icons'
+import { ChatIcon, SendIcon } from '@/components/icons'
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react'
 import { toast } from 'sonner'
 
@@ -6,18 +6,11 @@ import { CohostNudge } from '@/components/cohost-nudge'
 import { CohostPane } from '@/components/cohost-pane'
 import { CohostStatus } from '@/components/cohost-status'
 import { CommentRow, commentHighlightPresentationForMessage } from '@/components/comment-row'
+import { ChatHeaderActions, ViewerCountChip } from '@/components/comments-header'
 import { CommentsDestinationStatus } from '@/components/comments-destination-status'
 import { CHAT_PLATFORM_LABELS, ChatPlatformIcon } from '@/components/chat-platform-icon'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuLabel,
-  DropdownMenuRadioGroup,
-  DropdownMenuRadioItem,
-  DropdownMenuTrigger
-} from '@/components/ui/dropdown-menu'
 import { Empty, EmptyDescription, EmptyHeader, EmptyMedia, EmptyTitle } from '@/components/ui/empty'
 import {
   InputGroup,
@@ -42,7 +35,6 @@ import type {
   StreamPlatform,
   ViewerSample
 } from '@/lib/backend'
-import { COMMENT_HIGHLIGHT_ANCHORS, normalizeCommentHighlightAnchor } from '@/lib/backend'
 import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
 import { useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { cohostGroupedDeltaFlash } from '@/lib/cohost-presence'
@@ -54,19 +46,16 @@ import {
   draftForQuestion,
   COHOST_QUESTION_TOAST_ID
 } from '@/lib/cohost-view'
+import {
+  CHAT_HEADER_CONTAINER,
+  CHAT_HEADER_TIGHT_HIDDEN,
+  CHAT_HEADER_TIGHT_INVISIBLE
+} from '@/lib/chat-header-tiers'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { liveChatEmptyMessage, sortMessagesChronological } from '@/lib/live-chat-view'
 import { cn } from '@/lib/utils'
-import { viewerChipDetail, viewerChipLabel, viewerSampleStale } from '@/lib/viewer-count-view'
 
 const BOTTOM_THRESHOLD_PX = 64
-
-const HIGHLIGHT_ANCHOR_LABELS: Record<CommentHighlightAnchor, string> = {
-  'top-left': 'Top left',
-  'top-right': 'Top right',
-  'bottom-left': 'Bottom left',
-  'bottom-right': 'Bottom right'
-}
 
 function scrollViewport(root: HTMLDivElement | null): HTMLDivElement | null {
   return root?.querySelector<HTMLDivElement>('[data-slot="scroll-area-viewport"]') ?? null
@@ -332,34 +321,50 @@ export function CommentsReader({
           this exact strip from main (AUX_WINDOW_HEADER_HEIGHT), so a child that
           grew the row would silently pull the title off their centre line.
           Gutter: on current macOS the three 14px lights end 74px in (measured
-          on a real window), so 88px leaves the title a clear 14px of air. */}
-      <header className="flex h-10 shrink-0 items-center gap-2 overflow-hidden pl-[88px] pr-3 [-webkit-app-region:drag]">
-        <span className="shrink-0 text-xs font-medium">Chat</span>
+          on a real window), so 88px leaves the title a clear 14px of air.
+          The header is also a container: its tiers (comments-header.tsx)
+          follow its own width, so the viewer count keeps one line and every
+          control stays reachable down to the 320px window minimum. */}
+      <header
+        className={cn(
+          CHAT_HEADER_CONTAINER,
+          'flex h-10 shrink-0 items-center gap-2 overflow-hidden pl-[88px] pr-3 [-webkit-app-region:drag]'
+        )}
+        data-slot="chat-header"
+      >
+        <span
+          className={cn(
+            'shrink-0 text-xs font-medium',
+            viewMode?.kind === 'history' && CHAT_HEADER_TIGHT_HIDDEN
+          )}
+        >
+          Chat
+        </span>
         <Badge
           className="h-4 shrink-0 px-1.5 text-[10px]"
+          title={
+            viewMode?.kind === 'history'
+              ? `${viewMode.title} · ${new Date(viewMode.startedAt).toLocaleDateString()}`
+              : undefined
+          }
           variant={mode === 'Live' ? 'success' : mode === 'History' ? 'secondary' : 'outline'}
         >
           {mode}
         </Badge>
         {viewMode?.kind === 'history' ? (
-          <span className="min-w-0 flex-1 truncate text-[10px] text-muted-foreground">
+          <span
+            className={cn(
+              'min-w-0 flex-1 truncate text-[10px] text-muted-foreground',
+              CHAT_HEADER_TIGHT_INVISIBLE
+            )}
+            data-slot="chat-header-history-title"
+          >
             {viewMode.title} · {new Date(viewMode.startedAt).toLocaleDateString()}
           </span>
         ) : (
           <span className="flex-1" />
         )}
-        {viewerSample ? (
-          <span
-            className={cn(
-              'flex items-center gap-1 text-xs tabular-nums',
-              viewerSampleStale(viewerSample, nowMs) ? 'text-subtle' : 'text-foreground'
-            )}
-            title={viewerChipDetail(viewerSample)}
-          >
-            <PreviewIcon aria-hidden className="size-3.5 shrink-0" weight="duotone" />
-            {viewerChipLabel(viewerSample)}
-          </span>
-        ) : null}
+        {viewerSample ? <ViewerCountChip nowMs={nowMs} sample={viewerSample} /> : null}
         {/* Permanent presence: whatever the co-host is doing (including
             nothing), the streamer can read it here without opening anything. */}
         {cohostPresent ? (
@@ -377,67 +382,14 @@ export function CommentsReader({
             onUpgrade={onCohostUpgrade}
           />
         ) : null}
-        <div className="flex items-center gap-0.5 [-webkit-app-region:no-drag]">
-          {viewMode?.kind === 'history' && onBackToLive ? (
-            <Button size="sm" type="button" variant="ghost" onClick={onBackToLive}>
-              Back to live
-            </Button>
-          ) : null}
-          {highlightAnchor && onHighlightAnchorChange ? (
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  aria-label="Highlight position"
-                  size="icon-sm"
-                  title={`Highlight position: ${HIGHLIGHT_ANCHOR_LABELS[highlightAnchor]}`}
-                  type="button"
-                  variant="ghost"
-                >
-                  <FrameIcon data-icon="inline-start" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end">
-                <DropdownMenuLabel>Show highlighted messages in</DropdownMenuLabel>
-                <DropdownMenuRadioGroup
-                  value={highlightAnchor}
-                  onValueChange={(value) =>
-                    onHighlightAnchorChange(normalizeCommentHighlightAnchor(value))
-                  }
-                >
-                  {COMMENT_HIGHLIGHT_ANCHORS.map((anchor) => (
-                    <DropdownMenuRadioItem key={anchor} value={anchor}>
-                      {HIGHLIGHT_ANCHOR_LABELS[anchor]}
-                    </DropdownMenuRadioItem>
-                  ))}
-                </DropdownMenuRadioGroup>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          ) : null}
-          {onToggleAlwaysOnTop ? (
-            <Button
-              aria-label="Keep this window on top"
-              aria-pressed={alwaysOnTop}
-              className={cn(alwaysOnTop && 'text-foreground')}
-              size="icon-sm"
-              type="button"
-              variant="ghost"
-              onClick={onToggleAlwaysOnTop}
-            >
-              <PinIcon data-icon="inline-start" weight={alwaysOnTop ? 'fill' : 'regular'} />
-            </Button>
-          ) : null}
-          {onClear ? (
-            <Button
-              size="sm"
-              title="Clear view keeps Library history."
-              type="button"
-              variant="ghost"
-              onClick={onClear}
-            >
-              Clear view
-            </Button>
-          ) : null}
-        </div>
+        <ChatHeaderActions
+          alwaysOnTop={alwaysOnTop}
+          highlightAnchor={onHighlightAnchorChange ? highlightAnchor : undefined}
+          onBackToLive={viewMode?.kind === 'history' ? onBackToLive : undefined}
+          onClear={onClear}
+          onHighlightAnchorChange={onHighlightAnchorChange}
+          onToggleAlwaysOnTop={onToggleAlwaysOnTop}
+        />
       </header>
       <Separator />
 

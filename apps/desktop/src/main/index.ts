@@ -536,6 +536,10 @@ type CommentsSmokeCommandFixture =
 let commentsSmokeCommandFixture: CommentsSmokeCommandFixture | null = null
 let commentsSmokeCommandTrace: Record<string, unknown> | null = null
 let commentsSmokeSnapshotOverride = false
+// Once a smoke seeds viewers or co-host state, the idle main renderer's pushes
+// (null viewers, the off co-host shape) must not overwrite the fixture.
+let commentsSmokeViewerOverride = false
+let commentsSmokeCohostOverride = false
 let captionsWindow: BrowserWindow | null = null
 let captionsWindowLastFrame: Electron.Rectangle | null = null
 let captionsWindowAlwaysOnTop = false
@@ -2881,6 +2885,13 @@ function emitCommentHighlightState(state: CommentHighlightState): void {
 // socket, the entitlement snapshot and the renderer-local cloud-AI consent, so
 // it resolves the whole segment and pushes ONE value; the Comments window seeds
 // from the cache and follows pushes, exactly like the highlight relay.
+function emitCommentsViewerSample(sample: ViewerSample | null): void {
+  latestViewerSample = sample
+  if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:viewers', latestViewerSample)
+  }
+}
+
 function emitCohostWindowState(state: CohostWindowState): void {
   latestCohostWindowState = state
   if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
@@ -3010,7 +3021,11 @@ function dispatchSmokeCommentsSend(command: CommentsSendCommand): boolean {
   return true
 }
 
-function commentsCaptureHeaderSignal(image: NativeImage): number {
+function commentsCaptureHeaderSignal(
+  image: NativeImage,
+  logicalWidth: number,
+  logicalHeight: number
+): number {
   const size = image.getSize()
   const bitmap = image.toBitmap()
   // The "Chat" title and its Live/History/Idle badge occupy this stable
@@ -3018,10 +3033,10 @@ function commentsCaptureHeaderSignal(image: NativeImage): number {
   // 88px traffic-light gutter). A stale partial texture can still contain
   // bright message-row text near the top, so scoring the whole header produces
   // false positives; score the title strip itself.
-  const xStart = Math.max(0, Math.floor((80 / 420) * size.width))
-  const xEnd = Math.min(size.width, Math.ceil((166 / 420) * size.width))
-  const yStart = Math.max(0, Math.floor((8 / 640) * size.height))
-  const yEnd = Math.min(size.height, Math.ceil((29 / 640) * size.height))
+  const xStart = Math.max(0, Math.floor((80 / logicalWidth) * size.width))
+  const xEnd = Math.min(size.width, Math.ceil((166 / logicalWidth) * size.width))
+  const yStart = Math.max(0, Math.floor((8 / logicalHeight) * size.height))
+  const yEnd = Math.min(size.height, Math.ceil((29 / logicalHeight) * size.height))
   let signal = 0
   for (let y = yStart; y < yEnd; y += 1) {
     for (let x = xStart; x < xEnd; x += 1) {
@@ -10062,6 +10077,149 @@ async function runSmokePreviewMotionCommand(
     )
   }
 
+  if (command === 'comments-window-seed-viewers') {
+    commentsSmokeViewerOverride = true
+    const sample = params.sample
+    emitCommentsViewerSample(sample && typeof sample === 'object' ? (sample as ViewerSample) : null)
+    return { viewers: latestViewerSample }
+  }
+
+  if (command === 'comments-window-seed-cohost') {
+    const state = params.state
+    if (!state || typeof state !== 'object' || !('state' in state)) {
+      throw new Error('Co-host seed must be a CohostWindowState.')
+    }
+    commentsSmokeCohostOverride = true
+    emitCohostWindowState(state as CohostWindowState)
+    return { cohost: latestCohostWindowState }
+  }
+
+  // Narrow-width proof (plan 047): real geometry of the header and the Orcle
+  // action bar, so the probe can assert nothing overflows or clips.
+  if (command === 'comments-window-layout-metrics') {
+    const window = commentsWindow
+    if (!commentsWindowIsOpen() || !window) {
+      throw new Error('Chat window is not open.')
+    }
+    const openMoreMenu = params.openMoreMenu === true
+    const metrics = await window.webContents.executeJavaScript(
+      `(async () => {
+        const visible = (element) => {
+          if (!element) return false;
+          const style = getComputedStyle(element);
+          const rect = element.getBoundingClientRect();
+          return style.display !== 'none' && style.visibility !== 'hidden' && rect.width > 0 && rect.height > 0;
+        };
+        const rect = (element) => {
+          const r = element.getBoundingClientRect();
+          return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width, height: r.height };
+        };
+        const box = (element) => {
+          if (!element) return null;
+          const style = getComputedStyle(element);
+          return {
+            ...rect(element),
+            scrollWidth: element.scrollWidth,
+            clientWidth: element.clientWidth,
+            paddingRight: parseFloat(style.paddingRight) || 0,
+            paddingLeft: parseFloat(style.paddingLeft) || 0
+          };
+        };
+        // Every visible leaf-ish element inside a container, with its box, so
+        // clipping anywhere (not just in direct children) is caught.
+        const visibleDescendants = (root) =>
+          root
+            ? Array.from(root.querySelectorAll('span, button, kbd, [data-slot="badge"]'))
+                .filter((element) => visible(element) && !element.closest('.sr-only') && getComputedStyle(element).position !== 'absolute')
+                .map((element) => ({
+                  tag: element.tagName.toLowerCase(),
+                  slot: element.getAttribute('data-slot'),
+                  label: element.getAttribute('aria-label') ?? (element.textContent ?? '').trim().slice(0, 40),
+                  ...rect(element)
+                }))
+            : [];
+        const header = document.querySelector('[data-slot="chat-header"]');
+        const viewer = document.querySelector('[data-slot="viewer-count"]');
+        const viewerNumber = document.querySelector('[data-slot="viewer-count-number"]');
+        const actions = document.querySelector('[data-slot="cohost-actions"]');
+        const paneTrigger = document.querySelector('[data-slot="cohost-pane"] > button');
+        const button = (label) => {
+          const element = document.querySelector('button[aria-label="' + label + '"]');
+          return { present: Boolean(element), visible: visible(element) };
+        };
+        const backToLive = Array.from(document.querySelectorAll('button')).find(
+          (element) => (element.textContent ?? '').trim() === 'Back to live'
+        );
+        const clearView = Array.from(document.querySelectorAll('button')).find(
+          (element) => (element.textContent ?? '').trim() === 'Clear view'
+        );
+        const cohostLabel = document.querySelector('[data-slot="cohost-status-label"]');
+        const inFlow = (element) =>
+          visible(element) && getComputedStyle(element).position !== 'absolute';
+        const watching = viewer?.lastElementChild ?? null;
+        // Radix opens a menu on pointerdown, not click; Escape closes it again.
+        // Poll both edges: a fixed sleep races Radix's layer registration.
+        const settle = async (predicate) => {
+          for (let attempt = 0; attempt < 20; attempt += 1) {
+            if (predicate()) return true;
+            await new Promise((resolve) => setTimeout(resolve, 50));
+          }
+          return predicate();
+        };
+        const openMenu = () => document.querySelector('[role="menu"]');
+        let moreMenuItems = null;
+        if (${JSON.stringify(openMoreMenu)}) {
+          const trigger = document.querySelector('button[aria-label="More chat actions"]');
+          if (visible(trigger) && !openMenu()) {
+            trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
+            if (await settle(() => openMenu()?.querySelector('[role^="menuitem"]'))) {
+              moreMenuItems = Array.from(openMenu().querySelectorAll('[role^="menuitem"]')).map(
+                (item) => (item.textContent ?? '').trim()
+              );
+            } else {
+              moreMenuItems = [];
+            }
+            for (let attempt = 0; attempt < 3 && openMenu(); attempt += 1) {
+              (openMenu() ?? document).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+              await settle(() => !openMenu());
+            }
+            // Escape hands keyboard focus back to the trigger; drop it so the
+            // captures show what a pointer user sees.
+            document.activeElement?.blur?.();
+          }
+        }
+        return {
+          moreMenuItems,
+          menuOpenAfter: Boolean(document.querySelector('[role="menu"]')),
+          watchingVisible: inFlow(watching),
+          windowWidth: window.innerWidth,
+          header: box(header),
+          headerItems: visibleDescendants(header),
+          viewer: viewer
+            ? {
+                visible: visible(viewer),
+                text: viewer.textContent,
+                visibleNumber: visible(viewerNumber) ? viewerNumber.textContent : null,
+                ...rect(viewer)
+              }
+            : null,
+          cohostLabelVisible: inFlow(cohostLabel),
+          moreMenu: button('More chat actions'),
+          highlightPosition: button('Highlight position'),
+          keepOnTop: button('Keep this window on top'),
+          clearViewVisible: visible(clearView),
+          backToLiveVisible: visible(backToLive),
+          actions: box(actions),
+          actionItems: visibleDescendants(actions),
+          paneTrigger: box(paneTrigger),
+          paneTriggerItems: visibleDescendants(paneTrigger)
+        };
+      })()`,
+      true
+    )
+    return metrics
+  }
+
   if (command === 'comments-window-reader-state') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
@@ -10108,9 +10266,11 @@ async function runSmokePreviewMotionCommand(
     if (!commentsWindowIsOpen() || !window) {
       throw new Error('Chat window is not open.')
     }
+    const width = typeof params.width === 'number' ? params.width : 420
+    const height = typeof params.height === 'number' ? params.height : 640
     const current = window.getBounds()
-    if (current.width !== 420 || current.height !== 640) {
-      window.setBounds({ x: current.x, y: current.y, width: 420, height: 640 })
+    if (current.width !== width || current.height !== height) {
+      window.setBounds({ x: current.x, y: current.y, width, height })
     }
     window.show()
     let captured: NativeImage | null = null
@@ -10120,7 +10280,7 @@ async function runSmokePreviewMotionCommand(
       window.webContents.invalidate()
       await delay(120)
       const candidate = await window.webContents.capturePage()
-      const candidateSignal = commentsCaptureHeaderSignal(candidate)
+      const candidateSignal = commentsCaptureHeaderSignal(candidate, width, height)
       captureAttempts = attempt
       if (candidateSignal > headerSignal) {
         captured = candidate
@@ -10132,9 +10292,9 @@ async function runSmokePreviewMotionCommand(
     }
     const sourceSize = captured.getSize()
     const image =
-      sourceSize.width === 420 && sourceSize.height === 640
+      sourceSize.width === width && sourceSize.height === height
         ? captured
-        : captured.resize({ width: 420, height: 640, quality: 'best' })
+        : captured.resize({ width, height, quality: 'best' })
     const name =
       typeof params.name === 'string' ? params.name.replace(/[^a-z0-9-]/gi, '') : 'comments'
     const directory = process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? app.getPath('temp')
@@ -12903,10 +13063,10 @@ app.whenReady().then(async () => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return undefined
     }
-    latestViewerSample = sample && typeof sample === 'object' ? (sample as ViewerSample) : null
-    if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
-      sendElectronEvent(commentsWindow.webContents, 'comments-window:viewers', latestViewerSample)
+    if (commentsSmokeViewerOverride) {
+      return undefined
     }
+    emitCommentsViewerSample(sample && typeof sample === 'object' ? (sample as ViewerSample) : null)
   })
   secureIpcHandle('comments-window:viewers-get', () => latestViewerSample)
   secureIpcHandle('comments-window:cohost-push', (event, state: unknown) => {
@@ -12914,6 +13074,9 @@ app.whenReady().then(async () => {
       return undefined
     }
     if (!state || typeof state !== 'object' || !('state' in state)) {
+      return undefined
+    }
+    if (commentsSmokeCohostOverride) {
       return undefined
     }
     emitCohostWindowState(state as CohostWindowState)
