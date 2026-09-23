@@ -19,6 +19,7 @@ export type GlassMaterial = NonNullable<Parameters<BrowserWindow['setVibrancy']>
 
 export type GlassMode =
   | { kind: 'material'; material: GlassMaterial }
+  | { kind: 'mica' }
   | { kind: 'solid'; reason: 'disabled' | 'platform' | 'appearance-unpinned' }
 
 export interface GlassEnvironment {
@@ -27,6 +28,20 @@ export interface GlassEnvironment {
   glass?: string
   /** Legacy `VIDEORC_GLASS_VIBRANCY`, honoured as an alias for one release. */
   legacyVibrancy?: string
+  /** Windows build number (from `os.release()`), which decides Mica. */
+  windowsBuild?: number
+}
+
+/**
+ * Windows 11 22H2: the first build whose DWM backdrop (`backgroundMaterial`)
+ * Electron can set. Older builds, and Windows 10, keep the solid palette.
+ */
+export const WINDOWS_MICA_MIN_BUILD = 22621
+
+/** The build from an `os.release()` string such as `10.0.22631`. */
+export function windowsBuildFromRelease(release: string): number | undefined {
+  const build = Number.parseInt(release.split('.')[2] ?? '', 10)
+  return Number.isFinite(build) ? build : undefined
 }
 
 /** The one material. `sidebar` and `fullscreen-ui` also transmit; `fullscreen-ui` is far too light over white. */
@@ -57,10 +72,21 @@ function glassMaterialFrom(value: string | undefined): GlassMaterial | null {
 }
 
 export function resolveGlassMode(environment: GlassEnvironment): GlassMode {
+  const disabled = environment.glass?.trim() === '0' || environment.legacyVibrancy?.trim() === '0'
+  if (environment.platform === 'win32') {
+    // Mica (plan 050, D7): it tints from the wallpaper without a live blur, so
+    // it stays cheap on the low-end iGPUs Windows testers use.
+    if (disabled) {
+      return { kind: 'solid', reason: 'disabled' }
+    }
+    return (environment.windowsBuild ?? 0) >= WINDOWS_MICA_MIN_BUILD
+      ? { kind: 'mica' }
+      : { kind: 'solid', reason: 'platform' }
+  }
   if (environment.platform !== 'darwin') {
     return { kind: 'solid', reason: 'platform' }
   }
-  if (environment.glass?.trim() === '0' || environment.legacyVibrancy?.trim() === '0') {
+  if (disabled) {
     return { kind: 'solid', reason: 'disabled' }
   }
   const material =
@@ -106,14 +132,15 @@ export const DARK_ALWAYS_ROLES: ReadonlySet<GlassWindowRole> = new Set([
 /**
  * A dark-always window whose appearance cannot be pinned paints the solid
  * palette: its material would otherwise follow a light app theme and put dark
- * text tokens on light glass.
+ * text tokens on light glass. Windows has no per-window appearance pin, so
+ * there the dark-always windows are always solid and only main gets Mica.
  */
 export function glassModeForRole(
   role: GlassWindowRole,
   mode: GlassMode,
   appearancePinAvailable: boolean
 ): GlassMode {
-  if (mode.kind === 'material' && DARK_ALWAYS_ROLES.has(role) && !appearancePinAvailable) {
+  if (mode.kind !== 'solid' && DARK_ALWAYS_ROLES.has(role) && !appearancePinAvailable) {
     return { kind: 'solid', reason: 'appearance-unpinned' }
   }
   return mode
@@ -131,6 +158,11 @@ export function windowGlassOptions(
     context.platform === 'darwin'
       ? { titleBarStyle: 'hiddenInset', trafficLightPosition: trafficLightPosition(role) }
       : {}
+  if (context.mode.kind === 'mica') {
+    // The web contents must be transparent for the backdrop to show through;
+    // the body's window coat does the rest. The native frame stays.
+    return { ...chrome, backgroundMaterial: 'mica', backgroundColor: '#00000000' }
+  }
   if (context.mode.kind === 'material') {
     // No `transparent` backing: with a vibrancy material Electron already
     // renders the web contents transparent, and the window keeps its native

@@ -14,4 +14,10 @@
   } catch {
     document.documentElement.classList.add('dark')
   }
+  // The platform before first paint: Windows (Mica) takes its own coats.
+  document.documentElement.dataset.platform = /Win/i.test(navigator.platform)
+    ? 'win32'
+    : /Mac/i.test(navigator.platform)
+      ? 'darwin'
+      : 'linux'
 })()

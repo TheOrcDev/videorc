@@ -6,7 +6,9 @@ import {
   resolveGlassMode,
   solidWindowBase,
   trafficLightPosition,
+  WINDOWS_MICA_MIN_BUILD,
   windowGlassOptions,
+  windowsBuildFromRelease,
   type GlassWindowRole
 } from './window-glass'
 import { DARK_WINDOW_PALETTE, LIGHT_WINDOW_PALETTE } from './window-palette'
@@ -119,5 +121,54 @@ describe('glassModeForRole', () => {
   it('never turns a solid mode back into a material', () => {
     const solid = resolveGlassMode({ ...mac, glass: '0' })
     expect(glassModeForRole('chat', solid, true)).toEqual(solid)
+  })
+})
+
+describe('Windows Mica (plan 050, D7)', () => {
+  const win = (windowsBuild?: number, glass?: string) => ({
+    platform: 'win32' as const,
+    windowsBuild,
+    glass
+  })
+
+  it('reads the build from os.release()', () => {
+    expect(windowsBuildFromRelease('10.0.22631')).toBe(22631)
+    expect(windowsBuildFromRelease('10.0.19045')).toBe(19045)
+    expect(windowsBuildFromRelease('not-a-release')).toBeUndefined()
+  })
+
+  it('uses Mica from Windows 11 22H2 and the solid palette before it', () => {
+    expect(WINDOWS_MICA_MIN_BUILD).toBe(22621)
+    expect(resolveGlassMode(win(22621))).toEqual({ kind: 'mica' })
+    expect(resolveGlassMode(win(26100))).toEqual({ kind: 'mica' })
+    expect(resolveGlassMode(win(22000))).toEqual({ kind: 'solid', reason: 'platform' })
+    expect(resolveGlassMode(win(19045))).toEqual({ kind: 'solid', reason: 'platform' })
+    expect(resolveGlassMode(win(undefined))).toEqual({ kind: 'solid', reason: 'platform' })
+  })
+
+  it('honours VIDEORC_GLASS=0 on Windows too', () => {
+    expect(resolveGlassMode(win(22631, '0'))).toEqual({ kind: 'solid', reason: 'disabled' })
+  })
+
+  it('gives main Mica over transparent web contents, and keeps the native frame', () => {
+    const options = windowGlassOptions('main', {
+      platform: 'win32',
+      mode: { kind: 'mica' },
+      dark: true
+    })
+    expect(options).toEqual({ backgroundMaterial: 'mica', backgroundColor: '#00000000' })
+    expect(options.titleBarStyle).toBeUndefined()
+    expect(options.vibrancy).toBeUndefined()
+  })
+
+  it('keeps the dark-always windows solid: Windows cannot pin their appearance', () => {
+    const mica = resolveGlassMode(win(22631))
+    for (const role of ['chat', 'captions', 'notes', 'preview'] as const) {
+      expect(glassModeForRole(role, mica, false)).toEqual({
+        kind: 'solid',
+        reason: 'appearance-unpinned'
+      })
+    }
+    expect(glassModeForRole('main', mica, false)).toEqual({ kind: 'mica' })
   })
 })

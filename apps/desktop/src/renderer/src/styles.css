@@ -240,10 +240,23 @@
   --video-ground-muted: oklch(0.71 0.01 286);
 }
 
+/* Windows 11 Mica (plan 050, D7): Mica tints from the wallpaper and never
+   shows what is behind the window, so the coats only carry the tone.
+   Starting values; the Windows box tunes them (S21 acceptance). */
+:root[data-platform='win32'] {
+  --glass-window: oklch(0.985 0.001 286 / 50%);
+  --glass-content: oklch(0.985 0.001 286 / 24%);
+}
+:root[data-platform='win32'].dark {
+  --glass-window: oklch(0.13 0.003 286 / 34%);
+  --glass-content: oklch(0.13 0.003 286 / 26%);
+}
+
 /* Increase Contrast: hairlines strong enough to read on glass, and the
    secondary tier one step closer to the primary. */
 @media (prefers-contrast: more) {
-  :root {
+  :root,
+  :root[data-platform='win32'] {
     --border: oklch(0 0 0 / 28%);
     --input: oklch(0 0 0 / 28%);
     --muted-foreground: oklch(0.38 0.006 286);
@@ -251,7 +264,8 @@
     --chip-rim: oklch(0 0 0 / 24%);
     --keycap-rim: oklch(0 0 0 / 28%);
   }
-  .dark {
+  .dark,
+  :root[data-platform='win32'].dark {
     --border: oklch(1 0 0 / 24%);
     --input: oklch(1 0 0 / 24%);
     --muted-foreground: oklch(0.8 0.01 286);
@@ -266,7 +280,9 @@
    text contrast never depends on what sits behind. */
 @media (prefers-reduced-transparency: reduce) {
   :root,
-  .dark {
+  .dark,
+  :root[data-platform='win32'],
+  :root[data-platform='win32'].dark {
     --glass-window: var(--glass-solid);
     --glass-content: transparent;
   }

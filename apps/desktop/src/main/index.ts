@@ -269,7 +269,8 @@ import {
   WINDOW_HEADER_HEIGHT,
   windowGlassOptions,
   type GlassMode,
-  type GlassWindowRole
+  type GlassWindowRole,
+  windowsBuildFromRelease
 } from './window-glass'
 import {
   applyVideorcWindowCaptureProtection,
@@ -762,7 +763,8 @@ function smokeNativeWindowIdentity(window: BrowserWindow | null): {
 const glassMode = resolveGlassMode({
   platform: process.platform,
   glass: process.env.VIDEORC_GLASS,
-  legacyVibrancy: process.env.VIDEORC_GLASS_VIBRANCY
+  legacyVibrancy: process.env.VIDEORC_GLASS_VIBRANCY,
+  windowsBuild: process.platform === 'win32' ? windowsBuildFromRelease(release()) : undefined
 })
 const glassVibrancyMaterial: GlassVibrancyMaterial =
   glassMode.kind === 'material' ? glassMode.material : DEFAULT_GLASS_MATERIAL
@@ -1543,7 +1545,7 @@ function finishGlassWindow(window: BrowserWindow, role: GlassWindowRole, mode: G
     recordAppliedGlass(window, { role, mode, appearance: 'follows-app' })
     return
   }
-  if (mode.kind !== 'material') {
+  if (mode.kind === 'solid') {
     recordAppliedGlass(window, {
       role,
       mode,
@@ -1552,6 +1554,12 @@ function finishGlassWindow(window: BrowserWindow, role: GlassWindowRole, mode: G
         ? { appearanceNote: windowAppearanceLoad.unavailableReason ?? undefined }
         : {})
     })
+    return
+  }
+  if (mode.kind === 'mica') {
+    // Not reached today: glassModeForRole keeps the dark-always windows solid
+    // on Windows, which has no per-window appearance pin.
+    recordAppliedGlass(window, { role, mode, appearance: 'follows-app' })
     return
   }
   const pin = pinWindowAppearance(
