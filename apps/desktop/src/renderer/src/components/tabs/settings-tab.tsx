@@ -792,8 +792,9 @@ function UpdateControl({
     case 'unsupported':
       return (
         <p className="text-xs text-muted-foreground">
-          Automatic updates aren’t available for this build yet. Grab new versions from the
-          downloads page.
+          {status.reason === 'windows-feed-unpublished'
+            ? 'No Windows update is published for you yet. Sign in to get Windows Alpha pilot updates automatically, or download the newest build from your account page.'
+            : 'Automatic updates aren’t available for this build yet. Grab new versions from the downloads page.'}
         </p>
       )
     case 'checking':

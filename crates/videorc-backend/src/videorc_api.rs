@@ -27,6 +27,34 @@ const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::
 /// simply delays the next one.
 pub(crate) const COHOST_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 const COHOST_TICK_PATH: &str = "/api/ai/cohost/tick";
+const WINDOWS_PILOT_UPDATE_TOKEN_PATH: &str = "/api/desktop/updates/windows-pilot-token";
+/// Bounded well inside the provider-mutation RPC envelope: an update check must
+/// never wait on a slow web edge for long.
+pub(crate) const WINDOWS_PILOT_UPDATE_TOKEN_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_secs(10);
+
+/// A short-lived token that reads only the Windows pilot update feed. The web
+/// mints it for a signed-in account while Windows is in pilot; the account
+/// session itself never leaves the backend.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WindowsPilotUpdateToken {
+    pub token: String,
+    pub expires_at: String,
+}
+
+/// The web answers "no pilot for this caller" (signed out, pilot closed, or an
+/// older web without the endpoint) with these; they are an ordinary `None`, not
+/// an update failure.
+fn windows_pilot_update_token_refused(status: u16) -> bool {
+    matches!(status, 401 | 403 | 404 | 409)
+}
+
+fn valid_windows_pilot_update_token(token: &str) -> bool {
+    token.starts_with("wpu1.")
+        && token.len() <= 512
+        && token.bytes().all(|byte| byte.is_ascii_graphic())
+}
 
 use crate::cohost::{
     CohostAlertKind, CohostErrorDetail, CohostFlagAction, CohostFlagKind, CohostFlagSeverity,
@@ -838,6 +866,37 @@ impl VideorcApiClient {
         Err(classify_caption_failure(status.as_u16(), code, message))
     }
 
+    /// Exchange the stored account session for a Windows pilot update token.
+    /// `Ok(None)` when the web declines (signed out or pilot closed).
+    pub async fn mint_windows_pilot_update_token(
+        &self,
+        bearer_token: &str,
+    ) -> Result<Option<WindowsPilotUpdateToken>> {
+        let response = self
+            .http
+            .post(self.endpoint(WINDOWS_PILOT_UPDATE_TOKEN_PATH))
+            .bearer_auth(bearer_token)
+            .timeout(WINDOWS_PILOT_UPDATE_TOKEN_TIMEOUT)
+            .send()
+            .await
+            .context("Could not reach the Videorc update service.")?;
+        let status = response.status();
+        if windows_pilot_update_token_refused(status.as_u16()) {
+            return Ok(None);
+        }
+        if !status.is_success() {
+            bail!("Windows pilot update token request failed ({status}).");
+        }
+        let token: WindowsPilotUpdateToken = response
+            .json()
+            .await
+            .context("Could not read the Windows pilot update token.")?;
+        if !valid_windows_pilot_update_token(&token.token) {
+            bail!("The Windows pilot update token was malformed.");
+        }
+        Ok(Some(token))
+    }
+
     /// Report streamed caption seconds against the monthly allowance.
     /// Best-effort — accounting failures never interrupt captions.
     pub async fn report_caption_usage(
@@ -1090,6 +1149,39 @@ mod tests {
         // min-gap interaction test.
         assert_eq!(COHOST_TICK_TIMEOUT.as_secs(), 12);
         assert!(AI_CAPABILITIES_REQUEST_TIMEOUT < std::time::Duration::from_secs(10));
+    }
+
+    #[test]
+    fn windows_pilot_update_token_refusals_and_shape() {
+        for status in [401, 403, 404, 409] {
+            assert!(windows_pilot_update_token_refused(status), "{status}");
+        }
+        for status in [200, 400, 429, 500, 502] {
+            assert!(!windows_pilot_update_token_refused(status), "{status}");
+        }
+        assert!(valid_windows_pilot_update_token(
+            "wpu1.1790000000.abcdefghijklmnopqrstuvwx.0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
+        ));
+        for invalid in [
+            "",
+            "Bearer wpu1.1.a.b",
+            "wpu2.1.a.b",
+            "wpu1.1.a b.c",
+            "wpu1.1.a\nb.c",
+            &format!("wpu1.{}", "x".repeat(600)),
+        ] {
+            assert!(!valid_windows_pilot_update_token(invalid), "{invalid:?}");
+        }
+        let token: WindowsPilotUpdateToken = serde_json::from_str(
+            r#"{"token":"wpu1.1.a.b","expiresAt":"2026-09-23T13:00:00.000Z"}"#,
+        )
+        .unwrap();
+        assert_eq!(token.expires_at, "2026-09-23T13:00:00.000Z");
+        assert_eq!(
+            serde_json::to_value(&token).unwrap(),
+            serde_json::json!({"token":"wpu1.1.a.b","expiresAt":"2026-09-23T13:00:00.000Z"})
+        );
+        assert!(WINDOWS_PILOT_UPDATE_TOKEN_TIMEOUT < std::time::Duration::from_secs(30));
     }
 
     #[test]

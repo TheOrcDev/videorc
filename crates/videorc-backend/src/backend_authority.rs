@@ -175,6 +175,7 @@ fn admin_only_method(method: &str) -> bool {
             "account.auth.begin_intent"
                 | "account.refresh"
                 | "account.sign_out"
+                | "account.windows_pilot_update_token"
                 | "compositor.scene.update"
                 | "preview.surface.take_native_host_commands"
                 | "sessions.delete.resolve"
@@ -262,6 +263,7 @@ mod tests {
             "account.auth.begin_intent",
             "account.refresh",
             "account.sign_out",
+            "account.windows_pilot_update_token",
             "encoder_bridge.synthetic_record",
             "recording.start_test",
             "captions.test.inject-audio",

@@ -12,7 +12,7 @@ export type UpdaterEvent =
   | { type: 'progress'; percent: number }
   | { type: 'downloaded'; version: string }
   | { type: 'error'; message: string }
-  | { type: 'unsupported' }
+  | { type: 'unsupported'; reason?: 'windows-feed-unpublished' }
 
 // electron-updater surfaces an unpublished feed — no `latest*.yml` for this
 // build's platform/channel — as a 404 / "Cannot find channel" error. That is
@@ -62,7 +62,9 @@ export function updateStatusFromEvent(event: UpdaterEvent): UpdateStatus {
     case 'error':
       return { phase: 'error', message: event.message }
     case 'unsupported':
-      return { phase: 'unsupported' }
+      return event.reason
+        ? { phase: 'unsupported', reason: event.reason }
+        : { phase: 'unsupported' }
   }
 }
 
@@ -79,8 +81,10 @@ export const BACKGROUND_RECHECK_INTERVAL_MS = 30 * 60 * 1000
 
 // Re-check only from settled states: never while a check or download is in
 // flight, never once an update is staged (it applies on the next quit), and
-// never when updates are unsupported. 'available' with no download running
-// means the background download failed — re-checking retries it.
+// never when updates are unsupported — except a Windows build whose feed is not
+// published yet: signing in or a public Alpha can open one at any time, and the
+// check is one small yml fetch. 'available' with no download running means the
+// background download failed — re-checking retries it.
 export function shouldBackgroundRecheck(status: UpdateStatus): boolean {
   switch (status.phase) {
     case 'idle':
@@ -91,7 +95,8 @@ export function shouldBackgroundRecheck(status: UpdateStatus): boolean {
     case 'checking':
     case 'downloading':
     case 'downloaded':
-    case 'unsupported':
       return false
+    case 'unsupported':
+      return status.reason === 'windows-feed-unpublished'
   }
 }

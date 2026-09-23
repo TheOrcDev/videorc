@@ -3479,7 +3479,9 @@ export type UpdateStatus =
   | { phase: 'downloaded'; version: string }
   | { phase: 'not-available'; currentVersion: string }
   | { phase: 'error'; message: string }
-  | { phase: 'unsupported' }
+  // `windows-feed-unpublished`: a Windows build found no update published for
+  // it (no public Alpha feed, and no signed-in pilot access). Rechecked.
+  | { phase: 'unsupported'; reason?: 'windows-feed-unpublished' }
 
 export type AccountCallbackEnvelope = {
   id: string
