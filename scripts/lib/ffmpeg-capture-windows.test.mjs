@@ -6,6 +6,7 @@ import { createHash } from 'node:crypto'
 import { test } from 'node:test'
 import {
   CAPTURE_FLAGS,
+  verifyCaptureConfigureOutput,
   hasDshowClockProtocol,
   peImports,
   verifySystemImports,
@@ -147,4 +148,19 @@ test('build wrapper carries current Node into MSYS2 without installing machine t
   assert.match(wrapper, /VIDEORC_NODE_EXECUTABLE: process\.execPath/)
   assert.match(recipe, /NODE_EXE="\$\(cygpath -u/)
   assert.doesNotMatch(wrapper, /pacman|winget|choco/)
+})
+
+test('capture configure rejects unknown components before compilation and enables the PCM muxer', () => {
+  assert.ok(CAPTURE_FLAGS.includes('--enable-muxer=pcm_f32le'))
+  assert.ok(!CAPTURE_FLAGS.includes('--enable-muxer=f32le'))
+  verifyCaptureConfigureOutput('Enabled muxers:\npcm_f32le\n')
+  for (const option of ['--enable-muxer=f32le', '--disable-filter=missing']) {
+    assert.throws(
+      () =>
+        verifyCaptureConfigureOutput(`configuration
+WARNING: Option ${option} did not match anything
+`),
+      /explicit component/
+    )
+  }
 })

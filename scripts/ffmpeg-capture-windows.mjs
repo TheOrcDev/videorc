@@ -5,6 +5,14 @@ import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), '..')
+export function verifyCaptureConfigureOutput(output) {
+  const unmatched = output.match(
+    /^WARNING: Option --(?:enable|disable)-[^\r\n]*did not match anything[^\r\n]*$/m
+  )
+  if (unmatched)
+    throw new Error(`Capture worker configure rejected an explicit component: ${unmatched[0]}`)
+}
+
 export const CAPTURE_FLAGS = [
   '--disable-everything',
   '--disable-autodetect',
@@ -23,7 +31,7 @@ export const CAPTURE_FLAGS = [
   '--enable-filter=aresample,aformat,ashowinfo,anullsrc,sine,atrim,anull',
   '--enable-decoder=pcm_u8,pcm_s16le,pcm_s24le,pcm_s32le,pcm_f32le,pcm_f64le',
   '--enable-encoder=pcm_f32le',
-  '--enable-muxer=f32le',
+  '--enable-muxer=pcm_f32le',
   '--enable-protocol=pipe',
   '--extra-cflags=-D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00',
   '--extra-ldflags=-static',
@@ -225,6 +233,8 @@ export function verifyNormalizedCapture(output) {
 
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv[2] === '--configure-flags') console.log(CAPTURE_FLAGS.join('\n'))
+  else if (process.argv[2] === '--check-configure-log')
+    verifyCaptureConfigureOutput(readFileSync(process.argv[3], 'utf8'))
   else {
     const writing = process.argv[2] === '--write-manifest'
     const bundle = resolve(process.argv[writing ? 3 : 2] ?? 'vendor/ffmpeg/windows-x64')
