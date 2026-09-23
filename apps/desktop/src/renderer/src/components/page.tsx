@@ -1,33 +1,29 @@
 import type { ReactElement, ReactNode } from 'react'
 
+import { ToolbarActions } from '@/components/pane'
 import { cn } from '@/lib/utils'
 
 /**
- * Shared page-layout vocabulary for the archetype system (Page Layout Redesign
- * plan). North star: a focused creator tool (Riverside / Loom / Ecamm) — calm,
- * preview-forward, progressive disclosure; NOT OBS dock-density. Pages compose
- * these helpers instead of hand-rolling grids, so the 2-col / 1-col choice is
- * consistent and intentional rather than per-screen drift.
+ * Page vocabulary (plan 050, D4). There is no page column: every page fills
+ * its pane edge to edge, under the pane's toolbar, and only `PaneBody`
+ * scrolls. Pages compose these helpers instead of hand-rolling grids.
  *
- * Archetypes (each page is assigned exactly one):
- *   Stage       — Studio: preview hero + a clear transport band. Bespoke.
- *   Bench       — Layout: a sticky preview pane beside grouped controls. Bespoke.
- *   Config-grid — Sources / Streaming / Recording / Settings: grouped
- *                 PanelSections via <ConfigGrid>, in a fixed reading order.
- *   Gallery     — Assets / Screens: a responsive card grid via <Gallery>.
- *   Browse      — Library / AI: a <PageHeader> over a list/grid.
- *   Inspect     — Diagnostics: dense, sectioned metric rows. Bespoke.
+ *   Stage       — Studio: the preview pane leads. Bespoke.
+ *   Bench       — Scene: a flush stage pane beside the inspector. Bespoke.
+ *   Config-grid — Sources / Livestream / Output / Settings: flush sections via
+ *                 <ConfigGrid>, one column, two at `lg`, split by hairlines.
+ *   Gallery     — Assets / Screens: picture cards via <Gallery>.
+ *   Browse      — Library / Publish: a flush list or table in the pane body.
+ *   Inspect     — Health: dense sections of metric rows. Bespoke.
  *
- * Breakpoints (one set): `lg` is THE archetype breakpoint — Config-grid, Bench,
- * and the custom-ratio 2-col pages (Streaming 1.5/1, Layout 1.3/1, Assets
- * 1fr/360) split at `lg`, and their sticky panes (preview, readiness) engage
- * only there; below `lg` every page is a single column. Galleries are
- * breakpoint-free (auto-fill). The dense Inspect page (Diagnostics) may split
- * later, at `xl`. Inner form sub-grids use `sm`/`md`. Min card width (180px)
- * keeps galleries usable on narrow windows.
+ * `lg` is the one layout breakpoint. Inner form sub-grids use `sm`/`md`.
  */
 
-/** Page header: title + optional description + optional primary affordance. */
+/**
+ * A page's intro: the toolbar already names the page, so the title is for
+ * assistive tech; the description is a flush intro line and the action joins
+ * the toolbar.
+ */
 export function PageHeader({
   title,
   description,
@@ -40,28 +36,18 @@ export function PageHeader({
   className?: string
 }): ReactElement {
   return (
-    <div className={cn('flex items-start justify-between gap-4', className)}>
-      <div className="flex min-w-0 flex-col gap-1">
-        <h2 className="text-xl leading-none font-semibold tracking-tight text-foreground">
-          {title}
-        </h2>
-        {description ? <p className="text-sm text-muted-foreground">{description}</p> : null}
-      </div>
-      {action ? <div className="shrink-0">{action}</div> : null}
+    <div className={cn('px-gutter pt-3 pb-1', className)} data-slot="page-header">
+      <h2 className="sr-only">{title}</h2>
+      {description ? <p className="text-xs text-muted-foreground">{description}</p> : null}
+      {action ? <ToolbarActions>{action}</ToolbarActions> : null}
     </div>
   )
 }
 
 /**
- * Config-grid archetype: grouped sections in a responsive grid that collapses
- * to one column below `lg`. Reading order is top-to-bottom, then left-to-right.
- *
- * `items-start` is the default on purpose: a grid row stretches its items to
- * the tallest one, so a short card (e.g. Settings' Remote control when it is
- * off) grew a lake of empty glass next to a tall neighbour. Every card is now
- * exactly as tall as its own content. Pages that want balanced columns stack
- * their sections in `flex flex-col gap-5` children instead of relying on the
- * grid to even them out.
+ * Config-grid archetype: flush sections in one column, two at `lg`, with a
+ * hairline between the columns. Grid rows stretch, which is harmless now that
+ * sections are flush: a short section simply leaves pane background below it.
  */
 export function ConfigGrid({
   children,
@@ -70,10 +56,17 @@ export function ConfigGrid({
   children: ReactNode
   className?: string
 }): ReactElement {
-  return <div className={cn('grid items-start gap-5 lg:grid-cols-2', className)}>{children}</div>
+  return (
+    <div
+      className={cn('grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r', className)}
+      data-slot="config-grid"
+    >
+      {children}
+    </div>
+  )
 }
 
-/** Gallery archetype: a responsive card grid that fills by available width. */
+/** Gallery archetype: picture cards that fill by available width. */
 export function Gallery({
   children,
   className
@@ -84,7 +77,7 @@ export function Gallery({
   return (
     <div
       className={cn(
-        'grid gap-4 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]',
+        'grid gap-3 [grid-template-columns:repeat(auto-fill,minmax(180px,1fr))]',
         className
       )}
     >
@@ -93,7 +86,7 @@ export function Gallery({
   )
 }
 
-/** The default vertical rhythm for single-column pages. */
+/** A single column of flush sections. */
 export function PageStack({
   children,
   className
@@ -101,5 +94,5 @@ export function PageStack({
   children: ReactNode
   className?: string
 }): ReactElement {
-  return <div className={cn('flex flex-col gap-5', className)}>{children}</div>
+  return <div className={cn('flex flex-col', className)}>{children}</div>
 }

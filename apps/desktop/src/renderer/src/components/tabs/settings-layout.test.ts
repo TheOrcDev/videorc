@@ -38,9 +38,15 @@ function settingsColumns(): string[][] {
 }
 
 describe('Settings layout', () => {
-  it('sizes config-grid cards to their own content instead of stretching the row', () => {
-    const configGrid = pageSource.slice(pageSource.indexOf('export function ConfigGrid'))
-    expect(configGrid).toContain("cn('grid items-start gap-5 lg:grid-cols-2', className)")
+  it('splits the config grid into flush columns with a hairline between them', () => {
+    // Plan 050, D4: sections are flush, so the columns stretch (the hairline
+    // runs the full height) and no gap separates them.
+    const configGrid = pageSource.slice(
+      pageSource.indexOf('export function ConfigGrid'),
+      pageSource.indexOf('export function Gallery')
+    )
+    expect(configGrid).toContain("'grid lg:grid-cols-2 lg:[&>*:nth-child(odd)]:border-r'")
+    expect(configGrid).not.toMatch(/\bgap-\d/)
   })
 
   it('lays every card out in ONE grid, so no column can wait on another', () => {

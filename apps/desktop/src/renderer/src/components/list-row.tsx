@@ -3,10 +3,11 @@ import type { ComponentProps, ReactElement, ReactNode } from 'react'
 import { cn } from '@/lib/utils'
 
 /**
- * The shared row (videorc-design): every icon+title+meta list renders through
- * this one anatomy — 24px rounded-square icon tile, primary title, inline
- * secondary context, optional alias chips, spring space, right-aligned status
- * icons and secondary meta label. Selection is the theme's 8% block.
+ * The shared row (plan 050, D4): every icon + title + meta list renders
+ * through this one anatomy. A 20 px icon tile, the primary title, inline
+ * secondary context, optional alias chips, spring space, then right-aligned
+ * status icons and a secondary meta label. 32 px, or 28 px when compact.
+ * Selection is the theme's accent block.
  */
 export function ListRow({
   icon,
@@ -17,24 +18,27 @@ export function ListRow({
   meta,
   selected = false,
   interactive = true,
+  compact = false,
   className,
   children,
   ...props
 }: {
-  /** 24px rounded-square tile content (app/source icon — the colorful slot). */
+  /** The icon tile content (app/source icon: the colourful slot). */
   icon?: ReactNode
   title: ReactNode
-  /** Inline secondary-gray context after the title (platform, owner, kind). */
+  /** Inline secondary context after the title (platform, owner, kind). */
   context?: ReactNode
   /** Optional key chips right after the context (e.g. an alias). */
   alias?: ReactNode
   /** Small status icons just before the meta label. */
   statusIcons?: ReactNode
-  /** Right-aligned secondary-gray metadata ("Command", "Connected"). */
+  /** Right-aligned secondary metadata ("Command", "Connected"). */
   meta?: ReactNode
   selected?: boolean
   /** Render hover/active affordances; rows inside cmdk manage their own. */
   interactive?: boolean
+  /** 28 px instead of 32 px. */
+  compact?: boolean
   children?: ReactNode
 } & ComponentProps<'div'>): ReactElement {
   return (
@@ -42,8 +46,9 @@ export function ListRow({
       data-slot="list-row"
       data-selected={selected || undefined}
       className={cn(
-        'flex h-11 items-center gap-3 rounded-row px-3 text-sm',
-        interactive && 'cursor-default transition-colors duration-100 hover:bg-accent',
+        'flex items-center gap-2.5 rounded-row px-3 text-sm in-data-[slot=grouped-list]:rounded-none',
+        compact ? 'h-row-compact' : 'h-row',
+        interactive && 'cursor-default hover:bg-accent',
         selected && 'bg-accent',
         className
       )}
@@ -52,7 +57,7 @@ export function ListRow({
       {icon ? (
         <span
           data-slot="list-row-icon"
-          className="flex size-6 shrink-0 items-center justify-center overflow-hidden rounded-chip [&_svg:not([class*='size-'])]:size-5"
+          className="flex size-5 shrink-0 items-center justify-center overflow-hidden rounded-[5px] [&_svg:not([class*='size-'])]:size-4"
         >
           {icon}
         </span>
@@ -76,11 +81,41 @@ export function ListRow({
           </span>
         ) : null}
         {meta ? (
-          <span data-slot="list-row-meta" className="text-[13px] text-muted-foreground">
+          <span data-slot="list-row-meta" className="text-xs text-muted-foreground">
             {meta}
           </span>
         ) : null}
       </span>
+    </div>
+  )
+}
+
+/**
+ * A grouped list (macOS Settings style): like things in one inset group,
+ * split by hairlines. An optional 11 px label names the group.
+ */
+export function GroupedList({
+  label,
+  children,
+  className
+}: {
+  label?: ReactNode
+  children: ReactNode
+  className?: string
+}): ReactElement {
+  return (
+    <div className={cn('flex flex-col gap-1.5', className)}>
+      {label ? (
+        <div className="px-1 text-[11px] font-semibold text-subtle" data-slot="grouped-list-label">
+          {label}
+        </div>
+      ) : null}
+      <div
+        className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]"
+        data-slot="grouped-list"
+      >
+        {children}
+      </div>
     </div>
   )
 }
