@@ -352,12 +352,13 @@ pub(crate) fn probe_video_settings() -> VideoSettings {
     }
 }
 
-/// The bridge feeds RGBA raw frames and converts to NV12 before `hwupload`
+/// The bridge feeds RGBA raw frames, stamps BT.709 video-range on them and
+/// converts to NV12 before `hwupload`
 /// (`bridge_recording_video_filter_for_encoder`); the probe mirrors that
 /// exactly so the driver sees the same upload path a session uses.
 pub(crate) fn probe_filter(video: &VideoSettings) -> String {
     format!(
-        "setpts=PTS-STARTPTS,fps={},format=nv12,hwupload",
+        "setpts=PTS-STARTPTS,fps={},setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,format=nv12,hwupload",
         video.fps.max(1)
     )
 }
@@ -589,7 +590,7 @@ mod tests {
         ];
         let args = probe_args(Path::new("/dev/dri/renderD128"), &video, &encode_args);
         let joined = args.join(" ");
-        assert!(joined.starts_with("-hide_banner -loglevel error -vaapi_device /dev/dri/renderD128 -f lavfi -i color=c=black:s=1920x1080:r=30,format=rgba -vf setpts=PTS-STARTPTS,fps=30,format=nv12,hwupload -frames:v 30 -an -c:v h264_vaapi -rc_mode VBR"));
+        assert!(joined.starts_with("-hide_banner -loglevel error -vaapi_device /dev/dri/renderD128 -f lavfi -i color=c=black:s=1920x1080:r=30,format=rgba -vf setpts=PTS-STARTPTS,fps=30,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,format=nv12,hwupload -frames:v 30 -an -c:v h264_vaapi -rc_mode VBR"));
         assert!(joined.ends_with("-f null -"));
     }
 }

@@ -86,8 +86,18 @@ app discover it a second time.
 ## Run the app
 
 ```bash
+cargo build -p videorc-backend   # after every pull, before any smoke
 pnpm dev   # electron-vite + cargo run of the backend (first run compiles Rust)
 ```
+
+`pnpm dev` runs `cargo run --quiet`, which prints nothing while the debug
+backend recompiles (5-7 min on ogre), so an in-app smoke launched on a stale
+build used to time out at 90 s with misleading "GPU process launch failed"
+noise from the SIGTERMed Electron. The smoke launcher now runs
+`cargo build -p videorc-backend` itself before starting the launch clock
+(bounded by `VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS`, default 20 min; opt out
+with `VIDEORC_SMOKE_SKIP_PREBUILD=1`) and prints `[smoke:prebuild] …`
+lines; a timeout says "Backend still compiling" instead of GPU noise.
 
 Make sure `WAYLAND_DISPLAY`, `DISPLAY`, and `DBUS_SESSION_BUS_ADDRESS` are set
 when launching from a service or over SSH: `systemctl --user
@@ -177,20 +187,37 @@ ffprobe -v error -select_streams v:0 \
   -of default=nw=1 <file>
 ```
 
-All four must read `bt709` / `bt709` / `bt709` / `tv`. The OpenH264 path
-gets them from an SPS rewrite (`h264_metadata` bitstream filter) because
-libopenh264 writes no VUI on its own (Plan 053).
+All four must read `bt709` / `bt709` / `bt709` / `tv`. Both Linux arms
+stamp the raw frames with `setparams` before encoding AND rewrite the SPS
+afterwards (`h264_metadata` bitstream filter): libopenh264 writes no VUI on
+its own (Plan 053), and `h264_vaapi` on the bundled FFmpeg builds the VUI
+from the frame properties and drops the context colour options for
+primaries/transfer (ogre, Plan 0002). The VAAPI probe runs the same
+stamped filter chain.
 
 ## The VAAPI probe command
 
 Every VAAPI probe logs its exact FFmpeg command line at `info`
-("VAAPI probe on renderD128 (standard profile): …"). The backend tries the
+("VAAPI probe on renderD128 (standard profile): …"); the recording matrix
+smoke forwards those lines to its own log unconditionally, and with
+`VIDEORC_MATRIX_PRINT_BRIDGE_DIAGNOSTICS=1` its printed diagnostics line
+carries `linuxVaapiArgProfile`, `linuxRenderNodes` and any named fallback
+reason. The backend tries the
 standard argument set first and, only if the same node rejects it, a compat
-set (constant bitrate, no B-frames, no level pin). To bisect a rejection,
-copy the logged standard command and remove one item at a time in this
-order: `-rc_mode VBR` → `CBR`, drop `-level`, add `-bf 0`, drop
-`-flags +global_header`, drop `-force_key_frames`, 1080p → 720p. Record the
-first passing set and every failing stderr in the test report.
+set (constant bitrate, no B-frames) as defence in depth. Both sets pin the
+level in `h264_vaapi`'s own spelling (`-level 4`, not `-level 4.0`).
+
+Finding from the ogre bisect (Plan 0001, 2026-09-24): Intel iHD's
+"Failed to end picture encode issue: 24" was the `-level 4.0` spelling.
+`h264_vaapi`'s `-level` is an integer option whose named constants are
+`4`, `4.1`, `4.2`, `5`, … so `4.0` parses as `level_idc = 4`, an illegal
+level the driver rejects at end-of-picture. Rate control and B-frames were
+never the cause. Expect `linuxVaapiArgProfile: "standard"` in the bridge
+diagnostics on a healthy node; a `compat` selection now means a real driver
+rejection worth a bisect: copy the logged standard command and remove one
+item at a time (`-rc_mode VBR` → `CBR`, add `-bf 0`, drop
+`-flags +global_header`, drop `-force_key_frames`, 1080p → 720p) and record
+the first passing set and every failing stderr in the test report.
 
 `pnpm smoke:backend-single-instance` asserts the "after reaping … :<pid>"
 log line; run it with no other dev instance sharing the app-data directory.
