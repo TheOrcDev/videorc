@@ -233,8 +233,8 @@ async function main() {
   assertProbe(
     process.platform === 'darwin'
       ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'follows-app'
-      : chrome.glass?.mode?.kind === 'solid',
-    'chrome: Chat sits on real vibrancy that follows the app theme (solid palette off macOS)',
+      : ['solid', 'mica'].includes(chrome.glass?.mode?.kind),
+    'chrome: Chat sits on real vibrancy that follows the app theme (Mica or the solid palette off macOS)',
     JSON.stringify(chrome.glass)
   )
   assertProbe(
