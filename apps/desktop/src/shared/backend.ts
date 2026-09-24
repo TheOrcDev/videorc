@@ -1122,7 +1122,7 @@ export interface OAuthStartParams {
 export interface OAuthStartProviderParams {
   platform: StreamPlatform
   redirectUri?: string
-  /** Scopes on top of the base set; the backend accepts only offered ones (plan 053, S6). */
+  /** Scopes on top of the base set; the backend accepts only offered ones (plan 055, S6). */
   optionalScopes?: string[]
 }
 
@@ -3388,7 +3388,7 @@ export interface CommentsViewSnapshot {
   mode: CommentsViewMode
   snapshot: LiveChatSnapshot
   latestSendOperation?: CommentsSendOperation
-  /** History mode only: the finished session's saved stats (plan 053, S9). */
+  /** History mode only: the finished session's saved stats (plan 055, S9). */
   history?: CommentsHistoryStats
 }
 
@@ -3744,7 +3744,7 @@ export interface VideorcApi {
   pushViewerSample?: (sample: ViewerSample | null) => Promise<void>
   getViewerSample?: () => Promise<ViewerSample | null>
   onViewerSample?: (callback: (sample: ViewerSample | null) => void) => () => void
-  /** Stream Manager dashboard relay (plan 053, S7): main renderer -> main -> window. */
+  /** Stream Manager dashboard relay (plan 055, S7): main renderer -> main -> window. */
   pushDashboard?: (state: LiveDashboardState | null) => Promise<void>
   getDashboard?: () => Promise<LiveDashboardState | null>
   onDashboard?: (callback: (state: LiveDashboardState | null) => void) => () => void
@@ -3897,7 +3897,7 @@ export type LiveChatSubscriptionKind =
 
 /**
  * Structured event facts (wire mirror of live_chat.rs `LiveChatEventDetails`,
- * plan 053). Absent on plain chat. Amounts are micros of `currency`; a Twitch
+ * plan 055). Absent on plain chat. Amounts are micros of `currency`; a Twitch
  * `tier` is `1000`/`2000`/`3000`.
  */
 export type LiveChatEventDetails =
@@ -4474,7 +4474,7 @@ export interface ViewerPlatformCount {
 
 /**
  * Live concurrent-viewer sample (viewer rider V1) — viewers, not subs. `total`
- * sums every platform with a fresh count across all samplers (plan 053, B1).
+ * sums every platform with a fresh count across all samplers (plan 055, B1).
  */
 export interface ViewerSample {
   sessionId: string
@@ -4487,7 +4487,7 @@ export interface ViewerSample {
 export type AudienceMetric = 'followers' | 'subscribers'
 
 /**
- * Whether a platform's audience can be shown (plan 053, S3): `pending` until
+ * Whether a platform's audience can be shown (plan 055, S3): `pending` until
  * the first read, `hidden` when the channel hides it, `needs-reconnect` when
  * the platform refused the token, `unavailable` when this build or account
  * cannot read it (`message` says why).
@@ -4523,7 +4523,7 @@ export interface AudienceSnapshot {
   updatedAt: string
 }
 
-/** `sessions.viewers.list` (plan 053, S1): a session's saved samples, oldest first. */
+/** `sessions.viewers.list` (plan 055, S1): a session's saved samples, oldest first. */
 export interface SessionViewersListParams {
   sessionId: string
 }

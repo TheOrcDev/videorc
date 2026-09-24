@@ -12,7 +12,7 @@ import {
   thankYouDraft
 } from './stream-activity'
 
-// Rows as the backend normalizes the plan 053 S0 fixtures
+// Rows as the backend normalizes the plan 055 S0 fixtures
 // (scripts/fixtures/stream-manager/*.json; Rust tests pin the same details).
 let sequence = 0
 function row(

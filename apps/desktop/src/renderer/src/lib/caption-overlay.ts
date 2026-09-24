@@ -420,7 +420,7 @@ export async function renderCaptionCueFramePng(params: {
 /**
  * The highlight card's text. An activity event (a sub, a gift, a raid, a
  * Super Chat) leads with what happened, then the viewer's own words: the
- * event variant of the card (plan 053, S11). Plain chat is the message.
+ * event variant of the card (plan 055, S11). Plain chat is the message.
  */
 export function commentHighlightCardText(message: import('@/lib/backend').LiveChatMessage): string {
   const item = message.details ? activityItems([message])[0] : undefined

@@ -115,7 +115,7 @@ pub struct OAuthStartProviderParams {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
     /// Scopes added on top of the platform's base set, from
-    /// [`optional_provider_scopes`] only (plan 053, S6).
+    /// [`optional_provider_scopes`] only (plan 055, S6).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub optional_scopes: Vec<String>,
 }
@@ -125,7 +125,7 @@ pub const TWITCH_FOLLOWERS_SCOPE: &str = "moderator:read:followers";
 /// Twitch subscriber total and points for the Stream Manager.
 pub const TWITCH_SUBSCRIPTIONS_SCOPE: &str = "channel:read:subscriptions";
 
-/// Scopes a user can opt into per platform (plan 053, S6). They stay opt-in
+/// Scopes a user can opt into per platform (plan 055, S6). They stay opt-in
 /// because adding a scope to the base set makes every existing connection
 /// reconnect once.
 pub fn optional_scopes_for(platform: StreamPlatform) -> &'static [&'static str] {

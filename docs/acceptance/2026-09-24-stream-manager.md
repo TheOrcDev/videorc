@@ -1,4 +1,4 @@
-# 2026-09-24 Stream Manager acceptance (plan 053, with plan 054)
+# 2026-09-24 Stream Manager acceptance (plan 055, with plan 054)
 
 The Stream Manager replaces the Chat window: the whole chat, live viewers,
 followers, supporters, tips, an activity feed and stream health across every

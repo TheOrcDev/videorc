@@ -534,7 +534,7 @@ let notesWindowContentProtected = false
 let notesWindowCloseFlushReady = false
 let notesWindowCloseFlushTimer: ReturnType<typeof setTimeout> | null = null
 let latestViewerSample: ViewerSample | null = null
-/** The Stream Manager's latest dashboard, history included (plan 053, S7). */
+/** The Stream Manager's latest dashboard, history included (plan 055, S7). */
 let latestDashboardState: LiveDashboardState | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
@@ -2414,7 +2414,7 @@ function restoreNotesWindowOnLaunch(): void {
 }
 
 // --- Stream Manager window (code name: comments) ------------------------------
-// The live dashboard in its own OS window (plan 053): chat, activity, stats
+// The live dashboard in its own OS window (plan 055): chat, activity, stats
 // and Orcle, relayed from the main renderer. Plain BrowserWindow with no
 // native surface. It is NOT capture-protected (owner call, 2026-08-19: only
 // Notes is), so Studio closes it during a recording that would capture it.
@@ -2424,7 +2424,7 @@ type CommentsWindowPrefs = {
   highlightAnchor?: CommentHighlightAnchor
   alwaysOnTopPreferenceVersion?: number
   open?: boolean
-  /** 2 once the frame moved off the old Chat default (plan 053, S8). */
+  /** 2 once the frame moved off the old Chat default (plan 055, S8). */
   layoutVersion?: number
 }
 
@@ -2640,7 +2640,7 @@ async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: '
     cursor = page.nextCursor
   } while (cursor && messages.length < maxMessages)
 
-  // The saved stats for the History summary (plan 053, S9); a session
+  // The saved stats for the History summary (plan 055, S9); a session
   // recorded before the Stream Manager simply has none.
   const [latestSendOperation, history] = await Promise.all([
     requestBackendAdmin<CommentsSendOperation | null>('liveChat.sendOperations.latest', {
@@ -13042,7 +13042,7 @@ app.whenReady().then(async () => {
     }
     cacheCommentsView(view)
     // A history view pushed from Library carries its transcript; its saved
-    // stats (the Stream Manager's History summary, plan 053) load here.
+    // stats (the Stream Manager's History summary, plan 055) load here.
     if (view.mode.kind === 'history' && !view.history) {
       void attachCommentsHistoryStats(view.mode.sessionId)
     }
@@ -13164,7 +13164,7 @@ app.whenReady().then(async () => {
     emitCommentsViewerSample(sample && typeof sample === 'object' ? (sample as ViewerSample) : null)
   })
   secureIpcHandle('comments-window:viewers-get', () => latestViewerSample)
-  // Stream Manager dashboard relay (plan 053, S7): same shape as the viewer
+  // Stream Manager dashboard relay (plan 055, S7): same shape as the viewer
   // relay. Only the main renderer pushes; the window seeds and follows.
   secureIpcHandle('comments-window:dashboard-push', (event, state: unknown) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {

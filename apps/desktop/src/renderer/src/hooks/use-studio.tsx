@@ -5412,7 +5412,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return () => window.clearTimeout(timer)
       }
     })
-    // Stream Manager dashboard (plan 053, S7): a lazy chunk folds these
+    // Stream Manager dashboard (plan 055, S7): a lazy chunk folds these
     // events into one relayed state; the few that arrive first wait for it.
     type DashboardFeed = Awaited<
       ReturnType<typeof import('@/lib/live-dashboard-relay').startLiveDashboardRelay>
@@ -5827,7 +5827,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           clearSessionRuntimeState()
           void refreshSessions(nextClient)
         }
-        // "Open Stream Manager when I go live" (plan 053, decision 6).
+        // "Open Stream Manager when I go live" (plan 055, decision 6).
         if (
           status.state === 'streaming' &&
           previousState !== 'streaming' &&

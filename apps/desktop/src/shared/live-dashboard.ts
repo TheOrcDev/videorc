@@ -10,7 +10,7 @@ import type {
 } from './backend'
 
 /**
- * The Stream Manager's live data (plan 053, D7). The main renderer, which
+ * The Stream Manager's live data (plan 055, D7). The main renderer, which
  * owns the backend socket, builds it from `recording.status`,
  * `stream.viewers`, `stream.audience`, `stream.health` and `stream.targets`.
  * It pushes at most once a second to main, which caches the latest and

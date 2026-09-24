@@ -473,7 +473,7 @@ export function commentCanHighlight(message: LiveChatMessage): boolean {
     return false
   }
   // Notices go on stream only as activity events: a sub, a gift, a raid
-  // (plan 053, S11). Plain system text stays off the card.
+  // (plan 055, S11). Plain system text stays off the card.
   if (
     message.eventType === 'system' ||
     message.eventType === 'membership' ||

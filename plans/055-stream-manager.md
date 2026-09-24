@@ -1,4 +1,7 @@
-# Plan 053: Stream Manager, a live dashboard that replaces the Chat window
+# Plan 055: Stream Manager, a live dashboard that replaces the Chat window
+
+> Drafted as plan 053; renumbered to 055 when main took 053 (Linux L1.5, #401)
+> and the X viewer diagnosis became 054.
 
 > Executor: implement the ordered slices below in an isolated worktree of current
 > main. Read AGENTS.md and `.claude/skills/videorc-design/SKILL.md` first. Keep
@@ -10,8 +13,8 @@
   review). S0 to S12 and S14's local gates are done. S13 (moderation) is
   deferred per decision 3. Owner live acceptance is pending: see
   `docs/acceptance/2026-09-24-stream-manager.md`. The owner also asked for
-  plan 054 (the X viewer count) in the same PR; it is folded in. See
-  "Execution notes" at the end for deviations.
+  plan 054 (the X viewer count, `plans/054-x-viewer-count.md`) in the same
+  PR; it is folded in. See "Execution notes" at the end for deviations.
 - Planned status: PLANNED 2026-09-24. Priority P1 (owner: "create some
   kind of live stream studio where we can see the entire chat, how many users
   are currently live, followers, and all the things like that … completely

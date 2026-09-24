@@ -32,7 +32,7 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 105: plan 053 added the Stream Manager dashboard push and get (plan 050
+    // 105: plan 055 added the Stream Manager dashboard push and get (plan 050
     // had retired glass:wallpaper:get with the wallpaper underlay).
     expect(Object.keys(electronInvokeApiMethods)).toHaveLength(105)
     expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(105)

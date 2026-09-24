@@ -86,7 +86,7 @@ describe('CommentRow', () => {
     expect(commentCanHighlight(message({ isDeleted: true }))).toBe(false)
   })
 
-  it('lets activity events go on stream, never plain notices (plan 053, S11)', () => {
+  it('lets activity events go on stream, never plain notices (plan 055, S11)', () => {
     expect(
       commentCanHighlight(
         message({ eventType: 'system', details: { kind: 'raid', viewerCount: 234 } })

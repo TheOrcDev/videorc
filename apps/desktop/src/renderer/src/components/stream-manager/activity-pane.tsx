@@ -28,7 +28,7 @@ import {
 } from '@/lib/stream-activity'
 import { cn } from '@/lib/utils'
 
-// The Activity pane (plan 053, D4): structured events, never chat text.
+// The Activity pane (plan 055, D4): structured events, never chat text.
 // Follows, subs and gifts, tips, raids and announcements from the chat
 // snapshot, and destination failures from the relayed dashboard.
 

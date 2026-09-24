@@ -13,7 +13,7 @@ import { formatViewerCount, viewerSampleStale } from '@/lib/viewer-count-view'
 
 import type { LiveDashboardState } from '../../../shared/live-dashboard'
 
-// The Stream Manager's stats strip (plan 053, D2), as pure tile models. A
+// The Stream Manager's stats strip (plan 055, D2), as pure tile models. A
 // tile exists only when its source exists for this session, and a value is
 // never a zero nobody measured: a platform that cannot report says why.
 

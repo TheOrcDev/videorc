@@ -176,7 +176,7 @@ export interface StreamManagerProps {
   onCohostUpgrade?: (url: string) => void
 }
 
-// The Stream Manager (plan 053): the Chat window grown into a live dashboard.
+// The Stream Manager (plan 055): the Chat window grown into a live dashboard.
 // One window, three widths (D1): the layout follows the window body's own
 // width through container queries, and every pane renders exactly once.
 export function StreamManager({

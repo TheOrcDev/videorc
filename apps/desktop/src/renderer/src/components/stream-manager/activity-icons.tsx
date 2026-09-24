@@ -1,5 +1,5 @@
 /**
- * The Stream Manager's activity glyphs (plan 053): what a viewer did for the
+ * The Stream Manager's activity glyphs (plan 055): what a viewer did for the
  * stream. A second, window-scoped registry: the shared one (`@/components/icons`)
  * ships in every window's eager chunk, and these six are only ever drawn in
  * the Stream Manager. They count toward the same licence ceiling

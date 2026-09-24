@@ -9,7 +9,7 @@
 //! Failure discipline: sampling can never degrade the stream or chat. A
 //! failed poll is a missing datum (skip the tick), with its own backoff.
 //!
-//! One total per session (plan 053, B1): the YouTube + Twitch sampler and the
+//! One total per session (plan 055, B1): the YouTube + Twitch sampler and the
 //! X sampler both feed [`ViewerAggregator`], so every emitted sample sums all
 //! platforms with a fresh count instead of one sampler's partial total.
 
@@ -40,7 +40,7 @@ pub struct YouTubeViewerConfig {
     pub broadcast_id: String,
     #[serde(default)]
     pub api_base_url: Option<String>,
-    /// Renews `access_token` mid-stream (plan 053, B2); never from params.
+    /// Renews `access_token` mid-stream (plan 055, B2); never from params.
     #[serde(skip)]
     pub token_source: crate::session_token::SessionTokenSource,
 }
@@ -53,13 +53,13 @@ pub struct TwitchViewerConfig {
     pub broadcaster_user_id: String,
     #[serde(default)]
     pub api_base_url: Option<String>,
-    /// Renews `access_token` mid-stream (plan 053, B2); never from params.
+    /// Renews `access_token` mid-stream (plan 055, B2); never from params.
     #[serde(skip)]
     pub token_source: crate::session_token::SessionTokenSource,
 }
 
 /// One count poll: a refused token is told apart from a missing count so
-/// the sampler can renew it (plan 053, B2).
+/// the sampler can renew it (plan 055, B2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CountFetch {
     Count(Option<u64>),

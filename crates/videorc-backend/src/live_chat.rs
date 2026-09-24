@@ -114,7 +114,7 @@ pub struct LiveChatMessageFragment {
     pub image_url: Option<String>,
 }
 
-/// Structured facts of a monetized or community event (plan 053). `None` on a
+/// Structured facts of a monetized or community event (plan 055). `None` on a
 /// plain chat message. Every optional field is skipped when absent: a
 /// serialized `null` has broken app load before.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -248,7 +248,7 @@ pub struct LiveChatMessage {
     pub is_deleted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_provider_type: Option<String>,
-    /// Structured event facts (plan 053); `None` for plain chat.
+    /// Structured event facts (plan 055); `None` for plain chat.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub details: Option<LiveChatEventDetails>,
     /// The message this one replies to, when the platform threads replies.
@@ -651,7 +651,7 @@ pub struct CommentsSendParams {
     #[serde(default)]
     pub in_reply_to_question_id: Option<String>,
     /// Send only to these providers (Stream Manager's "Send to" picker, plan
-    /// 053 S10). Absent sends to every provider, as before.
+    /// 055 S10). Absent sends to every provider, as before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_ids: Option<Vec<String>>,
 }
@@ -795,7 +795,7 @@ pub struct LiveChatCoordinator {
     /// authority afterward.
     send_operations_in_flight: HashMap<String, InFlightSendOperation>,
     /// `platform:author_id` of every chatter this session already checked for
-    /// the first-time marker (plan 053). Reset per session, not by Clear view.
+    /// the first-time marker (plan 055). Reset per session, not by Clear view.
     chatters_seen: HashSet<String>,
 }
 
@@ -906,7 +906,7 @@ impl LiveChatCoordinator {
             return HighlightMessageEligibility::WrongSession;
         }
         // A notice goes on stream only as an activity event (a raid, an
-        // announcement: plan 053, S11); plain system text never does.
+        // announcement: plan 055, S11); plain system text never does.
         let plain_notice =
             message.event_type == LiveChatEventType::System && message.details.is_none();
         if message.is_deleted
@@ -1329,7 +1329,7 @@ pub struct LiveChatStartParams {
     pub twitch: Option<crate::twitch_chat::TwitchChatConfig>,
     #[serde(default)]
     pub x: Option<crate::x_chat::XChatConfig>,
-    /// Follower and subscriber sources (plan 053, S3). Built by the backend
+    /// Follower and subscriber sources (plan 055, S3). Built by the backend
     /// from the session's destinations; never read from RPC params, because
     /// they resolve stored credentials.
     #[serde(skip)]
@@ -1386,7 +1386,7 @@ pub struct FakeChatConfig {
     #[serde(default)]
     pub send: FakeChatSendBehavior,
     /// After its messages, deliver one of each activity event its platform
-    /// has, with structured details (the Stream Manager smoke, plan 053).
+    /// has, with structured details (the Stream Manager smoke, plan 055).
     #[serde(default)]
     pub events: bool,
 }
@@ -1644,7 +1644,7 @@ where
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(handle);
     }
-    // Followers and subscribers (plan 053, S3) share the connectors'
+    // Followers and subscribers (plan 055, S3) share the connectors'
     // abort-on-stop lifecycle.
     let audience_handles = crate::audience::start_audience(
         state,
@@ -2159,7 +2159,7 @@ fn aggregate_send_phase(deliveries: &[DestinationDelivery]) -> CommentsSendOpera
 }
 
 /// A send hours into a stream takes the account's current token, refreshed
-/// when near expiry, instead of the one captured at Go Live (plan 053, B2).
+/// when near expiry, instead of the one captured at Go Live (plan 055, B2).
 async fn with_current_sender_token(
     state: &AppState,
     client: &reqwest::Client,
@@ -2442,7 +2442,7 @@ fn counts_as_chatter(message: &LiveChatMessage) -> bool {
     ) && !message.is_deleted
 }
 
-/// Marks the first message of each author no earlier session saw (plan 053).
+/// Marks the first message of each author no earlier session saw (plan 055).
 /// Runs before ingest, outside every delivery fence: one indexed query per
 /// batch of new authors, off the async runtime. A database error marks nothing
 /// rather than guessing; Twitch's own `user_intro` flag is kept as sent.
@@ -2787,7 +2787,7 @@ async fn run_fake_connector(
 
 /// Build one deterministic fake message. Shared by the fake connector and the unit tests.
 /// One of each activity event a platform has, shaped as its connector would
-/// normalize it (plan 053 smoke; the parsers' own tests pin the real payloads).
+/// normalize it (plan 055 smoke; the parsers' own tests pin the real payloads).
 fn fake_events(
     session_id: &str,
     platform: StreamPlatform,

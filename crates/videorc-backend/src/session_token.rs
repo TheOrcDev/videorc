@@ -1,4 +1,4 @@
-//! OAuth access tokens for session tasks that run all stream long (plan 053,
+//! OAuth access tokens for session tasks that run all stream long (plan 055,
 //! B2). A connector used to capture its token once at session start. A Twitch
 //! user token lasts about four hours and a Google one about an hour, so a long
 //! stream silently lost chat and viewer counts on the first refusal.

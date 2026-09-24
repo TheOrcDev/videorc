@@ -9,7 +9,7 @@ import type { StatTileModel } from '@/lib/stream-manager-stats'
 import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { cn } from '@/lib/utils'
 
-// The stats strip (plan 053, D2): flush cells split by hairlines, never cards
+// The stats strip (plan 055, D2): flush cells split by hairlines, never cards
 // inside the window. Tone lives only in dots and chips; the numbers stay
 // monochrome and tabular. Below 640 px the strip becomes one summary line.
 

@@ -19,7 +19,7 @@ import {
   type LiveDashboardState
 } from '../../../shared/live-dashboard'
 
-/** The backend events the dashboard folds (plan 053, D7). */
+/** The backend events the dashboard folds (plan 055, D7). */
 export type DashboardEvent =
   | 'recording.status'
   | 'stream.viewers'
@@ -41,7 +41,7 @@ export interface LiveDashboardRelay {
 }
 
 /**
- * The main renderer's half of the Stream Manager relay (plan 053, S7): folds
+ * The main renderer's half of the Stream Manager relay (plan 055, S7): folds
  * backend events into one `LiveDashboardState` and pushes it to main at most
  * once a second. Nothing here renders; React state is never touched.
  */

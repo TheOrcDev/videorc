@@ -358,7 +358,7 @@ try {
       )
     }
 
-    // Stream Manager (plan 053): structured activity events end to end, and the
+    // Stream Manager (plan 055): structured activity events end to end, and the
     // audience poller's baseline and delta, in their own short session.
     const eventsSessionId = `smoke-live-chat-events-${Date.now()}`
     // The socket was replaced above: listen on the current one.

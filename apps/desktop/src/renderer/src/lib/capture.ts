@@ -46,7 +46,7 @@ export type SettingsState = {
    */
   keepMicrophoneWarm?: boolean
   /**
-   * Open the Stream Manager when a livestream goes live (plan 053, decision 6).
+   * Open the Stream Manager when a livestream goes live (plan 055, decision 6).
    * Default off: the window otherwise remembers whether it was open.
    */
   openStreamManagerOnLive?: boolean

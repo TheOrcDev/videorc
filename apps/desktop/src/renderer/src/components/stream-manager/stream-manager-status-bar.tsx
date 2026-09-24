@@ -23,7 +23,7 @@ import type { AudienceSnapshot, CommentHighlightAnchor, LiveChatProviderState } 
 import { ABOVE_NARROW, COMPACT_LABEL, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { cn } from '@/lib/utils'
 
-// The Stream Manager's status bar (plan 053, D6): each provider's chat state
+// The Stream Manager's status bar (plan 055, D6): each provider's chat state
 // on the left, the window's quiet controls on the right. The title row keeps
 // the title only (owner call, 2026-09-23: no buttons in the top-right corner).
 // Below 640 px the controls fold into one ⋯ menu so none is ever clipped.

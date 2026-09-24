@@ -162,7 +162,7 @@ describe('commentHighlightCardText', () => {
     isDeleted: false
   }
 
-  it('leads an activity card with what happened (plan 053, S11)', () => {
+  it('leads an activity card with what happened (plan 055, S11)', () => {
     expect(
       commentHighlightCardText({
         ...base,

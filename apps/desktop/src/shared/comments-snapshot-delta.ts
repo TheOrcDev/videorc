@@ -5,7 +5,7 @@ import type {
   LiveChatSnapshot
 } from './backend'
 
-/** The Stream Manager keeps 2,000 rows; its list is virtualized (plan 053, S10). */
+/** The Stream Manager keeps 2,000 rows; its list is virtualized (plan 055, S10). */
 export const MAX_COMMENTS_SNAPSHOT_MESSAGES = 2000
 
 function emptySnapshot(delta: CommentsSnapshotDelta): LiveChatSnapshot {

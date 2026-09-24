@@ -2149,7 +2149,7 @@ async fn fresh_platform_access_token(
 }
 
 /// The optional scopes to request: the ones asked for, plus the ones the
-/// platform's connected account already holds (plan 053, S6).
+/// platform's connected account already holds (plan 055, S6).
 fn retained_optional_scopes(
     state: &AppState,
     platform: StreamPlatform,
@@ -2196,7 +2196,7 @@ fn platform_account_credential(
         })
 }
 
-/// An access token for a session task that runs all stream long (plan 053,
+/// An access token for a session task that runs all stream long (plan 055,
 /// B2). Without `refused` it is refreshed when near expiry; with the token the
 /// provider just refused, it is refreshed now. Refreshes are serialized: a
 /// task that lost the race takes the winner's token instead of spending the
@@ -2951,7 +2951,7 @@ async fn youtube_chat_config(
 
 /// Build the Twitch chat connector config for an enabled OAuth destination (slice 8).
 /// The token is refreshed here when near expiry, and the connector renews it
-/// through the same account for the rest of the stream (plan 053, B2).
+/// through the same account for the rest of the stream (plan 055, B2).
 async fn twitch_chat_config(
     state: &AppState,
     target: &crate::streaming::StreamTargetSettings,
@@ -3113,7 +3113,7 @@ async fn prepare_session_live_chat(
 }
 
 /// One follower/subscriber source per platform with an enabled destination
-/// (plan 053, S3). Twitch and X read the connected account whatever the
+/// (plan 055, S3). Twitch and X read the connected account whatever the
 /// destination's auth mode, as Twitch chat does; a manual YouTube key names no
 /// channel, so YouTube needs an OAuth destination.
 fn session_audience_sources(

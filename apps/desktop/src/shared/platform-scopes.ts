@@ -1,6 +1,6 @@
 /**
  * Twitch permissions for follow alerts and the sub count in the Stream
- * Manager (plan 053, S6). Opt-in: adding them to the base set would make
+ * Manager (plan 055, S6). Opt-in: adding them to the base set would make
  * every existing Twitch connection reconnect once. Kept out of `backend.ts`
  * so the main window's eager bundle does not carry them.
  */

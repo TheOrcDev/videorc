@@ -1,5 +1,5 @@
 /**
- * The Stream Manager window's frame (plan 053, S8). The window used to be a
+ * The Stream Manager window's frame (plan 055, S8). The window used to be a
  * 420 × 640 chat reader; the dashboard wants room for the stats strip and a
  * right pane. A frame the user never resized (the old default) moves to the
  * new default once; any frame the user sized is kept.

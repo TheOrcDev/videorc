@@ -7,7 +7,7 @@ import type {
 
 import type { DestinationEvent } from '../../../shared/live-dashboard'
 
-// The Stream Manager's Activity pane (plan 053, D4): a projection of the chat
+// The Stream Manager's Activity pane (plan 055, D4): a projection of the chat
 // snapshot's structured events and the relay's destination events, never of
 // chat text. One pure module shared by the live pane, the stats strip and
 // History, so the three can never count differently.

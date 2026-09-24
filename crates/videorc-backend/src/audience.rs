@@ -1,4 +1,4 @@
-//! Follower and subscriber counts for the Stream Manager (plan 053, S3).
+//! Follower and subscriber counts for the Stream Manager (plan 055, S3).
 //!
 //! While a stream session runs, one task per live platform reads the
 //! channel's audience total every ~2 minutes: Twitch followers, X followers,

@@ -1,4 +1,4 @@
-# Stream Manager: provider facts (plan 053, S0)
+# Stream Manager: provider facts (plan 055, S0)
 
 Checked 2026-09-24 against each platform's official API reference.
 

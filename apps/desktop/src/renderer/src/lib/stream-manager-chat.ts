@@ -1,7 +1,7 @@
 import type { LiveChatMessage, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
 import { commentMentions } from '@/components/comment-row'
 
-// The Stream Manager's chat filters (plan 053, D3): platform, Orcle's
+// The Stream Manager's chat filters (plan 055, D3): platform, Orcle's
 // questions, mentions of the streamer, and search. Follows are activity and
 // never appear in chat.
 
@@ -34,7 +34,7 @@ export function chatPaneMessages(
   })
 }
 
-/** The providers the composer's "Send to" picker offers (plan 053, S10). */
+/** The providers the composer's "Send to" picker offers (plan 055, S10). */
 export function writableProviders(
   providers: readonly LiveChatProviderState[]
 ): LiveChatProviderState[] {

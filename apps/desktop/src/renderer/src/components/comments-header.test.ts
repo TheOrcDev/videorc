@@ -26,7 +26,7 @@ function provider(overrides: Partial<LiveChatProviderState> = {}): LiveChatProvi
   }
 }
 
-// The Stream Manager's chrome (plan 053, D6): the title row carries the title
+// The Stream Manager's chrome (plan 055, D6): the title row carries the title
 // only; every control lives in the status bar, inline from 640 px and folded
 // into ⋯ below it. probe:comments-window proves the real geometry.
 describe('Stream Manager status bar', () => {

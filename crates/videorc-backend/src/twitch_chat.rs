@@ -63,12 +63,12 @@ pub struct TwitchChatConfig {
     /// Test-only override of the Helix API base URL.
     #[serde(default)]
     pub api_base_url: Option<String>,
-    /// How the connector renews `access_token` mid-stream (plan 053, B2).
+    /// How the connector renews `access_token` mid-stream (plan 055, B2).
     /// Built by the backend from the stored account; never read from params.
     #[serde(skip)]
     pub token_source: crate::session_token::SessionTokenSource,
     /// Subscribe to `channel.follow` v2: only when the account granted the
-    /// opt-in `moderator:read:followers` scope (plan 053, S6).
+    /// opt-in `moderator:read:followers` scope (plan 055, S6).
     #[serde(default)]
     pub follow_events: bool,
 }
@@ -495,7 +495,7 @@ fn subscription_details(
 }
 
 /// Structured facts for a `channel.chat.notification`, keyed by its notice
-/// type. Field names follow the EventSub reference (plan 053 S0).
+/// type. Field names follow the EventSub reference (plan 055 S0).
 fn notification_details(notice_type: &str, event: &Value) -> Option<LiveChatEventDetails> {
     match notice_type {
         "sub" => Some(subscription_details(
@@ -892,7 +892,7 @@ async fn create_subscriptions(
     Ok(())
 }
 
-/// Subscribes this socket, renewing a refused token once (plan 053, B2).
+/// Subscribes this socket, renewing a refused token once (plan 055, B2).
 async fn subscribe_socket(
     state: &AppState,
     client: &reqwest::Client,
@@ -1493,7 +1493,7 @@ mod tests {
     }
 
     /// A Twitch whose first socket drops after the user token expired
-    /// (plan 053, B2): the next socket's subscriptions refuse `token-1`
+    /// (plan 055, B2): the next socket's subscriptions refuse `token-1`
     /// and accept only `token-2`. With `twitch_reconnect`, the first socket
     /// instead hands over through a `session_reconnect` URL.
     #[derive(Clone)]

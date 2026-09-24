@@ -42,7 +42,7 @@ const DELAYED_SEND_ACK_MS =
   COMMENTS_SEND_TIMING_CONTRACT.reconciliationMs +
   2_000
 
-// Plan 053: the Stream Manager stays whole at every width it allows (320px
+// Plan 055: the Stream Manager stays whole at every width it allows (320px
 // minimum). Its body is a container with three tiers (D1):
 //   Wide ≥ 1040px, Medium 640–1039px, Narrow < 640px.
 const WIDE_TIER_MIN_WIDTH = 1040
@@ -693,7 +693,8 @@ async function probeNarrowWidths() {
     }
     if (width === 320) await captureState('sweep-320-live', 'Stream Manager 320px live', 320, 640)
     if (width === 800) await captureState('sweep-800-live', 'Stream Manager 800px live', 800, 640)
-    if (width === 1280) await captureState('sweep-1280-live', 'Stream Manager 1280px live', 1280, 720)
+    if (width === 1280)
+      await captureState('sweep-1280-live', 'Stream Manager 1280px live', 1280, 720)
   }
 
   // History: Back to live is the primary action and stays visible.
@@ -815,7 +816,13 @@ function dashboardFixture() {
       ]
     },
     health: {
-      latest: { sessionId: NEXT_LIVE_SESSION_ID, bitrateKbps: 6012, fps: 30, droppedFrames: 0, createdAt: at(2) },
+      latest: {
+        sessionId: NEXT_LIVE_SESSION_ID,
+        bitrateKbps: 6012,
+        fps: 30,
+        droppedFrames: 0,
+        createdAt: at(2)
+      },
       bitrateHistory: [5900, 6010, 5980, 6012].map((kbps, index) => ({
         at: at((4 - index) * 2),
         kbps,

@@ -21,7 +21,7 @@ The registry names icons by **meaning**, not by shape: call sites ask for
   variants, two pins, two locks and two spinners — nobody could have answered
   "which icons does Videorc use?" without a grep.
 
-Today: **98 semantic slots over 93 glyphs**, five of them platform brand marks outside the Nucleo count. The Stream Manager (plan 053) adds six activity slots (follow, supporter, gift, tip, raid, announcement) in its own registry, `components/stream-manager/activity-icons.tsx`: the shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Five slots share a glyph
+Today: **98 semantic slots over 93 glyphs**, five of them platform brand marks outside the Nucleo count. The Stream Manager (plan 055) adds six activity slots (follow, supporter, gift, tip, raid, announcement) in its own registry, `components/stream-manager/activity-icons.tsx`: the shared registry ships in every window's eager chunk, and these are only drawn in the Stream Manager. They count toward the same ceiling. Five slots share a glyph
 (`StudioIcon`/`CameraIcon`, `SourcesIcon`/`DisplayIcon`, `AssetsIcon`/`ImageIcon`,
 `OutputIcon`/`RecordIcon`, `PublishIcon`/`SparkleIcon`) — those are exactly the
 places the audit below expects to diverge.

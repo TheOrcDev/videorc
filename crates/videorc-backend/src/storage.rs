@@ -2877,7 +2877,7 @@ impl Database {
     }
 
     /// Which of these authors already chatted in an earlier session, as
-    /// `platform:author_id` keys (plan 053, the first-time-chatter marker).
+    /// `platform:author_id` keys (plan 055, the first-time-chatter marker).
     pub fn live_chat_returning_authors(
         &self,
         current_session_id: &str,
@@ -5944,7 +5944,7 @@ impl Database {
         )?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
-        // Stream Manager (plan 053): structured event facts, reply context and
+        // Stream Manager (plan 055): structured event facts, reply context and
         // the first-message flag travel with each persisted chat row.
         ensure_column(
             &conn,

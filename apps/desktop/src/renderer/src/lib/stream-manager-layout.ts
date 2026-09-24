@@ -1,5 +1,5 @@
 // The Stream Manager window body is a CSS container (`@container/stream-manager`):
-// its layout follows its own width, never JS resize state (plan 053, D1).
+// its layout follows its own width, never JS resize state (plan 055, D1).
 //   Wide    ≥ 1040px: the stats strip, then Chat beside a right pane
 //                     (Activity · Orcle).
 //   Medium  640–1039px: a compact strip, then one pane with a segmented

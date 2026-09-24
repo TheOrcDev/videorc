@@ -1105,11 +1105,11 @@ pub struct AppState {
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
     pub live_chat: LiveChatSlot,
     pub live_chat_persistence: LiveChatPersistence,
-    /// One viewer total per session across every sampler (plan 053, B1).
+    /// One viewer total per session across every sampler (plan 055, B1).
     pub viewer_aggregator: Arc<std::sync::Mutex<crate::viewer_stats::ViewerAggregator>>,
-    /// Follower and subscriber counts per platform for the session (plan 053, S3).
+    /// Follower and subscriber counts per platform for the session (plan 055, S3).
     pub audience: Arc<std::sync::Mutex<crate::audience::AudienceHub>>,
-    /// Serializes mid-session OAuth refreshes (plan 053, B2).
+    /// Serializes mid-session OAuth refreshes (plan 055, B2).
     pub platform_token_refresh: Arc<tokio::sync::Mutex<()>>,
     /// In-memory product-account session override (deep-link sign-in / Sign out).
     /// None falls back to the dev env mock; persistent token storage replaces it.

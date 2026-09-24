@@ -14,7 +14,7 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
   'yt3.ggpht.com',
   'yt4.ggpht.com',
   'googleusercontent.com',
-  // Twitch profile images, and chat emotes (plan 053, S10: the Stream
+  // Twitch profile images, and chat emotes (plan 055, S10: the Stream
   // Manager renders them from fragments through this same cache)
   'static-cdn.jtvnw.net',
   // X profile images (broadcast.chat authors)

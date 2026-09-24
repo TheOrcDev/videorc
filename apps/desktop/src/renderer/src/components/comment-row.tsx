@@ -147,7 +147,7 @@ const ROLE_LABELS: Record<string, string> = {
   member: 'Member'
 }
 
-/** Role tags (owner, moderator, VIP, member) as glass tag chips (plan 053, D3). */
+/** Role tags (owner, moderator, VIP, member) as glass tag chips (plan 055, D3). */
 function RoleTags({ roles }: { roles: readonly string[] }): ReactElement | null {
   const labels = [...new Set(roles.map((role) => ROLE_LABELS[role]).filter(Boolean))]
   if (labels.length === 0) return null
@@ -329,7 +329,7 @@ export function CommentRow({
   onHighlight?: (message: LiveChatMessage) => void
   /** The Stream Manager's ⋯ Reply: prefills the composer with @name. */
   onReply?: (message: LiveChatMessage) => void
-  /** Virtualized lists measure and place the row (plan 053, S10). */
+  /** Virtualized lists measure and place the row (plan 055, S10). */
   ref?: Ref<HTMLLIElement>
   style?: CSSProperties
   index?: number

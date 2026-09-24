@@ -108,7 +108,7 @@ function CommentsWindowApp(): ReactElement {
     setSendFailures(chatSendFailures(operation))
   }, [])
   const [viewerSample, setViewerSample] = useState<ViewerSample | null>(null)
-  // The Stream Manager's live data (plan 053, S7): relayed through main.
+  // The Stream Manager's live data (plan 055, S7): relayed through main.
   const [dashboard, setDashboard] = useState<LiveDashboardState | null>(null)
   // Co-host: the MAIN renderer resolves Premium, consent and the engine state,
   // and relays ONE value. This window never re-derives gating. Presence is

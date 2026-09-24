@@ -5,7 +5,7 @@ import { ChartContainer, type ChartConfig } from '@/components/ui/chart'
 import { cn } from '@/lib/utils'
 
 /**
- * A stats-strip sparkline (plan 053, D2), built on the shadcn chart. Neutral
+ * A stats-strip sparkline (plan 055, D2), built on the shadcn chart. Neutral
  * by default; a warning tone only when the tile itself is warning. No axes,
  * no tooltip, no animation: the number above it is the reading.
  */

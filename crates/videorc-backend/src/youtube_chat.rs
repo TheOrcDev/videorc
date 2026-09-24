@@ -51,7 +51,7 @@ pub struct YouTubeChatConfig {
     /// Test-only override of the API base URL.
     #[serde(default)]
     pub api_base_url: Option<String>,
-    /// How the connector renews `access_token` mid-stream (plan 053, B2).
+    /// How the connector renews `access_token` mid-stream (plan 055, B2).
     /// Built by the backend from the stored account; never read from params.
     #[serde(skip)]
     pub token_source: crate::session_token::SessionTokenSource,
@@ -321,7 +321,7 @@ fn small(value: Option<u64>) -> Option<u32> {
     value.and_then(|number| u32::try_from(number).ok())
 }
 
-/// Structured facts for a YouTube monetized or membership event (plan 053).
+/// Structured facts for a YouTube monetized or membership event (plan 055).
 fn event_details(
     snippet: &LiveChatItemSnippet,
     message_type: &str,
@@ -873,7 +873,7 @@ pub async fn run_youtube_chat_connector(
     let mut backoff_ms = MIN_POLLING_INTERVAL_MS;
     let mut connected = false;
     // One renewal per refusal: a second refusal right after it means the
-    // account itself must be reconnected (plan 053, B2).
+    // account itself must be reconnected (plan 055, B2).
     let mut renewed_since_success = false;
 
     loop {
@@ -1505,7 +1505,7 @@ mod tests {
     }
 
     /// YouTube accepts `token-1` for one page, then refuses it as expired;
-    /// only `token-2` works after that (plan 053, B2).
+    /// only `token-2` works after that (plan 055, B2).
     #[derive(Clone)]
     struct ExpiringYouTube {
         pages: Arc<std::sync::atomic::AtomicUsize>,

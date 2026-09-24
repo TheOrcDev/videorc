@@ -153,7 +153,7 @@ Everything except ⌘K uses the desktop scale.
 
 ## Stream Manager
 
-The live dashboard window (plan 053; code name `comments`, the old Chat
+The live dashboard window (plan 055; code name `comments`, the old Chat
 window). It follows the window family and adds its own layout rules.
 
 - **Tiers by container query.** The body is `@container/stream-manager`,

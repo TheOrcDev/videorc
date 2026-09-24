@@ -590,7 +590,7 @@ const CHAT_MESSAGE_FIELDS: &[&str] = &[
 
 pub fn project_chat_message(message: &serde_json::Value) -> Option<serde_json::Value> {
     let source = message.as_object()?;
-    // Follows are Stream Manager activity, not chat (plan 053).
+    // Follows are Stream Manager activity, not chat (plan 055).
     if source.get("eventType").and_then(serde_json::Value::as_str) == Some("follow") {
         return None;
     }
