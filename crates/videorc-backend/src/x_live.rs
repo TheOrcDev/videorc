@@ -1145,47 +1145,125 @@ async fn publish_broadcast(
     send_x_request(client, credentials, Method::PUT, url, Some(body)).await
 }
 
-/// Best-effort concurrent-viewer count for a live X broadcast (plan 028:
-/// `GET /2/users/{uid}/broadcasts/{bid}` surfaces state + viewer counts). The
-/// producer API's field name varies across its Periscope lineage, so parse
-/// defensively; a missing count is a skipped sample, never an error — the
-/// sampler's failure discipline (viewer_stats.rs) forbids degrading the
-/// stream over telemetry.
+/// One X viewer poll (plan 054): the concurrent count, or why there is none.
+/// The reasons carry key names and HTTP statuses only, never a body or URL,
+/// so they are safe to write to the session log.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum XViewerCountOutcome {
+    Count(u64),
+    /// The broadcast came back without a concurrent-viewer field.
+    NoField {
+        keys: Vec<String>,
+    },
+    Http {
+        status: u16,
+    },
+    Transport,
+}
+
+impl XViewerCountOutcome {
+    pub fn count(&self) -> Option<u64> {
+        match self {
+            Self::Count(count) => Some(*count),
+            _ => None,
+        }
+    }
+
+    /// A stable one-line reason for the session log; `None` for a count.
+    pub fn log_reason(&self) -> Option<String> {
+        match self {
+            Self::Count(_) => None,
+            Self::NoField { keys } => Some(format!(
+                "X broadcast had no concurrent-viewer field (keys: {}).",
+                if keys.is_empty() {
+                    "none".to_string()
+                } else {
+                    keys.join(", ")
+                }
+            )),
+            Self::Http { status } => Some(format!("X broadcast lookup failed with HTTP {status}.")),
+            Self::Transport => Some("X broadcast lookup could not reach X.".to_string()),
+        }
+    }
+}
+
+/// Concurrent viewers of a live X broadcast: `GET /2/broadcasts/{id}`, the
+/// documented "while live" call (viewer counts, thumbnails and state), signed
+/// with the "Authorize X Live" OAuth 1.0a token. A missing count is a skipped
+/// sample, never an error: the sampler's failure discipline
+/// (viewer_stats.rs) forbids degrading the stream over telemetry.
 pub async fn fetch_broadcast_viewer_count(
     client: &reqwest::Client,
     credentials: &XLivestreamCredentials,
     base_url: &str,
     broadcast_id: &str,
-) -> Option<u64> {
+) -> XViewerCountOutcome {
     // GET /2/broadcasts/:id — the user-prefixed route is deprecated (docs
     // verified 2026-08-19); ownership is still enforced by the auth context.
-    let url = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}")).ok()?;
-    let value: serde_json::Value = send_x_request(client, credentials, Method::GET, url, None)
+    let Ok(url) = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}")) else {
+        return XViewerCountOutcome::Transport;
+    };
+    let Ok(authorization) = oauth1_authorization_header(
+        Method::GET.as_str(),
+        url.as_str(),
+        credentials,
+        &oauth_nonce(),
+        oauth_timestamp(),
+    ) else {
+        return XViewerCountOutcome::Transport;
+    };
+    let Ok(response) = client
+        .get(url)
+        .header("Authorization", authorization)
+        .send()
         .await
-        .ok()?;
-    parse_x_broadcast_viewer_count(&value)
+    else {
+        return XViewerCountOutcome::Transport;
+    };
+    let status = response.status();
+    if !status.is_success() {
+        return XViewerCountOutcome::Http {
+            status: status.as_u16(),
+        };
+    }
+    match response.json::<serde_json::Value>().await {
+        Ok(body) => x_broadcast_viewer_outcome(&body),
+        Err(_) => XViewerCountOutcome::Transport,
+    }
 }
 
-pub fn parse_x_broadcast_viewer_count(body: &serde_json::Value) -> Option<u64> {
-    let broadcast = body.get("broadcast").unwrap_or(body);
-    for key in [
-        "viewer_count",
-        "total_watching",
-        "concurrent_viewers",
-        "num_watching",
-        "watching_count",
-    ] {
+/// Concurrent-viewer fields, current name first. `total_watched` is the
+/// cumulative count and is never used: it would inflate the chip.
+const X_CONCURRENT_VIEWER_KEYS: [&str; 5] = [
+    "total_watching",
+    "viewer_count",
+    "concurrent_viewers",
+    "num_watching",
+    "watching_count",
+];
+
+/// Reads the count from `GetBroadcastResponse`: the official OpenAPI wraps
+/// the `Broadcast` in `data` (plan 054), older shapes in `broadcast`, and the
+/// count is a string.
+pub fn x_broadcast_viewer_outcome(body: &serde_json::Value) -> XViewerCountOutcome {
+    let broadcast = crate::scheduled_x::payload(body);
+    for key in X_CONCURRENT_VIEWER_KEYS {
         let Some(count) = broadcast.get(key) else {
             continue;
         };
         if let Some(count) = count.as_u64() {
-            return Some(count);
+            return XViewerCountOutcome::Count(count);
         }
-        if let Some(count) = count.as_str().and_then(|value| value.parse().ok()) {
-            return Some(count);
+        if let Some(count) = count.as_str().and_then(|value| value.trim().parse().ok()) {
+            return XViewerCountOutcome::Count(count);
         }
     }
-    None
+    let mut keys: Vec<String> = broadcast
+        .as_object()
+        .map(|object| object.keys().cloned().collect())
+        .unwrap_or_default();
+    keys.sort();
+    XViewerCountOutcome::NoField { keys }
 }
 
 /// Maximum chat message length X accepts (`POST /2/broadcasts/:id/chat`).
@@ -1832,18 +1910,88 @@ mod tests {
         use serde_json::json;
         // Enveloped, numeric.
         assert_eq!(
-            parse_x_broadcast_viewer_count(&json!({"broadcast": {"total_watching": 42}})),
+            x_broadcast_viewer_outcome(&json!({"broadcast": {"total_watching": 42}})).count(),
             Some(42)
         );
         // Bare object, string-typed count (Periscope lineage).
         assert_eq!(
-            parse_x_broadcast_viewer_count(&json!({"viewer_count": "7"})),
+            x_broadcast_viewer_outcome(&json!({"viewer_count": "7"})).count(),
             Some(7)
         );
         // No recognized field = skipped sample, never a panic.
         assert_eq!(
-            parse_x_broadcast_viewer_count(&json!({"broadcast": {"state": "RUNNING"}})),
+            x_broadcast_viewer_outcome(&json!({"broadcast": {"state": "RUNNING"}})).count(),
             None
+        );
+    }
+
+    #[test]
+    fn the_documented_data_envelope_carries_the_viewer_count() {
+        use serde_json::json;
+        // `GetBroadcastResponse` per the official OpenAPI (plan 054): every
+        // X poll in 19 real broadcasts missed this envelope.
+        assert_eq!(
+            x_broadcast_viewer_outcome(&json!({"data": {"total_watching": "12"}})),
+            XViewerCountOutcome::Count(12)
+        );
+        assert_eq!(
+            x_broadcast_viewer_outcome(&json!({"broadcast": {"total_watching": 12}})),
+            XViewerCountOutcome::Count(12)
+        );
+        // Cumulative viewers never stand in for concurrent ones.
+        assert_eq!(
+            x_broadcast_viewer_outcome(
+                &json!({"data": {"total_watched": "500", "state": "RUNNING"}})
+            ),
+            XViewerCountOutcome::NoField {
+                keys: vec!["state".to_string(), "total_watched".to_string()]
+            }
+        );
+        assert_eq!(
+            XViewerCountOutcome::NoField {
+                keys: vec!["state".to_string()]
+            }
+            .log_reason()
+            .as_deref(),
+            Some("X broadcast had no concurrent-viewer field (keys: state).")
+        );
+        assert_eq!(XViewerCountOutcome::Count(3).log_reason(), None);
+    }
+
+    #[tokio::test]
+    async fn a_refused_viewer_lookup_reports_its_status() {
+        use axum::Router;
+        use axum::http::StatusCode;
+        use axum::routing::get;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(
+                listener,
+                Router::new()
+                    .route(
+                        "/2/broadcasts/refused",
+                        get(|| async { (StatusCode::UNAUTHORIZED, "{}") }),
+                    )
+                    .route(
+                        "/2/broadcasts/live",
+                        get(|| async {
+                            axum::Json(serde_json::json!({"data": {"total_watching": "31"}}))
+                        }),
+                    ),
+            )
+            .await
+            .unwrap();
+        });
+        let client = reqwest::Client::new();
+        let base = format!("http://{address}");
+        assert_eq!(
+            fetch_broadcast_viewer_count(&client, &credentials(), &base, "refused").await,
+            XViewerCountOutcome::Http { status: 401 }
+        );
+        assert_eq!(
+            fetch_broadcast_viewer_count(&client, &credentials(), &base, "live").await,
+            XViewerCountOutcome::Count(31)
         );
     }
     use super::*;

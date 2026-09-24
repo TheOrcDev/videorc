@@ -306,16 +306,67 @@ async fn fetch_twitch_count(
     CountFetch::Count(body.as_ref().and_then(parse_twitch_viewer_count))
 }
 
-async fn fetch_x_count(client: &reqwest::Client, config: &XViewerConfig) -> Option<u64> {
+/// Session log code for an X viewer poll that produced no count (plan 054).
+pub const X_VIEWER_LOG_CODE: &str = "stream-viewers-x";
+
+/// Why X polls came back without a count, logged once per distinct reason per
+/// session: an HTTP status and an envelope mismatch used to look identical
+/// (no log, no sample) through 19 real broadcasts.
+#[derive(Debug, Default)]
+pub struct XViewerDiagnostics {
+    logged: std::collections::HashSet<String>,
+}
+
+impl XViewerDiagnostics {
+    /// The reason to log for this outcome, only the first time it is seen.
+    pub fn first_report(&mut self, outcome: &crate::x_live::XViewerCountOutcome) -> Option<String> {
+        let reason = outcome.log_reason()?;
+        self.logged.insert(reason.clone()).then_some(reason)
+    }
+}
+
+async fn fetch_x_count(
+    state: &AppState,
+    session_id: &str,
+    client: &reqwest::Client,
+    config: &XViewerConfig,
+    diagnostics: &mut XViewerDiagnostics,
+) -> Option<u64> {
     // Credentials are resolved per poll so a rotated token is picked up
     // without restarting the sampler.
-    let credentials = crate::x_live::x_livestream_credentials().ok().flatten()?;
+    let Some(credentials) = crate::x_live::x_livestream_credentials().ok().flatten() else {
+        if diagnostics.logged.insert("missing-credentials".to_string()) {
+            let _ = state.database.add_session_log(
+                session_id,
+                HealthLevel::Warn,
+                X_VIEWER_LOG_CODE,
+                "X viewers need the \"Authorize X Live\" token, which is missing.",
+                None,
+            );
+        }
+        return None;
+    };
     let base = config
         .api_base_url
         .as_deref()
         .unwrap_or(crate::x_live::DEFAULT_API_BASE_URL);
-    crate::x_live::fetch_broadcast_viewer_count(client, &credentials, base, &config.broadcast_id)
-        .await
+    let outcome = crate::x_live::fetch_broadcast_viewer_count(
+        client,
+        &credentials,
+        base,
+        &config.broadcast_id,
+    )
+    .await;
+    if let Some(reason) = diagnostics.first_report(&outcome) {
+        let _ = state.database.add_session_log(
+            session_id,
+            HealthLevel::Warn,
+            X_VIEWER_LOG_CODE,
+            &reason,
+            None,
+        );
+    }
+    outcome.count()
 }
 
 /// Session-scoped sampler task; aborted with the live-chat connectors on stop.
@@ -341,6 +392,7 @@ pub async fn run_viewer_sampler(
             config.token_source.clone(),
         )
     });
+    let mut x_diagnostics = XViewerDiagnostics::default();
     let mut twitch_token = twitch.as_ref().map(|config| {
         crate::session_token::SessionToken::new(
             config.access_token.clone(),
@@ -365,7 +417,9 @@ pub async fn run_viewer_sampler(
             counts.push((StreamPlatform::Twitch, count));
         }
         if let Some(config) = x.as_ref() {
-            counts.push((StreamPlatform::X, fetch_x_count(&client, config).await));
+            let count =
+                fetch_x_count(&state, &session_id, &client, config, &mut x_diagnostics).await;
+            counts.push((StreamPlatform::X, count));
         }
 
         let sample = state
@@ -531,6 +585,26 @@ mod tests {
             .unwrap();
         assert_eq!(sample.session_id, "new");
         assert_eq!(totals(&sample), (3, vec![(StreamPlatform::X, 3)]));
+    }
+
+    #[test]
+    fn an_x_poll_without_a_count_is_reported_once_per_reason() {
+        use crate::x_live::XViewerCountOutcome;
+        let mut diagnostics = XViewerDiagnostics::default();
+        let refused = XViewerCountOutcome::Http { status: 401 };
+        assert_eq!(
+            diagnostics.first_report(&refused).as_deref(),
+            Some("X broadcast lookup failed with HTTP 401.")
+        );
+        assert_eq!(diagnostics.first_report(&refused), None);
+        let envelope = XViewerCountOutcome::NoField {
+            keys: vec!["state".to_string()],
+        };
+        assert!(diagnostics.first_report(&envelope).is_some());
+        assert_eq!(
+            diagnostics.first_report(&XViewerCountOutcome::Count(9)),
+            None
+        );
     }
 
     #[test]
