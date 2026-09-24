@@ -87,6 +87,11 @@ pub struct PlatformAudience {
     /// Twitch sub points (a Tier 1 sub is 1, Tier 2 is 2, Tier 3 is 6).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subscriber_points: Option<u64>,
+    /// Twitch only: whether the account granted the opt-in scopes for
+    /// follow alerts and the sub count (S6). The window offers the
+    /// reconnect when this is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub audience_scopes: Option<bool>,
 }
 
 /// Twitch `Get Broadcaster Subscriptions` totals.
@@ -169,6 +174,7 @@ impl AudienceHub {
                     message: None,
                     subscribers: None,
                     subscriber_points: None,
+                    audience_scopes: None,
                 });
             }
         }
@@ -229,6 +235,31 @@ impl AudienceHub {
         if *entry == before {
             return None;
         }
+        snapshot.updated_at = now.to_string();
+        Some(snapshot.clone())
+    }
+
+    /// Records whether a platform's account holds the opt-in audience
+    /// scopes. Returns the snapshot to emit when that changed.
+    pub fn apply_audience_scopes(
+        &mut self,
+        session_id: &str,
+        platform: StreamPlatform,
+        granted: bool,
+        now: &str,
+    ) -> Option<AudienceSnapshot> {
+        let snapshot = self
+            .snapshot
+            .as_mut()
+            .filter(|snapshot| snapshot.session_id == session_id)?;
+        let entry = snapshot
+            .platforms
+            .iter_mut()
+            .find(|entry| entry.platform == platform)?;
+        if entry.audience_scopes == Some(granted) {
+            return None;
+        }
+        entry.audience_scopes = Some(granted);
         snapshot.updated_at = now.to_string();
         Some(snapshot.clone())
     }
@@ -504,6 +535,8 @@ pub async fn fetch_x_followers_oauth1(
 struct SourceRead {
     reading: AudienceReading,
     subscribers: Option<SubscriberCount>,
+    /// Twitch: whether both opt-in audience scopes are granted.
+    audience_scopes: Option<bool>,
 }
 
 impl From<AudienceReading> for SourceRead {
@@ -511,15 +544,7 @@ impl From<AudienceReading> for SourceRead {
         Self {
             reading,
             subscribers: None,
-        }
-    }
-}
-
-impl AudienceReading {
-    fn with_subscribers(self, subscribers: Option<SubscriberCount>) -> SourceRead {
-        SourceRead {
-            reading: self,
-            subscribers,
+            audience_scopes: None,
         }
     }
 }
@@ -586,9 +611,16 @@ async fn read_source(
             Err(error) => return token_error_reading(source.platform, &error).into(),
         }
     }
-    reading.with_subscribers(
-        read_twitch_subscribers(client, source.platform, &credential, &token).await,
-    )
+    let audience_scopes = (source.platform == StreamPlatform::Twitch).then(|| {
+        crate::oauth::optional_scopes_for(StreamPlatform::Twitch)
+            .iter()
+            .all(|scope| credential.account.scopes.iter().any(|held| held == scope))
+    });
+    SourceRead {
+        subscribers: read_twitch_subscribers(client, source.platform, &credential, &token).await,
+        reading,
+        audience_scopes,
+    }
 }
 
 /// The Twitch sub total, only when the account opted into the scope (S6).
@@ -755,10 +787,20 @@ async fn run_source(state: AppState, session_id: String, source: AudienceSource)
         let SourceRead {
             reading,
             subscribers,
+            audience_scopes,
         } = read_source(&state, &client, &source).await;
         apply_reading(&state, &session_id, source.platform, &reading);
         if let Some(count) = subscribers {
             apply_subscribers(&state, &session_id, source.platform, count);
+        }
+        if let Some(granted) = audience_scopes {
+            let now = chrono::Utc::now().to_rfc3339();
+            let snapshot = state.audience.lock().ok().and_then(|mut hub| {
+                hub.apply_audience_scopes(&session_id, source.platform, granted, &now)
+            });
+            if let Some(snapshot) = snapshot {
+                publish(&state, snapshot, false);
+            }
         }
         let delay = reading.next_delay(backoff);
         backoff = matches!(reading, AudienceReading::Failed(_)).then_some(delay);

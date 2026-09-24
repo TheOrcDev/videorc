@@ -166,6 +166,10 @@ pub enum LiveChatEventDetails {
         gift_count: Option<u32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient_name: Option<String>,
+        /// Ties a community gift to the single gifts Twitch also sends for
+        /// it, so the Activity pane counts the gift once.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        community_gift_id: Option<String>,
     },
     /// Twitch bits.
     Cheer { bits: u64 },
@@ -646,6 +650,10 @@ pub struct CommentsSendParams {
     /// operation.
     #[serde(default)]
     pub in_reply_to_question_id: Option<String>,
+    /// Send only to these providers (Stream Manager's "Send to" picker, plan
+    /// 053 S10). Absent sends to every provider, as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -897,12 +905,15 @@ impl LiveChatCoordinator {
         if message.session_id != session_id {
             return HighlightMessageEligibility::WrongSession;
         }
+        // A notice goes on stream only as an activity event (a raid, an
+        // announcement: plan 053, S11); plain system text never does.
+        let plain_notice =
+            message.event_type == LiveChatEventType::System && message.details.is_none();
         if message.is_deleted
+            || plain_notice
             || matches!(
                 message.event_type,
-                LiveChatEventType::Deleted
-                    | LiveChatEventType::System
-                    | LiveChatEventType::Moderation
+                LiveChatEventType::Deleted | LiveChatEventType::Moderation
             )
         {
             return HighlightMessageEligibility::Ineligible;
@@ -1952,13 +1963,26 @@ async fn execute_send_live_chat_message(
         if coordinator.session_id.as_deref() != Some(params.session_id.as_str()) {
             return Err("The Comments session changed before this message could send.".to_string());
         }
-        let providers = coordinator.providers.clone();
+        let providers = coordinator
+            .providers
+            .iter()
+            .filter(|provider| {
+                params
+                    .destination_ids
+                    .as_ref()
+                    .is_none_or(|selected| selected.contains(&provider.id))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
         let senders = providers
             .iter()
             .map(|provider| (provider.id.clone(), coordinator.sender(&provider.id)))
             .collect::<HashMap<_, _>>();
         (providers, senders)
     };
+    if params.destination_ids.is_some() && providers.is_empty() {
+        return Err("Pick at least one destination to send to.".to_string());
+    }
 
     let now = chrono::Utc::now().to_rfc3339();
     let in_reply_to_question_id = params
@@ -2990,7 +3014,86 @@ mod tests {
             session_id: session_id.to_string(),
             text: text.to_string(),
             in_reply_to_question_id: None,
+            destination_ids: None,
         }
+    }
+
+    #[test]
+    fn activity_events_can_go_on_stream_but_plain_notices_cannot() {
+        let mut coordinator = LiveChatCoordinator::new(10);
+        coordinator.start_session(
+            "s1".to_string(),
+            vec![connected_provider("twitch", StreamPlatform::Twitch)],
+        );
+        let mut raid = fake_message("s1", StreamPlatform::Twitch, None, 1);
+        raid.event_type = LiveChatEventType::System;
+        raid.details = Some(LiveChatEventDetails::Raid { viewer_count: 234 });
+        let mut notice = fake_message("s1", StreamPlatform::Twitch, None, 2);
+        notice.event_type = LiveChatEventType::System;
+        let mut resub = fake_message("s1", StreamPlatform::Twitch, None, 3);
+        resub.event_type = LiveChatEventType::Membership;
+        for message in [&raid, &notice, &resub] {
+            coordinator.ingest(message.clone());
+        }
+        assert_eq!(
+            coordinator.highlight_message_eligibility("s1", &raid.id),
+            HighlightMessageEligibility::Eligible
+        );
+        assert_eq!(
+            coordinator.highlight_message_eligibility("s1", &notice.id),
+            HighlightMessageEligibility::Ineligible
+        );
+        assert_eq!(
+            coordinator.highlight_message_eligibility("s1", &resub.id),
+            HighlightMessageEligibility::Eligible
+        );
+    }
+
+    #[tokio::test]
+    async fn a_send_reaches_only_the_picked_destinations() {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("picked")
+            .unwrap();
+        {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session(
+                "picked".to_string(),
+                vec![
+                    connected_provider("youtube-a", StreamPlatform::Youtube),
+                    connected_provider("twitch-a", StreamPlatform::Twitch),
+                ],
+            );
+            coordinator.register_sender(
+                "youtube-a".to_string(),
+                ChatSenderConfig::Fake(FakeChatSendBehavior::Sent),
+            );
+            coordinator.register_sender(
+                "twitch-a".to_string(),
+                ChatSenderConfig::Fake(FakeChatSendBehavior::Sent),
+            );
+        }
+        let mut params = send_params(
+            "11111111-2222-4333-8444-555555555555",
+            "picked",
+            "only twitch",
+        );
+        params.destination_ids = Some(vec!["twitch-a".to_string()]);
+        let operation = send_live_chat_message(&state, params).await.unwrap();
+        assert_eq!(
+            operation
+                .destinations
+                .iter()
+                .map(|delivery| delivery.destination_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["twitch-a"]
+        );
+        assert_eq!(operation.phase, CommentsSendOperationPhase::Sent);
+
+        let mut none = send_params("11111111-2222-4333-8444-666666666666", "picked", "nowhere");
+        none.destination_ids = Some(Vec::new());
+        assert!(send_live_chat_message(&state, none).await.is_err());
     }
 
     #[test]

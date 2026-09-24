@@ -9994,22 +9994,26 @@ async fn handle_text_message_with_role(
             }
         }
         "platformAccounts.oauth.startProvider" => {
-            match serde_json::from_value::<OAuthStartProviderParams>(command.params) {
-                Ok(mut params) => match {
+            let parsed = serde_json::from_value::<OAuthStartProviderParams>(command.params).map(
+                |mut params| {
                     // A reconnect keeps the optional scopes the account already
                     // granted, so a plain "Reconnect" never drops follow alerts.
                     params.optional_scopes =
                         retained_optional_scopes(state, params.platform, &params.optional_scopes);
-                    state
-                        .oauth
-                        .start_provider_with_secret_store(
-                            params,
-                            state.oauth_redirect_port(),
-                            secrets::put_secret,
-                            secrets::delete_secret,
-                        )
-                        .await
-                } {
+                    params
+                },
+            );
+            match parsed {
+                Ok(params) => match state
+                    .oauth
+                    .start_provider_with_secret_store(
+                        params,
+                        state.oauth_redirect_port(),
+                        secrets::put_secret,
+                        secrets::delete_secret,
+                    )
+                    .await
+                {
                     Ok(result) => {
                         // A device grant (Twitch) has no redirect, so nothing
                         // will ever deliver a callback. Drive the SAME

@@ -471,6 +471,17 @@ fn subscription_details(
     gift_count: Option<u32>,
     recipient_name: Option<String>,
 ) -> LiveChatEventDetails {
+    // `community_sub_gift.id` on the community notice, `community_gift_id`
+    // on each single gift it produces.
+    let community_gift_id = body["community_gift_id"]
+        .as_str()
+        .or(if kind == SubscriptionKind::CommunitySubGift {
+            body["id"].as_str()
+        } else {
+            None
+        })
+        .filter(|id| !id.is_empty())
+        .map(ToOwned::to_owned);
     LiveChatEventDetails::Subscription {
         subscription: kind,
         tier: tier_field(&body["sub_tier"]),
@@ -479,6 +490,7 @@ fn subscription_details(
         streak_months: u32_field(&body["streak_months"]),
         gift_count,
         recipient_name,
+        community_gift_id,
     }
 }
 
@@ -2163,6 +2175,7 @@ mod tests {
                 streak_months: Some(2),
                 gift_count: None,
                 recipient_name: None,
+                community_gift_id: None,
             })
         );
 
@@ -2191,12 +2204,24 @@ mod tests {
 
         let community = notice(&fixture!("twitch-notification-community-sub-gift"));
         assert!(matches!(
-            community.details,
+            &community.details,
             Some(LiveChatEventDetails::Subscription {
                 subscription: SubscriptionKind::CommunitySubGift,
                 gift_count: Some(5),
+                community_gift_id: Some(id),
                 ..
-            })
+            }) if id == "gift-batch-1"
+        ));
+        // One of the single gifts Twitch sends for that community gift.
+        let mut single = fixture!("twitch-notification-sub-gift");
+        single["sub_gift"]["community_gift_id"] = serde_json::json!("gift-batch-1");
+        assert!(matches!(
+            &notice(&single).details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::SubGift,
+                community_gift_id: Some(id),
+                ..
+            }) if id == "gift-batch-1"
         ));
 
         let raid = notice(&fixture!("twitch-notification-raid"));
