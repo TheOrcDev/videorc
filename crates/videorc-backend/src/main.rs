@@ -4888,6 +4888,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sessions.delete.pending"
         | "sessions.storage"
         | "sessions.comments.list"
+        | "sessions.viewers.list"
         | "platformAccounts.list"
         | "liveChat.capability"
         | "liveChat.status"
@@ -9386,6 +9387,27 @@ async fn handle_text_message_with_role(
                         error.to_string(),
                     ),
                 },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "sessions.viewers.list" => {
+            match serde_json::from_value::<viewer_stats::SessionViewersListParams>(command.params) {
+                Ok(params) => {
+                    match viewer_stats::session_viewer_history(&state.database, &params.session_id)
+                    {
+                        Ok(samples) => ServerResponse::ok(
+                            command.id,
+                            viewer_stats::SessionViewersPage { samples },
+                        ),
+                        Err(error) => ServerResponse::error(
+                            command.id,
+                            "session-viewers-list-failed",
+                            error.to_string(),
+                        ),
+                    }
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }

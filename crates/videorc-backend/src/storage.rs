@@ -3356,6 +3356,29 @@ impl Database {
         })
     }
 
+    /// The latest `limit` log messages with `code` for a session, oldest first.
+    pub fn list_session_log_messages(
+        &self,
+        session_id: &str,
+        code: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT message FROM session_logs
+             WHERE session_id = ?1 AND code = ?2
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![session_id, code, limit], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut messages = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        messages.reverse();
+        Ok(messages)
+    }
+
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
         let conn = self.lock()?;
         let mut stmt = conn.prepare(
@@ -7780,6 +7803,50 @@ mod tests {
         assert_eq!(messages[1].details, None);
         assert_eq!(messages[1].reply, None);
         assert!(!messages[1].first_message);
+    }
+
+    #[test]
+    fn viewer_history_reads_back_a_finished_sessions_samples_in_order() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("finished"))
+            .unwrap();
+        database.create_session(&sample_session("other")).unwrap();
+        for (session, total) in [("finished", 10), ("other", 99), ("finished", 25)] {
+            let sample = serde_json::json!({
+                "sessionId": session,
+                "platforms": [{ "platform": "twitch", "count": total }],
+                "total": total,
+                "at": "2026-09-24T10:00:00Z",
+            });
+            database
+                .add_session_log(
+                    session,
+                    HealthLevel::Info,
+                    crate::viewer_stats::VIEWER_SAMPLE_LOG_CODE,
+                    &sample.to_string(),
+                    None,
+                )
+                .unwrap();
+            // created_at has sub-second precision; keep the rows ordered.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        database
+            .add_session_log(
+                "finished",
+                HealthLevel::Info,
+                crate::viewer_stats::VIEWER_SAMPLE_LOG_CODE,
+                "not json",
+                None,
+            )
+            .unwrap();
+        database
+            .add_session_log("finished", HealthLevel::Warn, "other-code", "{}", None)
+            .unwrap();
+
+        let history = crate::viewer_stats::session_viewer_history(&database, "finished").unwrap();
+        let totals: Vec<u64> = history.iter().map(|sample| sample.total).collect();
+        assert_eq!(totals, vec![10, 25]);
     }
 
     #[test]

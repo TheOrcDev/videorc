@@ -4423,12 +4423,24 @@ export interface ViewerPlatformCount {
   count: number
 }
 
-/** Live concurrent-viewer sample (viewer rider V1) — viewers, not subs. */
+/**
+ * Live concurrent-viewer sample (viewer rider V1) — viewers, not subs. `total`
+ * sums every platform with a fresh count across all samplers (plan 053, B1).
+ */
 export interface ViewerSample {
   sessionId: string
   platforms: ViewerPlatformCount[]
   total: number
   at: string
+}
+
+/** `sessions.viewers.list` (plan 053, S1): a session's saved samples, oldest first. */
+export interface SessionViewersListParams {
+  sessionId: string
+}
+
+export interface SessionViewersPage {
+  samples: ViewerSample[]
 }
 
 export interface ObsDiscovery {

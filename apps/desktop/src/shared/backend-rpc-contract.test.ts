@@ -11,6 +11,7 @@ import type {
   SessionHealthEventsPage,
   SessionListPage,
   SessionLogsPage,
+  SessionViewersPage,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
   StreamTargetsSnapshot
@@ -590,6 +591,33 @@ describe('backend RPC contract', () => {
         limit: 1001
       })
     ).toThrow('less than or equal to 1000')
+  })
+
+  it('types a session viewer history and rejects forged sample fields', () => {
+    expectTypeOf<BackendRpcResult<'sessions.viewers.list'>>().toEqualTypeOf<SessionViewersPage>()
+    const sample = {
+      sessionId: 'session-1',
+      platforms: [
+        { platform: 'twitch', count: 40 },
+        { platform: 'x', count: 2 }
+      ],
+      total: 42,
+      at: '2026-09-24T10:00:00Z'
+    }
+    expect(validateBackendRpcParams('sessions.viewers.list', { sessionId: 'session-1' })).toEqual({
+      sessionId: 'session-1'
+    })
+    expect(validateBackendRpcResult('sessions.viewers.list', { samples: [sample] })).toEqual({
+      samples: [sample]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', {
+        samples: [{ ...sample, platforms: [{ platform: 'myspace', count: 1 }] }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', { samples: [{ ...sample, total: -1 }] })
+    ).toThrow()
   })
 
   it('keeps Library summaries slim and types each paginated detail collection', () => {
