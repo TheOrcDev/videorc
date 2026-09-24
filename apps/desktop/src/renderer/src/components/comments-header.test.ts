@@ -30,15 +30,20 @@ function provider(overrides: Partial<LiveChatProviderState> = {}): LiveChatProvi
 // only; every control lives in the status bar, inline from 640 px and folded
 // into ⋯ below it. probe:comments-window proves the real geometry.
 describe('Stream Manager status bar', () => {
-  it('names each provider by what chat can do there', () => {
-    expect(providerCapabilityLabel(provider())).toBe('read · send')
+  // Plan 057, D3: quiet when fine. A platform that reads and sends is its
+  // icon and dot; words appear only for what chat cannot do.
+  it('names a provider only by what chat cannot do there', () => {
+    expect(providerCapabilityLabel(provider())).toBe('')
     expect(providerCapabilityLabel(provider({ platform: 'x', write: 'read-only' }))).toBe(
       'read-only'
     )
-    expect(providerCapabilityLabel(provider({ write: 'missing-scope' }))).toBe(
-      'read · reconnect to send'
-    )
+    expect(providerCapabilityLabel(provider({ write: 'missing-scope' }))).toBe('reconnect to send')
     expect(providerCapabilityLabel(provider({ state: 'failed' }))).toBe('failed')
+    expect(providerCapabilityLabel(provider({ state: 'reconnecting' }))).toBe('reconnecting')
+    // The words still live in the hover text.
+    expect(providerCapabilityTitle(provider(), null).split('\n')[0]).toBe(
+      'Twitch chat: reads and sends'
+    )
   })
 
   it('offers the Twitch reconnect when follow alerts need the opt-in scopes', () => {
@@ -70,8 +75,13 @@ describe('Stream Manager status bar', () => {
     expect(markup).toContain('aria-label="Keep this window on top"')
     expect(markup).toContain('aria-pressed="true"')
     expect(markup).toContain('title="Highlight position: Bottom left"')
-    expect(markup).toContain('Clear view')
-    expect(markup).toContain('Open Preview')
+    expect(markup).toContain('aria-label="Clear view"')
+    expect(markup).toContain('>Clear<')
+    expect(markup).toContain('aria-label="Open Preview"')
+    // Icons with their names on hover: no visible "Keep on top" words inline.
+    expect(markup).not.toContain('>Keep on top</span>')
+    // A healthy provider draws no words.
+    expect(markup).not.toContain('read · send')
     expect(markup).toContain('aria-label="More Stream Manager actions"')
     expect(markup).toContain(NARROW_ONLY)
     expect(markup).toContain('[-webkit-app-region:no-drag]')

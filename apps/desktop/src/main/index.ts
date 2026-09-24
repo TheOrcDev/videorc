@@ -10233,7 +10233,7 @@ async function runSmokePreviewMotionCommand(
           moreMenu: button('More Stream Manager actions'),
           highlightPosition: button('Highlight position'),
           keepOnTop: button('Keep this window on top'),
-          clearViewVisible: visible(textButton('Clear view')),
+          clearViewVisible: visible(document.querySelector('button[aria-label="Clear view"]')),
           openPreviewVisible: visible(document.querySelector('button[aria-label="Open Preview"]')),
           backToLiveVisible: visible(textButton('Back to live'))
         };
