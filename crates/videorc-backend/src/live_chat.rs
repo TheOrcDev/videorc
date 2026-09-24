@@ -1316,6 +1316,14 @@ pub struct LiveChatStartParams {
     pub twitch: Option<crate::twitch_chat::TwitchChatConfig>,
     #[serde(default)]
     pub x: Option<crate::x_chat::XChatConfig>,
+    /// Follower and subscriber sources (plan 053, S3). Built by the backend
+    /// from the session's destinations; never read from RPC params, because
+    /// they resolve stored credentials.
+    #[serde(skip)]
+    pub audience: Vec<crate::audience::AudienceSource>,
+    /// Canned audience readings for smokes (no network, no credentials).
+    #[serde(default)]
+    pub fake_audience: Vec<crate::audience::FakeAudienceConfig>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1614,6 +1622,20 @@ where
         ));
         let mut coordinator = state.live_chat.lock().await;
         coordinator.attach_task(handle);
+    }
+    // Followers and subscribers (plan 053, S3) share the connectors'
+    // abort-on-stop lifecycle.
+    let audience_handles = crate::audience::start_audience(
+        state,
+        &params.session_id,
+        params.audience.clone(),
+        params.fake_audience.clone(),
+    );
+    if !audience_handles.is_empty() {
+        let mut coordinator = state.live_chat.lock().await;
+        for handle in audience_handles {
+            coordinator.attach_task(handle);
+        }
     }
     let snapshot = current_status(state).await;
     before_snapshot_emit.await;
@@ -3308,6 +3330,8 @@ mod tests {
                     youtube: None,
                     twitch: None,
                     x: None,
+                    audience: Vec::new(),
+                    fake_audience: Vec::new(),
                 },
             )
             .await
@@ -4850,6 +4874,8 @@ mod tests {
                 youtube: None,
                 twitch: None,
                 x: None,
+                audience: Vec::new(),
+                fake_audience: Vec::new(),
             },
         )
         .await;

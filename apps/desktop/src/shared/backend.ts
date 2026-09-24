@@ -4434,6 +4434,41 @@ export interface ViewerSample {
   at: string
 }
 
+/** What a platform's audience number counts: YouTube has subscribers, not followers. */
+export type AudienceMetric = 'followers' | 'subscribers'
+
+/**
+ * Whether a platform's audience can be shown (plan 053, S3): `pending` until
+ * the first read, `hidden` when the channel hides it, `needs-reconnect` when
+ * the platform refused the token, `unavailable` when this build or account
+ * cannot read it (`message` says why).
+ */
+export type AudienceCapability =
+  | 'pending'
+  | 'available'
+  | 'hidden'
+  | 'needs-reconnect'
+  | 'unavailable'
+
+export interface PlatformAudience {
+  platform: StreamPlatform
+  metric: AudienceMetric
+  capability: AudienceCapability
+  total?: number
+  /** The session's first reading; `delta` is `total - baseline`. */
+  baseline?: number
+  delta?: number
+  at?: string
+  message?: string
+}
+
+/** `stream.audience` event and `stream.audience.snapshot` result (wire mirror of audience.rs). */
+export interface AudienceSnapshot {
+  sessionId: string
+  platforms: PlatformAudience[]
+  updatedAt: string
+}
+
 /** `sessions.viewers.list` (plan 053, S1): a session's saved samples, oldest first. */
 export interface SessionViewersListParams {
   sessionId: string

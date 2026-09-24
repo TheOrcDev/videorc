@@ -8,6 +8,7 @@
 mod account;
 mod ai;
 mod atomic_file;
+mod audience;
 mod audio;
 mod audio_capture_adapter;
 mod backend_authority;
@@ -2144,6 +2145,66 @@ async fn fresh_platform_access_token(
     })
 }
 
+/// The stored OAuth account for `platform`, matched by row id or provider id;
+/// `None` takes the first connected account of the platform.
+fn platform_account_credential(
+    state: &AppState,
+    platform: StreamPlatform,
+    account_id: Option<&str>,
+) -> Result<storage::PlatformAccountCredentials> {
+    state
+        .database
+        .list_platform_account_credentials()?
+        .into_iter()
+        .find(|credential| {
+            credential.account.platform == platform
+                && account_id.is_none_or(|account_id| {
+                    credential.account.account_id == account_id
+                        || credential.account.id == account_id
+                })
+        })
+        .with_context(|| {
+            format!(
+                "No connected {} OAuth account is available.",
+                streaming::stream_platform_label(platform)
+            )
+        })
+}
+
+/// An access token for a session task that runs all stream long (plan 053,
+/// B2). Without `refused` it is refreshed when near expiry; with the token the
+/// provider just refused, it is refreshed now. Refreshes are serialized: a
+/// task that lost the race takes the winner's token instead of spending the
+/// refresh token again (X rotates them, so a second use fails).
+async fn session_platform_access_token(
+    state: &AppState,
+    platform: StreamPlatform,
+    account_id: Option<&str>,
+    client: &reqwest::Client,
+    refused: Option<&str>,
+) -> Result<String> {
+    let _refresh = state.platform_token_refresh.lock().await;
+    let credential = platform_account_credential(state, platform, account_id)?;
+    let Some(refused) = refused else {
+        return Ok(fresh_platform_access_token(state, &credential, client)
+            .await?
+            .access_token);
+    };
+    let access_ref = credential
+        .token_secret_ref
+        .as_deref()
+        .context("No OAuth access token is stored for this account.")?;
+    let current = secrets::get_secret(access_ref).context("Could not read access token.")?;
+    if current != refused {
+        return Ok(current);
+    }
+    Ok(
+        refresh_platform_access_token(state, &credential, access_ref, client)
+            .await?
+            .access_token,
+    )
+}
+
 async fn refresh_platform_access_token(
     state: &AppState,
     credential: &storage::PlatformAccountCredentials,
@@ -2916,6 +2977,8 @@ async fn prepare_session_live_chat(
         youtube: None,
         twitch: None,
         x: None,
+        audience: Vec::new(),
+        fake_audience: Vec::new(),
     };
     for target in &streaming.targets {
         if !enabled.contains(target.id.as_str()) {
@@ -2994,7 +3057,41 @@ async fn prepare_session_live_chat(
             StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {}
         }
     }
+    params.audience = session_audience_sources(streaming, &enabled);
     (!params.destinations.is_empty()).then_some(params)
+}
+
+/// One follower/subscriber source per platform with an enabled destination
+/// (plan 053, S3). Twitch and X read the connected account whatever the
+/// destination's auth mode, as Twitch chat does; a manual YouTube key names no
+/// channel, so YouTube needs an OAuth destination.
+fn session_audience_sources(
+    streaming: &crate::streaming::StreamingSettings,
+    enabled: &std::collections::HashSet<&str>,
+) -> Vec<audience::AudienceSource> {
+    let mut sources: Vec<audience::AudienceSource> = Vec::new();
+    for target in &streaming.targets {
+        let reads_audience = matches!(
+            target.platform,
+            StreamPlatform::Twitch | StreamPlatform::Youtube | StreamPlatform::X
+        );
+        let youtube_without_oauth = target.platform == StreamPlatform::Youtube
+            && target.auth_mode != crate::streaming::StreamAuthMode::Oauth;
+        if !enabled.contains(target.id.as_str())
+            || !reads_audience
+            || youtube_without_oauth
+            || sources
+                .iter()
+                .any(|source| source.platform == target.platform)
+        {
+            continue;
+        }
+        sources.push(audience::AudienceSource {
+            platform: target.platform,
+            account_id: target.account_id.clone(),
+        });
+    }
+    sources
 }
 
 /// Commit one fully-prepared Comments session only while the matching capture
@@ -4889,6 +4986,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "sessions.storage"
         | "sessions.comments.list"
         | "sessions.viewers.list"
+        | "sessions.audience.get"
+        | "stream.audience.snapshot"
         | "platformAccounts.list"
         | "liveChat.capability"
         | "liveChat.status"
@@ -9384,6 +9483,26 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(
                         command.id,
                         "session-logs-list-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "stream.audience.snapshot" => {
+            let snapshot = state.audience.lock().ok().and_then(|hub| hub.snapshot());
+            ServerResponse::ok(command.id, snapshot)
+        }
+        "sessions.audience.get" => {
+            match serde_json::from_value::<audience::SessionAudienceParams>(command.params) {
+                Ok(params) => match audience::session_audience(&state.database, &params.session_id)
+                {
+                    Ok(snapshot) => ServerResponse::ok(command.id, snapshot),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "session-audience-get-failed",
                         error.to_string(),
                     ),
                 },
@@ -18838,5 +18957,54 @@ mod tests {
         destroy_preview_surface(&state)
             .await
             .expect("preview surface lifecycle available");
+    }
+
+    #[test]
+    fn audience_sources_follow_the_enabled_destinations_one_per_platform() {
+        let mut targets = crate::streaming::default_stream_targets();
+        for target in &mut targets {
+            if target.id == "twitch" {
+                target.account_id = Some("twitch-account".to_string());
+            }
+            if target.id == "youtube-vertical" {
+                target.auth_mode = crate::streaming::StreamAuthMode::Oauth;
+                target.account_id = Some("UC-vertical".to_string());
+            }
+        }
+        let streaming = crate::streaming::StreamingSettings {
+            enabled: true,
+            mode: crate::streaming::StreamMode::Multi,
+            targets,
+            selected_target_id: None,
+            default_output_preset: crate::protocol::VideoPreset::Tutorial1080p30,
+            default_bitrate_kbps: 6000,
+            enabled_target_ids: Vec::new(),
+        };
+        let enabled: std::collections::HashSet<&str> =
+            ["youtube", "twitch", "x", "youtube-vertical", "tiktok"]
+                .into_iter()
+                .collect();
+        let sources = session_audience_sources(&streaming, &enabled);
+        assert_eq!(
+            sources,
+            vec![
+                // The manual-key main YouTube card names no channel; the OAuth
+                // vertical card does. TikTok has no audience API.
+                audience::AudienceSource {
+                    platform: StreamPlatform::Twitch,
+                    account_id: Some("twitch-account".to_string()),
+                },
+                audience::AudienceSource {
+                    platform: StreamPlatform::X,
+                    account_id: None,
+                },
+                audience::AudienceSource {
+                    platform: StreamPlatform::Youtube,
+                    account_id: Some("UC-vertical".to_string()),
+                },
+            ]
+        );
+        let only_twitch: std::collections::HashSet<&str> = ["twitch"].into_iter().collect();
+        assert_eq!(session_audience_sources(&streaming, &only_twitch).len(), 1);
     }
 }

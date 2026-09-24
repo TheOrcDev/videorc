@@ -12,6 +12,7 @@ import type {
   SessionListPage,
   SessionLogsPage,
   SessionViewersPage,
+  AudienceSnapshot,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
   StreamTargetsSnapshot
@@ -617,6 +618,49 @@ describe('backend RPC contract', () => {
     ).toThrow()
     expect(() =>
       validateBackendRpcResult('sessions.viewers.list', { samples: [{ ...sample, total: -1 }] })
+    ).toThrow()
+  })
+
+  it('types audience snapshots and never accepts a forged capability', () => {
+    expectTypeOf<
+      BackendRpcResult<'stream.audience.snapshot'>
+    >().toEqualTypeOf<AudienceSnapshot | null>()
+    const snapshot = {
+      sessionId: 'session-1',
+      platforms: [
+        {
+          platform: 'twitch',
+          metric: 'followers',
+          capability: 'available',
+          total: 61_942,
+          baseline: 61_930,
+          delta: 12,
+          at: '2026-09-24T10:02:00Z'
+        },
+        { platform: 'youtube', metric: 'subscribers', capability: 'hidden' },
+        {
+          platform: 'x',
+          metric: 'followers',
+          capability: 'needs-reconnect',
+          message: 'Reconnect X to show followers.'
+        }
+      ],
+      updatedAt: '2026-09-24T10:02:00Z'
+    }
+    expect(validateBackendRpcResult('stream.audience.snapshot', snapshot)).toEqual(snapshot)
+    expect(validateBackendRpcResult('stream.audience.snapshot', null)).toBeNull()
+    expect(validateBackendRpcResult('sessions.audience.get', snapshot)).toEqual(snapshot)
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...snapshot,
+        platforms: [{ ...snapshot.platforms[0], capability: 'guessed' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...snapshot,
+        platforms: [{ ...snapshot.platforms[0], total: null }]
+      })
     ).toThrow()
   })
 
