@@ -247,7 +247,6 @@ import type {
   CaptionStyleId,
   CaptureRecoveryStatus,
   LiveChatSnapshot,
-  AudienceSnapshot,
   PlatformConnectOptions,
   NotesWindowState,
   PreviewCameraStatus,
@@ -2493,11 +2492,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? await window.videorc?.cacheChatAvatar?.(message.authorAvatarUrl).catch(() => null)
           : null
         if (commentHighlightIntentRef.current !== intent) return null
-        const { renderCommentHighlightPng } = await loadCaptionOverlay()
+        const { renderCommentHighlightPng, commentHighlightCardText } = await loadCaptionOverlay()
         if (commentHighlightIntentRef.current !== intent) return null
         const pngBase64 = await renderCommentHighlightPng({
           authorName: message.authorName,
-          text: message.messageText,
+          text: commentHighlightCardText(message),
           avatarUrl: avatarUrl ?? null,
           canvasWidth: streamVideo.width,
           platform: message.platform
@@ -2663,6 +2662,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // terminal sent/partial phase, so the pane clears itself.
           ...(command.inReplyToQuestionId
             ? { inReplyToQuestionId: command.inReplyToQuestionId }
+            : {}),
+          ...(Array.isArray(command.destinationIds)
+            ? { destinationIds: command.destinationIds }
             : {})
         })
       })()
@@ -2768,6 +2770,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await window.videorc?.openCommentsWindow?.()
     await refreshLiveChatSnapshotForComments().catch(() => {})
   }, [refreshLiveChatSnapshotForComments])
+  const openCommentsWindowRef = useRef(openCommentsWindow)
+  openCommentsWindowRef.current = openCommentsWindow
   const closeCommentsWindow = useCallback(async () => {
     await window.videorc?.closeCommentsWindow?.()
   }, [])
@@ -5408,59 +5412,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return () => window.clearTimeout(timer)
       }
     })
-    // Stream Manager dashboard (plan 053, S7). The relay is a lazy chunk so
-    // the main window's eager bundle does not grow; events that arrive
-    // before it loads wait in a short queue.
-    type DashboardRelay = import('@/lib/live-dashboard-relay').LiveDashboardRelay
-    let dashboardRelay: DashboardRelay | null = null
-    let dashboardRelayQueue: Array<(relay: DashboardRelay) => void> = []
-    const withDashboardRelay = (apply: (relay: DashboardRelay) => void): void => {
-      if (dashboardRelay) {
-        apply(dashboardRelay)
-      } else if (dashboardRelayQueue.length < 256) {
-        dashboardRelayQueue.push(apply)
-      }
+    // Stream Manager dashboard (plan 053, S7): a lazy chunk folds these
+    // events into one relayed state; the few that arrive first wait for it.
+    type DashboardFeed = Awaited<
+      ReturnType<typeof import('@/lib/live-dashboard-relay').startLiveDashboardRelay>
+    >
+    let dashboard: DashboardFeed | null = null
+    const dashboardBacklog: Parameters<DashboardFeed['feed']>[] = []
+    const feedDashboard: DashboardFeed['feed'] = (event, payload) => {
+      if (dashboard) dashboard.feed(event, payload)
+      else if (dashboardBacklog.length < 256) dashboardBacklog.push([event, payload])
     }
-    void import('@/lib/live-dashboard-relay').then(
-      async ({ createLiveDashboardRelay }) => {
-        if (!generationIsCurrent()) return
-        const relay = createLiveDashboardRelay((state) => {
-          if (generationIsCurrent()) void window.videorc?.pushDashboard?.(state)
-        })
-        // A renderer reload mid-session adopts main's cached history.
-        relay.seed((await window.videorc?.getDashboard?.().catch(() => null)) ?? null)
-        if (!generationIsCurrent()) return
-        dashboardRelay = relay
-        const queued = dashboardRelayQueue
-        dashboardRelayQueue = []
-        for (const apply of queued) apply(relay)
-      },
-      () => undefined
-    )
-    let dashboardHydratedSessionId: string | null = null
-    const hydrateDashboardSession = (sessionId: string): void => {
-      if (dashboardHydratedSessionId === sessionId) return
-      dashboardHydratedSessionId = sessionId
-      void nextClient.requestTyped('sessions.viewers.list', { sessionId }).then(
-        (page) =>
-          generationIsCurrent() &&
-          withDashboardRelay((relay) => relay.backfillViewers(sessionId, page.samples)),
-        () => undefined
+    void import('@/lib/live-dashboard-relay')
+      .then(({ startLiveDashboardRelay }) =>
+        startLiveDashboardRelay({ client: nextClient, isCurrent: generationIsCurrent })
       )
-      void nextClient.requestTyped('stream.audience.snapshot').then(
-        (snapshot) =>
-          generationIsCurrent() &&
-          snapshot?.sessionId === sessionId &&
-          withDashboardRelay((relay) => relay.audience(snapshot)),
-        () => undefined
-      )
-    }
-    const feedDashboardRecording = (status: RecordingStatus): void => {
-      withDashboardRelay((relay) => relay.recording(status))
-      if (status.sessionId && (status.state === 'recording' || status.state === 'streaming')) {
-        hydrateDashboardSession(status.sessionId)
-      }
-    }
+      .then((started) => {
+        if (!generationIsCurrent()) return started.dispose()
+        dashboard = started
+        for (const [event, payload] of dashboardBacklog.splice(0)) started.feed(event, payload)
+      })
+      .catch(() => undefined)
     const bufferLiveChatBootstrapEvent = (event: LiveChatBootstrapEvent): void => {
       if (liveChatBootstrapComplete) {
         return
@@ -5836,13 +5808,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           lastRecordingSessionIdRef.current = status.sessionId
         }
         applyRecordingStatus(status)
-        feedDashboardRecording(status)
+        feedDashboard('recording.status', status)
         if (['idle', 'failed'].includes(status.state)) {
           setStreamTargets([])
           void refreshSessions(nextClient)
           // Session over: the viewer chip must clear, not freeze (rider V2).
           void window.videorc?.pushViewerSample?.(null)
-          withDashboardRelay((relay) => relay.viewers(null))
+          feedDashboard('stream.viewers', null)
         }
         // Capture started: pull the fresh 'running' row so the Library shows
         // the live session immediately (status ticks repeat the state, so
@@ -5854,6 +5826,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ) {
           clearSessionRuntimeState()
           void refreshSessions(nextClient)
+        }
+        // "Open Stream Manager when I go live" (plan 053, decision 6).
+        if (
+          status.state === 'streaming' &&
+          previousState !== 'streaming' &&
+          settingsRef.current.openStreamManagerOnLive
+        ) {
+          void openCommentsWindowRef.current().catch(() => undefined)
         }
         // A terminal session moves a persistent degradation notice to past
         // tense. A saved recording also gets its two natural next steps: watch
@@ -5901,11 +5881,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Comments window (main-process cache + push, same shape as highlight).
       nextClient.on('stream.viewers', (payload) => {
         void window.videorc?.pushViewerSample?.(payload as ViewerSample)
-        withDashboardRelay((relay) => relay.viewers(payload as ViewerSample))
+        feedDashboard('stream.viewers', payload)
       }),
-      nextClient.on('stream.audience', (payload) => {
-        withDashboardRelay((relay) => relay.audience(payload as AudienceSnapshot))
-      }),
+      nextClient.on('stream.audience', (payload) => feedDashboard('stream.audience', payload)),
       nextClient.on('health.event', (payload) => {
         bootstrapGuard.mark('sessions')
         const event = payload as HealthEvent
@@ -5997,11 +5975,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('stream.health', (payload) => {
         setStreamHealth((current) => mergeStreamHealth(current, payload as StreamHealth))
-        withDashboardRelay((relay) => relay.health(payload as StreamHealth))
+        feedDashboard('stream.health', payload)
       }),
       nextClient.on('stream.targets', (payload) => {
         setStreamTargets((payload as StreamTargetsSnapshot).targets)
-        withDashboardRelay((relay) => relay.targets(payload as StreamTargetsSnapshot))
+        feedDashboard('stream.targets', payload)
       }),
       nextClient.on('diagnostics.stats', (payload) => {
         bootstrapGuard.mark('diagnostics')
@@ -6371,7 +6349,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             (status) => {
               if (generationIsCurrent() && bootstrapGuard.isCurrent(snapshot, 'recording')) {
                 applyRecordingStatus(status)
-                feedDashboardRecording(status)
+                feedDashboard('recording.status', status)
               }
             },
             () =>
@@ -6713,8 +6691,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelCaptionCueRender()
       bootstrapAbort.abort()
       liveChatMessageBatcher.dispose()
-      dashboardRelay?.dispose()
-      dashboardRelayQueue = []
+      dashboard?.dispose()
+      dashboardBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {
         window.clearTimeout(liveChatRecoveryRetryTimer)
         liveChatRecoveryRetryTimer = null

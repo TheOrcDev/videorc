@@ -14,7 +14,8 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
   'yt3.ggpht.com',
   'yt4.ggpht.com',
   'googleusercontent.com',
-  // Twitch profile images
+  // Twitch profile images, and chat emotes (plan 053, S10: the Stream
+  // Manager renders them from fragments through this same cache)
   'static-cdn.jtvnw.net',
   // X profile images (broadcast.chat authors)
   'pbs.twimg.com',
@@ -27,8 +28,9 @@ const AVATAR_ALLOWED_HOST_SUFFIXES = [
   'videorc.com'
 ]
 
-/** Keep the cache bounded; oldest files (by mtime) are pruned past this. */
-export const AVATAR_CACHE_MAX_FILES = 200
+/** Keep the cache bounded; oldest files (by mtime) are pruned past this.
+ * Emotes share it with avatars, so it holds a busy stream's worth of both. */
+export const AVATAR_CACHE_MAX_FILES = 500
 
 /** Refuse to store avatars past this size. Matches the web's account-avatar
  * upload cap (2 MB) — the old 512 KB desktop cap silently monogrammed any

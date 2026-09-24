@@ -257,7 +257,7 @@ export function SessionPanel({
 }
 
 /**
- * One co-host line, same derivation as the Comments window header so the two
+ * One co-host line, same derivation as the Stream Manager's Orcle pane so the two
  * surfaces cannot disagree. Dot + label only: this panel is a fact list, not a
  * working surface, so the typing shimmer stays where the work is read.
  */

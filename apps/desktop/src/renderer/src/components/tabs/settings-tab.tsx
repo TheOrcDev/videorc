@@ -602,6 +602,28 @@ export function SettingsTab({
                   <ToggleGroupItem value="system">System</ToggleGroupItem>
                 </ToggleGroup>
               </Field>
+              {runtimeInfo?.commentsWindowEnabled !== false ? (
+                <Field>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="flex min-w-0 flex-col gap-0.5">
+                      <FieldLabel htmlFor="open-stream-manager-on-live">
+                        Open Stream Manager when I go live
+                      </FieldLabel>
+                      <p className="text-xs text-muted-foreground">
+                        Chat, viewers, followers and activity for the whole stream, in their own
+                        window.
+                      </p>
+                    </div>
+                    <Switch
+                      checked={settings.openStreamManagerOnLive === true}
+                      id="open-stream-manager-on-live"
+                      onCheckedChange={(checked) =>
+                        setSettings((current) => ({ ...current, openStreamManagerOnLive: checked }))
+                      }
+                    />
+                  </div>
+                </Field>
+              ) : null}
               {runtimeInfo?.platform === 'win32' ? (
                 <Field>
                   <div className="flex items-center justify-between gap-3">

@@ -46,6 +46,11 @@ export type SettingsState = {
    */
   keepMicrophoneWarm?: boolean
   /**
+   * Open the Stream Manager when a livestream goes live (plan 053, decision 6).
+   * Default off: the window otherwise remembers whether it was open.
+   */
+  openStreamManagerOnLive?: boolean
+  /**
    * OS-global shortcuts (work with the app unfocused — a Stream Deck's
    * native Hotkey action drives these). Electron accelerator syntax.
    */

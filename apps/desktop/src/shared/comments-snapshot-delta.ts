@@ -5,7 +5,8 @@ import type {
   LiveChatSnapshot
 } from './backend'
 
-export const MAX_COMMENTS_SNAPSHOT_MESSAGES = 500
+/** The Stream Manager keeps 2,000 rows; its list is virtualized (plan 053, S10). */
+export const MAX_COMMENTS_SNAPSHOT_MESSAGES = 2000
 
 function emptySnapshot(delta: CommentsSnapshotDelta): LiveChatSnapshot {
   const updatedAt = delta.kind === 'message' ? delta.message.receivedAt : delta.updatedAt
@@ -71,7 +72,13 @@ export function applyCommentsSnapshotDelta(
       updatedAt: delta.message.receivedAt
     }
   }
-  const messages = [...snapshot.messages, delta.message].sort(messageOrder)
+  // Chat arrives in order almost always: append without re-sorting 2,000
+  // rows, and sort only when a row lands out of order.
+  const last = snapshot.messages.at(-1)
+  const messages =
+    !last || messageOrder(last, delta.message) <= 0
+      ? [...snapshot.messages, delta.message]
+      : [...snapshot.messages, delta.message].sort(messageOrder)
   return {
     ...snapshot,
     sessionId: snapshot.sessionId ?? delta.message.sessionId,

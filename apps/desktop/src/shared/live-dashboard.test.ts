@@ -133,7 +133,11 @@ describe('live dashboard state', () => {
       { sessionId: 's1', targets: [target('failed', 'Twitch dropped the connection.')] },
       at(3)
     )
-    state = reduceDashboardTargets(state, { sessionId: 's1', targets: [target('connecting')] }, at(4))
+    state = reduceDashboardTargets(
+      state,
+      { sessionId: 's1', targets: [target('connecting')] },
+      at(4)
+    )
     state = reduceDashboardTargets(state, { sessionId: 's1', targets: [target('live')] }, at(5))
     state = reduceDashboardTargets(state, { sessionId: 's1', targets: [target('live')] }, at(6))
     expect(
@@ -154,7 +158,11 @@ describe('live dashboard state', () => {
     ])
     expect(new Set(state.destinationEvents.map((event) => event.id)).size).toBe(2)
     // A destination that was never failed never "recovers".
-    const fresh = reduceDashboardTargets(live(), { sessionId: 's1', targets: [target('live')] }, at(1))
+    const fresh = reduceDashboardTargets(
+      live(),
+      { sessionId: 's1', targets: [target('live')] },
+      at(1)
+    )
     expect(fresh.destinationEvents).toEqual([])
   })
 

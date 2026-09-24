@@ -1171,8 +1171,7 @@ function OAuthAccountPanel({
       !TWITCH_AUDIENCE_SCOPES.every((scope) => account.scopes.includes(scope)) ? (
         <div className="flex items-center justify-between gap-3 rounded-row bg-background/60 px-2 py-1.5">
           <span className="text-xs text-muted-foreground">
-            Follow alerts and your sub count in the Stream Manager need one more Twitch
-            permission.
+            Follow alerts and your sub count in the Stream Manager need one more Twitch permission.
           </span>
           <Button
             disabled={disabled}

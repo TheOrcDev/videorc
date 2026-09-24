@@ -32,6 +32,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'comments-window-reader-state',
   'comments-window-route-send-result',
   'comments-window-seed-cohost',
+  'comments-window-seed-dashboard',
   'comments-window-seed-viewers',
   'comments-window-set-bounds',
   'comments-window-set-command-fixture',

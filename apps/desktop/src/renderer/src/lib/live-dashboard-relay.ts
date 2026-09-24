@@ -5,6 +5,7 @@ import type {
   StreamTargetsSnapshot,
   ViewerSample
 } from '@/lib/backend'
+import type { BackendClient } from '@/backendClient'
 
 import {
   createDashboardPushCoalescer,
@@ -17,6 +18,14 @@ import {
   reduceDashboardViewers,
   type LiveDashboardState
 } from '../../../shared/live-dashboard'
+
+/** The backend events the dashboard folds (plan 053, D7). */
+export type DashboardEvent =
+  | 'recording.status'
+  | 'stream.viewers'
+  | 'stream.audience'
+  | 'stream.health'
+  | 'stream.targets'
 
 export interface LiveDashboardRelay {
   recording: (status: RecordingStatus) => void
@@ -62,4 +71,60 @@ export function createLiveDashboardRelay(
     current: () => state,
     dispose: () => coalescer.dispose()
   }
+}
+
+/**
+ * Starts the relay for one backend connection: seeds from main's cache (a
+ * renderer reload mid-stream keeps its history), then returns the feed
+ * Studio forwards events to. The first time a session is seen on air it
+ * backfills viewer history and the audience snapshot from the backend.
+ */
+export async function startLiveDashboardRelay({
+  client,
+  isCurrent
+}: {
+  client: BackendClient
+  isCurrent: () => boolean
+}): Promise<{ feed: (event: DashboardEvent, payload: unknown) => void; dispose: () => void }> {
+  const relay = createLiveDashboardRelay((state) => {
+    if (isCurrent()) void window.videorc?.pushDashboard?.(state)
+  })
+  relay.seed((await window.videorc?.getDashboard?.().catch(() => null)) ?? null)
+  let hydratedSessionId: string | null = null
+  const hydrate = (sessionId: string): void => {
+    if (hydratedSessionId === sessionId) return
+    hydratedSessionId = sessionId
+    void client.requestTyped('sessions.viewers.list', { sessionId }).then(
+      (page) => isCurrent() && relay.backfillViewers(sessionId, page.samples),
+      () => undefined
+    )
+    void client.requestTyped('stream.audience.snapshot').then(
+      (snapshot) => isCurrent() && snapshot?.sessionId === sessionId && relay.audience(snapshot),
+      () => undefined
+    )
+  }
+  const feed = (event: DashboardEvent, payload: unknown): void => {
+    switch (event) {
+      case 'recording.status': {
+        const status = payload as RecordingStatus
+        relay.recording(status)
+        if (status.sessionId && (status.state === 'recording' || status.state === 'streaming')) {
+          hydrate(status.sessionId)
+        }
+        return
+      }
+      case 'stream.viewers':
+        relay.viewers(payload as ViewerSample | null)
+        return
+      case 'stream.audience':
+        relay.audience(payload as AudienceSnapshot)
+        return
+      case 'stream.health':
+        relay.health(payload as StreamHealth)
+        return
+      case 'stream.targets':
+        relay.targets(payload as StreamTargetsSnapshot)
+    }
+  }
+  return { feed, dispose: () => relay.dispose() }
 }

@@ -15,7 +15,7 @@ import type {
 export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'x']
 
 /** Max persisted messages projected into the renderer at once; SQLite remains authoritative. */
-export const MAX_LIVE_CHAT_VIEW_MESSAGES = 500
+export const MAX_LIVE_CHAT_VIEW_MESSAGES = 2000
 
 /**
  * Websocket messages are coalesced for one frame before touching React state. The queue is
@@ -469,11 +469,17 @@ export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
 }
 
 export function commentCanHighlight(message: LiveChatMessage): boolean {
-  return (
-    !message.isDeleted &&
-    message.eventType !== 'deleted' &&
-    message.eventType !== 'system' &&
-    message.eventType !== 'moderation' &&
-    message.eventType !== 'membership'
-  )
+  if (message.isDeleted || message.eventType === 'deleted' || message.eventType === 'moderation') {
+    return false
+  }
+  // Notices go on stream only as activity events: a sub, a gift, a raid
+  // (plan 053, S11). Plain system text stays off the card.
+  if (
+    message.eventType === 'system' ||
+    message.eventType === 'membership' ||
+    message.eventType === 'follow'
+  ) {
+    return Boolean(message.details)
+  }
+  return true
 }

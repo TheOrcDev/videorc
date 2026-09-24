@@ -53,6 +53,8 @@ export interface LiveDashboardViewers {
 export interface BitratePoint {
   at: string
   kbps: number
+  /** Cumulative dropped frames when this point was taken. */
+  droppedFrames?: number
 }
 
 export interface LiveDashboardHealth {
@@ -239,7 +241,16 @@ export function reduceDashboardHealth(
   const bitrateHistory =
     typeof health.bitrateKbps === 'number' && Number.isFinite(health.bitrateKbps)
       ? trimByWindow(
-          [...previous, { at: health.createdAt, kbps: health.bitrateKbps }],
+          [
+            ...previous,
+            {
+              at: health.createdAt,
+              kbps: health.bitrateKbps,
+              ...(typeof health.droppedFrames === 'number'
+                ? { droppedFrames: health.droppedFrames }
+                : {})
+            }
+          ],
           BITRATE_HISTORY_WINDOW_MS,
           BITRATE_HISTORY_POINTS,
           health.createdAt

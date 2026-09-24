@@ -3294,6 +3294,8 @@ export interface CommentsSendCommand {
   text: string
   /** Co-host reply: the open question this send answers (cleared on sent/partial). */
   inReplyToQuestionId?: string
+  /** Only these providers (the Stream Manager's "Send to" picker); absent sends to all. */
+  destinationIds?: string[]
 }
 
 export interface CommentsClearCommand {
@@ -3362,6 +3364,13 @@ export interface CommentsViewSnapshot {
   mode: CommentsViewMode
   snapshot: LiveChatSnapshot
   latestSendOperation?: CommentsSendOperation
+  /** History mode only: the finished session's saved stats (plan 053, S9). */
+  history?: CommentsHistoryStats
+}
+
+export interface CommentsHistoryStats {
+  viewers: ViewerSample[]
+  audience: AudienceSnapshot | null
 }
 
 // Detached preview window: main is the lifecycle and bounds authority; renderer
@@ -3898,6 +3907,8 @@ export type LiveChatEventDetails =
       streakMonths?: number
       giftCount?: number
       recipientName?: string
+      /** Ties Twitch's single gifts to their community gift. */
+      communityGiftId?: string
     }
   | { kind: 'cheer'; bits: number }
   | { kind: 'raid'; viewerCount: number }
@@ -3992,6 +4003,8 @@ export interface CommentsSendParams {
   text: string
   /** Co-host reply: on a terminal `sent`/`partial` phase the engine marks this question answered. */
   inReplyToQuestionId?: string
+  /** Only these providers; absent sends to every provider. */
+  destinationIds?: string[]
 }
 
 // --- Live Chat Co-host (Premium cloud AI) ---
@@ -4475,6 +4488,8 @@ export interface PlatformAudience {
   /** Twitch only, with the opt-in `channel:read:subscriptions` scope. */
   subscribers?: number
   subscriberPoints?: number
+  /** Twitch only: false when follow alerts and the sub count need a reconnect. */
+  audienceScopes?: boolean
 }
 
 /** `stream.audience` event and `stream.audience.snapshot` result (wire mirror of audience.rs). */

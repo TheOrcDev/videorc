@@ -47,7 +47,11 @@ export default tseslint.config(
     // Importing the icon package directly bypasses both — so it is an error
     // everywhere except inside the registry itself.
     files: ['apps/desktop/src/renderer/**/*.{ts,tsx}'],
-    ignores: ['apps/desktop/src/renderer/src/components/icons.tsx'],
+    ignores: [
+      'apps/desktop/src/renderer/src/components/icons.tsx',
+      // The Stream Manager's own glyphs stay out of every window's eager chunk.
+      'apps/desktop/src/renderer/src/components/stream-manager/activity-icons.tsx'
+    ],
     rules: {
       'no-restricted-imports': [
         'error',
