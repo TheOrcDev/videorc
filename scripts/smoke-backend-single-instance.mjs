@@ -21,7 +21,15 @@ try {
 
   let sawReapLog = false
   second = await launchIsolatedApp('b', (line) => {
-    if (line.includes('Reaping') && line.includes(String(firstPid))) {
+    // The app logs "Confirmed N stale owned process record(s) dead after
+    // reaping M live pid(s): <label>:<pid>" (main/index.ts). The older
+    // "Reaping <pid>" form is accepted too so a future wording change in
+    // either direction does not silently break this smoke again (it asserted
+    // a line no code wrote until Plan 053).
+    if (
+      (line.includes('after reaping') && line.includes(`:${firstPid}`)) ||
+      (line.includes('Reaping') && line.includes(String(firstPid)))
+    ) {
       sawReapLog = true
     }
   })
@@ -30,7 +38,11 @@ try {
   await waitUntil(() => !processExists(firstPid), 5000, 'first backend to be reaped')
   assert.notEqual(secondPid, firstPid, 'second launch should own a new backend pid')
   assert.equal(processExists(secondPid), true, 'second backend should stay alive')
-  assert.equal(sawReapLog, true, 'second launch should log reaping the first backend')
+  assert.equal(
+    sawReapLog,
+    true,
+    `second launch should log "after reaping ... :${firstPid}" for the first backend`
+  )
   assert.deepEqual(
     readLedger().map((record) => record.pid),
     [secondPid],
@@ -76,10 +88,26 @@ function readLedger() {
 function processExists(pid) {
   try {
     process.kill(pid, 0)
-    return true
   } catch {
     return false
   }
+  if (process.platform === 'linux') {
+    // kill(pid, 0) still succeeds for a zombie until its parent waits on it.
+    // A reaped backend that is only waiting to be collected is not alive.
+    try {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      const state = stat
+        .slice(stat.lastIndexOf(')') + 1)
+        .trim()
+        .split(/\s+/)[0]
+      if (state === 'Z' || state === 'X') {
+        return false
+      }
+    } catch {
+      return false
+    }
+  }
+  return true
 }
 
 async function waitUntil(predicate, timeoutMs, label) {

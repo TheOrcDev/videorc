@@ -221,6 +221,50 @@ export class OwnedProcessRegistry {
   }
 
   /**
+   * Re-stamp a recorded process whose executable path changed after it was
+   * recorded, without ever changing which process the record names.
+   *
+   * Why this exists: dev mode spawns `~/.cargo/bin/cargo`, the rustup proxy,
+   * which `exec`s the toolchain cargo a few milliseconds later. `record()`
+   * probes identity right after spawn. On Linux that probe is an instant
+   * `/proc/<pid>/exe` readlink and captures the proxy path; the next launch
+   * then sees the toolchain path, calls it an identity mismatch, and never
+   * signals the process (the `smoke:backend-single-instance` timeout on the
+   * ogre box, 2026-09-24). On macOS the `ps` probe is slow enough that the
+   * exec has usually happened. Calling this at READY closes the race on both.
+   *
+   * The birth token (kernel start time) survives `exec`, so it is the only
+   * thing that must match. Any other change means the PID was reused and the
+   * record is left untouched.
+   */
+  refreshIdentity(pid: number | undefined, label: string): 'refreshed' | 'unchanged' | 'skipped' {
+    if (!validPid(pid) || pid === this.currentPid) {
+      return 'skipped'
+    }
+    const records = this.readRecords()
+    const record = records.find((candidate) => candidate.pid === pid)
+    if (!record?.identity) {
+      return 'skipped'
+    }
+    const probe = this.probeForRegistration(pid)
+    if (probe.state !== 'live') {
+      return 'skipped'
+    }
+    if (probe.identity.birthToken !== record.identity.birthToken) {
+      return 'skipped'
+    }
+    if (probe.identity.executablePath === record.identity.executablePath) {
+      return 'unchanged'
+    }
+    this.writeRecords(
+      records.map((candidate) =>
+        candidate.pid === pid ? { ...candidate, label, identity: probe.identity } : candidate
+      )
+    )
+    return 'refreshed'
+  }
+
+  /**
    * Reconcile an in-memory PID claim against its durable identity without
    * signaling the process. `gone` means the recorded process exited, even if
    * the numeric PID is now occupied by a different process.
@@ -532,7 +576,15 @@ function probeExactOwnedProcess(pid: number, platform: NodeJS.Platform): OwnedPr
 function probeLinuxProcess(pid: number): OwnedProcessProbeResult {
   try {
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const before = linuxProcessBirthToken(readFileSync(`/proc/${pid}/stat`, 'utf8'))
+      const statBefore = readFileSync(`/proc/${pid}/stat`, 'utf8')
+      if (linuxProcessStatIsDead(statBefore)) {
+        // A zombie still answers kill(pid, 0) and keeps its /proc entry until
+        // the parent waits on it, but it can never run again. Its exe link is
+        // already gone, so without this check it would read as unprobeable
+        // and block replacement startup forever.
+        return { state: 'dead' }
+      }
+      const before = linuxProcessBirthToken(statBefore)
       const executablePath = readlinkSync(`/proc/${pid}/exe`)
       const after = linuxProcessBirthToken(readFileSync(`/proc/${pid}/stat`, 'utf8'))
       if (before && before === after && executablePath) {
@@ -545,17 +597,33 @@ function probeLinuxProcess(pid: number): OwnedProcessProbeResult {
   return exactProcessIsAlive(pid) ? { state: 'unprobeable' } : { state: 'dead' }
 }
 
-function linuxProcessBirthToken(stat: string): string | undefined {
+/** Fields of `/proc/<pid>/stat` after the parenthesised command. */
+function linuxProcessStatFields(stat: string): string[] | undefined {
   const commandEnd = stat.lastIndexOf(')')
   if (commandEnd < 0) {
     return undefined
   }
-  // Fields after the command begin at stat field 3 (state); starttime is field
-  // 22, therefore index 19 in this suffix.
   return stat
     .slice(commandEnd + 1)
     .trim()
-    .split(/\s+/)[19]
+    .split(/\s+/)
+}
+
+/** The process state letter (stat field 3): R, S, D, Z, T, X, … */
+export function linuxProcessStatState(stat: string): string | undefined {
+  return linuxProcessStatFields(stat)?.[0]
+}
+
+/** Zombie (`Z`) and dead (`X`) processes can never run again. */
+export function linuxProcessStatIsDead(stat: string): boolean {
+  const state = linuxProcessStatState(stat)
+  return state === 'Z' || state === 'X'
+}
+
+export function linuxProcessBirthToken(stat: string): string | undefined {
+  // Fields after the command begin at stat field 3 (state); starttime is field
+  // 22, therefore index 19 in this suffix.
+  return linuxProcessStatFields(stat)?.[19]
 }
 
 function probeDarwinProcess(pid: number): OwnedProcessProbeResult {

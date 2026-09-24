@@ -108,9 +108,18 @@ export function mediaAccessToState(status: MediaAccessStatus | undefined): Syste
     case 'restricted':
       return 'not-granted'
     default:
-      // 'not-determined' | 'unknown' | undefined
+      // 'not-determined' | 'unknown' | 'not-applicable' | undefined
       return 'first-use'
   }
+}
+
+// Linux (plan 052 S5): Electron has no getMediaAccessStatus there and no
+// OS-level camera/mic grant exists, so main answers 'not-applicable'. A row
+// for a permission the OS never asks about would only ever read first-use, so
+// the chip hides itself instead. Portal consent for screen capture is
+// per-capture, not a standing grant, so that row is omitted too.
+function mediaAccessNotApplicable(status: MediaAccessStatus | undefined): boolean {
+  return status === 'not-applicable'
 }
 
 function windowsMediaAccessState(
@@ -210,8 +219,10 @@ export function systemAccessRows({
   const rows: SystemAccessRow[] = []
 
   // Windows has no per-app screen-capture permission — the desktop is always
-  // capturable — so the Screen Recording row only exists on macOS.
-  if (os !== 'win32') {
+  // capturable — and Linux consents per capture through the desktop portal,
+  // so neither shows a Screen Recording row. An unknown platform (before
+  // runtimeInfo arrives) keeps the macOS row set, as it always has.
+  if (os !== 'win32' && platform !== 'linux') {
     const screen = screenAccessState(deviceList)
     rows.push({
       id: 'screen-recording',
@@ -222,19 +233,25 @@ export function systemAccessRows({
     })
   }
 
-  rows.push({
-    id: 'camera',
-    label: 'Camera',
-    purpose: 'Camera overlay in your scenes.',
-    state: camera,
-    detail:
-      os === 'darwin' && mediaAccess?.camera === 'restricted'
-        ? 'Camera access is restricted by macOS policy and may not be changeable here.'
-        : camera === 'device-issue'
-          ? 'Camera permission is granted, but no usable camera is currently available.'
-          : accessDetail(camera, 'the camera', os)
-  })
+  // No OS grant to show (Linux): the camera and microphone chips render nothing.
+  if (!mediaAccessNotApplicable(mediaAccess?.camera)) {
+    rows.push({
+      id: 'camera',
+      label: 'Camera',
+      purpose: 'Camera overlay in your scenes.',
+      state: camera,
+      detail:
+        os === 'darwin' && mediaAccess?.camera === 'restricted'
+          ? 'Camera access is restricted by macOS policy and may not be changeable here.'
+          : camera === 'device-issue'
+            ? 'Camera permission is granted, but no usable camera is currently available.'
+            : accessDetail(camera, 'the camera', os)
+    })
+  }
 
+  if (mediaAccessNotApplicable(mediaAccess?.microphone)) {
+    return rows
+  }
   rows.push({
     id: 'microphone',
     label: 'Microphone',

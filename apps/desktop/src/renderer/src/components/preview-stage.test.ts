@@ -2,7 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import type { PreviewSupervisorState } from '@/lib/backend'
 
-import { previewPermissionPane, previewSupervisorDisplay } from './preview-stage'
+import {
+  previewDisabledCopy,
+  previewPermissionPane,
+  previewSupervisorDisplay
+} from './preview-stage'
 
 function supervisor(
   permissionStatus: PreviewSupervisorState['permissionStatus'],
@@ -103,5 +107,27 @@ describe('previewSupervisorDisplay', () => {
         }
       ).title
     ).toBe('Preview needs permission')
+  })
+})
+
+describe('previewDisabledCopy', () => {
+  it('names the unbuilt Linux phase instead of a fault to retry', () => {
+    expect(previewDisabledCopy('linux', 'Native preview addon is not built on linux')).toEqual({
+      title: "Preview isn't built for Linux yet",
+      detail: 'Recording still works. A Linux preview arrives in a later port phase.',
+      retryable: false,
+      tone: 'expected'
+    })
+  })
+
+  it('keeps the retryable warning everywhere a native preview exists', () => {
+    for (const platform of ['darwin', 'win32', undefined]) {
+      expect(previewDisabledCopy(platform, 'The addon failed to load.')).toEqual({
+        title: 'Native preview is disabled',
+        detail: 'The addon failed to load.',
+        retryable: true,
+        tone: 'warn'
+      })
+    }
   })
 })

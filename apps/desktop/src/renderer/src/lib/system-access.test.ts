@@ -350,6 +350,43 @@ describe('systemAccessRows', () => {
     expect(rows.find((row) => row.id === 'microphone')?.state).toBe('not-granted')
   })
 
+  it('hides every permission chip on Linux, where the OS has no grant to report', () => {
+    // main answers 'not-applicable' on Linux (Electron has no
+    // getMediaAccessStatus there); a row that could only ever read first-use
+    // would push onboarding open on every launch, so no row is rendered.
+    const rows = systemAccessRows({
+      deviceList: devices([
+        { id: 'screen:pipewire:portal', kind: 'screen', status: 'available' },
+        { kind: 'camera', status: 'available' }
+      ]),
+      audioMeter: null,
+      platform: 'linux',
+      mediaAccess: { camera: 'not-applicable', microphone: 'not-applicable' }
+    })
+    expect(rows).toEqual([])
+    expect(
+      shouldShowPermissionsOnboarding({
+        rows,
+        dismissed: false,
+        backendReady: true,
+        mediaAccessReady: isMediaAccessSnapshotReady({
+          camera: 'not-applicable',
+          microphone: 'not-applicable'
+        })
+      })
+    ).toBe(false)
+  })
+
+  it('hides only the chip whose access is not applicable', () => {
+    const rows = systemAccessRows({
+      deviceList: devices([{ kind: 'camera', status: 'available' }]),
+      audioMeter: { status: 'ready' },
+      platform: 'linux',
+      mediaAccess: { camera: 'not-applicable', microphone: 'unknown' }
+    })
+    expect(rows.map((row) => row.id)).toEqual(['microphone'])
+  })
+
   it('mediaAccessToState maps OS statuses to chip states', () => {
     expect(mediaAccessToState('granted')).toBe('granted')
     expect(mediaAccessToState('denied')).toBe('not-granted')

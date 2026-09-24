@@ -656,6 +656,8 @@ pub fn idle_diagnostics() -> DiagnosticStats {
         encoder_bridge_stream_video_toolbox_fifo_enqueue_max_ms: None,
         encoder_bridge_error: None,
         encode_backend: None,
+        linux_render_nodes: None,
+        linux_vaapi_arg_profile: None,
         compositor_backend: None,
         compositor_fallback_reason: None,
         compositor_cpu_frames: 0,

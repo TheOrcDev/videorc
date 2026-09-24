@@ -1,10 +1,12 @@
 // Hardware-only L1.5 acceptance. This runs the real dev app's 1080p30
 // recording matrix once with forced OpenH264 and once with forced VAAPI, then
 // emits named-machine evidence. CI and VMs intentionally cannot satisfy it.
+// Any named physical Linux x64 box qualifies; the distribution and the render
+// node drivers are recorded, not gated (docs/linux-port-plan.md).
 
 import { spawnSync } from 'node:child_process'
 import { cpus, platform, release, tmpdir } from 'node:os'
-import { existsSync } from 'node:fs'
+import { existsSync, readlinkSync } from 'node:fs'
 import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -12,6 +14,7 @@ import { fileURLToPath } from 'node:url'
 import {
   assessLinuxEncoderAcceptanceHost,
   assessLinuxEncoderMatrixResults,
+  describeLinuxRenderNodes,
   parseLinuxEncoderAcceptanceArgs,
   parseOsRelease
 } from './lib/linux-encoder-acceptance.mjs'
@@ -109,6 +112,8 @@ async function main() {
     tester: { name: testerName, machine: machineName },
     host: {
       distribution: osRelease.PRETTY_NAME,
+      osReleaseId: osRelease.ID ?? null,
+      osReleaseVersion: osRelease.VERSION_ID ?? null,
       kernel: release(),
       architecture: process.arch,
       physicalHardwareAttested: true,
@@ -116,7 +121,9 @@ async function main() {
       displaySession: process.env.XDG_SESSION_TYPE ?? 'unknown',
       waylandDisplayPresent: Boolean(process.env.WAYLAND_DISPLAY),
       videoDevices,
-      renderDevices
+      renderDevices,
+      renderNodes: describeLinuxRenderNodes(renderDevices, readlinkSync),
+      vaapiDevicePin: process.env.VIDEORC_LINUX_VAAPI_DEVICE ?? null
     },
     ffmpeg: { path: ffmpegPath, url: pin.url, sha256: pin.sha256 },
     runs

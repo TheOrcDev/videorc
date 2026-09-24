@@ -1348,6 +1348,18 @@ export type EncodeBackend =
   // required LGPL fallback when no DRM render node passes the VAAPI probe.
   | 'software-open-h264'
 
+/** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
+export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'
+
+export type LinuxVaapiArgProfile = 'standard' | 'compat'
+
+export interface LinuxRenderNodeDiagnostic {
+  node: string
+  driver?: string
+  state: LinuxRenderNodeState
+  detail?: string
+}
+
 export type StreamOutputTopologyRole = 'shared' | 'recording' | 'stream'
 
 export type StreamOutputBridge =
@@ -2386,6 +2398,10 @@ export interface DiagnosticStats {
   encoderBridgeError?: string
   /** Which encoder the active session requested — proves hardware vs software encode. */
   encodeBackend?: EncodeBackend
+  /** Linux only: every render node the VAAPI policy saw and what it did with it. */
+  linuxRenderNodes?: LinuxRenderNodeDiagnostic[]
+  /** Linux VAAPI only: which argument profile the session encodes with. */
+  linuxVaapiArgProfile?: LinuxVaapiArgProfile
   /** Which compositor backend produced the most recent diagnostic window. */
   compositorBackend?: CompositorBackend
   /** Why the compositor had to render on CPU fallback. */
@@ -2719,8 +2735,16 @@ export type HealthLevel = 'info' | 'warn' | 'error'
 export type SystemPermissionPane = 'privacy' | 'screen-recording' | 'camera' | 'microphone'
 
 // Mirrors Electron systemPreferences.getMediaAccessStatus return values, plus
-// 'unknown' for platforms/errors where it cannot be read.
-export type MediaAccessStatus = 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'
+// 'unknown' for errors where it cannot be read and 'not-applicable' for Linux,
+// where Electron has no such API and no OS-level camera/mic grant exists (the
+// permission chips hide themselves for it instead of showing an unknown state).
+export type MediaAccessStatus =
+  | 'not-determined'
+  | 'granted'
+  | 'denied'
+  | 'restricted'
+  | 'unknown'
+  | 'not-applicable'
 
 export interface MediaAccessSnapshot {
   camera: MediaAccessStatus
