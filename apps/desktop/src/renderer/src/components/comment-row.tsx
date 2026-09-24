@@ -20,6 +20,7 @@ import { cohostFlagActionLabel, cohostFlagChipLabel, cohostFlagDetail } from '@/
 import { cn } from '@/lib/utils'
 
 export type CommentHighlightPhase = 'idle' | 'applying' | 'live' | 'failed'
+export type CommentTimestamps = 'always' | 'hover'
 
 export interface CommentHighlightPresentation {
   phase: CommentHighlightPhase
@@ -228,7 +229,8 @@ function CommentContent({
   highlight,
   flag,
   suggested,
-  mentioned
+  mentioned,
+  timestamps
 }: {
   message: LiveChatMessage
   density: 'compact' | 'comfortable'
@@ -236,6 +238,7 @@ function CommentContent({
   flag?: CohostFlag
   suggested: boolean
   mentioned: boolean
+  timestamps: CommentTimestamps
 }): ReactElement {
   const avatarUrl = useCachedAvatar(message.authorAvatarUrl)
   const time = formatCommentTime(message.receivedAt)
@@ -262,8 +265,13 @@ function CommentContent({
             </Badge>
           ) : null}
           {mentioned ? (
-            <Badge className="shrink-0" data-slot="comment-mention" variant="secondary">
-              Mentions you
+            <Badge
+              className="shrink-0"
+              data-slot="comment-mention"
+              title="Mentions you"
+              variant="secondary"
+            >
+              @you
             </Badge>
           ) : null}
           <span className="flex-1" />
@@ -271,8 +279,14 @@ function CommentContent({
           <CohostMarks flag={flag} suggested={suggested} />
           <HighlightStatus status={highlight} />
           {time ? (
+            // While live the time waits for the pointer, like the row's ⋯:
+            // a clock on every row is noise mid-stream (plan 057, D3).
             <time
-              className="ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground"
+              className={cn(
+                'ml-auto shrink-0 text-[10px] tabular-nums text-muted-foreground',
+                timestamps === 'hover' &&
+                  'opacity-0 group-focus-within/comment:opacity-100 group-hover/comment:opacity-100'
+              )}
               dateTime={message.receivedAt}
             >
               {time}
@@ -285,7 +299,7 @@ function CommentContent({
             data-slot="comment-reply"
             title={`${message.reply.parentAuthorName}: ${message.reply.parentText}`}
           >
-            ↳ Replying to @{message.reply.parentAuthorName}: {message.reply.parentText}
+            ↳ @{message.reply.parentAuthorName}: {message.reply.parentText}
           </span>
         ) : null}
         <span
@@ -307,6 +321,7 @@ function CommentContent({
 export function CommentRow({
   message,
   density = 'compact',
+  timestamps = 'always',
   highlight = { phase: 'idle' },
   cohostFlag,
   cohostSuggested = false,
@@ -319,6 +334,8 @@ export function CommentRow({
 }: {
   message: LiveChatMessage
   density?: 'compact' | 'comfortable'
+  /** 'hover' keeps the time out of sight until the pointer is on the row. */
+  timestamps?: CommentTimestamps
   highlight?: CommentHighlightPresentation
   /** The co-host's flag for this message, already filtered by Sensitivity. */
   cohostFlag?: CohostFlag
@@ -347,6 +364,7 @@ export function CommentRow({
       mentioned={mentioned}
       message={message}
       suggested={suggested}
+      timestamps={timestamps}
     />
   )
   const menu: KebabMenuItem[] = onReply
@@ -377,7 +395,7 @@ export function CommentRow({
   return (
     <li
       ref={ref}
-      className={cn(menu.length > 0 && 'group/comment flex items-start gap-0.5')}
+      className={cn('group/comment', menu.length > 0 && 'flex items-start gap-0.5')}
       data-highlight-phase={highlight.phase}
       data-index={index}
       data-mention={mentioned || undefined}

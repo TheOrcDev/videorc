@@ -4,7 +4,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   CommentsDestinationStatus,
-  commentsDestinationSummary,
+  commentsDestinationNotes,
   providerBadgeTitle
 } from '@/components/comments-destination-status'
 import type { LiveChatProviderState, StreamPlatform } from '@/lib/backend'
@@ -28,28 +28,29 @@ function provider(
 const providers = [provider('youtube'), provider('twitch'), provider('x', { write: 'read-only' })]
 
 describe('comments destination status', () => {
-  it('states exactly which destinations receive a shared send', () => {
+  // Plan 057, D3: the "To:" picker names where a message goes, so the notes
+  // line speaks only for the destinations that will not get it.
+  it('says nothing when every destination can send', () => {
     expect(
-      commentsDestinationSummary({
+      commentsDestinationNotes({
+        providers: [provider('youtube'), provider('twitch')],
+        sendTargets: ['youtube', 'twitch']
+      })
+    ).toBe('')
+  })
+
+  it('names only the destinations a shared send skips', () => {
+    expect(
+      commentsDestinationNotes({
         providers,
         sendTargets: ['youtube', 'twitch']
       })
-    ).toBe('Sends to YouTube + Twitch · X receive-only')
-  })
-
-  it('surfaces per-destination failures without hiding receive-only destinations', () => {
-    expect(
-      commentsDestinationSummary({
-        providers,
-        sendTargets: ['youtube', 'twitch'],
-        failures: [{ destinationId: 'twitch-target', platform: 'twitch', reason: 'Token expired' }]
-      })
-    ).toBe('Sends to YouTube + Twitch · Twitch failed · X receive-only')
+    ).toBe('X receive-only')
   })
 
   it('distinguishes a missing write scope from a receive-only provider', () => {
     expect(
-      commentsDestinationSummary({
+      commentsDestinationNotes({
         providers: [
           provider('twitch', { write: 'missing-scope' }),
           provider('x', { write: 'read-only' })
@@ -90,8 +91,20 @@ describe('comments destination status', () => {
     expect(providerMarkup).toContain('YouTube')
     expect(providerMarkup).toContain('Connected')
     expect(providerMarkup).toContain('Receive-only')
-    expect(composerMarkup).toContain('Sends to YouTube + Twitch · Twitch failed · X receive-only')
+    expect(composerMarkup).toContain('X receive-only')
+    expect(composerMarkup).not.toContain('Sends to')
+    // A failed send speaks once, with its reason.
     expect(composerMarkup).toContain('Twitch: Token expired')
+    expect(composerMarkup).not.toContain('Twitch failed')
+
+    const quiet = renderToStaticMarkup(
+      createElement(CommentsDestinationStatus, {
+        providers: [provider('youtube'), provider('twitch')],
+        mode: 'composer',
+        sendTargets: ['youtube', 'twitch']
+      })
+    )
+    expect(quiet).toBe('')
   })
 })
 

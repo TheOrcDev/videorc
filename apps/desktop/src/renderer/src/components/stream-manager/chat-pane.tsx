@@ -40,7 +40,6 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type {
   CohostFlag,
-  CohostState,
   CommentHighlightState,
   CommentsSendOperation,
   LiveChatMessage,
@@ -50,6 +49,7 @@ import type {
 import { chatDraftMaxChars, validateChatDraft, type ChatSendFailure } from '@/lib/chat-send'
 import {
   chatPaneMessages,
+  followChatOnResize,
   pickedSendProviders,
   writableProviders,
   type ChatPaneFilter
@@ -91,7 +91,6 @@ export function ChatPane({
   sendFailures = [],
   onSend,
   prefill = null,
-  cohostState = null,
   cohostNudge = false,
   onCohostNudgeTurnOn,
   onCohostNudgeDismiss,
@@ -119,7 +118,6 @@ export function ChatPane({
   sendFailures?: ChatSendFailure[]
   onSend?: (text: string, options?: ChatSendOptions) => void
   prefill?: ChatPrefill | null
-  cohostState?: CohostState | null
   cohostNudge?: boolean
   onCohostNudgeTurnOn?: () => void
   onCohostNudgeDismiss?: () => void
@@ -199,6 +197,13 @@ export function ChatPane({
     }
     viewport.addEventListener('scroll', onScroll, { passive: true })
     return () => viewport.removeEventListener('scroll', onScroll)
+  }, [viewport])
+
+  // A resize (the window, the composer's notes, a row whose emotes loaded)
+  // keeps a pinned chat on its newest row (plan 057, P4).
+  useEffect(() => {
+    if (!viewport || typeof ResizeObserver === 'undefined') return
+    return followChatOnResize(viewport, () => pinnedRef.current)
   }, [viewport])
 
   // Follow new chat while pinned; count it while the streamer reads back.
@@ -434,6 +439,7 @@ export function ChatPane({
                     cohostFlag={cohostFlags?.get(message.id)}
                     cohostSuggested={cohostSuggested?.has(message.id) ?? false}
                     density="comfortable"
+                    timestamps={live ? 'hover' : 'always'}
                     highlight={commentHighlightPresentationForMessage({
                       messageId: message.id,
                       highlightedId,
@@ -466,6 +472,7 @@ export function ChatPane({
         </ScrollArea>
         {!pinned && unread > 0 ? (
           <Button
+            aria-label={`Chat paused: ${unread} new. Jump to the newest`}
             className="absolute inset-x-0 bottom-2 mx-auto h-6 w-fit rounded-full px-2.5 text-xs text-foreground glass-chip hover:text-foreground"
             data-slot="chat-paused"
             size="sm"
@@ -473,7 +480,7 @@ export function ChatPane({
             variant="ghost"
             onClick={jumpToLatest}
           >
-            Chat paused · {unread} new ↓
+            {unread} new ↓
           </Button>
         ) : null}
       </div>
@@ -481,7 +488,6 @@ export function ChatPane({
       {composerVisible && onSend ? (
         <Composer
           cohostNudge={cohostNudge}
-          cohostState={cohostState}
           failures={sendFailures}
           operation={sendOperation}
           pending={sendPending}
@@ -502,7 +508,6 @@ function Composer({
   failures,
   operation,
   prefill,
-  cohostState,
   cohostNudge,
   onCohostNudgeTurnOn,
   onCohostNudgeDismiss,
@@ -513,7 +518,6 @@ function Composer({
   failures: ChatSendFailure[]
   operation: CommentsSendOperation | null
   prefill: ChatPrefill | null
-  cohostState: CohostState | null
   cohostNudge: boolean
   onCohostNudgeTurnOn?: () => void
   onCohostNudgeDismiss?: () => void
@@ -653,13 +657,12 @@ function Composer({
           </InputGroupAddon>
         </InputGroup>
         {replyToQuestionId ? (
-          <p className="mt-1 text-[11px] text-subtle">
-            Replying to a question Orcle found. Edit freely, nothing sends until you do.
-          </p>
+          <p className="mt-1 text-[11px] text-subtle">Orcle&apos;s draft. ↵ sends it.</p>
         ) : null}
-        <div className="mt-1.5">
+        {/* Only exceptions speak here (plan 057, D3): the "To:" picker names
+            where a message goes, and Orcle's segment carries its status. */}
+        <div className="mt-1.5 empty:hidden">
           <CommentsDestinationStatus
-            cohostState={cohostState}
             failures={failures}
             mode="composer"
             providers={[...providers]}
@@ -675,49 +678,18 @@ function Composer({
   )
 }
 
-function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): ReactElement {
+/**
+ * A send in flight says so; a finished one says nothing (plan 057, D3). The
+ * message shows up in chat, a failed destination shows its reason as a
+ * badge, and a receive-only one is named in the notes line.
+ */
+function DeliveryStatus({ operation }: { operation: CommentsSendOperation }): ReactElement | null {
+  if (operation.phase !== 'sending') return null
   return (
-    <div className="mt-1.5 flex flex-col gap-1" aria-label="Latest message delivery">
-      <Badge
-        className="max-w-full truncate"
-        title={operation.text}
-        variant={
-          operation.phase === 'sent'
-            ? 'success'
-            : operation.phase === 'failed' || operation.phase === 'delivery-unknown'
-              ? 'destructive'
-              : 'secondary'
-        }
-      >
-        You · {operation.text} · {operation.phase.replace('-', ' ')}
+    <div aria-label="Latest message delivery" className="mt-1.5 flex">
+      <Badge className="max-w-full truncate" title={operation.text} variant="secondary">
+        Sending…
       </Badge>
-      <div className="flex flex-wrap gap-1">
-        {operation.destinations.map((destination) => (
-          <Badge
-            key={destination.destinationId}
-            title={destination.reason}
-            variant={
-              destination.phase === 'sent'
-                ? 'success'
-                : destination.phase === 'failed' || destination.phase === 'timed-out-unknown'
-                  ? 'destructive'
-                  : destination.phase === 'pending'
-                    ? 'warning'
-                    : 'outline'
-            }
-          >
-            <ChatPlatformIcon decorative platform={destination.platform} />
-            {CHAT_PLATFORM_LABELS[destination.platform]} ·{' '}
-            {destination.phase === 'timed-out-unknown'
-              ? 'Unknown'
-              : destination.phase === 'read-only'
-                ? 'Receive-only'
-                : destination.phase === 'pending'
-                  ? 'Sending…'
-                  : destination.phase.charAt(0).toUpperCase() + destination.phase.slice(1)}
-          </Badge>
-        ))}
-      </div>
     </div>
   )
 }

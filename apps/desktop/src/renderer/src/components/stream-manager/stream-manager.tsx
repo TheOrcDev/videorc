@@ -69,9 +69,13 @@ import {
   type StreamManagerRightPane
 } from '@/lib/stream-manager-layout'
 import { sendablePlatforms } from '@/lib/chat-send'
+import { detectedPlatform, isMacPlatform } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
+
+/** ⌘J on macOS, Ctrl+J elsewhere; the key handler below accepts both. */
+const ORCLE_SHORTCUT = isMacPlatform(detectedPlatform()) ? '⌘J' : 'Ctrl+J'
 
 /** True while the element is laid out and on screen (a hidden pane is not). */
 function usePaneVisible(ref: RefObject<HTMLElement | null>): boolean {
@@ -258,7 +262,8 @@ export function StreamManager({
       next: cohostState,
       paneOpen: cohostPaneOpenRef.current,
       lastToastAtMs: cohostToastAtRef.current,
-      nowMs: Date.now()
+      nowMs: Date.now(),
+      shortcut: ORCLE_SHORTCUT
     })
     if (questionToast) {
       cohostToastAtRef.current = questionToast.atMs
@@ -564,7 +569,6 @@ export function StreamManager({
             className="flex"
             cohostFlags={cohostVisible ? cohostMarks.flags : undefined}
             cohostNudge={cohostNudge}
-            cohostState={cohostState}
             cohostSuggested={cohostVisible ? cohostMarks.suggested : undefined}
             highlightApplyingId={highlightApplyingId}
             highlightFailure={highlightFailure}

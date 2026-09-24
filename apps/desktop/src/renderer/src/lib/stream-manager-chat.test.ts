@@ -6,7 +6,12 @@ import { CommentRow, commentMentions } from '@/components/comment-row'
 import type { LiveChatMessage, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
 import { chatDraftMaxChars } from '@/lib/chat-send'
 
-import { chatPaneMessages, pickedSendProviders, type ChatPaneFilter } from './stream-manager-chat'
+import {
+  chatPaneMessages,
+  followChatOnResize,
+  pickedSendProviders,
+  type ChatPaneFilter
+} from './stream-manager-chat'
 
 function message(
   id: string,
@@ -100,8 +105,13 @@ describe('Stream Manager chat pane', () => {
     )
     expect(markup).toContain('data-slot="comment-first-message"')
     expect(markup).toContain('First chat')
-    expect(markup).toContain('Replying to @ph4se_on3: which mic is that?')
+    // Plan 057, D3: the arrow says reply; the chip says mention in four
+    // characters, with the words on hover.
+    expect(markup).toContain('↳ @ph4se_on3: which mic is that?')
+    expect(markup).not.toContain('Replying to')
     expect(markup).toContain('data-slot="comment-mention"')
+    expect(markup).toContain('@you')
+    expect(markup).toContain('title="Mentions you"')
     expect(markup).toContain('data-slot="comment-role"')
     expect(markup).toContain('VIP')
   })
@@ -124,5 +134,66 @@ describe('Stream Manager chat pane', () => {
     // The cache resolves asynchronously: the emote's text stands in until then.
     expect(markup).toContain('hi ')
     expect(markup).toContain('Kappa')
+  })
+
+  it('shows the time on every row in History, and on hover while live', () => {
+    const row = (timestamps: 'always' | 'hover'): string =>
+      renderToStaticMarkup(
+        createElement(CommentRow, {
+          density: 'comfortable',
+          message: message('8', 'twitch', 'hello'),
+          timestamps
+        })
+      )
+    expect(row('always')).toContain('<time class="ml-auto shrink-0')
+    expect(row('always')).not.toContain('opacity-0')
+    expect(row('hover')).toContain('opacity-0')
+    expect(row('hover')).toContain('group-hover/comment:opacity-100')
+  })
+})
+
+describe('followChatOnResize (plan 057, P4)', () => {
+  function setup(pinned: boolean) {
+    const content = { id: 'content' } as unknown as Element
+    const viewport = { scrollTop: 100, scrollHeight: 900, firstElementChild: content }
+    const observed: Element[] = []
+    let fire = (): void => undefined
+    let disconnected = false
+    const cleanup = followChatOnResize(
+      viewport,
+      () => pinned,
+      (callback) => {
+        fire = callback
+        return {
+          observe: (target) => observed.push(target),
+          disconnect: () => {
+            disconnected = true
+          }
+        }
+      }
+    )
+    return {
+      viewport,
+      content,
+      observed,
+      fire: () => fire(),
+      cleanup,
+      isDisconnected: () => disconnected
+    }
+  }
+
+  it('keeps a pinned chat on its newest row when the viewport or its rows resize', () => {
+    const chat = setup(true)
+    expect(chat.observed).toEqual([chat.viewport, chat.content])
+    chat.fire()
+    expect(chat.viewport.scrollTop).toBe(900)
+  })
+
+  it('leaves a streamer who scrolled back where they are', () => {
+    const chat = setup(false)
+    chat.fire()
+    expect(chat.viewport.scrollTop).toBe(100)
+    chat.cleanup()
+    expect(chat.isDisconnected()).toBe(true)
   })
 })

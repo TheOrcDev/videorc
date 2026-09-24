@@ -196,8 +196,9 @@ async function main() {
       s.text.includes('YouTube Viewer') &&
       s.text.includes('Twitch Viewer') &&
       s.text.includes('X Viewer') &&
-      s.destinationStatus.includes('Sends to YouTube + Twitch') &&
-      s.destinationStatus.includes('X receive-only'),
+      // Plan 057: the notes name only what a send skips.
+      s.destinationStatus.includes('X receive-only') &&
+      !s.destinationStatus.includes('Sends to'),
     8000
   )
   assertProbe(
@@ -380,13 +381,20 @@ async function main() {
     'send budget: delayed composer message submitted',
     JSON.stringify(delayedSubmitted)
   )
+  const sending = await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) => s.deliveryStatus.includes('Sending'),
+    5000
+  )
+  assertProbe(sending.ok, 'send: a message in flight says Sending', JSON.stringify(sending.last))
+  // A finished send says nothing more (plan 057): the message shows up in chat.
   const delayedSend = await waitFor(
     async () => ({
       reader: await smokeCommand('comments-window-reader-state'),
       command: await smokeCommand('comments-window-command-trace')
     }),
     (s) =>
-      s.reader.text.includes(`You · ${delayedOutboundText} · sent`) &&
+      s.reader.deliveryStatus === '' &&
       s.command.pendingCount === 0 &&
       s.command.trace?.resolutionAccepted === true &&
       s.command.trace?.terminal === 'resolved',
@@ -416,12 +424,12 @@ async function main() {
       command: await smokeCommand('comments-window-command-trace')
     }),
     (s) =>
-      s.reader.text.includes(`You · ${outboundText} · partial`) &&
+      // Only the exceptions speak: Twitch's reason once, X receive-only in
+      // the notes, and nothing for YouTube, which got the message.
       s.reader.text.includes('Twitch probe destination rejected this message.') &&
       s.reader.destinationStatus.includes('X receive-only') &&
-      s.reader.deliveryStatus.includes('YouTube · Sent') &&
-      s.reader.deliveryStatus.includes('Twitch · Failed') &&
-      s.reader.deliveryStatus.includes('X · Receive-only') &&
+      !s.reader.destinationStatus.includes('YouTube') &&
+      s.reader.deliveryStatus === '' &&
       s.command.pendingCount === 0 &&
       s.command.trace?.terminal === 'resolved',
     5000
