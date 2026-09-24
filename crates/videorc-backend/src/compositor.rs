@@ -6958,7 +6958,12 @@ fn try_update_preview_surface_frames(
     if surface.status.state != PreviewSurfaceState::Live {
         return Ok(None);
     }
-    surface.status.frames_rendered = frames_rendered;
+    // Never rewind a live surface's count (Plan 0004): a reused surface keeps
+    // the frames its presenter already reported (`presented_frame_id`), and a
+    // compositor pump that publishes its first frame under that surface must
+    // not drag `frames_rendered` back below it. Fresh surfaces start at 0, so
+    // `max` is a no-op for them.
+    surface.status.frames_rendered = surface.status.frames_rendered.max(frames_rendered);
     surface.status.updated_at = Utc::now().to_rfc3339();
     Ok(Some(surface.status.clone()))
 }
