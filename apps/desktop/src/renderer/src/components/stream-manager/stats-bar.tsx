@@ -71,9 +71,10 @@ const HEALTH_DOTS: Record<StatTone, StatusDotTone> = {
 function SessionChip({ badge }: { badge: StatItemModel['badge'] }): ReactElement | null {
   switch (badge) {
     case 'live':
+      // Broadcast convention (owner call, 2026-09-24): the live chip is ON AIR.
       return (
         <Badge data-slot="session-on-air" variant="live">
-          On air
+          ON AIR
         </Badge>
       )
     case 'recording':

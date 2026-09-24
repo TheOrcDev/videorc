@@ -132,7 +132,7 @@ describe('StatsBar (plan 057)', () => {
     const markup = renderToStaticMarkup(createElement(StatsBar, { items }))
     expect(markup).toContain('data-slot="stats-bar"')
     expect(markup).not.toContain('stats-summary')
-    expect(markup).toContain('On air')
+    expect(markup).toContain('>ON AIR<')
     const order = [...markup.matchAll(/data-stat="([a-z]+)"/g)].map((match) => match[1])
     expect(order).toEqual(['session', 'viewers', 'health', 'followers'])
     expect(markup.match(/data-group="main"/g)).toHaveLength(3)
