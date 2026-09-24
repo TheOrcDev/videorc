@@ -358,10 +358,103 @@ try {
       )
     }
 
+    // Stream Manager (plan 053): structured activity events end to end, and the
+    // audience poller's baseline and delta, in their own short session.
+    const eventsSessionId = `smoke-live-chat-events-${Date.now()}`
+    // The socket was replaced above: listen on the current one.
+    const eventMessages = collectMessages(ws).messages
+    const audience = collectEvent(ws, 'stream.audience')
+    const eventDestinations = [
+      { platform: 'twitch', targetId: 'smoke-twitch-events' },
+      { platform: 'youtube', targetId: 'smoke-youtube-events' }
+    ]
+    await request(ws, timeoutMs, 'liveChat.start', {
+      sessionId: eventsSessionId,
+      platforms: ['twitch', 'youtube'],
+      destinations: eventDestinations.map(({ platform, targetId }) => ({
+        platform,
+        targetId,
+        read: 'ready',
+        write: 'ready'
+      })),
+      fakes: eventDestinations.map((destination) => ({
+        ...destination,
+        count: 1,
+        intervalMs: 60,
+        events: true
+      })),
+      fakeAudience: [{ platform: 'twitch', totals: [500, 512], intervalMs: 150 }]
+    })
+    const expectedKinds = [
+      'subscription',
+      'cheer',
+      'raid',
+      'follow',
+      'super-chat',
+      'super-sticker',
+      'membership'
+    ]
+    const eventKinds = () =>
+      new Set(
+        eventMessages
+          .filter((message) => message.sessionId === eventsSessionId && message.details)
+          .map((message) => message.details.kind)
+      )
+    await waitFor(
+      () => expectedKinds.every((kind) => eventKinds().has(kind)),
+      timeoutMs,
+      `every activity kind (${expectedKinds.join(', ')})`
+    )
+    const eventRows = eventMessages.filter((message) => message.sessionId === eventsSessionId)
+    const cheer = eventRows.find((message) => message.details?.kind === 'cheer')
+    const raid = eventRows.find((message) => message.details?.kind === 'raid')
+    const follow = eventRows.find((message) => message.details?.kind === 'follow')
+    if (
+      cheer?.details.bits !== 1500 ||
+      raid?.details.viewerCount !== 234 ||
+      follow?.eventType !== 'follow' ||
+      eventRows.some((message) => 'details' in message && message.details === null)
+    ) {
+      throw new Error(`Activity events lost their details: ${JSON.stringify(eventRows)}`)
+    }
+    await waitFor(
+      () =>
+        audience.payloads.some((snapshot) =>
+          snapshot.platforms?.some(
+            (entry) => entry.platform === 'twitch' && entry.total === 512 && entry.delta === 12
+          )
+        ),
+      timeoutMs,
+      'the audience poller baseline (500) and delta (+12)'
+    )
+    const audienceSnapshot = await request(ws, timeoutMs, 'stream.audience.snapshot')
+    const twitchAudience = audienceSnapshot?.platforms?.find((entry) => entry.platform === 'twitch')
+    if (
+      audienceSnapshot?.sessionId !== eventsSessionId ||
+      twitchAudience?.baseline !== 500 ||
+      twitchAudience?.total !== 512
+    ) {
+      throw new Error(`stream.audience.snapshot disagrees: ${JSON.stringify(audienceSnapshot)}`)
+    }
+    const persistedEvents = await listPersistedMessages(
+      ws,
+      eventsSessionId,
+      eventRows.length,
+      timeoutMs
+    )
+    const persistedKinds = new Set(
+      persistedEvents.filter((message) => message.details).map((message) => message.details.kind)
+    )
+    if (!expectedKinds.every((kind) => persistedKinds.has(kind))) {
+      throw new Error(`Persisted events lost their details: ${JSON.stringify([...persistedKinds])}`)
+    }
+    await request(ws, timeoutMs, 'liveChat.stop', {})
+
     console.log(
       `Unified-comments fake-provider smoke OK - ${diagnostics.messagesReceived} messages, ` +
         `${diagnostics.duplicatesSkipped} duplicate(s) skipped, sent/failed/read-only/timeout ` +
-        `fan-out preserved, websocket snapshot recovered, X receive-only as "${x.message}".`
+        `fan-out preserved, websocket snapshot recovered, X receive-only as "${x.message}", ` +
+        `${expectedKinds.length} activity kinds with details, audience baseline and delta.`
     )
   } finally {
     ws.close()
@@ -384,6 +477,19 @@ function closeWebSocket(ws) {
     )
     ws.close()
   })
+}
+
+function collectEvent(ws, name) {
+  const collection = { payloads: [] }
+  ws.addEventListener('message', (event) => {
+    try {
+      const parsed = JSON.parse(event.data)
+      if (parsed.event === name) collection.payloads.push(parsed.payload)
+    } catch {
+      // Not JSON: not ours.
+    }
+  })
+  return collection
 }
 
 function collectMessages(ws) {

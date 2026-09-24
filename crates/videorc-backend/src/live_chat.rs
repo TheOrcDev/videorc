@@ -1385,6 +1385,10 @@ pub struct FakeChatConfig {
     pub reconnect_at: Option<u32>,
     #[serde(default)]
     pub send: FakeChatSendBehavior,
+    /// After its messages, deliver one of each activity event its platform
+    /// has, with structured details (the Stream Manager smoke, plan 053).
+    #[serde(default)]
+    pub events: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default, Deserialize)]
@@ -2763,6 +2767,12 @@ async fn run_fake_connector(
             .await;
         }
     }
+    if config.events {
+        for message in fake_events(&session_id, platform, config.target_id.as_deref()) {
+            sleep(interval).await;
+            let _ = try_deliver_message(&state, session_generation, message).await;
+        }
+    }
     set_provider_and_emit(
         &state,
         &session_id,
@@ -2776,6 +2786,141 @@ async fn run_fake_connector(
 }
 
 /// Build one deterministic fake message. Shared by the fake connector and the unit tests.
+/// One of each activity event a platform has, shaped as its connector would
+/// normalize it (plan 053 smoke; the parsers' own tests pin the real payloads).
+fn fake_events(
+    session_id: &str,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+) -> Vec<LiveChatMessage> {
+    let event = |kind: &str,
+                 author: &str,
+                 event_type: LiveChatEventType,
+                 details: LiveChatEventDetails,
+                 text: &str,
+                 amount: Option<&str>| {
+        let mut message = fake_message(session_id, platform, target_id, 0);
+        message.provider_message_id = format!("fake-event-{kind}");
+        message.id = live_chat_message_id(
+            session_id,
+            platform,
+            target_id,
+            &message.provider_message_id,
+        );
+        message.author_id = Some(format!("fake-{author}"));
+        message.author_name = author.to_string();
+        message.event_type = event_type;
+        message.details = Some(details);
+        message.message_text = text.to_string();
+        message.amount_text = amount.map(str::to_string);
+        message.raw_provider_type = Some(kind.to_string());
+        message
+    };
+    let subscription = |kind: SubscriptionKind, months, gift_count, gift_id: Option<&str>| {
+        LiveChatEventDetails::Subscription {
+            subscription: kind,
+            tier: Some("1000".to_string()),
+            is_prime: false,
+            months,
+            streak_months: None,
+            gift_count,
+            recipient_name: None,
+            community_gift_id: gift_id.map(str::to_string),
+        }
+    };
+    match platform {
+        StreamPlatform::Twitch => vec![
+            event(
+                "resub",
+                "morgaesis",
+                LiveChatEventType::Membership,
+                subscription(SubscriptionKind::Resub, Some(8), None, None),
+                "morgaesis subscribed at Tier 1. They've subscribed for 8 months!",
+                None,
+            ),
+            event(
+                "community-sub-gift",
+                "generous",
+                LiveChatEventType::Membership,
+                subscription(
+                    SubscriptionKind::CommunitySubGift,
+                    None,
+                    Some(5),
+                    Some("fake-gift"),
+                ),
+                "generous is gifting 5 Tier 1 Subs!",
+                None,
+            ),
+            event(
+                "cheer",
+                "sarzdotmd",
+                LiveChatEventType::Paid,
+                LiveChatEventDetails::Cheer { bits: 1500 },
+                "Cheer1500 fake cheer",
+                Some("1500 bits"),
+            ),
+            event(
+                "raid",
+                "raider42",
+                LiveChatEventType::System,
+                LiveChatEventDetails::Raid { viewer_count: 234 },
+                "234 raiders from raider42 have joined!",
+                None,
+            ),
+            event(
+                "follow",
+                "new_friend",
+                LiveChatEventType::Follow,
+                LiveChatEventDetails::Follow,
+                "new_friend followed",
+                None,
+            ),
+        ],
+        StreamPlatform::Youtube => vec![
+            event(
+                "super-chat",
+                "Maria",
+                LiveChatEventType::Paid,
+                LiveChatEventDetails::SuperChat {
+                    amount_micros: 5_000_000,
+                    currency: "USD".to_string(),
+                    amount_display: "$5.00".to_string(),
+                    tier: Some(2),
+                },
+                "Great stream!",
+                Some("$5.00"),
+            ),
+            event(
+                "super-sticker",
+                "Jonas",
+                LiveChatEventType::Paid,
+                LiveChatEventDetails::SuperSticker {
+                    amount_micros: 2_000_000,
+                    currency: "EUR".to_string(),
+                    amount_display: "€2.00".to_string(),
+                    alt_text: Some("Party hat".to_string()),
+                },
+                "",
+                Some("€2.00"),
+            ),
+            event(
+                "membership",
+                "Newbie",
+                LiveChatEventType::Membership,
+                LiveChatEventDetails::Membership {
+                    membership: MembershipKind::New,
+                    level_name: Some("Gold".to_string()),
+                    months: None,
+                    gift_count: None,
+                },
+                "Welcome to Gold!",
+                None,
+            ),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 fn fake_message(
     session_id: &str,
     platform: StreamPlatform,
