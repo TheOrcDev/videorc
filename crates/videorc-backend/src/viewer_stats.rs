@@ -40,6 +40,9 @@ pub struct YouTubeViewerConfig {
     pub broadcast_id: String,
     #[serde(default)]
     pub api_base_url: Option<String>,
+    /// Renews `access_token` mid-stream (plan 053, B2); never from params.
+    #[serde(skip)]
+    pub token_source: crate::session_token::SessionTokenSource,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -50,6 +53,53 @@ pub struct TwitchViewerConfig {
     pub broadcaster_user_id: String,
     #[serde(default)]
     pub api_base_url: Option<String>,
+    /// Renews `access_token` mid-stream (plan 053, B2); never from params.
+    #[serde(skip)]
+    pub token_source: crate::session_token::SessionTokenSource,
+}
+
+/// One count poll: a refused token is told apart from a missing count so
+/// the sampler can renew it (plan 053, B2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CountFetch {
+    Count(Option<u64>),
+    Refused,
+}
+
+fn count_fetch_for_status(status: reqwest::StatusCode) -> Option<CountFetch> {
+    if status == reqwest::StatusCode::UNAUTHORIZED {
+        return Some(CountFetch::Refused);
+    }
+    (!status.is_success()).then_some(CountFetch::Count(None))
+}
+
+/// Polls once, renewing a refused token and polling again. A token that
+/// cannot be renewed is a missing count, as any other failure.
+async fn poll_with_renewal<F, Fut>(
+    state: &AppState,
+    client: &reqwest::Client,
+    token: &mut crate::session_token::SessionToken,
+    fetch: F,
+) -> Option<u64>
+where
+    F: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = CountFetch>,
+{
+    let access_token = token.ensure_fresh(state, client).await.to_string();
+    match fetch(access_token).await {
+        CountFetch::Count(count) => count,
+        CountFetch::Refused => {
+            let renewed = token
+                .renew_after_refusal(state, client)
+                .await
+                .ok()?
+                .to_string();
+            match fetch(renewed).await {
+                CountFetch::Count(count) => count,
+                CountFetch::Refused => None,
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -205,7 +255,8 @@ pub fn session_viewer_history(
 async fn fetch_youtube_count(
     client: &reqwest::Client,
     config: &YouTubeViewerConfig,
-) -> Option<u64> {
+    access_token: &str,
+) -> CountFetch {
     let base = config
         .api_base_url
         .as_deref()
@@ -215,20 +266,21 @@ async fn fetch_youtube_count(
         base.trim_end_matches('/'),
         config.broadcast_id
     );
-    let response = client
-        .get(url)
-        .bearer_auth(&config.access_token)
-        .send()
-        .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
+    let Ok(response) = client.get(url).bearer_auth(access_token).send().await else {
+        return CountFetch::Count(None);
+    };
+    if let Some(outcome) = count_fetch_for_status(response.status()) {
+        return outcome;
     }
-    let body: Value = response.json().await.ok()?;
-    parse_youtube_concurrent_viewers(&body)
+    let body: Option<Value> = response.json().await.ok();
+    CountFetch::Count(body.as_ref().and_then(parse_youtube_concurrent_viewers))
 }
 
-async fn fetch_twitch_count(client: &reqwest::Client, config: &TwitchViewerConfig) -> Option<u64> {
+async fn fetch_twitch_count(
+    client: &reqwest::Client,
+    config: &TwitchViewerConfig,
+    access_token: &str,
+) -> CountFetch {
     let base = config
         .api_base_url
         .as_deref()
@@ -238,18 +290,20 @@ async fn fetch_twitch_count(client: &reqwest::Client, config: &TwitchViewerConfi
         base.trim_end_matches('/'),
         config.broadcaster_user_id
     );
-    let response = client
+    let Ok(response) = client
         .get(url)
-        .bearer_auth(&config.access_token)
+        .bearer_auth(access_token)
         .header("Client-Id", &config.client_id)
         .send()
         .await
-        .ok()?;
-    if !response.status().is_success() {
-        return None;
+    else {
+        return CountFetch::Count(None);
+    };
+    if let Some(outcome) = count_fetch_for_status(response.status()) {
+        return outcome;
     }
-    let body: Value = response.json().await.ok()?;
-    parse_twitch_viewer_count(&body)
+    let body: Option<Value> = response.json().await.ok();
+    CountFetch::Count(body.as_ref().and_then(parse_twitch_viewer_count))
 }
 
 async fn fetch_x_count(client: &reqwest::Client, config: &XViewerConfig) -> Option<u64> {
@@ -281,19 +335,34 @@ pub async fn run_viewer_sampler(
     let jitter_ms = (session_id.bytes().map(u64::from).sum::<u64>() % 5000) + 500;
     sleep(Duration::from_millis(jitter_ms)).await;
 
+    let mut youtube_token = youtube.as_ref().map(|config| {
+        crate::session_token::SessionToken::new(
+            config.access_token.clone(),
+            config.token_source.clone(),
+        )
+    });
+    let mut twitch_token = twitch.as_ref().map(|config| {
+        crate::session_token::SessionToken::new(
+            config.access_token.clone(),
+            config.token_source.clone(),
+        )
+    });
     loop {
         let mut counts: Vec<(StreamPlatform, Option<u64>)> = Vec::new();
-        if let Some(config) = youtube.as_ref() {
-            counts.push((
-                StreamPlatform::Youtube,
-                fetch_youtube_count(&client, config).await,
-            ));
+        let client_ref = &client;
+        if let (Some(config), Some(token)) = (youtube.as_ref(), youtube_token.as_mut()) {
+            let count = poll_with_renewal(&state, &client, token, |access_token| async move {
+                fetch_youtube_count(client_ref, config, &access_token).await
+            })
+            .await;
+            counts.push((StreamPlatform::Youtube, count));
         }
-        if let Some(config) = twitch.as_ref() {
-            counts.push((
-                StreamPlatform::Twitch,
-                fetch_twitch_count(&client, config).await,
-            ));
+        if let (Some(config), Some(token)) = (twitch.as_ref(), twitch_token.as_mut()) {
+            let count = poll_with_renewal(&state, &client, token, |access_token| async move {
+                fetch_twitch_count(client_ref, config, &access_token).await
+            })
+            .await;
+            counts.push((StreamPlatform::Twitch, count));
         }
         if let Some(config) = x.as_ref() {
             counts.push((StreamPlatform::X, fetch_x_count(&client, config).await));

@@ -75,6 +75,7 @@ mod screen_capture;
 mod secrets;
 mod session_audio;
 mod session_ops;
+mod session_token;
 mod source_mask;
 mod source_registry;
 mod source_status;
@@ -2898,22 +2899,36 @@ async fn youtube_chat_config(
             broadcast_id: target.platform_broadcast_id.clone(),
             target_id: Some(target.id.clone()),
             api_base_url: Some(base),
+            token_source: Default::default(),
         });
     }
     let credential = youtube_account_credentials(state, target.account_id.as_deref())?;
     let client = reqwest::Client::new();
-    let fresh = fresh_platform_access_token(state, &credential, &client).await?;
+    let access_token = session_platform_access_token(
+        state,
+        StreamPlatform::Youtube,
+        Some(&credential.account.id),
+        &client,
+        None,
+    )
+    .await?;
     Ok(youtube_chat::YouTubeChatConfig {
-        access_token: fresh.access_token,
+        access_token,
         live_chat_id: None,
         broadcast_id: target.platform_broadcast_id.clone(),
         target_id: Some(target.id.clone()),
         api_base_url: None,
+        token_source: session_token::SessionTokenSource::account(
+            StreamPlatform::Youtube,
+            credential.account.id.clone(),
+        ),
     })
 }
 
 /// Build the Twitch chat connector config for an enabled OAuth destination (slice 8).
-fn twitch_chat_config(
+/// The token is refreshed here when near expiry, and the connector renews it
+/// through the same account for the rest of the stream (plan 053, B2).
+async fn twitch_chat_config(
     state: &AppState,
     target: &crate::streaming::StreamTargetSettings,
 ) -> Result<twitch_chat::TwitchChatConfig> {
@@ -2927,11 +2942,14 @@ fn twitch_chat_config(
     {
         anyhow::bail!("Reconnect Twitch to enable live comments.");
     }
-    let access_ref = credential
-        .token_secret_ref
-        .as_deref()
-        .context("No Twitch access token is stored.")?;
-    let access_token = secrets::get_secret(access_ref)?;
+    let access_token = session_platform_access_token(
+        state,
+        StreamPlatform::Twitch,
+        Some(&credential.account.id),
+        &reqwest::Client::new(),
+        None,
+    )
+    .await?;
     let client_id = oauth::provider_client_id(StreamPlatform::Twitch)?;
     Ok(twitch_chat::TwitchChatConfig {
         access_token,
@@ -2941,6 +2959,10 @@ fn twitch_chat_config(
         target_id: Some(target.id.clone()),
         eventsub_ws_url: None,
         api_base_url: None,
+        token_source: session_token::SessionTokenSource::account(
+            StreamPlatform::Twitch,
+            credential.account.id.clone(),
+        ),
     })
 }
 
@@ -3020,7 +3042,7 @@ async fn prepare_session_live_chat(
                     }
                 }
             }
-            StreamPlatform::Twitch => match twitch_chat_config(state, target) {
+            StreamPlatform::Twitch => match twitch_chat_config(state, target).await {
                 Ok(config) => {
                     if !params.platforms.contains(&StreamPlatform::Twitch) {
                         params.platforms.push(StreamPlatform::Twitch);

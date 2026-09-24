@@ -51,7 +51,15 @@ pub struct YouTubeChatConfig {
     /// Test-only override of the API base URL.
     #[serde(default)]
     pub api_base_url: Option<String>,
+    /// How the connector renews `access_token` mid-stream (plan 053, B2).
+    /// Built by the backend from the stored account; never read from params.
+    #[serde(skip)]
+    pub token_source: crate::session_token::SessionTokenSource,
 }
+
+/// The provider message when YouTube refuses even a renewed token.
+pub const YOUTUBE_SIGN_IN_EXPIRED: &str =
+    "YouTube sign-in expired. Reconnect YouTube to keep live comments.";
 
 /// Request body for `liveChatMessages.insert` (pure, tested).
 pub fn chat_send_body(live_chat_id: &str, text: &str) -> serde_json::Value {
@@ -796,14 +804,17 @@ pub async fn run_youtube_chat_connector(
         .clone()
         .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
     let target_id = config.target_id.clone();
+    let mut token = crate::session_token::SessionToken::new(
+        config.access_token.clone(),
+        config.token_source.clone(),
+    );
 
     let resolved = match config.live_chat_id.clone() {
         Some(id) => Some(id),
         None => match &config.broadcast_id {
             Some(broadcast_id) => {
-                match resolve_live_chat_id(&client, &base_url, &config.access_token, broadcast_id)
-                    .await
-                {
+                let access_token = token.ensure_fresh(&state, &client).await.to_string();
+                match resolve_live_chat_id(&client, &base_url, &access_token, broadcast_id).await {
                     Ok(live_chat_id) => live_chat_id,
                     Err(error) => {
                         set_provider_and_emit(
@@ -861,12 +872,16 @@ pub async fn run_youtube_chat_connector(
     let mut page_token: Option<String> = None;
     let mut backoff_ms = MIN_POLLING_INTERVAL_MS;
     let mut connected = false;
+    // One renewal per refusal: a second refusal right after it means the
+    // account itself must be reconnected (plan 053, B2).
+    let mut renewed_since_success = false;
 
     loop {
+        let access_token = token.ensure_fresh(&state, &client).await.to_string();
         match fetch_chat_page(
             &client,
             &base_url,
-            &config.access_token,
+            &access_token,
             transport,
             &live_chat_id,
             page_token.as_deref(),
@@ -874,6 +889,7 @@ pub async fn run_youtube_chat_connector(
         .await
         {
             Ok(response) => {
+                renewed_since_success = false;
                 let now = chrono::Utc::now().to_rfc3339();
                 let page = normalize_page(response, &session_id, target_id.as_deref(), &now);
                 if !connected {
@@ -935,6 +951,25 @@ pub async fn run_youtube_chat_connector(
                     FetchError::Api(kind) => kind,
                     FetchError::Network => YouTubeChatErrorKind::Transient,
                 };
+                if kind == YouTubeChatErrorKind::AuthExpired {
+                    if !renewed_since_success
+                        && token.renew_after_refusal(&state, &client).await.is_ok()
+                    {
+                        renewed_since_success = true;
+                        continue;
+                    }
+                    set_provider_and_emit(
+                        &state,
+                        &session_id,
+                        session_generation,
+                        StreamPlatform::Youtube,
+                        target_id.as_deref(),
+                        LiveChatProviderConnectionState::Failed,
+                        YOUTUBE_SIGN_IN_EXPIRED,
+                    )
+                    .await;
+                    return;
+                }
                 let (provider_state, message, stop) = provider_reaction(kind);
                 set_provider_and_emit(
                     &state,
@@ -1467,6 +1502,201 @@ mod tests {
         .unwrap();
         assert_eq!(stream.path(), LIVE_CHAT_MESSAGES_STREAM_PATH);
         assert!(!stream.query().unwrap().contains("pageToken"));
+    }
+
+    /// YouTube accepts `token-1` for one page, then refuses it as expired;
+    /// only `token-2` works after that (plan 053, B2).
+    #[derive(Clone)]
+    struct ExpiringYouTube {
+        pages: Arc<std::sync::atomic::AtomicUsize>,
+        refused: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    fn text_item(id: &str, text: &str) -> Value {
+        json!({
+            "id": id,
+            "snippet": {
+                "type": "textMessageEvent",
+                "liveChatId": "chat-1",
+                "authorChannelId": "UC-viewer",
+                "publishedAt": "2026-09-24T10:00:00Z",
+                "hasDisplayContent": true,
+                "displayMessage": text,
+                "textMessageDetails": { "messageText": text }
+            },
+            "authorDetails": {
+                "channelId": "UC-viewer",
+                "displayName": "Viewer",
+                "isChatOwner": false,
+                "isChatSponsor": false,
+                "isChatModerator": false
+            }
+        })
+    }
+
+    async fn expiring_messages(
+        State(server): State<ExpiringYouTube>,
+        headers: axum::http::HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        use std::sync::atomic::Ordering;
+        let token = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .trim_start_matches("Bearer ")
+            .to_string();
+        let served = server.pages.load(Ordering::SeqCst);
+        if token == "token-1" && served >= 1 {
+            server.refused.fetch_add(1, Ordering::SeqCst);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": { "errors": [{ "reason": "authError" }] } })),
+            );
+        }
+        let page = server.pages.fetch_add(1, Ordering::SeqCst) + 1;
+        (
+            StatusCode::OK,
+            Json(json!({
+                "nextPageToken": format!("page-{page}"),
+                "pollingIntervalMillis": 1000,
+                "items": [text_item(&format!("m{page}"), &format!("message {page}"))]
+            })),
+        )
+    }
+
+    async fn spawn_expiring_youtube() -> (String, ExpiringYouTube) {
+        let server = ExpiringYouTube {
+            pages: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            refused: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(LIVE_CHAT_MESSAGES_STREAM_PATH, get(expiring_messages))
+            .route(LIVE_CHAT_MESSAGES_PATH, get(expiring_messages))
+            .with_state(server.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn expiry_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        state
+    }
+
+    async fn start_expiring_connector(
+        state: &AppState,
+        base_url: String,
+        token_source: crate::session_token::SessionTokenSource,
+    ) -> tokio::task::JoinHandle<()> {
+        let provider = crate::live_chat::LiveChatProviderState {
+            id: "youtube".to_string(),
+            platform: StreamPlatform::Youtube,
+            target_id: Some("youtube".to_string()),
+            account_id: None,
+            account_label: None,
+            read: crate::live_chat::CommentsReadState::Connecting,
+            write: crate::live_chat::CommentsWriteState::Ready,
+            state: LiveChatProviderConnectionState::Connecting,
+            message: String::new(),
+            last_connected_at: None,
+            last_message_at: None,
+            last_error: None,
+        };
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![provider]);
+            coordinator.session_generation()
+        };
+        tokio::spawn(run_youtube_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            YouTubeChatConfig {
+                access_token: "token-1".to_string(),
+                live_chat_id: Some("chat-1".to_string()),
+                broadcast_id: None,
+                target_id: Some("youtube".to_string()),
+                api_base_url: Some(base_url),
+                token_source,
+            },
+        ))
+    }
+
+    async fn wait_for_provider(
+        state: &AppState,
+        done: impl Fn(&crate::live_chat::LiveChatSnapshot) -> bool,
+    ) -> crate::live_chat::LiveChatSnapshot {
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let snapshot = crate::live_chat::current_status(state).await;
+            if done(&snapshot) {
+                return snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_keeps_polling_after_the_token_expires_mid_session() {
+        let (base_url, server) = spawn_expiring_youtube().await;
+        let state = expiry_state();
+        let connector = start_expiring_connector(
+            &state,
+            base_url,
+            crate::session_token::SessionTokenSource::scripted(vec![Ok("token-2")]),
+        )
+        .await;
+        let snapshot = wait_for_provider(&state, |snapshot| snapshot.messages.len() >= 2).await;
+        connector.abort();
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .map(|message| message.message_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message 1", "message 2"]
+        );
+        assert_eq!(
+            snapshot.providers[0].state,
+            LiveChatProviderConnectionState::Connected
+        );
+        assert_eq!(server.refused.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_youtube_sign_in_fails_clearly() {
+        let (base_url, _server) = spawn_expiring_youtube().await;
+        let state = expiry_state();
+        let connector = start_expiring_connector(
+            &state,
+            base_url,
+            crate::session_token::SessionTokenSource::scripted(vec![Err("revoked")]),
+        )
+        .await;
+        let snapshot = wait_for_provider(&state, |snapshot| {
+            snapshot.providers[0].state == LiveChatProviderConnectionState::Failed
+        })
+        .await;
+        connector.abort();
+        assert_eq!(snapshot.providers[0].message, YOUTUBE_SIGN_IN_EXPIRED);
+        assert_eq!(snapshot.messages.len(), 1);
     }
 
     #[tokio::test]

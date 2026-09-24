@@ -616,6 +616,8 @@ pub enum ChatSenderConfig {
         access_token: String,
         api_base_url: Option<String>,
         live_chat_id: Option<String>,
+        /// Sends hours into a stream refresh through the stored account (B2).
+        token_source: crate::session_token::SessionTokenSource,
     },
     Twitch(crate::twitch_chat::TwitchChatSenderConfig),
     /// X live-broadcast chat (closed-beta Livestream API). Credentials are
@@ -1546,6 +1548,7 @@ where
                 access_token: youtube.access_token.clone(),
                 api_base_url: youtube.api_base_url.clone(),
                 live_chat_id: youtube.live_chat_id.clone(),
+                token_source: youtube.token_source.clone(),
             },
         );
         drop(coordinator);
@@ -1567,6 +1570,7 @@ where
                     access_token: config.access_token.clone(),
                     broadcast_id,
                     api_base_url: config.api_base_url.clone(),
+                    token_source: config.token_source.clone(),
                 }
             })
         });
@@ -1579,6 +1583,7 @@ where
                     client_id: config.client_id.clone(),
                     broadcaster_user_id: config.broadcaster_user_id.clone(),
                     api_base_url: config.api_base_url.clone(),
+                    token_source: config.token_source.clone(),
                 });
         if youtube_viewers.is_some() || twitch_viewers.is_some() {
             let handle = tokio::spawn(crate::viewer_stats::run_viewer_sampler(
@@ -1610,6 +1615,7 @@ where
                 // The authorized user sends as themself.
                 sender_user_id: twitch.user_id,
                 api_base_url: twitch.api_base_url,
+                token_source: twitch.token_source,
             }),
         );
     }
@@ -1997,11 +2003,12 @@ async fn execute_send_live_chat_message(
                     let client = client.clone();
                     let destination_id = delivery.destination_id.clone();
                     let text = operation.text.clone();
+                    let state = state.clone();
                     async move {
-                        let outcome = timeout(
-                            CHAT_SEND_TIMEOUT,
-                            send_to_destination(&client, sender, &text),
-                        )
+                        let outcome = timeout(CHAT_SEND_TIMEOUT, async {
+                            let sender = with_current_sender_token(&state, &client, sender).await;
+                            send_to_destination(&client, sender, &text).await
+                        })
                         .await;
                         (destination_id, outcome)
                     }
@@ -2123,6 +2130,42 @@ fn aggregate_send_phase(deliveries: &[DestinationDelivery]) -> CommentsSendOpera
     }
 }
 
+/// A send hours into a stream takes the account's current token, refreshed
+/// when near expiry, instead of the one captured at Go Live (plan 053, B2).
+async fn with_current_sender_token(
+    state: &AppState,
+    client: &reqwest::Client,
+    sender: ChatSenderConfig,
+) -> ChatSenderConfig {
+    match sender {
+        ChatSenderConfig::YouTube {
+            access_token,
+            api_base_url,
+            live_chat_id,
+            token_source,
+        } => {
+            let mut token =
+                crate::session_token::SessionToken::unchecked(access_token, token_source.clone());
+            let access_token = token.ensure_fresh(state, client).await.to_string();
+            ChatSenderConfig::YouTube {
+                access_token,
+                api_base_url,
+                live_chat_id,
+                token_source,
+            }
+        }
+        ChatSenderConfig::Twitch(mut config) => {
+            let mut token = crate::session_token::SessionToken::unchecked(
+                config.access_token.clone(),
+                config.token_source.clone(),
+            );
+            config.access_token = token.ensure_fresh(state, client).await.to_string();
+            ChatSenderConfig::Twitch(config)
+        }
+        other => other,
+    }
+}
+
 async fn send_to_destination(
     client: &reqwest::Client,
     sender: ChatSenderConfig,
@@ -2133,6 +2176,7 @@ async fn send_to_destination(
             access_token,
             api_base_url,
             live_chat_id: Some(live_chat_id),
+            ..
         } => {
             crate::youtube_chat::send_youtube_chat_message(
                 client,
@@ -3433,6 +3477,7 @@ mod tests {
                 access_token: "t".to_string(),
                 api_base_url: None,
                 live_chat_id: None,
+                token_source: Default::default(),
             },
         );
         assert!(coordinator.sender("youtube").is_some());
@@ -3449,6 +3494,7 @@ mod tests {
                 broadcaster_user_id: "b".to_string(),
                 sender_user_id: "u".to_string(),
                 api_base_url: None,
+                token_source: Default::default(),
             }),
         );
         coordinator.start_session("s2".to_string(), Vec::new());
@@ -3469,6 +3515,7 @@ mod tests {
                             access_token: "token".to_string(),
                             api_base_url: None,
                             live_chat_id: None,
+                            token_source: Default::default(),
                         },
                     )
                 })
@@ -3511,6 +3558,7 @@ mod tests {
                     access_token: "token".to_string(),
                     api_base_url: None,
                     live_chat_id: None,
+                    token_source: Default::default(),
                 },
             )],
         )
@@ -4262,6 +4310,7 @@ mod tests {
                     access_token: "old-token".to_string(),
                     api_base_url: None,
                     live_chat_id: None,
+                    token_source: Default::default(),
                 },
             )],
         )
@@ -4301,6 +4350,7 @@ mod tests {
                     access_token: "replacement-token".to_string(),
                     api_base_url: None,
                     live_chat_id: None,
+                    token_source: Default::default(),
                 },
             );
             let generation = coordinator.session_generation();

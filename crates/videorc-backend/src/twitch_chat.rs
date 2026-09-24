@@ -63,6 +63,10 @@ pub struct TwitchChatConfig {
     /// Test-only override of the Helix API base URL.
     #[serde(default)]
     pub api_base_url: Option<String>,
+    /// How the connector renews `access_token` mid-stream (plan 053, B2).
+    /// Built by the backend from the stored account; never read from params.
+    #[serde(skip)]
+    pub token_source: crate::session_token::SessionTokenSource,
 }
 
 /// Send one chat message via Helix (Comments upgrade S4). Requires the
@@ -163,6 +167,8 @@ pub struct TwitchChatSenderConfig {
     pub broadcaster_user_id: String,
     pub sender_user_id: String,
     pub api_base_url: Option<String>,
+    /// Sends hours into a stream refresh through the stored account (B2).
+    pub token_source: crate::session_token::SessionTokenSource,
 }
 
 // --- Pure frame parsing + normalization (unit-tested) ---
@@ -302,6 +308,7 @@ impl TwitchAvatarCache {
         &mut self,
         client: &reqwest::Client,
         config: &TwitchChatConfig,
+        access_token: &str,
         user_id: &str,
     ) -> Option<String> {
         if let Some(cached) = self.by_user_id.get(user_id) {
@@ -314,7 +321,7 @@ impl TwitchAvatarCache {
         let fetched = client
             .get(format!("{base}/helix/users"))
             .query(&[("id", user_id)])
-            .bearer_auth(&config.access_token)
+            .bearer_auth(access_token)
             .header("Client-Id", &config.client_id)
             .send()
             .await
@@ -747,11 +754,20 @@ enum SessionOutcome {
     Fatal(String),
 }
 
+/// Why subscribing failed: a refused token can be renewed, anything else
+/// needs the user.
+#[derive(Debug)]
+enum SubscribeError {
+    Unauthorized,
+    Other(anyhow::Error),
+}
+
 async fn create_subscriptions(
     client: &reqwest::Client,
     config: &TwitchChatConfig,
+    access_token: &str,
     session_id: &str,
-) -> Result<()> {
+) -> std::result::Result<(), SubscribeError> {
     let base_url = config
         .api_base_url
         .clone()
@@ -767,26 +783,80 @@ async fn create_subscriptions(
             &config.user_id,
             session_id,
         );
-        client
+        let response = client
             .post(&url)
-            .bearer_auth(&config.access_token)
+            .bearer_auth(access_token)
             .header("Client-Id", &config.client_id)
             .json(&body)
             .send()
             .await
-            .with_context(|| format!("Could not create {subscription_type} subscription."))?
-            .error_for_status()
-            .with_context(|| format!("Twitch rejected the {subscription_type} subscription."))?;
+            .with_context(|| format!("Could not create {subscription_type} subscription."))
+            .map_err(SubscribeError::Other)?;
+        match response.status() {
+            status if status.is_success() => {}
+            // A retry after a renewal finds the ones made before the refusal.
+            reqwest::StatusCode::CONFLICT => {}
+            reqwest::StatusCode::UNAUTHORIZED => return Err(SubscribeError::Unauthorized),
+            status => {
+                return Err(SubscribeError::Other(anyhow::anyhow!(
+                    "Twitch rejected the {subscription_type} subscription (HTTP {status})."
+                )));
+            }
+        }
     }
     Ok(())
 }
 
+/// Subscribes this socket, renewing a refused token once (plan 053, B2).
+async fn subscribe_socket(
+    state: &AppState,
+    client: &reqwest::Client,
+    config: &TwitchChatConfig,
+    token: &mut crate::session_token::SessionToken,
+    socket_session: &str,
+) -> std::result::Result<(), String> {
+    let access_token = token.ensure_fresh(state, client).await.to_string();
+    let subscribe_failed = |error: anyhow::Error| {
+        state.emit_log(
+            "warn",
+            format!("Twitch chat subscription failed: {error:#}"),
+        );
+        "Could not subscribe to Twitch live chat. Reconnect Twitch to enable live comments."
+            .to_string()
+    };
+    match create_subscriptions(client, config, &access_token, socket_session).await {
+        Ok(()) => return Ok(()),
+        Err(SubscribeError::Other(error)) => return Err(subscribe_failed(error)),
+        Err(SubscribeError::Unauthorized) => {}
+    }
+    let Ok(renewed) = token.renew_after_refusal(state, client).await else {
+        return Err(TWITCH_SIGN_IN_EXPIRED.to_string());
+    };
+    let renewed = renewed.to_string();
+    create_subscriptions(client, config, &renewed, socket_session)
+        .await
+        .map_err(|error| match error {
+            SubscribeError::Unauthorized => TWITCH_SIGN_IN_EXPIRED.to_string(),
+            SubscribeError::Other(error) => subscribe_failed(error),
+        })
+}
+
+/// The provider message when Twitch refuses even a renewed token.
+pub const TWITCH_SIGN_IN_EXPIRED: &str =
+    "Twitch sign-in expired. Reconnect Twitch to keep live comments.";
+
+/// One EventSub socket. `subscribe` is false for a socket opened from a
+/// Twitch `session_reconnect` URL: its subscriptions carry over, and making
+/// them again would be refused.
+#[allow(clippy::too_many_arguments)]
 async fn run_eventsub_session(
     state: &AppState,
     session_owner: (&str, u64),
     config: &TwitchChatConfig,
+    token: &mut crate::session_token::SessionToken,
     client: &reqwest::Client,
     ws_url: &str,
+    subscribe: bool,
     seen: &mut HashSet<String>,
     avatars: &mut TwitchAvatarCache,
 ) -> SessionOutcome {
@@ -805,14 +875,11 @@ async fn run_eventsub_session(
                 EventSubFrame::Welcome {
                     session_id: socket_session,
                 } => {
-                    if create_subscriptions(client, config, &socket_session)
-                        .await
-                        .is_err()
+                    if subscribe
+                        && let Err(message) =
+                            subscribe_socket(state, client, config, token, &socket_session).await
                     {
-                        return SessionOutcome::Fatal(
-                            "Could not subscribe to Twitch live chat. Reconnect Twitch to enable live comments."
-                                .to_string(),
-                        );
+                        return SessionOutcome::Fatal(message);
                     }
                     set_provider_and_emit(
                         state,
@@ -847,8 +914,9 @@ async fn run_eventsub_session(
                         if message.author_avatar_url.is_none()
                             && let Some(author_id) = message.author_id.clone()
                         {
-                            message.author_avatar_url =
-                                avatars.lookup(client, config, &author_id).await;
+                            message.author_avatar_url = avatars
+                                .lookup(client, config, token.current(), &author_id)
+                                .await;
                         }
                         let provider_message_id = message.provider_message_id.clone();
                         let mut persistence_backoff_ms = MIN_BACKOFF_MS;
@@ -943,6 +1011,11 @@ pub async fn run_twitch_chat_connector(
         .unwrap_or_else(|| EVENTSUB_WS_URL.to_string());
     let mut seen: HashSet<String> = HashSet::new();
     let mut backoff_ms = MIN_BACKOFF_MS;
+    let mut token = crate::session_token::SessionToken::new(
+        config.access_token.clone(),
+        config.token_source.clone(),
+    );
+    let mut subscribe = true;
 
     set_provider_and_emit(
         &state,
@@ -961,14 +1034,19 @@ pub async fn run_twitch_chat_connector(
             &state,
             (&session_id, session_generation),
             &config,
+            &mut token,
             &client,
             &ws_url,
+            subscribe,
             &mut seen,
             &mut avatars,
         )
         .await
         {
             SessionOutcome::Reconnect(next_url) => {
+                // Twitch's own reconnect URL carries the subscriptions over;
+                // a dropped socket starts a new session that needs them.
+                subscribe = next_url.is_none();
                 ws_url = next_url.unwrap_or_else(|| default_ws_url.clone());
                 set_provider_and_emit(
                     &state,
@@ -1329,6 +1407,231 @@ mod tests {
         }
     }
 
+    /// A Twitch whose first socket drops after the user token expired
+    /// (plan 053, B2): the next socket's subscriptions refuse `token-1`
+    /// and accept only `token-2`. With `twitch_reconnect`, the first socket
+    /// instead hands over through a `session_reconnect` URL.
+    #[derive(Clone)]
+    struct ExpiringTokenTwitch {
+        sockets: Arc<AtomicUsize>,
+        expired: Arc<std::sync::atomic::AtomicBool>,
+        accepted: Arc<Mutex<Vec<String>>>,
+        refused: Arc<AtomicUsize>,
+        twitch_reconnect: bool,
+        base_ws: Arc<std::sync::OnceLock<String>>,
+    }
+
+    async fn expiring_eventsub_ws(
+        State(server): State<ExpiringTokenTwitch>,
+        ws: WebSocketUpgrade,
+    ) -> impl IntoResponse {
+        let socket_number = server.sockets.fetch_add(1, Ordering::SeqCst) + 1;
+        ws.on_upgrade(move |mut socket| async move {
+            let welcome = json!({
+                "metadata": { "message_type": "session_welcome" },
+                "payload": { "session": { "id": format!("socket-{socket_number}") } }
+            })
+            .to_string();
+            let _ = socket.send(AxumMessage::Text(welcome.into())).await;
+            if socket_number == 1 {
+                // Let the first subscriptions land, then the token expires.
+                sleep(Duration::from_millis(150)).await;
+                server
+                    .expired
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                if server.twitch_reconnect {
+                    let reconnect = json!({
+                        "metadata": { "message_type": "session_reconnect" },
+                        "payload": { "session": {
+                            "id": "socket-1",
+                            "reconnect_url": server.base_ws.get().unwrap(),
+                        } }
+                    })
+                    .to_string();
+                    let _ = socket.send(AxumMessage::Text(reconnect.into())).await;
+                }
+                return;
+            }
+            // Later sockets deliver chat once they are usable.
+            sleep(Duration::from_millis(150)).await;
+            let _ = socket
+                .send(AxumMessage::Text(chat_message_frame().into()))
+                .await;
+            sleep(Duration::from_millis(500)).await;
+        })
+    }
+
+    async fn expiring_subscriptions(
+        State(server): State<ExpiringTokenTwitch>,
+        headers: axum::http::HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        let token = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .trim_start_matches("Bearer ")
+            .to_string();
+        let expired = server.expired.load(std::sync::atomic::Ordering::SeqCst);
+        if token == "token-2" || (token == "token-1" && !expired) {
+            server.accepted.lock().await.push(token);
+            (StatusCode::ACCEPTED, Json(json!({ "data": [] })))
+        } else {
+            server.refused.fetch_add(1, Ordering::SeqCst);
+            (StatusCode::UNAUTHORIZED, Json(json!({ "status": 401 })))
+        }
+    }
+
+    async fn spawn_expiring_token_twitch(
+        twitch_reconnect: bool,
+    ) -> (String, String, ExpiringTokenTwitch) {
+        let server = ExpiringTokenTwitch {
+            sockets: Arc::new(AtomicUsize::new(0)),
+            expired: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            accepted: Arc::new(Mutex::new(Vec::new())),
+            refused: Arc::new(AtomicUsize::new(0)),
+            twitch_reconnect,
+            base_ws: Arc::new(std::sync::OnceLock::new()),
+        };
+        let app = Router::new()
+            .route("/eventsub", get(expiring_eventsub_ws))
+            .route(
+                "/helix/eventsub/subscriptions",
+                post(expiring_subscriptions),
+            )
+            .route("/helix/users", get(mock_users))
+            .with_state(server.clone());
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("mock twitch listener");
+        let addr = listener.local_addr().expect("mock twitch addr");
+        let ws_url = format!("ws://{addr}/eventsub");
+        server.base_ws.set(ws_url.clone()).unwrap();
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{addr}"), ws_url, server)
+    }
+
+    fn expiring_config(
+        api_base_url: String,
+        eventsub_ws_url: String,
+        token_source: crate::session_token::SessionTokenSource,
+    ) -> TwitchChatConfig {
+        TwitchChatConfig {
+            access_token: "token-1".to_string(),
+            client_id: "client-1".to_string(),
+            broadcaster_user_id: "broadcaster-1".to_string(),
+            user_id: "user-1".to_string(),
+            target_id: Some("twitch".to_string()),
+            eventsub_ws_url: Some(eventsub_ws_url),
+            api_base_url: Some(api_base_url),
+            token_source,
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_keeps_flowing_after_the_token_expires_mid_session() {
+        let (api, ws, server) = spawn_expiring_token_twitch(false).await;
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
+            coordinator.session_generation()
+        };
+        let connector = tokio::spawn(run_twitch_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            expiring_config(
+                api,
+                ws,
+                crate::session_token::SessionTokenSource::scripted(vec![Ok("token-2")]),
+            ),
+        ));
+
+        let snapshot = wait_for_twitch_message(&state).await;
+        connector.abort();
+        let twitch = snapshot
+            .providers
+            .iter()
+            .find(|provider| provider.platform == StreamPlatform::Twitch)
+            .unwrap();
+        assert_eq!(twitch.state, LiveChatProviderConnectionState::Connected);
+        let accepted = server.accepted.lock().await.clone();
+        let renewed = accepted.iter().filter(|token| *token == "token-2").count();
+        assert_eq!(renewed, CHAT_SUBSCRIPTION_TYPES.len(), "{accepted:?}");
+        assert_eq!(server.refused.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_refresh_token_fails_clearly_instead_of_going_quiet() {
+        let (api, ws, _server) = spawn_expiring_token_twitch(false).await;
+        let state = test_state();
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
+            coordinator.session_generation()
+        };
+        let connector = tokio::spawn(run_twitch_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            expiring_config(
+                api,
+                ws,
+                crate::session_token::SessionTokenSource::scripted(vec![Err("revoked")]),
+            ),
+        ));
+        let failed = wait_for_terminal_storage_failure(&state).await;
+        connector.abort();
+        assert_eq!(failed.message, TWITCH_SIGN_IN_EXPIRED);
+    }
+
+    #[tokio::test]
+    async fn a_twitch_reconnect_url_keeps_its_subscriptions() {
+        let (api, ws, server) = spawn_expiring_token_twitch(true).await;
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
+            coordinator.session_generation()
+        };
+        // No renewal is scripted: resubscribing after the handover would
+        // fail on the expired token.
+        let connector = tokio::spawn(run_twitch_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            expiring_config(
+                api,
+                ws,
+                crate::session_token::SessionTokenSource::scripted(Vec::new()),
+            ),
+        ));
+        let snapshot = wait_for_twitch_message(&state).await;
+        connector.abort();
+        assert!(
+            snapshot
+                .providers
+                .iter()
+                .any(|provider| provider.state == LiveChatProviderConnectionState::Connected)
+        );
+        assert_eq!(server.sockets.load(Ordering::SeqCst), 2);
+        assert_eq!(server.refused.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            server.accepted.lock().await.len(),
+            CHAT_SUBSCRIPTION_TYPES.len()
+        );
+    }
+
     fn sender_config(api_base_url: String) -> TwitchChatSenderConfig {
         TwitchChatSenderConfig {
             access_token: "token".to_string(),
@@ -1336,6 +1639,7 @@ mod tests {
             broadcaster_user_id: "broadcaster".to_string(),
             sender_user_id: "sender".to_string(),
             api_base_url: Some(api_base_url),
+            token_source: Default::default(),
         }
     }
 
@@ -1436,6 +1740,7 @@ mod tests {
                 target_id: Some("twitch".to_string()),
                 eventsub_ws_url: Some(eventsub_ws_url),
                 api_base_url: Some(api_base_url),
+                token_source: Default::default(),
             },
         ));
 
@@ -1503,6 +1808,7 @@ mod tests {
                 target_id: Some("twitch".to_string()),
                 eventsub_ws_url: Some(eventsub_ws_url),
                 api_base_url: Some(api_base_url),
+                token_source: Default::default(),
             },
         ));
 
@@ -1570,6 +1876,7 @@ mod tests {
                 target_id: Some("twitch".to_string()),
                 eventsub_ws_url: Some(eventsub_ws_url),
                 api_base_url: Some(api_base_url),
+                token_source: Default::default(),
             },
         ));
 

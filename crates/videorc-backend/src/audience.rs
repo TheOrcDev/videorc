@@ -615,10 +615,12 @@ async fn run_source(state: AppState, session_id: String, source: AudienceSource)
 
 async fn run_fake(state: AppState, session_id: String, fake: FakeAudienceConfig) {
     let interval = Duration::from_millis(fake.interval_ms.max(50));
-    for read_index in 0.. {
+    let mut read_index = 0;
+    loop {
         sleep(interval).await;
         let reading = fake.reading(read_index);
         apply_reading(&state, &session_id, fake.platform, &reading);
+        read_index = read_index.saturating_add(1);
     }
 }
 
