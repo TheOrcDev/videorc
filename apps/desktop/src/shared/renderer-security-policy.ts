@@ -97,6 +97,8 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:highlight-state-get': MAIN_AND_COMMENTS,
   'comments-window:viewers-push': MAIN_ONLY,
   'comments-window:viewers-get': MAIN_AND_COMMENTS,
+  'comments-window:dashboard-push': MAIN_ONLY,
+  'comments-window:dashboard-get': MAIN_AND_COMMENTS,
   'comments-window:cohost-push': MAIN_ONLY,
   'comments-window:cohost-get': MAIN_AND_COMMENTS,
   'comments-window:cohost-action': MAIN_AND_COMMENTS,

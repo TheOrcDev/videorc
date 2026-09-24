@@ -1,3 +1,4 @@
+import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 export type { BackgroundImportResult } from './background-import'
@@ -3703,6 +3704,10 @@ export interface VideorcApi {
   pushViewerSample?: (sample: ViewerSample | null) => Promise<void>
   getViewerSample?: () => Promise<ViewerSample | null>
   onViewerSample?: (callback: (sample: ViewerSample | null) => void) => () => void
+  /** Stream Manager dashboard relay (plan 053, S7): main renderer -> main -> window. */
+  pushDashboard?: (state: LiveDashboardState | null) => Promise<void>
+  getDashboard?: () => Promise<LiveDashboardState | null>
+  onDashboard?: (callback: (state: LiveDashboardState | null) => void) => () => void
   openSession: (sessionId: string) => Promise<string>
   trashSessionDeletion: (operationId: string) => Promise<{ deleted: boolean; failedCount: number }>
   onOAuthCallbackUrl: (callback: (envelope: OAuthCallbackEnvelope) => void) => () => void

@@ -247,6 +247,7 @@ import type {
   CaptionStyleId,
   CaptureRecoveryStatus,
   LiveChatSnapshot,
+  AudienceSnapshot,
   NotesWindowState,
   PreviewCameraStatus,
   PreviewScreenStatus,
@@ -5403,6 +5404,59 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return () => window.clearTimeout(timer)
       }
     })
+    // Stream Manager dashboard (plan 053, S7). The relay is a lazy chunk so
+    // the main window's eager bundle does not grow; events that arrive
+    // before it loads wait in a short queue.
+    type DashboardRelay = import('@/lib/live-dashboard-relay').LiveDashboardRelay
+    let dashboardRelay: DashboardRelay | null = null
+    let dashboardRelayQueue: Array<(relay: DashboardRelay) => void> = []
+    const withDashboardRelay = (apply: (relay: DashboardRelay) => void): void => {
+      if (dashboardRelay) {
+        apply(dashboardRelay)
+      } else if (dashboardRelayQueue.length < 256) {
+        dashboardRelayQueue.push(apply)
+      }
+    }
+    void import('@/lib/live-dashboard-relay').then(
+      async ({ createLiveDashboardRelay }) => {
+        if (!generationIsCurrent()) return
+        const relay = createLiveDashboardRelay((state) => {
+          if (generationIsCurrent()) void window.videorc?.pushDashboard?.(state)
+        })
+        // A renderer reload mid-session adopts main's cached history.
+        relay.seed((await window.videorc?.getDashboard?.().catch(() => null)) ?? null)
+        if (!generationIsCurrent()) return
+        dashboardRelay = relay
+        const queued = dashboardRelayQueue
+        dashboardRelayQueue = []
+        for (const apply of queued) apply(relay)
+      },
+      () => undefined
+    )
+    let dashboardHydratedSessionId: string | null = null
+    const hydrateDashboardSession = (sessionId: string): void => {
+      if (dashboardHydratedSessionId === sessionId) return
+      dashboardHydratedSessionId = sessionId
+      void nextClient.requestTyped('sessions.viewers.list', { sessionId }).then(
+        (page) =>
+          generationIsCurrent() &&
+          withDashboardRelay((relay) => relay.backfillViewers(sessionId, page.samples)),
+        () => undefined
+      )
+      void nextClient.requestTyped('stream.audience.snapshot').then(
+        (snapshot) =>
+          generationIsCurrent() &&
+          snapshot?.sessionId === sessionId &&
+          withDashboardRelay((relay) => relay.audience(snapshot)),
+        () => undefined
+      )
+    }
+    const feedDashboardRecording = (status: RecordingStatus): void => {
+      withDashboardRelay((relay) => relay.recording(status))
+      if (status.sessionId && (status.state === 'recording' || status.state === 'streaming')) {
+        hydrateDashboardSession(status.sessionId)
+      }
+    }
     const bufferLiveChatBootstrapEvent = (event: LiveChatBootstrapEvent): void => {
       if (liveChatBootstrapComplete) {
         return
@@ -5778,11 +5832,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           lastRecordingSessionIdRef.current = status.sessionId
         }
         applyRecordingStatus(status)
+        feedDashboardRecording(status)
         if (['idle', 'failed'].includes(status.state)) {
           setStreamTargets([])
           void refreshSessions(nextClient)
           // Session over: the viewer chip must clear, not freeze (rider V2).
           void window.videorc?.pushViewerSample?.(null)
+          withDashboardRelay((relay) => relay.viewers(null))
         }
         // Capture started: pull the fresh 'running' row so the Library shows
         // the live session immediately (status ticks repeat the state, so
@@ -5841,6 +5897,10 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Comments window (main-process cache + push, same shape as highlight).
       nextClient.on('stream.viewers', (payload) => {
         void window.videorc?.pushViewerSample?.(payload as ViewerSample)
+        withDashboardRelay((relay) => relay.viewers(payload as ViewerSample))
+      }),
+      nextClient.on('stream.audience', (payload) => {
+        withDashboardRelay((relay) => relay.audience(payload as AudienceSnapshot))
       }),
       nextClient.on('health.event', (payload) => {
         bootstrapGuard.mark('sessions')
@@ -5933,9 +5993,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('stream.health', (payload) => {
         setStreamHealth((current) => mergeStreamHealth(current, payload as StreamHealth))
+        withDashboardRelay((relay) => relay.health(payload as StreamHealth))
       }),
       nextClient.on('stream.targets', (payload) => {
         setStreamTargets((payload as StreamTargetsSnapshot).targets)
+        withDashboardRelay((relay) => relay.targets(payload as StreamTargetsSnapshot))
       }),
       nextClient.on('diagnostics.stats', (payload) => {
         bootstrapGuard.mark('diagnostics')
@@ -6302,10 +6364,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const snapshot = bootstrapGuard.snapshot()
           const read = bootstrapRequest<RecordingStatus>('recording.status')
           read.then(
-            (status) =>
-              generationIsCurrent() &&
-              bootstrapGuard.isCurrent(snapshot, 'recording') &&
-              applyRecordingStatus(status),
+            (status) => {
+              if (generationIsCurrent() && bootstrapGuard.isCurrent(snapshot, 'recording')) {
+                applyRecordingStatus(status)
+                feedDashboardRecording(status)
+              }
+            },
             () =>
               attempt < 4 &&
               setTimeout(
@@ -6645,6 +6709,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelCaptionCueRender()
       bootstrapAbort.abort()
       liveChatMessageBatcher.dispose()
+      dashboardRelay?.dispose()
+      dashboardRelayQueue = []
       if (liveChatRecoveryRetryTimer !== null) {
         window.clearTimeout(liveChatRecoveryRetryTimer)
         liveChatRecoveryRetryTimer = null

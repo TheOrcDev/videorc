@@ -129,6 +129,7 @@ import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surfac
 import { compositorSceneConflictsWithCommitted } from '../shared/native-preview-scene-authority'
 import { isCanonicalWindowsD3d11PreviewStatus } from '../shared/native-preview-capability'
 import { applyCommentsSnapshotDelta } from '../shared/comments-snapshot-delta'
+import { normalizeLiveDashboardState, type LiveDashboardState } from '../shared/live-dashboard'
 import {
   CommentsHistoryCache,
   CommentsViewSelection,
@@ -522,6 +523,8 @@ let notesWindowContentProtected = false
 let notesWindowCloseFlushReady = false
 let notesWindowCloseFlushTimer: ReturnType<typeof setTimeout> | null = null
 let latestViewerSample: ViewerSample | null = null
+/** The Stream Manager's latest dashboard, history included (plan 053, S7). */
+let latestDashboardState: LiveDashboardState | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -556,6 +559,7 @@ let commentsSmokeSnapshotOverride = false
 // Once a smoke seeds viewers or co-host state, the idle main renderer's pushes
 // (null viewers, the off co-host shape) must not overwrite the fixture.
 let commentsSmokeViewerOverride = false
+let commentsSmokeDashboardOverride = false
 let commentsSmokeCohostOverride = false
 let captionsWindow: BrowserWindow | null = null
 let captionsWindowLastFrame: Electron.Rectangle | null = null
@@ -2642,6 +2646,13 @@ function emitCommentsViewerSample(sample: ViewerSample | null): void {
   latestViewerSample = sample
   if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
     sendElectronEvent(commentsWindow.webContents, 'comments-window:viewers', latestViewerSample)
+  }
+}
+
+function emitCommentsDashboard(state: LiveDashboardState | null): void {
+  latestDashboardState = state
+  if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:dashboard', latestDashboardState)
   }
 }
 
@@ -9829,7 +9840,8 @@ async function runSmokePreviewMotionCommand(
     const before = {
       highlight: latestCommentHighlightState,
       view: currentCommentsView(),
-      viewers: latestViewerSample
+      viewers: latestViewerSample,
+      dashboard: latestDashboardState
     }
     const invokeResults = await window.webContents.executeJavaScript(
       `(async () => {
@@ -9855,6 +9867,16 @@ async function runSmokePreviewMotionCommand(
             total: 999999,
             sampledAt: '2099-01-01T00:00:00Z',
             destinations: []
+          }]],
+          ['pushDashboard', [{
+            sessionId: 'forged-comments-session',
+            session: { state: 'live', startedAt: '2099-01-01T00:00:00Z' },
+            viewers: { latest: null, peak: 999999, history: [] },
+            audience: null,
+            health: null,
+            targets: [],
+            destinationEvents: [],
+            updatedAt: '2099-01-01T00:00:00Z'
           }]]
         ];
         return Promise.all(attempts.map(async ([method, args]) => {
@@ -9874,7 +9896,8 @@ async function runSmokePreviewMotionCommand(
     const after = {
       highlight: latestCommentHighlightState,
       view: currentCommentsView(),
-      viewers: latestViewerSample
+      viewers: latestViewerSample,
+      dashboard: latestDashboardState
     }
     return {
       invokeResults,
@@ -9927,6 +9950,14 @@ async function runSmokePreviewMotionCommand(
       })()`,
       true
     )
+  }
+
+  if (command === 'comments-window-seed-dashboard') {
+    commentsSmokeDashboardOverride = true
+    emitCommentsDashboard(
+      params.state === null ? null : normalizeLiveDashboardState(params.state)
+    )
+    return { dashboard: latestDashboardState }
   }
 
   if (command === 'comments-window-seed-viewers') {
@@ -13000,6 +13031,18 @@ app.whenReady().then(async () => {
     emitCommentsViewerSample(sample && typeof sample === 'object' ? (sample as ViewerSample) : null)
   })
   secureIpcHandle('comments-window:viewers-get', () => latestViewerSample)
+  // Stream Manager dashboard relay (plan 053, S7): same shape as the viewer
+  // relay. Only the main renderer pushes; the window seeds and follows.
+  secureIpcHandle('comments-window:dashboard-push', (event, state: unknown) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+      return undefined
+    }
+    if (commentsSmokeDashboardOverride) {
+      return undefined
+    }
+    emitCommentsDashboard(state === null ? null : normalizeLiveDashboardState(state))
+  })
+  secureIpcHandle('comments-window:dashboard-get', () => latestDashboardState)
   secureIpcHandle('comments-window:cohost-push', (event, state: unknown) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return undefined

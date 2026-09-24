@@ -210,9 +210,15 @@ async function main() {
   assertProbe(
     authority.after?.highlight?.generation !== 999 &&
       authority.after?.view?.snapshot?.sessionId !== 'forged-comments-session' &&
-      authority.after?.viewers?.total !== 999999,
-    'authority: detached renderer cannot forge snapshot, viewers, or On stream state',
+      authority.after?.viewers?.total !== 999999 &&
+      authority.after?.dashboard?.sessionId !== 'forged-comments-session',
+    'authority: detached renderer cannot forge snapshot, viewers, dashboard, or On stream state',
     JSON.stringify(authority)
+  )
+  assertProbe(
+    authority.invokeResults?.some((attempt) => attempt.method === 'pushDashboard'),
+    'authority: the probe tried to push a forged dashboard',
+    JSON.stringify(authority.invokeResults)
   )
 
   // Chat chrome: renamed title, the corner picker, and real glass (plan 050):

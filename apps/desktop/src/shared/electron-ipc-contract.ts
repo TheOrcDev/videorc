@@ -26,6 +26,7 @@ import type {
   VideorcApi,
   ViewerSample
 } from './backend'
+import type { LiveDashboardState } from './live-dashboard'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
 import { COMMENT_HIGHLIGHT_ANCHORS, LAYOUT_PRESET_VALUES } from './backend'
 import {
@@ -123,6 +124,8 @@ export const electronInvokeApiMethods = {
   'comments-window:clear-result-push': 'pushCommentsClearResult',
   'comments-window:viewers-push': 'pushViewerSample',
   'comments-window:viewers-get': 'getViewerSample',
+  'comments-window:dashboard-push': 'pushDashboard',
+  'comments-window:dashboard-get': 'getDashboard',
   'comments-window:cohost-push': 'pushCohostWindowState',
   'comments-window:cohost-get': 'getCohostWindowState',
   'comments-window:cohost-action': 'sendCohostAction',
@@ -192,6 +195,7 @@ export interface ElectronIpcEventMap {
   'comments-window:send-request': CommentsSendCommand
   'comments-window:clear-request': CommentsClearCommand
   'comments-window:viewers': ViewerSample | null
+  'comments-window:dashboard': LiveDashboardState | null
   'comments-window:cohost': CohostWindowState
   'comments-window:cohost-action-request': CohostActionCommand
   'comments-window:cohost-enable-request': CohostEnableCommand
@@ -227,6 +231,7 @@ export const electronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:viewers',
+  'comments-window:dashboard',
   'comments-window:cohost',
   'comments-window:cohost-action-request',
   'comments-window:cohost-enable-request',
@@ -1011,6 +1016,8 @@ export const boundedPassthroughElectronInvokeChannels = [
   'comments-window:clear-result-push',
   'comments-window:viewers-push',
   'comments-window:viewers-get',
+  'comments-window:dashboard-push',
+  'comments-window:dashboard-get',
   'comments-window:cohost-push',
   'comments-window:cohost-get',
   'comments-window:cohost-action',
@@ -1137,6 +1144,7 @@ export const boundedPassthroughElectronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:viewers',
+  'comments-window:dashboard',
   'comments-window:cohost',
   'comments-window:cohost-action-request',
   'comments-window:cohost-enable-request',
