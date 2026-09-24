@@ -2,14 +2,14 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { StatsStrip } from '@/components/stream-manager/stats-strip'
+import { StatsBar } from '@/components/stream-manager/stats-bar'
 import {
   providerCapabilityLabel,
   providerCapabilityTitle,
   StreamManagerStatusBar
 } from '@/components/stream-manager/stream-manager-status-bar'
 import type { LiveChatProviderState } from '@/lib/backend'
-import type { StatTileModel } from '@/lib/stream-manager-stats'
+import type { StatItemModel } from '@/lib/stream-manager-stats'
 import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 
 const noop = (): void => undefined
@@ -78,35 +78,61 @@ describe('Stream Manager status bar', () => {
   })
 })
 
-describe('StatsStrip', () => {
-  const tiles: StatTileModel[] = [
-    { id: 'session', label: 'Session', value: '12:04', tone: 'neutral', badge: 'live' },
+describe('StatsBar (plan 057)', () => {
+  const items: StatItemModel[] = [
+    {
+      id: 'session',
+      label: 'Session',
+      value: '12:04',
+      tone: 'neutral',
+      badge: 'live',
+      details: [],
+      description: 'On air for 12:04'
+    },
     {
       id: 'viewers',
       label: 'Viewers',
       value: '1.2k',
-      detail: 'Peak 1.4k',
       tone: 'neutral',
-      spark: [1, 2]
+      spark: [1, 2],
+      details: [{ label: 'Peak', value: '1.4k' }],
+      description: '1.2k viewers, peak 1.4k'
+    },
+    {
+      id: 'health',
+      label: 'Stream health',
+      value: 'X failed',
+      tone: 'error',
+      details: [],
+      description: 'Stream health: X failed'
     },
     {
       id: 'followers',
       label: 'Followers',
       value: '61,942',
-      detail: '+12 this stream',
-      tone: 'neutral'
+      unit: 'followers',
+      delta: '+12',
+      tone: 'neutral',
+      details: [],
+      description: '61,942 followers, +12 this stream'
     }
   ]
 
-  it('renders tiles for wide tiers and one summary line for narrow ones', () => {
-    const markup = renderToStaticMarkup(createElement(StatsStrip, { tiles }))
-    expect(markup).toContain('data-slot="stats-strip"')
-    expect(markup).toContain('data-tile="viewers"')
+  it('draws one bar: the main three first, the rest after a hairline', () => {
+    const markup = renderToStaticMarkup(createElement(StatsBar, { items }))
+    expect(markup).toContain('data-slot="stats-bar"')
+    expect(markup).not.toContain('stats-summary')
     expect(markup).toContain('On air')
-    expect(markup).toContain('data-slot="stats-summary"')
-    expect(markup).toContain('data-summary="viewers"')
-    // The viewer count is in the narrow summary too: never hidden while live.
-    expect(markup.match(/1\.2k/g)?.length).toBe(2)
-    expect(markup).toContain('watching')
+    const order = [...markup.matchAll(/data-stat="([a-z]+)"/g)].map((match) => match[1])
+    expect(order).toEqual(['session', 'viewers', 'health', 'followers'])
+    expect(markup.match(/data-group="main"/g)).toHaveLength(3)
+    expect(markup).toContain('data-group="more"')
+    // The viewer count is drawn once, at every width: never hidden while live.
+    expect(markup.match(/>1\.2k</g)?.length).toBe(1)
+    // Health speaks only when something is wrong, and in the error tone.
+    expect(markup).toContain('X failed')
+    expect(markup).toContain('data-tone="error"')
+    expect(markup).toContain('aria-label="Stream health: X failed"')
+    expect(markup).toContain('+12')
   })
 })

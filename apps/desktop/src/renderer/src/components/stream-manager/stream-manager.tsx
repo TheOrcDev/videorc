@@ -17,7 +17,7 @@ import {
   type ChatPrefill,
   type ChatSendOptions
 } from '@/components/stream-manager/chat-pane'
-import { StatsStrip } from '@/components/stream-manager/stats-strip'
+import { StatsBar } from '@/components/stream-manager/stats-bar'
 import { StreamManagerStatusBar } from '@/components/stream-manager/stream-manager-status-bar'
 import { StatusDot, type StatusDotTone } from '@/components/status-dot'
 import { Badge } from '@/components/ui/badge'
@@ -58,7 +58,7 @@ import {
   thankYouDraft,
   type ActivityItem
 } from '@/lib/stream-activity'
-import { statTiles } from '@/lib/stream-manager-stats'
+import { statItems } from '@/lib/stream-manager-stats'
 import {
   BELOW_WIDE,
   PANES_GRID,
@@ -330,9 +330,9 @@ export function StreamManager({
         .filter((name): name is string => Boolean(name)),
     [snapshot.providers]
   )
-  const tiles = useMemo(
+  const stats = useMemo(
     () =>
-      statTiles({
+      statItems({
         dashboard: inHistory ? null : dashboard,
         viewerSample: inHistory ? null : viewerSample,
         messages,
@@ -464,7 +464,8 @@ export function StreamManager({
       data-slot="stream-manager"
     >
       {/* The title row: the title only (owner call, 2026-09-23). Fixed height:
-          the traffic lights are centred on this strip. */}
+          the traffic lights are centred on this strip. The stats bar says
+          On air, and History has its own bar (plan 057). */}
       <header
         className={cn(
           'flex h-10 shrink-0 items-center gap-2 overflow-hidden border-b border-border pr-3 [-webkit-app-region:drag]',
@@ -475,12 +476,6 @@ export function StreamManager({
         <span className="shrink-0 truncate text-xs font-medium" data-slot="stream-manager-title">
           Stream Manager
         </span>
-        <Badge
-          className="shrink-0"
-          variant={mode === 'Live' ? 'success' : mode === 'History' ? 'secondary' : 'outline'}
-        >
-          {mode}
-        </Badge>
       </header>
 
       {viewMode?.kind === 'history' ? (
@@ -505,7 +500,7 @@ export function StreamManager({
         </div>
       ) : null}
 
-      <StatsStrip tiles={tiles} />
+      <StatsBar items={stats} />
 
       <div className={PANES_GRID} data-slot="stream-manager-panes">
         {/* Below Wide: one segmented control picks the pane. */}

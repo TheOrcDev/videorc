@@ -48,6 +48,10 @@ const DELAYED_SEND_ACK_MS =
 const WIDE_TIER_MIN_WIDTH = 1040
 const MEDIUM_TIER_MIN_WIDTH = 640
 const SWEEP_WIDTHS = [320, 480, 640, 800, 1040, 1280]
+// Plan 057: 32 px of stats plus the hairline under them; the main three sit
+// at most a gap-4 (16 px) apart, with a little room for rounding.
+const STATS_BAR_MAX_HEIGHT = 33.5
+const STATS_MAIN_MAX_GAP = 20
 
 let launched
 let smoke
@@ -133,8 +137,10 @@ async function main() {
   )
   const coldLive = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
+    // The title row carries the title only (plan 057): the stats bar's session
+    // stat says the window is off air.
     (s) =>
-      s.text.includes('Idle') &&
+      s.text.includes('Off air') &&
       s.composerCount === 0 &&
       !s.text.includes('History-only replay comment'),
     5000
@@ -149,7 +155,7 @@ async function main() {
   await smokeCommand('comments-window-push-snapshot', { snapshot: idleSnapshot() })
   const idle = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
-    (s) => s.open && s.messageCount === 0 && s.composerCount === 0 && s.text.includes('Idle'),
+    (s) => s.open && s.messageCount === 0 && s.composerCount === 0 && s.text.includes('Off air'),
     8000
   )
   assertProbe(
@@ -162,8 +168,9 @@ async function main() {
   await smokeCommand('comments-window-push-snapshot', { snapshot: failedLiveSnapshot() })
   const failedLive = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
+    // Live mode shows in the composer and the highlight action, not a badge.
     (s) =>
-      s.text.includes('Live') &&
+      !s.text.includes('Back to live') &&
       s.text.includes('All providers are temporarily unavailable') &&
       s.composerCount === 1 &&
       s.composerDisabled === true &&
@@ -646,16 +653,16 @@ async function probeNarrowWidths() {
       `${tag}: the viewer count is visible while live`,
       JSON.stringify(metrics.viewer)
     )
+    assertStatsBar(metrics, tag)
     assertBoxFits(metrics.statusBar, metrics.statusBarItems, `${tag}: status bar`)
     if (width >= WIDE_TIER_MIN_WIDTH) {
       assertProbe(
         metrics.wideTabs &&
           !metrics.narrowTabs &&
           metrics.panes.chat &&
-          (metrics.panes.activity || metrics.panes.orcle) &&
-          metrics.strip !== null,
-        `${tag}: Wide shows the strip, Chat and the right pane`,
-        JSON.stringify({ panes: metrics.panes, wide: metrics.wideTabs, strip: metrics.strip })
+          (metrics.panes.activity || metrics.panes.orcle),
+        `${tag}: Wide shows Chat and the right pane`,
+        JSON.stringify({ panes: metrics.panes, wide: metrics.wideTabs })
       )
     } else {
       const shown = Object.values(metrics.panes).filter(Boolean).length
@@ -672,25 +679,14 @@ async function probeNarrowWidths() {
           metrics.highlightPosition.visible &&
           metrics.clearViewVisible &&
           metrics.openPreviewVisible &&
-          !metrics.moreMenu.visible &&
-          metrics.strip !== null,
+          !metrics.moreMenu.visible,
         `${tag}: every control is inline in the status bar`,
         JSON.stringify(metrics)
       )
-      assertProbe(
-        metrics.stripRule >= 1,
-        `${tag}: a hairline splits the stats strip from the panes`,
-        JSON.stringify({ stripRule: metrics.stripRule })
-      )
     } else {
       assertProbe(
-        metrics.summaryRule >= 1,
-        `${tag}: a hairline splits the summary from the panes`,
-        JSON.stringify({ summaryRule: metrics.summaryRule })
-      )
-      assertProbe(
-        metrics.moreMenu.visible && !metrics.inlineActions && metrics.summary !== null,
-        `${tag}: controls fold into ⋯ and the strip becomes one line`,
+        metrics.moreMenu.visible && !metrics.inlineActions,
+        `${tag}: controls fold into ⋯`,
         JSON.stringify(metrics)
       )
       assertProbe(
@@ -783,6 +779,33 @@ function assertHeaderFits(metrics, tag) {
     `${tag}: every visible header item sits inside the gutters`,
     JSON.stringify({ header, clipped })
   )
+}
+
+// Plan 057: one thin bar at every width. The clock, viewers and health lead
+// it, whole and side by side; any other stat is either whole or wrapped out
+// of sight, never cut at the edge.
+function assertStatsBar(metrics, tag) {
+  assertProbe(
+    metrics.bar !== null && metrics.bar.height <= STATS_BAR_MAX_HEIGHT,
+    `${tag}: the stats bar is one thin row (<= ${STATS_BAR_MAX_HEIGHT}px)`,
+    JSON.stringify(metrics.bar)
+  )
+  assertProbe(
+    metrics.barRule >= 1,
+    `${tag}: a hairline splits the stats bar from the panes`,
+    JSON.stringify({ barRule: metrics.barRule })
+  )
+  const main = (metrics.stats ?? []).filter((stat) => stat.group === 'main')
+  const gaps = main.slice(1).map((stat, index) => stat.left - main[index].right)
+  assertProbe(
+    main.map((stat) => stat.id).join(',') === 'session,viewers,health' &&
+      main.every((stat) => stat.shown) &&
+      gaps.every((gap) => gap <= STATS_MAIN_MAX_GAP),
+    `${tag}: the clock, viewers and health lead the bar, whole and together`,
+    JSON.stringify({ main, gaps })
+  )
+  const cut = (metrics.stats ?? []).filter((stat) => stat.straddles)
+  assertProbe(cut.length === 0, `${tag}: no stat is cut at the bar's edge`, JSON.stringify(cut))
 }
 
 function assertBoxFits(box, items, label) {

@@ -10143,13 +10143,31 @@ async function runSmokePreviewMotionCommand(
                 }))
             : [];
         const header = document.querySelector('[data-slot="chat-header"]');
-        const strip = document.querySelector('[data-slot="stats-strip"]');
-        const summary = document.querySelector('[data-slot="stats-summary"]');
+        const bar = document.querySelector('[data-slot="stats-bar"]');
         const statusBar = document.querySelector('[data-slot="status-bar"]');
         const inlineActions = document.querySelector('[data-slot="stream-manager-actions"]');
-        const viewerTile = document.querySelector('[data-tile="viewers"] [data-slot="stat-value"]');
-        const viewerSummary = document.querySelector('[data-summary="viewers"]');
-        const viewerNode = visible(viewerTile) ? viewerTile : visible(viewerSummary) ? viewerSummary : null;
+        const viewerValue = document.querySelector('[data-stat="viewers"] [data-slot="stat-value"]');
+        const viewerNode = visible(viewerValue) ? viewerValue : null;
+        // Each stat is either whole inside its clip box (the bar, or the
+        // wrapping rest group) or wrapped out of sight below it (plan 057).
+        const stats = Array.from(document.querySelectorAll('[data-slot="stat-item"]')).map((element) => {
+          const r = element.getBoundingClientRect();
+          const clipElement = element.closest('[data-slot="stats-more"]') ?? bar;
+          const clip = clipElement ? clipElement.getBoundingClientRect() : r;
+          const shown =
+            r.width > 0 &&
+            r.left >= clip.left - 0.5 && r.right <= clip.right + 0.5 &&
+            r.top >= clip.top - 0.5 && r.bottom <= clip.bottom + 0.5;
+          const hidden = r.width === 0 || r.top >= clip.bottom - 0.5 || r.left >= clip.right - 0.5;
+          return {
+            id: element.getAttribute('data-stat'),
+            group: element.getAttribute('data-group'),
+            shown,
+            straddles: !shown && !hidden,
+            text: (element.querySelector('[data-slot="stat-value"]')?.textContent ?? '').trim(),
+            ...rect(element)
+          };
+        });
         const button = (label) => {
           const element = document.querySelector('button[aria-label="' + label + '"]');
           return { present: Boolean(element), visible: visible(element) };
@@ -10200,10 +10218,9 @@ async function runSmokePreviewMotionCommand(
           headerItems: visibleDescendants(header),
           headerButtons: header ? header.querySelectorAll('button').length : -1,
           headerTitle: document.querySelector('[data-slot="stream-manager-title"]')?.textContent ?? '',
-          strip: visible(strip) ? box(strip) : null,
-          summary: visible(summary) ? box(summary) : null,
-          stripRule: visible(strip) ? parseFloat(getComputedStyle(strip).borderBottomWidth) || 0 : null,
-          summaryRule: visible(summary) ? parseFloat(getComputedStyle(summary).borderBottomWidth) || 0 : null,
+          bar: visible(bar) ? box(bar) : null,
+          barRule: visible(bar) ? parseFloat(getComputedStyle(bar).borderBottomWidth) || 0 : null,
+          stats,
           statusBar: box(statusBar),
           statusBarItems: visibleDescendants(statusBar),
           viewer: viewerNode
