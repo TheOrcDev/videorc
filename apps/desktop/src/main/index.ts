@@ -10106,6 +10106,7 @@ async function runSmokePreviewMotionCommand(
       throw new Error('Stream Manager window is not open.')
     }
     const openMoreMenu = params.openMoreMenu === true
+    const openStatsMenu = params.openStatsMenu === true
     const metrics = await window.webContents.executeJavaScript(
       `(async () => {
         const visible = (element) => {
@@ -10209,8 +10210,31 @@ async function runSmokePreviewMotionCommand(
             document.activeElement?.blur?.();
           }
         }
+        // Plan 057, D2: right-click a stat and read the bar's own menu.
+        let statsMenuItems = null;
+        if (${JSON.stringify(openStatsMenu)}) {
+          const statsMenu = () => document.querySelector('[data-slot="stats-bar-menu"]');
+          const target =
+            document.querySelector('[data-stat="followers"]') ??
+            document.querySelector('[data-slot="stats-bar"]');
+          if (visible(target) && !statsMenu()) {
+            const r = target.getBoundingClientRect();
+            target.dispatchEvent(
+              new MouseEvent('contextmenu', { bubbles: true, cancelable: true, button: 2, clientX: r.left + 4, clientY: r.top + 4 })
+            );
+            statsMenuItems = (await settle(() => statsMenu()?.querySelector('[role^="menuitem"]')))
+              ? Array.from(statsMenu().querySelectorAll('[role^="menuitem"]')).map((item) => (item.textContent ?? '').trim())
+              : [];
+            for (let attempt = 0; attempt < 3 && statsMenu(); attempt += 1) {
+              (statsMenu() ?? document).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+              await settle(() => !statsMenu());
+            }
+            document.activeElement?.blur?.();
+          }
+        }
         return {
           moreMenuItems,
+          statsMenuItems,
           menuOpenAfter: Boolean(document.querySelector('[role="menu"]')),
           windowWidth: window.innerWidth,
           documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 0.5,

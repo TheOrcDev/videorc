@@ -643,7 +643,10 @@ async function probeNarrowWidths() {
   await smokeCommand('comments-window-seed-cohost', { state: cohostListeningFixture() })
 
   for (const width of SWEEP_WIDTHS) {
-    const metrics = await layoutAt(width, { openMoreMenu: true })
+    const metrics = await layoutAt(width, {
+      openMoreMenu: true,
+      openStatsMenu: width >= WIDE_TIER_MIN_WIDTH
+    })
     const tag = `sweep ${width}px live`
     assertHeaderFits(metrics, tag)
     assertProbe(
@@ -664,6 +667,23 @@ async function probeNarrowWidths() {
     assertStatsBar(metrics, tag)
     assertBoxFits(metrics.statusBar, metrics.statusBarItems, `${tag}: status bar`)
     if (width >= WIDE_TIER_MIN_WIDTH) {
+      // Plan 057, D2: right-clicking a stat offers show/hide, moving it, and
+      // a reset, and closes cleanly.
+      assertProbe(
+        [
+          'Stream health',
+          'Followers',
+          'Subs and members',
+          'Tips',
+          'Chat pace',
+          'Move Followers left',
+          'Move Followers right',
+          'Reset stats'
+        ].every((label) => metrics.statsMenuItems?.includes(label)) &&
+          metrics.menuOpenAfter === false,
+        `${tag}: right-clicking a stat offers show, hide, move and reset`,
+        JSON.stringify({ items: metrics.statsMenuItems, openAfter: metrics.menuOpenAfter })
+      )
       assertProbe(
         metrics.wideTabs &&
           !metrics.narrowTabs &&

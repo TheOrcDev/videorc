@@ -55,6 +55,12 @@ import { sortMessagesChronological } from '@/lib/live-chat-view'
 import { activityItems, thankYouDraft, type ActivityItem } from '@/lib/stream-activity'
 import { statItems } from '@/lib/stream-manager-stats'
 import {
+  browserStorage,
+  loadStatsLayout,
+  saveStatsLayout,
+  type StatsLayout
+} from '@/lib/stream-manager-stats-layout'
+import {
   BELOW_WIDE,
   PANES_GRID,
   STREAM_MANAGER_CONTAINER,
@@ -350,6 +356,13 @@ export function StreamManager({
     [dashboard, history, inHistory, messages, nowMs, snapshot.providers, viewMode, viewerSample]
   )
 
+  // The streamer's own order and picks for the stats bar (plan 057, D2).
+  const [statsLayout, setStatsLayout] = useState(() => loadStatsLayout(browserStorage()))
+  const changeStatsLayout = useCallback((next: StatsLayout): void => {
+    setStatsLayout(next)
+    saveStatsLayout(browserStorage(), next)
+  }, [])
+
   const showOrcle = useCallback((): void => {
     setNarrowPane('orcle')
     setRightPane('orcle')
@@ -499,7 +512,7 @@ export function StreamManager({
         </div>
       ) : null}
 
-      <StatsBar items={stats} />
+      <StatsBar items={stats} layout={statsLayout} onLayoutChange={changeStatsLayout} />
 
       <div className={PANES_GRID} data-slot="stream-manager-panes">
         {/* Below Wide: one segmented control picks the pane. */}
