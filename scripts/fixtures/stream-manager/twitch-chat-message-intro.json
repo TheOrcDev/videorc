@@ -1,0 +1,33 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "4145994",
+  "chatter_user_login": "nacroni_",
+  "chatter_user_name": "Nacroni_",
+  "message_id": "chat-intro-1",
+  "message": {
+    "text": "can anyone ask claude how to optically center text",
+    "fragments": [
+      {
+        "type": "text",
+        "text": "can anyone ask claude how to optically center text",
+        "cheermote": null,
+        "emote": null,
+        "mention": null
+      }
+    ]
+  },
+  "color": "#00FF7F",
+  "badges": [
+    {
+      "set_id": "subscriber",
+      "id": "3",
+      "info": "3"
+    }
+  ],
+  "message_type": "user_intro",
+  "cheer": null,
+  "reply": null,
+  "channel_points_custom_reward_id": null
+}

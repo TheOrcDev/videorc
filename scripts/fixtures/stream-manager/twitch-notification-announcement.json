@@ -1,0 +1,40 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "49912639",
+  "chatter_user_login": "streamer",
+  "chatter_user_name": "Streamer",
+  "chatter_is_anonymous": false,
+  "color": "#1E90FF",
+  "badges": [],
+  "system_message": "",
+  "message_id": "notice-announcement",
+  "message": {
+    "text": "New video out today",
+    "fragments": [
+      {
+        "type": "text",
+        "text": "New video out today",
+        "cheermote": null,
+        "emote": null,
+        "mention": null
+      }
+    ]
+  },
+  "notice_type": "announcement",
+  "sub": null,
+  "resub": null,
+  "sub_gift": null,
+  "community_sub_gift": null,
+  "gift_paid_upgrade": null,
+  "prime_paid_upgrade": null,
+  "raid": null,
+  "unraid": null,
+  "pay_it_forward": null,
+  "announcement": {
+    "color": "PURPLE"
+  },
+  "bits_badge_tier": null,
+  "charity_donation": null
+}

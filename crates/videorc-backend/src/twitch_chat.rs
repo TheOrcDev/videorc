@@ -24,8 +24,9 @@ use tokio_tungstenite::connect_async;
 use tokio_tungstenite::tungstenite::Message;
 
 use crate::live_chat::{
-    LiveChatEventType, LiveChatMessage, LiveChatMessageFragment, LiveChatProviderConnectionState,
-    ProviderSendReceipt, live_chat_message_id, set_provider_and_emit, try_deliver_message,
+    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatMessageFragment,
+    LiveChatProviderConnectionState, LiveChatReply, ProviderSendReceipt, SubscriptionKind,
+    live_chat_message_id, set_provider_and_emit, try_deliver_message,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -363,6 +364,9 @@ fn base_message(
         amount_text: None,
         is_deleted: false,
         raw_provider_type: None,
+        details: None,
+        reply: None,
+        first_message: false,
     }
 }
 
@@ -409,8 +413,137 @@ fn normalize_chat_message(
         LiveChatEventType::Message
     };
     message.amount_text = amount_text;
+    message.details = event["cheer"]["bits"]
+        .as_u64()
+        .map(|bits| LiveChatEventDetails::Cheer { bits });
+    message.reply = parse_reply(&event["reply"]);
+    // Twitch's own first-chat intro; other authors are checked against earlier
+    // sessions at delivery (`mark_first_time_chatters`).
+    message.first_message = event["message_type"].as_str() == Some("user_intro");
     message.raw_provider_type = Some("channel.chat.message".to_string());
     Some(message)
+}
+
+/// The threaded-reply parent of a chat message, when Twitch sends one.
+fn parse_reply(reply: &Value) -> Option<LiveChatReply> {
+    let parent_message_id = reply["parent_message_id"]
+        .as_str()
+        .filter(|id| !id.is_empty())?;
+    Some(LiveChatReply {
+        parent_message_id: parent_message_id.to_string(),
+        parent_author_name: reply["parent_user_name"]
+            .as_str()
+            .unwrap_or("a viewer")
+            .to_string(),
+        parent_text: reply["parent_message_body"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
+    })
+}
+
+fn u32_field(value: &Value) -> Option<u32> {
+    value.as_u64().and_then(|number| u32::try_from(number).ok())
+}
+
+fn tier_field(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .filter(|tier| !tier.is_empty())
+        .map(ToOwned::to_owned)
+}
+
+fn subscription_details(
+    kind: SubscriptionKind,
+    body: &Value,
+    months: Option<u32>,
+    gift_count: Option<u32>,
+    recipient_name: Option<String>,
+) -> LiveChatEventDetails {
+    LiveChatEventDetails::Subscription {
+        subscription: kind,
+        tier: tier_field(&body["sub_tier"]),
+        is_prime: body["is_prime"].as_bool().unwrap_or(false),
+        months,
+        streak_months: u32_field(&body["streak_months"]),
+        gift_count,
+        recipient_name,
+    }
+}
+
+/// Structured facts for a `channel.chat.notification`, keyed by its notice
+/// type. Field names follow the EventSub reference (plan 053 S0).
+fn notification_details(notice_type: &str, event: &Value) -> Option<LiveChatEventDetails> {
+    match notice_type {
+        "sub" => Some(subscription_details(
+            SubscriptionKind::Sub,
+            &event["sub"],
+            None,
+            None,
+            None,
+        )),
+        "resub" => {
+            let body = &event["resub"];
+            Some(subscription_details(
+                SubscriptionKind::Resub,
+                body,
+                u32_field(&body["cumulative_months"]),
+                None,
+                None,
+            ))
+        }
+        "sub_gift" => {
+            let body = &event["sub_gift"];
+            Some(subscription_details(
+                SubscriptionKind::SubGift,
+                body,
+                None,
+                Some(1),
+                body["recipient_user_name"].as_str().map(ToOwned::to_owned),
+            ))
+        }
+        "community_sub_gift" => {
+            let body = &event["community_sub_gift"];
+            Some(subscription_details(
+                SubscriptionKind::CommunitySubGift,
+                body,
+                None,
+                u32_field(&body["total"]),
+                None,
+            ))
+        }
+        "gift_paid_upgrade" => Some(subscription_details(
+            SubscriptionKind::GiftPaidUpgrade,
+            &event["gift_paid_upgrade"],
+            None,
+            None,
+            None,
+        )),
+        "prime_paid_upgrade" => Some(subscription_details(
+            SubscriptionKind::PrimePaidUpgrade,
+            &event["prime_paid_upgrade"],
+            None,
+            None,
+            None,
+        )),
+        "pay_it_forward" => Some(subscription_details(
+            SubscriptionKind::PayItForward,
+            &event["pay_it_forward"],
+            None,
+            None,
+            None,
+        )),
+        "raid" => event["raid"]["viewer_count"]
+            .as_u64()
+            .map(|viewer_count| LiveChatEventDetails::Raid { viewer_count }),
+        "announcement" => Some(LiveChatEventDetails::Announcement {
+            color: event["announcement"]["color"]
+                .as_str()
+                .filter(|color| !color.is_empty())
+                .map(ToOwned::to_owned),
+        }),
+        _ => None,
+    }
 }
 
 fn notice_event_type(notice_type: &str) -> LiveChatEventType {
@@ -443,13 +576,32 @@ fn normalize_chat_notification(
         timestamp,
         received_at,
     );
-    message.author_name = event["chatter_user_name"]
-        .as_str()
-        .unwrap_or("Twitch")
-        .to_string();
+    let anonymous = event["chatter_is_anonymous"].as_bool().unwrap_or(false);
+    message.author_name = if anonymous {
+        "Anonymous".to_string()
+    } else {
+        event["chatter_user_name"]
+            .as_str()
+            .unwrap_or("Twitch")
+            .to_string()
+    };
+    if !anonymous {
+        message.author_id = event["chatter_user_id"]
+            .as_str()
+            .filter(|id| !id.is_empty())
+            .map(ToOwned::to_owned);
+    }
+    if notice_type == "raid" {
+        // The raiding channel is the author; its avatar rides along.
+        message.author_avatar_url = event["raid"]["profile_image_url"]
+            .as_str()
+            .filter(|url| !url.is_empty())
+            .map(ToOwned::to_owned);
+    }
     message.message_text = text;
     message.fragments = parse_fragments(&event["message"]["fragments"]);
     message.event_type = notice_event_type(notice_type);
+    message.details = notification_details(notice_type, event);
     message.raw_provider_type = Some(format!("channel.chat.notification:{notice_type}"));
     message
 }
@@ -1526,6 +1678,146 @@ mod tests {
         );
         // Published timestamp comes from the frame metadata.
         assert_eq!(message.published_at, "2026-06-06T10:00:00Z");
+    }
+
+    macro_rules! fixture {
+        ($name:literal) => {
+            serde_json::from_str::<Value>(include_str!(concat!(
+                "../../../scripts/fixtures/stream-manager/",
+                $name,
+                ".json"
+            )))
+            .unwrap()
+        };
+    }
+
+    fn notice(event: &Value) -> LiveChatMessage {
+        normalize_notification(
+            "channel.chat.notification",
+            event,
+            "delivery",
+            None,
+            "s1",
+            None,
+            "now",
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn notifications_carry_structured_details() {
+        let resub = notice(&fixture!("twitch-notification-resub"));
+        assert_eq!(resub.event_type, LiveChatEventType::Membership);
+        assert_eq!(resub.author_id.as_deref(), Some("49912639"));
+        assert_eq!(
+            resub.details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::Resub,
+                tier: Some("1000".to_string()),
+                is_prime: false,
+                months: Some(3),
+                streak_months: Some(2),
+                gift_count: None,
+                recipient_name: None,
+            })
+        );
+
+        let sub = notice(&fixture!("twitch-notification-sub"));
+        assert!(matches!(
+            sub.details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::Sub,
+                is_prime: true,
+                ..
+            })
+        ));
+
+        let gift = notice(&fixture!("twitch-notification-sub-gift"));
+        assert_eq!(gift.author_name, "Anonymous");
+        assert_eq!(gift.author_id, None);
+        assert!(matches!(
+            &gift.details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::SubGift,
+                gift_count: Some(1),
+                recipient_name: Some(name),
+                ..
+            }) if name == "LuckyViewer"
+        ));
+
+        let community = notice(&fixture!("twitch-notification-community-sub-gift"));
+        assert!(matches!(
+            community.details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::CommunitySubGift,
+                gift_count: Some(5),
+                ..
+            })
+        ));
+
+        let raid = notice(&fixture!("twitch-notification-raid"));
+        assert_eq!(raid.event_type, LiveChatEventType::System);
+        assert_eq!(raid.author_name, "Raider42");
+        assert_eq!(
+            raid.details,
+            Some(LiveChatEventDetails::Raid { viewer_count: 234 })
+        );
+        assert!(raid.author_avatar_url.is_some());
+
+        let announcement = notice(&fixture!("twitch-notification-announcement"));
+        assert_eq!(
+            announcement.details,
+            Some(LiveChatEventDetails::Announcement {
+                color: Some("PURPLE".to_string())
+            })
+        );
+    }
+
+    #[test]
+    fn chat_messages_carry_reply_first_chat_and_cheer_details() {
+        let intro = normalize_chat_message(
+            &fixture!("twitch-chat-message-intro"),
+            "s1",
+            None,
+            None,
+            "now",
+        )
+        .unwrap();
+        assert!(intro.first_message);
+        assert_eq!(intro.reply, None);
+        assert_eq!(intro.details, None);
+
+        let reply = normalize_chat_message(
+            &fixture!("twitch-chat-message-reply"),
+            "s1",
+            None,
+            None,
+            "now",
+        )
+        .unwrap();
+        assert!(!reply.first_message);
+        assert_eq!(
+            reply.reply,
+            Some(LiveChatReply {
+                parent_message_id: "chat-parent-1".to_string(),
+                parent_author_name: "ph4se_on3".to_string(),
+                parent_text: "old skateboard injury".to_string(),
+            })
+        );
+
+        let cheer = normalize_chat_message(
+            &fixture!("twitch-chat-message-cheer"),
+            "s1",
+            None,
+            None,
+            "now",
+        )
+        .unwrap();
+        assert_eq!(cheer.event_type, LiveChatEventType::Paid);
+        assert_eq!(
+            cheer.details,
+            Some(LiveChatEventDetails::Cheer { bits: 1500 })
+        );
     }
 
     #[test]

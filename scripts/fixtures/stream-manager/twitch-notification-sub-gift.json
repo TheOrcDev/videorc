@@ -1,0 +1,38 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": null,
+  "chatter_user_login": null,
+  "chatter_user_name": null,
+  "chatter_is_anonymous": true,
+  "color": "#1E90FF",
+  "badges": [],
+  "system_message": "An anonymous user gifted a Tier 1 sub to LuckyViewer!",
+  "message_id": "notice-sub_gift",
+  "message": {
+    "text": "",
+    "fragments": []
+  },
+  "notice_type": "sub_gift",
+  "sub": null,
+  "resub": null,
+  "sub_gift": {
+    "duration_months": 1,
+    "cumulative_total": null,
+    "recipient_user_id": "555",
+    "recipient_user_name": "LuckyViewer",
+    "recipient_user_login": "luckyviewer",
+    "sub_tier": "1000",
+    "community_gift_id": null
+  },
+  "community_sub_gift": null,
+  "gift_paid_upgrade": null,
+  "prime_paid_upgrade": null,
+  "raid": null,
+  "unraid": null,
+  "pay_it_forward": null,
+  "announcement": null,
+  "bits_badge_tier": null,
+  "charity_donation": null
+}

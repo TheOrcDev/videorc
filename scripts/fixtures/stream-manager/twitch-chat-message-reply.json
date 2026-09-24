@@ -1,0 +1,43 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "8",
+  "chatter_user_login": "nacroni_",
+  "chatter_user_name": "defaltGOD",
+  "message_id": "chat-reply-1",
+  "message": {
+    "text": "oh damn that sucks",
+    "fragments": [
+      {
+        "type": "text",
+        "text": "oh damn that sucks",
+        "cheermote": null,
+        "emote": null,
+        "mention": null
+      }
+    ]
+  },
+  "color": "#00FF7F",
+  "badges": [
+    {
+      "set_id": "subscriber",
+      "id": "3",
+      "info": "3"
+    }
+  ],
+  "message_type": "text",
+  "cheer": null,
+  "reply": {
+    "parent_message_id": "chat-parent-1",
+    "parent_message_body": "old skateboard injury",
+    "parent_user_id": "9",
+    "parent_user_name": "ph4se_on3",
+    "parent_user_login": "ph4se_on3",
+    "thread_message_id": "chat-parent-1",
+    "thread_user_id": "9",
+    "thread_user_name": "ph4se_on3",
+    "thread_user_login": "ph4se_on3"
+  },
+  "channel_points_custom_reward_id": null
+}

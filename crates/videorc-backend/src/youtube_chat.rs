@@ -21,8 +21,9 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 use crate::live_chat::{
-    LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, ProviderSendReceipt,
-    live_chat_message_id, set_provider_and_emit, try_deliver_messages,
+    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState,
+    MembershipKind, ProviderSendReceipt, live_chat_message_id, set_provider_and_emit,
+    try_deliver_messages,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -221,6 +222,14 @@ struct LiveChatItemSnippet {
     super_sticker_details: Option<AmountDetails>,
     #[serde(default)]
     message_deleted_details: Option<MessageDeletedDetails>,
+    #[serde(default)]
+    new_sponsor_details: Option<NewSponsorDetails>,
+    #[serde(default)]
+    member_milestone_chat_details: Option<MemberMilestoneDetails>,
+    #[serde(default)]
+    membership_gifting_details: Option<MembershipGiftingDetails>,
+    #[serde(default)]
+    gift_membership_received_details: Option<GiftMembershipReceivedDetails>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -230,11 +239,158 @@ struct MessageDeletedDetails {
     deleted_message_id: Option<String>,
 }
 
+/// Super Chat and Super Sticker amounts. Google encodes unsigned longs as JSON
+/// strings, so the numeric fields accept either form.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AmountDetails {
     #[serde(default)]
     amount_display_string: Option<String>,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    amount_micros: Option<u64>,
+    #[serde(default)]
+    currency: Option<String>,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    tier: Option<u64>,
+    #[serde(default)]
+    super_sticker_metadata: Option<SuperStickerMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SuperStickerMetadata {
+    #[serde(default)]
+    alt_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewSponsorDetails {
+    #[serde(default)]
+    member_level_name: Option<String>,
+    #[serde(default)]
+    is_upgrade: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MemberMilestoneDetails {
+    #[serde(default)]
+    member_level_name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    member_month: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MembershipGiftingDetails {
+    #[serde(default, deserialize_with = "lenient_u64")]
+    gift_memberships_count: Option<u64>,
+    #[serde(default)]
+    gift_memberships_level_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GiftMembershipReceivedDetails {
+    #[serde(default)]
+    member_level_name: Option<String>,
+}
+
+fn lenient_u64<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(number)) => number.as_u64(),
+            Some(serde_json::Value::String(text)) => text.trim().parse().ok(),
+            _ => None,
+        },
+    )
+}
+
+fn small(value: Option<u64>) -> Option<u32> {
+    value.and_then(|number| u32::try_from(number).ok())
+}
+
+/// Structured facts for a YouTube monetized or membership event (plan 053).
+fn event_details(
+    snippet: &LiveChatItemSnippet,
+    message_type: &str,
+) -> Option<LiveChatEventDetails> {
+    let amount = |details: &AmountDetails| {
+        Some((
+            details.amount_micros?,
+            details.currency.clone().filter(|code| !code.is_empty())?,
+            details.amount_display_string.clone().unwrap_or_default(),
+        ))
+    };
+    match message_type {
+        "superChatEvent" => {
+            let details = snippet.super_chat_details.as_ref()?;
+            let (amount_micros, currency, amount_display) = amount(details)?;
+            Some(LiveChatEventDetails::SuperChat {
+                amount_micros,
+                currency,
+                amount_display,
+                tier: small(details.tier),
+            })
+        }
+        "superStickerEvent" => {
+            let details = snippet.super_sticker_details.as_ref()?;
+            let (amount_micros, currency, amount_display) = amount(details)?;
+            Some(LiveChatEventDetails::SuperSticker {
+                amount_micros,
+                currency,
+                amount_display,
+                alt_text: details
+                    .super_sticker_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.alt_text.clone()),
+            })
+        }
+        "newSponsorEvent" => {
+            let details = snippet.new_sponsor_details.as_ref();
+            Some(LiveChatEventDetails::Membership {
+                membership: if details.is_some_and(|details| details.is_upgrade) {
+                    MembershipKind::Upgrade
+                } else {
+                    MembershipKind::New
+                },
+                level_name: details.and_then(|details| details.member_level_name.clone()),
+                months: None,
+                gift_count: None,
+            })
+        }
+        "memberMilestoneChatEvent" => {
+            let details = snippet.member_milestone_chat_details.as_ref();
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Milestone,
+                level_name: details.and_then(|details| details.member_level_name.clone()),
+                months: details.and_then(|details| small(details.member_month)),
+                gift_count: None,
+            })
+        }
+        "membershipGiftingEvent" => {
+            let details = snippet.membership_gifting_details.as_ref();
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Gift,
+                level_name: details.and_then(|details| details.gift_memberships_level_name.clone()),
+                months: None,
+                gift_count: details.and_then(|details| small(details.gift_memberships_count)),
+            })
+        }
+        "giftMembershipReceivedEvent" => Some(LiveChatEventDetails::Membership {
+            membership: MembershipKind::GiftReceived,
+            level_name: snippet
+                .gift_membership_received_details
+                .as_ref()
+                .and_then(|details| details.member_level_name.clone()),
+            months: None,
+            gift_count: None,
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -428,6 +584,9 @@ fn normalize_item(
         amount_text,
         is_deleted: matches!(event_type, LiveChatEventType::Deleted),
         raw_provider_type: Some(message_type.to_string()),
+        details: event_details(&item.snippet, message_type),
+        reply: None,
+        first_message: false,
     })
 }
 
@@ -888,6 +1047,99 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn monetized_and_membership_events_carry_structured_details() {
+        let response: LiveChatMessagesResponse = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/stream-manager/youtube-live-chat-page.json"
+        ))
+        .unwrap();
+        let page = normalize_page(response, "s1", None, "now");
+        let details = |id: &str| {
+            page.messages
+                .iter()
+                .find(|message| message.provider_message_id == id)
+                .unwrap()
+                .details
+                .clone()
+        };
+        assert_eq!(
+            details("yt-super-chat"),
+            Some(LiveChatEventDetails::SuperChat {
+                amount_micros: 5_000_000,
+                currency: "USD".to_string(),
+                amount_display: "$5.00".to_string(),
+                tier: Some(2),
+            })
+        );
+        assert_eq!(
+            details("yt-super-sticker"),
+            Some(LiveChatEventDetails::SuperSticker {
+                amount_micros: 2_000_000,
+                currency: "EUR".to_string(),
+                amount_display: "€2.00".to_string(),
+                alt_text: Some("Party hat".to_string()),
+            })
+        );
+        assert!(matches!(
+            details("yt-new-member"),
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Upgrade,
+                ..
+            })
+        ));
+        assert!(matches!(
+            details("yt-milestone"),
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Milestone,
+                months: Some(12),
+                ..
+            })
+        ));
+        assert!(matches!(
+            details("yt-gifting"),
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Gift,
+                gift_count: Some(5),
+                ..
+            })
+        ));
+        assert!(matches!(
+            details("yt-gift-received"),
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::GiftReceived,
+                ..
+            })
+        ));
+        assert_eq!(details("yt-text"), None);
+    }
+
+    #[test]
+    fn plain_rows_serialize_without_the_new_fields_and_details_use_camel_case() {
+        let response: LiveChatMessagesResponse = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/stream-manager/youtube-live-chat-page.json"
+        ))
+        .unwrap();
+        let page = normalize_page(response, "s1", None, "now");
+        let text = page
+            .messages
+            .iter()
+            .find(|message| message.provider_message_id == "yt-text")
+            .unwrap();
+        let json = serde_json::to_value(text).unwrap();
+        for key in ["details", "reply", "firstMessage"] {
+            assert!(json.get(key).is_none(), "{key} must be absent, never null");
+        }
+        let super_chat = page
+            .messages
+            .iter()
+            .find(|message| message.provider_message_id == "yt-super-chat")
+            .unwrap();
+        let json = serde_json::to_value(super_chat).unwrap();
+        assert_eq!(json["details"]["kind"], "super-chat");
+        assert_eq!(json["details"]["amountMicros"], 5_000_000);
+        assert_eq!(json["details"]["amountDisplay"], "$5.00");
     }
 
     #[test]

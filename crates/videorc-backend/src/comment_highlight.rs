@@ -601,6 +601,9 @@ mod tests {
             amount_text: None,
             is_deleted,
             raw_provider_type: Some("x-chat".to_string()),
+            details: None,
+            reply: None,
+            first_message: false,
         }
     }
 

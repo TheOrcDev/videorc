@@ -1,0 +1,36 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "49912639",
+  "chatter_user_login": "raider42",
+  "chatter_user_name": "Raider42",
+  "chatter_is_anonymous": false,
+  "color": "#1E90FF",
+  "badges": [],
+  "system_message": "234 raiders from Raider42 have joined!",
+  "message_id": "notice-raid",
+  "message": {
+    "text": "",
+    "fragments": []
+  },
+  "notice_type": "raid",
+  "sub": null,
+  "resub": null,
+  "sub_gift": null,
+  "community_sub_gift": null,
+  "gift_paid_upgrade": null,
+  "prime_paid_upgrade": null,
+  "raid": {
+    "user_id": "777",
+    "user_name": "Raider42",
+    "user_login": "raider42",
+    "viewer_count": 234,
+    "profile_image_url": "https://static-cdn.jtvnw.net/user-default-pictures-uv/raider42-profile_image-300x300.png"
+  },
+  "unraid": null,
+  "pay_it_forward": null,
+  "announcement": null,
+  "bits_badge_tier": null,
+  "charity_donation": null
+}

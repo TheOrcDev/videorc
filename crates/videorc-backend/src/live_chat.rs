@@ -73,6 +73,9 @@ pub enum LiveChatEventType {
     System,
     Deleted,
     Moderation,
+    /// A new follower (Twitch `channel.follow`, only with the opt-in scope).
+    /// The Stream Manager lists it under Activity and never in chat.
+    Follow,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -111,6 +114,104 @@ pub struct LiveChatMessageFragment {
     pub image_url: Option<String>,
 }
 
+/// Structured facts of a monetized or community event (plan 053). `None` on a
+/// plain chat message. Every optional field is skipped when absent: a
+/// serialized `null` has broken app load before.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "kebab-case")]
+pub enum LiveChatEventDetails {
+    /// YouTube Super Chat; `amount_micros` is in micros of `currency`.
+    #[serde(rename_all = "camelCase")]
+    SuperChat {
+        amount_micros: u64,
+        currency: String,
+        amount_display: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<u32>,
+    },
+    /// YouTube Super Sticker.
+    #[serde(rename_all = "camelCase")]
+    SuperSticker {
+        amount_micros: u64,
+        currency: String,
+        amount_display: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        alt_text: Option<String>,
+    },
+    /// A YouTube membership event.
+    #[serde(rename_all = "camelCase")]
+    Membership {
+        membership: MembershipKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        level_name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        months: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gift_count: Option<u32>,
+    },
+    /// A Twitch subscription notice. `months` is the cumulative total for a
+    /// resub; `tier` is Twitch's `1000`/`2000`/`3000`.
+    #[serde(rename_all = "camelCase")]
+    Subscription {
+        subscription: SubscriptionKind,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        tier: Option<String>,
+        #[serde(default)]
+        is_prime: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        months: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        streak_months: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gift_count: Option<u32>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        recipient_name: Option<String>,
+    },
+    /// Twitch bits.
+    Cheer { bits: u64 },
+    /// A Twitch raid; the author is the raiding channel.
+    #[serde(rename_all = "camelCase")]
+    Raid { viewer_count: u64 },
+    /// A Twitch announcement.
+    Announcement {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        color: Option<String>,
+    },
+    /// A new follower.
+    Follow,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum MembershipKind {
+    New,
+    Upgrade,
+    Milestone,
+    Gift,
+    GiftReceived,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubscriptionKind {
+    Sub,
+    Resub,
+    SubGift,
+    CommunitySubGift,
+    GiftPaidUpgrade,
+    PrimePaidUpgrade,
+    PayItForward,
+}
+
+/// The message a chat message replies to, when the platform threads replies.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LiveChatReply {
+    pub parent_message_id: String,
+    pub parent_author_name: String,
+    pub parent_text: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 #[allow(dead_code)]
@@ -143,6 +244,16 @@ pub struct LiveChatMessage {
     pub is_deleted: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub raw_provider_type: Option<String>,
+    /// Structured event facts (plan 053); `None` for plain chat.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<LiveChatEventDetails>,
+    /// The message this one replies to, when the platform threads replies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reply: Option<LiveChatReply>,
+    /// The author's first message in the channel: Twitch's own first-chat
+    /// intro, or the first message from an author no earlier session saw.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub first_message: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -673,6 +784,9 @@ pub struct LiveChatCoordinator {
     /// removed after terminal persistence; SQLite remains the durable idempotency
     /// authority afterward.
     send_operations_in_flight: HashMap<String, InFlightSendOperation>,
+    /// `platform:author_id` of every chatter this session already checked for
+    /// the first-time marker (plan 053). Reset per session, not by Clear view.
+    chatters_seen: HashSet<String>,
 }
 
 /// Minimal authoritative answer needed at the comment-card commit edge. Do
@@ -751,6 +865,7 @@ impl LiveChatCoordinator {
             tasks: Vec::new(),
             senders: HashMap::new(),
             send_operations_in_flight: HashMap::new(),
+            chatters_seen: HashSet::new(),
         }
     }
 
@@ -856,6 +971,7 @@ impl LiveChatCoordinator {
         self.messages_received = 0;
         self.reconnect_count = 0;
         self.senders.clear();
+        self.chatters_seen.clear();
     }
 
     /// Abort connector tasks and mark every connected provider `ended`. The transcript is
@@ -2220,6 +2336,91 @@ pub(crate) async fn try_deliver_message(
     try_deliver_messages(state, expected_session_generation, vec![message]).await
 }
 
+fn chatter_key(platform: StreamPlatform, author_id: &str) -> String {
+    format!("{}:{author_id}", stream_platform_id(platform))
+}
+
+/// Chat and tips count toward "first time"; notices and system rows do not.
+fn counts_as_chatter(message: &LiveChatMessage) -> bool {
+    matches!(
+        message.event_type,
+        LiveChatEventType::Message | LiveChatEventType::Paid
+    ) && !message.is_deleted
+}
+
+/// Marks the first message of each author no earlier session saw (plan 053).
+/// Runs before ingest, outside every delivery fence: one indexed query per
+/// batch of new authors, off the async runtime. A database error marks nothing
+/// rather than guessing; Twitch's own `user_intro` flag is kept as sent.
+async fn mark_first_time_chatters(
+    state: &AppState,
+    mut messages: Vec<LiveChatMessage>,
+) -> Vec<LiveChatMessage> {
+    let (session_id, fresh) = {
+        let coordinator = state.live_chat.lock().await;
+        let Some(session_id) = coordinator.session_id.clone() else {
+            return messages;
+        };
+        let mut fresh: Vec<(StreamPlatform, String)> = Vec::new();
+        for message in &messages {
+            let Some(author_id) = message.author_id.as_deref() else {
+                continue;
+            };
+            if !counts_as_chatter(message)
+                || coordinator
+                    .chatters_seen
+                    .contains(&chatter_key(message.platform, author_id))
+                || fresh
+                    .iter()
+                    .any(|(platform, seen)| *platform == message.platform && seen == author_id)
+            {
+                continue;
+            }
+            fresh.push((message.platform, author_id.to_string()));
+        }
+        (session_id, fresh)
+    };
+    if fresh.is_empty() {
+        return messages;
+    }
+    let database = state.database.clone();
+    let lookup = fresh.clone();
+    let lookup_session_id = session_id.clone();
+    let returning = tokio::task::spawn_blocking(move || {
+        database.live_chat_returning_authors(&lookup_session_id, &lookup)
+    })
+    .await;
+    if let Ok(Ok(returning)) = returning {
+        let mut marked = HashSet::new();
+        for message in &mut messages {
+            let Some(author_id) = message.author_id.clone() else {
+                continue;
+            };
+            let key = chatter_key(message.platform, &author_id);
+            if !counts_as_chatter(message)
+                || !fresh
+                    .iter()
+                    .any(|(platform, seen)| *platform == message.platform && *seen == author_id)
+                || !marked.insert(key.clone())
+            {
+                continue;
+            }
+            if !returning.contains(&key) {
+                message.first_message = true;
+            }
+        }
+    }
+    let mut coordinator = state.live_chat.lock().await;
+    if coordinator.session_id.as_deref() == Some(session_id.as_str()) {
+        for (platform, author_id) in fresh {
+            coordinator
+                .chatters_seen
+                .insert(chatter_key(platform, &author_id));
+        }
+    }
+    messages
+}
+
 /// Persist and emit one sequential provider delivery as one atomic transaction. The
 /// delivery guard plus constant-size per-message undo records make a terminal
 /// persistence failure retryable without cloning the full transcript. Transient
@@ -2232,6 +2433,7 @@ pub(crate) async fn try_deliver_messages(
     if messages.is_empty() {
         return Ok(());
     }
+    let messages = mark_first_time_chatters(state, messages).await;
     let _delivery = state.live_chat_persistence.begin_delivery().await;
     let (delivery_generation, delivery_session_id, undos, authoritative_messages) = {
         // Coordinator ingest can turn an eligible message into a tombstone.
@@ -2511,6 +2713,9 @@ fn fake_message(
         amount_text: None,
         is_deleted: false,
         raw_provider_type: Some("fake".to_string()),
+        details: None,
+        reply: None,
+        first_message: false,
     }
 }
 
@@ -2529,6 +2734,53 @@ mod tests {
             events,
             Database::open_in_memory_for_tests(),
         )
+    }
+
+    #[tokio::test]
+    async fn first_time_chatters_are_marked_once_and_regulars_never() {
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("earlier")
+            .unwrap();
+        let mut earlier = fake_message("earlier", StreamPlatform::Twitch, None, 1);
+        earlier.author_id = Some("regular".to_string());
+        state.database.save_live_chat_message(&earlier).unwrap();
+
+        state
+            .database
+            .ensure_fake_live_chat_session("current")
+            .unwrap();
+        state
+            .live_chat
+            .lock()
+            .await
+            .start_session("current".to_string(), Vec::new());
+        let with_author = |seq: u32, author: &str| {
+            let mut message = fake_message("current", StreamPlatform::Twitch, None, seq);
+            message.author_id = Some(author.to_string());
+            message
+        };
+        assert!(deliver_message(&state, with_author(2, "regular")).await);
+        assert!(deliver_message(&state, with_author(3, "newcomer")).await);
+        assert!(deliver_message(&state, with_author(4, "newcomer")).await);
+
+        let first = |provider_message_id: &str| {
+            state
+                .database
+                .list_live_chat_messages_recent("current", 10)
+                .unwrap()
+                .into_iter()
+                .find(|message| message.provider_message_id == provider_message_id)
+                .unwrap()
+                .first_message
+        };
+        assert!(
+            !first("fake-2"),
+            "a regular from an earlier session is not new"
+        );
+        assert!(first("fake-3"), "a newcomer's first message is marked");
+        assert!(!first("fake-4"), "only the first message is marked");
     }
 
     fn empty_start_params(session_id: &str) -> LiveChatStartParams {
@@ -4663,6 +4915,9 @@ mod tests {
             amount_text: Some("$5.00".to_string()),
             is_deleted: false,
             raw_provider_type: Some("superChatEvent".to_string()),
+            details: None,
+            reply: None,
+            first_message: false,
         };
         assert_eq!(message.id, "session-1:youtube:target-1:abc123");
         let json = serde_json::to_value(&message).unwrap();

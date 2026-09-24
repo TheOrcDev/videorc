@@ -650,6 +650,9 @@ fn relay_event_to_message(
         amount_text: None,
         is_deleted: false,
         raw_provider_type: Some("x-broadcast-chat".to_string()),
+        details: None,
+        reply: None,
+        first_message: false,
     })
 }
 
