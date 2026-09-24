@@ -52,12 +52,7 @@ import {
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { CHAT_HEADER_CONTAINER } from '@/lib/chat-header-tiers'
 import { sortMessagesChronological } from '@/lib/live-chat-view'
-import {
-  activityItems,
-  activityTotals,
-  thankYouDraft,
-  type ActivityItem
-} from '@/lib/stream-activity'
+import { activityItems, thankYouDraft, type ActivityItem } from '@/lib/stream-activity'
 import { statItems } from '@/lib/stream-manager-stats'
 import {
   BELOW_WIDE,
@@ -319,7 +314,6 @@ export function StreamManager({
     () => activityItems(messages, inHistory ? [] : (dashboard?.destinationEvents ?? [])),
     [dashboard?.destinationEvents, inHistory, messages]
   )
-  const totals = useMemo(() => activityTotals(messages), [messages])
   const chatCount = useMemo(
     () => messages.filter((message) => message.eventType !== 'follow').length,
     [messages]
@@ -604,7 +598,6 @@ export function StreamManager({
             items={items}
             nowMs={nowMs}
             providers={snapshot.providers}
-            totals={totals}
             onShowOnStream={live && onHighlight ? showActivityOnStream : undefined}
             onThank={live && onSend ? thankInChat : undefined}
           />

@@ -3,12 +3,11 @@ import { describe, expect, it } from 'vitest'
 import type { LiveChatEventDetails, LiveChatMessage, StreamPlatform } from '@/lib/backend'
 
 import {
+  activityFilterCounts,
   activityItems,
   activityTotals,
   chatActivity,
   filterActivity,
-  formatActivitySummary,
-  formatTipsValue,
   thankYouDraft
 } from './stream-activity'
 
@@ -187,6 +186,58 @@ describe('stream activity', () => {
     expect(activityItems(all).some((item) => item.name === 'chatty')).toBe(false)
   })
 
+  // Plan 057, D3: the pane reads at a glance. The sentence above stays for
+  // the stream's highlight card (caption-overlay.test.ts pins it), Copy and
+  // the row's tooltip.
+  it('gives every row a short fact for the pane', () => {
+    const shorts = Object.fromEntries(activityItems(all).map((item) => [item.name, item.short]))
+    expect(shorts).toMatchObject({
+      morgaesis: 'Resub · 3 months',
+      primer: 'Prime sub',
+      generous: 'Gifted 5 subs',
+      Anonymous: 'Gift sub → LuckyViewer',
+      Raider42: 'Raid · 234 viewers',
+      streamer: 'Announcement',
+      sarzdotmd: '1,500 bits',
+      Maria: '$5.00 Super Chat',
+      Jonas: '€2.00 Super Sticker',
+      Newbie: 'Upgraded · Gold',
+      Loyal: 'Member · 12 months',
+      Gifter: 'Gifted 5 memberships',
+      Lucky: 'Gift membership',
+      Cool_User: 'Follow'
+    })
+    const tierThree = activityItems([
+      row('twitch', 'big', 'membership', {
+        kind: 'subscription',
+        subscription: 'resub',
+        tier: '3000',
+        isPrime: false,
+        months: 14
+      })
+    ])[0]
+    expect(tierThree.short).toBe('Resub · 14 months · Tier 3')
+    expect(tierThree.line).toBe('Resubscribed for 14 months at Tier 3')
+  })
+
+  it('counts what each filter chip would show, under the platform pick', () => {
+    const items = activityItems(all)
+    // Rows, not supporters: a received gift is its own row (the totals count
+    // it on its gifter's).
+    expect(activityFilterCounts(items)).toEqual({
+      follows: 1,
+      support: 8,
+      tips: 4,
+      raids: 1,
+      destinations: 0
+    })
+    expect(activityFilterCounts(filterActivity(items, 'all', 'youtube'))).toMatchObject({
+      follows: 0,
+      tips: 3,
+      raids: 0
+    })
+  })
+
   it("counts a community gift once, not again through Twitch's single gifts", () => {
     const generous = activityItems(all).filter((item) => item.name === 'generous')
     expect(generous).toHaveLength(1)
@@ -206,11 +257,6 @@ describe('stream activity', () => {
       { currency: 'USD', amountMicros: 15_000_000 },
       { currency: 'EUR', amountMicros: 2_000_000 }
     ])
-    expect(formatTipsValue(totals)).toMatch(/^1,500 bits · \$15\.00 · €2\.00$/)
-    expect(formatActivitySummary(totals)).toBe(
-      `1 follow · 15 subs · 1,500 bits · ${formatTipsValue({ ...totals, bits: 0 })} · 1 raid`
-    )
-    expect(formatTipsValue(activityTotals([fixtures.chat]))).toBeNull()
   })
 
   it('projects destination failures and recoveries, newest first', () => {
@@ -236,9 +282,9 @@ describe('stream activity', () => {
         }
       ]
     )
-    expect(items.map((item) => [item.kind, item.line, item.message])).toEqual([
-      ['destination-recovered', 'Back on air', undefined],
-      ['destination-failed', 'Destination failed', 'Connection dropped.']
+    expect(items.map((item) => [item.kind, item.line, item.short, item.message])).toEqual([
+      ['destination-recovered', 'Back on air', 'Back on air', undefined],
+      ['destination-failed', 'Destination failed', 'Failed', 'Connection dropped.']
     ])
   })
 
