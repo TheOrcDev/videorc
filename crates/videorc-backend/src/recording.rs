@@ -25763,10 +25763,17 @@ mod tests {
             "sine=frequency=880:sample_rate=48000",
             "-re"
         ));
-        assert!(
-            args.iter()
-                .any(|arg| arg == "[0:v]setpts=PTS-STARTPTS,fps=30[v_main]")
-        );
+        // The software arms (libopenh264) stamp frames with setparams; the
+        // hardware arms do not. The expectation follows the platform's real
+        // encoder table, which is Macos here, OpenH264 on Windows and on the
+        // Linux CI job.
+        let expected_filter = match current_ffmpeg_h264_platform().expect("platform encoder") {
+            FfmpegH264Platform::LinuxSoftware | FfmpegH264Platform::WindowsSoftware => {
+                "[0:v]setpts=PTS-STARTPTS,fps=30,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv[v_main]"
+            }
+            _ => "[0:v]setpts=PTS-STARTPTS,fps=30[v_main]",
+        };
+        assert!(args.iter().any(|arg| arg == expected_filter));
         assert!(!args.iter().any(|arg| arg == "[preview]"));
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_current_h264_encoder_args(&args, false);
@@ -25774,11 +25781,53 @@ mod tests {
         assert!(args.iter().any(|arg| arg == "-shortest"));
 
         let filter = arg_value(&args, "-filter_complex").unwrap();
-        assert_eq!(filter, "[0:v]setpts=PTS-STARTPTS,fps=30[v_main]");
+        assert_eq!(filter, expected_filter);
         assert_eq!(arg_value(&args, "-fps_mode"), Some("vfr"));
         assert_eq!(arg_value(&args, "-r"), None);
         assert!(!args.iter().any(|arg| arg == "pipe:1"));
         assert!(!args.iter().any(|arg| arg == "pipe:0"));
+    }
+
+    #[test]
+    fn bridge_filter_stamps_bt709_for_software_encoders_only() {
+        let video = VideoSettings {
+            preset: VideoPreset::Tutorial1080p30,
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            bitrate_kbps: 8000,
+        };
+        let filter_for = |platform: FfmpegH264Platform| {
+            bridge_recording_video_filter_for_encoder(
+                0,
+                &video,
+                &ResolvedFfmpegH264Encoder::for_platform(platform),
+            )
+        };
+        const STAMP: &str =
+            "setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv";
+        for platform in [
+            FfmpegH264Platform::LinuxSoftware,
+            FfmpegH264Platform::WindowsSoftware,
+        ] {
+            assert_eq!(
+                filter_for(platform),
+                format!("[0:v]setpts=PTS-STARTPTS,fps=30,{STAMP}[v_main]")
+            );
+        }
+        for platform in [
+            FfmpegH264Platform::Macos,
+            FfmpegH264Platform::WindowsHardware,
+        ] {
+            assert_eq!(
+                filter_for(platform),
+                "[0:v]setpts=PTS-STARTPTS,fps=30[v_main]"
+            );
+        }
+        assert_eq!(
+            filter_for(FfmpegH264Platform::LinuxVaapi),
+            "[0:v]setpts=PTS-STARTPTS,fps=30,format=nv12,hwupload[v_main]"
+        );
     }
 
     #[test]
