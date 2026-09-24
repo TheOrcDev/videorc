@@ -40,6 +40,7 @@ import {
   parseCsvFloatColumn,
   parseFramemd5,
   parseFreezedetect,
+  interiorSilenceRuns,
   parseSilencedetect,
   renderMarkdownReport,
   uniqueFrameStats
@@ -79,6 +80,24 @@ describe('parseSilencedetect', () => {
     assert.equal(segments[0].start, 1.002896)
     assert.equal(segments[0].end, 1.408)
     assert.ok(Math.abs(segments[0].duration - 0.405104) < 1e-6)
+  })
+})
+
+describe('interiorSilenceRuns', () => {
+  it('drops runs inside the lead-in and tail windows and keeps the rest', () => {
+    const runs = [
+      { start: 0, end: 0.149, duration: 0.149 },
+      { start: 1.217, end: 1.2307, duration: 0.0137 },
+      { start: 5.79, end: 6.72, duration: 0.93 }
+    ]
+    const kept = interiorSilenceRuns(runs, { leadInMs: 500, tailMs: 300, durationSeconds: 6.72 })
+    assert.deepEqual(kept, [runs[1]])
+    const noDuration = interiorSilenceRuns(runs, {
+      leadInMs: 500,
+      tailMs: 300,
+      durationSeconds: null
+    })
+    assert.deepEqual(noDuration, [runs[1], runs[2]])
   })
 })
 
@@ -288,6 +307,9 @@ describe('evaluateGates', () => {
     maxAudioGapMs: 0,
     longestSilenceMs: 0,
     silenceCount: 0,
+    digitalZeroRunCount: 0,
+    longestDigitalZeroMs: 0,
+    firstDigitalZeroSeconds: null,
     avSkewMs: 10,
     durationSeconds: 3,
     frameDerivedDurationSeconds: 3,
@@ -472,6 +494,25 @@ describe('evaluateGates', () => {
     assert.match(v.failures[0], /audio PTS gap 80ms/)
   })
 
+  it('warns on mid-take digital-zero runs by default and fails when required', () => {
+    const dropped = {
+      ...clean,
+      digitalZeroRunCount: 21,
+      longestDigitalZeroMs: 13.3,
+      firstDigitalZeroSeconds: 1.217
+    }
+    const lenient = evaluateGates(dropped)
+    assert.equal(lenient.pass, true)
+    assert.ok(lenient.warnings.some((w) => /21 digital-zero run\(s\) mid-take/.test(w)))
+    const strict = evaluateGates(dropped, { ...DEFAULT_GATES, requireNoDigitalZeroRuns: true })
+    assert.equal(strict.pass, false)
+    assert.ok(strict.failures.some((f) => /digital-zero run/.test(f)))
+    assert.equal(
+      evaluateGates(clean).warnings.some((w) => /digital-zero/.test(w)),
+      false
+    )
+  })
+
   it('warns (does not fail) on a silence segment', () => {
     const v = evaluateGates({ ...clean, longestSilenceMs: 400, silenceCount: 1 })
     assert.equal(v.pass, true)
@@ -634,6 +675,7 @@ describe(
     let clean
     let midfreeze
     let silence
+    let zerohole
     let screenonly
 
     before(async () => {
@@ -641,6 +683,7 @@ describe(
       clean = join(dir, 'clean.mp4')
       midfreeze = join(dir, 'midfreeze.mp4')
       silence = join(dir, 'silence.mp4')
+      zerohole = join(dir, 'zerohole.mp4')
       screenonly = join(dir, 'screenonly.mp4')
 
       await generate([
@@ -714,6 +757,33 @@ describe(
         'aac',
         silence
       ])
+      // One 30 ms hole of exact zeros mid-take: what a dropped microphone
+      // packet looks like after the bus renders loss silence (plan 056).
+      await generate([
+        '-f',
+        'lavfi',
+        '-i',
+        'testsrc2=size=320x240:rate=30',
+        '-f',
+        'lavfi',
+        '-i',
+        'sine=frequency=440:sample_rate=48000',
+        '-t',
+        '3',
+        '-af',
+        "volume=enable='between(t,1.5,1.53)':volume=0",
+        '-fps_mode',
+        'cfr',
+        '-c:v',
+        'libx264',
+        '-preset',
+        'ultrafast',
+        '-pix_fmt',
+        'yuv420p',
+        '-c:a',
+        'aac',
+        zerohole
+      ])
       await generate([
         '-f',
         'lavfi',
@@ -748,6 +818,34 @@ describe(
       assert.equal(report.metrics.uniqueFrameCount, report.metrics.observedFrameHashes)
       assert.equal(report.metrics.uniqueFrameRatio, 1)
       assert.equal(report.metrics.freezeCount, 0)
+      assert.equal(report.metrics.digitalZeroRunCount, 0)
+    })
+
+    it('WARNS on a mid-take digital-zero hole and FAILS it when required', async () => {
+      const report = await analyzeRecording(zerohole, { ffmpegPath, ffprobePath, intendedFps: 30 })
+      assert.equal(
+        report.verdict.pass,
+        true,
+        `unexpected failures: ${report.verdict.failures.join('; ')}`
+      )
+      assert.ok(
+        report.metrics.digitalZeroRunCount >= 1,
+        `digital zero runs ${report.metrics.digitalZeroRunCount}`
+      )
+      assert.ok(
+        report.metrics.firstDigitalZeroSeconds > 1.4 &&
+          report.metrics.firstDigitalZeroSeconds < 1.6,
+        `first run at ${report.metrics.firstDigitalZeroSeconds}s`
+      )
+      assert.ok(report.verdict.warnings.some((w) => /digital-zero run/.test(w)))
+      const strict = await analyzeRecording(zerohole, {
+        ffmpegPath,
+        ffprobePath,
+        intendedFps: 30,
+        gates: { requireNoDigitalZeroRuns: true }
+      })
+      assert.equal(strict.verdict.pass, false)
+      assert.ok(strict.verdict.failures.some((f) => /digital-zero run/.test(f)))
     })
 
     it('FAILS a recording with a mid-stream freeze (freeze + repeated-frame gates)', async () => {

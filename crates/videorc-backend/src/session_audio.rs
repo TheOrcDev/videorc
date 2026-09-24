@@ -6,8 +6,19 @@ use std::collections::VecDeque;
 use crate::audio::{AudioFrame, NATIVE_AUDIO_CHANNELS, NATIVE_AUDIO_SAMPLE_RATE};
 
 pub const CHUNK_FRAMES: usize = 480;
-const MAX_BUFFERED_FRAMES: u64 = 4_800;
-const MAX_BUFFERED_PACKETS: usize = 32;
+/// How far ahead of the cursor captured audio may wait, sized in TIME rather
+/// than packets so a 128-frame CoreAudio callback (Shure MV7+) gets the same
+/// headroom as a 512-frame one (built-in microphone). One second absorbs a
+/// bursty FIFO reader (FFmpeg drains the 64 KiB Darwin pipe in ~170 ms gulps)
+/// and a slow muxer start without turning captured speech into silence. Memory
+/// stays bounded by the producer's 1024-packet channel upstream.
+const MAX_BUFFERED_FRAMES: u64 = 48_000;
+/// Contiguous packets are merged until a queued packet reaches this size, so
+/// the queue length is independent of the device callback size.
+const COALESCE_LIMIT_FRAMES: u64 = 4_800;
+/// Frames older than this at ingest are stale. The producer channel holds
+/// about 2.7 s of 128-frame packets, so anything older cannot be real time.
+const MAX_FRAME_AGE: Duration = Duration::from_secs(2);
 const PLAYOUT_DELAY: Duration = Duration::from_millis(50);
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,6 +66,46 @@ pub struct AudioTimeline {
     generation: u64,
     packets: VecDeque<QueuedPcm>,
     counters: AudioBusCounters,
+    losses: BusLosses,
+}
+
+/// Why captured audio did not reach the bus, split by cause. Diagnostics only:
+/// `AudioBusCounters` stays the renderer contract, this explains its totals in
+/// the log when a take loses microphone audio.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct BusLosses {
+    /// Refused because it landed more than `MAX_BUFFERED_FRAMES` past the cursor.
+    pub dropped_ahead_of_cap: u64,
+    /// Refused for a wrong generation, format, or non-finite samples.
+    pub dropped_malformed: u64,
+    /// The producer's own channel was full when CoreAudio delivered the frame.
+    pub producer_queue_full: u64,
+    /// Older than `MAX_FRAME_AGE` (or malformed) when the bus ingested it.
+    pub discarded_stale: u64,
+    /// Captured before the video epoch (pre-roll), never part of the take.
+    pub discarded_before_epoch: u64,
+    /// Overlapped audio already rendered or queued.
+    pub discarded_overlap: u64,
+    /// Repeated or non-advancing device timestamps.
+    pub discarded_duplicate: u64,
+    /// Queued packets discarded when the wall clock moved past the buffer.
+    pub discarded_behind_cap: u64,
+    /// Chunk frames replaced by silence because the FIFO stayed full for 100 ms.
+    pub stale_written: u64,
+}
+
+impl BusLosses {
+    fn merge(&mut self, other: BusLosses) {
+        self.dropped_ahead_of_cap += other.dropped_ahead_of_cap;
+        self.dropped_malformed += other.dropped_malformed;
+        self.producer_queue_full += other.producer_queue_full;
+        self.discarded_stale += other.discarded_stale;
+        self.discarded_before_epoch += other.discarded_before_epoch;
+        self.discarded_overlap += other.discarded_overlap;
+        self.discarded_duplicate += other.discarded_duplicate;
+        self.discarded_behind_cap += other.discarded_behind_cap;
+        self.stale_written += other.stale_written;
+    }
 }
 
 impl AudioTimeline {
@@ -64,6 +115,7 @@ impl AudioTimeline {
             generation: 0,
             packets: VecDeque::new(),
             counters: AudioBusCounters::default(),
+            losses: BusLosses::default(),
         }
     }
 
@@ -72,6 +124,9 @@ impl AudioTimeline {
     }
     pub fn counters(&self) -> AudioBusCounters {
         self.counters
+    }
+    pub fn losses(&self) -> BusLosses {
+        self.losses
     }
 
     /// Candidate pre-roll never enters this queue. A committed generation
@@ -89,6 +144,7 @@ impl AudioTimeline {
             }
             let frames = floor.saturating_sub(packet.start).min(packet.frames());
             self.counters.discarded_frames += frames;
+            self.losses.discarded_behind_cap += frames;
             if frames == packet.frames() {
                 self.packets.pop_front();
             } else {
@@ -108,6 +164,7 @@ impl AudioTimeline {
             || frame.samples.iter().any(|sample| !sample.is_finite())
         {
             self.counters.dropped_frames += frames;
+            self.losses.dropped_malformed += frames;
             return false;
         }
         let floor = self
@@ -116,21 +173,31 @@ impl AudioTimeline {
             .map_or(self.cursor, |packet| packet.end().max(self.cursor));
         let trim = floor.saturating_sub(start).min(frames);
         self.counters.discarded_frames += trim;
+        self.losses.discarded_overlap += trim;
         if trim == frames {
             return false;
         }
         let start = start + trim;
         let frames = frames - trim;
-        if start.saturating_add(frames) > self.cursor.saturating_add(MAX_BUFFERED_FRAMES)
-            || self.packets.len() >= MAX_BUFFERED_PACKETS
-        {
+        // The only ceiling is time ahead of the cursor. A packet count would
+        // give a 128-frame callback device a fraction of the headroom.
+        if start.saturating_add(frames) > self.cursor.saturating_add(MAX_BUFFERED_FRAMES) {
             self.counters.dropped_frames += frames;
+            self.losses.dropped_ahead_of_cap += frames;
             return false;
         }
-        self.packets.push_back(QueuedPcm {
-            start,
-            samples: frame.samples[(trim as usize * 2)..].to_vec(),
-        });
+        let samples = &frame.samples[(trim as usize * 2)..];
+        if let Some(back) = self.packets.back_mut()
+            && back.end() == start
+            && back.frames() < COALESCE_LIMIT_FRAMES
+        {
+            back.samples.extend_from_slice(samples);
+        } else {
+            self.packets.push_back(QueuedPcm {
+                start,
+                samples: samples.to_vec(),
+            });
+        }
         true
     }
 
@@ -1356,7 +1423,96 @@ fn valid_fresh_frame(frame: &AudioFrame, now: Instant) -> bool {
         && frame.samples.len().is_multiple_of(2)
         && frame.samples.iter().all(|sample| sample.is_finite())
         && frame.captured_at <= now
-        && now.duration_since(frame.captured_at) <= Duration::from_millis(100)
+        && now.duration_since(frame.captured_at) <= MAX_FRAME_AGE
+}
+
+/// Drains every pending producer frame into the timeline. Returns `true` when
+/// the producer channel is disconnected. Called from the pacing loop and from
+/// inside a blocked FIFO write, so a bursty reader never starves ingestion.
+fn ingest_pending(
+    receiver: &mpsc::Receiver<AudioFrame>,
+    timeline: &mut AudioTimeline,
+    clock: &mut Option<SourceClock>,
+    generation: u64,
+    epoch: Instant,
+    stats: &AudioCaptureStats,
+    last_source_frame: &mut Instant,
+) -> bool {
+    loop {
+        match receiver.try_recv() {
+            Ok(frame) => {
+                let now = Instant::now();
+                if !valid_fresh_frame(&frame, now) {
+                    let frames = frame.frame_count() as u64;
+                    timeline.counters.discarded_frames += frames;
+                    timeline.losses.discarded_stale += frames;
+                    continue;
+                }
+                let trimmed = crate::audio::trim_audio_frame_before_epoch(frame, epoch);
+                timeline.counters.discarded_frames += trimmed.discarded_frames;
+                timeline.losses.discarded_before_epoch += trimmed.discarded_frames;
+                let Some(frame) = trimmed.frame else {
+                    continue;
+                };
+                let clock = clock.get_or_insert_with(|| SourceClock::new(&frame, epoch));
+                let Some((start, frames)) = clock.interval(&frame) else {
+                    let frames = frame.frame_count() as u64;
+                    timeline.counters.discarded_frames += frames;
+                    timeline.losses.discarded_duplicate += frames;
+                    continue;
+                };
+                if timeline.push(generation, start, resample_frame(frame, frames)) {
+                    *last_source_frame = now;
+                    stats.mark_live();
+                }
+            }
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => return true,
+        }
+    }
+}
+
+/// Worst-case pacing observed by one bus run; logged with the loss split.
+#[derive(Debug, Default, Clone, Copy)]
+struct BusDiagnostics {
+    max_write_stall: Duration,
+    max_lateness: Duration,
+}
+
+fn log_bus_summary(timeline: &AudioTimeline, diagnostics: &BusDiagnostics, outcome: &str) {
+    let counters = timeline.counters();
+    let losses = timeline.losses();
+    let lost = counters
+        .dropped_frames
+        .saturating_add(losses.discarded_stale)
+        .saturating_add(losses.stale_written);
+    let message = format!(
+        "Session audio bus {outcome}: cursor={} captured={} generated={} discarded={} \
+         (stale={}, before-epoch={}, overlap={}, duplicate={}, behind-cap={}) dropped={} \
+         (ahead-of-cap={}, malformed={}, producer-queue-full={}) stale-written={} \
+         max-write-stall={}ms max-lateness={}ms",
+        counters.captured_frames + counters.generated_frames,
+        counters.captured_frames,
+        counters.generated_frames,
+        counters.discarded_frames,
+        losses.discarded_stale,
+        losses.discarded_before_epoch,
+        losses.discarded_overlap,
+        losses.discarded_duplicate,
+        losses.discarded_behind_cap,
+        counters.dropped_frames,
+        losses.dropped_ahead_of_cap,
+        losses.dropped_malformed,
+        losses.producer_queue_full,
+        losses.stale_written,
+        diagnostics.max_write_stall.as_millis(),
+        diagnostics.max_lateness.as_millis(),
+    );
+    if lost > 0 {
+        tracing::warn!("{message}");
+    } else {
+        tracing::info!("{message}");
+    }
 }
 
 /// A slowly adjusted device-to-session clock. Hardware rate error is corrected
@@ -1734,6 +1890,7 @@ fn run_bus_owned(
     let mut last_source_frame = Instant::now();
     let mut clock = None;
     let mut accounted = AudioBusCounters::default();
+    let mut diagnostics = BusDiagnostics::default();
     let mut previous_producer_drops = producer_stats
         .as_ref()
         .map_or(0, |stats| stats.dropped_frames());
@@ -1754,41 +1911,22 @@ fn run_bus_owned(
         }
         if let Some(stats) = producer_stats.as_ref() {
             let drops = stats.dropped_frames();
-            timeline.counters.dropped_frames += drops.saturating_sub(previous_producer_drops);
+            let new_drops = drops.saturating_sub(previous_producer_drops);
+            timeline.counters.dropped_frames += new_drops;
+            timeline.losses.producer_queue_full += new_drops;
             previous_producer_drops = drops;
         }
         let mut source_lost = false;
         if let Some(receiver) = receiver.as_ref() {
-            loop {
-                match receiver.try_recv() {
-                    Ok(frame) => {
-                        let now = Instant::now();
-                        if !valid_fresh_frame(&frame, now) {
-                            timeline.counters.discarded_frames += frame.frame_count() as u64;
-                            continue;
-                        }
-                        let trimmed = crate::audio::trim_audio_frame_before_epoch(frame, epoch);
-                        timeline.counters.discarded_frames += trimmed.discarded_frames;
-                        let Some(frame) = trimmed.frame else {
-                            continue;
-                        };
-                        let clock = clock.get_or_insert_with(|| SourceClock::new(&frame, epoch));
-                        let Some((start, frames)) = clock.interval(&frame) else {
-                            timeline.counters.discarded_frames += frame.frame_count() as u64;
-                            continue;
-                        };
-                        if timeline.push(generation, start, resample_frame(frame, frames)) {
-                            last_source_frame = now;
-                            stats.mark_live();
-                        }
-                    }
-                    Err(mpsc::TryRecvError::Empty) => break,
-                    Err(mpsc::TryRecvError::Disconnected) => {
-                        source_lost = true;
-                        break;
-                    }
-                }
-            }
+            source_lost = ingest_pending(
+                receiver,
+                &mut timeline,
+                &mut clock,
+                generation,
+                epoch,
+                &stats,
+                &mut last_source_frame,
+            );
             source_lost |= last_source_frame.elapsed() >= source_stall_timeout;
         }
         if source_lost {
@@ -1835,6 +1973,9 @@ fn run_bus_owned(
             thread::sleep(remaining.min(Duration::from_millis(2)));
             continue;
         }
+        diagnostics.max_lateness = diagnostics
+            .max_lateness
+            .max(Instant::now().saturating_duration_since(next));
         let mut ramp_old = false;
         let mut ramp_in = false;
         if let Some(handoff) = pending.as_mut() {
@@ -1894,6 +2035,7 @@ fn run_bus_owned(
                         timeline.select_generation(generation);
                         timeline.counters.discarded_frames += handoff.pcm.counters.discarded_frames;
                         timeline.counters.dropped_frames += handoff.pcm.counters.dropped_frames;
+                        timeline.losses.merge(handoff.pcm.losses);
                         timeline.packets = std::mem::take(&mut handoff.pcm.packets);
                         shared.retiring.retain(|(_, completion)| {
                             *completion.borrow() != ProducerCompletion::Closed
@@ -2020,8 +2162,42 @@ fn run_bus_owned(
         if ramp_in {
             ramp_through_zero(&mut raw.samples, true);
         }
-        let written = write_chunk(&mut file, &raw.samples, settings, stop)?;
+        let write_started = Instant::now();
+        let written = write_chunk_with_clock(
+            &mut file,
+            &raw.samples,
+            settings,
+            stop,
+            Instant::now,
+            || {
+                // The FIFO reader is behind. Keep ingesting so a bursty reader
+                // never pushes the microphone into the timeline's drop path.
+                if let Some(receiver) = receiver.as_ref() {
+                    ingest_pending(
+                        receiver,
+                        &mut timeline,
+                        &mut clock,
+                        generation,
+                        epoch,
+                        &stats,
+                        &mut last_source_frame,
+                    );
+                }
+                thread::sleep(Duration::from_millis(1));
+            },
+        );
+        let written = match written {
+            Ok(written) => written,
+            Err(error) => {
+                log_bus_summary(&timeline, &diagnostics, &format!("ended ({error})"));
+                return Err(error);
+            }
+        };
+        diagnostics.max_write_stall = diagnostics.max_write_stall.max(write_started.elapsed());
         timeline.account_stale_chunk(&raw, written.stale_from);
+        if let Some(from) = written.stale_from {
+            timeline.losses.stale_written += (CHUNK_FRAMES - from) as u64;
+        }
         #[cfg(test)]
         if ramp_old {
             let observer = shared
@@ -2089,6 +2265,7 @@ fn run_bus_owned(
         }
         retired.retain(CompletionTicket::running);
     }
+    log_bus_summary(&timeline, &diagnostics, "stopped");
 
     Ok(())
 }
@@ -2096,17 +2273,6 @@ fn run_bus_owned(
 struct WrittenChunk {
     samples: Vec<f32>,
     stale_from: Option<usize>,
-}
-
-fn write_chunk(
-    file: &mut impl Write,
-    raw: &[f32],
-    settings: &AudioProcessingSettingsHandle,
-    stop: &AtomicBool,
-) -> io::Result<WrittenChunk> {
-    write_chunk_with_clock(file, raw, settings, stop, Instant::now, || {
-        thread::sleep(Duration::from_millis(1));
-    })
 }
 
 fn write_chunk_with_clock(
@@ -2220,12 +2386,128 @@ mod tests {
         let mut timeline = AudioTimeline::new();
         timeline.push(0, 0, frame(0.2, 480));
         timeline.push(0, 240, frame(0.8, 480));
-        assert!(!timeline.push(0, 4800, frame(1.0, 480)));
+        assert!(!timeline.push(0, MAX_BUFFERED_FRAMES, frame(1.0, 480)));
+        assert_eq!(timeline.losses().dropped_ahead_of_cap, 480);
         assert_eq!(timeline.render_chunk(), vec![0.2; 960]);
         let next = timeline.render_chunk();
         assert_eq!(&next[..480], &[0.8; 480]);
         assert_eq!(&next[480..], &[0.0; 480]);
         assert_eq!(timeline.counters().discarded_frames, 240);
+    }
+
+    #[test]
+    fn buffering_is_sized_in_time_so_small_callbacks_get_the_same_headroom() {
+        // 128-frame CoreAudio callbacks (Shure MV7+) arriving 800 ms ahead of a
+        // stalled cursor used to hit a 32-packet ceiling after about 85 ms.
+        let mut timeline = AudioTimeline::new();
+        let packets = 300_u64;
+        for index in 0..packets {
+            assert!(
+                timeline.push(0, index * 128, frame(0.5, 128)),
+                "packet {index} was refused"
+            );
+        }
+        assert!(
+            timeline.packets.len() <= 10,
+            "contiguous packets coalesce: {}",
+            timeline.packets.len()
+        );
+        assert_eq!(timeline.counters().dropped_frames, 0);
+        let total = packets * 128;
+        let mut fully_captured_chunks = 0;
+        while timeline.cursor() < total {
+            let chunk = timeline.render_with_provenance();
+            if chunk.captured.iter().all(|captured| *captured) {
+                fully_captured_chunks += 1;
+            }
+        }
+        assert_eq!(
+            fully_captured_chunks,
+            (total / CHUNK_FRAMES as u64) as usize
+        );
+        assert_eq!(timeline.counters().captured_frames, total);
+        assert_eq!(timeline.counters().generated_frames, 0);
+        assert_eq!(timeline.losses(), BusLosses::default());
+        // The ceiling is still a ceiling, in time: one second ahead is refused.
+        let cursor = timeline.cursor();
+        assert!(!timeline.push(0, cursor + MAX_BUFFERED_FRAMES, frame(0.5, 128)));
+        assert_eq!(timeline.losses().dropped_ahead_of_cap, 128);
+        assert_eq!(timeline.counters().dropped_frames, 128);
+    }
+
+    #[test]
+    fn a_frame_is_stale_only_past_the_producer_channel_depth() {
+        let now = Instant::now();
+        let mut fresh = frame(0.5, 128);
+        fresh.captured_at = now - Duration::from_millis(900);
+        assert!(valid_fresh_frame(&fresh, now));
+        let mut stale = frame(0.5, 128);
+        stale.captured_at = now - MAX_FRAME_AGE - Duration::from_millis(1);
+        assert!(!valid_fresh_frame(&stale, now));
+    }
+
+    #[tokio::test]
+    async fn a_bursty_fifo_reader_never_drops_small_microphone_callbacks() {
+        use std::io::Read;
+        // FFmpeg with a starved demux queue drains the 64 KiB Darwin pipe in
+        // gulps. 230 ms of reader silence exceeds the pipe at 48 kHz stereo
+        // f32, so the writer blocks for tens of milliseconds each cycle. With
+        // 128-frame callbacks that used to overflow the packet ceiling.
+        let path =
+            crate::audio::native_audio_fifo_path(&format!("bursty-bus-{}", uuid::Uuid::new_v4()));
+        crate::audio::create_native_audio_fifo(&path).unwrap();
+        let reader_path = path.clone();
+        let reader = thread::spawn(move || {
+            let mut file = std::fs::File::open(reader_path).unwrap();
+            let mut buffer = vec![0_u8; 256 * 1024];
+            let mut total = 0_usize;
+            let started = Instant::now();
+            loop {
+                thread::sleep(Duration::from_millis(230));
+                // Real time on average: after each stall, catch up to the
+                // byte budget the wall clock implies, then stall again.
+                let budget = started.elapsed().as_secs_f64() * 48_000.0 * 8.0;
+                while (total as f64) < budget {
+                    match file.read(&mut buffer) {
+                        Ok(0) => return total,
+                        Ok(count) => total += count,
+                        Err(error) => panic!("{error}"),
+                    }
+                }
+            }
+        });
+        let count = Arc::new(AtomicU64::new(0));
+        let producer = paced_test_producer_with_packet(
+            "microphone:coreaudio:7",
+            0.5,
+            count.clone(),
+            None,
+            128,
+        )
+        .await;
+        let session = attach_prepared(
+            Some(InitialAudioSource {
+                source: InitialInput::Owned { producer, count },
+            }),
+            path,
+            None,
+            AudioProcessingSettings::default(),
+            Duration::from_secs(1),
+        );
+        tokio::time::sleep(Duration::from_millis(1_500)).await;
+        let status = session.status();
+        session.request_stop();
+        drop(session);
+        let bytes = reader.join().unwrap();
+        assert!(bytes > 0);
+        assert_eq!(status.counters.dropped_frames, 0, "{:?}", status.counters);
+        // At most 200 ms of the whole take may be anything but captured speech
+        // (the playout delay before the first packet lands, plus jitter).
+        assert!(
+            status.counters.captured_frames + 9_600 >= status.sample_cursor,
+            "{:?}",
+            status.counters
+        );
     }
 
     #[test]
@@ -2777,6 +3059,16 @@ mod tests {
         count: Arc<AtomicU64>,
         controls: Option<(AudioProcessingSettingsHandle, AudioProcessingSettings)>,
     ) -> ManagedProducer {
+        paced_test_producer_with_packet(id, value, count, controls, 480).await
+    }
+
+    async fn paced_test_producer_with_packet(
+        id: &str,
+        value: f32,
+        count: Arc<AtomicU64>,
+        controls: Option<(AudioProcessingSettingsHandle, AudioProcessingSettings)>,
+        packet_frames: usize,
+    ) -> ManagedProducer {
         let id = id.to_string();
         prepare_producer_with(
             move || {
@@ -2785,8 +3077,10 @@ mod tests {
                 let producer_stop = stop.clone();
                 let epoch = Instant::now();
                 let worker = thread::spawn(move || {
-                    for index in 0.. {
-                        let end = epoch + Duration::from_millis((index + 1) * 10);
+                    let packet_nanos =
+                        packet_frames as u64 * 1_000_000_000 / u64::from(NATIVE_AUDIO_SAMPLE_RATE);
+                    for index in 0_u64.. {
+                        let end = epoch + Duration::from_nanos((index + 1) * packet_nanos);
                         // Media pacing only; readiness and cleanup use channels.
                         if let Some(remaining) = end.checked_duration_since(Instant::now()) {
                             thread::sleep(remaining);
@@ -2794,8 +3088,9 @@ mod tests {
                         if producer_stop.load(Ordering::Acquire) {
                             break;
                         }
-                        let mut packet = frame(value, 480);
-                        packet.timestamp_micros = index * 10_000;
+                        let mut packet = frame(value, packet_frames);
+                        packet.timestamp_micros = index * packet_frames as u64 * 1_000_000
+                            / u64::from(NATIVE_AUDIO_SAMPLE_RATE);
                         packet.captured_at = end;
                         if sender.send(packet).is_err() {
                             break;

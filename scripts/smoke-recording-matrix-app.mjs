@@ -114,6 +114,9 @@ const MATRIX_GATES = Object.freeze({
   requireMotion: false,
   requireColorTags: true,
   requireValidLevel: true,
+  // The test tone is never silent, so any mid-take digital-zero run is a
+  // dropped audio packet (plan 056).
+  requireNoDigitalZeroRuns: true,
   keyframeMaxIntervalSeconds: 2.5,
   maxTailMismatchMs: 100
 })
