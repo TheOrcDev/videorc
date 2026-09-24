@@ -26072,7 +26072,7 @@ mod tests {
                 &audio_fifo_path.display().to_string(),
                 "-thread_queue_size"
             ),
-            Some("4")
+            Some("1024")
         );
         assert_eq!(
             input_arg_value(&args, &fifo_path.display().to_string(), "-f"),
@@ -29894,7 +29894,7 @@ mod tests {
         );
         assert_eq!(
             input_arg_value(&args, "/tmp/videorc-audio-test.f32le", "-thread_queue_size"),
-            Some("4")
+            Some("1024")
         );
         assert!(args.iter().any(|arg| arg == "1:a?"));
         assert_eq!(

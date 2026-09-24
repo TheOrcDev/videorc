@@ -23,9 +23,13 @@ pub const AUDIO_COVERAGE_WARMUP_SECS: f64 = 3.0;
 // bounded multi-second packet cushion instead of dropping valid mic callbacks.
 const AUDIO_RING_CAPACITY_PACKETS: usize = 1024;
 const METER_SAMPLE_DURATION: Duration = Duration::from_millis(700);
-// Raw PCM demux packets are bounded, so four pending packets replace the
-// previous multi-second queue. The bus discards unpublished stale samples.
-pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 4;
+// FFmpeg's demux thread for the session audio FIFO. Gain and mute are applied
+// by the bus at write time, so this queue never delays a control change; its
+// depth is only headroom for a stalled muxer (mpegts probing at start, a slow
+// output). At 4 packets (~85 ms) the demux thread blocked, the 64 KiB Darwin
+// pipe filled in 170 ms gulps, and the bus writer spun on WouldBlock while
+// 128-frame microphone callbacks piled up and were dropped (plan 056).
+pub const NATIVE_AUDIO_FFMPEG_QUEUE_SIZE: u32 = 1024;
 /// Once a warmed native microphone stops producing callbacks for this long,
 /// retire its producer as a source loss. The session bus keeps its FIFO open
 /// with paced silence and can accept an explicitly selected replacement.
