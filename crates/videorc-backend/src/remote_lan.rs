@@ -590,6 +590,10 @@ const CHAT_MESSAGE_FIELDS: &[&str] = &[
 
 pub fn project_chat_message(message: &serde_json::Value) -> Option<serde_json::Value> {
     let source = message.as_object()?;
+    // Follows are Stream Manager activity, not chat (plan 053).
+    if source.get("eventType").and_then(serde_json::Value::as_str) == Some("follow") {
+        return None;
+    }
     let mut projected = serde_json::Map::new();
     for field in CHAT_MESSAGE_FIELDS {
         if let Some(value) = source.get(*field) {
@@ -1055,6 +1059,21 @@ mod tests {
         assert_eq!(projected["authorName"], "Viewer");
         assert_eq!(projected["amountText"], "$5.00");
         assert_eq!(projected["fragments"][1]["text"], ":wave:");
+    }
+
+    #[test]
+    fn chat_projection_drops_follows_and_structured_details() {
+        let mut message = full_message();
+        message["details"] = serde_json::json!({ "kind": "super-chat", "amountMicros": 5_000_000 });
+        message["reply"] = serde_json::json!({ "parentMessageId": "p", "parentAuthorName": "A", "parentText": "t" });
+        message["firstMessage"] = serde_json::json!(true);
+        let projected = project_chat_message(&message).unwrap();
+        for field in ["details", "reply", "firstMessage"] {
+            assert!(projected.get(field).is_none(), "projection leaked {field}");
+        }
+
+        message["eventType"] = serde_json::json!("follow");
+        assert!(project_chat_message(&message).is_none());
     }
 
     #[test]

@@ -3836,6 +3836,68 @@ export type LiveChatEventType =
   | 'system'
   | 'deleted'
   | 'moderation'
+  | 'follow'
+
+export type LiveChatMembershipKind = 'new' | 'upgrade' | 'milestone' | 'gift' | 'gift-received'
+
+/** Twitch subscription notice kinds, kebab-cased from EventSub's `notice_type`. */
+export type LiveChatSubscriptionKind =
+  | 'sub'
+  | 'resub'
+  | 'sub-gift'
+  | 'community-sub-gift'
+  | 'gift-paid-upgrade'
+  | 'prime-paid-upgrade'
+  | 'pay-it-forward'
+
+/**
+ * Structured event facts (wire mirror of live_chat.rs `LiveChatEventDetails`,
+ * plan 053). Absent on plain chat. Amounts are micros of `currency`; a Twitch
+ * `tier` is `1000`/`2000`/`3000`.
+ */
+export type LiveChatEventDetails =
+  | {
+      kind: 'super-chat'
+      amountMicros: number
+      currency: string
+      amountDisplay: string
+      tier?: number
+    }
+  | {
+      kind: 'super-sticker'
+      amountMicros: number
+      currency: string
+      amountDisplay: string
+      altText?: string
+    }
+  | {
+      kind: 'membership'
+      membership: LiveChatMembershipKind
+      levelName?: string
+      months?: number
+      giftCount?: number
+    }
+  | {
+      kind: 'subscription'
+      subscription: LiveChatSubscriptionKind
+      tier?: string
+      isPrime: boolean
+      months?: number
+      streakMonths?: number
+      giftCount?: number
+      recipientName?: string
+    }
+  | { kind: 'cheer'; bits: number }
+  | { kind: 'raid'; viewerCount: number }
+  | { kind: 'announcement'; color?: string }
+  | { kind: 'follow' }
+
+/** The message a chat message replies to, when the platform threads replies. */
+export interface LiveChatReply {
+  parentMessageId: string
+  parentAuthorName: string
+  parentText: string
+}
 
 /** Live connector state for one platform within a session. */
 export interface LiveChatProviderState {
@@ -3880,6 +3942,10 @@ export interface LiveChatMessage {
   amountText?: string
   isDeleted: boolean
   rawProviderType?: string
+  details?: LiveChatEventDetails
+  reply?: LiveChatReply
+  /** The author's first message in the channel (Twitch intro, or unseen in earlier sessions). */
+  firstMessage?: boolean
 }
 
 /** Authoritative live-chat snapshot: provider rows + persisted/buffered messages + unread count. */

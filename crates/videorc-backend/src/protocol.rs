@@ -5167,6 +5167,26 @@ mod tests {
     }
 
     #[test]
+    fn shared_high_risk_contract_fixture_matches_chat_event_details() {
+        use crate::live_chat::{LiveChatEventDetails, LiveChatEventType, LiveChatMessage};
+
+        let wire = shared_high_risk_contract_fixture_value("/comments/eventMessages");
+        let messages: Vec<LiveChatMessage> = serde_json::from_value(wire.clone()).unwrap();
+        // Round-trips exactly: a plain row gains no `details: null`, and every
+        // variant keeps its kebab-case tag with camelCase fields.
+        assert_eq!(serde_json::to_value(&messages).unwrap(), wire);
+        assert!(messages[0].details.is_none() && messages[0].reply.is_none());
+        assert!(!messages[0].first_message);
+        assert!(messages[1].first_message);
+        assert_eq!(
+            messages[1].details,
+            Some(LiveChatEventDetails::Cheer { bits: 1500 })
+        );
+        assert_eq!(messages[5].event_type, LiveChatEventType::Follow);
+        assert_eq!(messages[5].details, Some(LiveChatEventDetails::Follow));
+    }
+
+    #[test]
     fn shared_high_risk_contract_fixture_matches_cohost_dtos() {
         let start_wire = shared_high_risk_contract_fixture_value("/cohost/startParams");
         let start: CohostStartParams = serde_json::from_value(start_wire.clone()).unwrap();
