@@ -1,8 +1,8 @@
 // Per-window AppKit appearance (plan 050, D1).
 //
 // Electron's `nativeTheme.themeSource` is app-global, so a light main window
-// would give every window a light vibrancy material. The dark-always windows
-// (Chat, Captions, Notes, Preview) pin `darkAqua` on their own NSWindow
+// would give every window a light vibrancy material. The dark-always window
+// (Preview, which frames video) pins `darkAqua` on its own NSWindow
 // through the in-process native addon instead. The binding is loaded on its
 // own, independent of the preview driver: a window must not lose its pin
 // because the preview fell back to the helper process.

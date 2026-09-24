@@ -10,7 +10,7 @@ import { MAX_NOTES_TEXT_LENGTH } from '../../../shared/notes-limits'
 
 // The detached Notes window (plan 050 S4): the private teleprompter, now a real
 // renderer window on the same glass, header and controls as Chat and Captions.
-// It is capture-protected by main (never in a recording) and dark-always.
+// It is capture-protected by main (never in a recording) and follows the app theme.
 
 const SAVE_DELAY_MS = 120
 

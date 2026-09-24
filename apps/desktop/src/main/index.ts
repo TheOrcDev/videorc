@@ -961,7 +961,7 @@ const windowAppearanceLoad = loadWindowAppearanceBinding({
 })
 if (windowAppearanceLoad.unavailableReason && process.platform === 'darwin') {
   safeConsole.warn(
-    `Window appearance pin unavailable; Chat, Captions, Notes and Preview paint the solid palette: ${windowAppearanceLoad.unavailableReason}`
+    `Window appearance pin unavailable; Preview paints the solid palette: ${windowAppearanceLoad.unavailableReason}`
   )
 }
 type NativePreviewRealSurfaceDriverKind = 'in-process' | 'external-module' | 'helper-process'
@@ -1549,7 +1549,7 @@ function glassWindowChrome(role: GlassWindowRole): {
     options: windowGlassOptions(role, {
       platform: process.platform,
       mode,
-      dark: role === 'main' ? nativeTheme.shouldUseDarkColors : true
+      dark: nativeTheme.shouldUseDarkColors
     })
   }
 }
@@ -12965,9 +12965,13 @@ app.whenReady().then(async () => {
     nativeTheme.themeSource = theme === 'light' ? 'light' : 'dark'
     repinDarkAlwaysWindows()
     // A solid window (off macOS, or VIDEORC_GLASS=0) repaints its palette base
-    // with the theme; the glass windows' material follows nativeTheme itself.
-    if (glassMode.kind === 'solid') {
-      mainWindow?.setBackgroundColor(solidWindowBase('main', theme !== 'light'))
+    // with the theme; the glass windows' material follows nativeTheme itself,
+    // and every window's page follows it through prefers-color-scheme.
+    for (const window of [mainWindow, commentsWindow, captionsWindow, notesWindow]) {
+      const applied = appliedGlass(window)
+      if (window && !window.isDestroyed() && applied?.mode.kind === 'solid') {
+        window.setBackgroundColor(solidWindowBase(applied.role, theme !== 'light'))
+      }
     }
   })
   secureIpcHandle('preview-window:open', () => openPreviewWindow())

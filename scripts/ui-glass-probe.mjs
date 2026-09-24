@@ -11,7 +11,8 @@
 //                 glass is smooth; a translucent coat over sharp text is not
 //                 (the July text leak, as a number)
 //   contrast      text tokens against the coat measured over white and black
-//   pinned        dark-always windows stay dark while main is in light theme
+//   pinned        the dark-always Preview stays dark while main is in light theme
+//   followsTheme  Stream Manager, Captions and Notes pages carry the app theme
 //   native        the window's NSVisualEffectViews read back as `active`
 //                 (window-glass-state), so the glass never follows focus
 //
@@ -110,7 +111,7 @@ const SET_BOUNDS_COMMAND = {
   notes: 'notes-window-set-bounds',
   preview: 'preview-window-set-bounds'
 }
-const PINNED_DARK_ROLES = new Set(['chat', 'captions', 'notes', 'preview'])
+const PINNED_DARK_ROLES = new Set(['preview'])
 
 const argv = process.argv.slice(2)
 const flag = (name) => argv.includes(`--${name}`)
@@ -189,6 +190,17 @@ async function pageTarget(devtoolsHost, role) {
   const targets = await fetchJson(`http://${devtoolsHost}/json/list`)
   const matches = targetMatcher(role)
   return targets.find((target) => target.type === 'page' && matches(target.url ?? '')) ?? null
+}
+
+// The page's theme class, or null for a window without a renderer page (Preview).
+async function pageDarkClass(devtoolsHost, role) {
+  const target = await pageTarget(devtoolsHost, role)
+  return target
+    ? await cdpEvaluate(
+        target.webSocketDebuggerUrl,
+        `document.documentElement.classList.contains('dark')`
+      )
+    : null
 }
 
 async function applyTheme(devtoolsHost, theme) {
@@ -294,14 +306,14 @@ function round(value, digits = 2) {
   return Number(value.toFixed(digits))
 }
 
-function evaluate(theme, role, shots, glassState) {
+function evaluate(theme, role, shots, glassState, pageDark) {
   const results = []
   const byName = (variant) => shots[variant]
   for (const [index, sample] of SAMPLES[role].entries()) {
     const at = (variant) => byName(variant)[index]
     const transmission = colorDistance(at('red').mean, at('blue').mean)
     const sharpness = at('text').sharpness
-    const text = TEXT[role === 'main' ? theme : 'dark']
+    const text = TEXT[PINNED_DARK_ROLES.has(role) ? 'dark' : theme]
     const backgrounds = [at('white').mean, at('black').mean]
     const primaryContrast = Math.min(...backgrounds.map((bg) => contrastRatio(text.primary, bg)))
     const secondaryContrast = Math.min(
@@ -316,6 +328,9 @@ function evaluate(theme, role, shots, glassState) {
     }
     if (theme === 'light' && PINNED_DARK_ROLES.has(role)) {
       checks.pinnedDark = whiteLuminance <= GLASS_THRESHOLDS.maxPinnedLuminance
+    }
+    if (role !== 'main' && !PINNED_DARK_ROLES.has(role)) {
+      checks.followsTheme = pageDark === (theme === 'dark')
     }
     const effectViews = glassState?.effectViews ?? []
     checks.native = effectViews.length > 0 && effectViews.every((view) => view.state === 'active')
@@ -427,7 +442,8 @@ async function main() {
         const look = await shoot(smoke, theme, role, 'photo')
         looks.push({ file: look.file, label: `${theme} · ${role}` })
         const glassState = await requestSmokeCommand(smoke, 'window-glass-state', { role })
-        report.results.push(...evaluate(theme, role, shots, glassState))
+        const pageDark = await pageDarkClass(devtoolsHost, role)
+        report.results.push(...evaluate(theme, role, shots, glassState, pageDark))
       }
     }
     await requestSmokeCommand(smoke, 'close-backdrop-window')

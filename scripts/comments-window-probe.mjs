@@ -221,8 +221,8 @@ async function main() {
   )
 
   // Chat chrome: renamed title, the corner picker, and real glass (plan 050):
-  // the shared window frame, and on macOS the OS material pinned dark through
-  // the native addon (the dev launch builds it first).
+  // the shared window frame, and on macOS the OS material following the app
+  // theme like the main window (only the Preview is pinned dark).
   const chrome = await smokeCommand('comments-window-reader-state')
   assertProbe(
     chrome.headerTitle === 'Stream Manager',
@@ -232,9 +232,9 @@ async function main() {
   assertProbe(chrome.windowFrame === true, 'chrome: the shared glass window frame is mounted')
   assertProbe(
     process.platform === 'darwin'
-      ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'pinned-dark'
+      ? chrome.glass?.mode?.kind === 'material' && chrome.glass?.appearance === 'follows-app'
       : chrome.glass?.mode?.kind === 'solid',
-    'chrome: Chat sits on real vibrancy pinned dark (solid palette off macOS)',
+    'chrome: Chat sits on real vibrancy that follows the app theme (solid palette off macOS)',
     JSON.stringify(chrome.glass)
   )
   assertProbe(

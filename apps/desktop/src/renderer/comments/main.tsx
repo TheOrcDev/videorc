@@ -440,9 +440,9 @@ function CommentsWindowApp(): ReactElement {
           void window.videorc?.setCommentsWindowAlwaysOnTop?.(!alwaysOnTop)
         }
       />
-      {/* The Comments window frames video and is dark-always; sonner needs its
-          own host here because this is a separate React root. */}
-      <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" theme="dark" />
+      {/* sonner needs its own host here because this is a separate React root;
+          with no theme provider it follows prefers-color-scheme, like the page. */}
+      <Toaster offset={{ bottom: 16, right: 16 }} position="bottom-right" />
     </WindowFrame>
   )
 }
