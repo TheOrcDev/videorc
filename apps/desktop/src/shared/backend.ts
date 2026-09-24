@@ -1122,6 +1122,13 @@ export interface OAuthStartParams {
 export interface OAuthStartProviderParams {
   platform: StreamPlatform
   redirectUri?: string
+  /** Scopes on top of the base set; the backend accepts only offered ones (plan 053, S6). */
+  optionalScopes?: string[]
+}
+
+/** Options for connecting (or reconnecting) a platform account. */
+export interface PlatformConnectOptions {
+  optionalScopes?: readonly string[]
 }
 
 export interface OAuthStartResult {
@@ -4465,6 +4472,9 @@ export interface PlatformAudience {
   delta?: number
   at?: string
   message?: string
+  /** Twitch only, with the opt-in `channel:read:subscriptions` scope. */
+  subscribers?: number
+  subscriberPoints?: number
 }
 
 /** `stream.audience` event and `stream.audience.snapshot` result (wire mirror of audience.rs). */

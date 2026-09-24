@@ -625,7 +625,9 @@ const audienceSnapshotSchema = objectSchema(
           baseline: optionalSchema(numberSchema({ integer: true, min: 0 })),
           delta: optionalSchema(numberSchema({ integer: true })),
           at: optionalSchema(boundedString),
-          message: optionalSchema(stringSchema({ maxLength: 2_000 }))
+          message: optionalSchema(stringSchema({ maxLength: 2_000 })),
+          subscribers: optionalSchema(numberSchema({ integer: true, min: 0 })),
+          subscriberPoints: optionalSchema(numberSchema({ integer: true, min: 0 }))
         },
         { allowUnknown: false }
       ),

@@ -81,6 +81,19 @@ pub struct PlatformAudience {
     pub at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    /// Twitch only, with the opt-in `channel:read:subscriptions` (S6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscribers: Option<u64>,
+    /// Twitch sub points (a Tier 1 sub is 1, Tier 2 is 2, Tier 3 is 6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subscriber_points: Option<u64>,
+}
+
+/// Twitch `Get Broadcaster Subscriptions` totals.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriberCount {
+    pub total: u64,
+    pub points: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -154,6 +167,8 @@ impl AudienceHub {
                     delta: None,
                     at: None,
                     message: None,
+                    subscribers: None,
+                    subscriber_points: None,
                 });
             }
         }
@@ -214,6 +229,32 @@ impl AudienceHub {
         if *entry == before {
             return None;
         }
+        snapshot.updated_at = now.to_string();
+        Some(snapshot.clone())
+    }
+
+    /// Twitch subscriber totals read alongside followers. Returns the
+    /// snapshot to emit when they changed.
+    pub fn apply_subscribers(
+        &mut self,
+        session_id: &str,
+        platform: StreamPlatform,
+        count: SubscriberCount,
+        now: &str,
+    ) -> Option<AudienceSnapshot> {
+        let snapshot = self
+            .snapshot
+            .as_mut()
+            .filter(|snapshot| snapshot.session_id == session_id)?;
+        let entry = snapshot
+            .platforms
+            .iter_mut()
+            .find(|entry| entry.platform == platform)?;
+        if entry.subscribers == Some(count.total) && entry.subscriber_points == Some(count.points) {
+            return None;
+        }
+        entry.subscribers = Some(count.total);
+        entry.subscriber_points = Some(count.points);
         snapshot.updated_at = now.to_string();
         Some(snapshot.clone())
     }
@@ -311,6 +352,35 @@ pub fn parse_youtube_subscribers(body: &Value) -> Option<AudienceReading> {
         .as_u64()
         .or_else(|| count.as_str()?.parse().ok())
         .map(AudienceReading::Count)
+}
+
+/// Helix `Get Broadcaster Subscriptions` → `total` and `points`.
+pub fn parse_twitch_subscriptions(body: &Value) -> Option<SubscriberCount> {
+    Some(SubscriberCount {
+        total: body.get("total")?.as_u64()?,
+        points: body.get("points")?.as_u64()?,
+    })
+}
+
+/// Needs `channel:read:subscriptions`; any failure is simply no number.
+pub async fn fetch_twitch_subscriptions(
+    client: &reqwest::Client,
+    api_base: &str,
+    access_token: &str,
+    client_id: &str,
+    broadcaster_id: &str,
+) -> Option<SubscriberCount> {
+    let url = format!("{}/subscriptions", api_base.trim_end_matches('/'));
+    let response = client
+        .get(url)
+        .query(&[("broadcaster_id", broadcaster_id), ("first", "1")])
+        .bearer_auth(access_token)
+        .header("Client-Id", client_id)
+        .send()
+        .await
+        .ok()
+        .filter(|response| response.status().is_success())?;
+    parse_twitch_subscriptions(&response.json::<Value>().await.ok()?)
 }
 
 /// `GET /2/users/me?user.fields=public_metrics` → `followers_count`.
@@ -428,15 +498,41 @@ pub async fn fetch_x_followers_oauth1(
 
 // --- Reading a real account ------------------------------------------------
 
+/// One read of a source: the audience total and, for Twitch with the opt-in
+/// scope, the subscriber totals.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SourceRead {
+    reading: AudienceReading,
+    subscribers: Option<SubscriberCount>,
+}
+
+impl From<AudienceReading> for SourceRead {
+    fn from(reading: AudienceReading) -> Self {
+        Self {
+            reading,
+            subscribers: None,
+        }
+    }
+}
+
+impl AudienceReading {
+    fn with_subscribers(self, subscribers: Option<SubscriberCount>) -> SourceRead {
+        SourceRead {
+            reading: self,
+            subscribers,
+        }
+    }
+}
+
 /// Reads one real source. A refused token is refreshed once and the read
 /// retried before the platform is marked `needs-reconnect` (B2).
 async fn read_source(
     state: &AppState,
     client: &reqwest::Client,
     source: &AudienceSource,
-) -> AudienceReading {
+) -> SourceRead {
     if let Some(message) = crate::oauth::provider_oauth_unavailable_message(source.platform) {
-        return AudienceReading::Unavailable(message.to_string());
+        return AudienceReading::Unavailable(message.to_string()).into();
     }
     let account_id = source.account_id.as_deref();
     let credential = crate::platform_account_credential(state, source.platform, account_id).ok();
@@ -450,12 +546,14 @@ async fn read_source(
                 crate::x_live::DEFAULT_API_BASE_URL,
                 &credentials,
             )
-            .await;
+            .await
+            .into();
         }
         return AudienceReading::Unavailable(format!(
             "Connect {} to show its audience.",
             crate::streaming::stream_platform_label(source.platform)
-        ));
+        ))
+        .into();
     };
     let token = match crate::session_platform_access_token(
         state,
@@ -467,24 +565,56 @@ async fn read_source(
     .await
     {
         Ok(token) => token,
-        Err(error) => return token_error_reading(source.platform, &error),
+        Err(error) => return token_error_reading(source.platform, &error).into(),
     };
-    let reading = read_with_token(client, source.platform, &credential, &token).await;
-    if !matches!(reading, AudienceReading::NeedsReconnect(_)) {
-        return reading;
+    let mut reading = read_with_token(client, source.platform, &credential, &token).await;
+    let mut token = token;
+    if matches!(reading, AudienceReading::NeedsReconnect(_)) {
+        match crate::session_platform_access_token(
+            state,
+            source.platform,
+            account_id,
+            client,
+            Some(&token),
+        )
+        .await
+        {
+            Ok(refreshed) => {
+                reading = read_with_token(client, source.platform, &credential, &refreshed).await;
+                token = refreshed;
+            }
+            Err(error) => return token_error_reading(source.platform, &error).into(),
+        }
     }
-    match crate::session_platform_access_token(
-        state,
-        source.platform,
-        account_id,
+    reading.with_subscribers(
+        read_twitch_subscribers(client, source.platform, &credential, &token).await,
+    )
+}
+
+/// The Twitch sub total, only when the account opted into the scope (S6).
+async fn read_twitch_subscribers(
+    client: &reqwest::Client,
+    platform: StreamPlatform,
+    credential: &crate::storage::PlatformAccountCredentials,
+    token: &str,
+) -> Option<SubscriberCount> {
+    let granted = credential
+        .account
+        .scopes
+        .iter()
+        .any(|scope| scope == crate::oauth::TWITCH_SUBSCRIPTIONS_SCOPE);
+    if platform != StreamPlatform::Twitch || !granted {
+        return None;
+    }
+    let client_id = crate::oauth::provider_client_id(StreamPlatform::Twitch).ok()?;
+    fetch_twitch_subscriptions(
         client,
-        Some(&token),
+        TWITCH_API_BASE,
+        token,
+        &client_id,
+        &credential.account.account_id,
     )
     .await
-    {
-        Ok(refreshed) => read_with_token(client, source.platform, &credential, &refreshed).await,
-        Err(error) => token_error_reading(source.platform, &error),
-    }
 }
 
 fn token_error_reading(platform: StreamPlatform, error: &anyhow::Error) -> AudienceReading {
@@ -556,6 +686,23 @@ fn apply_reading(
     }
 }
 
+fn apply_subscribers(
+    state: &AppState,
+    session_id: &str,
+    platform: StreamPlatform,
+    count: SubscriberCount,
+) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let snapshot = state
+        .audience
+        .lock()
+        .ok()
+        .and_then(|mut hub| hub.apply_subscribers(session_id, platform, count, &now));
+    if let Some(snapshot) = snapshot {
+        publish(state, snapshot, true);
+    }
+}
+
 /// Registers the session's platforms and emits the pending snapshot. Returns
 /// one task per source for the caller to attach to the session lifecycle.
 pub fn start_audience(
@@ -605,8 +752,14 @@ async fn run_source(state: AppState, session_id: String, source: AudienceSource)
     sleep(Duration::from_millis(jitter_ms)).await;
     let mut backoff = None;
     loop {
-        let reading = read_source(&state, &client, &source).await;
+        let SourceRead {
+            reading,
+            subscribers,
+        } = read_source(&state, &client, &source).await;
         apply_reading(&state, &session_id, source.platform, &reading);
+        if let Some(count) = subscribers {
+            apply_subscribers(&state, &session_id, source.platform, count);
+        }
         let delay = reading.next_delay(backoff);
         backoff = matches!(reading, AudienceReading::Failed(_)).then_some(delay);
         sleep(delay).await;
@@ -685,6 +838,7 @@ mod tests {
         let hits = Arc::new(AtomicUsize::new(0));
         let app = Router::new()
             .route("/channels/followers", get(respond))
+            .route("/subscriptions", get(respond))
             .route("/channels", get(respond))
             .route("/2/users/me", get(respond))
             .with_state(Mock {
@@ -762,6 +916,39 @@ mod tests {
         assert_eq!(
             fetch_youtube_subscribers(&client, &base, "token").await,
             AudienceReading::Hidden
+        );
+    }
+
+    #[tokio::test]
+    async fn twitch_subscriber_totals_ride_along_with_the_opt_in_scope() {
+        let client = reqwest::Client::new();
+        let (base, _) = spawn_provider(vec![(
+            StatusCode::OK,
+            json!({ "data": [], "total": 212, "points": 260, "pagination": {} }),
+        )])
+        .await;
+        let count = fetch_twitch_subscriptions(&client, &base, "token", "client", "1")
+            .await
+            .unwrap();
+        assert_eq!(
+            count,
+            SubscriberCount {
+                total: 212,
+                points: 260
+            }
+        );
+
+        let mut hub = AudienceHub::default();
+        hub.begin("s", &[StreamPlatform::Twitch], "t0");
+        let snapshot = hub
+            .apply_subscribers("s", StreamPlatform::Twitch, count, "t1")
+            .unwrap();
+        assert_eq!(snapshot.platforms[0].subscribers, Some(212));
+        assert_eq!(snapshot.platforms[0].subscriber_points, Some(260));
+        assert!(
+            hub.apply_subscribers("s", StreamPlatform::Twitch, count, "t2")
+                .is_none(),
+            "an unchanged total emits nothing"
         );
     }
 

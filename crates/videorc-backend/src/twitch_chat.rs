@@ -67,6 +67,10 @@ pub struct TwitchChatConfig {
     /// Built by the backend from the stored account; never read from params.
     #[serde(skip)]
     pub token_source: crate::session_token::SessionTokenSource,
+    /// Subscribe to `channel.follow` v2: only when the account granted the
+    /// opt-in `moderator:read:followers` scope (plan 053, S6).
+    #[serde(default)]
+    pub follow_events: bool,
 }
 
 /// Send one chat message via Helix (Comments upgrade S4). Requires the
@@ -665,6 +669,14 @@ fn normalize_notification(
             timestamp,
             received_at,
         )),
+        "channel.follow" => normalize_follow(
+            event,
+            message_id,
+            session_id,
+            target_id,
+            timestamp,
+            received_at,
+        ),
         "channel.chat.message_delete" => {
             let deleted_message_id = event["message_id"]
                 .as_str()
@@ -741,6 +753,54 @@ fn chat_subscription_body(
     })
 }
 
+/// `channel.follow` v2: the broadcaster moderates their own channel.
+fn follow_subscription_body(broadcaster_user_id: &str, session_id: &str) -> Value {
+    json!({
+        "type": "channel.follow",
+        "version": "2",
+        "condition": {
+            "broadcaster_user_id": broadcaster_user_id,
+            "moderator_user_id": broadcaster_user_id,
+        },
+        "transport": {
+            "method": "websocket",
+            "session_id": session_id,
+        },
+    })
+}
+
+/// A follow as an Activity row; it never shows in the chat list.
+fn normalize_follow(
+    event: &Value,
+    message_id: &str,
+    session_id: &str,
+    target_id: Option<&str>,
+    timestamp: Option<&str>,
+    received_at: &str,
+) -> Option<LiveChatMessage> {
+    let user_id = event["user_id"].as_str()?.to_string();
+    let name = event["user_name"]
+        .as_str()
+        .or_else(|| event["user_login"].as_str())
+        .unwrap_or("Someone")
+        .to_string();
+    let followed_at = event["followed_at"].as_str().or(timestamp);
+    let mut message = base_message(
+        format!("follow:{message_id}"),
+        session_id,
+        target_id,
+        followed_at,
+        received_at,
+    );
+    message.message_text = format!("{name} followed");
+    message.author_id = Some(user_id);
+    message.author_name = name;
+    message.event_type = LiveChatEventType::Follow;
+    message.details = Some(LiveChatEventDetails::Follow);
+    message.raw_provider_type = Some("channel.follow".to_string());
+    Some(message)
+}
+
 fn next_backoff_ms(current: u64) -> u64 {
     current
         .saturating_mul(2)
@@ -803,6 +863,19 @@ async fn create_subscriptions(
                 )));
             }
         }
+    }
+    if config.follow_events {
+        // Follows are extra: a refusal here never costs the chat itself.
+        let _ = client
+            .post(&url)
+            .bearer_auth(access_token)
+            .header("Client-Id", &config.client_id)
+            .json(&follow_subscription_body(
+                &config.broadcaster_user_id,
+                session_id,
+            ))
+            .send()
+            .await;
     }
     Ok(())
 }
@@ -1526,6 +1599,7 @@ mod tests {
             eventsub_ws_url: Some(eventsub_ws_url),
             api_base_url: Some(api_base_url),
             token_source,
+            follow_events: false,
         }
     }
 
@@ -1630,6 +1704,66 @@ mod tests {
             server.accepted.lock().await.len(),
             CHAT_SUBSCRIPTION_TYPES.len()
         );
+    }
+
+    #[test]
+    fn a_follow_notification_becomes_a_follow_row() {
+        let event: Value = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/stream-manager/twitch-channel-follow.json"
+        ))
+        .unwrap();
+        let row = normalize_notification(
+            "channel.follow",
+            &event,
+            "delivery-9",
+            Some("2026-09-24T10:04:01Z"),
+            "session-1",
+            Some("twitch"),
+            "2026-09-24T10:04:01.2Z",
+        )
+        .expect("follow row");
+        assert_eq!(row.event_type, LiveChatEventType::Follow);
+        assert_eq!(row.details, Some(LiveChatEventDetails::Follow));
+        assert_eq!(row.author_name, "Cool_User");
+        assert_eq!(row.author_id.as_deref(), Some("1234"));
+        assert_eq!(row.message_text, "Cool_User followed");
+        assert_eq!(row.published_at, "2026-09-24T10:04:00.123456789Z");
+        assert_eq!(row.provider_message_id, "follow:delivery-9");
+    }
+
+    #[tokio::test]
+    async fn follow_events_subscribe_only_with_the_opt_in_scope() {
+        for follow_events in [false, true] {
+            let (api_base_url, eventsub_ws_url, subscriptions, _, _, shutdown) =
+                spawn_mock_twitch_server().await;
+            let mut config = expiring_config(
+                api_base_url,
+                eventsub_ws_url,
+                crate::session_token::SessionTokenSource::Fixed,
+            );
+            config.follow_events = follow_events;
+            create_subscriptions(&reqwest::Client::new(), &config, "token-1", "socket-1")
+                .await
+                .unwrap();
+            let bodies = subscriptions.lock().await.clone();
+            let follow = bodies
+                .iter()
+                .find(|body| body["type"] == "channel.follow")
+                .cloned();
+            assert_eq!(
+                bodies.len(),
+                CHAT_SUBSCRIPTION_TYPES.len() + usize::from(follow_events)
+            );
+            if follow_events {
+                let follow = follow.expect("channel.follow subscription");
+                assert_eq!(follow["version"], "2");
+                assert_eq!(follow["condition"]["moderator_user_id"], "broadcaster-1");
+                assert_eq!(follow["transport"]["session_id"], "socket-1");
+            } else {
+                assert!(follow.is_none(), "no follow subscription without the scope");
+            }
+            let _ = shutdown.send(());
+        }
     }
 
     fn sender_config(api_base_url: String) -> TwitchChatSenderConfig {
@@ -1741,6 +1875,7 @@ mod tests {
                 eventsub_ws_url: Some(eventsub_ws_url),
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
+                follow_events: false,
             },
         ));
 
@@ -1809,6 +1944,7 @@ mod tests {
                 eventsub_ws_url: Some(eventsub_ws_url),
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
+                follow_events: false,
             },
         ));
 
@@ -1877,6 +2013,7 @@ mod tests {
                 eventsub_ws_url: Some(eventsub_ws_url),
                 api_base_url: Some(api_base_url),
                 token_source: Default::default(),
+                follow_events: false,
             },
         ));
 

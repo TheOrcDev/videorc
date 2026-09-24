@@ -2146,6 +2146,28 @@ async fn fresh_platform_access_token(
     })
 }
 
+/// The optional scopes to request: the ones asked for, plus the ones the
+/// platform's connected account already holds (plan 053, S6).
+fn retained_optional_scopes(
+    state: &AppState,
+    platform: StreamPlatform,
+    requested: &[String],
+) -> Vec<String> {
+    let offered = oauth::optional_scopes_for(platform);
+    let mut scopes = requested.to_vec();
+    for account in state.database.list_platform_accounts().unwrap_or_default() {
+        if account.platform != platform {
+            continue;
+        }
+        for scope in account.scopes {
+            if offered.contains(&scope.as_str()) && !scopes.contains(&scope) {
+                scopes.push(scope);
+            }
+        }
+    }
+    scopes
+}
+
 /// The stored OAuth account for `platform`, matched by row id or provider id;
 /// `None` takes the first connected account of the platform.
 fn platform_account_credential(
@@ -2963,6 +2985,11 @@ async fn twitch_chat_config(
             StreamPlatform::Twitch,
             credential.account.id.clone(),
         ),
+        follow_events: credential
+            .account
+            .scopes
+            .iter()
+            .any(|scope| scope == oauth::TWITCH_FOLLOWERS_SCOPE),
     })
 }
 
@@ -9968,16 +9995,21 @@ async fn handle_text_message_with_role(
         }
         "platformAccounts.oauth.startProvider" => {
             match serde_json::from_value::<OAuthStartProviderParams>(command.params) {
-                Ok(params) => match state
-                    .oauth
-                    .start_provider_with_secret_store(
-                        params,
-                        state.oauth_redirect_port(),
-                        secrets::put_secret,
-                        secrets::delete_secret,
-                    )
-                    .await
-                {
+                Ok(mut params) => match {
+                    // A reconnect keeps the optional scopes the account already
+                    // granted, so a plain "Reconnect" never drops follow alerts.
+                    params.optional_scopes =
+                        retained_optional_scopes(state, params.platform, &params.optional_scopes);
+                    state
+                        .oauth
+                        .start_provider_with_secret_store(
+                            params,
+                            state.oauth_redirect_port(),
+                            secrets::put_secret,
+                            secrets::delete_secret,
+                        )
+                        .await
+                } {
                     Ok(result) => {
                         // A device grant (Twitch) has no redirect, so nothing
                         // will ever deliver a callback. Drive the SAME
@@ -12691,6 +12723,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 state.port,
             )

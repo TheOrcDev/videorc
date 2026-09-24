@@ -248,6 +248,7 @@ import type {
   CaptureRecoveryStatus,
   LiveChatSnapshot,
   AudienceSnapshot,
+  PlatformConnectOptions,
   NotesWindowState,
   PreviewCameraStatus,
   PreviewScreenStatus,
@@ -1179,7 +1180,10 @@ export type StudioContextValue = {
   refreshEntitlements: () => Promise<void>
   refreshPlatformAccounts: () => Promise<void>
   validatePlatformAccounts: () => Promise<PlatformAccountValidation[]>
-  connectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
+  connectPlatformAccount: (
+    platform: PlatformAccount['platform'],
+    options?: PlatformConnectOptions
+  ) => Promise<void>
   disconnectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
   refreshYouTubeChannels: (accountId?: string) => Promise<void>
   selectYouTubeChannel: (channelId: string, accountId?: string) => Promise<void>
@@ -10160,7 +10164,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const connectPlatformAccount = useCallback(
-    async (platform: PlatformAccount['platform']) => {
+    async (platform: PlatformAccount['platform'], options?: PlatformConnectOptions) => {
       if (oauthUnavailableReason(platform)) {
         // Silent: the destination card renders the unavailable reason inline
         // right next to the control that triggers this, so the toast only
@@ -10179,7 +10183,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         setLastError(null)
         const redirectUri = await window.videorc.getOAuthCallbackRedirectUri(platform)
-        const params = redirectUri ? { platform, redirectUri } : { platform }
+        const optionalScopes = options?.optionalScopes?.length
+          ? { optionalScopes: [...options.optionalScopes] }
+          : {}
+        const params = redirectUri
+          ? { platform, redirectUri, ...optionalScopes }
+          : { platform, ...optionalScopes }
         const result = await client.request<OAuthStartResult>(
           'platformAccounts.oauth.startProvider',
           params
