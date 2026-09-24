@@ -355,12 +355,7 @@ import {
   type EntitlementUiGate
 } from '@/lib/entitlement-ui'
 import { commentCanHighlight, CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
-import {
-  applyCohostState,
-  cohostErrorToast,
-  cohostHighlightMessageId,
-  sortedCohostQuestions
-} from '@/lib/cohost-view'
+import { applyCohostState, cohostErrorToast, cohostHighlightMessageId } from '@/lib/cohost-view'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-view'
 import {
@@ -3673,7 +3668,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
   const [cohostActionPending, setCohostActionPending] = useState(false)
   const cohostStateRef = useRef<CohostState | null>(null)
-  const cohostAutoHighlightedRef = useRef<Set<string>>(new Set())
   const streamTitleRef = useRef<string | null>(null)
   streamTitleRef.current =
     captureConfig.streaming.targets.find((target) => target.enabled && target.scheduledEventId)
@@ -3750,10 +3744,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus
   ])
 
-  useEffect(() => {
-    cohostAutoHighlightedRef.current.clear()
-  }, [cohostLiveSessionId])
-
   const patchCohostSettings = useCallback(
     async (patch: CohostSettingsPatch): Promise<void> => {
       if (!client) throw new Error('Backend socket is not connected.')
@@ -3829,28 +3819,41 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [toggleCommentHighlight]
   )
 
-  // "Show questions on stream automatically" (default off): highlight ONE new
-  // high-priority question, once, and only when the stream is not already
-  // showing a comment — it must never fight a highlight the streamer set by
-  // hand, and never re-show a question it already showed.
-  useEffect(() => {
-    if (!cohostSettings?.autoHighlight) return
-    if (!cohostState || cohostState.status !== 'listening') return
-    const alreadyShown = cohostAutoHighlightedRef.current
-    const candidate = sortedCohostQuestions(cohostState.questions).find(
-      (question) => question.priority === 'high' && !alreadyShown.has(question.id)
+  // Orcle's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
+  // safety gate, one command per decision with an engine-wide generation) and
+  // the renderer only executes it. Always-set semantics: an automatic path
+  // must never read a repeat as "un-pin" (the H key keeps its toggle). No
+  // renderer history: a command the message list cannot serve is simply not
+  // executed, and the engine never asks for the same message twice. Failures
+  // stay quiet; the backend's status is the truth either way.
+  const cohostAutoHighlightGeneration = cohostState?.autoHighlight?.generation ?? 0
+  const cohostAutoHighlightMessageId = cohostState?.autoHighlight?.messageId ?? null
+  const executeCohostAutoHighlightRef = useRef<(messageId: string) => void>(() => {})
+  executeCohostAutoHighlightRef.current = (messageId) => {
+    const message = liveChatSnapshotRef.current.messages.find(
+      (candidate) => candidate.id === messageId
     )
-    if (!candidate) return
-    alreadyShown.add(candidate.id)
-    if (commentHighlightState.phase === 'live' || commentHighlightApplyingId !== null) return
-    showCohostQuestionOnStream(candidate)
-  }, [
-    cohostSettings?.autoHighlight,
-    cohostState,
-    commentHighlightApplyingId,
-    commentHighlightState.phase,
-    showCohostQuestionOnStream
-  ])
+    if (!message || !commentCanHighlight(message)) return
+    const intent = ++commentHighlightIntentRef.current
+    void applyCommentHighlight(message, undefined, intent, { alwaysSet: true })
+      .then((state) => {
+        if (state && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(state)
+        }
+      })
+      .catch(async () => {
+        const authoritative = await client
+          ?.request<CommentHighlightState>('comments.highlight.status')
+          .catch(() => null)
+        if (authoritative && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(authoritative)
+        }
+      })
+  }
+  useEffect(() => {
+    if (cohostAutoHighlightGeneration === 0 || !cohostAutoHighlightMessageId) return
+    executeCohostAutoHighlightRef.current(cohostAutoHighlightMessageId)
+  }, [cohostAutoHighlightGeneration, cohostAutoHighlightMessageId])
 
   // One relayed value for the detached Comments window: the window never
   // re-derives Premium or consent, it renders what the main renderer resolved.

@@ -16,6 +16,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
+use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 use crate::protocol::{
     CohostFlagParams, CohostQuestionParams, CohostSettingsPatch, CohostStartParams, FeatureId,
@@ -70,6 +71,27 @@ const ALERT_MIN_AUTHORS: usize = 2;
 /// A report stops counting (and its kind leaves the state) after this long.
 const ALERT_EXPIRY: Duration = Duration::from_secs(120);
 const ALLOWED_ROLES: [&str; 5] = ["mod", "owner", "subscriber", "member", "vip"];
+/// Automatic on-stream cards (plan 060, D4-D6, D10). The engine decides, the
+/// renderer only renders and sets the card. At most one automatic card every
+/// `AUTO_HIGHLIGHT_COOLDOWN`, measured from the end of the previous card
+/// (whoever set it); never a message older than `AUTO_HIGHLIGHT_MAX_AGE`;
+/// never while chat tension is at or above the ceiling.
+pub(crate) const AUTO_HIGHLIGHT_COOLDOWN: Duration = Duration::from_secs(45);
+pub(crate) const AUTO_HIGHLIGHT_MAX_AGE: Duration = Duration::from_secs(120);
+const AUTO_HIGHLIGHT_TENSION_CEILING: f64 = 0.7;
+/// An open high-priority question has no server score; it competes at this
+/// baseline plus the asker's role bonus.
+const AUTO_HIGHLIGHT_QUESTION_SCORE: f64 = 0.5;
+/// Not the same highlight type this many times in a row when another exists.
+const AUTO_HIGHLIGHT_TYPE_RUN: usize = 3;
+const AUTO_HIGHLIGHT_ROLE_BONUS_MEMBER: f64 = 0.15;
+const AUTO_HIGHLIGHT_ROLE_BONUS_MOD: f64 = 0.10;
+/// A voice card may be re-set once while the match persists; the refresh is
+/// due when this little of the first lifetime is left (10 s + 10 s = 20 s max).
+const AUTO_HIGHLIGHT_VOICE_REFRESH_WINDOW: Duration = Duration::from_secs(2);
+/// A decision the renderer never turned into a live card stops counting as
+/// "applying" after this long (the message may have left the snapshot).
+const AUTO_HIGHLIGHT_APPLY_TIMEOUT: Duration = Duration::from_secs(8);
 
 // --- Wire enums --------------------------------------------------------------
 
@@ -214,6 +236,31 @@ pub enum CohostAlertKind {
     Unknown,
 }
 
+/// Where an automatic on-stream card came from.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostAutoHighlightSource {
+    /// The server's safety-gated `highlights[]`.
+    Pick,
+    /// An open question with priority `high`.
+    Question,
+    /// The comment the streamer is talking about (voice spotlight, plan 060 S3).
+    Voice,
+}
+
+/// One automatic "put this on stream" command. The renderer keys on
+/// `generation` and sets the card with always-set semantics; it keeps no
+/// history and makes no decision of its own.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostAutoHighlight {
+    pub generation: u64,
+    pub message_id: String,
+    pub source: CohostAutoHighlightSource,
+    /// The same message is re-set while still live (voice only, once).
+    pub refresh: bool,
+}
+
 // --- Settings ----------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -222,7 +269,13 @@ pub struct CohostSettings {
     pub enabled: bool,
     pub tone: CohostTone,
     pub notes: String,
+    /// Orcle's picks go on stream by themselves (server highlights and
+    /// high-priority questions, with the engine's cadence rules).
     pub auto_highlight: bool,
+    /// The comment the streamer is talking about goes on stream by itself.
+    /// `default` so a settings row from before the field still loads.
+    #[serde(default)]
+    pub voice_highlight: bool,
     /// Plain-language chat rules the co-host flags against (wire v2). `default`
     /// so a settings row from before the field still loads.
     #[serde(default)]
@@ -236,6 +289,7 @@ impl Default for CohostSettings {
             tone: CohostTone::Friendly,
             notes: String::new(),
             auto_highlight: false,
+            voice_highlight: false,
             rules: Vec::new(),
         }
     }
@@ -260,6 +314,9 @@ impl CohostSettings {
         }
         if let Some(auto_highlight) = patch.auto_highlight {
             self.auto_highlight = auto_highlight;
+        }
+        if let Some(voice_highlight) = patch.voice_highlight {
+            self.voice_highlight = voice_highlight;
         }
         if let Some(rules) = patch.rules {
             self.rules = normalize_rules(rules);
@@ -446,6 +503,11 @@ pub struct CohostState {
     pub alerts: Vec<CohostAlert>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mood_scores: Option<CohostMoodScores>,
+    /// The engine's latest automatic on-stream command (plan 060 S1). Omitted
+    /// until the engine made one this session; the renderer acts on a new
+    /// `generation` only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_highlight: Option<CohostAutoHighlight>,
 }
 
 impl CohostState {
@@ -469,6 +531,7 @@ impl CohostState {
             highlights: Vec::new(),
             alerts: Vec::new(),
             mood_scores: None,
+            auto_highlight: None,
         }
     }
 }
@@ -578,13 +641,64 @@ struct CohostSession {
     in_flight_messages: Vec<CohostTickMessage>,
     in_flight_dropped: u64,
     in_flight_rules: Vec<String>,
-    /// Author identity per known message id, for distinct-author alert counts.
-    authors: HashMap<String, String>,
+    /// Author identity, roles and note time per known message id: distinct-author
+    /// alert counts and the automatic-card rules read it.
+    known: HashMap<String, KnownMessage>,
     /// Known rows that were deleted after they were sent in a tick.
     deleted_ids: HashSet<String>,
     highlights: Vec<CohostHighlight>,
     alert_reports: Vec<AlertReport>,
     mood_scores: Option<CohostMoodScores>,
+    /// Automatic on-stream cards (plan 060 S1). All of it is per session: a
+    /// new session starts with no history, like the dismissed sets.
+    auto: AutoHighlightLedger,
+}
+
+/// What the engine remembers about one chat row it noted.
+#[derive(Debug, Clone)]
+struct KnownMessage {
+    /// Platform-qualified author key (`alert_author_key`).
+    author: String,
+    /// Normalised roles (`normalize_role`).
+    roles: Vec<String>,
+    noted_at: Instant,
+}
+
+/// A card the engine saw live on the overlay.
+#[derive(Debug, Clone)]
+struct ObservedCard {
+    message_id: String,
+    /// The engine asked for this card (else the streamer set it by hand).
+    engine_set: bool,
+    expires_at: Instant,
+}
+
+/// An automatic command the renderer has not turned into a live card yet.
+#[derive(Debug, Clone)]
+struct PendingAutoRequest {
+    message_id: String,
+    asked_at: Instant,
+}
+
+/// Session-scoped memory behind the automatic-card rules.
+#[derive(Debug, Default)]
+struct AutoHighlightLedger {
+    /// The latest command, as published in `cohost.state`.
+    latest: Option<CohostAutoHighlight>,
+    /// Outstanding command (cleared when its card shows up live, or times out).
+    requested: Option<PendingAutoRequest>,
+    /// The card currently live on the overlay, as last observed.
+    card: Option<ObservedCard>,
+    /// When the previous card left the stream (its expiry, or an earlier clear).
+    last_card_end: Option<Instant>,
+    /// Message ids that were on stream this session, automatically or by hand.
+    shown: HashSet<String>,
+    /// Author key of the previous automatic card.
+    last_author: Option<String>,
+    /// Types of the recent automatic cards, oldest first (bounded).
+    recent_types: Vec<CohostHighlightType>,
+    /// The voice card that already got its one refresh.
+    voice_refreshed: Option<String>,
 }
 
 impl CohostSession {
@@ -629,11 +743,12 @@ impl CohostSession {
             in_flight_messages: Vec::new(),
             in_flight_dropped: 0,
             in_flight_rules: Vec::new(),
-            authors: HashMap::new(),
+            known: HashMap::new(),
             deleted_ids: HashSet::new(),
             highlights: Vec::new(),
             alert_reports: Vec::new(),
             mood_scores: None,
+            auto: AutoHighlightLedger::default(),
         }
     }
 
@@ -669,6 +784,7 @@ impl CohostSession {
             highlights: self.highlights.clone(),
             alerts: self.alerts_at(now),
             mood_scores: self.mood_scores,
+            auto_highlight: self.auto.latest.clone(),
         }
     }
 
@@ -732,14 +848,14 @@ impl CohostSession {
             .collect()
     }
 
-    fn remember_id(&mut self, id: &str, author: String) {
+    fn remember_id(&mut self, id: &str, known: KnownMessage) {
         if self.known_set.insert(id.to_string()) {
             self.known_ids.push_back(id.to_string());
-            self.authors.insert(id.to_string(), author);
+            self.known.insert(id.to_string(), known);
             while self.known_ids.len() > KNOWN_MESSAGE_IDS_CAP {
                 if let Some(evicted) = self.known_ids.pop_front() {
                     self.known_set.remove(&evicted);
-                    self.authors.remove(&evicted);
+                    self.known.remove(&evicted);
                     self.deleted_ids.remove(&evicted);
                 }
             }
@@ -748,7 +864,9 @@ impl CohostSession {
 
     /// Buffer eligible rows newer than the cursor. Tombstones for a pending
     /// row pull it out of the delta (deleted messages never reach the model).
-    fn note_messages(&mut self, messages: &[LiveChatMessage]) -> usize {
+    /// `now` is when the engine saw the rows: the automatic-card age rule
+    /// counts from it, never from a provider timestamp.
+    fn note_messages(&mut self, messages: &[LiveChatMessage], now: Instant) -> usize {
         let mut noted = 0;
         let mut ordered: Vec<&LiveChatMessage> = messages
             .iter()
@@ -776,7 +894,14 @@ impl CohostSession {
             let Some(mapped) = tick_message_from_chat(message) else {
                 continue;
             };
-            self.remember_id(&message.id, alert_author_key(message));
+            self.remember_id(
+                &message.id,
+                KnownMessage {
+                    author: alert_author_key(message),
+                    roles: mapped.roles.clone().unwrap_or_default(),
+                    noted_at: now,
+                },
+            );
             self.pending.push_back(mapped);
             while self.pending.len() > TICK_DELTA_CAP {
                 self.pending.pop_front();
@@ -961,7 +1086,7 @@ impl CohostSession {
         self.alert_reports
             .retain(|report| now.saturating_duration_since(report.at) < ALERT_EXPIRY);
         for alert in response.alerts {
-            let Some(author) = self.authors.get(&alert.message_id) else {
+            let Some(author) = self.known.get(&alert.message_id) else {
                 continue;
             };
             self.alert_reports.push(AlertReport {
@@ -969,7 +1094,7 @@ impl CohostSession {
                     CohostAlertKind::Unknown => CohostAlertKind::Other,
                     known => known,
                 },
-                author: author.clone(),
+                author: author.author.clone(),
                 at: now,
                 at_iso: now_iso.to_string(),
             });
@@ -1105,6 +1230,429 @@ impl CohostSession {
         self.dismissed_flags.insert(message_id.to_string());
         before != self.flags.len()
     }
+
+    // --- Automatic on-stream cards (plan 060 S1) -----------------------------
+
+    /// Record what the comment-highlight overlay shows right now. A live card
+    /// the engine asked for settles its request; any live card counts as shown
+    /// this session (never re-shown automatically); a card leaving the stream
+    /// fixes the cooldown anchor at its expiry or its earlier clear.
+    fn observe_overlay(&mut self, overlay: &OverlayObservation, now: Instant) {
+        match overlay.live_message_id.as_deref() {
+            Some(message_id) => {
+                let requested = self
+                    .auto
+                    .requested
+                    .as_ref()
+                    .is_some_and(|request| request.message_id == message_id);
+                if requested {
+                    self.auto.requested = None;
+                }
+                let engine_set = requested
+                    || self
+                        .auto
+                        .card
+                        .as_ref()
+                        .is_some_and(|card| card.message_id == message_id && card.engine_set);
+                self.auto.card = Some(ObservedCard {
+                    message_id: message_id.to_string(),
+                    engine_set,
+                    expires_at: now + overlay.remaining,
+                });
+                self.auto.shown.insert(message_id.to_string());
+            }
+            None => {
+                if let Some(card) = self.auto.card.take() {
+                    self.auto.last_card_end = Some(card.expires_at.min(now));
+                }
+            }
+        }
+        // A command the renderer never fulfilled (message gone from its
+        // snapshot, card ineligible) must not block the policy for ever.
+        if self.auto.requested.as_ref().is_some_and(|request| {
+            now.saturating_duration_since(request.asked_at) > AUTO_HIGHLIGHT_APPLY_TIMEOUT
+        }) {
+            self.auto.requested = None;
+        }
+    }
+
+    /// One candidate with the safety facts read at fire time, or `None` for a
+    /// message the engine never noted (or evicted).
+    fn auto_candidate(
+        &self,
+        message_id: &str,
+        source: CohostAutoHighlightSource,
+        highlight_type: CohostHighlightType,
+        score: f64,
+        now: Instant,
+    ) -> Option<AutoHighlightCandidate> {
+        let known = self.known.get(message_id)?;
+        Some(AutoHighlightCandidate {
+            message_id: message_id.to_string(),
+            author: known.author.clone(),
+            roles: known.roles.clone(),
+            source,
+            highlight_type,
+            score,
+            age: now.saturating_duration_since(known.noted_at),
+            flagged: self.flags.iter().any(|flag| flag.message_id == message_id),
+            flag_dismissed: self.dismissed_flags.contains(message_id),
+            deleted: self.deleted_ids.contains(message_id),
+        })
+    }
+
+    fn auto_highlight_input(
+        &self,
+        picks_enabled: bool,
+        voice_enabled: bool,
+        voice: Option<AutoHighlightCandidate>,
+        now: Instant,
+    ) -> AutoHighlightInput {
+        let card = match (&self.auto.card, &self.auto.requested) {
+            (Some(card), _) => AutoHighlightCard::Live {
+                message_id: card.message_id.clone(),
+                engine_set: card.engine_set,
+                remaining: card.expires_at.saturating_duration_since(now),
+            },
+            (None, Some(_)) => AutoHighlightCard::Applying,
+            (None, None) => AutoHighlightCard::None,
+        };
+        let mut candidates: Vec<AutoHighlightCandidate> = Vec::new();
+        for highlight in &self.highlights {
+            if let Some(candidate) = self.auto_candidate(
+                &highlight.message_id,
+                CohostAutoHighlightSource::Pick,
+                highlight.highlight_type,
+                highlight.score,
+                now,
+            ) {
+                candidates.push(candidate);
+            }
+        }
+        for question in &self.questions {
+            if question.priority != CohostPriority::High {
+                continue;
+            }
+            let Some(message_id) = question.message_ids.first() else {
+                continue;
+            };
+            // A server pick of the same message already carries a real score.
+            if candidates
+                .iter()
+                .any(|candidate| &candidate.message_id == message_id)
+            {
+                continue;
+            }
+            if let Some(candidate) = self.auto_candidate(
+                message_id,
+                CohostAutoHighlightSource::Question,
+                CohostHighlightType::Question,
+                AUTO_HIGHLIGHT_QUESTION_SCORE,
+                now,
+            ) {
+                candidates.push(candidate);
+            }
+        }
+        AutoHighlightInput {
+            picks_enabled,
+            voice_enabled,
+            card,
+            since_last_card_end: self
+                .auto
+                .last_card_end
+                .map(|end| now.saturating_duration_since(end)),
+            last_author: self.auto.last_author.clone(),
+            recent_types: self.auto.recent_types.clone(),
+            tension: self.mood_scores.map(|scores| scores.tension),
+            candidates,
+            voice_refreshed: voice.as_ref().is_some_and(|voice| {
+                self.auto.voice_refreshed.as_deref() == Some(voice.message_id.as_str())
+            }),
+            voice,
+            shown: self.auto.shown.clone(),
+        }
+    }
+
+    /// Record a decision and turn it into the command the renderer executes.
+    fn apply_auto_decision(
+        &mut self,
+        decision: AutoHighlightDecision,
+        generation: u64,
+        now: Instant,
+    ) -> CohostAutoHighlight {
+        if decision.refresh {
+            self.auto.voice_refreshed = Some(decision.message_id.clone());
+        }
+        self.auto.requested = Some(PendingAutoRequest {
+            message_id: decision.message_id.clone(),
+            asked_at: now,
+        });
+        self.auto.shown.insert(decision.message_id.clone());
+        self.auto.last_author = Some(decision.author);
+        if let Some(highlight_type) = decision.highlight_type {
+            self.auto.recent_types.push(highlight_type);
+            while self.auto.recent_types.len() > AUTO_HIGHLIGHT_TYPE_RUN {
+                self.auto.recent_types.remove(0);
+            }
+        }
+        let command = CohostAutoHighlight {
+            generation,
+            message_id: decision.message_id,
+            source: decision.source,
+            refresh: decision.refresh,
+        };
+        self.auto.latest = Some(command.clone());
+        command
+    }
+}
+
+/// The comment-highlight overlay as the automatic-card rules see it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct OverlayObservation {
+    /// The message on stream right now (`phase == live`), else `None`.
+    pub(crate) live_message_id: Option<String>,
+    /// Time left on that card; zero when unknown.
+    pub(crate) remaining: Duration,
+}
+
+impl OverlayObservation {
+    pub(crate) fn from_highlight(highlight: &CommentHighlightState) -> Self {
+        if highlight.phase != CommentHighlightPhase::Live {
+            return Self::default();
+        }
+        let remaining = highlight
+            .expires_at
+            .as_deref()
+            .and_then(|at| chrono::DateTime::parse_from_rfc3339(at).ok())
+            .and_then(|at| {
+                (at.with_timezone(&chrono::Utc) - chrono::Utc::now())
+                    .to_std()
+                    .ok()
+            })
+            .unwrap_or_default();
+        Self {
+            live_message_id: highlight.message_id.clone(),
+            remaining,
+        }
+    }
+}
+
+/// One message the automatic-card policy may put on stream, with every
+/// safety fact read at fire time (a later tick can flag what an earlier one
+/// suggested).
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AutoHighlightCandidate {
+    pub(crate) message_id: String,
+    /// Platform-qualified author key.
+    pub(crate) author: String,
+    /// Normalised roles (`mod`, `owner`, `subscriber`, `member`, `vip`).
+    pub(crate) roles: Vec<String>,
+    pub(crate) source: CohostAutoHighlightSource,
+    pub(crate) highlight_type: CohostHighlightType,
+    /// Server score (Pick) or the question baseline; unused for Voice.
+    pub(crate) score: f64,
+    /// Since the engine noted the message.
+    pub(crate) age: Duration,
+    pub(crate) flagged: bool,
+    pub(crate) flag_dismissed: bool,
+    pub(crate) deleted: bool,
+}
+
+/// What is on stream when the policy runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum AutoHighlightCard {
+    None,
+    /// The engine asked for a card the renderer has not set yet.
+    Applying,
+    Live {
+        message_id: String,
+        /// The engine asked for it (false: the streamer set it by hand).
+        engine_set: bool,
+        remaining: Duration,
+    },
+}
+
+/// Plain input of `auto_highlight_pick`: everything the rules need, nothing
+/// they must look up.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AutoHighlightInput {
+    /// `settings.auto_highlight`: Pick and Question sources.
+    pub(crate) picks_enabled: bool,
+    /// `settings.voice_highlight`: the Voice source.
+    pub(crate) voice_enabled: bool,
+    pub(crate) card: AutoHighlightCard,
+    /// Since the previous card (whoever set it) left the stream; `None` when
+    /// no card has been on stream this session.
+    pub(crate) since_last_card_end: Option<Duration>,
+    /// Author key of the previous automatic card.
+    pub(crate) last_author: Option<String>,
+    /// Types of the recent automatic cards, oldest first.
+    pub(crate) recent_types: Vec<CohostHighlightType>,
+    /// `mood_scores.tension` from the latest tick.
+    pub(crate) tension: Option<f64>,
+    /// Pick and Question candidates.
+    pub(crate) candidates: Vec<AutoHighlightCandidate>,
+    /// The comment the streamer is talking about right now (source Voice).
+    pub(crate) voice: Option<AutoHighlightCandidate>,
+    /// The voice card already had its one refresh.
+    pub(crate) voice_refreshed: bool,
+    /// Message ids that were on stream this session.
+    pub(crate) shown: HashSet<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AutoHighlightDecision {
+    pub(crate) message_id: String,
+    pub(crate) author: String,
+    pub(crate) source: CohostAutoHighlightSource,
+    /// `None` for a voice card: it takes no part in the type-run rule.
+    pub(crate) highlight_type: Option<CohostHighlightType>,
+    pub(crate) refresh: bool,
+}
+
+impl AutoHighlightDecision {
+    fn show(candidate: &AutoHighlightCandidate, refresh: bool) -> Self {
+        Self {
+            message_id: candidate.message_id.clone(),
+            author: candidate.author.clone(),
+            source: candidate.source,
+            highlight_type: (candidate.source != CohostAutoHighlightSource::Voice)
+                .then_some(candidate.highlight_type),
+            refresh,
+        }
+    }
+}
+
+/// D5: a small additive bonus, never a filter. The best role counts once.
+fn auto_highlight_role_bonus(roles: &[String]) -> f64 {
+    roles
+        .iter()
+        .map(|role| match role.as_str() {
+            "member" | "subscriber" | "vip" => AUTO_HIGHLIGHT_ROLE_BONUS_MEMBER,
+            "mod" => AUTO_HIGHLIGHT_ROLE_BONUS_MOD,
+            _ => 0.0,
+        })
+        .fold(0.0, f64::max)
+}
+
+/// D6 at fire time: not flagged now, not flag-dismissed, not deleted, and
+/// never the broadcaster's own message.
+fn auto_highlight_safe(candidate: &AutoHighlightCandidate) -> bool {
+    !candidate.flagged
+        && !candidate.flag_dismissed
+        && !candidate.deleted
+        && !candidate.roles.iter().any(|role| role == "owner")
+}
+
+/// The type the last `AUTO_HIGHLIGHT_TYPE_RUN - 1` automatic cards all had.
+fn auto_highlight_run_type(recent: &[CohostHighlightType]) -> Option<CohostHighlightType> {
+    let run = AUTO_HIGHLIGHT_TYPE_RUN - 1;
+    if recent.len() < run {
+        return None;
+    }
+    let tail = &recent[recent.len() - run..];
+    let last = *tail.last()?;
+    tail.iter().all(|kind| *kind == last).then_some(last)
+}
+
+/// The automatic on-stream card policy, pure for the test matrix (plan 060,
+/// D4, D5, D6, D10). At most one automatic card per `AUTO_HIGHLIGHT_COOLDOWN`
+/// from the previous card's end; never while a card is live or applying;
+/// never the previous automatic author; never older than
+/// `AUTO_HIGHLIGHT_MAX_AGE`; not the same type three times in a row when an
+/// alternative exists; never at tension >= 0.7; never the broadcaster; the
+/// safety gate re-checked now; never a message already shown this session.
+/// Voice bypasses the cooldown and the age rule, may refresh its own card
+/// once while the match persists, and never replaces a card the streamer set
+/// by hand. Ties: score desc, then oldest, then id.
+pub(crate) fn auto_highlight_pick(input: &AutoHighlightInput) -> Option<AutoHighlightDecision> {
+    if input
+        .tension
+        .is_some_and(|tension| tension >= AUTO_HIGHLIGHT_TENSION_CEILING)
+    {
+        return None;
+    }
+    let voice = input
+        .voice
+        .as_ref()
+        .filter(|voice| input.voice_enabled && voice.source == CohostAutoHighlightSource::Voice);
+    match &input.card {
+        AutoHighlightCard::Applying => return None,
+        AutoHighlightCard::Live {
+            message_id,
+            engine_set,
+            remaining,
+        } => {
+            // The only thing allowed over a live card: one refresh of the
+            // engine's own voice card while the same match persists.
+            let voice = voice?;
+            if !engine_set
+                || voice.message_id != *message_id
+                || input.voice_refreshed
+                || *remaining > AUTO_HIGHLIGHT_VOICE_REFRESH_WINDOW
+                || !auto_highlight_safe(voice)
+            {
+                return None;
+            }
+            return Some(AutoHighlightDecision::show(voice, true));
+        }
+        AutoHighlightCard::None => {}
+    }
+    let not_previous_author = |candidate: &AutoHighlightCandidate| {
+        input.last_author.as_deref() != Some(candidate.author.as_str())
+    };
+    if let Some(voice) = voice.filter(|voice| {
+        auto_highlight_safe(voice)
+            && not_previous_author(voice)
+            && !input.shown.contains(&voice.message_id)
+    }) {
+        return Some(AutoHighlightDecision::show(voice, false));
+    }
+    if !input.picks_enabled {
+        return None;
+    }
+    if input
+        .since_last_card_end
+        .is_some_and(|since| since < AUTO_HIGHLIGHT_COOLDOWN)
+    {
+        return None;
+    }
+    let eligible: Vec<&AutoHighlightCandidate> = input
+        .candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.source != CohostAutoHighlightSource::Voice
+                && auto_highlight_safe(candidate)
+                && not_previous_author(candidate)
+                && candidate.age <= AUTO_HIGHLIGHT_MAX_AGE
+                && !input.shown.contains(&candidate.message_id)
+        })
+        .collect();
+    let pool: Vec<&AutoHighlightCandidate> = match auto_highlight_run_type(&input.recent_types) {
+        Some(run)
+            if eligible
+                .iter()
+                .any(|candidate| candidate.highlight_type != run) =>
+        {
+            eligible
+                .into_iter()
+                .filter(|candidate| candidate.highlight_type != run)
+                .collect()
+        }
+        _ => eligible,
+    };
+    let effective = |candidate: &AutoHighlightCandidate| {
+        candidate.score + auto_highlight_role_bonus(&candidate.roles)
+    };
+    pool.into_iter()
+        .min_by(|a, b| {
+            effective(b)
+                .partial_cmp(&effective(a))
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.age.cmp(&a.age))
+                .then_with(|| a.message_id.cmp(&b.message_id))
+        })
+        .map(|candidate| AutoHighlightDecision::show(candidate, false))
 }
 
 /// Cadence rule, pure for the test matrix: tick when at least five new rows
@@ -1242,6 +1790,9 @@ pub struct CohostEngine {
     generation: u64,
     session: Option<CohostSession>,
     scheduler: Option<JoinHandle<()>>,
+    /// Engine-wide counter for automatic-card commands: never repeats across
+    /// sessions, so the renderer can key on it alone.
+    auto_highlight_generation: u64,
 }
 
 impl CohostEngine {
@@ -1251,6 +1802,7 @@ impl CohostEngine {
             generation: 0,
             session: None,
             scheduler: None,
+            auto_highlight_generation: 0,
         }
     }
 
@@ -1300,10 +1852,50 @@ impl CohostEngine {
     }
 
     pub(crate) fn note_messages(&mut self, messages: &[LiveChatMessage]) -> usize {
+        self.note_messages_at(messages, Instant::now())
+    }
+
+    fn note_messages_at(&mut self, messages: &[LiveChatMessage], now: Instant) -> usize {
         self.session
             .as_mut()
-            .map(|session| session.note_messages(messages))
+            .map(|session| session.note_messages(messages, now))
             .unwrap_or(0)
+    }
+
+    /// One scheduler pass of the automatic-card policy (plan 060 S1). The
+    /// overlay is observed on every pass (so the ledger stays true while the
+    /// setting is off); the pick runs only while listening with picks or
+    /// voice enabled. Returns the new command when the engine decided.
+    pub(crate) fn evaluate_auto_highlight(
+        &mut self,
+        generation: u64,
+        overlay: &OverlayObservation,
+        voice_message_id: Option<&str>,
+        now: Instant,
+    ) -> Option<CohostAutoHighlight> {
+        let picks_enabled = self.settings.auto_highlight;
+        let voice_enabled = self.settings.voice_highlight;
+        let session = self.session.as_mut()?;
+        if session.generation != generation {
+            return None;
+        }
+        session.observe_overlay(overlay, now);
+        if session.status != CohostStatus::Listening || !(picks_enabled || voice_enabled) {
+            return None;
+        }
+        let voice = voice_message_id.and_then(|message_id| {
+            session.auto_candidate(
+                message_id,
+                CohostAutoHighlightSource::Voice,
+                CohostHighlightType::Other,
+                0.0,
+                now,
+            )
+        });
+        let input = session.auto_highlight_input(picks_enabled, voice_enabled, voice, now);
+        let decision = auto_highlight_pick(&input)?;
+        self.auto_highlight_generation = self.auto_highlight_generation.wrapping_add(1).max(1);
+        Some(session.apply_auto_decision(decision, self.auto_highlight_generation, now))
     }
 
     /// Messages buffered for the next tick (0 without a session).
@@ -1728,6 +2320,28 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
     let token = crate::account::stored_session_token();
     let premium = premium_entitled();
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    // Automatic on-stream cards: read the overlay first (its own lock, never
+    // nested with the engine's), then let the engine decide. The voice
+    // spotlight arrives with plan 060 S3; until then the Voice source is idle.
+    let overlay = OverlayObservation::from_highlight(&*state.comment_highlight.lock().await);
+    let auto_command = {
+        let mut engine = state.cohost.lock().await;
+        engine
+            .evaluate_auto_highlight(generation, &overlay, None, Instant::now())
+            .map(|command| (command, engine.snapshot()))
+    };
+    if let Some((command, snapshot)) = auto_command {
+        state.emit_log(
+            "info",
+            format!(
+                "Orcle puts {} on stream ({}{}).",
+                command.message_id,
+                serde_json::to_string(&command.source).unwrap_or_default(),
+                if command.refresh { ", refresh" } else { "" }
+            ),
+        );
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
     let prepared = {
         let mut engine = state.cohost.lock().await;
         let prepared = engine.prepare_tick(generation, token.is_some(), premium, Instant::now());
@@ -1896,6 +2510,7 @@ mod tests {
             tone: CohostTone::Short,
             notes: "Keyboard: Keychron Q1".to_string(),
             auto_highlight: false,
+            voice_highlight: false,
             rules: Vec::new(),
         }
     }
@@ -1988,6 +2603,519 @@ mod tests {
         assert!(tick_due(1, last, Some(last), last + secs(20)));
         // 4 new after a tick: still below the burst threshold.
         assert!(!tick_due(4, last, Some(last), last + secs(12)));
+    }
+
+    // --- Automatic on-stream cards (plan 060 S1) -----------------------------
+
+    fn auto_candidate(
+        id: &str,
+        author: &str,
+        score: f64,
+        highlight_type: CohostHighlightType,
+    ) -> AutoHighlightCandidate {
+        AutoHighlightCandidate {
+            message_id: id.to_string(),
+            author: author.to_string(),
+            roles: Vec::new(),
+            source: CohostAutoHighlightSource::Pick,
+            highlight_type,
+            score,
+            age: secs(10),
+            flagged: false,
+            flag_dismissed: false,
+            deleted: false,
+        }
+    }
+
+    fn auto_input(candidates: Vec<AutoHighlightCandidate>) -> AutoHighlightInput {
+        AutoHighlightInput {
+            picks_enabled: true,
+            voice_enabled: true,
+            card: AutoHighlightCard::None,
+            since_last_card_end: None,
+            last_author: None,
+            recent_types: Vec::new(),
+            tension: Some(0.2),
+            candidates,
+            voice: None,
+            voice_refreshed: false,
+            shown: HashSet::new(),
+        }
+    }
+
+    fn picked(input: &AutoHighlightInput) -> Option<String> {
+        auto_highlight_pick(input).map(|decision| decision.message_id)
+    }
+
+    #[test]
+    fn auto_highlight_matrix_matches_the_contract() {
+        use CohostHighlightType::{Joke, Praise};
+        let joke = auto_candidate("m-joke", "twitch:alice", 0.8, Joke);
+        let praise = auto_candidate("m-praise", "twitch:bob", 0.6, Praise);
+        let base = auto_input(vec![joke.clone(), praise.clone()]);
+
+        // Best score wins; no card yet this session means no cooldown.
+        let decision = auto_highlight_pick(&base).unwrap();
+        assert_eq!(
+            decision,
+            AutoHighlightDecision {
+                message_id: "m-joke".into(),
+                author: "twitch:alice".into(),
+                source: CohostAutoHighlightSource::Pick,
+                highlight_type: Some(Joke),
+                refresh: false,
+            }
+        );
+
+        // Cooldown: 45 s from the previous card's end, whoever set it.
+        let mut input = base.clone();
+        input.since_last_card_end = Some(secs(44));
+        assert_eq!(picked(&input), None);
+        input.since_last_card_end = Some(secs(45));
+        assert_eq!(picked(&input).as_deref(), Some("m-joke"));
+
+        // Never while a card is live or applying.
+        input = base.clone();
+        input.card = AutoHighlightCard::Live {
+            message_id: "m-other".into(),
+            engine_set: true,
+            remaining: secs(5),
+        };
+        assert_eq!(picked(&input), None);
+        input.card = AutoHighlightCard::Applying;
+        assert_eq!(picked(&input), None);
+
+        // Never the previous automatic author.
+        input = base.clone();
+        input.last_author = Some("twitch:alice".into());
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+
+        // Not the same type three times in a row when an alternative exists.
+        input = base.clone();
+        input.recent_types = vec![Joke, Joke];
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+        input.candidates = vec![joke.clone()];
+        assert_eq!(picked(&input).as_deref(), Some("m-joke"));
+        input.candidates = vec![joke.clone(), praise.clone()];
+        input.recent_types = vec![Praise, Joke];
+        assert_eq!(picked(&input).as_deref(), Some("m-joke"));
+
+        // Never a message older than 120 s.
+        input = base.clone();
+        input.candidates[0].age = secs(120);
+        assert_eq!(picked(&input).as_deref(), Some("m-joke"));
+        input.candidates[0].age = secs(121);
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+
+        // Never while tension is 0.7 or higher.
+        input = base.clone();
+        input.tension = Some(0.7);
+        assert_eq!(picked(&input), None);
+        input.tension = Some(0.69);
+        assert_eq!(picked(&input).as_deref(), Some("m-joke"));
+        input.tension = None;
+        assert_eq!(picked(&input).as_deref(), Some("m-joke"));
+
+        // Never the broadcaster.
+        input = base.clone();
+        input.candidates[0].roles = vec!["owner".into(), "mod".into()];
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+
+        // Safety gate at fire time: flagged since, flag-dismissed, deleted.
+        input = base.clone();
+        input.candidates[0].flagged = true;
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+        input = base.clone();
+        input.candidates[0].flag_dismissed = true;
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+        input = base.clone();
+        input.candidates[0].deleted = true;
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+
+        // Shown once per session.
+        input = base.clone();
+        input.shown.insert("m-joke".into());
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+        input.shown.insert("m-praise".into());
+        assert_eq!(picked(&input), None);
+
+        // Role bonus on top of the server score: +0.15 member/subscriber/vip,
+        // +0.10 mod, best role once.
+        input = base.clone();
+        input.candidates[1].roles = vec!["subscriber".into()];
+        assert_eq!(picked(&input).as_deref(), Some("m-joke")); // 0.75 < 0.8
+        input.candidates[1].score = 0.7;
+        assert_eq!(picked(&input).as_deref(), Some("m-praise")); // 0.85 > 0.8
+        input.candidates[1].roles = vec!["mod".into()];
+        assert_eq!(picked(&input).as_deref(), Some("m-joke")); // 0.80 does not beat 0.8
+        input.candidates[1].roles = vec!["mod".into(), "vip".into()];
+        assert_eq!(picked(&input).as_deref(), Some("m-praise")); // best role once: 0.85
+
+        // A high-priority question competes at 0.5 plus the role bonus.
+        let mut question = auto_candidate("m-q", "twitch:dave", 0.5, CohostHighlightType::Question);
+        question.source = CohostAutoHighlightSource::Question;
+        input = auto_input(vec![praise.clone(), question.clone()]);
+        assert_eq!(picked(&input).as_deref(), Some("m-praise"));
+        input.candidates[1].roles = vec!["vip".into()];
+        assert_eq!(picked(&input).as_deref(), Some("m-q")); // 0.65 > 0.6
+        assert_eq!(
+            auto_highlight_pick(&input).unwrap().source,
+            CohostAutoHighlightSource::Question
+        );
+
+        // Deterministic ties: equal score and age fall back to the id.
+        let mut a = auto_candidate("m-b", "twitch:x", 0.5, Joke);
+        let b = auto_candidate("m-a", "twitch:y", 0.5, Joke);
+        input = auto_input(vec![a.clone(), b.clone()]);
+        assert_eq!(picked(&input).as_deref(), Some("m-a"));
+        a.age = secs(20);
+        input = auto_input(vec![a, b]);
+        assert_eq!(picked(&input).as_deref(), Some("m-b"));
+
+        // Picks need the setting.
+        input = base.clone();
+        input.picks_enabled = false;
+        assert_eq!(picked(&input), None);
+    }
+
+    #[test]
+    fn auto_highlight_voice_rules() {
+        use CohostHighlightType::{Joke, Other};
+        let joke = auto_candidate("m-joke", "twitch:alice", 0.8, Joke);
+        let mut voice = auto_candidate("m-voice", "twitch:carol", 0.0, Other);
+        voice.source = CohostAutoHighlightSource::Voice;
+        voice.age = secs(600);
+        let mut base = auto_input(vec![joke]);
+        base.voice = Some(voice.clone());
+        base.since_last_card_end = Some(secs(3));
+
+        // Voice bypasses the cooldown and the age rule.
+        assert_eq!(
+            auto_highlight_pick(&base).unwrap(),
+            AutoHighlightDecision {
+                message_id: "m-voice".into(),
+                author: "twitch:carol".into(),
+                source: CohostAutoHighlightSource::Voice,
+                highlight_type: None,
+                refresh: false,
+            }
+        );
+
+        // Voice needs its own setting; picks stay under the cooldown.
+        let mut input = base.clone();
+        input.voice_enabled = false;
+        assert_eq!(picked(&input), None);
+        input.since_last_card_end = Some(secs(45));
+        assert_eq!(picked(&input).as_deref(), Some("m-joke"));
+
+        // A pick candidate never rides in through the voice slot, and a voice
+        // candidate never rides in through the pick list.
+        input = base.clone();
+        input.voice.as_mut().unwrap().source = CohostAutoHighlightSource::Pick;
+        assert_eq!(picked(&input), None);
+        input = base.clone();
+        input.voice = None;
+        input.candidates.push(voice.clone());
+        input.since_last_card_end = None;
+        assert_eq!(picked(&input).as_deref(), Some("m-joke"));
+
+        // Voice never replaces a card the streamer set by hand, nor another
+        // engine card.
+        input = base.clone();
+        input.card = AutoHighlightCard::Live {
+            message_id: "m-manual".into(),
+            engine_set: false,
+            remaining: secs(1),
+        };
+        assert_eq!(picked(&input), None);
+        input.card = AutoHighlightCard::Live {
+            message_id: "m-joke".into(),
+            engine_set: true,
+            remaining: secs(1),
+        };
+        assert_eq!(picked(&input), None);
+        input.card = AutoHighlightCard::Applying;
+        assert_eq!(picked(&input), None);
+
+        // One refresh of its own card, when the match persists into the last
+        // seconds of the first lifetime.
+        let own_card = |remaining: Duration| AutoHighlightCard::Live {
+            message_id: "m-voice".into(),
+            engine_set: true,
+            remaining,
+        };
+        input = base.clone();
+        input.card = own_card(secs(2));
+        let refresh = auto_highlight_pick(&input).unwrap();
+        assert!(refresh.refresh);
+        assert_eq!(refresh.message_id, "m-voice");
+        input.card = own_card(secs(3));
+        assert_eq!(picked(&input), None);
+        input.card = own_card(secs(2));
+        input.voice_refreshed = true;
+        assert_eq!(picked(&input), None);
+        input.voice_refreshed = false;
+        input.voice.as_mut().unwrap().flagged = true;
+        assert_eq!(picked(&input), None);
+        // A card set by hand is never refreshed, even for the same message.
+        input = base.clone();
+        input.card = AutoHighlightCard::Live {
+            message_id: "m-voice".into(),
+            engine_set: false,
+            remaining: secs(1),
+        };
+        assert_eq!(picked(&input), None);
+
+        // Everything else still applies: the safety gate, the broadcaster,
+        // the previous author, tension, and shown-once after the card ended.
+        input = base.clone();
+        input.voice.as_mut().unwrap().flagged = true;
+        assert_eq!(picked(&input), None);
+        input = base.clone();
+        input.voice.as_mut().unwrap().deleted = true;
+        assert_eq!(picked(&input), None);
+        input = base.clone();
+        input.voice.as_mut().unwrap().roles = vec!["owner".into()];
+        assert_eq!(picked(&input), None);
+        input = base.clone();
+        input.last_author = Some("twitch:carol".into());
+        assert_eq!(picked(&input), None);
+        input = base.clone();
+        input.tension = Some(0.7);
+        assert_eq!(picked(&input), None);
+        input = base.clone();
+        input.shown.insert("m-voice".into());
+        assert_eq!(picked(&input), None);
+    }
+
+    fn tick_highlight(
+        message_id: &str,
+        score: f64,
+        highlight_type: CohostHighlightType,
+    ) -> crate::videorc_api::CohostTickHighlight {
+        crate::videorc_api::CohostTickHighlight {
+            message_id: message_id.to_string(),
+            score,
+            highlight_type,
+        }
+    }
+
+    fn live_card(message_id: &str, remaining: Duration) -> OverlayObservation {
+        OverlayObservation {
+            live_message_id: Some(message_id.to_string()),
+            remaining,
+        }
+    }
+
+    #[test]
+    fn engine_auto_highlight_reads_engine_state_and_the_overlay() {
+        let start = Instant::now();
+        let mut engine = CohostEngine::new(CohostSettings {
+            auto_highlight: true,
+            ..enabled_settings()
+        });
+        let generation = engine.start_session("session-1".to_string(), true, None, start);
+        let rows = messages("session-1", 0..3);
+        engine.note_messages_at(&rows, start);
+        let mut tick = response(Vec::new());
+        tick.highlights = vec![
+            tick_highlight(&rows[1].id, 0.9, CohostHighlightType::Joke),
+            tick_highlight(&rows[0].id, 0.7, CohostHighlightType::Praise),
+        ];
+        let t = start + secs(20);
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), t, "2026-08-22T10:00:20Z"));
+        let idle = OverlayObservation::default();
+
+        // The best pick fires once and rides the snapshot.
+        let command = engine
+            .evaluate_auto_highlight(generation, &idle, None, t)
+            .unwrap();
+        assert_eq!(
+            command,
+            CohostAutoHighlight {
+                generation: 1,
+                message_id: rows[1].id.clone(),
+                source: CohostAutoHighlightSource::Pick,
+                refresh: false,
+            }
+        );
+        assert_eq!(engine.snapshot().auto_highlight, Some(command.clone()));
+        let json = serde_json::to_value(engine.snapshot()).unwrap();
+        assert_eq!(json["autoHighlight"]["source"], "pick");
+        assert_eq!(json["autoHighlight"]["generation"], 1);
+
+        // Applying: nothing else fires until the card shows up.
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, None, t + secs(1))
+                .is_none()
+        );
+        // Live: nothing fires while it is on stream.
+        let live = live_card(&rows[1].id, secs(10));
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &live, None, t + secs(2))
+                .is_none()
+        );
+        // It expires at t+12; the next pick waits 45 s from then and skips
+        // the previous author's row if it were the same person (it is not).
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, None, t + secs(13))
+                .is_none()
+        );
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, None, t + secs(56))
+                .is_none()
+        );
+        let second = engine
+            .evaluate_auto_highlight(generation, &idle, None, t + secs(57))
+            .unwrap();
+        assert_eq!(second.message_id, rows[0].id);
+        assert_eq!(second.generation, 2);
+        assert_eq!(engine.snapshot().auto_highlight, Some(second));
+
+        // A replaced generation never decides.
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation + 1, &idle, None, t + secs(120))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn engine_auto_highlight_counts_manual_cards_and_forgets_on_restart() {
+        let start = Instant::now();
+        let mut engine = CohostEngine::new(CohostSettings {
+            auto_highlight: true,
+            ..enabled_settings()
+        });
+        let generation = engine.start_session("session-1".to_string(), true, None, start);
+        let rows = messages("session-1", 0..3);
+        engine.note_messages_at(&rows, start);
+        let mut tick = response(Vec::new());
+        tick.highlights = vec![
+            tick_highlight(&rows[0].id, 0.9, CohostHighlightType::Joke),
+            tick_highlight(&rows[1].id, 0.8, CohostHighlightType::Praise),
+            tick_highlight(&rows[2].id, 0.5, CohostHighlightType::Insight),
+        ];
+        let t = start + secs(20);
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), t, "2026-08-22T10:00:20Z"));
+        let idle = OverlayObservation::default();
+
+        // The streamer shows the best row by hand (H): it is shown for the
+        // session and the cooldown runs from its expiry.
+        let manual = live_card(&rows[0].id, secs(4));
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &manual, None, t)
+                .is_none()
+        );
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, None, t + secs(5))
+                .is_none()
+        );
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, None, t + secs(48))
+                .is_none()
+        );
+        let first = engine
+            .evaluate_auto_highlight(generation, &idle, None, t + secs(49))
+            .unwrap();
+        assert_eq!(first.message_id, rows[1].id);
+
+        // The renderer never sets it (message gone): the request times out
+        // and the policy moves on without re-asking for the same message.
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, None, t + secs(50))
+                .is_none()
+        );
+        let next = engine
+            .evaluate_auto_highlight(generation, &idle, None, t + secs(58))
+            .unwrap();
+        assert_eq!(next.message_id, rows[2].id);
+        assert_eq!(next.generation, 2);
+
+        // A tombstone for a pending pick drops it at fire time.
+        let generation = engine.start_session("session-2".to_string(), true, None, start);
+        let rows = messages("session-2", 0..2);
+        engine.note_messages_at(&rows, start);
+        let mut tick = response(Vec::new());
+        tick.highlights = vec![
+            tick_highlight(&rows[0].id, 0.9, CohostHighlightType::Joke),
+            tick_highlight(&rows[1].id, 0.4, CohostHighlightType::Praise),
+        ];
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), t, "2026-08-22T10:00:20Z"));
+        let mut tombstone = rows[0].clone();
+        tombstone.is_deleted = true;
+        engine.note_messages_at(&[tombstone], t);
+        // No history carried over: the new session fires at once, with the
+        // engine-wide generation still counting up.
+        let command = engine
+            .evaluate_auto_highlight(generation, &idle, None, t + secs(1))
+            .unwrap();
+        assert_eq!(command.message_id, rows[1].id);
+        assert_eq!(command.generation, 3);
+
+        // The setting off: the overlay is still observed, nothing fires.
+        let mut off = CohostEngine::new(enabled_settings());
+        let generation = off.start_session("session-3".to_string(), true, None, start);
+        let rows = messages("session-3", 0..1);
+        off.note_messages_at(&rows, start);
+        let mut tick = response(Vec::new());
+        tick.highlights = vec![tick_highlight(&rows[0].id, 0.9, CohostHighlightType::Joke)];
+        assert!(off.apply_tick_result(generation, 0, Ok(tick), t, "2026-08-22T10:00:20Z"));
+        assert!(
+            off.evaluate_auto_highlight(generation, &idle, None, t)
+                .is_none()
+        );
+        assert_eq!(off.snapshot().auto_highlight, None);
+        assert!(
+            serde_json::to_value(off.snapshot())
+                .unwrap()
+                .get("autoHighlight")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn overlay_observation_reads_the_highlight_state() {
+        let idle = CommentHighlightState::default();
+        assert_eq!(
+            OverlayObservation::from_highlight(&idle),
+            OverlayObservation::default()
+        );
+        let live = CommentHighlightState {
+            session_id: Some("session-1".into()),
+            message_id: Some("m-1".into()),
+            generation: 3,
+            phase: CommentHighlightPhase::Live,
+            expires_at: Some((chrono::Utc::now() + chrono::Duration::seconds(9)).to_rfc3339()),
+            reason: None,
+        };
+        let observed = OverlayObservation::from_highlight(&live);
+        assert_eq!(observed.live_message_id.as_deref(), Some("m-1"));
+        assert!(observed.remaining > secs(7) && observed.remaining <= secs(9));
+        let expired = CommentHighlightState {
+            expires_at: Some((chrono::Utc::now() - chrono::Duration::seconds(1)).to_rfc3339()),
+            ..live.clone()
+        };
+        assert_eq!(
+            OverlayObservation::from_highlight(&expired).remaining,
+            Duration::ZERO
+        );
+        let failed = CommentHighlightState {
+            phase: CommentHighlightPhase::Failed,
+            ..live
+        };
+        assert_eq!(
+            OverlayObservation::from_highlight(&failed).live_message_id,
+            None
+        );
     }
 
     #[test]
@@ -3247,6 +4375,7 @@ mod tests {
             tone: Some(CohostTone::Professional),
             notes: Some("n".repeat(COHOST_NOTES_MAX_CHARS + 25)),
             auto_highlight: Some(true),
+            voice_highlight: None,
             rules: Some(vec!["  No spoilers ".to_string(), "   ".to_string()]),
         });
         assert_eq!(settings.notes.chars().count(), COHOST_NOTES_MAX_CHARS);
@@ -3543,6 +4672,7 @@ mod tests {
                 tone: None,
                 notes: Some("hello".to_string()),
                 auto_highlight: None,
+                voice_highlight: None,
                 rules: None,
             },
         )
@@ -3611,6 +4741,7 @@ mod tests {
                 tone: None,
                 notes: None,
                 auto_highlight: None,
+                voice_highlight: None,
                 rules: None,
             },
         )
@@ -3924,6 +5055,7 @@ mod tests {
                 tone: None,
                 notes: None,
                 auto_highlight: None,
+                voice_highlight: None,
                 rules: None,
             },
         )

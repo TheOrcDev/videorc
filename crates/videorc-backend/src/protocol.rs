@@ -3996,6 +3996,8 @@ pub struct CohostSettingsPatch {
     pub notes: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_highlight: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub voice_highlight: Option<bool>,
     /// Replaces the whole list; the engine normalises it (trim, <= 10 x 120).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rules: Option<Vec<String>>,
@@ -5257,7 +5259,7 @@ mod tests {
 
         let patch_wire = shared_high_risk_contract_fixture_value("/cohost/settingsPatch");
         let patch: CohostSettingsPatch = serde_json::from_value(patch_wire.clone()).unwrap();
-        assert_eq!(serde_json::to_value(patch).unwrap(), patch_wire);
+        assert_eq!(serde_json::to_value(&patch).unwrap(), patch_wire);
         let empty_patch: CohostSettingsPatch =
             serde_json::from_value(serde_json::json!({})).unwrap();
         assert_eq!(empty_patch, CohostSettingsPatch::default());
@@ -5319,7 +5321,28 @@ mod tests {
         assert_eq!(v2.flags[2].kind, crate::cohost::CohostFlagKind::Unknown);
         assert_eq!(v2.flags[2].confidence, None);
         assert!(v2.alerts[0].active);
+        // Plan 060 S1: the engine's automatic on-stream command rides the
+        // state with a kebab-case source; absent (never null) until it exists.
+        assert_eq!(
+            v2.auto_highlight,
+            Some(crate::cohost::CohostAutoHighlight {
+                generation: 4,
+                message_id: "session-fixture:twitch:default:message-highlight".to_string(),
+                source: crate::cohost::CohostAutoHighlightSource::Pick,
+                refresh: false,
+            })
+        );
         assert_eq!(serde_json::to_value(v2).unwrap(), v2_wire);
+        // `voiceHighlight` (plan 060) defaults off on a settings row or patch
+        // from before the field.
+        assert!(settings_wire.get("voiceHighlight").is_some());
+        let legacy_settings: crate::cohost::CohostSettings = serde_json::from_value(
+            serde_json::json!({ "enabled": true, "tone": "short", "notes": "", "autoHighlight": true }),
+        )
+        .unwrap();
+        assert!(legacy_settings.auto_highlight);
+        assert!(!legacy_settings.voice_highlight);
+        assert_eq!(patch.voice_highlight, Some(true));
 
         // A payload from before `detail` and the presence fields existed still
         // parses (serde defaults).
@@ -5330,8 +5353,10 @@ mod tests {
         assert!(legacy_wire.get("nextTickAt").is_none());
         assert!(legacy_wire.get("messagesSeen").is_none());
         assert!(legacy_wire.get("questionsTotal").is_none());
+        assert!(legacy_wire.get("autoHighlight").is_none());
         let legacy: crate::cohost::CohostState = serde_json::from_value(legacy_wire).unwrap();
         assert_eq!(legacy, crate::cohost::CohostState::off());
+        assert_eq!(legacy.auto_highlight, None);
     }
 
     #[test]

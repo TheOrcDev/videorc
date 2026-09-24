@@ -295,11 +295,12 @@ export function CohostSettingsSection(): ReactElement | null {
           <div className="flex items-center justify-between gap-3">
             <div className="flex min-w-0 flex-col gap-0.5">
               <FieldLabel htmlFor="cohost-auto-highlight">
-                Show questions on stream automatically
+                Show Orcle&apos;s picks on stream automatically
               </FieldLabel>
               <p className="text-xs text-muted-foreground">
-                Puts one new high-priority question on the stream by itself. Off by default. With it
-                off, you show a question with H.
+                Puts one of Orcle&apos;s suggested comments or a new high-priority question on the
+                stream by itself, at most one every 45 seconds. Off by default. With it off, you
+                show a question with H.
               </p>
             </div>
             <Switch

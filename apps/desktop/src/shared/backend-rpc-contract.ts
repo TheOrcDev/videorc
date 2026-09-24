@@ -1738,6 +1738,7 @@ const cohostSettingsSchema = objectSchema(
     tone: cohostToneSchema,
     notes: cohostNotesSchema,
     autoHighlight: booleanSchema,
+    voiceHighlight: booleanSchema,
     rules: cohostRulesSchema
   },
   { allowUnknown: false }
@@ -1748,6 +1749,7 @@ const cohostSettingsPatchSchema = objectSchema(
     tone: optionalSchema(cohostToneSchema),
     notes: optionalSchema(cohostNotesSchema),
     autoHighlight: optionalSchema(booleanSchema),
+    voiceHighlight: optionalSchema(booleanSchema),
     // The patch is what the streamer typed; the backend trims and caps it.
     rules: optionalSchema(arraySchema(stringSchema({ maxLength: 2000 }), { maxLength: 100 }))
   },
@@ -1825,6 +1827,17 @@ const cohostMoodScoresSchema = objectSchema(
   { hype: unitInterval, tension: unitInterval, confusion: unitInterval },
   { allowUnknown: false }
 )
+// The source vocabulary will grow (plan 060 S3 adds `voice`); a source this
+// build does not know must still validate, or the whole state event drops.
+const cohostAutoHighlightSchema = objectSchema(
+  {
+    generation: nonNegativeInteger,
+    messageId: boundedString,
+    source: stringSchema({ minLength: 1, maxLength: 32 }),
+    refresh: booleanSchema
+  },
+  { allowUnknown: false }
+)
 const cohostErrorDetailSchema = objectSchema(
   {
     code: stringSchema({ minLength: 1, maxLength: 128 }),
@@ -1867,7 +1880,9 @@ const cohostStateSchema = objectSchema(
     // Tick wire v2: omitted by the backend while empty.
     highlights: optionalSchema(arraySchema(cohostHighlightSchema, { maxLength: 5 })),
     alerts: optionalSchema(arraySchema(cohostAlertSchema, { maxLength: 8 })),
-    moodScores: optionalSchema(cohostMoodScoresSchema)
+    moodScores: optionalSchema(cohostMoodScoresSchema),
+    // Plan 060 S1: absent until the engine made an automatic command.
+    autoHighlight: optionalSchema(cohostAutoHighlightSchema)
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>

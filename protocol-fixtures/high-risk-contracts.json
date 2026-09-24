@@ -385,6 +385,7 @@
       "tone": "short",
       "notes": "Keyboard: Keychron Q1",
       "autoHighlight": false,
+      "voiceHighlight": true,
       "rules": ["No spoilers", "English only"]
     },
     "settings": {
@@ -392,6 +393,7 @@
       "tone": "friendly",
       "notes": "",
       "autoHighlight": false,
+      "voiceHighlight": false,
       "rules": []
     },
     "state": {
@@ -549,7 +551,13 @@
           "active": true
         }
       ],
-      "moodScores": { "hype": 0.2, "tension": 0.7, "confusion": 0.1 }
+      "moodScores": { "hype": 0.2, "tension": 0.7, "confusion": 0.1 },
+      "autoHighlight": {
+        "generation": 4,
+        "messageId": "session-fixture:twitch:default:message-highlight",
+        "source": "pick",
+        "refresh": false
+      }
     },
     "legacyState": {
       "sessionId": null,

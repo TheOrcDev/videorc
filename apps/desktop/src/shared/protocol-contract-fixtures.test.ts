@@ -231,6 +231,30 @@ describe('shared high-risk protocol fixture', () => {
         flags: [{ ...fixtures.cohost.stateV2.flags[0], target: null }]
       })
     ).toThrow('cohost.state')
+    // Plan 060 S1: the engine's automatic on-stream command. Absent until the
+    // engine made one (null is the serde trap), and a source this build does
+    // not know still validates so one new engine source never drops the state.
+    expect(fixtures.cohost.stateV2.autoHighlight).toStrictEqual({
+      generation: 4,
+      messageId: 'session-fixture:twitch:default:message-highlight',
+      source: 'pick',
+      refresh: false
+    })
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...fixtures.cohost.stateV2,
+        autoHighlight: null
+      })
+    ).toThrow('cohost.state')
+    const futureSource = {
+      ...fixtures.cohost.stateV2,
+      autoHighlight: { ...fixtures.cohost.stateV2.autoHighlight, source: 'spotlight-v9' }
+    }
+    expect(validateBackendEventPayload('cohost.state', futureSource)).toStrictEqual(futureSource)
+    expect(fixtures.cohost.legacyState).not.toHaveProperty('autoHighlight')
+    // `voiceHighlight` (plan 060) is part of the settings shape both ways.
+    expect(fixtures.cohost.settings.voiceHighlight).toBe(false)
+    expect(fixtures.cohost.settingsPatch.voiceHighlight).toBe(true)
     // `detail` carries the failed tick's envelope verbatim, or a desktop code
     // with no HTTP status; a pre-`detail` payload validates unchanged.
     for (const shape of ['errorState', 'timeoutState', 'legacyState'] as const) {

@@ -4083,8 +4083,17 @@ export interface CohostSettings {
   tone: CohostTone
   /** Streamer notes the model answers from; at most 4000 characters. */
   notes: string
-  /** "Show questions on stream automatically" (default off). */
+  /**
+   * Orcle's picks go on stream by themselves: the server's suggested
+   * comments and high-priority questions, under the engine's cadence rules
+   * (default off).
+   */
   autoHighlight: boolean
+  /**
+   * The comment the streamer is talking about goes on stream by itself
+   * (default off; needs live captions, wired in plan 060 S3).
+   */
+  voiceHighlight: boolean
   /** Plain-language chat rules the co-host flags against; ≤ 10 × 120 chars. */
   rules: string[]
 }
@@ -4095,6 +4104,7 @@ export interface CohostSettingsPatch {
   tone?: CohostTone
   notes?: string
   autoHighlight?: boolean
+  voiceHighlight?: boolean
   /** Replaces the whole list; the backend trims, drops empties and caps it. */
   rules?: string[]
 }
@@ -4155,6 +4165,24 @@ export interface CohostMoodScores {
   confusion: number
 }
 
+/** Known sources of an automatic card; the wire may carry a newer one. */
+export type CohostAutoHighlightSource = 'pick' | 'question' | 'voice'
+
+/**
+ * The engine's automatic "put this on stream" command (plan 060 S1). The
+ * BACKEND decides (cadence, roles, safety); the renderer acts on a new
+ * `generation` exactly once, renders the card and sets it with always-set
+ * semantics. It keeps no history.
+ */
+export interface CohostAutoHighlight {
+  generation: number
+  messageId: string
+  /** Tolerant on the wire: an unknown source is still executed. */
+  source: CohostAutoHighlightSource | (string & Record<never, never>)
+  /** The same message is re-set while still live (voice only, once). */
+  refresh: boolean
+}
+
 /**
  * What the last failed tick actually said. `code` is the server's error
  * envelope code verbatim (`ai-gateway-error`, `quota-exhausted`, ...) or a
@@ -4212,6 +4240,11 @@ export interface CohostState {
   highlights?: CohostHighlight[]
   alerts?: CohostAlert[]
   moodScores?: CohostMoodScores
+  /**
+   * The engine's latest automatic on-stream command; absent until it made one
+   * this session (never null).
+   */
+  autoHighlight?: CohostAutoHighlight
 }
 
 /**

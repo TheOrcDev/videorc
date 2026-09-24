@@ -1585,6 +1585,7 @@ describe('backend RPC contract', () => {
       tone: 'short',
       notes: 'Keychron Q1',
       autoHighlight: false,
+      voiceHighlight: false,
       rules: ['No spoilers']
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)
