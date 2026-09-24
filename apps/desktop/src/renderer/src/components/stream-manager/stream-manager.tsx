@@ -70,13 +70,17 @@ import {
   type StreamManagerRightPane
 } from '@/lib/stream-manager-layout'
 import { sendablePlatforms } from '@/lib/chat-send'
-import { detectedPlatform, isMacPlatform } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 import type { LiveDashboardState } from '../../../../shared/live-dashboard'
 
-/** ⌘J on macOS, Ctrl+J elsewhere; the key handler below accepts both. */
-const ORCLE_SHORTCUT = isMacPlatform(detectedPlatform()) ? '⌘J' : 'Ctrl+J'
+/**
+ * ⌘J on macOS, Ctrl+J elsewhere; the key handler below accepts both. Electron's
+ * user agent names the host OS, as lib/platform.ts reads it for toasts. Read
+ * here, not imported: importing that module moves it into the chunk this
+ * window shares with the main window and grows the main window's eager bytes.
+ */
+const ORCLE_SHORTCUT = /Macintosh/.test(globalThis.navigator?.userAgent ?? '') ? '⌘J' : 'Ctrl+J'
 
 /** True while the element is laid out and on screen (a hidden pane is not). */
 function usePaneVisible(ref: RefObject<HTMLElement | null>): boolean {

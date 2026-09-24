@@ -62,7 +62,7 @@ export function displayKeyGlyphs(keys: readonly string[], platform: string | und
 // Non-React callers (sonner toasts) cannot read runtimeInfo. Electron's
 // user agent names the host OS reliably, so it stands in ONLY when no
 // explicit platform was passed.
-export function detectedPlatform(): string | undefined {
+function detectedPlatform(): string | undefined {
   const userAgent = typeof navigator === 'undefined' ? '' : navigator.userAgent
   if (userAgent.includes('Windows')) {
     return 'win32'
