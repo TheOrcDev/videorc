@@ -31,6 +31,8 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod h264_profile;
+#[cfg(any(test, target_os = "linux"))]
+mod linux_vaapi;
 mod live_chat;
 mod live_chat_persistence;
 mod live_layout;

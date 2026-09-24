@@ -89,15 +89,15 @@ use crate::protocol::{
     AudioTrackSource, BackgroundFit, CameraCorner, CameraFit, CameraShape, CameraTransformMode,
     CompositorBackend, CompositorSceneUpdateParams, CompositorState, DiagnosticStats,
     EffectiveSceneBackground, EncodeBackend, EntitlementsSnapshot, FeatureId, HealthLevel,
-    LayoutPreset, LayoutSettings, PreviewCameraState, PreviewLiveParams, PreviewLiveSource,
-    PreviewLiveState, PreviewLiveStatus, PreviewScreenSourceKind, PreviewScreenState,
-    PreviewSnapshot, PreviewSnapshotParams, PreviewSurfaceBacking, PreviewTransport,
-    RecordingPipelineStage, RecordingState, RecordingStatus, RecordingTimelineSnapshot,
-    RemuxSessionParams, RtmpPreset, RtmpSettings, Scene, SceneConfigParams, SceneSourceKind,
-    SessionStopParams, SideBySideCameraSide, StartSessionParams, StreamHealth, StreamOutputBridge,
-    StreamOutputTopologyProbeParams, StreamOutputTopologyProbeResult,
-    StreamOutputTopologyProbeState, StreamOutputTopologyRole, StreamScreen, VideoPreset,
-    VideoSettings,
+    LayoutPreset, LayoutSettings, LinuxRenderNodeDiagnostic, PreviewCameraState, PreviewLiveParams,
+    PreviewLiveSource, PreviewLiveState, PreviewLiveStatus, PreviewScreenSourceKind,
+    PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams, PreviewSurfaceBacking,
+    PreviewTransport, RecordingPipelineStage, RecordingState, RecordingStatus,
+    RecordingTimelineSnapshot, RemuxSessionParams, RtmpPreset, RtmpSettings, Scene,
+    SceneConfigParams, SceneSourceKind, SessionStopParams, SideBySideCameraSide,
+    StartSessionParams, StreamHealth, StreamOutputBridge, StreamOutputTopologyProbeParams,
+    StreamOutputTopologyProbeResult, StreamOutputTopologyProbeState, StreamOutputTopologyRole,
+    StreamScreen, VideoPreset, VideoSettings,
 };
 use crate::recording_finalization::{
     FINALIZATION_STATE_FAILED, FINALIZATION_STATE_FINALIZED, FINALIZATION_STATE_FINALIZING,
@@ -3576,6 +3576,16 @@ async fn start_session_with_timeline(
     // the output clock; the legacy path captures via FFmpeg.
     initial_diagnostics.encode_backend =
         Some(windows_encoded_bridge_decision.effective_encode_backend);
+    initial_diagnostics.linux_render_nodes = (!windows_encoded_bridge_decision
+        .fallback_ffmpeg_encoder
+        .render_nodes
+        .is_empty())
+    .then(|| {
+        windows_encoded_bridge_decision
+            .fallback_ffmpeg_encoder
+            .render_nodes
+            .clone()
+    });
     initial_diagnostics.encoder_bridge_requested_video_output = Some(
         encoder_bridge_video_output_label(windows_encoded_bridge_decision.requested).to_string(),
     );
@@ -11093,6 +11103,9 @@ struct ResolvedFfmpegH264Encoder {
     platform: FfmpegH264Platform,
     vaapi_device: Option<PathBuf>,
     fallback_reason: Option<String>,
+    /// Linux only: what the render-node policy saw and did (Plan 052). Empty
+    /// elsewhere and for an explicit OpenH264 selection.
+    render_nodes: Vec<LinuxRenderNodeDiagnostic>,
 }
 
 impl ResolvedFfmpegH264Encoder {
@@ -11101,6 +11114,7 @@ impl ResolvedFfmpegH264Encoder {
             platform,
             vaapi_device: None,
             fallback_reason: None,
+            render_nodes: Vec::new(),
         }
     }
 
@@ -11415,53 +11429,22 @@ fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<St
 #[cfg(target_os = "windows")]
 const WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT: Duration = Duration::from_secs(15);
 
-#[cfg(any(test, target_os = "linux"))]
-fn linux_render_device_candidates_in(dri_directory: &Path) -> Vec<PathBuf> {
-    let mut devices = std::fs::read_dir(dri_directory)
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.file_name();
-            let name = name.to_str()?;
-            let suffix = name.strip_prefix("renderD")?;
-            suffix
-                .chars()
-                .all(|character| character.is_ascii_digit())
-                .then(|| entry.path())
-        })
-        .collect::<Vec<_>>();
-    devices.sort();
-    devices
-}
-
+/// The real-args VAAPI probe (Plan 052): the session's own H.264 arguments
+/// for the VAAPI platform at the acceptance profile, fed through the bridge's
+/// upload chain. A pass here predicts a session pass; the old 128x72 three
+/// frame probe passed on ogre's Intel node while every real rung failed.
 #[cfg(any(test, target_os = "linux"))]
 fn linux_vaapi_probe_args(device: &Path) -> Vec<String> {
-    vec![
-        "-hide_banner".to_string(),
-        "-loglevel".to_string(),
-        "error".to_string(),
-        "-vaapi_device".to_string(),
-        device.display().to_string(),
-        "-f".to_string(),
-        "lavfi".to_string(),
-        "-i".to_string(),
-        "color=c=black:s=128x72:r=30".to_string(),
-        "-vf".to_string(),
-        "format=nv12,hwupload".to_string(),
-        "-frames:v".to_string(),
-        "3".to_string(),
-        "-an".to_string(),
-        "-c:v".to_string(),
-        "h264_vaapi".to_string(),
-        "-profile:v".to_string(),
-        "high".to_string(),
-        "-b:v".to_string(),
-        "1000k".to_string(),
-        "-f".to_string(),
-        "null".to_string(),
-        "-".to_string(),
-    ]
+    let video = crate::linux_vaapi::probe_video_settings();
+    let mut encode_args = Vec::new();
+    append_h264_encoding_args_for_platform_with_timing(
+        &mut encode_args,
+        &video,
+        FfmpegH264Platform::LinuxVaapi,
+        false,
+        false,
+    );
+    crate::linux_vaapi::probe_args(device, &video, &encode_args)
 }
 
 #[cfg(any(test, target_os = "linux"))]
@@ -11477,6 +11460,7 @@ fn select_linux_h264_encoder(
             fallback_reason: Some(
                 "OpenH264 software encoding was selected explicitly for this session.".to_string(),
             ),
+            render_nodes: Vec::new(),
         });
     }
     if let Some(device) = accepted_device {
@@ -11484,6 +11468,7 @@ fn select_linux_h264_encoder(
             platform: FfmpegH264Platform::LinuxVaapi,
             vaapi_device: Some(device),
             fallback_reason: None,
+            render_nodes: Vec::new(),
         });
     }
     let reason = rejection_reason.unwrap_or_else(|| {
@@ -11498,39 +11483,143 @@ fn select_linux_h264_encoder(
         fallback_reason: Some(format!(
             "VAAPI was unavailable ({reason}); using the LGPL OpenH264 software fallback."
         )),
+        render_nodes: Vec::new(),
     })
 }
 
+/// Probes the planned nodes in order and stops at the first success. Every
+/// probe is wrapped in the quarantine sentinel: if the host hangs mid-probe,
+/// the next start quarantines that node instead of trying it again. A node
+/// whose sentinel cannot be armed is not probed at all.
 #[cfg(target_os = "linux")]
 async fn probe_linux_vaapi_encoder(
     ffmpeg_path: &str,
-    devices: &[PathBuf],
-) -> (Option<PathBuf>, Option<String>) {
-    const PROBE_TIMEOUT: Duration = Duration::from_secs(15);
+    candidates: &[crate::linux_vaapi::RenderNodeCandidate],
+    quarantine: &crate::linux_vaapi::ProbeQuarantine,
+) -> (
+    Option<PathBuf>,
+    Option<String>,
+    Vec<LinuxRenderNodeDiagnostic>,
+) {
+    use crate::protocol::LinuxRenderNodeState;
+    const PROBE_TIMEOUT: Duration = Duration::from_secs(20);
     let mut rejections = Vec::new();
-    for device in devices {
+    let mut reports = Vec::new();
+    for candidate in candidates {
+        if let Err(error) = quarantine.begin_probe(candidate, ffmpeg_path) {
+            let detail = format!("probe sentinel could not be armed: {error}");
+            rejections.push(format!("{}: {detail}", candidate.node_name()));
+            reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
+            continue;
+        }
         let mut command = Command::new(ffmpeg_path);
         command
-            .args(linux_vaapi_probe_args(device))
+            .args(linux_vaapi_probe_args(&candidate.path))
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
-        match timeout(PROBE_TIMEOUT, command.output()).await {
-            Ok(Ok(output)) if output.status.success() => return (Some(device.clone()), None),
-            Ok(Ok(output)) => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                rejections.push(format!(
-                    "{}: {}",
-                    device.display(),
-                    bounded_stream_output_topology_fallback_reason(&stderr)
-                ));
-            }
-            Ok(Err(error)) => rejections.push(format!("{}: {error}", device.display())),
-            Err(_) => rejections.push(format!("{}: probe timed out", device.display())),
+        let outcome = timeout(PROBE_TIMEOUT, command.output()).await;
+        if let Err(error) = quarantine.finish_probe() {
+            tracing::warn!(
+                "Could not clear the VAAPI probe sentinel for {}: {error}",
+                candidate.node_name()
+            );
         }
+        let detail = match outcome {
+            Ok(Ok(output)) if output.status.success() => {
+                reports.push(candidate.report(LinuxRenderNodeState::ProbedOk, None));
+                return (Some(candidate.path.clone()), None, reports);
+            }
+            Ok(Ok(output)) => bounded_stream_output_topology_fallback_reason(
+                &String::from_utf8_lossy(&output.stderr),
+            ),
+            Ok(Err(error)) => error.to_string(),
+            Err(_) => "probe timed out".to_string(),
+        };
+        rejections.push(format!("{}: {detail}", candidate.node_name()));
+        reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
     }
     let reason = (!rejections.is_empty()).then(|| rejections.join("; "));
-    (None, reason)
+    (None, reason, reports)
+}
+
+/// One decision per backend lifetime per FFmpeg binary, preference and pin.
+/// Both the session start and the renderer-driven topology probe call
+/// through here, so without this cache every render node would be re-probed
+/// on every session (the ogre incident's exposure).
+#[cfg(target_os = "linux")]
+static LINUX_ENCODER_DECISIONS: std::sync::OnceLock<
+    StdMutex<
+        std::collections::HashMap<String, std::result::Result<ResolvedFfmpegH264Encoder, String>>,
+    >,
+> = std::sync::OnceLock::new();
+
+#[cfg(target_os = "linux")]
+async fn resolve_linux_h264_encoder_uncached(
+    ffmpeg_path: &str,
+    preference: LinuxH264EncoderPreference,
+    pin: Option<&Path>,
+) -> Result<ResolvedFfmpegH264Encoder> {
+    use crate::linux_vaapi::{ProbeQuarantine, RenderNodeCandidate, render_node_candidates};
+
+    let quarantine = ProbeQuarantine::new(ProbeQuarantine::default_directory());
+    match quarantine.adopt_stale_sentinel() {
+        Ok(Some(entry)) => tracing::warn!(
+            "Quarantined Linux render node {} ({}): its VAAPI probe started at unix {} and never returned. It will not be probed again unless {} names it.",
+            entry.node,
+            entry.driver.as_deref().unwrap_or("driver unknown"),
+            entry.probe_started_at_unix_secs,
+            crate::linux_vaapi::DEVICE_PIN_ENV
+        ),
+        Ok(None) => {}
+        Err(error) => {
+            // Explicit over silent: a sentinel we cannot read is treated as a
+            // hang we cannot attribute, so no node is probed this lifetime.
+            let reason = format!(
+                "the VAAPI probe sentinel under {} is unreadable ({error}); no render node was probed",
+                ProbeQuarantine::default_directory().display()
+            );
+            return select_linux_h264_encoder(preference, None, Some(reason));
+        }
+    }
+    let quarantined = quarantine.quarantined();
+    let candidates = render_node_candidates(Path::new("/dev/dri"), Path::new("/sys/class/drm"));
+    tracing::info!(
+        "Linux render nodes: {}",
+        if candidates.is_empty() {
+            "none".to_string()
+        } else {
+            candidates
+                .iter()
+                .map(RenderNodeCandidate::describe)
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    let (to_probe, mut reports) =
+        crate::linux_vaapi::plan_probe_order(&candidates, pin, &quarantined)
+            .map_err(anyhow::Error::msg)?;
+    let (accepted, mut reason, probe_reports) =
+        probe_linux_vaapi_encoder(ffmpeg_path, &to_probe, &quarantine).await;
+    reports.extend(probe_reports);
+    if accepted.is_none() && reason.is_none() && !reports.is_empty() {
+        reason = Some(
+            reports
+                .iter()
+                .map(|report| {
+                    format!(
+                        "{}: {}",
+                        report.node,
+                        report.detail.as_deref().unwrap_or("not probed")
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("; "),
+        );
+    }
+    let mut resolved = select_linux_h264_encoder(preference, accepted, reason)?;
+    resolved.render_nodes = reports;
+    Ok(resolved)
 }
 
 async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpegH264Encoder> {
@@ -11543,10 +11632,38 @@ async fn default_h264_encode_backend(ffmpeg_path: &str) -> Result<ResolvedFfmpeg
         if preference == LinuxH264EncoderPreference::OpenH264 {
             return select_linux_h264_encoder(preference, None, None);
         }
-        let devices = linux_render_device_candidates_in(Path::new("/dev/dri"));
-        let (accepted_device, rejection_reason) =
-            probe_linux_vaapi_encoder(ffmpeg_path, &devices).await;
-        select_linux_h264_encoder(preference, accepted_device, rejection_reason)
+        let pin = crate::linux_vaapi::parse_device_pin(
+            std::env::var(crate::linux_vaapi::DEVICE_PIN_ENV)
+                .ok()
+                .as_deref(),
+        )
+        .map_err(anyhow::Error::msg)?;
+        let key = format!(
+            "{ffmpeg_path}|{preference:?}|{}",
+            pin.as_deref()
+                .map(|path| path.display().to_string())
+                .unwrap_or_default()
+        );
+        let decisions = LINUX_ENCODER_DECISIONS.get_or_init(|| StdMutex::new(Default::default()));
+        if let Some(cached) = decisions
+            .lock()
+            .ok()
+            .and_then(|cache| cache.get(&key).cloned())
+        {
+            return cached.map_err(anyhow::Error::msg);
+        }
+        let resolved =
+            resolve_linux_h264_encoder_uncached(ffmpeg_path, preference, pin.as_deref()).await;
+        if let Ok(mut cache) = decisions.lock() {
+            cache.insert(
+                key,
+                resolved
+                    .as_ref()
+                    .map(Clone::clone)
+                    .map_err(|error| error.to_string()),
+            );
+        }
+        resolved
     }
     #[cfg(not(target_os = "linux"))]
     {
@@ -20731,33 +20848,41 @@ mod tests {
     }
 
     #[test]
-    fn linux_render_device_candidates_include_only_numbered_render_nodes() {
-        let directory =
-            std::env::temp_dir().join(format!("videorc-linux-render-nodes-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&directory).expect("create render-node fixture directory");
-        for name in ["renderD129", "card0", "renderD128", "renderDnope"] {
-            File::create(directory.join(name)).expect("create render-node fixture");
-        }
-
-        assert_eq!(
-            linux_render_device_candidates_in(&directory),
-            vec![directory.join("renderD128"), directory.join("renderD129")]
-        );
-
-        std::fs::remove_dir_all(directory).expect("remove render-node fixture directory");
-    }
-
-    #[test]
-    fn linux_vaapi_probe_exercises_upload_and_real_encoder() {
+    fn linux_vaapi_probe_runs_the_real_session_encode_args_at_the_acceptance_profile() {
         let device = Path::new("/dev/dri/renderD128");
         let args = linux_vaapi_probe_args(device);
         assert_eq!(
             arg_value(&args, "-vaapi_device"),
             Some("/dev/dri/renderD128")
         );
-        assert_eq!(arg_value(&args, "-vf"), Some("format=nv12,hwupload"));
+        assert_eq!(
+            arg_value(&args, "-i"),
+            Some("color=c=black:s=1920x1080:r=30,format=rgba")
+        );
+        assert_eq!(
+            arg_value(&args, "-vf"),
+            Some("setpts=PTS-STARTPTS,fps=30,format=nv12,hwupload")
+        );
+        assert_eq!(arg_value(&args, "-frames:v"), Some("30"));
+        // The session's own VAAPI arguments, not a probe-only subset.
+        let mut session_args = Vec::new();
+        append_h264_encoding_args_for_platform_with_timing(
+            &mut session_args,
+            &crate::linux_vaapi::probe_video_settings(),
+            FfmpegH264Platform::LinuxVaapi,
+            false,
+            false,
+        );
+        assert!(!session_args.is_empty());
+        assert!(
+            args.windows(session_args.len())
+                .any(|window| window == session_args.as_slice()),
+            "probe args must embed the session encode args verbatim"
+        );
         assert_eq!(arg_value(&args, "-c:v"), Some("h264_vaapi"));
-        assert_eq!(arg_value(&args, "-frames:v"), Some("3"));
+        assert_eq!(arg_value(&args, "-rc_mode"), Some("VBR"));
+        assert_eq!(arg_value(&args, "-maxrate"), Some("8000k"));
+        assert_eq!(args.last().map(String::as_str), Some("-"));
     }
 
     #[test]
@@ -25373,6 +25498,7 @@ mod tests {
             platform: FfmpegH264Platform::LinuxVaapi,
             vaapi_device: Some(PathBuf::from("/dev/dri/renderD128")),
             fallback_reason: None,
+            render_nodes: Vec::new(),
         };
         let fifo_path = Path::new("/tmp/videorc-linux-vaapi.yuv");
         let bridge_args = bridge_recording_ffmpeg_args_with_encoder(

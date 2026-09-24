@@ -1,7 +1,13 @@
 import type { SystemPermissionPane } from '../shared/backend'
 
 export type MediaAccessPermissionName = 'camera' | 'microphone' | 'screen'
-export type MediaAccessStatus = 'not-determined' | 'granted' | 'denied' | 'restricted' | 'unknown'
+export type MediaAccessStatus =
+  | 'not-determined'
+  | 'granted'
+  | 'denied'
+  | 'restricted'
+  | 'unknown'
+  | 'not-applicable'
 
 export type MediaPermissionGrantWatcher = {
   stop: () => void

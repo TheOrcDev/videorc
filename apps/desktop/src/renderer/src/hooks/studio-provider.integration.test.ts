@@ -19,6 +19,7 @@ vi.mock('@/lib/caption-overlay', async (importOriginal) => ({
 }))
 
 import { revealInFileManagerLabel } from '@/lib/platform'
+import { isMediaAccessSnapshotReady, systemAccessRows } from '@/lib/system-access'
 import type {
   AccountCallbackEnvelope,
   AiArtifact,
@@ -5304,6 +5305,64 @@ describe('real StudioProvider lifecycle', () => {
       sessionLogs: [logEntry],
       aiArtifacts: [artifact]
     })
+  })
+
+  it('reads a Linux media-access snapshot as not-applicable and renders no permission chips', async () => {
+    const backend = new StudioBackend()
+    TestWebSocket.backend = backend
+    vi.stubGlobal('WebSocket', TestWebSocket)
+
+    const api = createVideorcApi({
+      acknowledge: async () => true,
+      pending: async () => [],
+      acknowledgeProvider: async () => true,
+      pendingProvider: async () => [],
+      platform: 'linux',
+      getMediaAccessStatus: async () => ({
+        camera: 'not-applicable',
+        microphone: 'not-applicable'
+      })
+    })
+    const testDom = installProviderTestEnvironment(api)
+    restoreEnvironment = testDom.restore
+    const observations: StudioObservation[] = []
+    const latest = (): StudioObservation | undefined => observations.at(-1)
+
+    await act(async () => {
+      root = createRoot(testDom.container)
+      root.render(
+        createElement(
+          BackgroundAssetsProvider,
+          null,
+          createElement(
+            StudioProvider,
+            null,
+            createElement(Probe, {
+              observe: (value) => {
+                observations.push(value)
+              }
+            })
+          )
+        )
+      )
+    })
+    await waitForObservation(
+      () =>
+        latest()?.core.wsStatus === 'connected' &&
+        latest()?.core.mediaAccess?.camera === 'not-applicable' &&
+        latest()?.core.mediaAccess?.microphone === 'not-applicable'
+    )
+
+    const core = latest()!.core
+    expect(isMediaAccessSnapshotReady(core.mediaAccess)).toBe(true)
+    expect(
+      systemAccessRows({
+        deviceList: core.deviceList,
+        audioMeter: null,
+        platform: core.runtimeInfo?.platform,
+        mediaAccess: core.mediaAccess
+      })
+    ).toEqual([])
   })
 
   it('requests fresh macOS camera access, then routes a denial to System Settings', async () => {

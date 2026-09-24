@@ -48,7 +48,7 @@ import { createRequire } from 'node:module'
 import { homedir, release } from 'node:os'
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
+import { execFileSync, spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 
 import {
   OwnedProcessRegistry,
@@ -996,7 +996,9 @@ function clearNativePreviewNativePlacementAuthority(): void {
 // and keeps the preview window's waiting hint truthful.
 const FIRST_FRAME_TICK_MS = 750
 const PREVIEW_WAIT_DETAIL_DEFAULT =
-  'The native surface appears here as soon as the compositor presents.'
+  process.platform === 'linux'
+    ? 'Recording still works. A Linux preview arrives in a later port phase.'
+    : 'The native surface appears here as soon as the compositor presents.'
 let firstFrameWatchdogTimer: NodeJS.Timeout | null = null
 let firstFrameWatchdogStartedAtMs = 0
 let firstFrameLedger: FirstFrameLedger = emptyFirstFrameLedger()
@@ -3432,6 +3434,12 @@ async function reconcileNativePreviewSurfaceForPreviewWindow(
   )
 }
 
+// Linux has no native preview surface yet (port plan L5), so the frame must
+// not promise one: the waiting copy there names the missing phase instead of
+// a compositor that will never present.
+const PREVIEW_WAIT_TITLE =
+  process.platform === 'linux' ? "Preview isn't built for Linux yet" : 'Waiting for preview'
+
 const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   /* The whole window is a drag surface: the native video floats above the area
      below the strip and ignores mouse events, so every grab lands here. The
@@ -3462,8 +3470,8 @@ const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><s
   body.docked .drag-bar { display: none; }
   body.docked .hint { top: 0; }
 </style></head><body>
-  <div class="hint"><div class="title">Waiting for preview</div>
-  <div id="videorc-wait-detail">The native surface appears here as soon as the compositor presents.</div></div>
+  <div class="hint"><div class="title">${PREVIEW_WAIT_TITLE}</div>
+  <div id="videorc-wait-detail">${PREVIEW_WAIT_DETAIL_DEFAULT}</div></div>
   <div class="drag-bar"><span class="label">Preview</span></div>
 </body></html>`
 
@@ -7644,6 +7652,32 @@ function rejectBackendBootstrapAuthority(runtime: BackendRuntime, reason: string
   }
 }
 
+// The spawned wrapper (cargo in dev) may have exec'd since its identity was
+// recorded at spawn. READY is the first moment the exec is guaranteed to be
+// over, so re-stamp the executable path while the birth token still matches.
+function refreshSpawnedBackendIdentity(runtime: BackendRuntime): void {
+  const pid = runtime.process.pid
+  if (!validOwnedProcessPid(pid)) {
+    return
+  }
+  try {
+    const outcome = withProcessRegistryLock(() =>
+      processRegistry().refreshIdentity(
+        pid,
+        app.isPackaged ? 'videorc-backend' : 'cargo-run-videorc-backend'
+      )
+    )
+    if (outcome === 'refreshed') {
+      logBackend('info', `Re-stamped the executable path of spawned backend pid ${pid} at READY.`)
+    }
+  } catch (error) {
+    logBackend(
+      'warn',
+      `Could not refresh the identity of spawned backend pid ${pid}: ${errorMessage(error)}`
+    )
+  }
+}
+
 function recordBackendRuntimePid(runtime: BackendRuntime, pid: number, parentPid?: number): void {
   if (!validOwnedProcessPid(pid) || runtime.ownedProcessPids.has(pid)) {
     return
@@ -7660,9 +7694,43 @@ function recordBackendRuntimeProcess(runtime: BackendRuntime, connection: Backen
   recordBackendRuntimePid(runtime, connection.pid, connection.parentPid)
 }
 
+let resolvedCargoBinary: string | undefined
+
+// Dev mode records the spawned cargo pid as an owned process. `~/.cargo/bin/
+// cargo` is the rustup proxy and `exec`s the toolchain cargo right after it
+// starts, which changes /proc/<pid>/exe under the recorded identity (Linux
+// probes it instantly, so the ledger keeps the proxy path and the next launch
+// reads a mismatch). Resolving the toolchain binary up front means the
+// recorded process never execs. READY additionally re-stamps the identity.
 function resolveCargoBinary(): string {
-  const rustupCargo = join(homedir(), '.cargo', 'bin', 'cargo')
-  return existsSync(rustupCargo) ? rustupCargo : 'cargo'
+  if (resolvedCargoBinary) {
+    return resolvedCargoBinary
+  }
+  const cargoBinDir = join(homedir(), '.cargo', 'bin')
+  const rustupProxy = join(cargoBinDir, 'cargo')
+  const rustup = join(cargoBinDir, 'rustup')
+  let toolchainCargo: string | undefined
+  try {
+    const candidate = execFileSync(existsSync(rustup) ? rustup : 'rustup', ['which', 'cargo'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      windowsHide: true,
+      stdio: ['ignore', 'pipe', 'ignore']
+    }).trim()
+    if (candidate && isAbsolute(candidate) && existsSync(candidate)) {
+      toolchainCargo = candidate
+    }
+  } catch {
+    // No rustup, or `rustup which` refused: fall back to the proxy below.
+  }
+  resolvedCargoBinary = toolchainCargo ?? (existsSync(rustupProxy) ? rustupProxy : 'cargo')
+  logBackend(
+    'info',
+    toolchainCargo
+      ? `Dev backend uses the rustup toolchain cargo at ${toolchainCargo}.`
+      : `Dev backend uses ${resolvedCargoBinary} (rustup toolchain cargo not resolved).`
+  )
+  return resolvedCargoBinary
 }
 
 function devCargoEnvOverrides(): Record<string, string> {
@@ -8704,6 +8772,7 @@ function handleBackendStdout(text: string, runtime: BackendRuntime, bufferedText
         backendConnection = bootstrap.renderer
         backendAdminConnection = bootstrap.admin
         logBackend('info', `Backend ready on ${backendConnection.host}:${backendConnection.port}`)
+        refreshSpawnedBackendIdentity(runtime)
         if (runtime.state === 'awaiting-shutdown-receipt') {
           logBackend(
             'info',
@@ -11719,7 +11788,14 @@ async function requestMediaAccessNative(pane: 'camera' | 'microphone'): Promise<
 // macOS AND Windows (only askForMediaAccess is mac-only), so this is the honest
 // signal the renderer chips read on Windows — where the audio meter has no
 // capture backend and the camera enumerates regardless of the privacy toggle.
+// Linux has neither the API (Electron leaves it undefined, so the call throws
+// "not a function" on every IPC read) nor an OS-level grant to report: the
+// answer there is 'not-applicable', read without touching systemPreferences
+// and without a warning per call (plan 052 S5).
 function readMediaAccessStatus(pane: 'camera' | 'microphone'): MediaAccessStatus {
+  if (process.platform === 'linux') {
+    return 'not-applicable'
+  }
   try {
     return systemPreferences.getMediaAccessStatus(pane) as MediaAccessStatus
   } catch (error) {

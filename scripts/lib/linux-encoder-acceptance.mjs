@@ -69,10 +69,12 @@ export function assessLinuxEncoderAcceptanceHost({
   if (platform !== 'linux' || arch !== 'x64') {
     problems.push(`requires Linux x64, got ${platform}/${arch}`)
   }
-  if (osRelease?.ID !== 'ubuntu' || osRelease?.VERSION_ID !== '24.04') {
-    problems.push(
-      `requires Ubuntu 24.04, got ${osRelease?.PRETTY_NAME ?? `${osRelease?.ID ?? 'unknown'} ${osRelease?.VERSION_ID ?? 'unknown'}`}`
-    )
+  // The encoder contract (pinned static FFmpeg, /dev/dri, V4L2) is
+  // distribution-independent, so any named physical Linux x64 box may run it.
+  // The distribution is recorded in the evidence rather than gated here; the
+  // Ubuntu 24.04 support baseline is proven by L6 packaging, not by L1.5.
+  if (!osRelease || typeof osRelease !== 'object') {
+    problems.push('could not read /etc/os-release to record the distribution')
   }
   if (!String(testerName ?? '').trim()) {
     problems.push('VIDEORC_LINUX_TESTER_NAME must name the person running acceptance')
@@ -93,6 +95,35 @@ export function assessLinuxEncoderAcceptanceHost({
     problems.push('VAAPI acceptance requires at least one /dev/dri/renderD* device')
   }
   return { ok: problems.length === 0, problems }
+}
+
+// Driver name behind a render node: the basename of the
+// /sys/class/drm/<node>/device/driver symlink (i915, xe, amdgpu, nouveau, …).
+// Evidence only, never policy — the product does not blocklist drivers.
+// Returns null when the link is unreadable and never throws.
+export function linuxRenderNodeDriver(devicePath, readlink) {
+  const node = String(devicePath ?? '')
+    .split('/')
+    .filter(Boolean)
+    .at(-1)
+  if (!node) return null
+  try {
+    const target = readlink(`/sys/class/drm/${node}/device/driver`)
+    const driver = String(target ?? '')
+      .split('/')
+      .filter(Boolean)
+      .at(-1)
+    return driver || null
+  } catch {
+    return null
+  }
+}
+
+export function describeLinuxRenderNodes(renderDevices, readlink) {
+  return (Array.isArray(renderDevices) ? renderDevices : []).map((node) => ({
+    node,
+    driver: linuxRenderNodeDriver(node, readlink)
+  }))
 }
 
 export function assessLinuxEncoderMatrixResults({ backend, results }) {
