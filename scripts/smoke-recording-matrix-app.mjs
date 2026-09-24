@@ -25,6 +25,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
 import { launchDevApp } from './lib/app-launcher.mjs'
+import { isLinuxSmokeEvidenceLine } from './lib/linux-smoke-evidence.mjs'
 import { resolveFinalRecordingPath } from './lib/final-recording-path.mjs'
 import { analyzeRecording, writeReports } from './lib/recording-analyzer.mjs'
 import { siblingFfprobePath } from './lib/ffmpeg-sibling-paths.mjs'
@@ -275,7 +276,13 @@ async function recordCombo({
       'encoderBridgeWriterActiveP95Ms',
       'encoderBridgeDeadlineLagP95Ms',
       'encoderBridgeDeadlineLagMaxMs',
-      'encoderBridgeError'
+      'encoderBridgeError',
+      // Linux evidence (Plan 0009): which node and argument profile encoded,
+      // and any named fallback, so the printed line stands on its own.
+      'linuxVaapiArgProfile',
+      'linuxRenderNodes',
+      'compositorFallbackReason',
+      'encoderBridgeEncodedOutputFallbackReason'
     ]
       .filter((key) => diagnostics[key] !== undefined)
       .map((key) => [key, diagnostics[key]])
@@ -410,6 +417,10 @@ async function runPass({
       onLine: (line) => {
         transientFifoPauseFiredCount += countTransientFifoPauseMarkers(line)
         if (process.env.VIDEORC_SMOKE_PRINT_APP_OUTPUT === '1') console.log(line)
+        // Always surface the backend's VAAPI probe command line and the
+        // prebuild progress: the Linux dev loop doc promises testers the
+        // exact probe command they can bisect on the box (Plan 0009).
+        else if (isLinuxSmokeEvidenceLine(line)) console.log(line)
       }
     })
     stopApp = launch.stop
