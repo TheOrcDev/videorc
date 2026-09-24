@@ -6,10 +6,12 @@
 
 ## Status and decisions
 
-- Status: **PLANNED 2026-09-24.** The owner asked for execution and a PR
-  before the plan was finished ("When you're done with planning, execute the
-  entire plan and create a PR"), so every decision below takes its
-  recommendation.
+- Status: **EXECUTED 2026-09-24** on `feat/stream-manager-focus` (PR
+  pending review). S1 to S6 are done and every local gate passes; see
+  "Execution notes" at the end. Owner by-eye review is pending. Planned the
+  same day: the owner asked for execution and a PR before the plan was
+  finished ("When you're done with planning, execute the entire plan and
+  create a PR"), so every decision below takes its recommendation.
 - Priority P1. Effort M: about 3 agent-days over 6 slices. Risk LOW to MEDIUM:
   renderer-only, one window, no backend, wire or IPC change. The busiest window
   of a live stream, so every slice keeps the probe green.
@@ -423,3 +425,34 @@ Each slice lists its model lane, size and a done-when check. Run them in order.
 - Order: S1 → S2 → S3 → S4 → S5 → S6.
 - Verification: the list above, per slice.
 - Blockers: none. No real accounts are needed; the probe seeds fake data.
+
+## Execution notes (2026-09-24)
+
+What shipped differs from the plan in these places, each for the stated
+reason:
+
+- **S1, stats while the relay is late.** The session stat reads the relayed
+  dashboard, so a window that has chat but no dashboard yet (the first
+  second of a session, or the probe's early phases) says "Off air" until the
+  relay arrives. The probe's idle checks read that instead of the removed
+  title badge.
+- **S1, the viewer and health stats hold their places while live.** They show
+  "–" until the first sample, rather than appearing a few seconds in: the main
+  three never jump. Viewers show only when a destination has a viewer API.
+- **S1, zero is shown when it was measured.** "0 subs · 0 tips · 0 msg/min"
+  stay, dimmed, because chat is read on those platforms; a platform without
+  the data still shows nothing.
+- **S2, delivery.** The composer's "Sending…" is the only delivery word. The
+  send-failure badges (with their reasons) and the notes line already named
+  every exception, so the per-destination "Sent" chips went too.
+- **S5, the context menu.** The shadcn CLI (`radix-rhea`) again added the
+  unrelated `cn` npm package and imported icons straight from the icon
+  package; both were fixed by hand, and the component was brought to the
+  dropdown menu's desktop scale.
+- **S6, the main window's eager bytes.** Importing `lib/platform.ts` from the
+  Stream Manager made Rollup move it into the chunk both windows load (+190
+  bytes gzip for the main window). The window now reads the host OS from the
+  user agent itself. The remaining delta against `origin/main` on the same
+  Mac is +95 bytes gzip (386,086 vs 385,991): the toast's shortcut parameter,
+  and the Radix menu parts the context menu reuses from the shared chunk. CI
+  reads about 1.6 KB lower than a Mac.
