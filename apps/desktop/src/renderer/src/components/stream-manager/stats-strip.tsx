@@ -150,11 +150,11 @@ export function StatsStrip({ tiles }: { tiles: readonly StatTileModel[] }): Reac
     <>
       <section
         aria-label="Stream stats"
-        className={cn('shrink-0 overflow-hidden', ABOVE_NARROW)}
+        className={cn('shrink-0 overflow-hidden border-b border-border', ABOVE_NARROW)}
         data-slot="stats-strip"
       >
-        {/* The outer hairlines are clipped: tiles draw right and bottom
-            rules, the strip hides the last ones. */}
+        {/* Tiles draw right and bottom rules and the strip clips the outer
+            ones; its own bottom rule splits it from the panes below. */}
         <div className="-mr-px -mb-px grid grid-cols-[repeat(auto-fit,minmax(8.5rem,1fr))]">
           {tiles.map((tile) => (
             <StatTile key={tile.id} tile={tile} />

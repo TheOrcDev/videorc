@@ -10202,6 +10202,8 @@ async function runSmokePreviewMotionCommand(
           headerTitle: document.querySelector('[data-slot="stream-manager-title"]')?.textContent ?? '',
           strip: visible(strip) ? box(strip) : null,
           summary: visible(summary) ? box(summary) : null,
+          stripRule: visible(strip) ? parseFloat(getComputedStyle(strip).borderBottomWidth) || 0 : null,
+          summaryRule: visible(summary) ? parseFloat(getComputedStyle(summary).borderBottomWidth) || 0 : null,
           statusBar: box(statusBar),
           statusBarItems: visibleDescendants(statusBar),
           viewer: viewerNode
