@@ -11608,6 +11608,25 @@ mod tests {
         if std::env::var(HARD_EXIT_CHILD_ENV).as_deref() != Ok("1") {
             return;
         }
+        // Plan 0003: the parent measures a 3 s wall-clock bound on this
+        // abort. With core dumps enabled, `wait()` only returns after the
+        // host's handler has consumed the core (systemd-coredump on
+        // Omarchy/Arch took 3.08 s to zstd + symbolise the 617 MB debug test
+        // binary), so the bound measured the coredump handler, not the exit
+        // path. Skip the core for THIS child only; the production
+        // `hard_abort_after_delay` is untouched and a real backend still
+        // dumps core for `diagnose-crash`. Do not "fix" this by raising the
+        // parent's deadline.
+        #[cfg(unix)]
+        // SAFETY: setrlimit on the calling process with a valid, fully
+        // initialised rlimit struct; no memory is shared or retained.
+        unsafe {
+            let no_core = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            libc::setrlimit(libc::RLIMIT_CORE, &no_core);
+        }
         std::thread::spawn(|| hard_abort_after_delay(Duration::from_millis(150)));
         // The parent deliberately never drains this pipe. Hold stderr's lock
         // and fill the OS buffer so any logging in the exit thread would block
