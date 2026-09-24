@@ -429,8 +429,8 @@ mod macos {
 
     /// Pins one window's AppKit appearance: `dark`, `light`, or `system` (follow
     /// the app). `nativeTheme` is app-global in Electron, so without this the
-    /// dark-always windows (Chat, Captions, Notes, Preview) would get a light
-    /// vibrancy material whenever the main window is in light theme (plan 050).
+    /// dark-always Preview window would get a light vibrancy material whenever
+    /// the main window is in light theme (plan 050).
     /// Returns false when the view is not in a window yet.
     #[napi]
     pub fn set_window_appearance(native_window_handle: Buffer, appearance: String) -> Result<bool> {

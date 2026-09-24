@@ -118,22 +118,19 @@ export function trafficLightPosition(role: GlassWindowRole): { x: number; y: num
 }
 
 /**
- * Roles that stay dark whatever the app theme (they frame video or are part of
- * the show). Their appearance is pinned per window, because `nativeTheme` is
- * app-global and would otherwise turn their material light.
+ * Roles that stay dark whatever the app theme: only the Preview, which frames
+ * video. Its appearance is pinned per window, because `nativeTheme` is
+ * app-global and would otherwise turn its material light. Stream Manager,
+ * Captions and Notes follow the app theme like main (their pages follow
+ * prefers-color-scheme, which `nativeTheme.themeSource` drives).
  */
-export const DARK_ALWAYS_ROLES: ReadonlySet<GlassWindowRole> = new Set([
-  'chat',
-  'captions',
-  'notes',
-  'preview'
-])
+export const DARK_ALWAYS_ROLES: ReadonlySet<GlassWindowRole> = new Set(['preview'])
 
 /**
  * A dark-always window whose appearance cannot be pinned paints the solid
  * palette: its material would otherwise follow a light app theme and put dark
  * text tokens on light glass. Windows has no per-window appearance pin, so
- * there the dark-always windows are always solid and only main gets Mica.
+ * there the dark-always windows are always solid.
  */
 export function glassModeForRole(
   role: GlassWindowRole,

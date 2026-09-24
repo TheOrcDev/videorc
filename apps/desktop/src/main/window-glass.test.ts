@@ -76,7 +76,7 @@ describe('windowGlassOptions', () => {
     expect(trafficLightPosition('preview')).toEqual({ x: 14, y: 7 })
   })
 
-  it('solid mode paints the palette base and keeps dark-always roles dark in light theme', () => {
+  it('solid mode paints the palette base and keeps only the preview dark in light theme', () => {
     const solid = resolveGlassMode({ ...mac, glass: '0' })
     expect(windowGlassOptions('main', { ...mac, mode: solid, dark: false }).backgroundColor).toBe(
       LIGHT_WINDOW_PALETTE.base
@@ -84,9 +84,11 @@ describe('windowGlassOptions', () => {
     expect(windowGlassOptions('main', { ...mac, mode: solid, dark: true }).backgroundColor).toBe(
       DARK_WINDOW_PALETTE.base
     )
-    for (const role of ['chat', 'captions', 'notes', 'preview'] as const) {
-      expect(solidWindowBase(role, false)).toBe(DARK_WINDOW_PALETTE.base)
+    for (const role of ['chat', 'captions', 'notes'] as const) {
+      expect(solidWindowBase(role, false)).toBe(LIGHT_WINDOW_PALETTE.base)
+      expect(solidWindowBase(role, true)).toBe(DARK_WINDOW_PALETTE.base)
     }
+    expect(solidWindowBase('preview', false)).toBe(DARK_WINDOW_PALETTE.base)
   })
 
   it('carries no macOS chrome off macOS', () => {
@@ -108,14 +110,14 @@ describe('glassModeForRole', () => {
     }
   })
 
-  it('paints dark-always roles solid without a pin, and leaves main on the material', () => {
-    expect(glassModeForRole('main', material, false)).toEqual(material)
-    for (const role of ['chat', 'captions', 'notes', 'preview'] as const) {
-      expect(glassModeForRole(role, material, false)).toEqual({
-        kind: 'solid',
-        reason: 'appearance-unpinned'
-      })
+  it('paints the dark-always preview solid without a pin; theme-following roles keep the material', () => {
+    for (const role of ['main', 'chat', 'captions', 'notes'] as const) {
+      expect(glassModeForRole(role, material, false)).toEqual(material)
     }
+    expect(glassModeForRole('preview', material, false)).toEqual({
+      kind: 'solid',
+      reason: 'appearance-unpinned'
+    })
   })
 
   it('never turns a solid mode back into a material', () => {
@@ -161,14 +163,14 @@ describe('Windows Mica (plan 050, D7)', () => {
     expect(options.vibrancy).toBeUndefined()
   })
 
-  it('keeps the dark-always windows solid: Windows cannot pin their appearance', () => {
+  it('keeps the dark-always preview solid: Windows cannot pin its appearance', () => {
     const mica = resolveGlassMode(win(22631))
-    for (const role of ['chat', 'captions', 'notes', 'preview'] as const) {
-      expect(glassModeForRole(role, mica, false)).toEqual({
-        kind: 'solid',
-        reason: 'appearance-unpinned'
-      })
+    expect(glassModeForRole('preview', mica, false)).toEqual({
+      kind: 'solid',
+      reason: 'appearance-unpinned'
+    })
+    for (const role of ['main', 'chat', 'captions', 'notes'] as const) {
+      expect(glassModeForRole(role, mica, false)).toEqual({ kind: 'mica' })
     }
-    expect(glassModeForRole('main', mica, false)).toEqual({ kind: 'mica' })
   })
 })
