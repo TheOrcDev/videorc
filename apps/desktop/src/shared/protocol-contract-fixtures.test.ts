@@ -13,6 +13,7 @@ import type {
   CohostState,
   CompositorStatus,
   LayoutSettings,
+  LiveChatMessage,
   PreviewSurfaceBounds,
   RecordingStatus,
   Scene,
@@ -27,6 +28,7 @@ import {
   validateBackendRpcResult,
   type BackendRpcParams
 } from './backend-rpc-contract'
+import { applyCommentsSnapshotDelta } from './comments-snapshot-delta'
 import { validateElectronEventPayload, validateElectronInvokeArgs } from './electron-ipc-contract'
 import { normalizePreviewSurfaceBounds } from './native-preview-bounds'
 
@@ -60,6 +62,7 @@ interface HighRiskContractFixtures {
     terminalPage: SessionCommentsPage
     deleteParams: BackendRpcParams<'sessions.delete'>
     deletionOperation: SessionDeletionOperation
+    eventMessages: LiveChatMessage[]
   }
   cohost: {
     startParams: CohostStartParams
@@ -286,5 +289,27 @@ describe('shared high-risk protocol fixture', () => {
         [fixtures.comments.deletionOperation]
       )
     }
+  })
+
+  it('loads chat rows with and without structured event details', () => {
+    const [plain, cheer, resub, raid, superChat, follow] = fixtures.comments.eventMessages
+    expect('details' in plain || 'reply' in plain || 'firstMessage' in plain).toBe(false)
+    expect(cheer.details).toEqual({ kind: 'cheer', bits: 1500 })
+    expect(cheer.reply?.parentAuthorName).toBe('regular_viewer')
+    expect(cheer.firstMessage).toBe(true)
+    expect(resub.details).toMatchObject({ kind: 'subscription', subscription: 'resub', months: 8 })
+    expect(raid.details).toEqual({ kind: 'raid', viewerCount: 234 })
+    expect(superChat.details).toMatchObject({ kind: 'super-chat', amountMicros: 5_000_000 })
+    expect(follow.eventType).toBe('follow')
+
+    const snapshot = fixtures.comments.eventMessages.reduce(
+      (current, message) => applyCommentsSnapshotDelta(current, { kind: 'message', message }),
+      applyCommentsSnapshotDelta(null, {
+        kind: 'clear',
+        sessionId: 'session-fixture',
+        updatedAt: '2026-09-24T10:00:00Z'
+      })
+    )
+    expect(snapshot.messages).toStrictEqual(fixtures.comments.eventMessages)
   })
 })

@@ -1,0 +1,46 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "10",
+  "chatter_user_login": "nacroni_",
+  "chatter_user_name": "sarzdotmd",
+  "message_id": "chat-cheer-1",
+  "message": {
+    "text": "Cheer1500 love the streams",
+    "fragments": [
+      {
+        "type": "cheermote",
+        "text": "Cheer1500",
+        "cheermote": {
+          "prefix": "cheer",
+          "bits": 1500,
+          "tier": 1000
+        },
+        "emote": null,
+        "mention": null
+      },
+      {
+        "type": "text",
+        "text": " love the streams",
+        "cheermote": null,
+        "emote": null,
+        "mention": null
+      }
+    ]
+  },
+  "color": "#00FF7F",
+  "badges": [
+    {
+      "set_id": "subscriber",
+      "id": "3",
+      "info": "3"
+    }
+  ],
+  "message_type": "text",
+  "cheer": {
+    "bits": 1500
+  },
+  "reply": null,
+  "channel_points_custom_reward_id": null
+}

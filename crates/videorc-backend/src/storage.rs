@@ -2817,8 +2817,8 @@ impl Database {
                     id, session_id, provider_message_id, platform, target_id, author_id,
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
-                    amount_text, is_deleted, raw_provider_type
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)
+                    amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)
                  ON CONFLICT(id) DO UPDATE SET
                     target_id = excluded.target_id,
                     author_id = excluded.author_id,
@@ -2833,7 +2833,10 @@ impl Database {
                     event_type = excluded.event_type,
                     amount_text = excluded.amount_text,
                     is_deleted = excluded.is_deleted,
-                    raw_provider_type = excluded.raw_provider_type",
+                    raw_provider_type = excluded.raw_provider_type,
+                    details_json = excluded.details_json,
+                    reply_json = excluded.reply_json,
+                    first_message = excluded.first_message",
                 params![
                     message.id,
                     message.session_id,
@@ -2853,6 +2856,13 @@ impl Database {
                     message.amount_text,
                     message.is_deleted,
                     message.raw_provider_type,
+                    message
+                        .details
+                        .as_ref()
+                        .map(serde_json::to_string)
+                        .transpose()?,
+                    message.reply.as_ref().map(serde_json::to_string).transpose()?,
+                    message.first_message,
                 ],
             )?;
         }
@@ -2864,6 +2874,50 @@ impl Database {
     pub fn list_live_chat_messages(&self, session_id: &str) -> Result<Vec<LiveChatMessage>> {
         let conn = self.lock()?;
         self.live_chat_messages_for_session_locked(&conn, session_id)
+    }
+
+    /// Which of these authors already chatted in an earlier session, as
+    /// `platform:author_id` keys (plan 055, the first-time-chatter marker).
+    pub fn live_chat_returning_authors(
+        &self,
+        current_session_id: &str,
+        authors: &[(StreamPlatform, String)],
+    ) -> Result<HashSet<String>> {
+        let mut returning = HashSet::new();
+        if authors.is_empty() {
+            return Ok(returning);
+        }
+        let conn = self.lock()?;
+        let mut by_platform: std::collections::BTreeMap<String, Vec<&str>> =
+            std::collections::BTreeMap::new();
+        for (platform, author_id) in authors {
+            by_platform
+                .entry(stream_platform_id(*platform).to_string())
+                .or_default()
+                .push(author_id.as_str());
+        }
+        for (platform_id, author_ids) in by_platform {
+            // Stay far below SQLite's bound-parameter limit.
+            for chunk in author_ids.chunks(400) {
+                let placeholders = (0..chunk.len())
+                    .map(|index| format!("?{}", index + 3))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut statement = conn.prepare(&format!(
+                    "SELECT DISTINCT author_id FROM live_chat_messages
+                     WHERE platform = ?1 AND session_id != ?2 AND author_id IN ({placeholders})"
+                ))?;
+                let mut values: Vec<&dyn rusqlite::ToSql> = vec![&platform_id, &current_session_id];
+                for author_id in chunk {
+                    values.push(author_id);
+                }
+                let rows = statement.query_map(values.as_slice(), |row| row.get::<_, String>(0))?;
+                for author_id in rows {
+                    returning.insert(format!("{platform_id}:{}", author_id?));
+                }
+            }
+        }
+        Ok(returning)
     }
 
     pub fn list_live_chat_messages_page(
@@ -2881,7 +2935,7 @@ impl Database {
                 "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
                         author_name, author_avatar_url, author_badges_json, author_roles_json,
                         published_at, received_at, message_text, fragments_json, event_type,
-                        amount_text, is_deleted, raw_provider_type
+                        amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message
                  FROM live_chat_messages
                  WHERE session_id = ?1
                    AND (received_at < ?2 OR (received_at = ?2 AND id < ?3))
@@ -2899,7 +2953,7 @@ impl Database {
                 "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
                         author_name, author_avatar_url, author_badges_json, author_roles_json,
                         published_at, received_at, message_text, fragments_json, event_type,
-                        amount_text, is_deleted, raw_provider_type
+                        amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message
                  FROM live_chat_messages
                  WHERE session_id = ?1
                  ORDER BY received_at DESC, id DESC
@@ -3300,6 +3354,29 @@ impl Database {
             entries,
             next_cursor,
         })
+    }
+
+    /// The latest `limit` log messages with `code` for a session, oldest first.
+    pub fn list_session_log_messages(
+        &self,
+        session_id: &str,
+        code: &str,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let limit = i64::try_from(limit.max(1)).unwrap_or(i64::MAX);
+        let conn = self.lock()?;
+        let mut statement = conn.prepare(
+            "SELECT message FROM session_logs
+             WHERE session_id = ?1 AND code = ?2
+             ORDER BY created_at DESC, id DESC
+             LIMIT ?3",
+        )?;
+        let rows = statement.query_map(params![session_id, code, limit], |row| {
+            row.get::<_, String>(0)
+        })?;
+        let mut messages = rows.collect::<std::result::Result<Vec<_>, _>>()?;
+        messages.reverse();
+        Ok(messages)
     }
 
     pub fn list_sessions(&self, limit: usize) -> Result<Vec<SessionSummary>> {
@@ -5867,6 +5944,26 @@ impl Database {
         )?;
         ensure_column(&conn, "sessions", "source_title", "source_title TEXT")?;
         ensure_column(&conn, "sessions", "processing_kind", "processing_kind TEXT")?;
+        // Stream Manager (plan 055): structured event facts, reply context and
+        // the first-message flag travel with each persisted chat row.
+        ensure_column(
+            &conn,
+            "live_chat_messages",
+            "details_json",
+            "details_json TEXT",
+        )?;
+        ensure_column(&conn, "live_chat_messages", "reply_json", "reply_json TEXT")?;
+        ensure_column(
+            &conn,
+            "live_chat_messages",
+            "first_message",
+            "first_message INTEGER NOT NULL DEFAULT 0",
+        )?;
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_live_chat_messages_platform_author
+                 ON live_chat_messages(platform, author_id)",
+            [],
+        )?;
         // Background MP4 finalization (instant-record P2). Never write into
         // `container` (the 0.9.55 "mp4" row bricked sessions.list).
         ensure_column(
@@ -6003,7 +6100,7 @@ impl Database {
             "SELECT id, session_id, provider_message_id, platform, target_id, author_id,
                     author_name, author_avatar_url, author_badges_json, author_roles_json,
                     published_at, received_at, message_text, fragments_json, event_type,
-                    amount_text, is_deleted, raw_provider_type
+                    amount_text, is_deleted, raw_provider_type, details_json, reply_json, first_message
              FROM live_chat_messages
              WHERE session_id = ?1
              ORDER BY received_at ASC, id ASC",
@@ -6290,6 +6387,14 @@ fn live_chat_message_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<LiveC
         amount_text: row.get(15)?,
         is_deleted: row.get(16)?,
         raw_provider_type: row.get(17)?,
+        // An unreadable stored detail degrades to a plain row, never a load failure.
+        details: row
+            .get::<_, Option<String>>(18)?
+            .and_then(|json| serde_json::from_str(&json).ok()),
+        reply: row
+            .get::<_, Option<String>>(19)?
+            .and_then(|json| serde_json::from_str(&json).ok()),
+        first_message: row.get::<_, Option<bool>>(20)?.unwrap_or(false),
     })
 }
 
@@ -7183,6 +7288,9 @@ mod tests {
             amount_text: None,
             is_deleted: false,
             raw_provider_type: Some("textMessageEvent".to_string()),
+            details: None,
+            reply: None,
+            first_message: false,
         }
     }
 
@@ -7670,6 +7778,102 @@ mod tests {
         assert_eq!(messages[0].message_text, "edited/deleted text");
         assert!(messages[0].is_deleted);
         assert_eq!(messages[1].fragments[0].text, "hello 2");
+    }
+
+    #[test]
+    fn live_chat_details_reply_and_first_message_round_trip() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("session-details"))
+            .unwrap();
+        let mut message = sample_live_chat_message("session-details", 1);
+        message.details = Some(crate::live_chat::LiveChatEventDetails::Cheer { bits: 1500 });
+        message.reply = Some(crate::live_chat::LiveChatReply {
+            parent_message_id: "parent".to_string(),
+            parent_author_name: "someone".to_string(),
+            parent_text: "hi".to_string(),
+        });
+        message.first_message = true;
+        database.save_live_chat_message(&message).unwrap();
+        let plain = sample_live_chat_message("session-details", 2);
+        database.save_live_chat_message(&plain).unwrap();
+
+        let messages = database.list_live_chat_messages("session-details").unwrap();
+        assert_eq!(messages[0], message);
+        assert_eq!(messages[1].details, None);
+        assert_eq!(messages[1].reply, None);
+        assert!(!messages[1].first_message);
+    }
+
+    #[test]
+    fn viewer_history_reads_back_a_finished_sessions_samples_in_order() {
+        let database = test_database();
+        database
+            .create_session(&sample_session("finished"))
+            .unwrap();
+        database.create_session(&sample_session("other")).unwrap();
+        for (session, total) in [("finished", 10), ("other", 99), ("finished", 25)] {
+            let sample = serde_json::json!({
+                "sessionId": session,
+                "platforms": [{ "platform": "twitch", "count": total }],
+                "total": total,
+                "at": "2026-09-24T10:00:00Z",
+            });
+            database
+                .add_session_log(
+                    session,
+                    HealthLevel::Info,
+                    crate::viewer_stats::VIEWER_SAMPLE_LOG_CODE,
+                    &sample.to_string(),
+                    None,
+                )
+                .unwrap();
+            // created_at has sub-second precision; keep the rows ordered.
+            std::thread::sleep(std::time::Duration::from_millis(2));
+        }
+        database
+            .add_session_log(
+                "finished",
+                HealthLevel::Info,
+                crate::viewer_stats::VIEWER_SAMPLE_LOG_CODE,
+                "not json",
+                None,
+            )
+            .unwrap();
+        database
+            .add_session_log("finished", HealthLevel::Warn, "other-code", "{}", None)
+            .unwrap();
+
+        let history = crate::viewer_stats::session_viewer_history(&database, "finished").unwrap();
+        let totals: Vec<u64> = history.iter().map(|sample| sample.total).collect();
+        assert_eq!(totals, vec![10, 25]);
+    }
+
+    #[test]
+    fn returning_authors_are_the_ones_seen_in_an_earlier_session() {
+        let database = test_database();
+        database.create_session(&sample_session("earlier")).unwrap();
+        database.create_session(&sample_session("current")).unwrap();
+        let mut earlier = sample_live_chat_message("earlier", 1);
+        earlier.author_id = Some("regular".to_string());
+        database.save_live_chat_message(&earlier).unwrap();
+        let mut current = sample_live_chat_message("current", 2);
+        current.author_id = Some("newcomer".to_string());
+        database.save_live_chat_message(&current).unwrap();
+
+        let platform = earlier.platform;
+        let returning = database
+            .live_chat_returning_authors(
+                "current",
+                &[
+                    (platform, "regular".to_string()),
+                    (platform, "newcomer".to_string()),
+                    (platform, "stranger".to_string()),
+                ],
+            )
+            .unwrap();
+        let expected = format!("{}:regular", stream_platform_id(platform));
+        assert_eq!(returning, HashSet::from([expected]));
     }
 
     #[test]

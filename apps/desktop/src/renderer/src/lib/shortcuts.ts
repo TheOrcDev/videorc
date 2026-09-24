@@ -28,7 +28,7 @@ export const SHORTCUTS: readonly ShortcutEntry[] = [
   { id: 'record-toggle', keys: ['␣'], label: 'Start / stop the session', group: 'Session' },
   { id: 'preview-window', keys: ['⌘', 'P'], label: 'Open preview window', group: 'Windows' },
   { id: 'notes-window', keys: ['⌘', '⇧', 'N'], label: 'Open notes window', group: 'Windows' },
-  { id: 'comments-window', keys: ['⌘', '⇧', 'J'], label: 'Open chat window', group: 'Windows' },
+  { id: 'comments-window', keys: ['⌘', '⇧', 'J'], label: 'Open Stream Manager', group: 'Windows' },
   { id: 'captions-window', keys: ['⌘', '⇧', 'C'], label: 'Open captions reader', group: 'Windows' },
 
   // Co-host pane (Comments window). Plain (cmd)J toggles the Comments window

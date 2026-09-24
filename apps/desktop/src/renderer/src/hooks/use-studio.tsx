@@ -247,6 +247,7 @@ import type {
   CaptionStyleId,
   CaptureRecoveryStatus,
   LiveChatSnapshot,
+  PlatformConnectOptions,
   NotesWindowState,
   PreviewCameraStatus,
   PreviewScreenStatus,
@@ -1178,7 +1179,10 @@ export type StudioContextValue = {
   refreshEntitlements: () => Promise<void>
   refreshPlatformAccounts: () => Promise<void>
   validatePlatformAccounts: () => Promise<PlatformAccountValidation[]>
-  connectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
+  connectPlatformAccount: (
+    platform: PlatformAccount['platform'],
+    options?: PlatformConnectOptions
+  ) => Promise<void>
   disconnectPlatformAccount: (platform: PlatformAccount['platform']) => Promise<void>
   refreshYouTubeChannels: (accountId?: string) => Promise<void>
   selectYouTubeChannel: (channelId: string, accountId?: string) => Promise<void>
@@ -2488,11 +2492,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           ? await window.videorc?.cacheChatAvatar?.(message.authorAvatarUrl).catch(() => null)
           : null
         if (commentHighlightIntentRef.current !== intent) return null
-        const { renderCommentHighlightPng } = await loadCaptionOverlay()
+        const { renderCommentHighlightPng, commentHighlightCardText } = await loadCaptionOverlay()
         if (commentHighlightIntentRef.current !== intent) return null
         const pngBase64 = await renderCommentHighlightPng({
           authorName: message.authorName,
-          text: message.messageText,
+          text: commentHighlightCardText(message),
           avatarUrl: avatarUrl ?? null,
           canvasWidth: streamVideo.width,
           platform: message.platform
@@ -2658,6 +2662,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           // terminal sent/partial phase, so the pane clears itself.
           ...(command.inReplyToQuestionId
             ? { inReplyToQuestionId: command.inReplyToQuestionId }
+            : {}),
+          ...(Array.isArray(command.destinationIds)
+            ? { destinationIds: command.destinationIds }
             : {})
         })
       })()
@@ -2763,6 +2770,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     await window.videorc?.openCommentsWindow?.()
     await refreshLiveChatSnapshotForComments().catch(() => {})
   }, [refreshLiveChatSnapshotForComments])
+  const openCommentsWindowRef = useRef(openCommentsWindow)
+  openCommentsWindowRef.current = openCommentsWindow
   const closeCommentsWindow = useCallback(async () => {
     await window.videorc?.closeCommentsWindow?.()
   }, [])
@@ -5403,6 +5412,27 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         return () => window.clearTimeout(timer)
       }
     })
+    // Stream Manager dashboard (plan 055, S7): a lazy chunk folds these
+    // events into one relayed state; the few that arrive first wait for it.
+    type DashboardFeed = Awaited<
+      ReturnType<typeof import('@/lib/live-dashboard-relay').startLiveDashboardRelay>
+    >
+    let dashboard: DashboardFeed | null = null
+    const dashboardBacklog: Parameters<DashboardFeed['feed']>[] = []
+    const feedDashboard: DashboardFeed['feed'] = (event, payload) => {
+      if (dashboard) dashboard.feed(event, payload)
+      else if (dashboardBacklog.length < 256) dashboardBacklog.push([event, payload])
+    }
+    void import('@/lib/live-dashboard-relay')
+      .then(({ startLiveDashboardRelay }) =>
+        startLiveDashboardRelay({ client: nextClient, isCurrent: generationIsCurrent })
+      )
+      .then((started) => {
+        if (!generationIsCurrent()) return started.dispose()
+        dashboard = started
+        for (const [event, payload] of dashboardBacklog.splice(0)) started.feed(event, payload)
+      })
+      .catch(() => undefined)
     const bufferLiveChatBootstrapEvent = (event: LiveChatBootstrapEvent): void => {
       if (liveChatBootstrapComplete) {
         return
@@ -5778,11 +5808,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           lastRecordingSessionIdRef.current = status.sessionId
         }
         applyRecordingStatus(status)
+        feedDashboard('recording.status', status)
         if (['idle', 'failed'].includes(status.state)) {
           setStreamTargets([])
           void refreshSessions(nextClient)
           // Session over: the viewer chip must clear, not freeze (rider V2).
           void window.videorc?.pushViewerSample?.(null)
+          feedDashboard('stream.viewers', null)
         }
         // Capture started: pull the fresh 'running' row so the Library shows
         // the live session immediately (status ticks repeat the state, so
@@ -5794,6 +5826,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         ) {
           clearSessionRuntimeState()
           void refreshSessions(nextClient)
+        }
+        // "Open Stream Manager when I go live" (plan 055, decision 6).
+        if (
+          status.state === 'streaming' &&
+          previousState !== 'streaming' &&
+          settingsRef.current.openStreamManagerOnLive
+        ) {
+          void openCommentsWindowRef.current().catch(() => undefined)
         }
         // A terminal session moves a persistent degradation notice to past
         // tense. A saved recording also gets its two natural next steps: watch
@@ -5841,7 +5881,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       // Comments window (main-process cache + push, same shape as highlight).
       nextClient.on('stream.viewers', (payload) => {
         void window.videorc?.pushViewerSample?.(payload as ViewerSample)
+        feedDashboard('stream.viewers', payload)
       }),
+      nextClient.on('stream.audience', (payload) => feedDashboard('stream.audience', payload)),
       nextClient.on('health.event', (payload) => {
         bootstrapGuard.mark('sessions')
         const event = payload as HealthEvent
@@ -5933,9 +5975,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       }),
       nextClient.on('stream.health', (payload) => {
         setStreamHealth((current) => mergeStreamHealth(current, payload as StreamHealth))
+        feedDashboard('stream.health', payload)
       }),
       nextClient.on('stream.targets', (payload) => {
         setStreamTargets((payload as StreamTargetsSnapshot).targets)
+        feedDashboard('stream.targets', payload)
       }),
       nextClient.on('diagnostics.stats', (payload) => {
         bootstrapGuard.mark('diagnostics')
@@ -6302,10 +6346,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
           const snapshot = bootstrapGuard.snapshot()
           const read = bootstrapRequest<RecordingStatus>('recording.status')
           read.then(
-            (status) =>
-              generationIsCurrent() &&
-              bootstrapGuard.isCurrent(snapshot, 'recording') &&
-              applyRecordingStatus(status),
+            (status) => {
+              if (generationIsCurrent() && bootstrapGuard.isCurrent(snapshot, 'recording')) {
+                applyRecordingStatus(status)
+                feedDashboard('recording.status', status)
+              }
+            },
             () =>
               attempt < 4 &&
               setTimeout(
@@ -6645,6 +6691,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       cancelCaptionCueRender()
       bootstrapAbort.abort()
       liveChatMessageBatcher.dispose()
+      dashboard?.dispose()
+      dashboardBacklog.length = 0
       if (liveChatRecoveryRetryTimer !== null) {
         window.clearTimeout(liveChatRecoveryRetryTimer)
         liveChatRecoveryRetryTimer = null
@@ -10094,7 +10142,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   )
 
   const connectPlatformAccount = useCallback(
-    async (platform: PlatformAccount['platform']) => {
+    async (platform: PlatformAccount['platform'], options?: PlatformConnectOptions) => {
       if (oauthUnavailableReason(platform)) {
         // Silent: the destination card renders the unavailable reason inline
         // right next to the control that triggers this, so the toast only
@@ -10113,7 +10161,12 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         setLastError(null)
         const redirectUri = await window.videorc.getOAuthCallbackRedirectUri(platform)
-        const params = redirectUri ? { platform, redirectUri } : { platform }
+        const optionalScopes = options?.optionalScopes?.length
+          ? { optionalScopes: [...options.optionalScopes] }
+          : {}
+        const params = redirectUri
+          ? { platform, redirectUri, ...optionalScopes }
+          : { platform, ...optionalScopes }
         const result = await client.request<OAuthStartResult>(
           'platformAccounts.oauth.startProvider',
           params

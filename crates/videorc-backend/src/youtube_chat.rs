@@ -21,8 +21,9 @@ use serde_json::Value;
 use tokio::time::sleep;
 
 use crate::live_chat::{
-    LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, ProviderSendReceipt,
-    live_chat_message_id, set_provider_and_emit, try_deliver_messages,
+    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState,
+    MembershipKind, ProviderSendReceipt, live_chat_message_id, set_provider_and_emit,
+    try_deliver_messages,
 };
 use crate::state::AppState;
 use crate::streaming::StreamPlatform;
@@ -50,7 +51,15 @@ pub struct YouTubeChatConfig {
     /// Test-only override of the API base URL.
     #[serde(default)]
     pub api_base_url: Option<String>,
+    /// How the connector renews `access_token` mid-stream (plan 055, B2).
+    /// Built by the backend from the stored account; never read from params.
+    #[serde(skip)]
+    pub token_source: crate::session_token::SessionTokenSource,
 }
+
+/// The provider message when YouTube refuses even a renewed token.
+pub const YOUTUBE_SIGN_IN_EXPIRED: &str =
+    "YouTube sign-in expired. Reconnect YouTube to keep live comments.";
 
 /// Request body for `liveChatMessages.insert` (pure, tested).
 pub fn chat_send_body(live_chat_id: &str, text: &str) -> serde_json::Value {
@@ -221,6 +230,14 @@ struct LiveChatItemSnippet {
     super_sticker_details: Option<AmountDetails>,
     #[serde(default)]
     message_deleted_details: Option<MessageDeletedDetails>,
+    #[serde(default)]
+    new_sponsor_details: Option<NewSponsorDetails>,
+    #[serde(default)]
+    member_milestone_chat_details: Option<MemberMilestoneDetails>,
+    #[serde(default)]
+    membership_gifting_details: Option<MembershipGiftingDetails>,
+    #[serde(default)]
+    gift_membership_received_details: Option<GiftMembershipReceivedDetails>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -230,11 +247,158 @@ struct MessageDeletedDetails {
     deleted_message_id: Option<String>,
 }
 
+/// Super Chat and Super Sticker amounts. Google encodes unsigned longs as JSON
+/// strings, so the numeric fields accept either form.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AmountDetails {
     #[serde(default)]
     amount_display_string: Option<String>,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    amount_micros: Option<u64>,
+    #[serde(default)]
+    currency: Option<String>,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    tier: Option<u64>,
+    #[serde(default)]
+    super_sticker_metadata: Option<SuperStickerMetadata>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SuperStickerMetadata {
+    #[serde(default)]
+    alt_text: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct NewSponsorDetails {
+    #[serde(default)]
+    member_level_name: Option<String>,
+    #[serde(default)]
+    is_upgrade: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MemberMilestoneDetails {
+    #[serde(default)]
+    member_level_name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_u64")]
+    member_month: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MembershipGiftingDetails {
+    #[serde(default, deserialize_with = "lenient_u64")]
+    gift_memberships_count: Option<u64>,
+    #[serde(default)]
+    gift_memberships_level_name: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GiftMembershipReceivedDetails {
+    #[serde(default)]
+    member_level_name: Option<String>,
+}
+
+fn lenient_u64<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<u64>, D::Error> {
+    Ok(
+        match Option::<serde_json::Value>::deserialize(deserializer)? {
+            Some(serde_json::Value::Number(number)) => number.as_u64(),
+            Some(serde_json::Value::String(text)) => text.trim().parse().ok(),
+            _ => None,
+        },
+    )
+}
+
+fn small(value: Option<u64>) -> Option<u32> {
+    value.and_then(|number| u32::try_from(number).ok())
+}
+
+/// Structured facts for a YouTube monetized or membership event (plan 055).
+fn event_details(
+    snippet: &LiveChatItemSnippet,
+    message_type: &str,
+) -> Option<LiveChatEventDetails> {
+    let amount = |details: &AmountDetails| {
+        Some((
+            details.amount_micros?,
+            details.currency.clone().filter(|code| !code.is_empty())?,
+            details.amount_display_string.clone().unwrap_or_default(),
+        ))
+    };
+    match message_type {
+        "superChatEvent" => {
+            let details = snippet.super_chat_details.as_ref()?;
+            let (amount_micros, currency, amount_display) = amount(details)?;
+            Some(LiveChatEventDetails::SuperChat {
+                amount_micros,
+                currency,
+                amount_display,
+                tier: small(details.tier),
+            })
+        }
+        "superStickerEvent" => {
+            let details = snippet.super_sticker_details.as_ref()?;
+            let (amount_micros, currency, amount_display) = amount(details)?;
+            Some(LiveChatEventDetails::SuperSticker {
+                amount_micros,
+                currency,
+                amount_display,
+                alt_text: details
+                    .super_sticker_metadata
+                    .as_ref()
+                    .and_then(|metadata| metadata.alt_text.clone()),
+            })
+        }
+        "newSponsorEvent" => {
+            let details = snippet.new_sponsor_details.as_ref();
+            Some(LiveChatEventDetails::Membership {
+                membership: if details.is_some_and(|details| details.is_upgrade) {
+                    MembershipKind::Upgrade
+                } else {
+                    MembershipKind::New
+                },
+                level_name: details.and_then(|details| details.member_level_name.clone()),
+                months: None,
+                gift_count: None,
+            })
+        }
+        "memberMilestoneChatEvent" => {
+            let details = snippet.member_milestone_chat_details.as_ref();
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Milestone,
+                level_name: details.and_then(|details| details.member_level_name.clone()),
+                months: details.and_then(|details| small(details.member_month)),
+                gift_count: None,
+            })
+        }
+        "membershipGiftingEvent" => {
+            let details = snippet.membership_gifting_details.as_ref();
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Gift,
+                level_name: details.and_then(|details| details.gift_memberships_level_name.clone()),
+                months: None,
+                gift_count: details.and_then(|details| small(details.gift_memberships_count)),
+            })
+        }
+        "giftMembershipReceivedEvent" => Some(LiveChatEventDetails::Membership {
+            membership: MembershipKind::GiftReceived,
+            level_name: snippet
+                .gift_membership_received_details
+                .as_ref()
+                .and_then(|details| details.member_level_name.clone()),
+            months: None,
+            gift_count: None,
+        }),
+        _ => None,
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -428,6 +592,9 @@ fn normalize_item(
         amount_text,
         is_deleted: matches!(event_type, LiveChatEventType::Deleted),
         raw_provider_type: Some(message_type.to_string()),
+        details: event_details(&item.snippet, message_type),
+        reply: None,
+        first_message: false,
     })
 }
 
@@ -637,14 +804,17 @@ pub async fn run_youtube_chat_connector(
         .clone()
         .unwrap_or_else(|| YOUTUBE_API_BASE_URL.to_string());
     let target_id = config.target_id.clone();
+    let mut token = crate::session_token::SessionToken::new(
+        config.access_token.clone(),
+        config.token_source.clone(),
+    );
 
     let resolved = match config.live_chat_id.clone() {
         Some(id) => Some(id),
         None => match &config.broadcast_id {
             Some(broadcast_id) => {
-                match resolve_live_chat_id(&client, &base_url, &config.access_token, broadcast_id)
-                    .await
-                {
+                let access_token = token.ensure_fresh(&state, &client).await.to_string();
+                match resolve_live_chat_id(&client, &base_url, &access_token, broadcast_id).await {
                     Ok(live_chat_id) => live_chat_id,
                     Err(error) => {
                         set_provider_and_emit(
@@ -702,12 +872,16 @@ pub async fn run_youtube_chat_connector(
     let mut page_token: Option<String> = None;
     let mut backoff_ms = MIN_POLLING_INTERVAL_MS;
     let mut connected = false;
+    // One renewal per refusal: a second refusal right after it means the
+    // account itself must be reconnected (plan 055, B2).
+    let mut renewed_since_success = false;
 
     loop {
+        let access_token = token.ensure_fresh(&state, &client).await.to_string();
         match fetch_chat_page(
             &client,
             &base_url,
-            &config.access_token,
+            &access_token,
             transport,
             &live_chat_id,
             page_token.as_deref(),
@@ -715,6 +889,7 @@ pub async fn run_youtube_chat_connector(
         .await
         {
             Ok(response) => {
+                renewed_since_success = false;
                 let now = chrono::Utc::now().to_rfc3339();
                 let page = normalize_page(response, &session_id, target_id.as_deref(), &now);
                 if !connected {
@@ -776,6 +951,25 @@ pub async fn run_youtube_chat_connector(
                     FetchError::Api(kind) => kind,
                     FetchError::Network => YouTubeChatErrorKind::Transient,
                 };
+                if kind == YouTubeChatErrorKind::AuthExpired {
+                    if !renewed_since_success
+                        && token.renew_after_refusal(&state, &client).await.is_ok()
+                    {
+                        renewed_since_success = true;
+                        continue;
+                    }
+                    set_provider_and_emit(
+                        &state,
+                        &session_id,
+                        session_generation,
+                        StreamPlatform::Youtube,
+                        target_id.as_deref(),
+                        LiveChatProviderConnectionState::Failed,
+                        YOUTUBE_SIGN_IN_EXPIRED,
+                    )
+                    .await;
+                    return;
+                }
                 let (provider_state, message, stop) = provider_reaction(kind);
                 set_provider_and_emit(
                     &state,
@@ -888,6 +1082,99 @@ mod tests {
             }]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn monetized_and_membership_events_carry_structured_details() {
+        let response: LiveChatMessagesResponse = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/stream-manager/youtube-live-chat-page.json"
+        ))
+        .unwrap();
+        let page = normalize_page(response, "s1", None, "now");
+        let details = |id: &str| {
+            page.messages
+                .iter()
+                .find(|message| message.provider_message_id == id)
+                .unwrap()
+                .details
+                .clone()
+        };
+        assert_eq!(
+            details("yt-super-chat"),
+            Some(LiveChatEventDetails::SuperChat {
+                amount_micros: 5_000_000,
+                currency: "USD".to_string(),
+                amount_display: "$5.00".to_string(),
+                tier: Some(2),
+            })
+        );
+        assert_eq!(
+            details("yt-super-sticker"),
+            Some(LiveChatEventDetails::SuperSticker {
+                amount_micros: 2_000_000,
+                currency: "EUR".to_string(),
+                amount_display: "€2.00".to_string(),
+                alt_text: Some("Party hat".to_string()),
+            })
+        );
+        assert!(matches!(
+            details("yt-new-member"),
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Upgrade,
+                ..
+            })
+        ));
+        assert!(matches!(
+            details("yt-milestone"),
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Milestone,
+                months: Some(12),
+                ..
+            })
+        ));
+        assert!(matches!(
+            details("yt-gifting"),
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::Gift,
+                gift_count: Some(5),
+                ..
+            })
+        ));
+        assert!(matches!(
+            details("yt-gift-received"),
+            Some(LiveChatEventDetails::Membership {
+                membership: MembershipKind::GiftReceived,
+                ..
+            })
+        ));
+        assert_eq!(details("yt-text"), None);
+    }
+
+    #[test]
+    fn plain_rows_serialize_without_the_new_fields_and_details_use_camel_case() {
+        let response: LiveChatMessagesResponse = serde_json::from_str(include_str!(
+            "../../../scripts/fixtures/stream-manager/youtube-live-chat-page.json"
+        ))
+        .unwrap();
+        let page = normalize_page(response, "s1", None, "now");
+        let text = page
+            .messages
+            .iter()
+            .find(|message| message.provider_message_id == "yt-text")
+            .unwrap();
+        let json = serde_json::to_value(text).unwrap();
+        for key in ["details", "reply", "firstMessage"] {
+            assert!(json.get(key).is_none(), "{key} must be absent, never null");
+        }
+        let super_chat = page
+            .messages
+            .iter()
+            .find(|message| message.provider_message_id == "yt-super-chat")
+            .unwrap();
+        let json = serde_json::to_value(super_chat).unwrap();
+        assert_eq!(json["details"]["kind"], "super-chat");
+        assert_eq!(json["details"]["amountMicros"], 5_000_000);
+        assert_eq!(json["details"]["amountDisplay"], "$5.00");
     }
 
     #[test]
@@ -1215,6 +1502,201 @@ mod tests {
         .unwrap();
         assert_eq!(stream.path(), LIVE_CHAT_MESSAGES_STREAM_PATH);
         assert!(!stream.query().unwrap().contains("pageToken"));
+    }
+
+    /// YouTube accepts `token-1` for one page, then refuses it as expired;
+    /// only `token-2` works after that (plan 055, B2).
+    #[derive(Clone)]
+    struct ExpiringYouTube {
+        pages: Arc<std::sync::atomic::AtomicUsize>,
+        refused: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    fn text_item(id: &str, text: &str) -> Value {
+        json!({
+            "id": id,
+            "snippet": {
+                "type": "textMessageEvent",
+                "liveChatId": "chat-1",
+                "authorChannelId": "UC-viewer",
+                "publishedAt": "2026-09-24T10:00:00Z",
+                "hasDisplayContent": true,
+                "displayMessage": text,
+                "textMessageDetails": { "messageText": text }
+            },
+            "authorDetails": {
+                "channelId": "UC-viewer",
+                "displayName": "Viewer",
+                "isChatOwner": false,
+                "isChatSponsor": false,
+                "isChatModerator": false
+            }
+        })
+    }
+
+    async fn expiring_messages(
+        State(server): State<ExpiringYouTube>,
+        headers: axum::http::HeaderMap,
+    ) -> (StatusCode, Json<Value>) {
+        use std::sync::atomic::Ordering;
+        let token = headers
+            .get("authorization")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default()
+            .trim_start_matches("Bearer ")
+            .to_string();
+        let served = server.pages.load(Ordering::SeqCst);
+        if token == "token-1" && served >= 1 {
+            server.refused.fetch_add(1, Ordering::SeqCst);
+            return (
+                StatusCode::UNAUTHORIZED,
+                Json(json!({ "error": { "errors": [{ "reason": "authError" }] } })),
+            );
+        }
+        let page = server.pages.fetch_add(1, Ordering::SeqCst) + 1;
+        (
+            StatusCode::OK,
+            Json(json!({
+                "nextPageToken": format!("page-{page}"),
+                "pollingIntervalMillis": 1000,
+                "items": [text_item(&format!("m{page}"), &format!("message {page}"))]
+            })),
+        )
+    }
+
+    async fn spawn_expiring_youtube() -> (String, ExpiringYouTube) {
+        let server = ExpiringYouTube {
+            pages: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            refused: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+        };
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let app = Router::new()
+            .route(LIVE_CHAT_MESSAGES_STREAM_PATH, get(expiring_messages))
+            .route(LIVE_CHAT_MESSAGES_PATH, get(expiring_messages))
+            .with_state(server.clone());
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        (format!("http://{address}"), server)
+    }
+
+    fn expiry_state() -> AppState {
+        let (events, _) = tokio::sync::broadcast::channel(64);
+        let state = AppState::new(
+            "test-token".to_string(),
+            1234,
+            events,
+            crate::storage::Database::open_in_memory_for_tests(),
+        );
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        state
+    }
+
+    async fn start_expiring_connector(
+        state: &AppState,
+        base_url: String,
+        token_source: crate::session_token::SessionTokenSource,
+    ) -> tokio::task::JoinHandle<()> {
+        let provider = crate::live_chat::LiveChatProviderState {
+            id: "youtube".to_string(),
+            platform: StreamPlatform::Youtube,
+            target_id: Some("youtube".to_string()),
+            account_id: None,
+            account_label: None,
+            read: crate::live_chat::CommentsReadState::Connecting,
+            write: crate::live_chat::CommentsWriteState::Ready,
+            state: LiveChatProviderConnectionState::Connecting,
+            message: String::new(),
+            last_connected_at: None,
+            last_message_at: None,
+            last_error: None,
+        };
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![provider]);
+            coordinator.session_generation()
+        };
+        tokio::spawn(run_youtube_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            YouTubeChatConfig {
+                access_token: "token-1".to_string(),
+                live_chat_id: Some("chat-1".to_string()),
+                broadcast_id: None,
+                target_id: Some("youtube".to_string()),
+                api_base_url: Some(base_url),
+                token_source,
+            },
+        ))
+    }
+
+    async fn wait_for_provider(
+        state: &AppState,
+        done: impl Fn(&crate::live_chat::LiveChatSnapshot) -> bool,
+    ) -> crate::live_chat::LiveChatSnapshot {
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        loop {
+            let snapshot = crate::live_chat::current_status(state).await;
+            if done(&snapshot) {
+                return snapshot;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out: {snapshot:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn chat_keeps_polling_after_the_token_expires_mid_session() {
+        let (base_url, server) = spawn_expiring_youtube().await;
+        let state = expiry_state();
+        let connector = start_expiring_connector(
+            &state,
+            base_url,
+            crate::session_token::SessionTokenSource::scripted(vec![Ok("token-2")]),
+        )
+        .await;
+        let snapshot = wait_for_provider(&state, |snapshot| snapshot.messages.len() >= 2).await;
+        connector.abort();
+        assert_eq!(
+            snapshot
+                .messages
+                .iter()
+                .map(|message| message.message_text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["message 1", "message 2"]
+        );
+        assert_eq!(
+            snapshot.providers[0].state,
+            LiveChatProviderConnectionState::Connected
+        );
+        assert_eq!(server.refused.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_revoked_youtube_sign_in_fails_clearly() {
+        let (base_url, _server) = spawn_expiring_youtube().await;
+        let state = expiry_state();
+        let connector = start_expiring_connector(
+            &state,
+            base_url,
+            crate::session_token::SessionTokenSource::scripted(vec![Err("revoked")]),
+        )
+        .await;
+        let snapshot = wait_for_provider(&state, |snapshot| {
+            snapshot.providers[0].state == LiveChatProviderConnectionState::Failed
+        })
+        .await;
+        connector.abort();
+        assert_eq!(snapshot.providers[0].message, YOUTUBE_SIGN_IN_EXPIRED);
+        assert_eq!(snapshot.messages.len(), 1);
     }
 
     #[tokio::test]

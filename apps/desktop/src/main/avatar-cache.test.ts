@@ -50,6 +50,17 @@ describe('avatarHostAllowed', () => {
     expect(avatarHostAllowed('https://static-cdn.jtvnw.net/jtv_user_pictures/x.png')).toBe(true)
     expect(avatarHostAllowed('https://pbs.twimg.com/profile_images/1/a_normal.jpg')).toBe(true)
     expect(avatarHostAllowed('https://pbs.twimg.com.evil.example/a.jpg')).toBe(false)
+    // Stream Manager emotes (plan 055, S10): Twitch's own emote CDN only;
+    // third-party emote CDNs are refused like any other host.
+    expect(avatarHostAllowed('https://static-cdn.jtvnw.net/emoticons/v2/25/default/dark/1.0')).toBe(
+      true
+    )
+    expect(avatarHostAllowed('https://cdn.7tv.app/emote/60ae958e229664e8667aea38/1x.webp')).toBe(
+      false
+    )
+    expect(avatarHostAllowed('https://cdn.betterttv.net/emote/5f1b0186cf6d2144653d2970/1x')).toBe(
+      false
+    )
     expect(avatarHostAllowed('http://yt3.ggpht.com/abc')).toBe(false)
   })
 

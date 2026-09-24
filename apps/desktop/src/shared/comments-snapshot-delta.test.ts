@@ -45,7 +45,7 @@ describe('comments snapshot deltas', () => {
     for (let index = MAX_COMMENTS_SNAPSHOT_MESSAGES; index >= 0; index -= 1) {
       current = applyCommentsSnapshotDelta(current, {
         kind: 'message',
-        message: message(String(index).padStart(3, '0'))
+        message: message(String(index).padStart(4, '0'))
       })
     }
     const duplicate = applyCommentsSnapshotDelta(current, {
@@ -54,8 +54,10 @@ describe('comments snapshot deltas', () => {
     })
 
     expect(current.messages).toHaveLength(MAX_COMMENTS_SNAPSHOT_MESSAGES)
-    expect(current.messages[0].id).toBe('001')
-    expect(current.messages.at(-1)?.id).toBe('500')
+    expect(current.messages[0].id).toBe('0001')
+    expect(current.messages.at(-1)?.id).toBe(
+      String(MAX_COMMENTS_SNAPSHOT_MESSAGES).padStart(4, '0')
+    )
     expect(duplicate).toBe(current)
   })
 

@@ -1,0 +1,35 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "49912639",
+  "chatter_user_login": "drba15",
+  "chatter_user_name": "DrBA15",
+  "chatter_is_anonymous": false,
+  "color": "#1E90FF",
+  "badges": [],
+  "system_message": "DrBA15 is gifting 5 Tier 1 Subs to Streamer's community!",
+  "message_id": "notice-community_sub_gift",
+  "message": {
+    "text": "",
+    "fragments": []
+  },
+  "notice_type": "community_sub_gift",
+  "sub": null,
+  "resub": null,
+  "sub_gift": null,
+  "community_sub_gift": {
+    "id": "gift-batch-1",
+    "total": 5,
+    "sub_tier": "1000",
+    "cumulative_total": 42
+  },
+  "gift_paid_upgrade": null,
+  "prime_paid_upgrade": null,
+  "raid": null,
+  "unraid": null,
+  "pay_it_forward": null,
+  "announcement": null,
+  "bits_badge_tier": null,
+  "charity_donation": null
+}

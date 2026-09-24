@@ -393,7 +393,7 @@ export function AppShell(): ReactElement {
             {runtimeInfo?.commentsWindowEnabled !== false ? (
               <StatusBarHint
                 keys={`${shiftKey}${modKey}J`}
-                label="Chat"
+                label="Stream Manager"
                 pressed={commentsWindowOpen}
                 onClick={() =>
                   commentsWindowOpen ? void closeCommentsWindow() : void openCommentsWindow()

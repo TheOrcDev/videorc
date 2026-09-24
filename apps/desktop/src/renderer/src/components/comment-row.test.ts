@@ -86,6 +86,30 @@ describe('CommentRow', () => {
     expect(commentCanHighlight(message({ isDeleted: true }))).toBe(false)
   })
 
+  it('lets activity events go on stream, never plain notices (plan 055, S11)', () => {
+    expect(
+      commentCanHighlight(
+        message({ eventType: 'system', details: { kind: 'raid', viewerCount: 234 } })
+      )
+    ).toBe(true)
+    expect(
+      commentCanHighlight(
+        message({
+          eventType: 'membership',
+          details: { kind: 'subscription', subscription: 'resub', isPrime: false, months: 8 }
+        })
+      )
+    ).toBe(true)
+    expect(commentCanHighlight(message({ eventType: 'follow', details: { kind: 'follow' } }))).toBe(
+      true
+    )
+    expect(
+      commentCanHighlight(
+        message({ eventType: 'moderation', details: { kind: 'raid', viewerCount: 1 } })
+      )
+    ).toBe(false)
+  })
+
   it('renders one accessible row contract with avatar, platform, author, and message', () => {
     const markup = renderRow({ phase: 'idle' })
 

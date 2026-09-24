@@ -4,6 +4,7 @@
 // the canvas painter is a thin shell over it.
 
 import { commentHighlightPlatformBadge, layoutCommentHighlight } from '@/lib/comment-highlight'
+import { activityItems } from '@/lib/stream-activity'
 import type { CaptionStyleId } from '@/lib/backend'
 
 export type CaptionTextSize = 's' | 'm' | 'l'
@@ -416,6 +417,17 @@ export async function renderCaptionCueFramePng(params: {
  * beside it — and up to three message lines sit below at full card width.
  * Best-effort: a failed avatar load still renders the card.
  */
+/**
+ * The highlight card's text. An activity event (a sub, a gift, a raid, a
+ * Super Chat) leads with what happened, then the viewer's own words: the
+ * event variant of the card (plan 055, S11). Plain chat is the message.
+ */
+export function commentHighlightCardText(message: import('@/lib/backend').LiveChatMessage): string {
+  const item = message.details ? activityItems([message])[0] : undefined
+  if (!item) return message.messageText
+  return item.message ? `${item.line}: ${item.message}` : item.line
+}
+
 export async function renderCommentHighlightPng(params: {
   authorName: string
   text: string

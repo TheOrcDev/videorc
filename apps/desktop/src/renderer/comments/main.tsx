@@ -2,8 +2,8 @@ import React, { useCallback, useEffect, useRef, useState, type ReactElement } fr
 import ReactDOM from 'react-dom/client'
 import { toast } from 'sonner'
 
-import { CommentsReader } from '@/components/comments-reader'
 import { AppErrorBoundary } from '@/components/error-boundary'
+import { StreamManager } from '@/components/stream-manager/stream-manager'
 import { WindowFrame } from '@/components/window-frame'
 import type {
   CohostQuestion,
@@ -27,7 +27,7 @@ import {
 } from '@/lib/cohost-view'
 import { Toaster } from '@/components/ui/sonner'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
-import { chatSendFailures, pendingCommentsSendOperation, sendablePlatforms } from '@/lib/chat-send'
+import { chatSendFailures, pendingCommentsSendOperation } from '@/lib/chat-send'
 import type { ChatSendFailure } from '@/lib/chat-send'
 import { commentHighlightExpiryDelay, expireCommentHighlightState } from '@/lib/comment-highlight'
 import {
@@ -36,6 +36,7 @@ import {
 } from '../../shared/comments-send-operation'
 import { emptyLiveChatSnapshot } from '@/lib/live-chat-view'
 import { applyCommentsSnapshotDelta } from '../../shared/comments-snapshot-delta'
+import type { LiveDashboardState } from '../../shared/live-dashboard'
 import '@/styles.css'
 
 // Long-lived second window: drop React's dev perf-track measures, which buffer
@@ -107,6 +108,8 @@ function CommentsWindowApp(): ReactElement {
     setSendFailures(chatSendFailures(operation))
   }, [])
   const [viewerSample, setViewerSample] = useState<ViewerSample | null>(null)
+  // The Stream Manager's live data (plan 055, S7): relayed through main.
+  const [dashboard, setDashboard] = useState<LiveDashboardState | null>(null)
   // Co-host: the MAIN renderer resolves Premium, consent and the engine state,
   // and relays ONE value. This window never re-derives gating. Presence is
   // unconditional: the window mounts on the off shape, never on null.
@@ -172,6 +175,11 @@ function CommentsWindowApp(): ReactElement {
       .then((sample) => setViewerSample(sample ?? null))
       .catch(() => {})
     const offViewers = window.videorc?.onViewerSample?.((sample) => setViewerSample(sample))
+    void window.videorc
+      ?.getDashboard?.()
+      .then((state) => setDashboard(state ?? null))
+      .catch(() => {})
+    const offDashboard = window.videorc?.onDashboard?.((state) => setDashboard(state))
     const offState = window.videorc?.onCommentsWindowState?.((state) => {
       setAlwaysOnTop(state.alwaysOnTop)
       setHighlightAnchor(normalizeCommentHighlightAnchor(state.highlightAnchor))
@@ -195,13 +203,13 @@ function CommentsWindowApp(): ReactElement {
       offSnapshot?.()
       offDelta?.()
       offViewers?.()
+      offDashboard?.()
       offState?.()
       offHighlight?.()
       offCohost?.()
     }
   }, [applySendOperation])
   const { snapshot } = view
-  const sendTargets = sendablePlatforms(snapshot.providers)
   const live = view.mode.kind === 'live' && Boolean(snapshot.sessionId)
 
   const requestHighlight = (message: LiveChatMessage): void => {
@@ -306,7 +314,9 @@ function CommentsWindowApp(): ReactElement {
     // Real glass: the OS material under the body's window coat, and the
     // frame's content coat on top (plan 050), like every other window.
     <WindowFrame>
-      <CommentsReader
+      <StreamManager
+        dashboard={view.mode.kind === 'live' ? dashboard : null}
+        history={view.mode.kind === 'history' ? view.history : undefined}
         viewerSample={view.mode.kind === 'live' ? viewerSample : null}
         snapshot={snapshot}
         viewMode={view.mode}
@@ -318,7 +328,6 @@ function CommentsWindowApp(): ReactElement {
         sendFailures={sendFailures}
         sendOperation={sendOperation}
         sendPending={sendPending}
-        sendTargets={sendTargets}
         cohostActionPending={cohostActionPending}
         cohostConsented={cohost.consented}
         cohostEnabled={cohost.enabled}
@@ -366,18 +375,22 @@ function CommentsWindowApp(): ReactElement {
             : undefined
         }
         onHighlight={live ? requestHighlight : undefined}
+        onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
         onSend={(text, options) => {
           if (!snapshot.sessionId) return
           const operationId = crypto.randomUUID()
           sendPendingOperationIdRef.current = operationId
           setSendPending(true)
           setSendFailures([])
+          const picked = options?.destinationIds ? new Set(options.destinationIds) : null
           applySendOperation(
             pendingCommentsSendOperation({
               id: operationId,
               sessionId: snapshot.sessionId,
               text,
-              providers: snapshot.providers
+              providers: picked
+                ? snapshot.providers.filter((provider) => picked.has(provider.id))
+                : snapshot.providers
             })
           )
           void window.videorc
@@ -388,7 +401,8 @@ function CommentsWindowApp(): ReactElement {
               text,
               ...(options?.inReplyToQuestionId
                 ? { inReplyToQuestionId: options.inReplyToQuestionId }
-                : {})
+                : {}),
+              ...(options?.destinationIds ? { destinationIds: options.destinationIds } : {})
             })
             .then((operation) => {
               if (sendPendingOperationIdRef.current !== operationId) return

@@ -2,109 +2,111 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
+import { StatsStrip } from '@/components/stream-manager/stats-strip'
 import {
-  ChatHeaderActions,
-  ViewerCountChip,
-  type ChatHeaderActionsProps
-} from '@/components/comments-header'
-import {
-  CHAT_HEADER_COMPACT_ONLY,
-  CHAT_HEADER_FULL_ONLY,
-  CHAT_HEADER_TIGHT_SR_ONLY
-} from '@/lib/chat-header-tiers'
-import type { ViewerSample } from '@/lib/backend'
+  providerCapabilityLabel,
+  providerCapabilityTitle,
+  StreamManagerStatusBar
+} from '@/components/stream-manager/stream-manager-status-bar'
+import type { LiveChatProviderState } from '@/lib/backend'
+import type { StatTileModel } from '@/lib/stream-manager-stats'
+import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 
-const NOW = Date.parse('2026-09-23T12:00:00.000Z')
+const noop = (): void => undefined
 
-function sample(overrides: Partial<ViewerSample> = {}): ViewerSample {
+function provider(overrides: Partial<LiveChatProviderState> = {}): LiveChatProviderState {
   return {
-    sessionId: 's',
-    platforms: [
-      { platform: 'youtube', count: 900 },
-      { platform: 'twitch', count: 334 }
-    ],
-    total: 1234,
-    at: '2026-09-23T11:59:50.000Z',
+    id: 'twitch',
+    platform: 'twitch',
+    read: 'ready',
+    write: 'ready',
+    state: 'connected',
+    message: 'Twitch live chat connected.',
     ...overrides
   }
 }
 
-function renderActions(props: Partial<ChatHeaderActionsProps> = {}): string {
-  return renderToStaticMarkup(createElement(ChatHeaderActions, props))
-}
-
-const noop = (): void => undefined
-
-// The narrow Chat window (320px minimum) keeps every control reachable and the
-// viewer count on screen: tiers are container-query classes, asserted here;
-// probe:comments-window proves the real geometry.
-describe('ViewerCountChip', () => {
-  it('keeps the number and the full accessible label, never wrapping', () => {
-    const markup = renderToStaticMarkup(
-      createElement(ViewerCountChip, { sample: sample(), nowMs: NOW })
+// The Stream Manager's chrome (plan 055, D6): the title row carries the title
+// only; every control lives in the status bar, inline from 640 px and folded
+// into ⋯ below it. probe:comments-window proves the real geometry.
+describe('Stream Manager status bar', () => {
+  it('names each provider by what chat can do there', () => {
+    expect(providerCapabilityLabel(provider())).toBe('read · send')
+    expect(providerCapabilityLabel(provider({ platform: 'x', write: 'read-only' }))).toBe(
+      'read-only'
     )
-    expect(markup).toContain('data-slot="viewer-count"')
-    expect(markup).toContain('<span data-slot="viewer-count-number">1.2k</span>')
-    expect(markup).toContain('whitespace-nowrap')
-    expect(markup).toContain('shrink-0')
-    // "watching" leaves the eye in the Tight tier but stays for screen readers.
-    expect(markup).toContain(`<span class="${CHAT_HEADER_TIGHT_SR_ONLY}"> watching</span>`)
-    expect(markup).toContain('title="youtube: 900 · twitch: 334"')
+    expect(providerCapabilityLabel(provider({ write: 'missing-scope' }))).toBe(
+      'read · reconnect to send'
+    )
+    expect(providerCapabilityLabel(provider({ state: 'failed' }))).toBe('failed')
   })
 
-  it('greys out a stale sample instead of hiding it', () => {
+  it('offers the Twitch reconnect when follow alerts need the opt-in scopes', () => {
+    const title = providerCapabilityTitle(provider(), {
+      sessionId: 's',
+      updatedAt: 'now',
+      platforms: [
+        { platform: 'twitch', metric: 'followers', capability: 'available', audienceScopes: false }
+      ]
+    })
+    expect(title).toContain('Reconnect Twitch in Livestream → Setup')
+  })
+
+  it('keeps every control reachable: inline from 640 px, ⋯ below it', () => {
     const markup = renderToStaticMarkup(
-      createElement(ViewerCountChip, {
-        sample: sample({ at: '2026-09-23T11:50:00.000Z' }),
-        nowMs: NOW
+      createElement(StreamManagerStatusBar, {
+        providers: [provider()],
+        audience: null,
+        alwaysOnTop: true,
+        highlightAnchor: 'bottom-left',
+        onHighlightAnchorChange: noop,
+        onToggleAlwaysOnTop: noop,
+        onClear: noop,
+        onOpenPreview: noop
       })
     )
-    expect(markup).toContain('text-subtle')
-    expect(markup).toContain('1.2k')
+    expect(markup).toContain('data-slot="stream-manager-actions"')
+    expect(markup).toContain(ABOVE_NARROW)
+    expect(markup).toContain('aria-label="Keep this window on top"')
+    expect(markup).toContain('aria-pressed="true"')
+    expect(markup).toContain('title="Highlight position: Bottom left"')
+    expect(markup).toContain('Clear view')
+    expect(markup).toContain('Open Preview')
+    expect(markup).toContain('aria-label="More Stream Manager actions"')
+    expect(markup).toContain(NARROW_ONLY)
+    expect(markup).toContain('[-webkit-app-region:no-drag]')
   })
 })
 
-describe('ChatHeaderActions', () => {
-  const live: Partial<ChatHeaderActionsProps> = {
-    highlightAnchor: 'top-left',
-    onHighlightAnchorChange: noop,
-    onToggleAlwaysOnTop: noop,
-    onClear: noop
-  }
+describe('StatsStrip', () => {
+  const tiles: StatTileModel[] = [
+    { id: 'session', label: 'Session', value: '12:04', tone: 'neutral', badge: 'live' },
+    {
+      id: 'viewers',
+      label: 'Viewers',
+      value: '1.2k',
+      detail: 'Peak 1.4k',
+      tone: 'neutral',
+      spark: [1, 2]
+    },
+    {
+      id: 'followers',
+      label: 'Followers',
+      value: '61,942',
+      detail: '+12 this stream',
+      tone: 'neutral'
+    }
+  ]
 
-  it('renders the inline controls for Full and the ⋯ trigger for narrower tiers', () => {
-    const markup = renderActions(live)
-    expect(markup).toContain('data-slot="chat-header-inline-actions"')
-    expect(markup).toContain(CHAT_HEADER_FULL_ONLY)
-    expect(markup).toContain('aria-label="More chat actions"')
-    expect(markup).toContain(CHAT_HEADER_COMPACT_ONLY)
-    expect(markup).toContain('Clear view')
-    expect(markup).toContain('aria-label="Highlight position"')
-    expect(markup).toContain('aria-label="Keep this window on top"')
-  })
-
-  it('keeps Back to live outside the fold in history', () => {
-    const markup = renderActions({
-      highlightAnchor: 'top-left',
-      onHighlightAnchorChange: noop,
-      onToggleAlwaysOnTop: noop,
-      onBackToLive: noop
-    })
-    const backToLive = markup.indexOf('Back to live')
-    const inline = markup.indexOf('data-slot="chat-header-inline-actions"')
-    expect(backToLive).toBeGreaterThan(-1)
-    expect(backToLive).toBeLessThan(inline)
-    expect(markup).not.toContain('Clear view')
-  })
-
-  it('renders no ⋯ trigger when there is nothing to fold', () => {
-    const markup = renderActions({ onBackToLive: noop })
-    expect(markup).toContain('Back to live')
-    expect(markup).not.toContain('More chat actions')
-    expect(markup).not.toContain('chat-header-inline-actions')
-  })
-
-  it('keeps the controls clickable inside the draggable header', () => {
-    expect(renderActions(live)).toContain('[-webkit-app-region:no-drag]')
+  it('renders tiles for wide tiers and one summary line for narrow ones', () => {
+    const markup = renderToStaticMarkup(createElement(StatsStrip, { tiles }))
+    expect(markup).toContain('data-slot="stats-strip"')
+    expect(markup).toContain('data-tile="viewers"')
+    expect(markup).toContain('On air')
+    expect(markup).toContain('data-slot="stats-summary"')
+    expect(markup).toContain('data-summary="viewers"')
+    // The viewer count is in the narrow summary too: never hidden while live.
+    expect(markup.match(/1\.2k/g)?.length).toBe(2)
+    expect(markup).toContain('watching')
   })
 })

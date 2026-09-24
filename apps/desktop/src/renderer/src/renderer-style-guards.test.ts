@@ -28,7 +28,10 @@ const COLOUR_LITERAL_ALLOWLIST = new Set([
   // The recording-invisibility smoke marker is loud red on purpose.
   'src/components/notes-window.tsx',
   // Canvas drawing: a fallback stroke and a transparency mask, not colours.
-  'src/components/ui/live-waveform.tsx'
+  'src/components/ui/live-waveform.tsx',
+  // shadcn chart: selectors that MATCH Recharts' own default strokes
+  // ([stroke='#ccc']) to restyle them with tokens; it paints no literal.
+  'src/components/ui/chart.tsx'
 ])
 
 function rendererFiles(): string[] {

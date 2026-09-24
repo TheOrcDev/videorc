@@ -174,11 +174,11 @@ export function CommandPalette({
           )}
           {runtimeInfo?.commentsWindowEnabled ? (
             <CommandItem
-              value="Toggle chat window"
+              value="Toggle Stream Manager chat window"
               onSelect={() => run(() => toggleCommentsWindow())}
             >
               <ChatIcon className="size-4" />
-              {commentsWindow.open ? 'Close chat window' : 'Open chat window'}
+              {commentsWindow.open ? 'Close Stream Manager' : 'Open Stream Manager'}
               <CommandShortcut className="tracking-normal">
                 <Kbd>
                   {modKey}

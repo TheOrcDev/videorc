@@ -114,6 +114,46 @@ pub struct OAuthStartProviderParams {
     pub platform: StreamPlatform,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub redirect_uri: Option<String>,
+    /// Scopes added on top of the platform's base set, from
+    /// [`optional_provider_scopes`] only (plan 055, S6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub optional_scopes: Vec<String>,
+}
+
+/// Twitch follow events (`channel.follow` v2) for the Stream Manager.
+pub const TWITCH_FOLLOWERS_SCOPE: &str = "moderator:read:followers";
+/// Twitch subscriber total and points for the Stream Manager.
+pub const TWITCH_SUBSCRIPTIONS_SCOPE: &str = "channel:read:subscriptions";
+
+/// Scopes a user can opt into per platform (plan 055, S6). They stay opt-in
+/// because adding a scope to the base set makes every existing connection
+/// reconnect once.
+pub fn optional_scopes_for(platform: StreamPlatform) -> &'static [&'static str] {
+    match platform {
+        StreamPlatform::Twitch => &[TWITCH_FOLLOWERS_SCOPE, TWITCH_SUBSCRIPTIONS_SCOPE],
+        _ => &[],
+    }
+}
+
+/// The requested optional scopes, refusing any the platform does not offer.
+pub fn optional_provider_scopes(
+    platform: StreamPlatform,
+    requested: &[String],
+) -> Result<Vec<String>> {
+    let allowed = optional_scopes_for(platform);
+    let mut scopes: Vec<String> = Vec::new();
+    for scope in requested {
+        if !allowed.contains(&scope.as_str()) {
+            anyhow::bail!(
+                "{scope} is not an optional {} permission.",
+                stream_platform_label(platform)
+            );
+        }
+        if !scopes.contains(scope) {
+            scopes.push(scope.clone());
+        }
+    }
+    Ok(scopes)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -1150,7 +1190,12 @@ impl OAuthSessions {
         if let Some(message) = provider_oauth_unavailable_message(params.platform) {
             anyhow::bail!("{message}");
         }
-        let config = provider_config(params.platform)?;
+        let mut config = provider_config(params.platform)?;
+        for scope in optional_provider_scopes(params.platform, &params.optional_scopes)? {
+            if !config.scopes.contains(&scope) {
+                config.scopes.push(scope);
+            }
+        }
         let state = Uuid::new_v4().to_string();
         let redirect_uri = provider_redirect_uri(
             params.platform,
@@ -3300,6 +3345,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
                 |secret_ref, value| {
@@ -3547,6 +3593,7 @@ mod tests {
                     OAuthStartProviderParams {
                         platform: StreamPlatform::X,
                         redirect_uri: Some("videorc://oauth/callback".to_string()),
+                        optional_scopes: Vec::new(),
                     },
                     61234,
                     |secret_ref, value| {
@@ -3617,6 +3664,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
                 |secret_ref, value| {
@@ -3683,6 +3731,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
                 |secret_ref, value| {
@@ -3797,6 +3846,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
             )
@@ -3883,6 +3933,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
             )
@@ -3922,6 +3973,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
             )
@@ -4023,6 +4075,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
             )
@@ -4077,6 +4130,7 @@ mod tests {
                     OAuthStartProviderParams {
                         platform: StreamPlatform::X,
                         redirect_uri: Some("videorc://oauth/callback".to_string()),
+                        optional_scopes: Vec::new(),
                     },
                     61234,
                 )
@@ -4132,6 +4186,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
                 |secret_ref, value| {
@@ -4206,6 +4261,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
                 |secret_ref, value| {
@@ -4544,6 +4600,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
                 |secret_ref, value| {
@@ -4646,6 +4703,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::X,
                     redirect_uri: Some("videorc://oauth/callback".to_string()),
+                    optional_scopes: Vec::new(),
                 },
                 61234,
             )
@@ -4929,6 +4987,7 @@ mod tests {
                 OAuthStartProviderParams {
                     platform: StreamPlatform::Youtube,
                     redirect_uri: None,
+                    optional_scopes: Vec::new(),
                 },
                 61234,
             )
@@ -5575,5 +5634,41 @@ mod tests {
 
         assert!(status.client_secret_present);
         assert!(status.ready);
+    }
+
+    #[test]
+    fn only_offered_optional_scopes_can_be_requested() {
+        let twitch = optional_provider_scopes(
+            StreamPlatform::Twitch,
+            &[
+                TWITCH_FOLLOWERS_SCOPE.to_string(),
+                TWITCH_SUBSCRIPTIONS_SCOPE.to_string(),
+                TWITCH_FOLLOWERS_SCOPE.to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(
+            twitch,
+            vec![
+                TWITCH_FOLLOWERS_SCOPE.to_string(),
+                TWITCH_SUBSCRIPTIONS_SCOPE.to_string()
+            ]
+        );
+        assert!(
+            optional_provider_scopes(
+                StreamPlatform::Twitch,
+                &["moderator:manage:banned_users".to_string()]
+            )
+            .is_err()
+        );
+        assert!(
+            optional_provider_scopes(StreamPlatform::X, &[TWITCH_FOLLOWERS_SCOPE.to_string()])
+                .is_err()
+        );
+        assert!(
+            optional_provider_scopes(StreamPlatform::Youtube, &[])
+                .unwrap()
+                .is_empty()
+        );
     }
 }

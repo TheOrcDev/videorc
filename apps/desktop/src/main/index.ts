@@ -128,7 +128,16 @@ import { NativePreviewRunAuthority } from './native-preview-run-authority'
 import { loadNativePreviewRealSurfaceDriver } from './native-preview-real-surface-loader'
 import { compositorSceneConflictsWithCommitted } from '../shared/native-preview-scene-authority'
 import { isCanonicalWindowsD3d11PreviewStatus } from '../shared/native-preview-capability'
-import { applyCommentsSnapshotDelta } from '../shared/comments-snapshot-delta'
+import {
+  applyCommentsSnapshotDelta,
+  MAX_COMMENTS_SNAPSHOT_MESSAGES
+} from '../shared/comments-snapshot-delta'
+import { normalizeLiveDashboardState, type LiveDashboardState } from '../shared/live-dashboard'
+import {
+  migrateStreamManagerFrame,
+  STREAM_MANAGER_DEFAULT_SIZE,
+  STREAM_MANAGER_LAYOUT_VERSION
+} from './stream-manager-frame'
 import {
   CommentsHistoryCache,
   CommentsViewSelection,
@@ -437,6 +446,9 @@ import type {
   SystemPermissionPane,
   RuntimeInfo,
   SessionCommentsPage,
+  SessionViewersPage,
+  AudienceSnapshot,
+  CommentsHistoryStats,
   VideorcAccountSnapshot,
   ViewerSample
 } from '../shared/backend'
@@ -522,6 +534,8 @@ let notesWindowContentProtected = false
 let notesWindowCloseFlushReady = false
 let notesWindowCloseFlushTimer: ReturnType<typeof setTimeout> | null = null
 let latestViewerSample: ViewerSample | null = null
+/** The Stream Manager's latest dashboard, history included (plan 055, S7). */
+let latestDashboardState: LiveDashboardState | null = null
 let commentsWindow: BrowserWindow | null = null
 let commentsWindowLastFrame: Electron.Rectangle | null = null
 let commentsWindowAlwaysOnTop = false
@@ -556,6 +570,7 @@ let commentsSmokeSnapshotOverride = false
 // Once a smoke seeds viewers or co-host state, the idle main renderer's pushes
 // (null viewers, the off co-host shape) must not overwrite the fixture.
 let commentsSmokeViewerOverride = false
+let commentsSmokeDashboardOverride = false
 let commentsSmokeCohostOverride = false
 let captionsWindow: BrowserWindow | null = null
 let captionsWindowLastFrame: Electron.Rectangle | null = null
@@ -2398,17 +2413,19 @@ function restoreNotesWindowOnLaunch(): void {
   }
 }
 
-// --- Detached Comments window -------------------------------------------------
-// A read-only live-chat reader in its own OS window (the comments plan's
-// "detachable second-monitor chat window"), mirroring the Notes window. Plain
-// BrowserWindow — no native surface, but content-protected so it can be kept
-// open during recording/livestreaming without appearing in captured output.
+// --- Stream Manager window (code name: comments) ------------------------------
+// The live dashboard in its own OS window (plan 055): chat, activity, stats
+// and Orcle, relayed from the main renderer. Plain BrowserWindow with no
+// native surface. It is NOT capture-protected (owner call, 2026-08-19: only
+// Notes is), so Studio closes it during a recording that would capture it.
 type CommentsWindowPrefs = {
   frame?: Electron.Rectangle
   alwaysOnTop?: boolean
   highlightAnchor?: CommentHighlightAnchor
   alwaysOnTopPreferenceVersion?: number
   open?: boolean
+  /** 2 once the frame moved off the old Chat default (plan 055, S8). */
+  layoutVersion?: number
 }
 
 function commentsWindowPrefsPath(): string {
@@ -2582,8 +2599,35 @@ function cacheCommentsSendResult(operation: CommentsSendOperation): 'live' | 'hi
   return 'history'
 }
 
+/** The finished session's saved viewer samples and audience, for History. */
+async function loadCommentsHistoryStats(sessionId: string): Promise<CommentsHistoryStats> {
+  const [viewers, audience] = await Promise.all([
+    requestBackendAdmin<SessionViewersPage>('sessions.viewers.list', { sessionId })
+      .then((page) => page.samples)
+      .catch(() => []),
+    requestBackendAdmin<AudienceSnapshot | null>('sessions.audience.get', { sessionId }).catch(
+      () => null
+    )
+  ])
+  return { viewers, audience }
+}
+
+async function attachCommentsHistoryStats(sessionId: string): Promise<void> {
+  const history = await loadCommentsHistoryStats(sessionId)
+  const cached = commentsHistoryCache.peek(sessionId)
+  if (!cached || cached.history) return
+  const selectedMode = commentsViewSelection.current()
+  commentsHistoryCache.put(
+    { ...cached, history },
+    selectedMode.kind === 'history' ? selectedMode.sessionId : undefined
+  )
+  if (selectedMode.kind === 'history' && selectedMode.sessionId === sessionId) {
+    emitCommentsView()
+  }
+}
+
 async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: 'history' }>) {
-  const maxMessages = 500
+  const maxMessages = MAX_COMMENTS_SNAPSHOT_MESSAGES
   let messages: LiveChatMessage[] = []
   let cursor: string | undefined
   do {
@@ -2596,10 +2640,14 @@ async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: '
     cursor = page.nextCursor
   } while (cursor && messages.length < maxMessages)
 
-  const latestSendOperation = await requestBackendAdmin<CommentsSendOperation | null>(
-    'liveChat.sendOperations.latest',
-    { sessionId: mode.sessionId }
-  ).catch(() => null)
+  // The saved stats for the History summary (plan 055, S9); a session
+  // recorded before the Stream Manager simply has none.
+  const [latestSendOperation, history] = await Promise.all([
+    requestBackendAdmin<CommentsSendOperation | null>('liveChat.sendOperations.latest', {
+      sessionId: mode.sessionId
+    }).catch(() => null),
+    loadCommentsHistoryStats(mode.sessionId)
+  ])
   return {
     mode,
     snapshot: {
@@ -2609,7 +2657,8 @@ async function loadCommentsHistoryView(mode: Extract<CommentsViewMode, { kind: '
       unreadCount: messages.length,
       updatedAt: new Date().toISOString()
     },
-    latestSendOperation: latestSendOperation ?? undefined
+    latestSendOperation: latestSendOperation ?? undefined,
+    history
   } satisfies HistoryCommentsView
 }
 
@@ -2644,6 +2693,13 @@ function emitCommentsViewerSample(sample: ViewerSample | null): void {
   latestViewerSample = sample
   if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
     sendElectronEvent(commentsWindow.webContents, 'comments-window:viewers', latestViewerSample)
+  }
+}
+
+function emitCommentsDashboard(state: LiveDashboardState | null): void {
+  latestDashboardState = state
+  if (commentsWindow && !commentsWindow.webContents.isDestroyed()) {
+    sendElectronEvent(commentsWindow.webContents, 'comments-window:dashboard', latestDashboardState)
   }
 }
 
@@ -2843,16 +2899,23 @@ async function openCommentsWindow(): Promise<CommentsWindowState> {
   }
 
   const prefs = loadCommentsWindowPrefs()
-  const rememberedFrame = commentsWindowLastFrame ?? prefs.frame ?? null
+  const savedFrame = migrateStreamManagerFrame(prefs)
+  if (savedFrame.migrated || prefs.layoutVersion !== STREAM_MANAGER_LAYOUT_VERSION) {
+    saveCommentsWindowPrefs({
+      ...(savedFrame.frame ? { frame: savedFrame.frame } : {}),
+      layoutVersion: STREAM_MANAGER_LAYOUT_VERSION
+    })
+  }
+  const rememberedFrame = commentsWindowLastFrame ?? savedFrame.frame ?? null
   const frame = rememberedFrame ? clampFrameToWorkArea(rememberedFrame) : null
   const chrome = glassWindowChrome('chat')
   const window = new BrowserWindow({
-    width: frame?.width ?? 420,
-    height: frame?.height ?? 640,
+    width: frame?.width ?? STREAM_MANAGER_DEFAULT_SIZE.width,
+    height: frame?.height ?? STREAM_MANAGER_DEFAULT_SIZE.height,
     ...(frame ? { x: frame.x, y: frame.y } : {}),
     minWidth: 320,
     minHeight: 360,
-    title: 'Videorc Chat',
+    title: 'Videorc Stream Manager',
     ...chrome.options,
     show: false,
     ...appWindowIconOptions(),
@@ -8442,6 +8505,8 @@ const MAIN_BACKEND_ADMIN_METHODS = new Set([
   'resource.admin.preview_surface_bounds',
   'preview.surface.take_native_host_commands',
   'sessions.comments.list',
+  'sessions.viewers.list',
+  'sessions.audience.get',
   'sessions.delete.resolve',
   'sessions.delete.complete',
   'liveChat.sendOperations.latest'
@@ -9898,7 +9963,8 @@ async function runSmokePreviewMotionCommand(
     const before = {
       highlight: latestCommentHighlightState,
       view: currentCommentsView(),
-      viewers: latestViewerSample
+      viewers: latestViewerSample,
+      dashboard: latestDashboardState
     }
     const invokeResults = await window.webContents.executeJavaScript(
       `(async () => {
@@ -9924,6 +9990,16 @@ async function runSmokePreviewMotionCommand(
             total: 999999,
             sampledAt: '2099-01-01T00:00:00Z',
             destinations: []
+          }]],
+          ['pushDashboard', [{
+            sessionId: 'forged-comments-session',
+            session: { state: 'live', startedAt: '2099-01-01T00:00:00Z' },
+            viewers: { latest: null, peak: 999999, history: [] },
+            audience: null,
+            health: null,
+            targets: [],
+            destinationEvents: [],
+            updatedAt: '2099-01-01T00:00:00Z'
           }]]
         ];
         return Promise.all(attempts.map(async ([method, args]) => {
@@ -9943,7 +10019,8 @@ async function runSmokePreviewMotionCommand(
     const after = {
       highlight: latestCommentHighlightState,
       view: currentCommentsView(),
-      viewers: latestViewerSample
+      viewers: latestViewerSample,
+      dashboard: latestDashboardState
     }
     return {
       invokeResults,
@@ -9998,6 +10075,12 @@ async function runSmokePreviewMotionCommand(
     )
   }
 
+  if (command === 'comments-window-seed-dashboard') {
+    commentsSmokeDashboardOverride = true
+    emitCommentsDashboard(params.state === null ? null : normalizeLiveDashboardState(params.state))
+    return { dashboard: latestDashboardState }
+  }
+
   if (command === 'comments-window-seed-viewers') {
     commentsSmokeViewerOverride = true
     const sample = params.sample
@@ -10020,7 +10103,7 @@ async function runSmokePreviewMotionCommand(
   if (command === 'comments-window-layout-metrics') {
     const window = commentsWindow
     if (!commentsWindowIsOpen() || !window) {
-      throw new Error('Chat window is not open.')
+      throw new Error('Stream Manager window is not open.')
     }
     const openMoreMenu = params.openMoreMenu === true
     const metrics = await window.webContents.executeJavaScript(
@@ -10060,26 +10143,27 @@ async function runSmokePreviewMotionCommand(
                 }))
             : [];
         const header = document.querySelector('[data-slot="chat-header"]');
-        const viewer = document.querySelector('[data-slot="viewer-count"]');
-        const viewerNumber = document.querySelector('[data-slot="viewer-count-number"]');
-        const actions = document.querySelector('[data-slot="cohost-actions"]');
-        const paneTrigger = document.querySelector('[data-slot="cohost-pane"] > button');
+        const strip = document.querySelector('[data-slot="stats-strip"]');
+        const summary = document.querySelector('[data-slot="stats-summary"]');
+        const statusBar = document.querySelector('[data-slot="status-bar"]');
+        const inlineActions = document.querySelector('[data-slot="stream-manager-actions"]');
+        const viewerTile = document.querySelector('[data-tile="viewers"] [data-slot="stat-value"]');
+        const viewerSummary = document.querySelector('[data-summary="viewers"]');
+        const viewerNode = visible(viewerTile) ? viewerTile : visible(viewerSummary) ? viewerSummary : null;
         const button = (label) => {
           const element = document.querySelector('button[aria-label="' + label + '"]');
           return { present: Boolean(element), visible: visible(element) };
         };
-        const backToLive = Array.from(document.querySelectorAll('button')).find(
-          (element) => (element.textContent ?? '').trim() === 'Back to live'
+        const textButton = (text) =>
+          Array.from(document.querySelectorAll('button')).find(
+            (element) => (element.textContent ?? '').trim() === text
+          );
+        const panes = Object.fromEntries(
+          ['chat', 'activity', 'orcle'].map((pane) => [
+            pane,
+            visible(document.querySelector('[data-pane="' + pane + '"]'))
+          ])
         );
-        const clearView = Array.from(document.querySelectorAll('button')).find(
-          (element) => (element.textContent ?? '').trim() === 'Clear view'
-        );
-        const cohostLabel = document.querySelector('[data-slot="cohost-status-label"]');
-        const inFlow = (element) =>
-          visible(element) && getComputedStyle(element).position !== 'absolute';
-        const watching = viewer?.lastElementChild ?? null;
-        // Radix opens a menu on pointerdown, not click; Escape closes it again.
-        // Poll both edges: a fixed sleep races Radix's layer registration.
         const settle = async (predicate) => {
           for (let attempt = 0; attempt < 20; attempt += 1) {
             if (predicate()) return true;
@@ -10090,7 +10174,7 @@ async function runSmokePreviewMotionCommand(
         const openMenu = () => document.querySelector('[role="menu"]');
         let moreMenuItems = null;
         if (${JSON.stringify(openMoreMenu)}) {
-          const trigger = document.querySelector('button[aria-label="More chat actions"]');
+          const trigger = document.querySelector('button[aria-label="More Stream Manager actions"]');
           if (visible(trigger) && !openMenu()) {
             trigger.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, button: 0, pointerType: 'mouse' }));
             if (await settle(() => openMenu()?.querySelector('[role^="menuitem"]'))) {
@@ -10104,36 +10188,35 @@ async function runSmokePreviewMotionCommand(
               (openMenu() ?? document).dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
               await settle(() => !openMenu());
             }
-            // Escape hands keyboard focus back to the trigger; drop it so the
-            // captures show what a pointer user sees.
             document.activeElement?.blur?.();
           }
         }
         return {
           moreMenuItems,
           menuOpenAfter: Boolean(document.querySelector('[role="menu"]')),
-          watchingVisible: inFlow(watching),
           windowWidth: window.innerWidth,
+          documentOverflow: document.documentElement.scrollWidth > window.innerWidth + 0.5,
           header: box(header),
           headerItems: visibleDescendants(header),
-          viewer: viewer
-            ? {
-                visible: visible(viewer),
-                text: viewer.textContent,
-                visibleNumber: visible(viewerNumber) ? viewerNumber.textContent : null,
-                ...rect(viewer)
-              }
+          headerButtons: header ? header.querySelectorAll('button').length : -1,
+          headerTitle: document.querySelector('[data-slot="stream-manager-title"]')?.textContent ?? '',
+          strip: visible(strip) ? box(strip) : null,
+          summary: visible(summary) ? box(summary) : null,
+          statusBar: box(statusBar),
+          statusBarItems: visibleDescendants(statusBar),
+          viewer: viewerNode
+            ? { visible: true, text: (viewerNode.textContent ?? '').trim(), ...rect(viewerNode) }
             : null,
-          cohostLabelVisible: inFlow(cohostLabel),
-          moreMenu: button('More chat actions'),
+          panes,
+          narrowTabs: visible(document.querySelector('[data-slot="pane-tabs-narrow"]')),
+          wideTabs: visible(document.querySelector('[data-slot="pane-tabs-wide"]')),
+          inlineActions: visible(inlineActions),
+          moreMenu: button('More Stream Manager actions'),
           highlightPosition: button('Highlight position'),
           keepOnTop: button('Keep this window on top'),
-          clearViewVisible: visible(clearView),
-          backToLiveVisible: visible(backToLive),
-          actions: box(actions),
-          actionItems: visibleDescendants(actions),
-          paneTrigger: box(paneTrigger),
-          paneTriggerItems: visibleDescendants(paneTrigger)
+          clearViewVisible: visible(textButton('Clear view')),
+          openPreviewVisible: visible(document.querySelector('button[aria-label="Open Preview"]')),
+          backToLiveVisible: visible(textButton('Back to live'))
         };
       })()`,
       true
@@ -12958,6 +13041,11 @@ app.whenReady().then(async () => {
       return currentCommentsView()
     }
     cacheCommentsView(view)
+    // A history view pushed from Library carries its transcript; its saved
+    // stats (the Stream Manager's History summary, plan 055) load here.
+    if (view.mode.kind === 'history' && !view.history) {
+      void attachCommentsHistoryStats(view.mode.sessionId)
+    }
     const selectedMode = commentsViewSelection.current()
     if (selectedMode.kind === view.mode.kind) {
       if (
@@ -13076,6 +13164,18 @@ app.whenReady().then(async () => {
     emitCommentsViewerSample(sample && typeof sample === 'object' ? (sample as ViewerSample) : null)
   })
   secureIpcHandle('comments-window:viewers-get', () => latestViewerSample)
+  // Stream Manager dashboard relay (plan 055, S7): same shape as the viewer
+  // relay. Only the main renderer pushes; the window seeds and follows.
+  secureIpcHandle('comments-window:dashboard-push', (event, state: unknown) => {
+    if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
+      return undefined
+    }
+    if (commentsSmokeDashboardOverride) {
+      return undefined
+    }
+    emitCommentsDashboard(state === null ? null : normalizeLiveDashboardState(state))
+  })
+  secureIpcHandle('comments-window:dashboard-get', () => latestDashboardState)
   secureIpcHandle('comments-window:cohost-push', (event, state: unknown) => {
     if (!mainWindow || event.sender.id !== mainWindow.webContents.id) {
       return undefined

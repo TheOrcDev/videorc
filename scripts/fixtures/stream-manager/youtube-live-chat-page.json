@@ -1,0 +1,207 @@
+{
+  "kind": "youtube#liveChatMessageListResponse",
+  "pollingIntervalMillis": 5000,
+  "nextPageToken": "next",
+  "items": [
+    {
+      "kind": "youtube#liveChatMessage",
+      "etag": "e",
+      "id": "yt-super-chat",
+      "snippet": {
+        "type": "superChatEvent",
+        "liveChatId": "chat-1",
+        "authorChannelId": "UC-yt-super-chat",
+        "publishedAt": "2026-09-24T10:00:00Z",
+        "hasDisplayContent": true,
+        "displayMessage": "great stream",
+        "superChatDetails": {
+          "amountMicros": "5000000",
+          "currency": "USD",
+          "amountDisplayString": "$5.00",
+          "userComment": "great stream",
+          "tier": 2
+        }
+      },
+      "authorDetails": {
+        "channelId": "UC-yt-super-chat",
+        "channelUrl": "",
+        "displayName": "Tipper",
+        "profileImageUrl": "https://yt3.ggpht.com/a",
+        "isVerified": false,
+        "isChatOwner": false,
+        "isChatSponsor": true,
+        "isChatModerator": false
+      }
+    },
+    {
+      "kind": "youtube#liveChatMessage",
+      "etag": "e",
+      "id": "yt-super-sticker",
+      "snippet": {
+        "type": "superStickerEvent",
+        "liveChatId": "chat-1",
+        "authorChannelId": "UC-yt-super-sticker",
+        "publishedAt": "2026-09-24T10:00:00Z",
+        "hasDisplayContent": true,
+        "displayMessage": "",
+        "superStickerDetails": {
+          "superStickerMetadata": {
+            "stickerId": "s1",
+            "altText": "Party hat",
+            "language": "en"
+          },
+          "amountMicros": "2000000",
+          "currency": "EUR",
+          "amountDisplayString": "€2.00",
+          "tier": 1
+        }
+      },
+      "authorDetails": {
+        "channelId": "UC-yt-super-sticker",
+        "channelUrl": "",
+        "displayName": "Stickerer",
+        "profileImageUrl": "https://yt3.ggpht.com/a",
+        "isVerified": false,
+        "isChatOwner": false,
+        "isChatSponsor": true,
+        "isChatModerator": false
+      }
+    },
+    {
+      "kind": "youtube#liveChatMessage",
+      "etag": "e",
+      "id": "yt-new-member",
+      "snippet": {
+        "type": "newSponsorEvent",
+        "liveChatId": "chat-1",
+        "authorChannelId": "UC-yt-new-member",
+        "publishedAt": "2026-09-24T10:00:00Z",
+        "hasDisplayContent": true,
+        "displayMessage": "Upgraded membership",
+        "newSponsorDetails": {
+          "memberLevelName": "Orc Squad",
+          "isUpgrade": true
+        }
+      },
+      "authorDetails": {
+        "channelId": "UC-yt-new-member",
+        "channelUrl": "",
+        "displayName": "NewMember",
+        "profileImageUrl": "https://yt3.ggpht.com/a",
+        "isVerified": false,
+        "isChatOwner": false,
+        "isChatSponsor": true,
+        "isChatModerator": false
+      }
+    },
+    {
+      "kind": "youtube#liveChatMessage",
+      "etag": "e",
+      "id": "yt-milestone",
+      "snippet": {
+        "type": "memberMilestoneChatEvent",
+        "liveChatId": "chat-1",
+        "authorChannelId": "UC-yt-milestone",
+        "publishedAt": "2026-09-24T10:00:00Z",
+        "hasDisplayContent": true,
+        "displayMessage": "one year!",
+        "memberMilestoneChatDetails": {
+          "userComment": "one year!",
+          "memberMonth": 12,
+          "memberLevelName": "Orc Squad"
+        }
+      },
+      "authorDetails": {
+        "channelId": "UC-yt-milestone",
+        "channelUrl": "",
+        "displayName": "Loyal",
+        "profileImageUrl": "https://yt3.ggpht.com/a",
+        "isVerified": false,
+        "isChatOwner": false,
+        "isChatSponsor": true,
+        "isChatModerator": false
+      }
+    },
+    {
+      "kind": "youtube#liveChatMessage",
+      "etag": "e",
+      "id": "yt-gifting",
+      "snippet": {
+        "type": "membershipGiftingEvent",
+        "liveChatId": "chat-1",
+        "authorChannelId": "UC-yt-gifting",
+        "publishedAt": "2026-09-24T10:00:00Z",
+        "hasDisplayContent": true,
+        "displayMessage": "",
+        "membershipGiftingDetails": {
+          "giftMembershipsCount": 5,
+          "giftMembershipsLevelName": "Orc Squad"
+        }
+      },
+      "authorDetails": {
+        "channelId": "UC-yt-gifting",
+        "channelUrl": "",
+        "displayName": "Gifter",
+        "profileImageUrl": "https://yt3.ggpht.com/a",
+        "isVerified": false,
+        "isChatOwner": false,
+        "isChatSponsor": true,
+        "isChatModerator": false
+      }
+    },
+    {
+      "kind": "youtube#liveChatMessage",
+      "etag": "e",
+      "id": "yt-gift-received",
+      "snippet": {
+        "type": "giftMembershipReceivedEvent",
+        "liveChatId": "chat-1",
+        "authorChannelId": "UC-yt-gift-received",
+        "publishedAt": "2026-09-24T10:00:00Z",
+        "hasDisplayContent": true,
+        "displayMessage": "",
+        "giftMembershipReceivedDetails": {
+          "memberLevelName": "Orc Squad",
+          "gifterChannelId": "UC-yt-gifting",
+          "associatedMembershipGiftingMessageId": "yt-gifting"
+        }
+      },
+      "authorDetails": {
+        "channelId": "UC-yt-gift-received",
+        "channelUrl": "",
+        "displayName": "Lucky",
+        "profileImageUrl": "https://yt3.ggpht.com/a",
+        "isVerified": false,
+        "isChatOwner": false,
+        "isChatSponsor": true,
+        "isChatModerator": false
+      }
+    },
+    {
+      "kind": "youtube#liveChatMessage",
+      "etag": "e",
+      "id": "yt-text",
+      "snippet": {
+        "type": "textMessageEvent",
+        "liveChatId": "chat-1",
+        "authorChannelId": "UC-yt-text",
+        "publishedAt": "2026-09-24T10:00:00Z",
+        "hasDisplayContent": true,
+        "displayMessage": "hello",
+        "textMessageDetails": {
+          "messageText": "hello"
+        }
+      },
+      "authorDetails": {
+        "channelId": "UC-yt-text",
+        "channelUrl": "",
+        "displayName": "Chatter",
+        "profileImageUrl": "https://yt3.ggpht.com/a",
+        "isVerified": false,
+        "isChatOwner": false,
+        "isChatSponsor": false,
+        "isChatModerator": false
+      }
+    }
+  ]
+}

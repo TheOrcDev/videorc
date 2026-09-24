@@ -57,6 +57,7 @@ import type {
   PlatformAccount,
   PlatformAccountValidation,
   OAuthProviderCredentialStatus,
+  PlatformConnectOptions,
   StreamAuthMode,
   StreamHealth,
   StreamMetadataDraft,
@@ -71,6 +72,7 @@ import type {
   XNativeLiveCapability,
   YouTubeChannel
 } from '@/lib/backend'
+import { TWITCH_AUDIENCE_SCOPES } from '../../../../shared/platform-scopes'
 import {
   isStreamTargetReady,
   oauthUnavailableReason,
@@ -476,7 +478,7 @@ function DestinationCard({
   xNativeCapabilityLoading: boolean
   youtubeChannels: YouTubeChannel[]
   youtubeChannelsLoading: boolean
-  onConnect: (platform: StreamPlatform) => void
+  onConnect: (platform: StreamPlatform, options?: PlatformConnectOptions) => void
   onDisconnect: (platform: StreamPlatform) => void
   onPatch: (targetId: string, patch: Partial<StreamTargetSettings>) => void
   onSaveManualStreamKey: (targetId: string, streamKey: string) => Promise<boolean>
@@ -996,7 +998,7 @@ function OAuthAccountPanel({
   xNativeCapabilityLoading: boolean
   youtubeChannels: YouTubeChannel[]
   youtubeChannelsLoading: boolean
-  onConnect: (platform: StreamPlatform) => void
+  onConnect: (platform: StreamPlatform, options?: PlatformConnectOptions) => void
   onDisconnect: (platform: StreamPlatform) => void
   onRefreshYouTubeChannels: (accountId?: string) => Promise<void>
   onRefreshXNativeCapability: (accountId?: string) => Promise<void>
@@ -1165,6 +1167,22 @@ function OAuthAccountPanel({
           <span className="text-xs text-muted-foreground">No granted scopes reported.</span>
         )}
       </div>
+      {platform === 'twitch' &&
+      !TWITCH_AUDIENCE_SCOPES.every((scope) => account.scopes.includes(scope)) ? (
+        <div className="flex items-center justify-between gap-3 rounded-row bg-background/60 px-2 py-1.5">
+          <span className="text-xs text-muted-foreground">
+            Follow alerts and your sub count in the Stream Manager need one more Twitch permission.
+          </span>
+          <Button
+            disabled={disabled}
+            size="sm"
+            variant="outline"
+            onClick={() => onConnect('twitch', { optionalScopes: TWITCH_AUDIENCE_SCOPES })}
+          >
+            Reconnect Twitch
+          </Button>
+        </div>
+      ) : null}
       {platform === 'youtube' ? (
         <Field>
           <FieldLabel>YouTube channel</FieldLabel>

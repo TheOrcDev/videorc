@@ -4,6 +4,7 @@ import {
   CAPTION_STYLE_DEFINITIONS,
   CAPTION_STYLE_IDS,
   captionBarMetrics,
+  commentHighlightCardText,
   layoutCaptionBar,
   MAX_CAPTION_BAR_LINES,
   wrapCaptionText,
@@ -143,5 +144,52 @@ describe('captionBarFramePosition', () => {
       position: 'top'
     })
     expect(top).toEqual({ x: 560, y: Math.round(1080 * 0.04) })
+  })
+})
+
+describe('commentHighlightCardText', () => {
+  const base = {
+    id: 's:twitch:1',
+    providerMessageId: '1',
+    platform: 'twitch' as const,
+    sessionId: 's',
+    authorName: 'morgaesis',
+    authorBadges: [],
+    authorRoles: [],
+    publishedAt: '2026-09-24T10:00:00Z',
+    receivedAt: '2026-09-24T10:00:00Z',
+    fragments: [],
+    isDeleted: false
+  }
+
+  it('leads an activity card with what happened (plan 055, S11)', () => {
+    expect(
+      commentHighlightCardText({
+        ...base,
+        eventType: 'membership',
+        messageText: "morgaesis subscribed at Tier 1. They've subscribed for 8 months!",
+        details: {
+          kind: 'subscription',
+          subscription: 'resub',
+          tier: '1000',
+          isPrime: false,
+          months: 8
+        }
+      })
+    ).toBe('Resubscribed for 8 months at Tier 1')
+    expect(
+      commentHighlightCardText({
+        ...base,
+        eventType: 'paid',
+        messageText: 'Cheer1500 amazing setup',
+        details: { kind: 'cheer', bits: 1500 }
+      })
+    ).toBe('Cheered 1,500 bits: amazing setup')
+  })
+
+  it('keeps plain chat as the message itself', () => {
+    expect(commentHighlightCardText({ ...base, eventType: 'message', messageText: 'hi' })).toBe(
+      'hi'
+    )
   })
 })

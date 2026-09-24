@@ -1,0 +1,34 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "49912639",
+  "chatter_user_login": "zerothedeadrobot",
+  "chatter_user_name": "zerothedeadrobot",
+  "chatter_is_anonymous": false,
+  "color": "#1E90FF",
+  "badges": [],
+  "system_message": "zerothedeadrobot subscribed with Prime.",
+  "message_id": "notice-sub",
+  "message": {
+    "text": "",
+    "fragments": []
+  },
+  "notice_type": "sub",
+  "sub": {
+    "sub_tier": "1000",
+    "is_prime": true,
+    "duration_months": 1
+  },
+  "resub": null,
+  "sub_gift": null,
+  "community_sub_gift": null,
+  "gift_paid_upgrade": null,
+  "prime_paid_upgrade": null,
+  "raid": null,
+  "unraid": null,
+  "pay_it_forward": null,
+  "announcement": null,
+  "bits_badge_tier": null,
+  "charity_donation": null
+}

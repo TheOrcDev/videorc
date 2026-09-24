@@ -937,7 +937,7 @@ function RowActions({
               }
             >
               <ChatIcon />
-              Open Chat
+              Open in Stream Manager
             </DropdownMenuItem>
           </DropdownMenuGroup>
           <DropdownMenuSeparator />

@@ -16,6 +16,13 @@ describe('preload API policy', () => {
     }
   })
 
+  it('gives the Stream Manager the dashboard to read, never to push', () => {
+    const comments = apiForRendererRole(fakeApi, 'comments')
+    expect(comments).toHaveProperty('getDashboard')
+    expect(comments).toHaveProperty('onDashboard')
+    expect(comments).not.toHaveProperty('pushDashboard')
+  })
+
   it('fails closed when the preload has no main-owned role argument', () => {
     expect(apiForRendererRole(fakeApi, null)).toEqual({})
     expect(Object.isFrozen(apiForRendererRole(fakeApi, null))).toBe(true)

@@ -11,6 +11,8 @@ import type {
   SessionHealthEventsPage,
   SessionListPage,
   SessionLogsPage,
+  SessionViewersPage,
+  AudienceSnapshot,
   StreamOutputTopologyProbeParams,
   StreamOutputTopologyProbeResult,
   StreamTargetsSnapshot
@@ -590,6 +592,76 @@ describe('backend RPC contract', () => {
         limit: 1001
       })
     ).toThrow('less than or equal to 1000')
+  })
+
+  it('types a session viewer history and rejects forged sample fields', () => {
+    expectTypeOf<BackendRpcResult<'sessions.viewers.list'>>().toEqualTypeOf<SessionViewersPage>()
+    const sample = {
+      sessionId: 'session-1',
+      platforms: [
+        { platform: 'twitch', count: 40 },
+        { platform: 'x', count: 2 }
+      ],
+      total: 42,
+      at: '2026-09-24T10:00:00Z'
+    }
+    expect(validateBackendRpcParams('sessions.viewers.list', { sessionId: 'session-1' })).toEqual({
+      sessionId: 'session-1'
+    })
+    expect(validateBackendRpcResult('sessions.viewers.list', { samples: [sample] })).toEqual({
+      samples: [sample]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', {
+        samples: [{ ...sample, platforms: [{ platform: 'myspace', count: 1 }] }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', { samples: [{ ...sample, total: -1 }] })
+    ).toThrow()
+  })
+
+  it('types audience snapshots and never accepts a forged capability', () => {
+    expectTypeOf<
+      BackendRpcResult<'stream.audience.snapshot'>
+    >().toEqualTypeOf<AudienceSnapshot | null>()
+    const snapshot = {
+      sessionId: 'session-1',
+      platforms: [
+        {
+          platform: 'twitch',
+          metric: 'followers',
+          capability: 'available',
+          total: 61_942,
+          baseline: 61_930,
+          delta: 12,
+          at: '2026-09-24T10:02:00Z'
+        },
+        { platform: 'youtube', metric: 'subscribers', capability: 'hidden' },
+        {
+          platform: 'x',
+          metric: 'followers',
+          capability: 'needs-reconnect',
+          message: 'Reconnect X to show followers.'
+        }
+      ],
+      updatedAt: '2026-09-24T10:02:00Z'
+    }
+    expect(validateBackendRpcResult('stream.audience.snapshot', snapshot)).toEqual(snapshot)
+    expect(validateBackendRpcResult('stream.audience.snapshot', null)).toBeNull()
+    expect(validateBackendRpcResult('sessions.audience.get', snapshot)).toEqual(snapshot)
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...snapshot,
+        platforms: [{ ...snapshot.platforms[0], capability: 'guessed' }]
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...snapshot,
+        platforms: [{ ...snapshot.platforms[0], total: null }]
+      })
+    ).toThrow()
   })
 
   it('keeps Library summaries slim and types each paginated detail collection', () => {

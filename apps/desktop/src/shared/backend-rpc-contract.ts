@@ -1,4 +1,5 @@
 import type {
+  AudienceSnapshot,
   SessionSources,
   SourceSwitchParams,
   BackendHealth,
@@ -48,6 +49,8 @@ import type {
   SessionLogsPage,
   SessionStopParams,
   SessionStorageTotals,
+  SessionViewersListParams,
+  SessionViewersPage,
   StartSessionParams,
   PerformanceCheckProgress,
   PerformanceCheckRunParams,
@@ -212,6 +215,9 @@ export interface BackendRpcMethodMap {
   'sessions.aiArtifacts.list': BackendRpcDefinition<SessionDetailListParams, SessionAiArtifactsPage>
   'sessions.storage': BackendRpcDefinition<undefined, SessionStorageTotals>
   'sessions.comments.list': BackendRpcDefinition<SessionCommentsListParams, SessionCommentsPage>
+  'sessions.viewers.list': BackendRpcDefinition<SessionViewersListParams, SessionViewersPage>
+  'sessions.audience.get': BackendRpcDefinition<{ sessionId: string }, AudienceSnapshot | null>
+  'stream.audience.snapshot': BackendRpcDefinition<undefined, AudienceSnapshot | null>
   'sessions.delete': BackendRpcDefinition<{ sessionIds: string[] }, SessionDeletionOperation[]>
   'sessions.delete.pending': BackendRpcDefinition<undefined, SessionDeletionOperation[]>
   'noiseCleanup.start': BackendRpcDefinition<{ sessionId: string }, NoiseCleanupJob>
@@ -599,6 +605,55 @@ const streamOutputTopologyProbeResultSchema = boundedSemanticValue(
 // question provenance exactly like the OAuth platforms.
 const STREAM_PLATFORMS = ['youtube', 'twitch', 'x', 'tiktok', 'instagram', 'custom'] as const
 const streamPlatformSchema = enumSchema(STREAM_PLATFORMS) as RuntimeSchema<StreamPlatform>
+
+const audienceSnapshotSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    platforms: arraySchema(
+      objectSchema(
+        {
+          platform: streamPlatformSchema,
+          metric: enumSchema(['followers', 'subscribers'] as const),
+          capability: enumSchema([
+            'pending',
+            'available',
+            'hidden',
+            'needs-reconnect',
+            'unavailable'
+          ] as const),
+          total: optionalSchema(numberSchema({ integer: true, min: 0 })),
+          baseline: optionalSchema(numberSchema({ integer: true, min: 0 })),
+          delta: optionalSchema(numberSchema({ integer: true })),
+          at: optionalSchema(boundedString),
+          message: optionalSchema(stringSchema({ maxLength: 2_000 })),
+          subscribers: optionalSchema(numberSchema({ integer: true, min: 0 })),
+          subscriberPoints: optionalSchema(numberSchema({ integer: true, min: 0 })),
+          audienceScopes: optionalSchema(booleanSchema)
+        },
+        { allowUnknown: false }
+      ),
+      { maxLength: 6 }
+    ),
+    updatedAt: boundedString
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<AudienceSnapshot>
+
+const viewerSampleSchema = objectSchema(
+  {
+    sessionId: boundedString,
+    platforms: arraySchema(
+      objectSchema(
+        { platform: streamPlatformSchema, count: numberSchema({ integer: true, min: 0 }) },
+        { allowUnknown: false }
+      ),
+      { maxLength: 6 }
+    ),
+    total: numberSchema({ integer: true, min: 0 }),
+    at: boundedString
+  },
+  { allowUnknown: false }
+)
 
 const streamTargetRuntimeSchema = objectSchema(
   {
@@ -2193,6 +2248,21 @@ const runtimeContracts = {
         messages: arraySchema(boundedBackendPayloadSchema, { maxLength: 1000 }),
         nextCursor: optionalSchema(stringSchema({ minLength: 1, maxLength: 4096 }))
       },
+      { allowUnknown: false }
+    )
+  },
+  'sessions.audience.get': {
+    params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
+    result: nullableSchema(audienceSnapshotSchema)
+  },
+  'stream.audience.snapshot': {
+    params: undefinedSchema,
+    result: nullableSchema(audienceSnapshotSchema)
+  },
+  'sessions.viewers.list': {
+    params: objectSchema({ sessionId: boundedString }, { allowUnknown: false }),
+    result: objectSchema(
+      { samples: arraySchema(viewerSampleSchema, { maxLength: 1440 }) },
       { allowUnknown: false }
     )
   },

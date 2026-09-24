@@ -260,6 +260,11 @@ describe('renderer security policy', () => {
     expect(roleCanInvokeChannel('notes', 'resource:open-session')).toBe(false)
     expect(roleCanInvokeChannel('comments', 'comments-window:send')).toBe(true)
     expect(roleCanInvokeChannel('comments', 'comments-window:push-snapshot')).toBe(false)
+    // The Stream Manager reads the dashboard; only the main renderer writes it.
+    expect(roleCanInvokeChannel('comments', 'comments-window:dashboard-get')).toBe(true)
+    expect(roleCanInvokeChannel('comments', 'comments-window:dashboard-push')).toBe(false)
+    expect(roleCanInvokeChannel('main', 'comments-window:dashboard-push')).toBe(true)
+    expect(roleCanInvokeChannel('notes', 'comments-window:dashboard-get')).toBe(false)
     expect(roleCanInvokeChannel('captions', 'captions-window:get-snapshot')).toBe(true)
     expect(roleCanInvokeChannel('captions', 'captions-window:push-snapshot')).toBe(false)
   })

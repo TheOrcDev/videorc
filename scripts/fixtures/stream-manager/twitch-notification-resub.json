@@ -1,0 +1,49 @@
+{
+  "broadcaster_user_id": "1971641",
+  "broadcaster_user_login": "streamer",
+  "broadcaster_user_name": "Streamer",
+  "chatter_user_id": "49912639",
+  "chatter_user_login": "morgaesis",
+  "chatter_user_name": "morgaesis",
+  "chatter_is_anonymous": false,
+  "color": "#1E90FF",
+  "badges": [],
+  "system_message": "morgaesis subscribed at Tier 1. They've subscribed for 3 months!",
+  "message_id": "notice-resub",
+  "message": {
+    "text": "Happy Wednesday",
+    "fragments": [
+      {
+        "type": "text",
+        "text": "Happy Wednesday",
+        "cheermote": null,
+        "emote": null,
+        "mention": null
+      }
+    ]
+  },
+  "notice_type": "resub",
+  "sub": null,
+  "resub": {
+    "cumulative_months": 3,
+    "duration_months": 1,
+    "streak_months": 2,
+    "sub_tier": "1000",
+    "is_prime": false,
+    "is_gift": false,
+    "gifter_is_anonymous": null,
+    "gifter_user_id": null,
+    "gifter_user_name": null,
+    "gifter_user_login": null
+  },
+  "sub_gift": null,
+  "community_sub_gift": null,
+  "gift_paid_upgrade": null,
+  "prime_paid_upgrade": null,
+  "raid": null,
+  "unraid": null,
+  "pay_it_forward": null,
+  "announcement": null,
+  "bits_badge_tier": null,
+  "charity_donation": null
+}

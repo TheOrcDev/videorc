@@ -31,6 +31,11 @@ export const AUXILIARY_API_KEYS = {
     'onCommentsDelta',
     'getViewerSample',
     'onViewerSample',
+    // Stream Manager dashboard (plan 055, S7): read and follow only.
+    'getDashboard',
+    'onDashboard',
+    // The status bar's Open Preview hint (plan 055, decision 4).
+    'openPreviewWindow',
     // Co-host presence: the window renders the relayed state and can act on it
     // (dismiss/answer, and — presence W2 — turn the engine on). Without these
     // the Comments window silently had no co-host at all.

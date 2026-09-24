@@ -1,3 +1,4 @@
+import type { LiveDashboardState } from './live-dashboard'
 import type { GlobalShortcutAction } from './global-shortcuts'
 import type { BackgroundImportResult } from './background-import'
 export type { BackgroundImportResult } from './background-import'
@@ -1121,6 +1122,13 @@ export interface OAuthStartParams {
 export interface OAuthStartProviderParams {
   platform: StreamPlatform
   redirectUri?: string
+  /** Scopes on top of the base set; the backend accepts only offered ones (plan 055, S6). */
+  optionalScopes?: string[]
+}
+
+/** Options for connecting (or reconnecting) a platform account. */
+export interface PlatformConnectOptions {
+  optionalScopes?: readonly string[]
 }
 
 export interface OAuthStartResult {
@@ -3310,6 +3318,8 @@ export interface CommentsSendCommand {
   text: string
   /** Co-host reply: the open question this send answers (cleared on sent/partial). */
   inReplyToQuestionId?: string
+  /** Only these providers (the Stream Manager's "Send to" picker); absent sends to all. */
+  destinationIds?: string[]
 }
 
 export interface CommentsClearCommand {
@@ -3378,6 +3388,13 @@ export interface CommentsViewSnapshot {
   mode: CommentsViewMode
   snapshot: LiveChatSnapshot
   latestSendOperation?: CommentsSendOperation
+  /** History mode only: the finished session's saved stats (plan 055, S9). */
+  history?: CommentsHistoryStats
+}
+
+export interface CommentsHistoryStats {
+  viewers: ViewerSample[]
+  audience: AudienceSnapshot | null
 }
 
 // Detached preview window: main is the lifecycle and bounds authority; renderer
@@ -3727,6 +3744,10 @@ export interface VideorcApi {
   pushViewerSample?: (sample: ViewerSample | null) => Promise<void>
   getViewerSample?: () => Promise<ViewerSample | null>
   onViewerSample?: (callback: (sample: ViewerSample | null) => void) => () => void
+  /** Stream Manager dashboard relay (plan 055, S7): main renderer -> main -> window. */
+  pushDashboard?: (state: LiveDashboardState | null) => Promise<void>
+  getDashboard?: () => Promise<LiveDashboardState | null>
+  onDashboard?: (callback: (state: LiveDashboardState | null) => void) => () => void
   openSession: (sessionId: string) => Promise<string>
   trashSessionDeletion: (operationId: string) => Promise<{ deleted: boolean; failedCount: number }>
   onOAuthCallbackUrl: (callback: (envelope: OAuthCallbackEnvelope) => void) => () => void
@@ -3860,6 +3881,70 @@ export type LiveChatEventType =
   | 'system'
   | 'deleted'
   | 'moderation'
+  | 'follow'
+
+export type LiveChatMembershipKind = 'new' | 'upgrade' | 'milestone' | 'gift' | 'gift-received'
+
+/** Twitch subscription notice kinds, kebab-cased from EventSub's `notice_type`. */
+export type LiveChatSubscriptionKind =
+  | 'sub'
+  | 'resub'
+  | 'sub-gift'
+  | 'community-sub-gift'
+  | 'gift-paid-upgrade'
+  | 'prime-paid-upgrade'
+  | 'pay-it-forward'
+
+/**
+ * Structured event facts (wire mirror of live_chat.rs `LiveChatEventDetails`,
+ * plan 055). Absent on plain chat. Amounts are micros of `currency`; a Twitch
+ * `tier` is `1000`/`2000`/`3000`.
+ */
+export type LiveChatEventDetails =
+  | {
+      kind: 'super-chat'
+      amountMicros: number
+      currency: string
+      amountDisplay: string
+      tier?: number
+    }
+  | {
+      kind: 'super-sticker'
+      amountMicros: number
+      currency: string
+      amountDisplay: string
+      altText?: string
+    }
+  | {
+      kind: 'membership'
+      membership: LiveChatMembershipKind
+      levelName?: string
+      months?: number
+      giftCount?: number
+    }
+  | {
+      kind: 'subscription'
+      subscription: LiveChatSubscriptionKind
+      tier?: string
+      isPrime: boolean
+      months?: number
+      streakMonths?: number
+      giftCount?: number
+      recipientName?: string
+      /** Ties Twitch's single gifts to their community gift. */
+      communityGiftId?: string
+    }
+  | { kind: 'cheer'; bits: number }
+  | { kind: 'raid'; viewerCount: number }
+  | { kind: 'announcement'; color?: string }
+  | { kind: 'follow' }
+
+/** The message a chat message replies to, when the platform threads replies. */
+export interface LiveChatReply {
+  parentMessageId: string
+  parentAuthorName: string
+  parentText: string
+}
 
 /** Live connector state for one platform within a session. */
 export interface LiveChatProviderState {
@@ -3904,6 +3989,10 @@ export interface LiveChatMessage {
   amountText?: string
   isDeleted: boolean
   rawProviderType?: string
+  details?: LiveChatEventDetails
+  reply?: LiveChatReply
+  /** The author's first message in the channel (Twitch intro, or unseen in earlier sessions). */
+  firstMessage?: boolean
 }
 
 /** Authoritative live-chat snapshot: provider rows + persisted/buffered messages + unread count. */
@@ -3938,6 +4027,8 @@ export interface CommentsSendParams {
   text: string
   /** Co-host reply: on a terminal `sent`/`partial` phase the engine marks this question answered. */
   inReplyToQuestionId?: string
+  /** Only these providers; absent sends to every provider. */
+  destinationIds?: string[]
 }
 
 // --- Live Chat Co-host (Premium cloud AI) ---
@@ -4381,12 +4472,64 @@ export interface ViewerPlatformCount {
   count: number
 }
 
-/** Live concurrent-viewer sample (viewer rider V1) — viewers, not subs. */
+/**
+ * Live concurrent-viewer sample (viewer rider V1) — viewers, not subs. `total`
+ * sums every platform with a fresh count across all samplers (plan 055, B1).
+ */
 export interface ViewerSample {
   sessionId: string
   platforms: ViewerPlatformCount[]
   total: number
   at: string
+}
+
+/** What a platform's audience number counts: YouTube has subscribers, not followers. */
+export type AudienceMetric = 'followers' | 'subscribers'
+
+/**
+ * Whether a platform's audience can be shown (plan 055, S3): `pending` until
+ * the first read, `hidden` when the channel hides it, `needs-reconnect` when
+ * the platform refused the token, `unavailable` when this build or account
+ * cannot read it (`message` says why).
+ */
+export type AudienceCapability =
+  | 'pending'
+  | 'available'
+  | 'hidden'
+  | 'needs-reconnect'
+  | 'unavailable'
+
+export interface PlatformAudience {
+  platform: StreamPlatform
+  metric: AudienceMetric
+  capability: AudienceCapability
+  total?: number
+  /** The session's first reading; `delta` is `total - baseline`. */
+  baseline?: number
+  delta?: number
+  at?: string
+  message?: string
+  /** Twitch only, with the opt-in `channel:read:subscriptions` scope. */
+  subscribers?: number
+  subscriberPoints?: number
+  /** Twitch only: false when follow alerts and the sub count need a reconnect. */
+  audienceScopes?: boolean
+}
+
+/** `stream.audience` event and `stream.audience.snapshot` result (wire mirror of audience.rs). */
+export interface AudienceSnapshot {
+  sessionId: string
+  platforms: PlatformAudience[]
+  updatedAt: string
+}
+
+/** `sessions.viewers.list` (plan 055, S1): a session's saved samples, oldest first. */
+export interface SessionViewersListParams {
+  sessionId: string
+}
+
+export interface SessionViewersPage {
+  samples: ViewerSample[]
 }
 
 export interface ObsDiscovery {

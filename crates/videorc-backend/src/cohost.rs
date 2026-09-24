@@ -1878,6 +1878,9 @@ mod tests {
             amount_text: None,
             is_deleted: false,
             raw_provider_type: Some("twitch".to_string()),
+            details: None,
+            reply: None,
+            first_message: false,
         }
     }
 

@@ -42,13 +42,12 @@ const DELAYED_SEND_ACK_MS =
   COMMENTS_SEND_TIMING_CONTRACT.reconciliationMs +
   2_000
 
-// Plan 047: the Chat window stays whole at every width it allows (320px
-// minimum). The header's container-query tiers follow its content box — the
-// window minus the 88px traffic-light gutter and 12px right gutter:
-//   Full ≥ 560px window, Compact 430–559px, Tight < 430px.
-const FULL_TIER_MIN_WIDTH = 560
-const TIGHT_TIER_MAX_WIDTH = 429
-const NARROW_PROBE_WIDTHS = [320, 380, 420, 429, 430, 480, 559, 560, 900]
+// Plan 055: the Stream Manager stays whole at every width it allows (320px
+// minimum). Its body is a container with three tiers (D1):
+//   Wide ≥ 1040px, Medium 640–1039px, Narrow < 640px.
+const WIDE_TIER_MIN_WIDTH = 1040
+const MEDIUM_TIER_MIN_WIDTH = 640
+const SWEEP_WIDTHS = [320, 480, 640, 800, 1040, 1280]
 
 let launched
 let smoke
@@ -210,16 +209,26 @@ async function main() {
   assertProbe(
     authority.after?.highlight?.generation !== 999 &&
       authority.after?.view?.snapshot?.sessionId !== 'forged-comments-session' &&
-      authority.after?.viewers?.total !== 999999,
-    'authority: detached renderer cannot forge snapshot, viewers, or On stream state',
+      authority.after?.viewers?.total !== 999999 &&
+      authority.after?.dashboard?.sessionId !== 'forged-comments-session',
+    'authority: detached renderer cannot forge snapshot, viewers, dashboard, or On stream state',
     JSON.stringify(authority)
+  )
+  assertProbe(
+    authority.invokeResults?.some((attempt) => attempt.method === 'pushDashboard'),
+    'authority: the probe tried to push a forged dashboard',
+    JSON.stringify(authority.invokeResults)
   )
 
   // Chat chrome: renamed title, the corner picker, and real glass (plan 050):
   // the shared window frame, and on macOS the OS material pinned dark through
   // the native addon (the dev launch builds it first).
   const chrome = await smokeCommand('comments-window-reader-state')
-  assertProbe(chrome.headerTitle === 'Chat', 'chrome: header title reads Chat', chrome.headerTitle)
+  assertProbe(
+    chrome.headerTitle === 'Stream Manager',
+    'chrome: header title reads Stream Manager',
+    chrome.headerTitle
+  )
   assertProbe(chrome.windowFrame === true, 'chrome: the shared glass window frame is mounted')
   assertProbe(
     process.platform === 'darwin'
@@ -615,70 +624,80 @@ async function captureState(name, label, width = 420, height = 640) {
 
 async function probeNarrowWidths() {
   await smokeCommand('comments-window-seed-viewers', { sample: viewerSampleFixture() })
+  await smokeCommand('comments-window-seed-dashboard', { state: dashboardFixture() })
   await smokeCommand('comments-window-seed-cohost', { state: cohostListeningFixture() })
 
-  for (const width of NARROW_PROBE_WIDTHS) {
+  for (const width of SWEEP_WIDTHS) {
     const metrics = await layoutAt(width, { openMoreMenu: true })
-    const tag = `narrow ${width}px live`
+    const tag = `sweep ${width}px live`
     assertHeaderFits(metrics, tag)
     assertProbe(
-      metrics.viewer?.visible === true &&
-        metrics.viewer.visibleNumber === '1.2k' &&
-        metrics.viewer.height <= 20,
-      `${tag}: viewer count is visible, one line`,
-      JSON.stringify(metrics.viewer)
+      metrics.documentOverflow === false,
+      `${tag}: nothing overflows the window`,
+      JSON.stringify(metrics.windowWidth)
     )
     assertProbe(
-      metrics.watchingVisible === width > TIGHT_TIER_MAX_WIDTH &&
-        metrics.cohostLabelVisible === width > TIGHT_TIER_MAX_WIDTH,
-      `${tag}: "watching" and the Orcle label show only above the Tight tier`,
-      JSON.stringify({ watching: metrics.watchingVisible, cohost: metrics.cohostLabelVisible })
+      metrics.headerButtons === 0 && metrics.headerTitle === 'Stream Manager',
+      `${tag}: the title row carries the title only`,
+      JSON.stringify({ buttons: metrics.headerButtons, title: metrics.headerTitle })
     )
-    if (width >= FULL_TIER_MIN_WIDTH) {
+    assertProbe(
+      metrics.viewer?.visible === true && metrics.viewer.text.includes('1.2k'),
+      `${tag}: the viewer count is visible while live`,
+      JSON.stringify(metrics.viewer)
+    )
+    assertBoxFits(metrics.statusBar, metrics.statusBarItems, `${tag}: status bar`)
+    if (width >= WIDE_TIER_MIN_WIDTH) {
       assertProbe(
-        metrics.highlightPosition.visible &&
+        metrics.wideTabs &&
+          !metrics.narrowTabs &&
+          metrics.panes.chat &&
+          (metrics.panes.activity || metrics.panes.orcle) &&
+          metrics.strip !== null,
+        `${tag}: Wide shows the strip, Chat and the right pane`,
+        JSON.stringify({ panes: metrics.panes, wide: metrics.wideTabs, strip: metrics.strip })
+      )
+    } else {
+      const shown = Object.values(metrics.panes).filter(Boolean).length
+      assertProbe(
+        metrics.narrowTabs && !metrics.wideTabs && shown === 1,
+        `${tag}: one pane at a time behind the segmented control`,
+        JSON.stringify({ panes: metrics.panes, narrow: metrics.narrowTabs })
+      )
+    }
+    if (width >= MEDIUM_TIER_MIN_WIDTH) {
+      assertProbe(
+        metrics.inlineActions &&
           metrics.keepOnTop.visible &&
+          metrics.highlightPosition.visible &&
           metrics.clearViewVisible &&
-          !metrics.moreMenu.visible,
-        `${tag}: Full tier keeps every control inline and no ⋯`,
+          metrics.openPreviewVisible &&
+          !metrics.moreMenu.visible &&
+          metrics.strip !== null,
+        `${tag}: every control is inline in the status bar`,
         JSON.stringify(metrics)
       )
     } else {
       assertProbe(
-        metrics.moreMenu.visible &&
-          !metrics.highlightPosition.visible &&
-          !metrics.keepOnTop.visible &&
-          !metrics.clearViewVisible,
-        `${tag}: controls fold into ⋯`,
+        metrics.moreMenu.visible && !metrics.inlineActions && metrics.summary !== null,
+        `${tag}: controls fold into ⋯ and the strip becomes one line`,
         JSON.stringify(metrics)
       )
       assertProbe(
-        ['Highlight position', 'Keep on top', 'Clear view'].every((label) =>
+        ['Highlight position', 'Keep on top', 'Open Preview', 'Clear view'].every((label) =>
           metrics.moreMenuItems?.some((item) => item.startsWith(label))
         ) && metrics.menuOpenAfter === false,
-        `${tag}: ⋯ offers highlight position, keep on top and Clear view, then closes`,
+        `${tag}: ⋯ offers highlight position, keep on top, Open Preview and Clear view`,
         JSON.stringify({ items: metrics.moreMenuItems, openAfter: metrics.menuOpenAfter })
       )
     }
-    assertBoxFits(metrics.actions, metrics.actionItems, `${tag}: Orcle action bar`)
-    assertBoxFits(metrics.paneTrigger, metrics.paneTriggerItems, `${tag}: Orcle pane header`)
-    if (width === 320) await captureState('narrow-320-live', 'narrow 320px live', 320, 640)
-    if (width === 900) await captureState('wide-900-live', 'wide 900px live', 900, 640)
+    if (width === 320) await captureState('sweep-320-live', 'Stream Manager 320px live', 320, 640)
+    if (width === 800) await captureState('sweep-800-live', 'Stream Manager 800px live', 800, 640)
+    if (width === 1280)
+      await captureState('sweep-1280-live', 'Stream Manager 1280px live', 1280, 720)
   }
 
-  // The longest header label Orcle can show: paused with a reason.
-  await smokeCommand('comments-window-seed-cohost', { state: cohostPausedFixture() })
-  for (const width of [320, 430, 480, 560]) {
-    const metrics = await layoutAt(width)
-    assertHeaderFits(metrics, `narrow ${width}px Orcle paused`)
-    assertProbe(
-      metrics.viewer?.visible === true && metrics.viewer.height <= 20,
-      `narrow ${width}px Orcle paused: viewer count keeps its line`,
-      JSON.stringify(metrics.viewer)
-    )
-  }
-
-  // History: Back to live is the primary action and never folds.
+  // History: Back to live is the primary action and stays visible.
   await smokeCommand('comments-window-push-snapshot', {
     mode: HISTORY_MODE,
     snapshot: historySnapshot()
@@ -688,16 +707,16 @@ async function probeNarrowWidths() {
     (s) => s.text.includes('Back to live'),
     5000
   )
-  for (const width of [320, 380, 480, 900]) {
+  for (const width of [320, 640, 1280]) {
     const metrics = await layoutAt(width)
-    assertHeaderFits(metrics, `narrow ${width}px history`)
+    assertHeaderFits(metrics, `sweep ${width}px history`)
     assertProbe(
       metrics.backToLiveVisible === true,
-      `narrow ${width}px history: Back to live stays visible`,
+      `sweep ${width}px history: Back to live stays visible`,
       JSON.stringify(metrics)
     )
   }
-  await captureState('narrow-320-history', 'narrow 320px history', 320, 640)
+  await captureState('sweep-320-history', 'Stream Manager 320px history', 320, 640)
   await smokeCommand('comments-window-set-view-mode', { mode: { kind: 'live' } })
   await waitFor(
     () => smokeCommand('comments-window-reader-state'),
@@ -708,6 +727,7 @@ async function probeNarrowWidths() {
   // Leave the rest of the probe exactly as it found the window: its frame is
   // persisted and asserted after reopen.
   await smokeCommand('comments-window-seed-viewers', { sample: null })
+  await smokeCommand('comments-window-seed-dashboard', { state: null })
   await smokeCommand('comments-window-seed-cohost', { state: cohostOffFixture() })
   await smokeCommand('comments-window-set-bounds', { width: 420, height: 640 })
   await waitFor(
@@ -763,6 +783,59 @@ function assertBoxFits(box, items, label) {
     `${label} fits without clipping`,
     JSON.stringify({ box, clipped })
   )
+}
+
+function dashboardFixture() {
+  const now = new Date()
+  const at = (secondsAgo) => new Date(now.getTime() - secondsAgo * 1000).toISOString()
+  return {
+    sessionId: NEXT_LIVE_SESSION_ID,
+    session: { state: 'live', startedAt: at(1840) },
+    viewers: {
+      latest: viewerSampleFixture(),
+      peak: 1402,
+      history: [900, 1010, 1180, 1402, 1234].map((total, index) => ({
+        at: at((5 - index) * 30),
+        total
+      }))
+    },
+    audience: {
+      sessionId: NEXT_LIVE_SESSION_ID,
+      updatedAt: at(10),
+      platforms: [
+        {
+          platform: 'twitch',
+          metric: 'followers',
+          capability: 'available',
+          total: 61942,
+          baseline: 61930,
+          delta: 12,
+          audienceScopes: false
+        },
+        { platform: 'youtube', metric: 'subscribers', capability: 'hidden' }
+      ]
+    },
+    health: {
+      latest: {
+        sessionId: NEXT_LIVE_SESSION_ID,
+        bitrateKbps: 6012,
+        fps: 30,
+        droppedFrames: 0,
+        createdAt: at(2)
+      },
+      bitrateHistory: [5900, 6010, 5980, 6012].map((kbps, index) => ({
+        at: at((4 - index) * 2),
+        kbps,
+        droppedFrames: 0
+      }))
+    },
+    targets: [
+      { targetId: 'probe-youtube', platform: 'youtube', label: 'YouTube', state: 'live' },
+      { targetId: 'probe-twitch', platform: 'twitch', label: 'Twitch', state: 'live' }
+    ],
+    destinationEvents: [],
+    updatedAt: at(1)
+  }
 }
 
 function viewerSampleFixture() {

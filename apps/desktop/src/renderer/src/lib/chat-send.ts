@@ -12,15 +12,14 @@ import type {
 
 export const CHAT_SEND_MAX_CHARS = 200
 
-/** Per-platform chat length caps. One send reaches every writable destination,
- * so a draft is trimmed to the SMALLEST cap of the targets it will reach —
- * otherwise a reply that fits YouTube gets silently cut on the stricter
- * platform. Every platform is 200 today; X's 140-char cap drops in HERE when
- * the X chat sender lands, and every counter/trim follows automatically. */
+/** Per-platform chat length caps. A draft must fit the SMALLEST cap of the
+ * destinations it will reach, otherwise a reply that fits YouTube fails on
+ * the stricter platform. X broadcast chat takes 140 characters
+ * (`x_live::X_CHAT_MESSAGE_MAX_CHARS`). */
 export const CHAT_SEND_PLATFORM_MAX_CHARS: Record<StreamPlatform, number> = {
   youtube: CHAT_SEND_MAX_CHARS,
   twitch: CHAT_SEND_MAX_CHARS,
-  x: CHAT_SEND_MAX_CHARS,
+  x: 140,
   // No public chat API — never reached by a send, kept for the strict Record.
   tiktok: CHAT_SEND_MAX_CHARS,
   instagram: CHAT_SEND_MAX_CHARS,

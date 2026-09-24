@@ -1105,6 +1105,12 @@ pub struct AppState {
     pub warm_microphone: Arc<crate::warm_microphone::WarmMicrophoneSlot>,
     pub live_chat: LiveChatSlot,
     pub live_chat_persistence: LiveChatPersistence,
+    /// One viewer total per session across every sampler (plan 055, B1).
+    pub viewer_aggregator: Arc<std::sync::Mutex<crate::viewer_stats::ViewerAggregator>>,
+    /// Follower and subscriber counts per platform for the session (plan 055, S3).
+    pub audience: Arc<std::sync::Mutex<crate::audience::AudienceHub>>,
+    /// Serializes mid-session OAuth refreshes (plan 055, B2).
+    pub platform_token_refresh: Arc<tokio::sync::Mutex<()>>,
     /// In-memory product-account session override (deep-link sign-in / Sign out).
     /// None falls back to the dev env mock; persistent token storage replaces it.
     pub account_session: Arc<tokio::sync::Mutex<Option<VideorcAccountSnapshot>>>,
@@ -1213,6 +1219,9 @@ impl AppState {
             last_audio_meter: Arc::new(tokio::sync::Mutex::new(None)),
             logs: Arc::new(StdMutex::new(Vec::new())),
             live_chat_persistence: LiveChatPersistence::new(database.clone()),
+            viewer_aggregator: Arc::default(),
+            audience: Arc::default(),
+            platform_token_refresh: Arc::default(),
             database,
             remote_control: std::sync::Arc::new(StdMutex::new(
                 crate::remote_control::RemoteControlRuntime::load_from_secrets(),

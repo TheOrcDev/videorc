@@ -53,7 +53,8 @@ export const IPC_INVOKE_ROLES = {
   'obs:discover': MAIN_ONLY,
   'obs:read': MAIN_ONLY,
   'obs:read-stream-key': MAIN_ONLY,
-  'preview-window:open': MAIN_ONLY,
+  // The Stream Manager's status bar offers Open Preview (plan 055, decision 4).
+  'preview-window:open': MAIN_AND_COMMENTS,
   'preview-window:close': MAIN_ONLY,
   'preview-window:toggle': MAIN_ONLY,
   'preview-window:get-state': MAIN_ONLY,
@@ -97,6 +98,8 @@ export const IPC_INVOKE_ROLES = {
   'comments-window:highlight-state-get': MAIN_AND_COMMENTS,
   'comments-window:viewers-push': MAIN_ONLY,
   'comments-window:viewers-get': MAIN_AND_COMMENTS,
+  'comments-window:dashboard-push': MAIN_ONLY,
+  'comments-window:dashboard-get': MAIN_AND_COMMENTS,
   'comments-window:cohost-push': MAIN_ONLY,
   'comments-window:cohost-get': MAIN_AND_COMMENTS,
   'comments-window:cohost-action': MAIN_AND_COMMENTS,
