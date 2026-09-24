@@ -677,7 +677,17 @@ async function probeNarrowWidths() {
         `${tag}: every control is inline in the status bar`,
         JSON.stringify(metrics)
       )
+      assertProbe(
+        metrics.stripRule >= 1,
+        `${tag}: a hairline splits the stats strip from the panes`,
+        JSON.stringify({ stripRule: metrics.stripRule })
+      )
     } else {
+      assertProbe(
+        metrics.summaryRule >= 1,
+        `${tag}: a hairline splits the summary from the panes`,
+        JSON.stringify({ summaryRule: metrics.summaryRule })
+      )
       assertProbe(
         metrics.moreMenu.visible && !metrics.inlineActions && metrics.summary !== null,
         `${tag}: controls fold into ⋯ and the strip becomes one line`,
