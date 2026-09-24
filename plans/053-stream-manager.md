@@ -6,7 +6,13 @@
 
 ## Status and decisions
 
-- Status: PLANNED 2026-09-24. Not started. Priority P1 (owner: "create some
+- Status: **EXECUTED 2026-09-24** on `feat/stream-manager` (PR pending
+  review). S0 to S12 and S14's local gates are done. S13 (moderation) is
+  deferred per decision 3. Owner live acceptance is pending: see
+  `docs/acceptance/2026-09-24-stream-manager.md`. The owner also asked for
+  plan 054 (the X viewer count) in the same PR; it is folded in. See
+  "Execution notes" at the end for deviations.
+- Planned status: PLANNED 2026-09-24. Priority P1 (owner: "create some
   kind of live stream studio where we can see the entire chat, how many users
   are currently live, followers, and all the things like that … completely
   replace our chat window"). Effort L: about 12–16 agent-days over 14 slices.
@@ -659,3 +665,50 @@ exist.
   - S0 and S14 need the owner's real Twitch and X accounts.
   - YouTube needs a verification build.
   - S6 and S13 need the owner's decisions 2 and 3.
+
+## Execution notes (2026-09-24)
+
+What shipped differs from the plan in these places, each for the stated
+reason:
+
+- **S2, first-time marker.** The backend marks `firstMessage` at delivery
+  instead of the renderer calling a `sessions.chat.authorsSeen` RPC. It uses
+  Twitch's `user_intro` flag, or an author no earlier session saw, looked
+  up once per new author with an index on `(platform, author_id)`. No round
+  trip, and History gets the flag from SQLite.
+- **S3, X followers.** Read with the X OAuth 2.0 account when there is one,
+  otherwise with the "Authorize X Live" OAuth 1.0a token, so manual X
+  destinations work too.
+- **S4.** A `session_token` module serves the Twitch and YouTube
+  connectors, the viewer sampler, the audience poller and every send.
+  - Refreshes are serialized, so a task that loses the race takes the
+    winner's token: X rotates refresh tokens.
+  - Twitch no longer re-creates subscriptions after its own
+    `session_reconnect` handover. That was a latent 409 on every handover.
+- **S5.** Destination failures and recoveries are projected in the relay's
+  reducer from `stream.targets` transitions, not recorded by the backend.
+  The effect is the same and there is one less wire type.
+- **S6.** The opt-in reconnect lives in Livestream → Setup on the Twitch
+  account. The Stream Manager's status bar explains it on hover rather than
+  offering a button: the window has no backend socket (the locked relay
+  decision), and a second OAuth entry point would break the
+  one-home-per-control rule.
+- **S7.** The relay is a lazy chunk, so the main window's eager bundle stays
+  inside its budget. The six activity glyphs live in a Stream Manager-only
+  icon registry for the same reason.
+- **S10.** Virtualization and the 2,000-message cap are in and
+  unit-covered. Not done: the 50 messages per second load measured with a
+  frame counter in the window. It needs a window-side frame counter; it is
+  listed as an owner/QA check in the acceptance record.
+- **S11.** "Thank in chat" prefills a warm template. Asking Orcle for the
+  draft is not done: Orcle has no endpoint that drafts arbitrary text,
+  only question replies. The event variant of the highlight card leads with
+  the event line ("Resubscribed for 8 months at Tier 1: <words>") through
+  `commentHighlightCardText`, and the backend now accepts activity rows
+  (raids, announcements) for the card.
+- **S12.** Orcle's status control sits in its pane header, and a presence
+  dot is on the Orcle segment.
+- **Plan 054 (owner request).** The X viewer parser unwraps the documented
+  `data` envelope and logs non-count outcomes once per reason
+  (`stream-viewers-x`). Its S2 (one sampler) is covered by S1's
+  aggregator.

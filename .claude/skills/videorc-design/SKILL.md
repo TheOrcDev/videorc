@@ -13,7 +13,7 @@ reference is the Videorc logo: a glossy black-glass orb with chrome detail and
 one LED-red accent. Light mode is the porcelain twin of the same structure.
 
 **Status: shipped in plan 050 (2026-09-23).** `styles.css` implements the
-tokens below. `src/main/window-glass.ts` gives every window (main, Chat,
+tokens below. `src/main/window-glass.ts` gives every window (main, Stream Manager,
 Captions, Notes, Preview) its material and title bar. The Preview frame's
 data-URL document mirrors the coats through `src/main/window-palette.ts`, and
 a parity test fails when they drift. Fix tokens and primitives, never restyle
@@ -50,7 +50,7 @@ Every window uses one material and one title-bar recipe (`window-glass.ts`):
   `useTrafficLightGutter()`, which drops to `pl-3` in native fullscreen.
   Header rows are drag regions, and their controls opt out with
   `[-webkit-app-region:no-drag]`.
-- **Dark-always windows.** Chat, Captions, Notes, and Preview frame video or
+- **Dark-always windows.** Stream Manager, Captions, Notes, and Preview frame video or
   sit beside it, so main pins their NSWindow appearance to `darkAqua` through
   the native addon. A light main window never lightens them. If the pin is
   unavailable, they fall back to solid dark.
@@ -130,7 +130,7 @@ Everything except ⌘K uses the desktop scale.
     and the Dock, never in the sidebar (owner call, 2026-09-23).
 - **Status bar** (`StatusBar`, 26 px): connection and record/live state on
   the left. On the right, quiet 11 px shortcut hints, each still clickable:
-  `⌘K Search`, `⌘P Preview`, `⇧⌘N Notes`, `⇧⌘J Chat`.
+  `⌘K Search`, `⌘P Preview`, `⇧⌘N Notes`, `⇧⌘J Stream Manager`.
 - **Sections** (`PanelSection`): flush. A 13 px / 600 header, a 12 px
   secondary description, a hairline between sections, and 16 px padding. No
   border, background, radius, or shadow.
@@ -150,6 +150,42 @@ Everything except ⌘K uses the desktop scale.
   choices use `Tabs`, a glass segmented control.
 - **Type.** The system stack (SF Pro). Body 14 px, metadata 12 px, section
   labels 11 px. Density comes from structure, not from smaller text.
+
+## Stream Manager
+
+The live dashboard window (plan 053; code name `comments`, the old Chat
+window). It follows the window family and adds its own layout rules.
+
+- **Tiers by container query.** The body is `@container/stream-manager`,
+  never JS resize state (`lib/stream-manager-layout.ts`):
+  - Wide (1,040 px and up): the stats strip, then Chat beside a right pane
+    with an Activity / Orcle segmented control.
+  - Medium (640 to 1,039 px): a compact strip (Session, Viewers, Followers,
+    Health), then one pane behind Chat / Activity / Orcle.
+  - Narrow (under 640 px, 320 minimum): a one-line summary above the same
+    segments.
+  - Every pane renders once; only its placement changes.
+- **The title row carries the title only.** Controls live in the status bar:
+  each provider's chat state on the left; Keep on top, Highlight, Clear view
+  and Open Preview on the right. They drop to icons under 800 px and fold
+  into ⋯ under 640 px.
+- **Stats are flush cells split by hairlines,** never cards. Numbers are
+  monochrome and tabular. Tone lives in dots and chips, and the ON AIR chip
+  is the only emphasis.
+  - Sparklines use the shadcn `chart`, neutral unless the tile warns.
+  - Per-platform splits open in a `HoverCard`.
+- **Never an unmeasured zero.** A tile exists only when its source does, and
+  an unreadable number shows "–" with the reason ("Reconnect X to show
+  followers."). The viewer count is never hidden while live.
+- **Chat keeps the big-text rows** (decision 5), virtualized with
+  `@tanstack/react-virtual`. Filters are inline chips from 640 px and one
+  Filters menu below it.
+- **Activity rows** use the platform tile with the event glyph (the
+  window-scoped registry `components/stream-manager/activity-icons.tsx`), a
+  one-line fact, the viewer's words, and a ⋯ menu.
+- **Proof.** `pnpm probe:comments-window` sweeps 320/480/640/800/1040/1280
+  and fails on any overflow, a hidden viewer count, a button in the title
+  row, or an unreachable control.
 
 ## ⌘K palette scale
 
@@ -229,7 +265,7 @@ near-opaque `bg-popover` surfaces with one soft shadow and a hairline ring.
 - Windows 11 22H2+ (build ≥ 22621): `backgroundMaterial: 'mica'` on the
   main window, with its own coats (`[data-platform='win32']` in styles.css).
   Mica tints from the wallpaper without a live blur, so it stays cheap on
-  low-end iGPUs. Chat, Captions, Notes, and Preview stay solid dark: Windows
+  low-end iGPUs. Stream Manager, Captions, Notes, and Preview stay solid dark: Windows
   has no per-window appearance pin.
 - Windows 10 and older builds use the solid palette.
 - The D3D11 preview window and the proof surface stay opaque.
