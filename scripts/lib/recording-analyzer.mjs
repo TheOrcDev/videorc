@@ -53,6 +53,18 @@ export const DEFAULT_GATES = Object.freeze({
   freezeNoiseDb: -60, // freezedetect near-identical noise floor (matches repair.rs)
   silenceDb: -50, // silencedetect dropout noise floor
   minSilenceGapMs: 20, // silence run that counts as a candidate dropout
+  // Digital-zero runs (plan 056): a microphone packet the pipeline dropped is
+  // rendered as EXACT zeros for 2.7-13 ms, far below minSilenceGapMs. A real
+  // room floor measures around -78 dBFS, so only true zeros trip -90 dB. Runs
+  // inside the lead-in/tail windows are ignored (the aligned leading pad and
+  // the stop drain are legitimately silent). Warn by default; smokes whose
+  // audio source is known non-silent set requireNoDigitalZeroRuns to fail.
+  digitalZeroNoiseDb: -90,
+  digitalZeroMinMs: 2,
+  digitalZeroLeadInMs: 500,
+  digitalZeroTailMs: 300,
+  maxDigitalZeroRuns: 0,
+  requireNoDigitalZeroRuns: false,
   // Recording colorimetry law (2026-07 quality plan Q1): artifacts must be
   // TAGGED BT.709 video-range. Warn by default (legacy files and third-party
   // callers); the recording matrix smoke sets true to hard-fail.
@@ -620,6 +632,23 @@ export function evaluateGates(metrics, gates = DEFAULT_GATES) {
           `(${metrics.silenceCount} segment(s)) — verify it is intentional, not a dropout`
       )
     }
+    if (
+      metrics.digitalZeroRunCount != null &&
+      metrics.digitalZeroRunCount > gates.maxDigitalZeroRuns
+    ) {
+      // Exact-zero runs mid-take are dropped microphone packets unless the
+      // source itself was muted; a muted mic is a legitimate recording.
+      const message =
+        `${metrics.digitalZeroRunCount} digital-zero run(s) mid-take ` +
+        `(longest ${(metrics.longestDigitalZeroMs ?? 0).toFixed(1)}ms, ` +
+        `first at ${(metrics.firstDigitalZeroSeconds ?? 0).toFixed(3)}s) — ` +
+        `dropped microphone packets unless the source was muted`
+      if (gates.requireNoDigitalZeroRuns) {
+        failures.push(message)
+      } else {
+        warnings.push(message)
+      }
+    }
   } else if (metrics.expectAudio) {
     failures.push('audio expected but no audio stream present')
   }
@@ -769,6 +798,25 @@ export async function runFreezedetect(
     '-'
   ])
   return parseFreezedetect(stderr)
+}
+
+/**
+ * Keep only the silence segments that sit inside the take: after the lead-in
+ * window and ending before the tail window. `durationSeconds` null keeps every
+ * segment past the lead-in.
+ * @returns {{start:number, end:number|null, duration:number}[]}
+ */
+export function interiorSilenceRuns(segments, { leadInMs, tailMs, durationSeconds }) {
+  const leadIn = leadInMs / 1000
+  const tailStart = durationSeconds == null ? null : durationSeconds - tailMs / 1000
+  return segments.filter((segment) => {
+    if (segment.start < leadIn) return false
+    if (tailStart != null) {
+      const end = segment.end ?? segment.start + segment.duration
+      if (end > tailStart) return false
+    }
+    return true
+  })
 }
 
 export async function runSilencedetect(
@@ -931,30 +979,49 @@ export async function analyzeRecording(filePath, options = {}) {
   // Run the video passes (freeze, exact-dup frames, pacing) and the audio passes
   // (packet gaps, silence) concurrently. A frozen/black source can still produce a
   // technically valid file, so every pass observes the decoded artifact directly.
-  const [freezes, frameHashes, ptsTimes, audioPackets, silences, keyframeTimes] = await Promise.all(
-    [
-      hasVideo
-        ? runFreezedetect(filePath, {
-            ffmpegPath,
-            noiseDb: gates.freezeNoiseDb,
-            minFreezeMs: gates.maxFreezeMs
-          })
-        : [],
-      hasVideo ? runFramemd5(filePath, { ffmpegPath }) : [],
-      hasVideo ? runVideoPacing(filePath, { ffprobePath }) : [],
-      hasAudio ? runAudioPackets(filePath, { ffprobePath }) : [],
-      hasAudio
-        ? runSilencedetect(filePath, {
-            ffmpegPath,
-            noiseDb: gates.silenceDb,
-            minSilenceMs: gates.minSilenceGapMs
-          })
-        : [],
-      hasVideo && gates.keyframeMaxIntervalSeconds != null
-        ? runKeyframeTimes(filePath, { ffprobePath })
-        : []
-    ]
-  )
+  const [
+    freezes,
+    frameHashes,
+    ptsTimes,
+    audioPackets,
+    silences,
+    keyframeTimes,
+    digitalZeroSegments
+  ] = await Promise.all([
+    hasVideo
+      ? runFreezedetect(filePath, {
+          ffmpegPath,
+          noiseDb: gates.freezeNoiseDb,
+          minFreezeMs: gates.maxFreezeMs
+        })
+      : [],
+    hasVideo ? runFramemd5(filePath, { ffmpegPath }) : [],
+    hasVideo ? runVideoPacing(filePath, { ffprobePath }) : [],
+    hasAudio ? runAudioPackets(filePath, { ffprobePath }) : [],
+    hasAudio
+      ? runSilencedetect(filePath, {
+          ffmpegPath,
+          noiseDb: gates.silenceDb,
+          minSilenceMs: gates.minSilenceGapMs
+        })
+      : [],
+    hasVideo && gates.keyframeMaxIntervalSeconds != null
+      ? runKeyframeTimes(filePath, { ffprobePath })
+      : [],
+    hasAudio
+      ? runSilencedetect(filePath, {
+          ffmpegPath,
+          noiseDb: gates.digitalZeroNoiseDb,
+          minSilenceMs: gates.digitalZeroMinMs
+        })
+      : []
+  ])
+  const digitalZeroRuns = interiorSilenceRuns(digitalZeroSegments, {
+    leadInMs: gates.digitalZeroLeadInMs,
+    tailMs: gates.digitalZeroTailMs,
+    durationSeconds: probe.formatDuration ?? null
+  })
+  const longestDigitalZero = digitalZeroRuns.reduce((max, s) => Math.max(max, s.duration), 0)
 
   const pacing = pacingStats(ptsTimes)
   const duplicatePts = duplicatePtsStats(ptsTimes)
@@ -1047,6 +1114,9 @@ export async function analyzeRecording(filePath, options = {}) {
     audioGapCount: audioGaps.gaps.length,
     silenceCount: silences.length,
     longestSilenceMs: hasAudio ? longestSilence * 1000 : null,
+    digitalZeroRunCount: hasAudio ? digitalZeroRuns.length : null,
+    longestDigitalZeroMs: hasAudio ? longestDigitalZero * 1000 : null,
+    firstDigitalZeroSeconds: digitalZeroRuns.length > 0 ? digitalZeroRuns[0].start : null,
     avSkewMs: skew,
     startSkewMs: skewComponents.startSkewMs,
     tailMismatchMs: skewComponents.tailMismatchMs,
@@ -1171,6 +1241,10 @@ export function renderMarkdownReport(report) {
     lines.push(`- Audio gaps: max ${fmt(m.maxAudioGapMs)}ms across ${m.audioGapCount} gap(s)`)
     lines.push(
       `- Silence: longest ${fmt(m.longestSilenceMs)}ms across ${m.silenceCount} segment(s)`
+    )
+    lines.push(
+      `- Digital zero runs mid-take: ${m.digitalZeroRunCount ?? 'n/a'} ` +
+        `(longest ${fmt(m.longestDigitalZeroMs)}ms)`
     )
   } else {
     lines.push(`- Audio: ${m.expectAudio ? 'EXPECTED BUT MISSING' : 'none (not expected)'}`)
