@@ -199,8 +199,8 @@ use crate::streaming::{
     PlatformAccountValidation, PlatformAccountValidationState, StoreManualStreamKeyParams,
     StoreManualStreamKeyResult, StreamAuthMode, StreamMetadataDraft, StreamPlatform,
     UpsertPlatformAccount, manual_stream_key_previous_secret_ref, manual_stream_key_secret_ref,
-    manual_stream_key_state, plan_manual_stream_key_restore, plan_manual_stream_key_store,
-    validate_stream_metadata_draft,
+    manual_stream_key_state, normalize_stream_metadata_draft, plan_manual_stream_key_restore,
+    plan_manual_stream_key_store, validate_stream_metadata_draft,
 };
 use crate::twitch::{
     PreparedTwitchBroadcast, TwitchCategorySearchParams, TwitchCategorySearchRequest,
@@ -10216,7 +10216,10 @@ async fn handle_text_message_with_role(
         }
         "streamTargets.metadata.validate" => {
             match serde_json::from_value::<StreamMetadataDraft>(command.params) {
-                Ok(draft) => ServerResponse::ok(command.id, validate_stream_metadata_draft(&draft)),
+                Ok(mut draft) => {
+                    normalize_stream_metadata_draft(&mut draft);
+                    ServerResponse::ok(command.id, validate_stream_metadata_draft(&draft))
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
