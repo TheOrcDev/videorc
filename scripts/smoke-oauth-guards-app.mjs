@@ -36,13 +36,16 @@ try {
       )
     }
 
-    await request(ws, timeoutMs, 'streamTargets.metadata.update', {
+    // An empty override list is what an old run of this smoke once wrote into
+    // a real database; the backend now backfills the three platform rows.
+    const savedMetadata = await request(ws, timeoutMs, 'streamTargets.metadata.update', {
       title: 'Smoke Go Live',
       description: 'Local preflight smoke for OAuth/native guards.',
       defaultPrivacy: 'unlisted',
       targetOverrides: [],
       updatedAt: new Date().toISOString()
     })
+    assertBackfilledOverrides(savedMetadata)
     const preflight = await request(ws, timeoutMs, 'streamTargets.confirmation.validate', {
       streaming: preflightStreamingFixture()
     })
@@ -69,6 +72,18 @@ try {
   }
 } finally {
   await stopApp()
+}
+
+function assertBackfilledOverrides(draft) {
+  const platforms = Array.isArray(draft?.targetOverrides)
+    ? draft.targetOverrides.map((target) => target.platform)
+    : []
+  const expected = ['youtube', 'twitch', 'x']
+  if (expected.some((platform) => !platforms.includes(platform))) {
+    throw new Error(
+      `Metadata update should backfill YouTube, Twitch and X override rows, got ${JSON.stringify(platforms)}`
+    )
+  }
 }
 
 function assertProviderCredentials(credentials) {

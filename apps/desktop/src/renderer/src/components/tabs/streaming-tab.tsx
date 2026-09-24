@@ -22,9 +22,16 @@ const ScheduledStreams = lazy(() =>
 import { GroupedList, ListRow } from '@/components/list-row'
 import { PlatformGlyph } from '@/components/platform-glyph'
 import { PanelSection } from '@/components/panel-section'
+import {
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger
+} from '@/components/ui/accordion'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { AvatarCircle } from '@/lib/chat-avatar'
+import { metadataOverrideSummary, visibleMetadataOverrides } from '@/lib/stream-metadata-summary'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
@@ -1361,7 +1368,7 @@ function validationBadge(validation: PlatformAccountValidation): {
   }
 }
 
-function MetadataEditor({
+export function MetadataEditor({
   draft,
   validation,
   targets,
@@ -1389,8 +1396,17 @@ function MetadataEditor({
   onSave: () => void
   onSearchTwitchCategories: (query: string) => Promise<void>
 }): ReactElement {
-  const nativeTargets = targets.filter((target) => target.platform !== 'custom')
   const globalTitleIssue = metadataIssue(validation, 'title')
+  // One row per connected native destination, in Destinations order. The
+  // rows are accordions: closed, each is a label and a one-line summary.
+  const visibleOverrides = visibleMetadataOverrides(targets, draft?.targetOverrides ?? [])
+  const [openPlatforms, setOpenPlatforms] = useState<string[]>([])
+  // A row with a validation issue stays open until the issue is gone, so the
+  // warning is never hidden behind a closed row.
+  const issuePlatforms = visibleOverrides
+    .filter(({ override }) => metadataIssue(validation, 'title', override.platform))
+    .map(({ override }) => override.platform)
+  const accordionValue = Array.from(new Set([...openPlatforms, ...issuePlatforms]))
 
   return (
     <PanelSection
@@ -1457,29 +1473,59 @@ function MetadataEditor({
             </Select>
             <FieldDescription>
               Applies to YouTube. Twitch channels are always public; X broadcasts are always public.
-              Use the X Announce toggle below to control the announcement post.
+              Use the Announce switch in the X row below to control the announcement post.
             </FieldDescription>
           </Field>
 
-          <div className="flex flex-col gap-4">
-            {draft.targetOverrides.map((override) => {
-              const target = nativeTargets.find((item) => item.platform === override.platform)
-              return (
-                <MetadataOverride
-                  disabled={disabled}
-                  draft={draft}
-                  key={override.platform}
-                  label={target?.label ?? platformLabel(override.platform)}
-                  override={override}
-                  twitchCategories={twitchCategories}
-                  twitchCategorySearchPending={twitchCategorySearchPending}
-                  validation={validation}
-                  onPatch={(patch) => onPatchTarget(override.platform, patch)}
-                  onSearchTwitchCategories={onSearchTwitchCategories}
-                />
-              )
-            })}
-          </div>
+          {visibleOverrides.length ? (
+            <Accordion
+              aria-label="Per-destination details"
+              type="multiple"
+              value={accordionValue}
+              onValueChange={setOpenPlatforms}
+            >
+              {visibleOverrides.map(({ override, label }) => {
+                const issue = metadataIssue(validation, 'title', override.platform)
+                return (
+                  <AccordionItem key={override.platform} value={override.platform}>
+                    <AccordionTrigger className="min-h-11 items-center gap-3 px-3 py-2 hover:bg-accent hover:no-underline">
+                      <PlatformGlyph platform={override.platform} />
+                      <span className="flex min-w-0 flex-1 items-baseline gap-2">
+                        <span className="truncate">{label}</span>
+                        <span className="truncate text-xs font-normal text-muted-foreground">
+                          {metadataOverrideSummary(draft, override)}
+                        </span>
+                      </span>
+                      {issue ? (
+                        <AlertIcon
+                          aria-label="Needs attention"
+                          className="size-4 shrink-0 text-warning"
+                          weight="fill"
+                        />
+                      ) : null}
+                    </AccordionTrigger>
+                    <AccordionContent className="flex flex-col gap-3 px-3">
+                      <MetadataOverride
+                        disabled={disabled}
+                        draft={draft}
+                        label={label}
+                        override={override}
+                        twitchCategories={twitchCategories}
+                        twitchCategorySearchPending={twitchCategorySearchPending}
+                        validation={validation}
+                        onPatch={(patch) => onPatchTarget(override.platform, patch)}
+                        onSearchTwitchCategories={onSearchTwitchCategories}
+                      />
+                    </AccordionContent>
+                  </AccordionItem>
+                )
+              })}
+            </Accordion>
+          ) : (
+            <p className="text-xs text-muted-foreground">
+              Connect YouTube, Twitch or X to set per-destination details.
+            </p>
+          )}
 
           {validation && !validation.valid ? (
             <Alert variant="warning">
@@ -1522,7 +1568,6 @@ function MetadataOverride({
   onSearchTwitchCategories: (query: string) => Promise<void>
 }): ReactElement {
   const titleIssue = metadataIssue(validation, 'title', override.platform)
-  const fieldsDisabled = disabled || !override.customize
   const twitch = override.platform === 'twitch'
   const youtube = override.platform === 'youtube'
   const x = override.platform === 'x'
@@ -1544,96 +1589,104 @@ function MetadataOverride({
     setTwitchCategoryQuery(override.twitchCategoryName ?? '')
   }, [override.twitchCategoryName])
 
+  // The switch gates custom TEXT only. Platform settings below it (made for
+  // kids, category, language, announce) always apply, on or off.
+  const customTextHint = override.customize
+    ? youtube
+      ? `Replaces the global title, description and privacy for ${label}.`
+      : `Replaces the global title for ${label}.`
+    : youtube
+      ? 'Uses the global title, description and privacy.'
+      : 'Uses the global title.'
+
   return (
-    <div className="flex flex-col gap-3 border-t pt-4 first:border-t-0 first:pt-0">
+    <>
       <div className="flex items-center justify-between gap-3">
         <div className="flex min-w-0 flex-col">
-          <span className="truncate text-sm font-medium">{label}</span>
-          <span className="truncate text-xs text-muted-foreground">
-            {override.customize ? 'Custom metadata' : 'Inherits global metadata'}
-          </span>
+          <span className="text-sm font-medium">Custom title and description</span>
+          <span className="text-xs text-muted-foreground">{customTextHint}</span>
         </div>
         <Switch
-          aria-label={`Customize ${label}`}
+          aria-label={`Custom title and description for ${label}`}
           checked={override.customize}
           disabled={disabled}
           onCheckedChange={(customize) => onPatch({ customize })}
         />
       </div>
 
-      <Field>
-        <FieldLabel htmlFor={`${override.platform}-metadata-title`}>Title</FieldLabel>
-        <Input
-          aria-invalid={Boolean(titleIssue)}
-          disabled={fieldsDisabled}
-          id={`${override.platform}-metadata-title`}
-          placeholder={draft.title || 'Inherits global title'}
-          value={override.title}
-          onChange={(event) => onPatch({ title: event.target.value })}
-        />
-        {titleIssue ? <FieldDescription>{titleIssue.message}</FieldDescription> : null}
-      </Field>
+      {override.customize ? (
+        <>
+          <Field>
+            <FieldLabel htmlFor={`${override.platform}-metadata-title`}>Title</FieldLabel>
+            <Input
+              aria-invalid={Boolean(titleIssue)}
+              disabled={disabled}
+              id={`${override.platform}-metadata-title`}
+              placeholder={draft.title || 'Untitled livestream'}
+              value={override.title}
+              onChange={(event) => onPatch({ title: event.target.value })}
+            />
+            {titleIssue ? <FieldDescription>{titleIssue.message}</FieldDescription> : null}
+            {twitch ? (
+              <FieldDescription>Twitch supports title, category, and language.</FieldDescription>
+            ) : null}
+            {x ? (
+              <FieldDescription>
+                X broadcasts carry a title only; it doubles as the announcement post text.
+              </FieldDescription>
+            ) : null}
+          </Field>
 
-      <Field>
-        <FieldLabel htmlFor={`${override.platform}-metadata-description`}>Description</FieldLabel>
-        <Textarea
-          className="min-h-20 resize-y"
-          disabled={fieldsDisabled || twitch || x}
-          id={`${override.platform}-metadata-description`}
-          placeholder={
-            twitch
-              ? 'Not supported by Twitch'
-              : x
-                ? 'Not supported by X'
-                : draft.description || 'Inherits global description'
-          }
-          value={twitch || x ? '' : override.description}
-          onChange={(event) => onPatch({ description: event.target.value })}
-        />
-        {twitch ? (
-          <FieldDescription>Twitch supports title, category, and language.</FieldDescription>
-        ) : null}
-        {x ? (
-          <FieldDescription>
-            X broadcasts carry a title only; it doubles as the announcement post text.
-          </FieldDescription>
-        ) : null}
-      </Field>
+          {youtube ? (
+            <>
+              <Field>
+                <FieldLabel htmlFor="youtube-metadata-description">Description</FieldLabel>
+                <Textarea
+                  className="min-h-20 resize-y"
+                  disabled={disabled}
+                  id="youtube-metadata-description"
+                  placeholder={draft.description || 'Optional'}
+                  value={override.description}
+                  onChange={(event) => onPatch({ description: event.target.value })}
+                />
+              </Field>
+              <Field>
+                <FieldLabel>Privacy</FieldLabel>
+                <Select
+                  disabled={disabled}
+                  value={override.privacy}
+                  onValueChange={(value) => onPatch({ privacy: value as StreamPrivacy })}
+                >
+                  <SelectTrigger className="w-full">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="private">Private</SelectItem>
+                    <SelectItem value="unlisted">Unlisted</SelectItem>
+                    <SelectItem value="public">Public</SelectItem>
+                  </SelectContent>
+                </Select>
+              </Field>
+            </>
+          ) : null}
+        </>
+      ) : null}
 
       {youtube ? (
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Field>
-            <FieldLabel>Privacy</FieldLabel>
-            <Select
-              disabled={fieldsDisabled}
-              value={override.privacy}
-              onValueChange={(value) => onPatch({ privacy: value as StreamPrivacy })}
-            >
-              <SelectTrigger className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="private">Private</SelectItem>
-                <SelectItem value="unlisted">Unlisted</SelectItem>
-                <SelectItem value="public">Public</SelectItem>
-              </SelectContent>
-            </Select>
-          </Field>
-          <Field>
-            <FieldLabel>Made for kids</FieldLabel>
-            <ToggleGroup
-              className="w-full"
-              disabled={fieldsDisabled}
-              type="single"
-              value={override.youtubeMadeForKids ? 'yes' : 'no'}
-              variant="outline"
-              onValueChange={(value) => value && onPatch({ youtubeMadeForKids: value === 'yes' })}
-            >
-              <ToggleGroupItem value="no">No</ToggleGroupItem>
-              <ToggleGroupItem value="yes">Yes</ToggleGroupItem>
-            </ToggleGroup>
-          </Field>
-        </div>
+        <Field>
+          <FieldLabel>Made for kids</FieldLabel>
+          <ToggleGroup
+            className="w-full"
+            disabled={disabled}
+            type="single"
+            value={override.youtubeMadeForKids ? 'yes' : 'no'}
+            variant="outline"
+            onValueChange={(value) => value && onPatch({ youtubeMadeForKids: value === 'yes' })}
+          >
+            <ToggleGroupItem value="no">No</ToggleGroupItem>
+            <ToggleGroupItem value="yes">Yes</ToggleGroupItem>
+          </ToggleGroup>
+        </Field>
       ) : null}
 
       {twitch ? (
@@ -1642,7 +1695,7 @@ function MetadataOverride({
             <FieldLabel htmlFor="twitch-category">Category</FieldLabel>
             <div className="flex gap-2">
               <Input
-                disabled={fieldsDisabled}
+                disabled={disabled}
                 id="twitch-category"
                 placeholder="Just Chatting"
                 value={twitchCategoryQuery}
@@ -1653,9 +1706,7 @@ function MetadataOverride({
               />
               <Button
                 disabled={
-                  fieldsDisabled ||
-                  twitchCategorySearchPending ||
-                  twitchCategoryQuery.trim().length < 2
+                  disabled || twitchCategorySearchPending || twitchCategoryQuery.trim().length < 2
                 }
                 size="sm"
                 variant="outline"
@@ -1667,7 +1718,7 @@ function MetadataOverride({
             </div>
             {twitchCategoryOptions.length ? (
               <Select
-                disabled={fieldsDisabled || twitchCategorySearchPending}
+                disabled={disabled || twitchCategorySearchPending}
                 value={override.twitchCategoryId ?? ''}
                 onValueChange={(categoryId) => {
                   const category = twitchCategoryOptions.find((item) => item.id === categoryId)
@@ -1693,7 +1744,7 @@ function MetadataOverride({
           <Field>
             <FieldLabel htmlFor="twitch-language">Language</FieldLabel>
             <Input
-              disabled={fieldsDisabled}
+              disabled={disabled}
               id="twitch-language"
               placeholder="en"
               value={override.twitchLanguage ?? ''}
@@ -1714,12 +1765,12 @@ function MetadataOverride({
           <Switch
             aria-label="Announce on X timeline"
             checked={override.xAnnounce ?? true}
-            disabled={fieldsDisabled}
+            disabled={disabled}
             onCheckedChange={(xAnnounce) => onPatch({ xAnnounce })}
           />
         </div>
       ) : null}
-    </div>
+    </>
   )
 }
 

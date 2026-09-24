@@ -466,27 +466,58 @@ pub fn default_stream_metadata_draft(updated_at: String) -> StreamMetadataDraft 
         title: String::new(),
         description: String::new(),
         default_privacy: StreamPrivacy::Private,
-        target_overrides: [
-            StreamPlatform::Youtube,
-            StreamPlatform::Twitch,
-            StreamPlatform::X,
-        ]
-        .into_iter()
-        .map(|platform| StreamTargetMetadataDraft {
-            platform,
-            customize: false,
-            title: String::new(),
-            description: String::new(),
-            privacy: StreamPrivacy::Private,
-            youtube_made_for_kids: (platform == StreamPlatform::Youtube).then_some(false),
-            twitch_category_id: None,
-            twitch_category_name: None,
-            twitch_language: (platform == StreamPlatform::Twitch).then(|| "en".to_string()),
-            x_announce: (platform == StreamPlatform::X).then_some(true),
-            updated_at: updated_at.clone(),
-        })
-        .collect(),
+        target_overrides: STREAM_METADATA_PLATFORMS
+            .into_iter()
+            .map(|platform| StreamTargetMetadataDraft {
+                platform,
+                customize: false,
+                title: String::new(),
+                description: String::new(),
+                privacy: StreamPrivacy::Private,
+                youtube_made_for_kids: (platform == StreamPlatform::Youtube).then_some(false),
+                twitch_category_id: None,
+                twitch_category_name: None,
+                twitch_language: (platform == StreamPlatform::Twitch).then(|| "en".to_string()),
+                x_announce: (platform == StreamPlatform::X).then_some(true),
+                updated_at: updated_at.clone(),
+            })
+            .collect(),
         updated_at,
+    }
+}
+
+/// The three native platforms every draft carries a row for, in the order the
+/// Livestream page lists them.
+const STREAM_METADATA_PLATFORMS: [StreamPlatform; 3] = [
+    StreamPlatform::Youtube,
+    StreamPlatform::Twitch,
+    StreamPlatform::X,
+];
+
+/// Backfill a default row for every native platform the draft is missing.
+///
+/// A draft saved over the wire (or by an old smoke before it isolated its
+/// database) can carry an empty override list; it parses, so the loader's
+/// default fallback never fires and the Livestream page then has no
+/// per-destination rows to draw. Existing rows and their order are kept;
+/// missing ones are appended in canonical order.
+pub fn normalize_stream_metadata_draft(draft: &mut StreamMetadataDraft) {
+    let defaults = default_stream_metadata_draft(draft.updated_at.clone());
+    for platform in STREAM_METADATA_PLATFORMS {
+        if draft
+            .target_overrides
+            .iter()
+            .any(|target| target.platform == platform)
+        {
+            continue;
+        }
+        if let Some(row) = defaults
+            .target_overrides
+            .iter()
+            .find(|target| target.platform == platform)
+        {
+            draft.target_overrides.push(row.clone());
+        }
     }
 }
 
@@ -858,6 +889,57 @@ mod tests {
                 .x_announce,
             Some(true)
         );
+    }
+
+    #[test]
+    fn normalize_backfills_missing_platform_rows_in_canonical_order() {
+        let mut draft = default_stream_metadata_draft("now".to_string());
+        draft.target_overrides.clear();
+
+        normalize_stream_metadata_draft(&mut draft);
+
+        assert_eq!(
+            draft
+                .target_overrides
+                .iter()
+                .map(|target| target.platform)
+                .collect::<Vec<_>>(),
+            vec![
+                StreamPlatform::Youtube,
+                StreamPlatform::Twitch,
+                StreamPlatform::X
+            ]
+        );
+        assert_eq!(draft, default_stream_metadata_draft("now".to_string()));
+    }
+
+    #[test]
+    fn normalize_keeps_existing_rows_first_and_never_drops_one() {
+        let mut draft = default_stream_metadata_draft("now".to_string());
+        draft
+            .target_overrides
+            .retain(|target| target.platform == StreamPlatform::X);
+        draft.target_overrides[0].x_announce = Some(false);
+
+        normalize_stream_metadata_draft(&mut draft);
+
+        assert_eq!(
+            draft
+                .target_overrides
+                .iter()
+                .map(|target| target.platform)
+                .collect::<Vec<_>>(),
+            vec![
+                StreamPlatform::X,
+                StreamPlatform::Youtube,
+                StreamPlatform::Twitch
+            ]
+        );
+        assert_eq!(draft.target_overrides[0].x_announce, Some(false));
+
+        let before = draft.clone();
+        normalize_stream_metadata_draft(&mut draft);
+        assert_eq!(draft, before);
     }
 
     #[test]

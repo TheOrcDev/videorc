@@ -277,20 +277,21 @@ fn effective_twitch_metadata(draft: &StreamMetadataDraft) -> Result<EffectiveTwi
         anyhow::bail!("Twitch stream title must be 140 characters or fewer.");
     }
 
+    // Category and language are platform settings, not custom text: they apply
+    // whether or not the row customizes its title (like YouTube's made-for-kids
+    // flag and X's announce toggle). Gating them behind `customize` forced a
+    // retyped title just to pick "Just Chatting".
     let category_id = override_draft
-        .filter(|target| target.customize)
         .and_then(|target| target.twitch_category_id.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
     let category_name = override_draft
-        .filter(|target| target.customize)
         .and_then(|target| target.twitch_category_name.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned);
     let language = override_draft
-        .filter(|target| target.customize)
         .and_then(|target| target.twitch_language.as_deref())
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -554,6 +555,49 @@ mod tests {
             Some("Bearer access-token")
         );
         assert_eq!(logs[0].client_id.as_deref(), Some("client-id"));
+    }
+
+    #[test]
+    fn twitch_category_and_language_apply_without_a_custom_title() {
+        let mut draft = default_stream_metadata_draft("2026-06-03T00:00:00Z".to_string());
+        draft.title = "Global Twitch title".to_string();
+        let twitch_override = draft
+            .target_overrides
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch_override.customize = false;
+        twitch_override.title = "Stale custom title".to_string();
+        twitch_override.twitch_category_id = Some("509658".to_string());
+        twitch_override.twitch_category_name = Some(" Just Chatting ".to_string());
+        twitch_override.twitch_language = Some("es".to_string());
+
+        let effective = effective_twitch_metadata(&draft).unwrap();
+
+        assert_eq!(effective.title, "Global Twitch title");
+        assert_eq!(effective.category_id.as_deref(), Some("509658"));
+        assert_eq!(effective.category_name.as_deref(), Some("Just Chatting"));
+        assert_eq!(effective.language.as_deref(), Some("es"));
+    }
+
+    #[test]
+    fn twitch_custom_title_still_needs_the_switch() {
+        let mut draft = default_stream_metadata_draft("2026-06-03T00:00:00Z".to_string());
+        draft.title = "Global Twitch title".to_string();
+        let twitch_override = draft
+            .target_overrides
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Twitch)
+            .unwrap();
+        twitch_override.customize = true;
+        twitch_override.title = "Twitch title".to_string();
+
+        let effective = effective_twitch_metadata(&draft).unwrap();
+
+        assert_eq!(effective.title, "Twitch title");
+        assert_eq!(effective.category_id, None);
+        // The default row ships with "en"; a platform setting, so it still applies.
+        assert_eq!(effective.language.as_deref(), Some("en"));
     }
 
     #[test]

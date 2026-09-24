@@ -1922,4 +1922,28 @@ mod tests {
 
         assert!(error.to_string().contains("title"));
     }
+
+    #[test]
+    fn youtube_made_for_kids_applies_without_a_custom_title() {
+        let mut draft = default_stream_metadata_draft("2026-06-03T00:00:00Z".to_string());
+        draft.title = "Global title".to_string();
+        draft.description = "Global description".to_string();
+        draft.default_privacy = StreamPrivacy::Unlisted;
+        let youtube_override = draft
+            .target_overrides
+            .iter_mut()
+            .find(|target| target.platform == StreamPlatform::Youtube)
+            .unwrap();
+        youtube_override.customize = false;
+        youtube_override.title = "Stale custom title".to_string();
+        youtube_override.privacy = StreamPrivacy::Public;
+        youtube_override.youtube_made_for_kids = Some(true);
+
+        let effective = effective_youtube_metadata(&draft).unwrap();
+
+        assert_eq!(effective.title, "Global title");
+        assert_eq!(effective.description, "Global description");
+        assert_eq!(effective.privacy, StreamPrivacy::Unlisted);
+        assert!(effective.made_for_kids);
+    }
 }
