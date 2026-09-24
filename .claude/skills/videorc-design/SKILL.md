@@ -168,19 +168,19 @@ made it chat first: one thin stats bar and fewer words.
     its main slots.
   - Every pane renders once; only its placement changes.
 - **The title row carries the title only,** with no mode badge: the stats bar
-  says On air, and History has its own bar. Controls live in the status bar:
+  says ON AIR, and History has its own bar. Controls live in the status bar:
   each provider's chat state on the left; Keep on top, Highlight, Clear and
   Open Preview as icons on the right, folded into ⋯ under 640 px.
 - **One thin stats bar** (32 px, `components/stream-manager/stats-bar.tsx`),
   never tiles or cards:
-  - The three main slots lead it: by default the On air clock, viewers and
+  - The three main slots lead it: by default the ON AIR clock, viewers and
     stream health. They are never clipped at any width.
   - The rest follow after a hairline as a number and a short unit
     ("89,860 followers +83 · 8 subs · $20 · 22 msg/min"). They sit in a
     clipped, wrapping row, so a stat that does not fit drops off the end
     whole.
   - Numbers are monochrome and tabular. Tone lives in the chip and the dots,
-    and the On air chip is the only emphasis. Mini sparklines (the shadcn
+    and the ON AIR chip is the only emphasis. Mini sparklines (the shadcn
     `chart`) appear at Wide only.
   - Details are one hover away (`HoverCard`): the per-platform split, peak,
     fps, drops, each destination's state.
