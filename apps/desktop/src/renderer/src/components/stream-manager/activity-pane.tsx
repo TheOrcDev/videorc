@@ -19,18 +19,19 @@ import type { LiveChatProviderState, StreamPlatform } from '@/lib/backend'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import {
   ACTIVITY_FILTERS,
+  activityFilterCounts,
   filterActivity,
-  formatActivitySummary,
   type ActivityFilter,
   type ActivityItem,
-  type ActivityKind,
-  type ActivityTotals
+  type ActivityKind
 } from '@/lib/stream-activity'
 import { cn } from '@/lib/utils'
 
 // The Activity pane (plan 055, D4): structured events, never chat text.
 // Follows, subs and gifts, tips, raids and announcements from the chat
-// snapshot, and destination failures from the relayed dashboard.
+// snapshot, and destination failures from the relayed dashboard. A row reads
+// at a glance (plan 057, D3): the name and the short fact on one line, the
+// viewer's own words below, the full sentence on hover.
 
 const KIND_ICONS: Record<ActivityKind, AppIcon | null> = {
   follow: FollowIcon,
@@ -123,17 +124,23 @@ function ActivityRow({
         />
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="flex min-w-0 items-baseline gap-2">
-          <span className="truncate text-sm font-medium text-foreground">{item.name}</span>
+        <span className="flex min-w-0 items-baseline gap-1.5">
+          <span className="max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground">
+            {item.name}
+          </span>
+          <span
+            className="min-w-0 truncate text-sm text-muted-foreground"
+            data-slot="activity-line"
+            title={item.line}
+          >
+            {item.short}
+          </span>
           <time
-            className="ml-auto shrink-0 text-[11px] text-subtle tabular-nums"
+            className="ml-auto shrink-0 pl-1 text-[11px] text-subtle tabular-nums"
             dateTime={item.at}
           >
             {relativeTime(item.at, nowMs)}
           </time>
-        </span>
-        <span className="text-xs text-muted-foreground" data-slot="activity-line">
-          {item.line}
         </span>
         {item.message ? (
           <span className="text-sm leading-snug break-words text-foreground select-text">
@@ -148,7 +155,6 @@ function ActivityRow({
 
 export function ActivityPane({
   items,
-  totals,
   providers,
   nowMs,
   className,
@@ -156,7 +162,6 @@ export function ActivityPane({
   onThank
 }: {
   items: readonly ActivityItem[]
-  totals: ActivityTotals
   providers: readonly LiveChatProviderState[]
   nowMs: number
   className?: string
@@ -170,7 +175,8 @@ export function ActivityPane({
     [providers]
   )
   const shown = filterActivity(items, filter, platform)
-  const summary = formatActivitySummary(totals)
+  // Counts follow the platform pick: a chip says what a click would show.
+  const counts = activityFilterCounts(filterActivity(items, 'all', platform))
   const note = activityCapabilityNote(platforms)
 
   return (
@@ -179,10 +185,7 @@ export function ActivityPane({
       className={cn('min-h-0 flex-1 flex-col', className)}
       data-slot="activity-pane"
     >
-      <div className="flex shrink-0 flex-col gap-1.5 border-b border-border px-3 py-2">
-        <p className="truncate text-xs text-muted-foreground" data-slot="activity-summary">
-          <span className="text-subtle">This stream:</span> {summary || 'nothing yet'}
-        </p>
+      <div className="flex shrink-0 items-center border-b border-border px-2 py-1.5">
         <div className="flex flex-wrap items-center gap-1">
           <ToggleGroup
             aria-label="Filter activity"
@@ -195,16 +198,21 @@ export function ActivityPane({
             <ToggleGroupItem className="h-6 px-2 text-xs" value="all">
               All
             </ToggleGroupItem>
-            {ACTIVITY_FILTERS.map((option) => (
-              <ToggleGroupItem
-                key={option.id}
-                className="h-6 px-2 text-xs"
-                title={option.title}
-                value={option.id}
-              >
-                {option.label}
-              </ToggleGroupItem>
-            ))}
+            {/* A chip shows once it has rows, with its count: the pane's
+                old "This stream: …" sentence, where it can be clicked. */}
+            {ACTIVITY_FILTERS.filter((option) => counts[option.id] > 0 || filter === option.id).map(
+              (option) => (
+                <ToggleGroupItem
+                  key={option.id}
+                  className="h-6 gap-1 px-2 text-xs"
+                  title={option.title}
+                  value={option.id}
+                >
+                  {option.label}
+                  <span className="text-muted-foreground tabular-nums">{counts[option.id]}</span>
+                </ToggleGroupItem>
+              )
+            )}
           </ToggleGroup>
           {platforms.length > 1 ? (
             <ToggleGroup

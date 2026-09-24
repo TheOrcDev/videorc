@@ -53,3 +53,29 @@ export function pickedSendProviders(
   const writable = writableProviders(providers)
   return picked ? writable.filter((provider) => picked.has(provider.id)) : writable
 }
+
+/** The part of a ResizeObserver the chat follow needs (a fake in tests). */
+export interface ResizeObserverLike {
+  observe: (target: Element) => void
+  disconnect: () => void
+}
+
+/**
+ * Keeps a pinned chat on its newest row when the scroll viewport or its
+ * content resizes (plan 057, P4). Following on new rows alone missed a window
+ * resize, the composer growing, and a row that grows once its emotes load:
+ * the newest message sat out of view with no paused chip. Returns the cleanup.
+ */
+export function followChatOnResize(
+  viewport: Pick<HTMLElement, 'scrollTop' | 'scrollHeight' | 'firstElementChild'>,
+  isPinned: () => boolean,
+  createObserver: (callback: () => void) => ResizeObserverLike = (callback) =>
+    new ResizeObserver(callback)
+): () => void {
+  const observer = createObserver(() => {
+    if (isPinned()) viewport.scrollTop = viewport.scrollHeight
+  })
+  observer.observe(viewport as Element)
+  if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
+  return () => observer.disconnect()
+}

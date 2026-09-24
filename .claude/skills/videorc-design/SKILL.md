@@ -50,10 +50,11 @@ Every window uses one material and one title-bar recipe (`window-glass.ts`):
   `useTrafficLightGutter()`, which drops to `pl-3` in native fullscreen.
   Header rows are drag regions, and their controls opt out with
   `[-webkit-app-region:no-drag]`.
-- **Dark-always windows.** Stream Manager, Captions, Notes, and Preview frame video or
-  sit beside it, so main pins their NSWindow appearance to `darkAqua` through
-  the native addon. A light main window never lightens them. If the pin is
-  unavailable, they fall back to solid dark.
+- **One dark-always window.** The Preview frames video, so main pins its
+  NSWindow appearance to `darkAqua` through the native addon, and a light
+  main window never lightens it. If the pin is unavailable, it falls back to
+  solid dark. Stream Manager, Captions and Notes follow the app theme like
+  main (#412).
 - **Coats.**
   - `body` paints `--glass-window`, the one window coat.
   - A content pane adds `--glass-content`, so the sidebar reads lighter than
@@ -154,38 +155,61 @@ Everything except ⌘K uses the desktop scale.
 ## Stream Manager
 
 The live dashboard window (plan 055; code name `comments`, the old Chat
-window). It follows the window family and adds its own layout rules.
+window). It follows the window family and adds its own layout rules. Plan 057
+made it chat first: one thin stats bar and fewer words.
 
 - **Tiers by container query.** The body is `@container/stream-manager`,
   never JS resize state (`lib/stream-manager-layout.ts`):
-  - Wide (1,040 px and up): the stats strip, then Chat beside a right pane
+  - Wide (1,040 px and up): the stats bar, then Chat beside a right pane
     with an Activity / Orcle segmented control.
-  - Medium (640 to 1,039 px): a compact strip (Session, Viewers, Followers,
-    Health), then one pane behind Chat / Activity / Orcle.
-  - Narrow (under 640 px, 320 minimum): a one-line summary above the same
-    segments.
+  - Medium (640 to 1,039 px): the stats bar, then one pane behind
+    Chat / Activity / Orcle.
+  - Narrow (under 640 px, 320 minimum): the same, with the stats bar down to
+    its main slots.
   - Every pane renders once; only its placement changes.
-- **The title row carries the title only.** Controls live in the status bar:
-  each provider's chat state on the left; Keep on top, Highlight, Clear view
-  and Open Preview on the right. They drop to icons under 800 px and fold
-  into ⋯ under 640 px.
-- **Stats are flush cells split by hairlines,** never cards. Numbers are
-  monochrome and tabular. Tone lives in dots and chips, and the ON AIR chip
-  is the only emphasis.
-  - Sparklines use the shadcn `chart`, neutral unless the tile warns.
-  - Per-platform splits open in a `HoverCard`.
-- **Never an unmeasured zero.** A tile exists only when its source does, and
-  an unreadable number shows "–" with the reason ("Reconnect X to show
-  followers."). The viewer count is never hidden while live.
-- **Chat keeps the big-text rows** (decision 5), virtualized with
-  `@tanstack/react-virtual`. Filters are inline chips from 640 px and one
-  Filters menu below it.
+- **The title row carries the title only,** with no mode badge: the stats bar
+  says On air, and History has its own bar. Controls live in the status bar:
+  each provider's chat state on the left; Keep on top, Highlight, Clear and
+  Open Preview as icons on the right, folded into ⋯ under 640 px.
+- **One thin stats bar** (32 px, `components/stream-manager/stats-bar.tsx`),
+  never tiles or cards:
+  - The three main slots lead it: by default the On air clock, viewers and
+    stream health. They are never clipped at any width.
+  - The rest follow after a hairline as a number and a short unit
+    ("89,860 followers +83 · 8 subs · $20 · 22 msg/min"). They sit in a
+    clipped, wrapping row, so a stat that does not fit drops off the end
+    whole.
+  - Numbers are monochrome and tabular. Tone lives in the chip and the dots,
+    and the On air chip is the only emphasis. Mini sparklines (the shadcn
+    `chart`) appear at Wide only.
+  - Details are one hover away (`HoverCard`): the per-platform split, peak,
+    fps, drops, each destination's state.
+  - Drag a stat to move it; right-click the bar to show or hide stats, move
+    one, or reset (`lib/stream-manager-stats-layout.ts`, kept in
+    `localStorage`). The clock and the viewer count cannot be hidden or leave
+    the main slots.
+- **Quiet when fine, specific when not.** Mid-stream there is no time to
+  read. A healthy state is a dot or a number; words appear only when
+  something needs the streamer:
+  - health shows "X failed" or "12 dropped/min" instead of the bitrate;
+  - a provider shows "read-only" or "reconnect to send";
+  - the composer names only what a send skips, and a finished send says
+    nothing;
+  - every removed caption survives in a hover card or a tooltip.
+- **Never an unmeasured zero.** A stat exists only when its source does, and
+  an unreadable number shows "–" with the reason on hover. The viewer count
+  is never hidden while live.
+- **Chat keeps the big-text rows** (plan 055, decision 5), virtualized with
+  `@tanstack/react-virtual`. While live, a row's time appears on hover.
+  Filters are inline chips from 640 px and one Filters menu below it.
 - **Activity rows** use the platform tile with the event glyph (the
-  window-scoped registry `components/stream-manager/activity-icons.tsx`), a
-  one-line fact, the viewer's words, and a ⋯ menu.
-- **Proof.** `pnpm probe:comments-window` sweeps 320/480/640/800/1040/1280
-  and fails on any overflow, a hidden viewer count, a button in the title
-  row, or an unreachable control.
+  window-scoped registry `components/stream-manager/activity-icons.tsx`), the
+  name and a short fact on one line ("Resub · 14 months"), the viewer's
+  words, and a ⋯ menu. Filter chips carry their counts.
+- **Proof.** `pnpm probe:comments-window` sweeps 320/480/640/800/1040/1280.
+  It fails on any overflow, a stats bar taller than one row, main stats
+  apart or clipped, a stat cut at the bar's edge, a hidden viewer count, a
+  button in the title row, or an unreachable control.
 
 ## ⌘K palette scale
 
@@ -263,10 +287,10 @@ near-opaque `bg-popover` surfaces with one soft shadow and a hairline ring.
 ## Windows
 
 - Windows 11 22H2+ (build ≥ 22621): `backgroundMaterial: 'mica'` on the
-  main window, with its own coats (`[data-platform='win32']` in styles.css).
-  Mica tints from the wallpaper without a live blur, so it stays cheap on
-  low-end iGPUs. Stream Manager, Captions, Notes, and Preview stay solid dark: Windows
-  has no per-window appearance pin.
+  main window, Stream Manager, Captions and Notes, with their own coats
+  (`[data-platform='win32']` in styles.css). Mica tints from the wallpaper
+  without a live blur, so it stays cheap on low-end iGPUs. The Preview stays
+  solid dark: Windows has no per-window appearance pin.
 - Windows 10 and older builds use the solid palette.
 - The D3D11 preview window and the proof surface stay opaque.
 - Windows-only chrome uses the `win32:` variant (`hidden win32:flex`). It

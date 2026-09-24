@@ -613,6 +613,12 @@ describe('cohostQuestionToast', () => {
       'Orcle: Ada is asking: What keyboard is that? · ⌘J'
     )
   })
+
+  it('writes the shortcut the way the platform does (Ctrl+J on Windows)', () => {
+    expect(cohostQuestionToastMessage(question({ askers: ['Ada'] }), 'Ctrl+J')).toBe(
+      'Orcle: Ada is asking: What keyboard is that? · Ctrl+J'
+    )
+  })
 })
 
 describe('cohostNudgeVisible', () => {

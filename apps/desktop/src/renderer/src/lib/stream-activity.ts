@@ -42,8 +42,11 @@ export interface ActivityItem {
   platform: StreamPlatform
   /** Who did it: the viewer, the raiding channel, or the destination. */
   name: string
-  /** One line: "Resubscribed for 8 months at Tier 1", "Gifted 5 subs". */
+  /** The sentence: "Resubscribed for 8 months at Tier 1". Viewers read it on
+   * the stream's highlight card, and Copy and the row's tooltip use it. */
   line: string
+  /** The fact at a glance, for the pane (plan 057, D3): "Resub · 8 months". */
+  short: string
   /** The viewer's own words, when the event carried any. */
   message?: string
   at: string
@@ -117,6 +120,50 @@ function subscriptionLine(details: SubscriptionDetails): string {
   return lines[details.subscription]()
 }
 
+/** Tier 2 and 3 are worth naming at a glance; Tier 1 is the default. */
+function notableTier(details: SubscriptionDetails): string | null {
+  if (details.isPrime) return 'Prime'
+  return details.tier && details.tier !== '1000' ? (TIER_LABELS[details.tier] ?? null) : null
+}
+
+function subscriptionShort(details: SubscriptionDetails): string {
+  const tier = notableTier(details)
+  const suffix = tier ? ` · ${tier}` : ''
+  switch (details.subscription) {
+    case 'sub':
+      return details.isPrime ? 'Prime sub' : `New sub${suffix}`
+    case 'resub':
+      return `Resub${details.months ? ` · ${plural(details.months, 'month', 'months')}` : ''}${suffix}`
+    case 'sub-gift':
+      return details.recipientName ? `Gift sub → ${details.recipientName}` : 'Gift sub'
+    case 'community-sub-gift':
+      return `Gifted ${plural(details.giftCount ?? 1, 'sub', 'subs')}`
+    case 'gift-paid-upgrade':
+      return 'Kept a gift sub'
+    case 'prime-paid-upgrade':
+      return `Prime → ${subscriptionTierLabel(details.tier, false)}`
+    case 'pay-it-forward':
+      return 'Paid it forward'
+  }
+}
+
+function membershipShort(details: MembershipDetails): string {
+  switch (details.membership) {
+    case 'new':
+      return details.levelName ? `Member · ${details.levelName}` : 'New member'
+    case 'upgrade':
+      return details.levelName ? `Upgraded · ${details.levelName}` : 'Upgraded'
+    case 'milestone':
+      return details.months
+        ? `Member · ${plural(details.months, 'month', 'months')}`
+        : 'Member milestone'
+    case 'gift':
+      return `Gifted ${plural(details.giftCount ?? 1, 'membership', 'memberships')}`
+    case 'gift-received':
+      return 'Gift membership'
+  }
+}
+
 function membershipLine(details: MembershipDetails): string {
   const level = details.levelName ? ` ${details.levelName}` : ''
   switch (details.membership) {
@@ -167,13 +214,14 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
       : undefined
   switch (details.kind) {
     case 'follow':
-      return { ...base, kind: 'follow', filter: 'follows', line: 'Followed' }
+      return { ...base, kind: 'follow', filter: 'follows', line: 'Followed', short: 'Follow' }
     case 'subscription':
       return {
         ...base,
         kind: 'subscription',
         filter: 'support',
         line: subscriptionLine(details),
+        short: subscriptionShort(details),
         ...(details.subscription === 'sub-gift' || details.subscription === 'community-sub-gift'
           ? { gift: true }
           : {})
@@ -184,6 +232,7 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         kind: 'membership',
         filter: 'support',
         line: membershipLine(details),
+        short: membershipShort(details),
         ...(details.membership === 'gift' ? { gift: true } : {}),
         ...(viewerWords ? { message: viewerWords } : {})
       }
@@ -194,6 +243,7 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         kind: 'cheer',
         filter: 'tips',
         line: `Cheered ${plural(details.bits, 'bit', 'bits')}`,
+        short: plural(details.bits, 'bit', 'bits'),
         ...(words ? { message: words } : {})
       }
     }
@@ -203,6 +253,7 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         kind: 'super-chat',
         filter: 'tips',
         line: `Super Chat · ${details.amountDisplay}`,
+        short: `${details.amountDisplay} Super Chat`,
         ...(viewerWords ? { message: viewerWords } : {})
       }
     case 'super-sticker':
@@ -211,6 +262,7 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         kind: 'super-sticker',
         filter: 'tips',
         line: `Super Sticker · ${details.amountDisplay}`,
+        short: `${details.amountDisplay} Super Sticker`,
         ...(details.altText ? { message: details.altText } : {})
       }
     case 'raid':
@@ -218,7 +270,8 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         ...base,
         kind: 'raid',
         filter: 'raids',
-        line: `Raided with ${plural(details.viewerCount, 'viewer', 'viewers')}`
+        line: `Raided with ${plural(details.viewerCount, 'viewer', 'viewers')}`,
+        short: `Raid · ${plural(details.viewerCount, 'viewer', 'viewers')}`
       }
     case 'announcement':
       return {
@@ -226,6 +279,7 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         kind: 'announcement',
         filter: null,
         line: 'Announcement',
+        short: 'Announcement',
         ...(message.messageText.trim() ? { message: message.messageText.trim() } : {})
       }
   }
@@ -240,6 +294,7 @@ function itemFromDestination(event: DestinationEvent): ActivityItem {
     platform: event.platform,
     name: event.label,
     line: failed ? 'Destination failed' : 'Back on air',
+    short: failed ? 'Failed' : 'Back on air',
     ...(failed && event.message ? { message: event.message } : {}),
     at: event.at
   }
@@ -337,23 +392,21 @@ export function activityTotals(messages: readonly LiveChatMessage[]): ActivityTo
   return totals
 }
 
-/** "12 follows · 5 subs · 1,500 bits · $42.00", leaving out what is zero. */
-export function formatActivitySummary(totals: ActivityTotals): string {
-  const parts: string[] = []
-  if (totals.follows) parts.push(plural(totals.follows, 'follow', 'follows'))
-  if (totals.supporters) parts.push(plural(totals.supporters, 'sub', 'subs'))
-  if (totals.bits) parts.push(plural(totals.bits, 'bit', 'bits'))
-  for (const tip of totals.tips) parts.push(formatMicros(tip.amountMicros, tip.currency))
-  if (totals.raids) parts.push(plural(totals.raids, 'raid', 'raids'))
-  return parts.join(' · ')
-}
-
-/** Tips as one short value: bits first, then each currency. */
-export function formatTipsValue(totals: ActivityTotals): string | null {
-  const parts: string[] = []
-  if (totals.bits) parts.push(plural(totals.bits, 'bit', 'bits'))
-  for (const tip of totals.tips) parts.push(formatMicros(tip.amountMicros, tip.currency))
-  return parts.length ? parts.join(' · ') : null
+/** How many rows each filter chip would show (plan 057, D3). */
+export function activityFilterCounts(
+  items: readonly ActivityItem[]
+): Record<ActivityFilter, number> {
+  const counts: Record<ActivityFilter, number> = {
+    follows: 0,
+    support: 0,
+    tips: 0,
+    raids: 0,
+    destinations: 0
+  }
+  for (const item of items) {
+    if (item.filter) counts[item.filter] += 1
+  }
+  return counts
 }
 
 export function filterActivity(

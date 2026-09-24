@@ -11,12 +11,6 @@ import type { ChatSendFailure } from '@/lib/chat-send'
 import type { CohostState } from '@/lib/backend'
 import { cohostChipView } from '@/lib/cohost-view'
 
-function joinLabels(labels: string[]): string {
-  if (labels.length < 2) return labels[0] ?? ''
-  if (labels.length === 2) return labels.join(' + ')
-  return `${labels.slice(0, -1).join(', ')} + ${labels.at(-1)}`
-}
-
 function providerStateLabel(state: LiveChatProviderConnectionState): string {
   switch (state) {
     case 'disabled':
@@ -77,55 +71,40 @@ export function providerBadgeTitle(provider: LiveChatProviderState): string {
   return provider.message || identity
 }
 
-export function commentsDestinationSummary({
+/**
+ * What the composer says about its destinations: only the exceptions (plan
+ * 057, D3). A destination that receives the send needs no words, since the
+ * "To:" picker already names where a message goes, and a failed send shows
+ * its own reason as a badge. Empty when everything can send.
+ */
+export function commentsDestinationNotes({
   providers,
-  sendTargets,
-  failures = []
+  sendTargets
 }: {
   providers: LiveChatProviderState[]
   sendTargets: StreamPlatform[]
-  failures?: ChatSendFailure[]
 }): string {
   const uniqueSendTargets = [...new Set(sendTargets)]
-  const sendLabels = uniqueSendTargets.map((platform) => CHAT_PLATFORM_LABELS[platform])
-  const parts = [
-    sendLabels.length > 0 ? `Sends to ${joinLabels(sendLabels)}` : 'No writable destinations'
-  ]
-  const failedPlatforms = new Set(failures.map((failure) => failure.platform))
+  const parts = uniqueSendTargets.length > 0 ? [] : ['No writable destinations']
   const describedPlatforms = new Set<StreamPlatform>()
 
   for (const provider of providers) {
     if (describedPlatforms.has(provider.platform)) continue
     describedPlatforms.add(provider.platform)
-    if (failedPlatforms.has(provider.platform)) {
-      parts.push(`${CHAT_PLATFORM_LABELS[provider.platform]} failed`)
-      continue
-    }
-    if (uniqueSendTargets.includes(provider.platform)) {
-      continue
-    }
+    if (uniqueSendTargets.includes(provider.platform)) continue
+    const label = CHAT_PLATFORM_LABELS[provider.platform]
     if (provider.write === 'missing-scope') {
-      parts.push(`${CHAT_PLATFORM_LABELS[provider.platform]} reconnect to send`)
-      continue
-    }
-    if (provider.write === 'failed') {
-      parts.push(`${CHAT_PLATFORM_LABELS[provider.platform]} send failed`)
-      continue
-    }
-    if (provider.write === 'read-only' || provider.state === 'connected') {
+      parts.push(`${label} reconnect to send`)
+    } else if (provider.write === 'failed') {
+      parts.push(`${label} send failed`)
+    } else if (provider.write === 'read-only' || provider.state === 'connected') {
       // X sends now (closed-beta chat API, 2026-08-19) — read-only here only
       // means THIS stream lacks send context (e.g. a manual-RTMP X target).
-      parts.push(`${CHAT_PLATFORM_LABELS[provider.platform]} receive-only`)
-      continue
-    }
-    if (provider.state === 'failed') {
-      parts.push(`${CHAT_PLATFORM_LABELS[provider.platform]} failed`)
-      continue
-    }
-    if (provider.state === 'connecting' || provider.state === 'reconnecting') {
-      parts.push(
-        `${CHAT_PLATFORM_LABELS[provider.platform]} ${providerStateLabel(provider.state).toLowerCase()}`
-      )
+      parts.push(`${label} receive-only`)
+    } else if (provider.state === 'failed') {
+      parts.push(`${label} failed`)
+    } else if (provider.state === 'connecting' || provider.state === 'reconnecting') {
+      parts.push(`${label} ${providerStateLabel(provider.state).toLowerCase()}`)
     }
   }
 
@@ -164,18 +143,22 @@ export function CommentsDestinationStatus({
   }
 
   if (mode === 'composer') {
-    const summary = commentsDestinationSummary({ providers, sendTargets, failures })
+    const notes = commentsDestinationNotes({ providers, sendTargets })
+    const chip = cohostChipView(cohostState)
+    if (!notes && !chip && failures.length === 0) return null
     return (
       <div className="flex min-w-0 flex-col gap-1.5" data-slot="comments-destination-status">
-        <div className="flex min-w-0 items-center gap-1.5">
-          <p
-            className="min-w-0 flex-1 truncate text-[11px] leading-tight text-muted-foreground"
-            title={summary}
-          >
-            {summary}
-          </p>
-          <CohostStatusChip state={cohostState} />
-        </div>
+        {notes || chip ? (
+          <div className="flex min-w-0 items-center gap-1.5">
+            <p
+              className="min-w-0 flex-1 truncate text-[11px] leading-tight text-muted-foreground"
+              title={notes}
+            >
+              {notes}
+            </p>
+            <CohostStatusChip state={cohostState} />
+          </div>
+        ) : null}
         {failures.length > 0 ? (
           <div className="flex flex-wrap gap-1">
             {failures.map((failure) => (

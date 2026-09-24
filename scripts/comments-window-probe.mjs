@@ -48,6 +48,10 @@ const DELAYED_SEND_ACK_MS =
 const WIDE_TIER_MIN_WIDTH = 1040
 const MEDIUM_TIER_MIN_WIDTH = 640
 const SWEEP_WIDTHS = [320, 480, 640, 800, 1040, 1280]
+// Plan 057: 32 px of stats plus the hairline under them; the main three sit
+// at most a gap-4 (16 px) apart, with a little room for rounding.
+const STATS_BAR_MAX_HEIGHT = 33.5
+const STATS_MAIN_MAX_GAP = 20
 
 let launched
 let smoke
@@ -133,8 +137,10 @@ async function main() {
   )
   const coldLive = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
+    // The title row carries the title only (plan 057): the stats bar's session
+    // stat says the window is off air.
     (s) =>
-      s.text.includes('Idle') &&
+      s.text.includes('Off air') &&
       s.composerCount === 0 &&
       !s.text.includes('History-only replay comment'),
     5000
@@ -149,7 +155,7 @@ async function main() {
   await smokeCommand('comments-window-push-snapshot', { snapshot: idleSnapshot() })
   const idle = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
-    (s) => s.open && s.messageCount === 0 && s.composerCount === 0 && s.text.includes('Idle'),
+    (s) => s.open && s.messageCount === 0 && s.composerCount === 0 && s.text.includes('Off air'),
     8000
   )
   assertProbe(
@@ -162,8 +168,9 @@ async function main() {
   await smokeCommand('comments-window-push-snapshot', { snapshot: failedLiveSnapshot() })
   const failedLive = await waitFor(
     () => smokeCommand('comments-window-reader-state'),
+    // Live mode shows in the composer and the highlight action, not a badge.
     (s) =>
-      s.text.includes('Live') &&
+      !s.text.includes('Back to live') &&
       s.text.includes('All providers are temporarily unavailable') &&
       s.composerCount === 1 &&
       s.composerDisabled === true &&
@@ -189,8 +196,9 @@ async function main() {
       s.text.includes('YouTube Viewer') &&
       s.text.includes('Twitch Viewer') &&
       s.text.includes('X Viewer') &&
-      s.destinationStatus.includes('Sends to YouTube + Twitch') &&
-      s.destinationStatus.includes('X receive-only'),
+      // Plan 057: the notes name only what a send skips.
+      s.destinationStatus.includes('X receive-only') &&
+      !s.destinationStatus.includes('Sends to'),
     8000
   )
   assertProbe(
@@ -373,13 +381,20 @@ async function main() {
     'send budget: delayed composer message submitted',
     JSON.stringify(delayedSubmitted)
   )
+  const sending = await waitFor(
+    () => smokeCommand('comments-window-reader-state'),
+    (s) => s.deliveryStatus.includes('Sending'),
+    5000
+  )
+  assertProbe(sending.ok, 'send: a message in flight says Sending', JSON.stringify(sending.last))
+  // A finished send says nothing more (plan 057): the message shows up in chat.
   const delayedSend = await waitFor(
     async () => ({
       reader: await smokeCommand('comments-window-reader-state'),
       command: await smokeCommand('comments-window-command-trace')
     }),
     (s) =>
-      s.reader.text.includes(`You · ${delayedOutboundText} · sent`) &&
+      s.reader.deliveryStatus === '' &&
       s.command.pendingCount === 0 &&
       s.command.trace?.resolutionAccepted === true &&
       s.command.trace?.terminal === 'resolved',
@@ -409,12 +424,12 @@ async function main() {
       command: await smokeCommand('comments-window-command-trace')
     }),
     (s) =>
-      s.reader.text.includes(`You · ${outboundText} · partial`) &&
+      // Only the exceptions speak: Twitch's reason once, X receive-only in
+      // the notes, and nothing for YouTube, which got the message.
       s.reader.text.includes('Twitch probe destination rejected this message.') &&
       s.reader.destinationStatus.includes('X receive-only') &&
-      s.reader.deliveryStatus.includes('YouTube · Sent') &&
-      s.reader.deliveryStatus.includes('Twitch · Failed') &&
-      s.reader.deliveryStatus.includes('X · Receive-only') &&
+      !s.reader.destinationStatus.includes('YouTube') &&
+      s.reader.deliveryStatus === '' &&
       s.command.pendingCount === 0 &&
       s.command.trace?.terminal === 'resolved',
     5000
@@ -628,7 +643,10 @@ async function probeNarrowWidths() {
   await smokeCommand('comments-window-seed-cohost', { state: cohostListeningFixture() })
 
   for (const width of SWEEP_WIDTHS) {
-    const metrics = await layoutAt(width, { openMoreMenu: true })
+    const metrics = await layoutAt(width, {
+      openMoreMenu: true,
+      openStatsMenu: width >= WIDE_TIER_MIN_WIDTH
+    })
     const tag = `sweep ${width}px live`
     assertHeaderFits(metrics, tag)
     assertProbe(
@@ -646,16 +664,33 @@ async function probeNarrowWidths() {
       `${tag}: the viewer count is visible while live`,
       JSON.stringify(metrics.viewer)
     )
+    assertStatsBar(metrics, tag)
     assertBoxFits(metrics.statusBar, metrics.statusBarItems, `${tag}: status bar`)
     if (width >= WIDE_TIER_MIN_WIDTH) {
+      // Plan 057, D2: right-clicking a stat offers show/hide, moving it, and
+      // a reset, and closes cleanly.
+      assertProbe(
+        [
+          'Stream health',
+          'Followers',
+          'Subs and members',
+          'Tips',
+          'Chat pace',
+          'Move Followers left',
+          'Move Followers right',
+          'Reset stats'
+        ].every((label) => metrics.statsMenuItems?.includes(label)) &&
+          metrics.menuOpenAfter === false,
+        `${tag}: right-clicking a stat offers show, hide, move and reset`,
+        JSON.stringify({ items: metrics.statsMenuItems, openAfter: metrics.menuOpenAfter })
+      )
       assertProbe(
         metrics.wideTabs &&
           !metrics.narrowTabs &&
           metrics.panes.chat &&
-          (metrics.panes.activity || metrics.panes.orcle) &&
-          metrics.strip !== null,
-        `${tag}: Wide shows the strip, Chat and the right pane`,
-        JSON.stringify({ panes: metrics.panes, wide: metrics.wideTabs, strip: metrics.strip })
+          (metrics.panes.activity || metrics.panes.orcle),
+        `${tag}: Wide shows Chat and the right pane`,
+        JSON.stringify({ panes: metrics.panes, wide: metrics.wideTabs })
       )
     } else {
       const shown = Object.values(metrics.panes).filter(Boolean).length
@@ -672,25 +707,14 @@ async function probeNarrowWidths() {
           metrics.highlightPosition.visible &&
           metrics.clearViewVisible &&
           metrics.openPreviewVisible &&
-          !metrics.moreMenu.visible &&
-          metrics.strip !== null,
+          !metrics.moreMenu.visible,
         `${tag}: every control is inline in the status bar`,
         JSON.stringify(metrics)
       )
-      assertProbe(
-        metrics.stripRule >= 1,
-        `${tag}: a hairline splits the stats strip from the panes`,
-        JSON.stringify({ stripRule: metrics.stripRule })
-      )
     } else {
       assertProbe(
-        metrics.summaryRule >= 1,
-        `${tag}: a hairline splits the summary from the panes`,
-        JSON.stringify({ summaryRule: metrics.summaryRule })
-      )
-      assertProbe(
-        metrics.moreMenu.visible && !metrics.inlineActions && metrics.summary !== null,
-        `${tag}: controls fold into ⋯ and the strip becomes one line`,
+        metrics.moreMenu.visible && !metrics.inlineActions,
+        `${tag}: controls fold into ⋯`,
         JSON.stringify(metrics)
       )
       assertProbe(
@@ -783,6 +807,33 @@ function assertHeaderFits(metrics, tag) {
     `${tag}: every visible header item sits inside the gutters`,
     JSON.stringify({ header, clipped })
   )
+}
+
+// Plan 057: one thin bar at every width. The clock, viewers and health lead
+// it, whole and side by side; any other stat is either whole or wrapped out
+// of sight, never cut at the edge.
+function assertStatsBar(metrics, tag) {
+  assertProbe(
+    metrics.bar !== null && metrics.bar.height <= STATS_BAR_MAX_HEIGHT,
+    `${tag}: the stats bar is one thin row (<= ${STATS_BAR_MAX_HEIGHT}px)`,
+    JSON.stringify(metrics.bar)
+  )
+  assertProbe(
+    metrics.barRule >= 1,
+    `${tag}: a hairline splits the stats bar from the panes`,
+    JSON.stringify({ barRule: metrics.barRule })
+  )
+  const main = (metrics.stats ?? []).filter((stat) => stat.group === 'main')
+  const gaps = main.slice(1).map((stat, index) => stat.left - main[index].right)
+  assertProbe(
+    main.map((stat) => stat.id).join(',') === 'session,viewers,health' &&
+      main.every((stat) => stat.shown) &&
+      gaps.every((gap) => gap <= STATS_MAIN_MAX_GAP),
+    `${tag}: the clock, viewers and health lead the bar, whole and together`,
+    JSON.stringify({ main, gaps })
+  )
+  const cut = (metrics.stats ?? []).filter((stat) => stat.straddles)
+  assertProbe(cut.length === 0, `${tag}: no stat is cut at the bar's edge`, JSON.stringify(cut))
 }
 
 function assertBoxFits(box, items, label) {

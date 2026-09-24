@@ -27,6 +27,8 @@ import { cn } from '@/lib/utils'
 // on the left, the window's quiet controls on the right. The title row keeps
 // the title only (owner call, 2026-09-23: no buttons in the top-right corner).
 // Below 640 px the controls fold into one ⋯ menu so none is ever clipped.
+// Quiet when fine (plan 057, D3): a platform that reads and sends is its icon
+// and a green dot, and the controls are icons with their names on hover.
 
 const ACTION_CLASS =
   'flex h-5 shrink-0 items-center gap-1 rounded-chip px-1.5 text-[11px] text-subtle transition-colors duration-100 hover:bg-accent hover:text-foreground aria-pressed:text-foreground [&_svg]:size-3.5'
@@ -46,22 +48,37 @@ function providerTone(provider: LiveChatProviderState): StatusDotTone {
   }
 }
 
-/** "read · send", "read-only", "off": what chat can do on this platform now. */
+/**
+ * What chat cannot do on this platform right now, in a word or two:
+ * "read-only", "reconnect to send", "failed". Empty when it reads and sends,
+ * so a healthy platform is just its icon and dot.
+ */
 export function providerCapabilityLabel(provider: LiveChatProviderState): string {
   if (provider.state === 'failed') return 'failed'
   if (provider.state === 'ended') return 'ended'
   if (provider.read === 'unavailable' || provider.state === 'unsupported') return 'off'
-  if (provider.write === 'ready') return 'read · send'
-  if (provider.write === 'missing-scope') return 'read · reconnect to send'
+  if (
+    provider.state === 'connecting' ||
+    provider.state === 'reconnecting' ||
+    provider.state === 'waiting'
+  ) {
+    return provider.state
+  }
+  if (provider.write === 'ready') return ''
+  if (provider.write === 'missing-scope') return 'reconnect to send'
   return 'read-only'
 }
 
-/** The capability line's hover text: the provider's own words plus audience notes. */
+/** The hover text: what chat can do, the provider's own words, audience notes. */
 export function providerCapabilityTitle(
   provider: LiveChatProviderState,
   audience: AudienceSnapshot | null
 ): string {
-  const lines = [providerBadgeTitle(provider)]
+  const capability = providerCapabilityLabel(provider) || 'reads and sends'
+  const lines = [
+    `${CHAT_PLATFORM_LABELS[provider.platform]} chat: ${capability}`,
+    providerBadgeTitle(provider)
+  ]
   const entry = audience?.platforms.find((candidate) => candidate.platform === provider.platform)
   if (entry?.message && entry.capability !== 'available') lines.push(entry.message)
   if (provider.platform === 'twitch' && entry?.audienceScopes === false) {
@@ -100,20 +117,28 @@ export function StreamManagerStatusBar({
       className="gap-2"
       leading={
         <span className="flex min-w-0 items-center gap-3 overflow-hidden" data-slot="chat-states">
-          {providers.map((provider) => (
-            <span
-              key={provider.id}
-              className="flex min-w-0 shrink items-center gap-1.5"
-              data-slot="chat-state"
-              title={providerCapabilityTitle(provider, audience)}
-            >
-              <ChatPlatformIcon decorative platform={provider.platform} />
-              <StatusDot tone={providerTone(provider)} />
-              <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
-                {CHAT_PLATFORM_LABELS[provider.platform]} {providerCapabilityLabel(provider)}
+          {providers.map((provider) => {
+            const label = providerCapabilityLabel(provider)
+            const title = providerCapabilityTitle(provider, audience)
+            return (
+              <span
+                key={provider.id}
+                aria-label={title.split('\n')[0]}
+                className="flex min-w-0 shrink items-center gap-1.5"
+                data-slot="chat-state"
+                role="img"
+                title={title}
+              >
+                <ChatPlatformIcon decorative platform={provider.platform} />
+                <StatusDot tone={providerTone(provider)} />
+                {label ? (
+                  <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
+                    {CHAT_PLATFORM_LABELS[provider.platform]} {label}
+                  </span>
+                ) : null}
               </span>
-            </span>
-          ))}
+            )
+          })}
         </span>
       }
     >
@@ -131,7 +156,6 @@ export function StreamManagerStatusBar({
             onClick={onToggleAlwaysOnTop}
           >
             <PinIcon aria-hidden weight={alwaysOnTop ? 'fill' : 'regular'} />
-            <span className={COMPACT_LABEL}>Keep on top</span>
           </button>
         ) : null}
         {anchorControl ? (
@@ -144,7 +168,6 @@ export function StreamManagerStatusBar({
                 type="button"
               >
                 <FrameIcon aria-hidden />
-                <span className={COMPACT_LABEL}>Highlight</span>
               </button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end" side="top">
@@ -154,12 +177,13 @@ export function StreamManagerStatusBar({
         ) : null}
         {onClear ? (
           <button
+            aria-label="Clear view"
             className={ACTION_CLASS}
-            title="Clear view keeps Library history."
+            title="Clear view (keeps Library history)"
             type="button"
             onClick={onClear}
           >
-            Clear view
+            Clear
           </button>
         ) : null}
         {onOpenPreview ? (
@@ -171,7 +195,6 @@ export function StreamManagerStatusBar({
             onClick={onOpenPreview}
           >
             <PreviewIcon aria-hidden />
-            <span className={COMPACT_LABEL}>Open Preview</span>
           </button>
         ) : null}
       </div>

@@ -614,8 +614,8 @@ export const COHOST_QUESTION_TOAST_THROTTLE_MS = 60_000
 
 const COHOST_QUESTION_TOAST_TEXT_CAP = 64
 
-/** "Orcle: 5 people asking: What keyboard is that? · ⌘J" */
-export function cohostQuestionToastMessage(question: CohostQuestion): string {
+/** "Orcle: 5 people asking: What keyboard is that? · ⌘J" (Ctrl+J on Windows). */
+export function cohostQuestionToastMessage(question: CohostQuestion, shortcut = '⌘J'): string {
   const askers = question.askers.length
   const who =
     askers > 1
@@ -624,7 +624,7 @@ export function cohostQuestionToastMessage(question: CohostQuestion): string {
         ? `${question.askers[0]} is asking`
         : 'a new question'
   const text = trimDraftToCap(question.text, COHOST_QUESTION_TOAST_TEXT_CAP)
-  return text ? `Orcle: ${who}: ${text} · ⌘J` : `Orcle: ${who} · ⌘J`
+  return text ? `Orcle: ${who}: ${text} · ${shortcut}` : `Orcle: ${who} · ${shortcut}`
 }
 
 export interface CohostQuestionToast {
@@ -643,13 +643,16 @@ export function cohostQuestionToast({
   next,
   paneOpen,
   lastToastAtMs,
-  nowMs
+  nowMs,
+  shortcut
 }: {
   previous: CohostState | null
   next: CohostState
   paneOpen: boolean
   lastToastAtMs: number | null
   nowMs: number
+  /** The key that focuses Orcle, as this platform writes it. */
+  shortcut?: string
 }): CohostQuestionToast | null {
   if (paneOpen) return null
   if (next.status !== 'listening') return null
@@ -665,7 +668,7 @@ export function cohostQuestionToast({
     (question) => question.priority === 'high' && !known.has(question.id)
   )
   if (!candidate) return null
-  return { message: cohostQuestionToastMessage(candidate), atMs: nowMs }
+  return { message: cohostQuestionToastMessage(candidate, shortcut), atMs: nowMs }
 }
 
 // --- Off-but-useful nudge ---------------------------------------------------
