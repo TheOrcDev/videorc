@@ -92,6 +92,15 @@ checks the SHA-256, executes the binary, and fails closed unless the build is
 LGPL-only, enables VAAPI and OpenH264, disables x264/x265/fdk-aac, and exposes
 both `h264_vaapi` and `libopenh264` encoders. Linux CI repeats this check.
 
+Second ogre run (2026-09-24, on Plan 052): OpenH264 records in-app; the only
+matrix gap was missing `color_primaries`/`color_transfer` in the OpenH264
+bitstream, now closed by the SPS VUI rewrite. VAAPI on `renderD128` rejects
+the standard argument set with "Failed to end picture encode issue: 24"
+while a plain CLI encode passes. The probe therefore tries a compat set
+(CBR, no B-frames, no level pin) after the standard set fails on the same
+node; that compat set is provisional until the bisect on the box confirms
+which argument the iHD driver rejects (Plan 053, S3).
+
 ## Delivery phases
 
 ### L1 — Compile and CI gate

@@ -1484,6 +1484,25 @@ pub struct LinuxRenderNodeDiagnostic {
     pub detail: Option<String>,
 }
 
+/// Which VAAPI argument set the Linux probe accepted (Plan 053). `compat`
+/// is only ever chosen after `standard` was rejected on the same node.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum LinuxVaapiArgProfile {
+    #[default]
+    Standard,
+    Compat,
+}
+
+impl std::fmt::Display for LinuxVaapiArgProfile {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Standard => "standard",
+            Self::Compat => "compat",
+        })
+    }
+}
+
 /// `performance.check.run` params. The ceiling is the largest output worth
 /// testing on this machine (the renderer sends the larger of the selected
 /// output and the display's native size); the ladder walks down from there.
@@ -2249,6 +2268,9 @@ pub struct DiagnosticStats {
     /// with it, so the evidence names the GPU that encoded (Plan 052).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub linux_render_nodes: Option<Vec<LinuxRenderNodeDiagnostic>>,
+    /// Linux VAAPI only: the argument profile the session encodes with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub linux_vaapi_arg_profile: Option<LinuxVaapiArgProfile>,
     /// Which compositor backend produced the most recent diagnostic window.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compositor_backend: Option<CompositorBackend>,
