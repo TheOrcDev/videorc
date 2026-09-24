@@ -1343,6 +1343,8 @@ export type EncodeBackend =
 /** One `/dev/dri/renderD*` node as the Linux VAAPI policy saw it (Plan 052). */
 export type LinuxRenderNodeState = 'probed-ok' | 'rejected' | 'quarantined' | 'skipped'
 
+export type LinuxVaapiArgProfile = 'standard' | 'compat'
+
 export interface LinuxRenderNodeDiagnostic {
   node: string
   driver?: string
@@ -2390,6 +2392,8 @@ export interface DiagnosticStats {
   encodeBackend?: EncodeBackend
   /** Linux only: every render node the VAAPI policy saw and what it did with it. */
   linuxRenderNodes?: LinuxRenderNodeDiagnostic[]
+  /** Linux VAAPI only: which argument profile the session encodes with. */
+  linuxVaapiArgProfile?: LinuxVaapiArgProfile
   /** Which compositor backend produced the most recent diagnostic window. */
   compositorBackend?: CompositorBackend
   /** Why the compositor had to render on CPU fallback. */

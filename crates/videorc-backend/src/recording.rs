@@ -89,12 +89,12 @@ use crate::protocol::{
     AudioTrackSource, BackgroundFit, CameraCorner, CameraFit, CameraShape, CameraTransformMode,
     CompositorBackend, CompositorSceneUpdateParams, CompositorState, DiagnosticStats,
     EffectiveSceneBackground, EncodeBackend, EntitlementsSnapshot, FeatureId, HealthLevel,
-    LayoutPreset, LayoutSettings, LinuxRenderNodeDiagnostic, PreviewCameraState, PreviewLiveParams,
-    PreviewLiveSource, PreviewLiveState, PreviewLiveStatus, PreviewScreenSourceKind,
-    PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams, PreviewSurfaceBacking,
-    PreviewTransport, RecordingPipelineStage, RecordingState, RecordingStatus,
-    RecordingTimelineSnapshot, RemuxSessionParams, RtmpPreset, RtmpSettings, Scene,
-    SceneConfigParams, SceneSourceKind, SessionStopParams, SideBySideCameraSide,
+    LayoutPreset, LayoutSettings, LinuxRenderNodeDiagnostic, LinuxVaapiArgProfile,
+    PreviewCameraState, PreviewLiveParams, PreviewLiveSource, PreviewLiveState, PreviewLiveStatus,
+    PreviewScreenSourceKind, PreviewScreenState, PreviewSnapshot, PreviewSnapshotParams,
+    PreviewSurfaceBacking, PreviewTransport, RecordingPipelineStage, RecordingState,
+    RecordingStatus, RecordingTimelineSnapshot, RemuxSessionParams, RtmpPreset, RtmpSettings,
+    Scene, SceneConfigParams, SceneSourceKind, SessionStopParams, SideBySideCameraSide,
     StartSessionParams, StreamHealth, StreamOutputBridge, StreamOutputTopologyProbeParams,
     StreamOutputTopologyProbeResult, StreamOutputTopologyProbeState, StreamOutputTopologyRole,
     StreamScreen, VideoPreset, VideoSettings,
@@ -3576,6 +3576,15 @@ async fn start_session_with_timeline(
     // the output clock; the legacy path captures via FFmpeg.
     initial_diagnostics.encode_backend =
         Some(windows_encoded_bridge_decision.effective_encode_backend);
+    initial_diagnostics.linux_vaapi_arg_profile = (windows_encoded_bridge_decision
+        .fallback_ffmpeg_encoder
+        .platform
+        == FfmpegH264Platform::LinuxVaapi)
+        .then_some(
+            windows_encoded_bridge_decision
+                .fallback_ffmpeg_encoder
+                .vaapi_arg_profile,
+        );
     initial_diagnostics.linux_render_nodes = (!windows_encoded_bridge_decision
         .fallback_ffmpeg_encoder
         .render_nodes
@@ -11106,6 +11115,9 @@ struct ResolvedFfmpegH264Encoder {
     /// Linux only: what the render-node policy saw and did (Plan 052). Empty
     /// elsewhere and for an explicit OpenH264 selection.
     render_nodes: Vec<LinuxRenderNodeDiagnostic>,
+    /// Which VAAPI argument set the probe accepted (Plan 053). `Standard`
+    /// everywhere except a Linux VAAPI selection that needed `Compat`.
+    vaapi_arg_profile: LinuxVaapiArgProfile,
 }
 
 impl ResolvedFfmpegH264Encoder {
@@ -11115,6 +11127,7 @@ impl ResolvedFfmpegH264Encoder {
             vaapi_device: None,
             fallback_reason: None,
             render_nodes: Vec::new(),
+            vaapi_arg_profile: LinuxVaapiArgProfile::Standard,
         }
     }
 
@@ -11410,6 +11423,7 @@ fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<St
         video,
         FfmpegH264Platform::WindowsHardware,
         true,
+        LinuxVaapiArgProfile::Standard,
     );
     // Plan 035 / issue #156: h264_mf has PASSED a null-output probe and then
     // failed during TEE header creation in production. Exercise the exact
@@ -11434,7 +11448,7 @@ const WINDOWS_MEDIA_FOUNDATION_PROBE_TIMEOUT: Duration = Duration::from_secs(15)
 /// upload chain. A pass here predicts a session pass; the old 128x72 three
 /// frame probe passed on ogre's Intel node while every real rung failed.
 #[cfg(any(test, target_os = "linux"))]
-fn linux_vaapi_probe_args(device: &Path) -> Vec<String> {
+fn linux_vaapi_probe_args(device: &Path, profile: LinuxVaapiArgProfile) -> Vec<String> {
     let video = crate::linux_vaapi::probe_video_settings();
     let mut encode_args = Vec::new();
     append_h264_encoding_args_for_platform_with_timing(
@@ -11443,6 +11457,7 @@ fn linux_vaapi_probe_args(device: &Path) -> Vec<String> {
         FfmpegH264Platform::LinuxVaapi,
         false,
         false,
+        profile,
     );
     crate::linux_vaapi::probe_args(device, &video, &encode_args)
 }
@@ -11450,7 +11465,7 @@ fn linux_vaapi_probe_args(device: &Path) -> Vec<String> {
 #[cfg(any(test, target_os = "linux"))]
 fn select_linux_h264_encoder(
     preference: LinuxH264EncoderPreference,
-    accepted_device: Option<PathBuf>,
+    accepted_device: Option<(PathBuf, LinuxVaapiArgProfile)>,
     rejection_reason: Option<String>,
 ) -> Result<ResolvedFfmpegH264Encoder> {
     if preference == LinuxH264EncoderPreference::OpenH264 {
@@ -11461,14 +11476,16 @@ fn select_linux_h264_encoder(
                 "OpenH264 software encoding was selected explicitly for this session.".to_string(),
             ),
             render_nodes: Vec::new(),
+            vaapi_arg_profile: LinuxVaapiArgProfile::Standard,
         });
     }
-    if let Some(device) = accepted_device {
+    if let Some((device, profile)) = accepted_device {
         return Ok(ResolvedFfmpegH264Encoder {
             platform: FfmpegH264Platform::LinuxVaapi,
             vaapi_device: Some(device),
             fallback_reason: None,
             render_nodes: Vec::new(),
+            vaapi_arg_profile: profile,
         });
     }
     let reason = rejection_reason.unwrap_or_else(|| {
@@ -11484,6 +11501,7 @@ fn select_linux_h264_encoder(
             "VAAPI was unavailable ({reason}); using the LGPL OpenH264 software fallback."
         )),
         render_nodes: Vec::new(),
+        vaapi_arg_profile: LinuxVaapiArgProfile::Standard,
     })
 }
 
@@ -11497,7 +11515,7 @@ async fn probe_linux_vaapi_encoder(
     candidates: &[crate::linux_vaapi::RenderNodeCandidate],
     quarantine: &crate::linux_vaapi::ProbeQuarantine,
 ) -> (
-    Option<PathBuf>,
+    Option<(PathBuf, LinuxVaapiArgProfile)>,
     Option<String>,
     Vec<LinuxRenderNodeDiagnostic>,
 ) {
@@ -11506,36 +11524,54 @@ async fn probe_linux_vaapi_encoder(
     let mut rejections = Vec::new();
     let mut reports = Vec::new();
     for candidate in candidates {
-        if let Err(error) = quarantine.begin_probe(candidate, ffmpeg_path) {
-            let detail = format!("probe sentinel could not be armed: {error}");
-            rejections.push(format!("{}: {detail}", candidate.node_name()));
-            reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
-            continue;
-        }
-        let mut command = Command::new(ffmpeg_path);
-        command
-            .args(linux_vaapi_probe_args(&candidate.path))
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped());
-        let outcome = timeout(PROBE_TIMEOUT, command.output()).await;
-        if let Err(error) = quarantine.finish_probe() {
-            tracing::warn!(
-                "Could not clear the VAAPI probe sentinel for {}: {error}",
-                candidate.node_name()
-            );
-        }
-        let detail = match outcome {
-            Ok(Ok(output)) if output.status.success() => {
-                reports.push(candidate.report(LinuxRenderNodeState::ProbedOk, None));
-                return (Some(candidate.path.clone()), None, reports);
+        let mut profile_rejections = Vec::new();
+        // Standard first; Compat only after the standard set was rejected on
+        // this same node, so a compat selection is always evidence-backed.
+        for profile in [LinuxVaapiArgProfile::Standard, LinuxVaapiArgProfile::Compat] {
+            if let Err(error) = quarantine.begin_probe(candidate, ffmpeg_path) {
+                let detail = format!("probe sentinel could not be armed: {error}");
+                profile_rejections.push(format!("{}: {detail}", profile));
+                break;
             }
-            Ok(Ok(output)) => bounded_stream_output_topology_fallback_reason(
-                &String::from_utf8_lossy(&output.stderr),
-            ),
-            Ok(Err(error)) => error.to_string(),
-            Err(_) => "probe timed out".to_string(),
-        };
+            let probe_args = linux_vaapi_probe_args(&candidate.path, profile);
+            // The exact command, so a tester can bisect it verbatim on the box.
+            tracing::info!(
+                "VAAPI probe on {} ({} profile): {} {}",
+                candidate.node_name(),
+                profile,
+                ffmpeg_path,
+                probe_args.join(" ")
+            );
+            let mut command = Command::new(ffmpeg_path);
+            command
+                .args(&probe_args)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::piped());
+            let outcome = timeout(PROBE_TIMEOUT, command.output()).await;
+            if let Err(error) = quarantine.finish_probe() {
+                tracing::warn!(
+                    "Could not clear the VAAPI probe sentinel for {}: {error}",
+                    candidate.node_name()
+                );
+            }
+            let detail = match outcome {
+                Ok(Ok(output)) if output.status.success() => {
+                    reports.push(candidate.report(
+                        LinuxRenderNodeState::ProbedOk,
+                        Some(format!("{} argument profile", profile)),
+                    ));
+                    return (Some((candidate.path.clone(), profile)), None, reports);
+                }
+                Ok(Ok(output)) => bounded_stream_output_topology_fallback_reason(
+                    &String::from_utf8_lossy(&output.stderr),
+                ),
+                Ok(Err(error)) => error.to_string(),
+                Err(_) => "probe timed out".to_string(),
+            };
+            profile_rejections.push(format!("{}: {detail}", profile));
+        }
+        let detail = profile_rejections.join(" | ");
         rejections.push(format!("{}: {detail}", candidate.node_name()));
         reports.push(candidate.report(LinuxRenderNodeState::Rejected, Some(detail)));
     }
@@ -11679,8 +11715,16 @@ fn append_h264_encoding_args_for_platform_preserving_input_timestamps(
     video: &VideoSettings,
     platform: FfmpegH264Platform,
     low_latency: bool,
+    vaapi_profile: LinuxVaapiArgProfile,
 ) {
-    append_h264_encoding_args_for_platform_with_timing(args, video, platform, false, low_latency);
+    append_h264_encoding_args_for_platform_with_timing(
+        args,
+        video,
+        platform,
+        false,
+        low_latency,
+        vaapi_profile,
+    );
     args.extend(["-fps_mode".to_string(), "vfr".to_string()]);
 }
 
@@ -11704,8 +11748,16 @@ fn append_h264_encoding_args_for_platform(
     video: &VideoSettings,
     platform: FfmpegH264Platform,
     low_latency: bool,
+    vaapi_profile: LinuxVaapiArgProfile,
 ) {
-    append_h264_encoding_args_for_platform_with_timing(args, video, platform, true, low_latency);
+    append_h264_encoding_args_for_platform_with_timing(
+        args,
+        video,
+        platform,
+        true,
+        low_latency,
+        vaapi_profile,
+    );
 }
 
 fn append_h264_encoding_args_for_platform_with_timing(
@@ -11714,6 +11766,7 @@ fn append_h264_encoding_args_for_platform_with_timing(
     platform: FfmpegH264Platform,
     force_output_fps: bool,
     low_latency: bool,
+    vaapi_profile: LinuxVaapiArgProfile,
 ) {
     let encoder = ffmpeg_h264_encoder(platform);
     if force_output_fps {
@@ -11742,12 +11795,27 @@ fn append_h264_encoding_args_for_platform_with_timing(
                 args.extend(["-prio_speed".to_string(), "1".to_string()]);
             }
         }
-        FfmpegH264Platform::LinuxVaapi => {
-            args.extend(["-rc_mode".to_string(), "VBR".to_string()]);
-            if low_latency {
-                args.extend(["-bf".to_string(), "0".to_string()]);
+        FfmpegH264Platform::LinuxVaapi => match vaapi_profile {
+            LinuxVaapiArgProfile::Standard => {
+                args.extend(["-rc_mode".to_string(), "VBR".to_string()]);
+                if low_latency {
+                    args.extend(["-bf".to_string(), "0".to_string()]);
+                }
             }
-        }
+            // Driver-compat profile (Plan 053): chosen by the probe only after
+            // the standard set was rejected on the same node (ogre's Coffee
+            // Lake iHD returned "end picture encode issue: 24" for the
+            // standard set while a plain CLI encode passed). Constant bitrate,
+            // no B-frames, no level pin; the bisect on the box refines this.
+            LinuxVaapiArgProfile::Compat => {
+                args.extend([
+                    "-rc_mode".to_string(),
+                    "CBR".to_string(),
+                    "-bf".to_string(),
+                    "0".to_string(),
+                ]);
+            }
+        },
         FfmpegH264Platform::LinuxSoftware => {
             args.extend([
                 "-rc_mode".to_string(),
@@ -11780,7 +11848,9 @@ fn append_h264_encoding_args_for_platform_with_timing(
     // Spec-valid High profile/level (the recording-quality audit caught the
     // encoders' auto picks under-leveling 60fps streams). Media Foundation
     // exposes neither option, so the Windows arms keep the encoder default.
-    if matches!(
+    if platform == FfmpegH264Platform::LinuxVaapi && vaapi_profile == LinuxVaapiArgProfile::Compat {
+        args.extend(["-profile:v".to_string(), "high".to_string()]);
+    } else if matches!(
         platform,
         FfmpegH264Platform::Macos
             | FfmpegH264Platform::LinuxVaapi
@@ -11811,6 +11881,27 @@ fn append_h264_encoding_args_for_platform_with_timing(
         "+global_header".to_string(),
     ]);
     args.extend(h264_bt709_color_tag_args());
+    // libopenh264 writes no VUI colour description, so the flags above only
+    // reach the container and ffprobe reports primaries/transfer unknown
+    // (ogre, 2026-09-24). Rewrite the SPS after encoding, the same way the
+    // Windows Media Foundation copy path already does. Hardware encoders
+    // build the VUI themselves.
+    if matches!(
+        platform,
+        FfmpegH264Platform::LinuxSoftware | FfmpegH264Platform::WindowsSoftware
+    ) {
+        args.extend(h264_bt709_vui_rewrite_bsf_args());
+    }
+}
+
+/// Rewrites the H.264 SPS VUI to BT.709 video-range after encoding, for
+/// encoders that do not stamp it themselves.
+fn h264_bt709_vui_rewrite_bsf_args() -> [String; 2] {
+    [
+        "-bsf:v".to_string(),
+        "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
+            .to_string(),
+    ]
 }
 
 /// Recording colorimetry law: every ffmpeg-encoded leg TAGS BT.709
@@ -15093,6 +15184,7 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                     &params.output.video,
                     encoder.platform,
                     !stream_targets.is_empty(),
+                    encoder.vaapi_arg_profile,
                 );
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
@@ -15622,11 +15714,7 @@ fn append_bridge_copy_output_args(
 
 fn append_media_foundation_h264_color_metadata_args(args: &mut Vec<String>) {
     args.extend(h264_bt709_color_tag_args());
-    args.extend([
-        "-bsf:v".to_string(),
-        "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1"
-            .to_string(),
-    ]);
+    args.extend(h264_bt709_vui_rewrite_bsf_args());
 }
 
 fn stream_output_audio_settings(audio: &AudioSettings) -> AudioSettings {
@@ -15687,12 +15775,17 @@ fn bridge_recording_video_filter_for_encoder(
     encoder: &ResolvedFfmpegH264Encoder,
 ) -> String {
     let fps = video.fps.max(1);
-    let upload = if encoder.platform == FfmpegH264Platform::LinuxVaapi {
-        ",format=nv12,hwupload"
-    } else {
-        ""
+    let tail = match encoder.platform {
+        FfmpegH264Platform::LinuxVaapi => ",format=nv12,hwupload",
+        // Stamp the frames too, so the software encoder's input carries the
+        // same BT.709 video-range facts the output tags and the VUI rewrite
+        // claim (the legacy composed graph does the same via setparams).
+        FfmpegH264Platform::LinuxSoftware | FfmpegH264Platform::WindowsSoftware => {
+            ",setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv"
+        }
+        _ => "",
     };
-    format!("[{video_input_index}:v]setpts=PTS-STARTPTS,fps={fps}{upload}[v_main]")
+    format!("[{video_input_index}:v]setpts=PTS-STARTPTS,fps={fps}{tail}[v_main]")
 }
 
 #[cfg(test)]
@@ -15756,6 +15849,7 @@ fn ffmpeg_args_with_encoder(
         &params.output.video,
         encoder.platform,
         !stream_targets.is_empty(),
+        encoder.vaapi_arg_profile,
     );
     append_audio_encoding_with_video_clock(
         &mut args,
@@ -20645,6 +20739,7 @@ mod tests {
             &video_1080p60,
             FfmpegH264Platform::Macos,
             false,
+            LinuxVaapiArgProfile::Standard,
         );
         assert_eq!(arg_value(&macos_args, "-profile:v"), Some("high"));
         // Record-only drops the speed-over-quality hint; -realtime stays.
@@ -20669,6 +20764,7 @@ mod tests {
             &video_4k60,
             FfmpegH264Platform::Macos,
             false,
+            LinuxVaapiArgProfile::Standard,
         );
         assert_eq!(arg_value(&experimental_args, "-level"), Some("5.2"));
         // 4K stays speed-priority even record-only: quality-mode 4K warmup
@@ -20683,6 +20779,7 @@ mod tests {
             &video_1080p60,
             FfmpegH264Platform::WindowsHardware,
             false,
+            LinuxVaapiArgProfile::Standard,
         );
         assert_eq!(arg_value(&windows_args, "-profile:v"), None);
         assert_eq!(arg_value(&windows_args, "-level"), None);
@@ -20706,6 +20803,7 @@ mod tests {
             &video,
             FfmpegH264Platform::Macos,
             true,
+            LinuxVaapiArgProfile::Standard,
         );
         assert_eq!(arg_value(&macos_args, "-c:v"), Some("h264_videotoolbox"));
         assert_eq!(arg_value(&macos_args, "-pix_fmt"), Some("yuv420p"));
@@ -20719,6 +20817,7 @@ mod tests {
             &video,
             FfmpegH264Platform::WindowsHardware,
             true,
+            LinuxVaapiArgProfile::Standard,
         );
         assert_eq!(arg_value(&windows_args, "-c:v"), Some("h264_mf"));
         assert_eq!(arg_value(&windows_args, "-pix_fmt"), Some("nv12"));
@@ -20733,6 +20832,7 @@ mod tests {
             &video,
             FfmpegH264Platform::WindowsSoftware,
             true,
+            LinuxVaapiArgProfile::Standard,
         );
         assert_eq!(
             arg_value(&windows_software_args, "-c:v"),
@@ -20758,6 +20858,7 @@ mod tests {
             &video,
             FfmpegH264Platform::LinuxVaapi,
             true,
+            LinuxVaapiArgProfile::Standard,
         );
         assert_eq!(arg_value(&linux_vaapi_args, "-c:v"), Some("h264_vaapi"));
         assert_eq!(arg_value(&linux_vaapi_args, "-pix_fmt"), Some("vaapi"));
@@ -20770,10 +20871,45 @@ mod tests {
             &video,
             FfmpegH264Platform::LinuxSoftware,
             true,
+            LinuxVaapiArgProfile::Standard,
         );
         assert_eq!(arg_value(&linux_software_args, "-c:v"), Some("libopenh264"));
         assert_eq!(arg_value(&linux_software_args, "-pix_fmt"), Some("yuv420p"));
         assert_eq!(arg_value(&linux_software_args, "-rc_mode"), Some("bitrate"));
+
+        // libopenh264 writes no VUI: both software arms rewrite the SPS to
+        // BT.709 video-range after encoding. Hardware encoders stamp it
+        // themselves and must not carry the bsf.
+        const VUI_REWRITE: &str = "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1";
+        for args in [&linux_software_args, &windows_software_args] {
+            assert_eq!(arg_value(args, "-bsf:v"), Some(VUI_REWRITE));
+            assert_eq!(arg_value(args, "-color_primaries"), Some("bt709"));
+            assert_eq!(arg_value(args, "-color_trc"), Some("bt709"));
+        }
+        for args in [&macos_args, &linux_vaapi_args, &windows_args] {
+            assert_eq!(arg_value(args, "-bsf:v"), None);
+        }
+
+        let mut linux_vaapi_compat_args = Vec::new();
+        append_h264_encoding_args_for_platform(
+            &mut linux_vaapi_compat_args,
+            &video,
+            FfmpegH264Platform::LinuxVaapi,
+            false,
+            LinuxVaapiArgProfile::Compat,
+        );
+        assert_eq!(
+            arg_value(&linux_vaapi_compat_args, "-c:v"),
+            Some("h264_vaapi")
+        );
+        assert_eq!(arg_value(&linux_vaapi_compat_args, "-rc_mode"), Some("CBR"));
+        assert_eq!(arg_value(&linux_vaapi_compat_args, "-bf"), Some("0"));
+        assert_eq!(
+            arg_value(&linux_vaapi_compat_args, "-profile:v"),
+            Some("high")
+        );
+        assert_eq!(arg_value(&linux_vaapi_compat_args, "-level"), None);
+        assert_eq!(arg_value(&linux_vaapi_compat_args, "-b:v"), Some("6000k"));
 
         for args in [
             &macos_args,
@@ -20850,7 +20986,10 @@ mod tests {
     #[test]
     fn linux_vaapi_probe_runs_the_real_session_encode_args_at_the_acceptance_profile() {
         let device = Path::new("/dev/dri/renderD128");
-        let args = linux_vaapi_probe_args(device);
+        let args = linux_vaapi_probe_args(device, LinuxVaapiArgProfile::Standard);
+        let compat_args = linux_vaapi_probe_args(device, LinuxVaapiArgProfile::Compat);
+        assert_eq!(arg_value(&compat_args, "-rc_mode"), Some("CBR"));
+        assert_eq!(arg_value(&compat_args, "-level"), None);
         assert_eq!(
             arg_value(&args, "-vaapi_device"),
             Some("/dev/dri/renderD128")
@@ -20872,6 +21011,7 @@ mod tests {
             FfmpegH264Platform::LinuxVaapi,
             false,
             false,
+            LinuxVaapiArgProfile::Standard,
         );
         assert!(!session_args.is_empty());
         assert!(
@@ -20888,13 +21028,27 @@ mod tests {
     #[test]
     fn linux_encoder_selection_prefers_probed_vaapi_and_falls_back_to_openh264() {
         let device = PathBuf::from("/dev/dri/renderD128");
-        let hardware =
-            select_linux_h264_encoder(LinuxH264EncoderPreference::Auto, Some(device.clone()), None)
-                .expect("probed VAAPI device");
+        let hardware = select_linux_h264_encoder(
+            LinuxH264EncoderPreference::Auto,
+            Some((device.clone(), LinuxVaapiArgProfile::Standard)),
+            None,
+        )
+        .expect("probed VAAPI device");
         assert_eq!(hardware.platform, FfmpegH264Platform::LinuxVaapi);
-        assert_eq!(hardware.vaapi_device, Some(device));
+        assert_eq!(hardware.vaapi_device, Some(device.clone()));
         assert_eq!(hardware.backend(), EncodeBackend::HardwareVaapi);
         assert_eq!(hardware.fallback_reason, None);
+        assert_eq!(hardware.vaapi_arg_profile, LinuxVaapiArgProfile::Standard);
+
+        // A node that only passed the compat set records that choice.
+        let compat = select_linux_h264_encoder(
+            LinuxH264EncoderPreference::Auto,
+            Some((device, LinuxVaapiArgProfile::Compat)),
+            None,
+        )
+        .expect("compat VAAPI device");
+        assert_eq!(compat.platform, FfmpegH264Platform::LinuxVaapi);
+        assert_eq!(compat.vaapi_arg_profile, LinuxVaapiArgProfile::Compat);
 
         let software = select_linux_h264_encoder(
             LinuxH264EncoderPreference::Auto,
@@ -25499,6 +25653,7 @@ mod tests {
             vaapi_device: Some(PathBuf::from("/dev/dri/renderD128")),
             fallback_reason: None,
             render_nodes: Vec::new(),
+            vaapi_arg_profile: LinuxVaapiArgProfile::Standard,
         };
         let fifo_path = Path::new("/tmp/videorc-linux-vaapi.yuv");
         let bridge_args = bridge_recording_ffmpeg_args_with_encoder(

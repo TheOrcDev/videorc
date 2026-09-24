@@ -165,3 +165,32 @@ Virtual machines and CI runners still do not count.
   the whole session and forced an unclean reboot (2026-09-24).
 - Do not treat a passing 128x72 probe as proof that a 1080p session works.
   The app probes with the session's real encode arguments for that reason.
+
+## Colour tags on a recorded artifact
+
+The matrix and the L1.5 acceptance require BT.709 video-range tags in the
+H.264 stream itself. Check an artifact with:
+
+```bash
+ffprobe -v error -select_streams v:0 \
+  -show_entries stream=color_space,color_primaries,color_transfer,color_range \
+  -of default=nw=1 <file>
+```
+
+All four must read `bt709` / `bt709` / `bt709` / `tv`. The OpenH264 path
+gets them from an SPS rewrite (`h264_metadata` bitstream filter) because
+libopenh264 writes no VUI on its own (Plan 053).
+
+## The VAAPI probe command
+
+Every VAAPI probe logs its exact FFmpeg command line at `info`
+("VAAPI probe on renderD128 (standard profile): …"). The backend tries the
+standard argument set first and, only if the same node rejects it, a compat
+set (constant bitrate, no B-frames, no level pin). To bisect a rejection,
+copy the logged standard command and remove one item at a time in this
+order: `-rc_mode VBR` → `CBR`, drop `-level`, add `-bf 0`, drop
+`-flags +global_header`, drop `-force_key_frames`, 1080p → 720p. Record the
+first passing set and every failing stderr in the test report.
+
+`pnpm smoke:backend-single-instance` asserts the "after reaping … :<pid>"
+log line; run it with no other dev instance sharing the app-data directory.
