@@ -7236,6 +7236,16 @@ fn try_gpu_compose(
     Err("Metal compositor unavailable on this OS".to_string())
 }
 
+#[cfg(not(target_os = "macos"))]
+fn try_gpu_compose_with_chrome(
+    gpu: Option<&mut GpuCompositor>,
+    inputs: &CompositorRenderInputs<'_>,
+    publish_yuv_frame: bool,
+    _editor_chrome: &[ChromeQuad],
+) -> Result<GpuCompositorFrame, String> {
+    try_gpu_compose(gpu, inputs, publish_yuv_frame)
+}
+
 fn caption_overlay_for_output(
     overlays: &crate::captions::CaptionOverlaySlotsSnapshot,
     target: crate::captions::CaptionOverlayTarget,
