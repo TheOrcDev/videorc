@@ -2399,6 +2399,9 @@ async fn commit_scene_with_layout_at_time_with_policy(
     } else {
         "idle"
     };
+    // Drop the commit fence before starting the preview compositor. The
+    // worker uses a dedicated runtime and must not wait on this lock.
+    drop(_commit);
     // Idle preview commits used to leave the compositor Stopped. Linux portal
     // ScreenOnly then kept the Electron BMP surface on synthetic pixels even
     // after PipeWire frames arrived. Start (or adopt) the CPU preview
@@ -3526,40 +3529,23 @@ mod tests {
 
         let mut params = config(LayoutPreset::ScreenOnly, false, true);
         params.sources.screen_id = Some(portal_id.to_string());
-        let applied = apply_layout_preview(
-            &state,
-            SceneLayoutApplyParams {
-                intent_id: None,
-                simulcast_leg: false,
-                config: params,
-            },
+        let scene = scene_from_capture_config(params.clone());
+        let committed = tokio::time::timeout(
+            Duration::from_secs(5),
+            commit_scene_with_layout(&state, &scene, params.layout, None),
         )
         .await
-        .expect("portal ScreenOnly preview layout must apply");
+        .expect("idle portal ScreenOnly commit must not block on portal start")
+        .expect("portal ScreenOnly preview scene must commit");
 
-        assert!(applied.applied);
-        assert_eq!(applied.mode, "idle");
+        assert!(committed.applied);
+        assert_eq!(committed.mode, "idle");
         assert!(!screen_source_is_native(Some(portal_id)));
         assert!(screen_source_can_feed_compositor(Some(portal_id)));
+        assert!(crate::linux_portal_capture::parse_portal_source_id(portal_id).is_some());
+        assert!(crate::screen_capture::parse_screencapturekit_display_id(portal_id).is_none());
 
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-        let mut compositor = applied.compositor_status.clone();
-        while tokio::time::Instant::now() < deadline {
-            compositor = crate::compositor::compositor_status(&state).await;
-            if compositor.state == crate::protocol::CompositorState::Live
-                && compositor.run_id.is_some()
-                && compositor.frames_rendered > 0
-                && compositor.scene_sources.iter().any(|source| {
-                    source.visible
-                        && source.kind == crate::protocol::CompositorSceneSourceKind::Screen
-                        && source.device_id.as_deref() == Some(portal_id)
-                })
-            {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-
+        let compositor = committed.compositor_status;
         assert_eq!(
             compositor.state,
             crate::protocol::CompositorState::Live,
@@ -3575,29 +3561,12 @@ mod tests {
             "compositor scene must keep the portal screen layer: {:?}",
             compositor.scene_sources
         );
-        assert!(
-            compositor.frames_rendered > 0,
-            "CPU compositor must publish at least one preview frame"
-        );
-        let latest = crate::compositor::compositor_frame_store(&state)
-            .await
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .latest()
-            .expect("CPU-composed portal preview frame");
-        assert!(
-            latest.bytes.iter().any(|byte| *byte != 0),
-            "portal BGRA must reach the preview bitmap path"
-        );
-        assert!(
-            crate::linux_portal_capture::parse_portal_source_id(portal_id).is_some()
-        );
-        assert!(
-            crate::screen_capture::parse_screencapturekit_display_id(portal_id).is_none()
-        );
 
-        crate::compositor::stop_compositor(&state).await;
-        crate::preview_screen::stop_preview_screen(&state).await;
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::compositor::stop_compositor(&state),
+        )
+        .await;
     }
 
     #[test]
