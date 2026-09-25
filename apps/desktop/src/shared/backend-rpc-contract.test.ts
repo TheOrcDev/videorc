@@ -1,7 +1,10 @@
 import { describe, expect, expectTypeOf, it } from 'vitest'
 
 import type {
+  CompositorStatus,
   DiagnosticStats,
+  SceneEditorDraftAck,
+  SceneEditorDraftParams,
   OAuthCallbackResult,
   OAuthCompleteParams,
   NoiseCleanupJob,
@@ -834,9 +837,194 @@ describe('backend RPC contract', () => {
         'scene.layout.apply_live',
         'sessions.delete',
         'sessions.delete.pending',
-        'repair.repair_file'
+        'repair.repair_file',
+        'scene.editor.draft.set',
+        'scene.editor.draft.clear'
       ])
     )
+  })
+
+  it('types and exactly validates the Scene editor draft RPCs (plan 058)', () => {
+    const transform = { x: 0.1, y: 0.2, width: 0.3, height: 0.4 }
+    const params = {
+      sourceId: 'source:camera',
+      transform,
+      chrome: {
+        selected: transform,
+        handles: true,
+        activeHandle: 'se',
+        guides: [
+          { axis: 'x', position: 0.5 },
+          { axis: 'y', position: 0.25 }
+        ],
+        scale: 1.5
+      }
+    } satisfies SceneEditorDraftParams
+    expectTypeOf<
+      BackendRpcParams<'scene.editor.draft.set'>
+    >().toEqualTypeOf<SceneEditorDraftParams>()
+    expectTypeOf<BackendRpcResult<'scene.editor.draft.set'>>().toEqualTypeOf<SceneEditorDraftAck>()
+    expectTypeOf<BackendRpcParams<'scene.editor.draft.clear'>>().toEqualTypeOf<undefined>()
+    expectTypeOf<
+      BackendRpcResult<'scene.editor.draft.clear'>
+    >().toEqualTypeOf<SceneEditorDraftAck>()
+
+    expect(validateBackendRpcParams('scene.editor.draft.set', params)).toEqual(params)
+    // The renderer omits activeHandle when no handle is dragged.
+    const moving = {
+      ...params,
+      chrome: { selected: transform, handles: false, guides: [], scale: 2 }
+    }
+    expect(validateBackendRpcParams('scene.editor.draft.set', moving)).toEqual(moving)
+    // The idle selection: chrome only, no rect override (absent, never null).
+    const held = {
+      sourceId: 'source:camera',
+      chrome: { selected: transform, handles: true, guides: [], scale: 2 }
+    } satisfies SceneEditorDraftParams
+    expect(validateBackendRpcParams('scene.editor.draft.set', held)).toEqual(held)
+    expect(() =>
+      validateBackendRpcParams('scene.editor.draft.set', { ...held, transform: null })
+    ).toThrow()
+    expect(validateBackendRpcParams('scene.editor.draft.clear', undefined)).toBeUndefined()
+    expect(() => validateBackendRpcParams('scene.editor.draft.clear', {})).toThrow()
+
+    // Every level is exact: unknown fields never ride along into the backend.
+    expect(() =>
+      validateBackendRpcParams('scene.editor.draft.set', { ...params, snap: 'none' })
+    ).toThrow('snap must be a known field')
+    expect(() =>
+      validateBackendRpcParams('scene.editor.draft.set', {
+        ...params,
+        transform: { ...transform, cropLeft: 0.1 }
+      })
+    ).toThrow('cropLeft must be a known field')
+    expect(() =>
+      validateBackendRpcParams('scene.editor.draft.set', {
+        ...params,
+        chrome: { ...params.chrome, color: '#ff0000' }
+      })
+    ).toThrow('color must be a known field')
+    expect(() =>
+      validateBackendRpcParams('scene.editor.draft.set', {
+        ...params,
+        chrome: { ...params.chrome, guides: [{ axis: 'x', position: 0.5, label: 'centre' }] }
+      })
+    ).toThrow('label must be a known field')
+    for (const malformed of [
+      { ...params, sourceId: '' },
+      { ...params, transform: { x: 0.1, y: 0.2, width: 0.3 } },
+      { ...params, transform: { ...transform, x: Number.NaN } },
+      { ...params, chrome: { ...params.chrome, activeHandle: 'north' } },
+      { ...params, chrome: { ...params.chrome, handles: 'yes' } },
+      { ...params, chrome: { ...params.chrome, guides: [{ axis: 'z', position: 0.5 }] } },
+      { ...params, chrome: { ...params.chrome, scale: -1 } },
+      { ...params, chrome: { selected: transform, handles: true, scale: 1 } }
+    ]) {
+      expect(() => validateBackendRpcParams('scene.editor.draft.set', malformed)).toThrow()
+    }
+
+    const draft = { sourceId: 'source:camera', transform, releaseAtRevision: 42 }
+    const ack = { active: true, editorDraft: draft } satisfies SceneEditorDraftAck
+    for (const method of ['scene.editor.draft.set', 'scene.editor.draft.clear'] as const) {
+      expect(validateBackendRpcResult(method, ack)).toEqual(ack)
+      expect(validateBackendRpcResult(method, { active: false })).toEqual({ active: false })
+      expect(validateBackendRpcResult(method, { active: false, editorDraft: null })).toEqual({
+        active: false,
+        editorDraft: null
+      })
+      expect(
+        validateBackendRpcResult(method, {
+          active: true,
+          editorDraft: { sourceId: 'source:camera', transform }
+        })
+      ).toEqual({ active: true, editorDraft: { sourceId: 'source:camera', transform } })
+      // A chrome-only draft reports no transform at all.
+      expect(
+        validateBackendRpcResult(method, {
+          active: true,
+          editorDraft: { sourceId: 'source:camera' }
+        })
+      ).toEqual({ active: true, editorDraft: { sourceId: 'source:camera' } })
+      expect(() =>
+        validateBackendRpcResult(method, {
+          active: true,
+          editorDraft: { sourceId: 'source:camera', transform: null }
+        })
+      ).toThrow()
+      expect(() =>
+        validateBackendRpcResult(method, { ...ack, editorDraft: { ...draft, chrome: {} } })
+      ).toThrow('chrome must be a known field')
+      expect(() => validateBackendRpcResult(method, { ...ack, generation: 3 })).toThrow(
+        'generation must be a known field'
+      )
+      expect(() => validateBackendRpcResult(method, { editorDraft: draft })).toThrow()
+      expect(() =>
+        validateBackendRpcResult(method, {
+          ...ack,
+          editorDraft: { ...draft, releaseAtRevision: -1 }
+        })
+      ).toThrow()
+    }
+  })
+
+  it('reports the effective editor draft on compositor status and never a forged one', () => {
+    const status = {
+      state: 'live',
+      targetFps: 30,
+      width: 1280,
+      height: 720,
+      sceneRevision: 7,
+      sceneSources: [],
+      sources: [],
+      framesRendered: 12,
+      repeatedFrames: 0,
+      droppedFrames: 0,
+      updatedAt: '2026-09-25T00:00:00Z'
+    } satisfies CompositorStatus
+    const draft = {
+      sourceId: 'source:camera',
+      transform: { x: 0.1, y: 0.2, width: 0.3, height: 0.4 },
+      releaseAtRevision: 8
+    }
+    // Absent (the idle shape Rust emits), null, and a live draft all pass.
+    expect(validateBackendRpcResult('compositor.status', status)).toEqual(status)
+    expect(validateBackendRpcResult('compositor.status', { ...status, editorDraft: null })).toEqual(
+      {
+        ...status,
+        editorDraft: null
+      }
+    )
+    expect(
+      validateBackendRpcResult('compositor.status', { ...status, editorDraft: draft })
+    ).toEqual({ ...status, editorDraft: draft })
+    expect(
+      validateBackendEventPayload('compositor.status', { ...status, editorDraft: draft })
+    ).toEqual({ ...status, editorDraft: draft })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        editorDraft: { ...draft, handles: true }
+      })
+    ).toThrow('handles must be a known field')
+    // The idle selection's hold: a draft with chrome only, no transform.
+    expect(
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        editorDraft: { sourceId: 'source:camera' }
+      })
+    ).toEqual({ ...status, editorDraft: { sourceId: 'source:camera' } })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        editorDraft: { transform: draft.transform }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        editorDraft: { sourceId: 'source:camera', transform: { x: 0.1, y: 0.2 } }
+      })
+    ).toThrow()
   })
 
   it('semantically rejects malformed preview state responses and events', () => {

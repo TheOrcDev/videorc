@@ -4,6 +4,7 @@ import {
   DOCK_SLOT_MIN_VISIBLE_FRACTION,
   composeDockedScreenRect,
   decideDockVisibility,
+  parseDockSlot,
   parseDockSlotReport,
   parsePreviewWindowMode,
   type DockSlotReport,
@@ -12,6 +13,7 @@ import {
 
 const slot: DockSlotReport = {
   epoch: 3,
+  slot: 'studio',
   x: 240,
   y: 96,
   width: 800,
@@ -62,6 +64,25 @@ describe('parseDockSlotReport', () => {
 
   it('treats a missing mounted flag as unmounted', () => {
     expect(parseDockSlotReport({ ...slot, mounted: undefined })?.mounted).toBe(false)
+  })
+
+  it('accepts both DOM slots and rejects a missing or unknown slot', () => {
+    expect(parseDockSlotReport({ ...slot, slot: 'scene' })?.slot).toBe('scene')
+    expect(parseDockSlotReport({ ...slot, slot: 'studio' })?.slot).toBe('studio')
+    // A report without a slot (a stale renderer) must not reach placement.
+    expect(parseDockSlotReport({ ...slot, slot: undefined })).toBeNull()
+    expect(parseDockSlotReport({ ...slot, slot: 'inspector' })).toBeNull()
+    expect(parseDockSlotReport({ ...slot, slot: 1 })).toBeNull()
+  })
+})
+
+describe('parseDockSlot', () => {
+  it('maps only the two known slots', () => {
+    expect(parseDockSlot('studio')).toBe('studio')
+    expect(parseDockSlot('scene')).toBe('scene')
+    expect(parseDockSlot('Scene')).toBeNull()
+    expect(parseDockSlot(undefined)).toBeNull()
+    expect(parseDockSlot(null)).toBeNull()
   })
 })
 

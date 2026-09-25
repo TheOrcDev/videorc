@@ -28,7 +28,7 @@ import type {
 } from './backend'
 import type { LiveDashboardState } from './live-dashboard'
 import { PRIVILEGED_PREVIEW_FIELDS } from './native-preview-bounds'
-import { COMMENT_HIGHLIGHT_ANCHORS, LAYOUT_PRESET_VALUES } from './backend'
+import { COMMENT_HIGHLIGHT_ANCHORS, DOCK_SLOTS, LAYOUT_PRESET_VALUES } from './backend'
 import {
   arraySchema,
   booleanSchema,
@@ -568,6 +568,23 @@ const previewBoundsSchema = objectSchema(
   { allowUnknown: false }
 )
 
+// Docked-preview slot report (renderer → main). The slot enum is validated at
+// runtime, not only by TypeScript: a report naming an unknown slot must be
+// refused at the boundary rather than reach placement with a guessed slot.
+const dockSlotReportSchema = objectSchema(
+  {
+    epoch: nonNegativeSafeIntegerSchema,
+    slot: enumSchema(DOCK_SLOTS),
+    x: numberSchema(),
+    y: numberSchema(),
+    width: numberSchema({ min: 0, max: 65_536 }),
+    height: numberSchema({ min: 0, max: 65_536 }),
+    visibleFraction: numberSchema({ min: 0, max: 1 }),
+    mounted: booleanSchema
+  },
+  { allowUnknown: false }
+)
+
 function boundedSemanticValue(
   description: string,
   semanticSchema: RuntimeSchema<unknown>
@@ -955,6 +972,7 @@ const specificRuntimeInvokeContracts = {
   'preview-window:set-aspect-ratio': invokeContract(
     tupleSchema([numberSchema({ min: 1, max: 65_536 }), numberSchema({ min: 1, max: 65_536 })])
   ),
+  'preview-window:report-dock-slot': invokeContract(tupleSchema([dockSlotReportSchema])),
   'resource:reveal-selection': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:authorize-output-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'resource:reveal-session': invokeContract(tupleSchema([boundedIdentifier])),
@@ -991,7 +1009,6 @@ export const boundedPassthroughElectronInvokeChannels = [
   'preview-window:permission-required',
   'preview-window:set-always-on-top',
   'preview-window:set-mode',
-  'preview-window:report-dock-slot',
   'preview-window:set-dock-overlay',
   'notes-window:open',
   'notes-window:close',

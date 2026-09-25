@@ -58,16 +58,19 @@ export function previewProofLayerFit(
 }
 
 /**
- * The camera mask the render paths actually draw: only the inset scenes
- * (screen-camera and its vertical twin) shape the bubble; band, region, and
- * full-frame scenes keep the camera rectangular. Mirrors Rust `camera_mask` —
- * every surface that DEPICTS the camera (proof surface, scene-editing stage)
- * must use this, or the editor shows a circle the recording won't have.
+ * The camera mask the render paths actually draw: the inset scenes
+ * (screen-camera and its vertical twin) shape the bubble in Preset mode, and
+ * so does Freeform — once the user drags the camera out of a preset it is
+ * their own bubble everywhere, not just on the two inset presets it happened
+ * to start from. Every other preset keeps the camera rectangular in Preset
+ * mode. Mirrors Rust `camera_mask` — every surface that DEPICTS the camera
+ * (proof surface, scene-editing stage) must use this, or the editor shows a
+ * circle the recording won't have.
  */
 export function effectiveCameraMaskShape(layout: LayoutSettings): CameraShape {
-  return layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
-    ? layout.cameraShape
-    : 'rectangle'
+  const isInsetPreset =
+    layout.layoutPreset === 'screen-camera' || layout.layoutPreset === 'vertical-screen-camera'
+  return isInsetPreset || layout.arrangementMode === 'freeform' ? layout.cameraShape : 'rectangle'
 }
 
 export function previewProofLayerShape(

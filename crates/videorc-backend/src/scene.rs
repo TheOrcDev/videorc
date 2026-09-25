@@ -7,7 +7,8 @@ use crate::protocol::{
     SceneTransformUpdateParams, SideBySideCameraSide, SourceSelection,
 };
 use crate::scene_geometry::{
-    preset_camera_transform, resolved_camera_transform, side_by_side_fractions,
+    custom_camera_box_fractions, preset_camera_transform, resolved_camera_transform,
+    side_by_side_fractions,
 };
 
 #[cfg(test)]
@@ -340,28 +341,83 @@ fn push_freeform_sources(
 ) {
     let overrides = &params.layout.source_transform_overrides;
     let mut base = base_source(&params.sources);
-    apply_transform_override(&mut base, overrides);
+    apply_transform_override(
+        &mut base,
+        overrides,
+        &params.layout,
+        output_width,
+        output_height,
+    );
     scene.sources.push(base);
 
     if let Some(camera_id) = params.sources.camera_id.clone() {
         let mut camera = camera_source(camera_id, &params.layout, output_width, output_height);
-        apply_transform_override(&mut camera, overrides);
+        apply_transform_override(
+            &mut camera,
+            overrides,
+            &params.layout,
+            output_width,
+            output_height,
+        );
         scene.sources.push(camera);
     }
 }
 
+/// Applies a Freeform per-source override on top of a source's layout-derived
+/// transform. For the camera source, the box is first conformed to the mask
+/// aspect law (circle → square in pixels, `cameraAspect` square → 1:1 px,
+/// portrait → 3:4 px, source → free) the same way `custom_camera_box_fractions`
+/// conforms a Custom-mode preset box — because Freeform is a bubble everywhere
+/// the mask law applies (see `scene_geometry::camera_mask`), so a dragged
+/// circle must stay round-in-a-square instead of settling into whatever
+/// rectangle the user drew. Width drives, height follows, and the box's
+/// CENTRE (not its corner) is preserved so conforming the aspect never makes
+/// the box appear to jump. The screen/base source is untouched: it always
+/// takes the override box as given.
 fn apply_transform_override(
     source: &mut SceneSource,
     overrides: &std::collections::BTreeMap<String, crate::protocol::CameraTransform>,
+    layout: &crate::protocol::LayoutSettings,
+    output_width: u32,
+    output_height: u32,
 ) {
     let Some(value) = overrides.get(&source.id) else {
         return;
     };
+    // Mirrors `custom_camera_box_fractions`' `forced_ratio` match exactly: a
+    // free (Rectangle shape, Source aspect) camera box passes straight
+    // through as `value.x/y/width/height` — not just numerically close, but
+    // the identical f64s — because a saved-override round trip must stay
+    // bit-exact (`precision_commits_survive_saved_freeform_overrides_without_resnapping`).
+    // Routing that case through the centre/half-width arithmetic below would
+    // reproduce `value.x` only up to float rounding, not exactly.
+    let is_shaped = source.kind == SceneSourceKind::Camera
+        && (matches!(layout.camera_shape, crate::protocol::CameraShape::Circle)
+            || matches!(
+                layout.camera_aspect,
+                crate::protocol::CameraAspect::Square | crate::protocol::CameraAspect::Portrait
+            ));
+    let (width, height, x, y) = if is_shaped {
+        let center_x = value.x + value.width / 2.0;
+        let center_y = value.y + value.height / 2.0;
+        let (width, height) = custom_camera_box_fractions(
+            layout,
+            *value,
+            &source.transform,
+            output_width,
+            output_height,
+        );
+        let x = (center_x - width / 2.0).clamp(0.0, (1.0 - width).max(0.0));
+        let y = (center_y - height / 2.0).clamp(0.0, (1.0 - height).max(0.0));
+        (width, height, x, y)
+    } else {
+        (value.width, value.height, value.x, value.y)
+    };
     source.transform = sanitize_transform_unsnapped(SceneTransform {
-        x: value.x,
-        y: value.y,
-        width: value.width,
-        height: value.height,
+        x,
+        y,
+        width,
+        height,
         crop_left: source.transform.crop_left,
         crop_top: source.transform.crop_top,
         crop_right: source.transform.crop_right,
@@ -1255,6 +1311,78 @@ mod tests {
         assert!(camera.transform.y <= 2.0);
         // The zoom crop rides along.
         assert!(camera.transform.crop_left > 0.0 || camera.transform.crop_right > 0.0);
+    }
+
+    #[test]
+    fn freeform_circle_override_squares_the_box_in_pixels_and_keeps_its_centre() {
+        // A wide, short freeform box (x=0.375,y=0.375,w=0.25,h=0.1 at the
+        // 1280x720 default) is far from square in PIXELS. Circle must square
+        // it in pixel space (like `custom_camera_box_fractions` does for
+        // Custom preset mode) and keep the box's CENTRE fixed rather than its
+        // top-left corner.
+        let mut params = base_params();
+        params.layout.arrangement_mode = ArrangementMode::Freeform;
+        params.layout.camera_shape = CameraShape::Circle;
+        params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
+            "source:camera".to_string(),
+            CameraTransform {
+                x: 0.375,
+                y: 0.375,
+                width: 0.25,
+                height: 0.1,
+            },
+        )]);
+
+        let scene = scene_from_capture_config(params);
+        let camera = &scene.sources[1];
+        assert_eq!(camera.kind, SceneSourceKind::Camera);
+
+        let width_px = camera.transform.width * 1280.0;
+        let height_px = camera.transform.height * 720.0;
+        assert!(
+            (width_px - height_px).abs() < 1e-6,
+            "circle box must be square in pixels: {width_px} vs {height_px}"
+        );
+
+        let old_center_x = 0.375 + 0.25 / 2.0;
+        let old_center_y = 0.375 + 0.1 / 2.0;
+        let new_center_x = camera.transform.x + camera.transform.width / 2.0;
+        let new_center_y = camera.transform.y + camera.transform.height / 2.0;
+        assert!(
+            (new_center_x - old_center_x).abs() < 1e-6,
+            "centre x preserved: {new_center_x} vs {old_center_x}"
+        );
+        assert!(
+            (new_center_y - old_center_y).abs() < 1e-6,
+            "centre y preserved: {new_center_y} vs {old_center_y}"
+        );
+        // Width drove; the box grew taller, not narrower.
+        assert!(camera.transform.height > 0.1);
+    }
+
+    #[test]
+    fn freeform_rectangle_source_override_keeps_its_own_box() {
+        // Rectangle shape with the free (Source) aspect never gets conformed
+        // — the override box passes through exactly like a screen/base
+        // override.
+        let mut params = base_params();
+        params.layout.arrangement_mode = ArrangementMode::Freeform;
+        params.layout.source_transform_overrides = std::collections::BTreeMap::from([(
+            "source:camera".to_string(),
+            CameraTransform {
+                x: 0.375,
+                y: 0.375,
+                width: 0.25,
+                height: 0.1,
+            },
+        )]);
+
+        let scene = scene_from_capture_config(params);
+        let camera = &scene.sources[1];
+        assert!((camera.transform.x - 0.375).abs() < 1e-9);
+        assert!((camera.transform.y - 0.375).abs() < 1e-9);
+        assert!((camera.transform.width - 0.25).abs() < 1e-9);
+        assert!((camera.transform.height - 0.1).abs() < 1e-9);
     }
 
     #[test]

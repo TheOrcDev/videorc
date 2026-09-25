@@ -183,6 +183,49 @@ describe('Electron IPC contract', () => {
     ).toThrow('at most 1024')
   })
 
+  it('validates the docked-preview slot report at runtime, including the slot enum', () => {
+    const report = {
+      epoch: 3,
+      slot: 'scene',
+      x: 240,
+      y: 96,
+      width: 800,
+      height: 450,
+      visibleFraction: 1,
+      mounted: true
+    }
+    // The slot must SURVIVE the boundary: a TypeScript-only field would be
+    // dropped by a structural passthrough and the Scene canvas would never
+    // become the live surface.
+    expect(validateElectronInvokeArgs('preview-window:report-dock-slot', [report])).toEqual([
+      report
+    ])
+    expect(
+      validateElectronInvokeArgs('preview-window:report-dock-slot', [{ ...report, slot: 'studio' }])
+    ).toEqual([{ ...report, slot: 'studio' }])
+    expect(() =>
+      validateElectronInvokeArgs('preview-window:report-dock-slot', [
+        { ...report, slot: 'inspector' }
+      ])
+    ).toThrow('one of studio, scene')
+    expect(() =>
+      validateElectronInvokeArgs('preview-window:report-dock-slot', [
+        { ...report, slot: undefined }
+      ])
+    ).toThrow('one of studio, scene')
+    expect(() =>
+      validateElectronInvokeArgs('preview-window:report-dock-slot', [{ ...report, x: Number.NaN }])
+    ).toThrow('finite number')
+    expect(() =>
+      validateElectronInvokeArgs('preview-window:report-dock-slot', [
+        { ...report, visibleFraction: 1.5 }
+      ])
+    ).toThrow()
+    expect(() =>
+      validateElectronInvokeArgs('preview-window:report-dock-slot', [{ ...report, screenX: 12 }])
+    ).toThrow('screenX')
+  })
+
   it('accepts only the four highlight corners over IPC and normalises everything else', () => {
     for (const anchor of COMMENT_HIGHLIGHT_ANCHORS) {
       expect(validateElectronInvokeArgs('comments-window:set-highlight-anchor', [anchor])).toEqual([

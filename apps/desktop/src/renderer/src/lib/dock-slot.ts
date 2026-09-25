@@ -1,9 +1,10 @@
 // Docked ("stick") preview: renderer-side slot measurement. The renderer
-// reports the Studio slot rect in WINDOW-RELATIVE CSS pixels only — never
-// screen coordinates, never on window moves (main owns the window-position
-// math; see main/preview-dock.ts for the history behind that rule).
+// reports the slot rect (the Studio preview card or the Scene canvas) in
+// WINDOW-RELATIVE CSS pixels only — never screen coordinates, never on window
+// moves (main owns the window-position math; see main/preview-dock.ts for the
+// history behind that rule).
 
-import type { DockSlotReport } from './backend'
+import type { DockSlot, DockSlotReport } from './backend'
 
 export interface SlotRect {
   x: number
@@ -31,11 +32,13 @@ export function measureDockSlot(
 
 export function buildDockSlotReport(
   epoch: number,
+  slot: DockSlot,
   measurement: { rect: SlotRect; visibleFraction: number },
   mounted: boolean
 ): DockSlotReport {
   return {
     epoch,
+    slot,
     x: measurement.rect.x,
     y: measurement.rect.y,
     width: measurement.rect.width,
@@ -57,6 +60,7 @@ export function dockSlotReportChanged(
   }
   return (
     previous.epoch !== next.epoch ||
+    previous.slot !== next.slot ||
     previous.mounted !== next.mounted ||
     Math.abs(previous.x - next.x) >= 1 ||
     Math.abs(previous.y - next.y) >= 1 ||

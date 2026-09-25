@@ -786,6 +786,93 @@ pub struct SceneTransformUpdateParams {
     pub snap: SceneTransformSnap,
 }
 
+/// Resize handle of the Scene editor's selection frame. Mirrors the
+/// renderer's `StageHandleId` (`components/scene/stage-transform.ts`).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EditorHandleId {
+    N,
+    S,
+    E,
+    W,
+    Ne,
+    Nw,
+    Se,
+    Sw,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum EditorGuideAxis {
+    X,
+    Y,
+}
+
+/// A snap guide line across the whole canvas; `position` is a canvas
+/// fraction (0..1) along the named axis.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorGuide {
+    pub axis: EditorGuideAxis,
+    pub position: f64,
+}
+
+/// Selection chrome the compositor draws over the preview while the Scene
+/// editor drags a source (plan 058): selection frame, resize handles and snap
+/// guides. Normalised canvas coordinates; `scale` is preview output pixels per
+/// CSS pixel of the on-screen slot so line thickness stays constant on screen.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct EditorChrome {
+    pub selected: CameraTransform,
+    pub handles: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_handle: Option<EditorHandleId>,
+    #[serde(default)]
+    pub guides: Vec<EditorGuide>,
+    pub scale: f64,
+}
+
+/// One frame of the Scene editor's live drag: the ghost rect of the dragged
+/// source plus the chrome to draw. Applied by the compositor at its snapshot
+/// choke point; never committed, never recorded. Without a `transform` the
+/// draft is chrome-only: the idle selection's frame and handles over the
+/// committed picture (the stage holds one while a source is selected).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneEditorDraftParams {
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<CameraTransform>,
+    pub chrome: EditorChrome,
+}
+
+/// The effective editor draft the compositor is currently applying, reported
+/// in `CompositorStatus.editor_draft` and by the draft RPCs so smokes can
+/// assert the on-screen geometry without screenshots. `transform` is absent
+/// for a chrome-only draft.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneEditorDraftStatus {
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<CameraTransform>,
+    /// Scene revision of the commit that ends this draft: the compositor
+    /// drops the draft once its installed scene revision reaches it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release_at_revision: Option<u64>,
+}
+
+/// Result of `scene.editor.draft.set` / `scene.editor.draft.clear`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct SceneEditorDraftAck {
+    /// Whether a draft is live after this call.
+    pub active: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_draft: Option<SceneEditorDraftStatus>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneSourceParams {
@@ -3279,6 +3366,12 @@ pub struct CompositorStatus {
     pub image_cache: CompositorImageCacheStatus,
     #[serde(default)]
     pub frame_pipeline: CompositorFramePipelineStatus,
+    /// The Scene editor draft the compositor is applying to this run, if any
+    /// (plan 058). Absent while no drag is live; never present during a
+    /// session. `skip_serializing_if` keeps `None` off the wire because the
+    /// renderer's optional contract fields reject `null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub editor_draft: Option<SceneEditorDraftStatus>,
     pub updated_at: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
@@ -4525,6 +4618,108 @@ impl ServerEvent {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn scene_editor_draft_params_round_trip_with_renderer_handle_ids() {
+        let wire = serde_json::json!({
+            "sourceId": "source:camera",
+            "transform": { "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4 },
+            "chrome": {
+                "selected": { "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4 },
+                "handles": true,
+                "activeHandle": "se",
+                "guides": [{ "axis": "x", "position": 0.5 }],
+                "scale": 1.5
+            }
+        });
+        let params: super::SceneEditorDraftParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(params.chrome.active_handle, Some(super::EditorHandleId::Se));
+        assert_eq!(params.chrome.guides[0].axis, super::EditorGuideAxis::X);
+        assert_eq!(serde_json::to_value(&params).unwrap(), wire);
+
+        // The renderer omits activeHandle and guides when nothing is active.
+        let minimal: super::SceneEditorDraftParams = serde_json::from_value(serde_json::json!({
+            "sourceId": "source:camera",
+            "transform": { "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4 },
+            "chrome": {
+                "selected": { "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4 },
+                "handles": false,
+                "scale": 1
+            }
+        }))
+        .unwrap();
+        assert_eq!(minimal.chrome.active_handle, None);
+        assert!(minimal.chrome.guides.is_empty());
+        let serialized = serde_json::to_value(&minimal).unwrap();
+        assert!(serialized["chrome"].get("activeHandle").is_none());
+        for bad_handle in ["north", "", "NE"] {
+            let mut wire = wire.clone();
+            wire["chrome"]["activeHandle"] = serde_json::json!(bad_handle);
+            assert!(serde_json::from_value::<super::SceneEditorDraftParams>(wire).is_err());
+        }
+    }
+
+    #[test]
+    fn scene_editor_draft_without_a_transform_is_chrome_only_on_the_wire() {
+        // The idle selection: chrome, no rect. Absent, not null, both ways.
+        let wire = serde_json::json!({
+            "sourceId": "source:camera",
+            "chrome": {
+                "selected": { "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4 },
+                "handles": true,
+                "scale": 2
+            }
+        });
+        let params: super::SceneEditorDraftParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(params.transform, None);
+        assert!(params.chrome.handles);
+        let serialized = serde_json::to_value(&params).unwrap();
+        assert!(serialized.get("transform").is_none());
+        assert_eq!(serialized["sourceId"], "source:camera");
+
+        let status = super::SceneEditorDraftStatus {
+            source_id: "source:camera".into(),
+            transform: None,
+            release_at_revision: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({ "sourceId": "source:camera" })
+        );
+        let parsed: super::SceneEditorDraftStatus =
+            serde_json::from_value(serde_json::json!({ "sourceId": "source:camera" })).unwrap();
+        assert_eq!(parsed, status);
+
+        // A partial rect is still a malformed draft, never a chrome-only one.
+        let mut partial = wire.clone();
+        partial["transform"] = serde_json::json!({ "x": 0.1, "y": 0.2 });
+        assert!(serde_json::from_value::<super::SceneEditorDraftParams>(partial).is_err());
+    }
+
+    #[test]
+    fn scene_editor_draft_status_never_serializes_null_release_revision() {
+        let status = super::SceneEditorDraftStatus {
+            source_id: "source:camera".into(),
+            transform: Some(super::CameraTransform {
+                x: 0.0,
+                y: 0.0,
+                width: 0.5,
+                height: 0.5,
+            }),
+            release_at_revision: None,
+        };
+        let wire = serde_json::to_value(&status).unwrap();
+        assert!(wire.get("releaseAtRevision").is_none());
+        assert!(wire.get("transform").is_some());
+        let ack = super::SceneEditorDraftAck {
+            active: false,
+            editor_draft: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&ack).unwrap(),
+            serde_json::json!({ "active": false })
+        );
+    }
+
     #[test]
     fn scene_transform_snap_defaults_to_legacy_for_older_requests() {
         for snap in [None, Some("legacy"), Some("none")] {

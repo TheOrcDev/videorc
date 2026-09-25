@@ -25,6 +25,7 @@ mod compositor;
 mod compositor_synthetic;
 mod devices;
 mod diagnostics;
+mod editor_chrome;
 mod encoder_bridge;
 mod entitlements;
 mod ffmpeg;
@@ -4901,6 +4902,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "scene.source.visibility.update"
         | "scene.source.nudge"
         | "scene.sources.reorder"
+        | "scene.editor.draft.set"
+        | "scene.editor.draft.clear"
         | "sessions.rename"
         | "sessions.duplicate"
         | "liveChat.start"
@@ -9221,6 +9224,12 @@ async fn handle_text_message_with_role(
         "scene.source.transform.update" => {
             match serde_json::from_value::<protocol::SceneTransformUpdateParams>(command.params) {
                 Ok(params) => {
+                    // Plan 058: a live editor draft for this source ends exactly
+                    // when the scene this commit installs reaches the
+                    // compositor. Capture the draft generation first so a
+                    // gesture that starts during the commit is never ended by it.
+                    let draft_generation =
+                        compositor::editor_draft_generation_for(state, &params.source_id).await;
                     let result = {
                         let mut guard = state.scene.lock().await;
                         update_source_transform(&mut guard, params)
@@ -9229,7 +9238,17 @@ async fn handle_text_message_with_role(
                         Ok(scene) => {
                             match live_layout::commit_scene_with_current_layout(state, &scene).await
                             {
-                                Ok(status) => ServerResponse::ok(command.id, status),
+                                Ok(status) => {
+                                    if let Some(generation) = draft_generation {
+                                        compositor::release_editor_draft_at(
+                                            state,
+                                            generation,
+                                            status.scene_revision,
+                                        )
+                                        .await;
+                                    }
+                                    ServerResponse::ok(command.id, status)
+                                }
                                 Err(error) => ServerResponse::error(
                                     command.id,
                                     "scene-commit-failed",
@@ -9245,6 +9264,32 @@ async fn handle_text_message_with_role(
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
+            }
+        }
+        "scene.editor.draft.set" => {
+            match serde_json::from_value::<protocol::SceneEditorDraftParams>(command.params) {
+                Ok(params) => match compositor::set_editor_draft(state, params).await {
+                    Ok(ack) => ServerResponse::ok(command.id, ack),
+                    Err(reason) => ServerResponse::error(
+                        command.id,
+                        compositor::EDITOR_DRAFT_REFUSED_CODE,
+                        reason,
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "scene.editor.draft.clear" => {
+            if !rpc_params_are_empty(&command.params) {
+                ServerResponse::error(
+                    command.id,
+                    "invalid-params",
+                    "scene.editor.draft.clear does not accept parameters.",
+                )
+            } else {
+                ServerResponse::ok(command.id, compositor::clear_editor_draft(state).await)
             }
         }
         "scene.source.transform.reset" => {

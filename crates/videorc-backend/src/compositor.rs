@@ -32,6 +32,7 @@ use crate::diagnostics::{
     apply_compositor_source_import_stats, apply_compositor_stats, apply_compositor_timing_stats,
     apply_runtime_diagnostics_snapshot,
 };
+use crate::editor_chrome::{ChromeQuad, editor_chrome_quads};
 use crate::frame_store::{FrameHandle, FrameStore};
 use crate::preview_camera::{
     PreviewCameraFrameInfo, PreviewCameraFrameSource, PreviewCameraPixelFormat,
@@ -44,13 +45,14 @@ use crate::preview_screen::{
     try_preview_screen_frame_source,
 };
 use crate::protocol::{
-    BackgroundFit, CameraShape, CompositorBackend, CompositorFramePipelineStatus,
+    BackgroundFit, CameraShape, CameraTransform, CompositorBackend, CompositorFramePipelineStatus,
     CompositorFrameReady, CompositorImageCacheStatus, CompositorSceneSourceFit,
     CompositorSceneSourceKind, CompositorSceneSourceStatus, CompositorSceneUpdateParams,
     CompositorSourceKind, CompositorSourceStatus, CompositorState, CompositorStatus,
-    DiagnosticStats, EffectiveSceneBackground, LayoutSettings, PreviewCameraState,
+    DiagnosticStats, EditorChrome, EffectiveSceneBackground, LayoutSettings, PreviewCameraState,
     PreviewScreenSourceKind, PreviewScreenState, PreviewSurfaceState, PreviewSurfaceStatus,
-    PreviewTransport, Scene, SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
+    PreviewTransport, Scene, SceneEditorDraftAck, SceneEditorDraftParams, SceneEditorDraftStatus,
+    SceneSource, SceneSourceKind, SceneTransform, StreamScreen,
 };
 use crate::scene_geometry::{
     ChromaKeySpec, PixelRect, SceneCrop, SceneFit, SceneMask, background_stage_margin,
@@ -389,6 +391,15 @@ pub struct CompositorRuntime {
     /// so every render path (Metal, CPU, preview, stream, recording) sees
     /// identical geometry by construction.
     scene_transition: Option<SceneTransition>,
+    /// The Scene editor's live drag (plan 058): the dragged source's ghost
+    /// rect plus selection chrome. Applied at the same snapshot choke point as
+    /// `scene_transition`, on the native-preview run only, and dropped by TTL,
+    /// by the committing scene's revision, or by a capture lease. See
+    /// `EditorDraft`.
+    editor_draft: Option<EditorDraft>,
+    /// Monotonic id of the latest `editor_draft`, so a commit handler can
+    /// release exactly the draft it observed and never a newer gesture's.
+    editor_draft_generation: u64,
     image_sources: CompositorImageCache,
     frame_store: CompositorFrameStore,
     stream_frame_store: Option<CompositorFrameStore>,
@@ -756,6 +767,9 @@ struct CompositorRenderCache {
     snapshot: Option<CompositorSceneSnapshot>,
     simulcast_snapshot: Option<CompositorSceneSnapshot>,
     transition: Option<SceneTransition>,
+    /// The editor draft as of the last refresh; `None` while a capture leases
+    /// the run. The tick re-checks TTL and release revision before use.
+    editor_draft: Option<EditorDraft>,
     active_image_source: Option<CompositorImageSource>,
     background_image_source: Option<CompositorImageSource>,
 }
@@ -767,7 +781,8 @@ impl CompositorRenderCache {
     }
 
     fn refresh_nonblocking(&mut self, state: &AppState) {
-        if let Ok(compositor) = state.compositor.try_lock() {
+        if let Ok(mut compositor) = state.compositor.try_lock() {
+            compositor.reap_editor_draft(Instant::now());
             *self = Self::from_runtime(&compositor);
         }
     }
@@ -796,6 +811,10 @@ impl CompositorRenderCache {
             snapshot: compositor.scene.clone(),
             simulcast_snapshot: compositor.simulcast_scene.clone(),
             transition: compositor.scene_transition.clone(),
+            editor_draft: compositor
+                .editor_draft
+                .clone()
+                .filter(|_| compositor.capture_lease.is_none()),
             active_image_source,
             background_image_source,
         }
@@ -1367,6 +1386,863 @@ struct CompositorSceneSnapshot {
     active_screen: Option<StreamScreen>,
 }
 
+/// A draft expires this long after its last `scene.editor.draft.set`; the
+/// stage heartbeats every 500 ms during a gesture, so a dead renderer cannot
+/// leave a phantom rect on screen (plan 058, decision 4).
+pub const EDITOR_DRAFT_TTL: Duration = Duration::from_secs(2);
+/// Error code for a refused `scene.editor.draft.set`.
+pub const EDITOR_DRAFT_REFUSED_CODE: &str = "editor-draft-refused";
+
+/// The Scene editor's live drag as the compositor holds it (plan 058,
+/// decision 3). `transform` replaces the named source's rect at the snapshot
+/// choke point (committed crops are kept); `chrome` is drawn on the primary
+/// output as blended quads. Release still commits once through
+/// `scene.source.transform.update`; that handler stamps `release_at_revision`
+/// so the draft drops exactly when the committed scene installs — no flash
+/// back to the old rect, and no draft outliving its commit.
+///
+/// A draft without a `transform` is *chrome-only*: the idle selection. The
+/// stage holds one for the selected source between gestures so the frame and
+/// handles stay on the live picture; the committed geometry is untouched.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EditorDraft {
+    pub source_id: String,
+    pub transform: Option<CameraTransform>,
+    pub chrome: EditorChrome,
+    pub refreshed_at: Instant,
+    pub release_at_revision: Option<u64>,
+    generation: u64,
+}
+
+impl EditorDraft {
+    fn is_expired(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.refreshed_at) > EDITOR_DRAFT_TTL
+    }
+
+    fn is_released_by(&self, installed_revision: Option<u64>) -> bool {
+        match (self.release_at_revision, installed_revision) {
+            (Some(release), Some(installed)) => installed >= release,
+            _ => false,
+        }
+    }
+
+    /// Whether the draft still applies against the installed scene revision.
+    fn is_live(&self, now: Instant, installed_revision: Option<u64>) -> bool {
+        !self.is_expired(now) && !self.is_released_by(installed_revision)
+    }
+
+    fn status(&self) -> SceneEditorDraftStatus {
+        SceneEditorDraftStatus {
+            source_id: self.source_id.clone(),
+            transform: self.transform,
+            release_at_revision: self.release_at_revision,
+        }
+    }
+}
+
+/// Smallest draft side, as a canvas fraction. The stage never sends less than
+/// 5 %; this only guards a degenerate rect from producing an empty placement.
+const EDITOR_DRAFT_MIN_SIZE: f64 = 0.01;
+
+/// Same clamp family as `scene::sanitize_transform_unsnapped` (finite, x/y in
+/// -1..2, sides in 0..2) plus a size floor. The draft is transient preview
+/// state, so it is cleaned here rather than through the scene sanitizer that
+/// owns committed transforms.
+fn sanitize_editor_draft_transform(transform: CameraTransform) -> CameraTransform {
+    let clean = |value: f64| if value.is_finite() { value } else { 0.0 };
+    CameraTransform {
+        x: clean(transform.x).clamp(-1.0, 2.0),
+        y: clean(transform.y).clamp(-1.0, 2.0),
+        width: clean(transform.width).clamp(EDITOR_DRAFT_MIN_SIZE, 2.0),
+        height: clean(transform.height).clamp(EDITOR_DRAFT_MIN_SIZE, 2.0),
+    }
+}
+
+/// Why `scene.editor.draft.set` is refused, if it is. Drafts are preview-tick
+/// state and must never reach a recording or a stream, so a live session
+/// refuses them outright (plan 058, decision 4).
+pub fn editor_draft_refusal(session_active: bool) -> Option<&'static str> {
+    session_active.then_some(
+        "A recording or stream is running. Stop the session before editing the scene live.",
+    )
+}
+
+/// Drafts follow only the native-preview run without an auxiliary (stream)
+/// output. A recording/stream consumer or a split output never sees one, so
+/// the override cannot leak into an encoder even before the capture lease
+/// reaps it. The Windows D3D11 proof surface composes its own per-source
+/// layers in the main process and ignores drafts (plan 058, decision 7).
+fn editor_draft_applies(frame_consumer: CompositorFrameConsumer, has_stream_output: bool) -> bool {
+    frame_consumer == CompositorFrameConsumer::NativePreview && !has_stream_output
+}
+
+/// Replace the named source's rect with the draft rect, keeping the committed
+/// crops (the same rule as `scene::apply_transform_override`). Other sources
+/// and a snapshot without that source are untouched, and a chrome-only draft
+/// (no `transform`) leaves every rect as committed.
+fn snapshot_with_editor_draft(
+    snapshot: Option<CompositorSceneSnapshot>,
+    draft: Option<&EditorDraft>,
+) -> Option<CompositorSceneSnapshot> {
+    let Some(transform) = draft.and_then(|draft| draft.transform.as_ref()) else {
+        return snapshot;
+    };
+    let draft = draft?;
+    let mut snapshot = snapshot?;
+    if let Some(scene) = snapshot.scene.as_mut()
+        && let Some(source) = scene
+            .sources
+            .iter_mut()
+            .find(|source| source.id == draft.source_id)
+    {
+        source.transform.x = transform.x;
+        source.transform.y = transform.y;
+        source.transform.width = transform.width;
+        source.transform.height = transform.height;
+    }
+    Some(snapshot)
+}
+
+impl CompositorRuntime {
+    fn installed_scene_revision(&self) -> Option<u64> {
+        self.scene.as_ref().map(|snapshot| snapshot.revision)
+    }
+
+    fn sync_editor_draft_status(&mut self) {
+        self.status.editor_draft = self.editor_draft.as_ref().map(EditorDraft::status);
+    }
+
+    fn editor_draft_ack(&self) -> SceneEditorDraftAck {
+        SceneEditorDraftAck {
+            active: self.editor_draft.is_some(),
+            editor_draft: self.editor_draft.as_ref().map(EditorDraft::status),
+        }
+    }
+
+    /// Install or refresh the draft. A new set always starts a fresh
+    /// generation with no release revision: a gesture that starts while the
+    /// previous commit is still in flight must not be ended by that commit.
+    fn set_editor_draft(
+        &mut self,
+        params: SceneEditorDraftParams,
+        now: Instant,
+    ) -> SceneEditorDraftAck {
+        self.editor_draft_generation = self.editor_draft_generation.wrapping_add(1);
+        self.editor_draft = Some(EditorDraft {
+            source_id: params.source_id,
+            transform: params.transform.map(sanitize_editor_draft_transform),
+            chrome: params.chrome,
+            refreshed_at: now,
+            release_at_revision: None,
+            generation: self.editor_draft_generation,
+        });
+        self.sync_editor_draft_status();
+        self.editor_draft_ack()
+    }
+
+    fn clear_editor_draft(&mut self) -> SceneEditorDraftAck {
+        self.editor_draft = None;
+        self.sync_editor_draft_status();
+        self.editor_draft_ack()
+    }
+
+    /// Generation of the live draft for `source_id`, for a commit handler to
+    /// capture before committing and hand back to `release_editor_draft_at`.
+    fn editor_draft_generation_for(&self, source_id: &str) -> Option<u64> {
+        self.editor_draft
+            .as_ref()
+            .filter(|draft| draft.source_id == source_id)
+            .map(|draft| draft.generation)
+    }
+
+    /// Stamp the revision whose install ends the draft, then reap at once
+    /// (the commit has usually installed by the time its handler gets here).
+    fn release_editor_draft_at(&mut self, generation: u64, revision: u64, now: Instant) -> bool {
+        if let Some(draft) = self.editor_draft.as_mut()
+            && draft.generation == generation
+        {
+            draft.release_at_revision = Some(revision);
+            self.sync_editor_draft_status();
+        }
+        self.reap_editor_draft(now)
+    }
+
+    /// Drop the draft when it expired, when the installed scene reached its
+    /// release revision, or when a capture leased this run. Runs every render
+    /// tick before use and on every scene install.
+    fn reap_editor_draft(&mut self, now: Instant) -> bool {
+        let installed = self.installed_scene_revision();
+        let drop = self
+            .editor_draft
+            .as_ref()
+            .is_some_and(|draft| !draft.is_live(now, installed) || self.capture_lease.is_some());
+        if drop {
+            self.editor_draft = None;
+            self.sync_editor_draft_status();
+        }
+        drop
+    }
+}
+
+/// `scene.editor.draft.set`: refused while a session is active; otherwise the
+/// draft replaces any previous one and starts a fresh TTL.
+pub async fn set_editor_draft(
+    state: &AppState,
+    params: SceneEditorDraftParams,
+) -> Result<SceneEditorDraftAck, &'static str> {
+    // Read the session flag as a temporary so the recording guard never nests
+    // inside the compositor lock (commit paths take them one after the other).
+    let session_active = state.recording.lock().await.is_some();
+    if let Some(reason) = editor_draft_refusal(session_active) {
+        return Err(reason);
+    }
+    let mut compositor = state.compositor.lock().await;
+    if let Some(reason) = editor_draft_refusal(compositor.capture_lease.is_some()) {
+        return Err(reason);
+    }
+    Ok(compositor.set_editor_draft(params, Instant::now()))
+}
+
+/// `scene.editor.draft.clear`: drops the draft immediately.
+pub async fn clear_editor_draft(state: &AppState) -> SceneEditorDraftAck {
+    state.compositor.lock().await.clear_editor_draft()
+}
+
+/// The live draft generation for `source_id`, captured by the transform
+/// commit handler before it commits.
+pub async fn editor_draft_generation_for(state: &AppState, source_id: &str) -> Option<u64> {
+    state
+        .compositor
+        .lock()
+        .await
+        .editor_draft_generation_for(source_id)
+}
+
+/// After `scene.source.transform.update` committed `revision`: end the draft
+/// generation the handler observed. Returns whether the draft is gone now.
+pub async fn release_editor_draft_at(state: &AppState, generation: u64, revision: u64) -> bool {
+    state
+        .compositor
+        .lock()
+        .await
+        .release_editor_draft_at(generation, revision, Instant::now())
+}
+
+#[cfg(test)]
+mod editor_draft_tests {
+    use super::*;
+    use crate::editor_chrome::ChromeTone;
+    use crate::protocol::{EditorGuide, EditorGuideAxis, EditorHandleId};
+
+    fn transform(x: f64, y: f64, width: f64, height: f64) -> SceneTransform {
+        SceneTransform {
+            x,
+            y,
+            width,
+            height,
+            crop_left: 0.1,
+            crop_top: 0.05,
+            crop_right: 0.2,
+            crop_bottom: 0.15,
+        }
+    }
+
+    fn source(id: &str, kind: SceneSourceKind, t: SceneTransform) -> SceneSource {
+        SceneSource {
+            id: id.to_string(),
+            kind,
+            name: id.to_string(),
+            device_id: None,
+            visible: true,
+            locked: false,
+            transform: t.clone(),
+            default_transform: t,
+        }
+    }
+
+    fn snapshot(revision: u64) -> CompositorSceneSnapshot {
+        CompositorSceneSnapshot {
+            revision,
+            scene: Some(Scene {
+                id: "scene".to_string(),
+                name: "scene".to_string(),
+                sources: vec![
+                    source(
+                        "source:screen",
+                        SceneSourceKind::Screen,
+                        transform(0.0, 0.0, 1.0, 1.0),
+                    ),
+                    source(
+                        "source:camera",
+                        SceneSourceKind::Camera,
+                        transform(0.7, 0.7, 0.25, 0.25),
+                    ),
+                ],
+                outputs: Vec::new(),
+                background: None,
+            }),
+            layout: crate::protocol::default_layout_settings(),
+            active_screen: None,
+        }
+    }
+
+    fn chrome() -> EditorChrome {
+        EditorChrome {
+            selected: CameraTransform {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.4,
+            },
+            handles: true,
+            active_handle: Some(EditorHandleId::Se),
+            guides: vec![EditorGuide {
+                axis: EditorGuideAxis::X,
+                position: 0.5,
+            }],
+            scale: 1.5,
+        }
+    }
+
+    fn params(source_id: &str) -> SceneEditorDraftParams {
+        SceneEditorDraftParams {
+            source_id: source_id.to_string(),
+            transform: Some(CameraTransform {
+                x: 0.1,
+                y: 0.2,
+                width: 0.3,
+                height: 0.4,
+            }),
+            chrome: chrome(),
+        }
+    }
+
+    /// The idle selection: chrome for the source, no rect override.
+    fn chrome_only_params(source_id: &str) -> SceneEditorDraftParams {
+        SceneEditorDraftParams {
+            transform: None,
+            ..params(source_id)
+        }
+    }
+
+    fn draft(source_id: &str, now: Instant) -> EditorDraft {
+        EditorDraft {
+            source_id: source_id.to_string(),
+            transform: params(source_id)
+                .transform
+                .map(sanitize_editor_draft_transform),
+            chrome: chrome(),
+            refreshed_at: now,
+            release_at_revision: None,
+            generation: 1,
+        }
+    }
+
+    #[test]
+    fn editor_draft_overrides_only_the_named_source_and_keeps_crops() {
+        let now = Instant::now();
+        let drafted =
+            snapshot_with_editor_draft(Some(snapshot(3)), Some(&draft("source:camera", now)))
+                .expect("snapshot survives");
+        let scene = drafted.scene.as_ref().unwrap();
+        let camera = &scene.sources[1];
+        assert_eq!(
+            (
+                camera.transform.x,
+                camera.transform.y,
+                camera.transform.width,
+                camera.transform.height
+            ),
+            (0.1, 0.2, 0.3, 0.4)
+        );
+        assert_eq!(
+            (
+                camera.transform.crop_left,
+                camera.transform.crop_top,
+                camera.transform.crop_right,
+                camera.transform.crop_bottom
+            ),
+            (0.1, 0.05, 0.2, 0.15),
+            "committed crops survive the draft"
+        );
+        assert_eq!(
+            scene.sources[0],
+            snapshot(3).scene.unwrap().sources[0],
+            "the other source is untouched"
+        );
+        assert_eq!(drafted.revision, 3);
+        assert_eq!(
+            camera.default_transform,
+            transform(0.7, 0.7, 0.25, 0.25),
+            "only the effective transform is drafted"
+        );
+
+        // Unknown source: the scene is byte-identical. No snapshot: still none.
+        assert_eq!(
+            snapshot_with_editor_draft(Some(snapshot(3)), Some(&draft("source:missing", now))),
+            Some(snapshot(3))
+        );
+        assert_eq!(
+            snapshot_with_editor_draft(None, Some(&draft("source:camera", now))),
+            None
+        );
+        assert_eq!(
+            snapshot_with_editor_draft(Some(snapshot(3)), None),
+            Some(snapshot(3))
+        );
+    }
+
+    #[test]
+    fn chrome_only_editor_draft_draws_chrome_and_leaves_every_transform_untouched() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(3));
+        let ack = runtime.set_editor_draft(chrome_only_params("source:camera"), now);
+        assert!(ack.active);
+        let status = ack.editor_draft.expect("the hold is reported");
+        assert_eq!(status.source_id, "source:camera");
+        assert_eq!(
+            status.transform, None,
+            "a chrome-only draft carries no rect"
+        );
+        assert_eq!(status.release_at_revision, None);
+        assert_eq!(runtime.status.editor_draft, Some(status));
+
+        let held = runtime.editor_draft.as_ref().expect("held");
+        assert_eq!(held.transform, None);
+        assert_eq!(held.chrome, chrome(), "the chrome is drawn as sent");
+        assert!(
+            !editor_chrome_quads(&held.chrome, 1280, 720).is_empty(),
+            "the idle selection still produces frame and handle quads"
+        );
+        assert_eq!(
+            snapshot_with_editor_draft(Some(snapshot(3)), Some(held)),
+            Some(snapshot(3)),
+            "no source rect changes under a chrome-only draft"
+        );
+
+        // It lives by the same rules: TTL, refresh, clear, release-at-revision.
+        assert!(!runtime.reap_editor_draft(now + Duration::from_millis(1_900)));
+        assert!(runtime.reap_editor_draft(now + Duration::from_millis(2_001)));
+        assert_eq!(runtime.status.editor_draft, None);
+        runtime.set_editor_draft(chrome_only_params("source:camera"), now);
+        let generation = runtime
+            .editor_draft_generation_for("source:camera")
+            .expect("held again");
+        runtime.scene = Some(snapshot(4));
+        assert!(runtime.release_editor_draft_at(generation, 4, now));
+        assert!(runtime.editor_draft.is_none());
+
+        // A drag replaces the hold with a rect, and the hold can replace it back.
+        runtime.set_editor_draft(params("source:camera"), now);
+        assert!(
+            runtime
+                .editor_draft
+                .as_ref()
+                .and_then(|draft| draft.transform)
+                .is_some()
+        );
+        runtime.set_editor_draft(chrome_only_params("source:camera"), now);
+        assert_eq!(
+            runtime
+                .editor_draft
+                .as_ref()
+                .and_then(|draft| draft.transform),
+            None
+        );
+    }
+
+    #[test]
+    fn editor_draft_transform_is_sanitized_like_a_precision_edit() {
+        let sanitized = sanitize_editor_draft_transform(CameraTransform {
+            x: f64::NAN,
+            y: 5.0,
+            width: -1.0,
+            height: f64::INFINITY,
+        });
+        assert_eq!(sanitized.x, 0.0);
+        assert_eq!(sanitized.y, 2.0);
+        assert_eq!(sanitized.width, EDITOR_DRAFT_MIN_SIZE);
+        assert_eq!(
+            sanitized.height, EDITOR_DRAFT_MIN_SIZE,
+            "infinite cleans to 0, then floors"
+        );
+        let kept = sanitize_editor_draft_transform(CameraTransform {
+            x: 0.25,
+            y: -0.5,
+            width: 0.5,
+            height: 1.5,
+        });
+        assert_eq!(
+            (kept.x, kept.y, kept.width, kept.height),
+            (0.25, -0.5, 0.5, 1.5)
+        );
+    }
+
+    #[test]
+    fn editor_draft_is_dropped_after_the_ttl() {
+        let t0 = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(3));
+        let ack = runtime.set_editor_draft(params("source:camera"), t0);
+        assert!(ack.active);
+        assert_eq!(
+            ack.editor_draft
+                .as_ref()
+                .map(|draft| draft.source_id.as_str()),
+            Some("source:camera")
+        );
+        assert_eq!(runtime.status.editor_draft, ack.editor_draft);
+
+        assert!(!runtime.reap_editor_draft(t0 + Duration::from_millis(1_900)));
+        assert!(
+            runtime.editor_draft.is_some(),
+            "inside the TTL the draft lives"
+        );
+        let refreshed =
+            runtime.set_editor_draft(params("source:camera"), t0 + Duration::from_secs(1));
+        assert!(refreshed.active);
+        assert!(
+            !runtime.reap_editor_draft(t0 + Duration::from_millis(2_900)),
+            "a refresh restarts the TTL"
+        );
+        assert!(runtime.reap_editor_draft(t0 + Duration::from_millis(3_001)));
+        assert!(runtime.editor_draft.is_none());
+        assert_eq!(runtime.status.editor_draft, None, "status follows the drop");
+        assert!(
+            !runtime.reap_editor_draft(t0 + Duration::from_secs(10)),
+            "nothing left to reap"
+        );
+
+        // The tick-side check agrees even when the runtime never reaped.
+        let stale = draft("source:camera", t0);
+        assert!(stale.is_live(t0 + Duration::from_secs(2), Some(3)));
+        assert!(!stale.is_live(t0 + Duration::from_millis(2_001), Some(3)));
+    }
+
+    #[test]
+    fn editor_draft_is_dropped_once_the_installed_revision_reaches_the_release_and_not_before() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(5));
+        runtime.set_editor_draft(params("source:camera"), now);
+        let generation = runtime
+            .editor_draft_generation_for("source:camera")
+            .expect("live draft for the camera");
+        assert_eq!(runtime.editor_draft_generation_for("source:screen"), None);
+
+        assert!(
+            !runtime.release_editor_draft_at(generation, 7, now),
+            "revision 5 < 7 keeps it"
+        );
+        assert_eq!(
+            runtime
+                .status
+                .editor_draft
+                .as_ref()
+                .and_then(|draft| draft.release_at_revision),
+            Some(7),
+            "status reports the pending release"
+        );
+        runtime.scene = Some(snapshot(6));
+        assert!(!runtime.reap_editor_draft(now), "revision 6 < 7 keeps it");
+        runtime.scene = Some(snapshot(7));
+        assert!(runtime.reap_editor_draft(now), "revision 7 >= 7 drops it");
+        assert!(runtime.editor_draft.is_none());
+        assert_eq!(runtime.status.editor_draft, None);
+
+        // The tick-side check agrees with the runtime.
+        let mut released = draft("source:camera", now);
+        released.release_at_revision = Some(7);
+        assert!(released.is_live(now, Some(6)));
+        assert!(!released.is_live(now, Some(7)));
+        assert!(!released.is_live(now, Some(9)));
+        assert!(
+            released.is_live(now, None),
+            "no installed scene yet: nothing released it"
+        );
+
+        // A commit that installs at once ends the draft in the same call.
+        runtime.scene = Some(snapshot(8));
+        runtime.set_editor_draft(params("source:camera"), now);
+        let generation = runtime
+            .editor_draft_generation_for("source:camera")
+            .unwrap();
+        runtime.scene = Some(snapshot(9));
+        assert!(runtime.release_editor_draft_at(generation, 9, now));
+        assert!(runtime.editor_draft.is_none());
+    }
+
+    #[test]
+    fn editor_draft_release_targets_only_the_generation_the_commit_observed() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(5));
+        runtime.set_editor_draft(params("source:camera"), now);
+        let observed = runtime
+            .editor_draft_generation_for("source:camera")
+            .unwrap();
+        // A new gesture starts while the previous commit is still in flight.
+        runtime.set_editor_draft(params("source:camera"), now);
+        runtime.scene = Some(snapshot(6));
+        assert!(
+            !runtime.release_editor_draft_at(observed, 6, now),
+            "the stale release must not end the new gesture"
+        );
+        assert_eq!(
+            runtime
+                .editor_draft
+                .as_ref()
+                .and_then(|draft| draft.release_at_revision),
+            None
+        );
+        let current = runtime
+            .editor_draft_generation_for("source:camera")
+            .unwrap();
+        assert_ne!(current, observed);
+        assert!(runtime.release_editor_draft_at(current, 6, now));
+    }
+
+    #[test]
+    fn editor_draft_clear_drops_immediately_and_acks_inactive() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(5));
+        runtime.set_editor_draft(params("source:camera"), now);
+        let ack = runtime.clear_editor_draft();
+        assert_eq!(
+            ack,
+            SceneEditorDraftAck {
+                active: false,
+                editor_draft: None
+            }
+        );
+        assert!(runtime.editor_draft.is_none());
+        assert_eq!(runtime.status.editor_draft, None);
+        assert!(
+            !runtime.clear_editor_draft().active,
+            "clearing twice is fine"
+        );
+    }
+
+    #[test]
+    fn editor_draft_set_is_refused_while_a_session_is_active() {
+        assert_eq!(editor_draft_refusal(false), None);
+        let reason = editor_draft_refusal(true).expect("a live session refuses drafts");
+        assert!(reason.contains("Stop the session"));
+        assert_eq!(EDITOR_DRAFT_REFUSED_CODE, "editor-draft-refused");
+    }
+
+    #[test]
+    fn editor_draft_applies_only_to_the_native_preview_run_without_a_stream_output() {
+        assert!(editor_draft_applies(
+            CompositorFrameConsumer::NativePreview,
+            false
+        ));
+        assert!(!editor_draft_applies(
+            CompositorFrameConsumer::NativePreview,
+            true
+        ));
+        for consumer in [
+            CompositorFrameConsumer::VideoToolboxEncoder,
+            CompositorFrameConsumer::MediaFoundationEncoder,
+            CompositorFrameConsumer::RawYuvEncoder,
+            CompositorFrameConsumer::JpegFallback,
+        ] {
+            assert!(
+                !editor_draft_applies(consumer, false),
+                "{consumer:?} never drafts"
+            );
+        }
+    }
+
+    #[test]
+    fn editor_draft_is_reaped_when_a_capture_leases_the_run() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(5));
+        runtime.set_editor_draft(params("source:camera"), now);
+        runtime.capture_lease = Some(CompositorCaptureLease {
+            session_id: "session".to_string(),
+            run_id: "run".to_string(),
+            render_dimensions: Arc::new(AtomicU64::new(pack_render_dimensions(1280, 720))),
+            preview_config: CompositorLoopConfig {
+                target_fps: 30,
+                frame_consumer: CompositorFrameConsumer::NativePreview,
+                caption_overlay_on_primary: false,
+                caption_overlay_on_aux: false,
+                highlight_overlay_on_primary: false,
+                highlight_overlay_on_aux: false,
+            },
+        });
+        assert_eq!(
+            CompositorRenderCache::from_runtime(&runtime).editor_draft,
+            None,
+            "a leased run never hands the draft to the tick"
+        );
+        assert!(runtime.reap_editor_draft(now));
+        assert!(runtime.editor_draft.is_none());
+    }
+
+    #[test]
+    fn editor_draft_new_run_starts_without_a_draft() {
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(5));
+        runtime.set_editor_draft(params("source:camera"), Instant::now());
+        assert_eq!(stopped_status(None).editor_draft, None);
+        let cache = CompositorRenderCache::from_runtime(&runtime);
+        assert_eq!(
+            cache
+                .editor_draft
+                .as_ref()
+                .map(|draft| draft.source_id.as_str()),
+            Some("source:camera")
+        );
+    }
+
+    #[test]
+    fn editor_chrome_quad_alpha_blends_over_the_cpu_frame() {
+        let (canvas_w, canvas_h) = (16_u32, 8_u32);
+        let quads = [ChromeQuad {
+            rect: crate::editor_chrome::ChromeRect {
+                x: 4,
+                y: 2,
+                width: 6,
+                height: 3,
+            },
+            tone: ChromeTone::Dark,
+        }];
+        // A mid-grey frame: the blend must land between the frame and the tone.
+        let base = vec![200_u8; raw_yuv420p_len(canvas_w, canvas_h)];
+        let mut bytes = base.clone();
+        composite_editor_chrome(&quads, canvas_w, canvas_h, &mut bytes);
+        let (r, g, b, a) = ChromeTone::Dark.rgba();
+        let alpha = u16::from(a);
+        let (dark_y, dark_u, dark_v) = rgb_to_yuv(r, g, b);
+        let mix = |tone: u8| ((u16::from(tone) * alpha + 200 * (255 - alpha)) / 255) as u8;
+        let index = 3 * canvas_w as usize + 6;
+        assert_eq!(
+            bytes[index],
+            mix(dark_y),
+            "source-over, not an opaque overwrite"
+        );
+        assert_ne!(
+            bytes[index], dark_y,
+            "55 % alpha never lands on the pure tone"
+        );
+        assert_ne!(bytes[index], 200, "and it visibly darkens the frame");
+        // Outside the quad the frame is untouched, luma and chroma alike.
+        let outside = canvas_w as usize + 1;
+        assert_eq!(bytes[outside], 200);
+        let y_len = (canvas_w * canvas_h) as usize;
+        let uv_width = (canvas_w as usize).div_ceil(2);
+        let uv_len = uv_width * (canvas_h as usize).div_ceil(2);
+        let uv_index = uv_width + 3; // block covering (6..8, 2..4)
+        assert_eq!(bytes[y_len + uv_index], mix(dark_u));
+        assert_eq!(bytes[y_len + uv_len + uv_index], mix(dark_v));
+        assert_eq!(bytes[y_len], 200, "chroma outside the quad is untouched");
+        assert_eq!(bytes[y_len + uv_len], 200);
+
+        // The frame entry point is scene render + chrome, nothing more.
+        let inputs = CompositorRenderInputs {
+            sequence: 1,
+            width: canvas_w,
+            height: canvas_h,
+            snapshot: None,
+            active_image_source: None,
+            background_image_source: None,
+            camera_frame: None,
+            screen_frame: None,
+            caption_overlay: None,
+            highlight_overlay: None,
+        };
+        let mut via_frame = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame_with_chrome(inputs, &quads, &mut via_frame);
+        let mut manual = vec![0; raw_yuv420p_len(canvas_w, canvas_h)];
+        render_compositor_yuv420p_frame(inputs, &mut manual);
+        composite_editor_chrome(&quads, canvas_w, canvas_h, &mut manual);
+        assert_eq!(via_frame, manual);
+
+        // An opaque tone is a plain overwrite of the luma sample.
+        let active = [ChromeQuad {
+            rect: crate::editor_chrome::ChromeRect {
+                x: 0,
+                y: 0,
+                width: 2,
+                height: 2,
+            },
+            tone: ChromeTone::Active,
+        }];
+        let mut opaque = base.clone();
+        composite_editor_chrome(&active, canvas_w, canvas_h, &mut opaque);
+        let (white_y, _, _) = rgb_to_yuv(255, 255, 255);
+        assert_eq!(opaque[0], white_y);
+        assert_eq!(opaque[2], 200);
+        // Empty chrome and an undersized buffer are no-ops.
+        let mut untouched = base.clone();
+        composite_editor_chrome(&[], canvas_w, canvas_h, &mut untouched);
+        assert_eq!(untouched, base);
+        let mut short = vec![7; 4];
+        composite_editor_chrome(&quads, canvas_w, canvas_h, &mut short);
+        assert_eq!(short, vec![7; 4]);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn editor_chrome_gpu_quads_blend_from_constant_bitmaps_with_stable_keys() {
+        let quads = editor_chrome_quads(&chrome(), 1280, 720);
+        assert!(!quads.is_empty());
+        let mut prepared = Vec::new();
+        push_editor_chrome_gpu_sources(&mut prepared, &quads, 1280, 720);
+        assert_eq!(
+            prepared.len(),
+            quads.len(),
+            "every chrome quad became a GPU quad"
+        );
+        for (quad, source) in quads.iter().zip(&prepared) {
+            assert!(source.blend, "chrome must alpha-blend");
+            assert!(source.as_gpu_source().blend);
+            assert_eq!((source.width, source.height), (2, 2));
+            assert_eq!(source.mask, SceneMask::None);
+            assert!(!source.mirror);
+            assert!(source.chroma_key.is_none());
+            assert_eq!(source.pixels.as_slice(), editor_chrome_bitmap(quad.tone));
+            assert_eq!(&source.pixels.as_slice()[..4], &quad.tone.bgra());
+            let key = source.content_key.expect("stable content key");
+            assert_eq!(key.namespace, EDITOR_CHROME_CONTENT_NAMESPACE);
+            assert_eq!(key.revision, quad.tone.index());
+            let expected = [
+                quad.rect.x as f32 / 1280.0,
+                quad.rect.y as f32 / 720.0,
+                quad.rect.width as f32 / 1280.0,
+                quad.rect.height as f32 / 720.0,
+            ];
+            for (actual, expected) in source.dest.iter().zip(expected) {
+                assert!((actual - expected).abs() < 1e-5, "{quad:?} dest");
+            }
+        }
+        // The same tone always carries the same key, so a slot that keeps its
+        // tone never re-uploads; different tones never share a key.
+        let mut keys = std::collections::HashMap::new();
+        for (quad, source) in quads.iter().zip(&prepared) {
+            let previous = keys.insert(quad.tone, source.content_key);
+            assert!(previous.is_none_or(|previous| previous == source.content_key));
+        }
+        assert_eq!(keys.len(), 3, "dark, light and active tones all appear");
+        let distinct: Vec<_> = keys.values().collect();
+        for (index, key) in distinct.iter().enumerate() {
+            for other in &distinct[index + 1..] {
+                assert_ne!(key, other, "tones never share a content key");
+            }
+        }
+        // A degenerate canvas cannot fail the Metal path: the geometry oracle
+        // yields no quads for it, so nothing is pushed and nothing errors.
+        let mut none = Vec::new();
+        push_editor_chrome_gpu_sources(&mut none, &editor_chrome_quads(&chrome(), 0, 0), 0, 0);
+        assert!(none.is_empty());
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 struct CompositorImageSource {
     image_path: String,
@@ -1636,6 +2512,8 @@ pub fn initial_compositor_state() -> CompositorRuntime {
         scene_request_token: 0,
         pending_scene_request: None,
         scene_transition: None,
+        editor_draft: None,
+        editor_draft_generation: 0,
         image_sources: CompositorImageCache::new(
             COMPOSITOR_IMAGE_CACHE_BUDGET_BYTES,
             COMPOSITOR_IMAGE_CACHE_ENTRY_BUDGET,
@@ -1729,6 +2607,7 @@ async fn start_synthetic_compositor_with_lifecycle(
             consumer: Some(params.frame_consumer.label().to_string()),
             ..CompositorFramePipelineStatus::default()
         },
+        editor_draft: None,
         updated_at: Utc::now().to_rfc3339(),
         message: Some("Synthetic compositor running.".to_string()),
     };
@@ -1765,6 +2644,8 @@ async fn start_synthetic_compositor_with_lifecycle(
         compositor.preview_resize_revision = None;
         compositor.loop_config_tx = Some(loop_config_tx);
         compositor.capture_lease = None;
+        // A new run is a new world: a drag from the previous run re-drafts.
+        compositor.editor_draft = None;
         // Spawn and publish the worker handle while holding the ownership lock. A concurrent
         // replacement can therefore never observe a live run id without the handle it must
         // await, avoiding the ineffective `abort` race of `spawn_blocking` workers.
@@ -3095,6 +3976,8 @@ async fn update_compositor_scene_with_prepare_hook(
         compositor.carry_source_edit_proof(state, &snapshot, false);
         compositor.scene = Some(snapshot);
         compositor.pending_scene_request = None;
+        // A draft released at this revision ends the moment the scene installs.
+        compositor.reap_editor_draft(now);
         compositor.status.clone()
     };
     state.emit_event("compositor.status", status.clone());
@@ -5178,6 +6061,98 @@ fn try_gpu_compose(
     inputs: &CompositorRenderInputs<'_>,
     publish_yuv_frame: bool,
 ) -> Result<GpuCompositorFrame, String> {
+    try_gpu_compose_with_chrome(gpu, inputs, publish_yuv_frame, &[])
+}
+
+/// Editor chrome content namespace (images use 1, captions 2, highlight 3,
+/// capture storage 4 and 5). One key per tone: the three 2x2 bitmaps never
+/// change, so a slot that keeps its tone never re-uploads.
+#[cfg(target_os = "macos")]
+const EDITOR_CHROME_CONTENT_NAMESPACE: u64 = 6;
+
+#[cfg(target_os = "macos")]
+const fn solid_2x2_bgra(pixel: [u8; 4]) -> [u8; 16] {
+    [
+        pixel[0], pixel[1], pixel[2], pixel[3], pixel[0], pixel[1], pixel[2], pixel[3], pixel[0],
+        pixel[1], pixel[2], pixel[3], pixel[0], pixel[1], pixel[2], pixel[3],
+    ]
+}
+
+/// The whole chrome palette: three constant 2x2 straight-alpha BGRA bitmaps,
+/// indexed by `ChromeTone::index`.
+#[cfg(target_os = "macos")]
+static EDITOR_CHROME_BITMAPS: [[u8; 16]; 3] = [
+    solid_2x2_bgra(crate::editor_chrome::ChromeTone::Dark.bgra()),
+    solid_2x2_bgra(crate::editor_chrome::ChromeTone::Light.bgra()),
+    solid_2x2_bgra(crate::editor_chrome::ChromeTone::Active.bgra()),
+];
+
+#[cfg(target_os = "macos")]
+fn editor_chrome_bitmap(tone: crate::editor_chrome::ChromeTone) -> &'static [u8; 16] {
+    &EDITOR_CHROME_BITMAPS[tone.index() as usize]
+}
+
+/// Append the chrome quads as blended solid quads (plan 058, decision 2). A
+/// quad whose placement fails is skipped, never an error: chrome must not be
+/// able to push the Metal path into CPU fallback.
+#[cfg(target_os = "macos")]
+fn push_editor_chrome_gpu_sources<'a>(
+    prepared_sources: &mut Vec<PreparedGpuSource<'a>>,
+    quads: &[ChromeQuad],
+    canvas_width: u32,
+    canvas_height: u32,
+) {
+    for quad in quads {
+        let Some((dest, crop)) = gpu_source_placement(
+            2,
+            2,
+            PixelRect {
+                x: quad.rect.x,
+                y: quad.rect.y,
+                width: quad.rect.width,
+                height: quad.rect.height,
+            },
+            false,
+            SceneCrop::none(),
+            (0.0, 0.0),
+            canvas_width,
+            canvas_height,
+        ) else {
+            continue;
+        };
+        prepared_sources.push(PreparedGpuSource {
+            pixels: PreparedGpuSourcePixels::Borrowed(editor_chrome_bitmap(quad.tone)),
+            kind: crate::metal_compositor::GpuSourceKind::Image,
+            content_key: Some(crate::metal_compositor::GpuSourceContentKey {
+                namespace: EDITOR_CHROME_CONTENT_NAMESPACE,
+                revision: quad.tone.index(),
+                variant: 0,
+            }),
+            iosurface: None,
+            pixel_buffer: None,
+            width: 2,
+            height: 2,
+            dest,
+            crop,
+            mirror: false,
+            mask: SceneMask::None,
+            // Straight-alpha source-over: the 55 % / 92 % tones must show the
+            // picture through, not stamp opaque boxes.
+            blend: true,
+            chroma_key: None,
+        });
+    }
+}
+
+/// `try_gpu_compose` plus the editor chrome quads drawn topmost. The primary
+/// output passes its chrome; auxiliary outputs pass none.
+#[cfg(target_os = "macos")]
+fn try_gpu_compose_with_chrome(
+    gpu: Option<&mut GpuCompositor>,
+    inputs: &CompositorRenderInputs<'_>,
+    publish_yuv_frame: bool,
+    editor_chrome: &[ChromeQuad],
+) -> Result<GpuCompositorFrame, String> {
     let gpu = gpu.ok_or_else(|| {
         if metal_compositor_enabled() {
             "Metal compositor unavailable"
@@ -5328,6 +6303,12 @@ fn try_gpu_compose(
                 0,
             );
         }
+        push_editor_chrome_gpu_sources(
+            &mut prepared_sources,
+            editor_chrome,
+            inputs.width,
+            inputs.height,
+        );
         let sources = prepared_sources
             .iter()
             .map(PreparedGpuSource::as_gpu_source)
@@ -5397,6 +6378,12 @@ fn try_gpu_compose(
                 0,
             );
         }
+        push_editor_chrome_gpu_sources(
+            &mut prepared_sources,
+            editor_chrome,
+            inputs.width,
+            inputs.height,
+        );
         let sources = prepared_sources
             .iter()
             .map(PreparedGpuSource::as_gpu_source)
@@ -5646,6 +6633,12 @@ fn try_gpu_compose(
             0,
         );
     }
+    push_editor_chrome_gpu_sources(
+        &mut prepared_sources,
+        editor_chrome,
+        inputs.width,
+        inputs.height,
+    );
     let sources = prepared_sources
         .iter()
         .map(PreparedGpuSource::as_gpu_source)
@@ -6287,6 +7280,20 @@ async fn publish_compositor_frame(
         render_cache.transition.as_ref(),
         Instant::now(),
     );
+    // Scene editor draft (plan 058): the dragged source follows the pointer on
+    // the preview run only. Re-checked here every tick because the cache may
+    // be stale when the runtime lock was contended.
+    let editor_draft = render_cache.editor_draft.as_ref().filter(|draft| {
+        editor_draft_applies(frame_consumer, stream_output.is_some())
+            && draft.is_live(
+                Instant::now(),
+                snapshot.as_ref().map(|snapshot| snapshot.revision),
+            )
+    });
+    let snapshot = snapshot_with_editor_draft(snapshot, editor_draft);
+    let editor_chrome = editor_draft
+        .map(|draft| editor_chrome_quads(&draft.chrome, width, height))
+        .unwrap_or_default();
     // The simulcast leg composes its own scene; without a simulcast-bound aux
     // it is inert and the tick behaves byte-identically to before.
     let simulcast_snapshot = stream_output
@@ -6401,10 +7408,11 @@ async fn publish_compositor_frame(
             },
         };
         // GPU path for the cases it reproduces exactly; otherwise the CPU compositor.
-        match try_gpu_compose(
+        match try_gpu_compose_with_chrome(
             gpu.as_deref_mut(),
             &inputs,
             frame_consumer.publishes_cpu_yuv(),
+            &editor_chrome,
         ) {
             Ok(frame) => {
                 bytes = frame.yuv;
@@ -6435,7 +7443,7 @@ async fn publish_compositor_frame(
                             .unwrap_or_else(|poisoned| poisoned.into_inner());
                         store.checkout_buffer(raw_yuv420p_len(width, height))
                     };
-                    render_compositor_yuv420p_frame(inputs, &mut bytes);
+                    render_compositor_yuv420p_frame_with_chrome(inputs, &editor_chrome, &mut bytes);
                 } else {
                     bytes = Vec::new();
                 }
@@ -6727,6 +7735,78 @@ fn render_compositor_yuv420p_frame(inputs: CompositorRenderInputs<'_>, bytes: &m
     }
     if let Some(overlay) = inputs.highlight_overlay {
         composite_caption_overlay(overlay, inputs.width, inputs.height, bytes, 0);
+    }
+}
+
+/// `render_compositor_yuv420p_frame` plus the editor chrome quads blended
+/// topmost (primary output only).
+fn render_compositor_yuv420p_frame_with_chrome(
+    inputs: CompositorRenderInputs<'_>,
+    editor_chrome: &[ChromeQuad],
+    bytes: &mut [u8],
+) {
+    render_compositor_yuv420p_frame(inputs, bytes);
+    composite_editor_chrome(editor_chrome, inputs.width, inputs.height, bytes);
+}
+
+/// Source-over blend of solid chrome quads into a yuv420p frame — the same
+/// straight-alpha rule as `composite_caption_overlay`, with chroma blended per
+/// 2x2 block whose top-left sample the quad covers.
+fn composite_editor_chrome(
+    quads: &[ChromeQuad],
+    canvas_width: u32,
+    canvas_height: u32,
+    dest: &mut [u8],
+) {
+    if quads.is_empty() {
+        return;
+    }
+    let canvas_width = canvas_width.max(1) as usize;
+    let canvas_height = canvas_height.max(1) as usize;
+    if dest.len() < raw_yuv420p_len(canvas_width as u32, canvas_height as u32) {
+        return;
+    }
+    let y_len = canvas_width * canvas_height;
+    let uv_width = canvas_width.div_ceil(2);
+    let uv_height = canvas_height.div_ceil(2);
+    let u_start = y_len;
+    let v_start = y_len + uv_width * uv_height;
+    let blend = alpha_blend_channel;
+    for quad in quads {
+        let (r, g, b, a) = quad.tone.rgba();
+        if a == 0 {
+            continue;
+        }
+        let alpha = u16::from(a);
+        let (y_value, u_value, v_value) = rgb_to_yuv(r, g, b);
+        let left = (quad.rect.x as usize).min(canvas_width);
+        let top = (quad.rect.y as usize).min(canvas_height);
+        let right = (quad.rect.x as usize)
+            .saturating_add(quad.rect.width as usize)
+            .min(canvas_width);
+        let bottom = (quad.rect.y as usize)
+            .saturating_add(quad.rect.height as usize)
+            .min(canvas_height);
+        if right <= left || bottom <= top {
+            continue;
+        }
+        for row in top..bottom {
+            let row_start = row * canvas_width;
+            for value in &mut dest[row_start + left..row_start + right] {
+                *value = blend(y_value, *value, alpha);
+            }
+        }
+        let uv_top = top / 2;
+        let uv_bottom = bottom.div_ceil(2).min(uv_height);
+        let uv_left = left / 2;
+        let uv_right = right.div_ceil(2).min(uv_width);
+        for uv_y in uv_top..uv_bottom {
+            for uv_x in uv_left..uv_right {
+                let uv_index = uv_y * uv_width + uv_x;
+                dest[u_start + uv_index] = blend(u_value, dest[u_start + uv_index], alpha);
+                dest[v_start + uv_index] = blend(v_value, dest[v_start + uv_index], alpha);
+            }
+        }
     }
 }
 
@@ -8024,6 +9104,7 @@ fn stopped_status(message: Option<String>) -> CompositorStatus {
             ..CompositorImageCacheStatus::default()
         },
         frame_pipeline: CompositorFramePipelineStatus::default(),
+        editor_draft: None,
         updated_at: Utc::now().to_rfc3339(),
         message,
     }
@@ -14177,6 +15258,13 @@ mod tests {
         // Only the screen+camera overlay masks; other presets render plain.
         layout.layout_preset = LayoutPreset::SideBySide;
         assert_eq!(camera_mask(&layout), SceneMask::None);
+
+        // Freeform is the user-owned bubble everywhere: the shape applies no
+        // matter which preset Freeform was entered from (plan 058 S1).
+        layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        assert_eq!(camera_mask(&layout), SceneMask::Rounded { radius_pct: 50 });
+        layout.camera_shape = CameraShape::Circle;
+        assert_eq!(camera_mask(&layout), SceneMask::Circle);
     }
 
     #[tokio::test]

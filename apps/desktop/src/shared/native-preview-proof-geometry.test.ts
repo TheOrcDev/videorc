@@ -109,4 +109,33 @@ describe('Windows proof-surface geometry', () => {
     expect(effectiveCameraMaskShape(layout({ cameraShape: 'circle' }))).toBe('circle')
     expect(effectiveCameraMaskShape(layout({ layoutPreset: 'side-by-side' }))).toBe('rectangle')
   })
+
+  it('applies the shape in Freeform for any preset, but not Preset side-by-side', () => {
+    // Freeform is the user-owned bubble everywhere: once the camera is
+    // dragged out of a preset, the mask shape applies regardless of which
+    // preset it was entered from. Preset mode keeps the existing rule.
+    expect(
+      effectiveCameraMaskShape(layout({ layoutPreset: 'side-by-side', arrangementMode: 'preset' }))
+    ).toBe('rectangle')
+    expect(
+      effectiveCameraMaskShape(
+        layout({ layoutPreset: 'side-by-side', arrangementMode: 'freeform' })
+      )
+    ).toBe('rounded')
+    expect(
+      effectiveCameraMaskShape(
+        layout({
+          layoutPreset: 'camera-only',
+          arrangementMode: 'freeform',
+          cameraShape: 'circle'
+        })
+      )
+    ).toBe('circle')
+    expect(
+      previewProofLayerShape(
+        camera,
+        layout({ layoutPreset: 'side-by-side', arrangementMode: 'freeform', cameraShape: 'circle' })
+      )
+    ).toBe('circle')
+  })
 })

@@ -27204,7 +27204,7 @@ mod tests {
     }
 
     #[test]
-    fn camera_rounded_mask_pct_only_applies_to_screen_camera_rounded() {
+    fn camera_rounded_mask_pct_only_applies_to_screen_camera_rounded_or_freeform() {
         let mut layout = crate::protocol::default_layout_settings();
         layout.layout_preset = LayoutPreset::ScreenCamera;
         layout.camera_shape = CameraShape::Rounded;
@@ -27217,6 +27217,11 @@ mod tests {
         layout.camera_shape = CameraShape::Rounded;
         layout.layout_preset = LayoutPreset::SideBySide;
         assert_eq!(camera_rounded_mask_pct(&layout), None);
+
+        // Freeform is the user-owned bubble everywhere: the same SideBySide
+        // preset, once dragged into Freeform, must apply the rounded mask.
+        layout.arrangement_mode = crate::protocol::ArrangementMode::Freeform;
+        assert_eq!(camera_rounded_mask_pct(&layout), Some(18));
     }
 
     #[test]
