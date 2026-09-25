@@ -819,8 +819,12 @@ pub struct EditorGuide {
 
 /// Selection chrome the compositor draws over the preview while the Scene
 /// editor drags a source (plan 058): selection frame, resize handles and snap
-/// guides. Normalised canvas coordinates; `scale` is preview output pixels per
-/// CSS pixel of the on-screen slot so line thickness stays constant on screen.
+/// guides. Normalised canvas coordinates. `slot_css_width` is the on-screen
+/// width of the canvas slot in CSS pixels: the compositor derives the chrome
+/// thickness from it and the width of the frame it actually draws into, so a
+/// hairline stays a hairline whatever size the preview run composes at.
+/// `scale` (preview output pixels per CSS pixel, as the renderer assumed it)
+/// is the fallback for callers that do not send the slot width.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct EditorChrome {
@@ -831,6 +835,8 @@ pub struct EditorChrome {
     #[serde(default)]
     pub guides: Vec<EditorGuide>,
     pub scale: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot_css_width: Option<f64>,
 }
 
 /// One frame of the Scene editor's live drag: the ghost rect of the dragged

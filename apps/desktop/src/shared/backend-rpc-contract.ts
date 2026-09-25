@@ -876,7 +876,9 @@ const editorChromeSchema = objectSchema(
       ),
       { maxLength: 16 }
     ),
-    scale: numberSchema({ min: 0, max: 64 })
+    scale: numberSchema({ min: 0, max: 64 }),
+    // On-screen slot width in CSS px; the backend derives the real scale from it.
+    slotCssWidth: optionalSchema(numberSchema({ min: 1, max: 100_000 }))
   },
   { allowUnknown: false }
 )

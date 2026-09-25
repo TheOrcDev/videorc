@@ -311,11 +311,16 @@ export function SceneStage({
       : edits.draft?.sourceId === source.id
         ? edits.draft.rect
         : source.transform
-  /** Output pixels per CSS pixel of the canvas, so the compositor's hairline
-   * is a hairline on screen (the schema caps it at 64; a canvas that small has
-   * no visible chrome anyway). */
+  /** Output pixels per CSS pixel of the canvas, as estimated from the session's
+   * output width (the schema caps it at 64; a canvas that small has no visible
+   * chrome anyway). Only a fallback: the compositor sizes the chrome from
+   * `slotCssWidth` and the frame it really draws into, which on the native
+   * preview run is the slot's device size, not the output width. */
   const chromeScale = (canvasWidth: number): number =>
     outputWidth && canvasWidth > 0 ? Math.min(64, Math.max(0, outputWidth / canvasWidth)) : 1
+  /** The canvas's on-screen width in CSS px, when it is measured. */
+  const chromeSlotWidth = (canvasWidth: number): { slotCssWidth: number } | Record<never, never> =>
+    Number.isFinite(canvasWidth) && canvasWidth >= 1 ? { slotCssWidth: canvasWidth } : {}
   /** One live-draft frame: the ghost plus the chrome the compositor draws for it. */
   const draftOf = (gesture: ActiveGesture, ghost: GhostResult): EditorDraftSample => {
     const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
@@ -327,7 +332,8 @@ export function SceneStage({
         handles: resizeEnabled && Boolean(source && editable(source)),
         ...(kind !== 'move' ? { activeHandle: kind } : {}),
         guides: ghost.guides,
-        scale: chromeScale(gesture.motion.pixels.width)
+        scale: chromeScale(gesture.motion.pixels.width),
+        ...chromeSlotWidth(gesture.motion.pixels.width)
       }
     }
   }
@@ -353,6 +359,7 @@ export function SceneStage({
   const heldHeight = heldRect?.height ?? 0
   const heldHandles = Boolean(selectedSource && resizeEnabled && editable(selectedSource))
   const heldScale = chromeScale(pixelScale * STAGE_W)
+  const heldSlotWidth = pixelScale * STAGE_W
   useEffect(() => {
     if (ownCommitPending) return
     if (heldId === null) {
@@ -363,7 +370,8 @@ export function SceneStage({
       selected: { x: heldX, y: heldY, width: heldWidth, height: heldHeight },
       handles: heldHandles,
       guides: [],
-      scale: heldScale
+      scale: heldScale,
+      ...chromeSlotWidth(heldSlotWidth)
     })
   }, [
     channel,
@@ -374,7 +382,8 @@ export function SceneStage({
     heldWidth,
     heldHeight,
     heldHandles,
-    heldScale
+    heldScale,
+    heldSlotWidth
   ])
   useEffect(() => () => channel.hold(null), [channel])
   const beginGesture = (

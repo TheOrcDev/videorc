@@ -6,9 +6,12 @@
 //! single geometry oracle for that chrome: pure, canvas-pixel output, no
 //! rendering. Both the Metal path and the CPU path draw exactly these quads.
 //!
-//! Thickness follows `EditorChrome::scale` (preview output pixels per CSS pixel
-//! of the on-screen slot) so a 1.5 px hairline is 1.5 px on screen at every
-//! window size. Everything is clamped inside the canvas.
+//! Thickness follows the chrome scale: output pixels of the frame being drawn
+//! per CSS pixel of the on-screen slot, derived from `slot_css_width` and the
+//! ACTUAL frame width (the native preview run composes at the surface's device
+//! size, not the session's output width), so a 1 px hairline is 1 px on screen
+//! at every window size. `EditorChrome::scale` is the fallback for callers
+//! that do not send the slot width. Everything is clamped inside the canvas.
 
 use crate::protocol::{EditorChrome, EditorGuideAxis, EditorHandleId};
 
@@ -68,14 +71,15 @@ pub struct ChromeQuad {
     pub tone: ChromeTone,
 }
 
-/// Bounds for `EditorChrome::scale`: a non-finite or absurd scale must not
-/// produce a canvas-sized frame line or a zero-width one.
+/// Bounds for the chrome scale: a non-finite or absurd scale must not produce
+/// a canvas-sized frame line or a zero-width one. The ceiling covers a 100 CSS
+/// px slot showing a 1280 px frame (12.8) and a 3x HiDPI slot at 4K.
 const MIN_SCALE: f64 = 0.25;
-const MAX_SCALE: f64 = 8.0;
+const MAX_SCALE: f64 = 16.0;
 /// Frame/guide light line thickness in CSS pixels before scaling.
-const FRAME_LINE_CSS_PX: f64 = 1.5;
+const FRAME_LINE_CSS_PX: f64 = 1.0;
 /// Handle square side in CSS pixels before scaling.
-const HANDLE_CSS_PX: f64 = 8.0;
+const HANDLE_CSS_PX: f64 = 6.0;
 /// Extra pixels the dark rim adds around a light line/handle (1 px each side).
 const DARK_RIM_PX: i64 = 2;
 /// Extra pixels the active handle grows by (1 px each side).
@@ -96,6 +100,18 @@ fn sanitize_scale(scale: f64) -> f64 {
     } else {
         1.0
     }
+}
+
+/// Output pixels per CSS pixel for the frame being drawn: `canvas_width /
+/// slot_css_width` when the renderer sent its slot width (the only value that
+/// is right whatever size the run composes at), else the renderer's own
+/// `scale` estimate. Sanitised either way.
+pub fn chrome_scale(chrome: &EditorChrome, canvas_width: u32) -> f64 {
+    let derived = chrome
+        .slot_css_width
+        .filter(|slot| slot.is_finite() && *slot > 0.0)
+        .map(|slot| f64::from(canvas_width.max(1)) / slot);
+    sanitize_scale(derived.unwrap_or(chrome.scale))
 }
 
 fn chrome_metrics(scale: f64) -> ChromeMetrics {
@@ -198,7 +214,7 @@ pub fn editor_chrome_quads(
         return Vec::new();
     }
     let canvas = (i64::from(canvas_width), i64::from(canvas_height));
-    let metrics = chrome_metrics(chrome.scale);
+    let metrics = chrome_metrics(chrome_scale(chrome, canvas_width));
     let width = f64::from(canvas_width);
     let height = f64::from(canvas_height);
 
@@ -309,6 +325,7 @@ mod tests {
             active_handle: None,
             guides: Vec::new(),
             scale,
+            slot_css_width: None,
         }
     }
 
@@ -325,18 +342,15 @@ mod tests {
         assert_eq!(quads.len(), 8);
         assert!(quads[..4].iter().all(|quad| quad.tone == ChromeTone::Dark));
         assert!(quads[4..].iter().all(|quad| quad.tone == ChromeTone::Light));
-        // Light line at scale 1 = round(1.5) = 2 px; dark = 4 px, centred.
+        // Light line at scale 1 = 1 px; dark = 3 px (1 px rim each side).
         let top_dark = quads[0].rect;
         let top_light = quads[4].rect;
-        assert_eq!(top_light.height, 2);
-        assert_eq!(top_dark.height, 4);
-        assert_eq!(top_light.y, 179, "centred on y = 0.25 * 720 = 180");
-        assert_eq!(top_dark.y, 178);
-        assert_eq!(top_light.x, 319);
-        assert_eq!(
-            top_light.width, 642,
-            "spans the edge plus half a line each side"
-        );
+        assert_eq!(top_light.height, 1);
+        assert_eq!(top_dark.height, 3);
+        assert_eq!(top_light.y, 180, "on y = 0.25 * 720 = 180");
+        assert_eq!(top_dark.y, 179);
+        assert_eq!(top_light.x, 320);
+        assert_eq!(top_light.width, 641, "spans the edge plus the line's end");
     }
 
     #[test]
@@ -380,12 +394,13 @@ mod tests {
                 .rect
                 .height
         };
-        assert_eq!(light(0.5), 1, "0.75 rounds to 1");
-        assert_eq!(light(1.0), 2);
-        assert_eq!(light(2.0), 3);
+        assert_eq!(light(0.5), 1, "0.5 rounds up to the 1 px floor");
+        assert_eq!(light(1.0), 1);
+        assert_eq!(light(2.0), 2, "a 1 px line is 2 px at 2x");
+        assert_eq!(light(3.0), 3);
         assert_eq!(light(4.0), 4, "capped at 4 px");
         assert_eq!(light(100.0), 4, "absurd scale is clamped");
-        assert_eq!(light(f64::NAN), 2, "non-finite scale falls back to 1.0");
+        assert_eq!(light(f64::NAN), 1, "non-finite scale falls back to 1.0");
         assert_eq!(light(-3.0), 1, "negative scale clamps to the floor");
         for scale in [0.5, 1.0, 2.0, 4.0] {
             let quads = editor_chrome_quads(&chrome(false, scale), 1280, 720);
@@ -410,15 +425,15 @@ mod tests {
         assert!(
             squares
                 .iter()
-                .all(|quad| quad.rect.width == 8 && quad.rect.height == 8)
+                .all(|quad| quad.rect.width == 6 && quad.rect.height == 6)
         );
         assert!(
             rims.iter()
-                .all(|quad| quad.rect.width == 10 && quad.rect.height == 10)
+                .all(|quad| quad.rect.width == 8 && quad.rect.height == 8)
         );
         // The NW handle is centred on the selection corner (320, 180).
-        assert_eq!(squares[0].rect.x, 316);
-        assert_eq!(squares[0].rect.y, 176);
+        assert_eq!(squares[0].rect.x, 317);
+        assert_eq!(squares[0].rect.y, 177);
         assert!(idle.iter().all(|quad| quad.tone != ChromeTone::Active));
 
         with_handles.active_handle = Some(EditorHandleId::Se);
@@ -430,7 +445,7 @@ mod tests {
             ChromeTone::Active,
             "the active handle is drawn last"
         );
-        assert_eq!(last.rect.width, 10, "2 px larger than an idle handle");
+        assert_eq!(last.rect.width, 8, "2 px larger than an idle handle");
         assert_eq!(
             active
                 .iter()
@@ -442,9 +457,9 @@ mod tests {
         // Its rim grew with it and is centred on the SE corner (960, 540).
         let se_rim = active[8..16]
             .iter()
-            .find(|quad| quad.rect.width == 12)
+            .find(|quad| quad.rect.width == 10)
             .expect("the active rim is 2 px larger");
-        assert_eq!((se_rim.rect.x, se_rim.rect.y), (954, 534));
+        assert_eq!((se_rim.rect.x, se_rim.rect.y), (955, 535));
         assert_eq!(handle_points(0, 0, 10, 10)[4].0, EditorHandleId::Se);
     }
 
@@ -454,9 +469,47 @@ mod tests {
             let quads = editor_chrome_quads(&chrome(true, scale), 1280, 720);
             quads[16].rect.width
         };
-        assert_eq!(square(1.0), 8);
-        assert_eq!(square(2.0), 16);
+        assert_eq!(square(1.0), 6);
+        assert_eq!(square(2.0), 12);
         assert_eq!(square(0.25), 3, "floor of 3 px");
+    }
+
+    #[test]
+    fn slot_width_derives_the_scale_from_the_frame_actually_drawn() {
+        // The renderer assumed a 1920 px output over a 512 CSS px slot
+        // (scale 3.75), but the native preview run composes at the slot's
+        // device size: 1024 px. The chrome must follow the real frame.
+        let mut sized = chrome(true, 3.75);
+        sized.slot_css_width = Some(512.0);
+        let square = |chrome: &EditorChrome, width: u32| {
+            editor_chrome_quads(chrome, width, width * 9 / 16)[16]
+                .rect
+                .width
+        };
+        assert_eq!(chrome_scale(&sized, 1024), 2.0);
+        assert_eq!(square(&sized, 1024), 12, "6 CSS px at 2 px per CSS px");
+        assert_eq!(
+            chrome_scale(&sized, 1920),
+            3.75,
+            "a recording lease at 1080p"
+        );
+        assert_eq!(square(&sized, 1920), 23, "6 * 3.75 = 22.5 rounds up");
+        // Without the slot width the renderer's estimate still applies.
+        assert_eq!(chrome_scale(&chrome(true, 3.75), 1024), 3.75);
+        assert_eq!(square(&chrome(true, 3.75), 1024), 23);
+        // A 100 CSS px slot showing a 1280 px frame is 12.8, inside the clamp.
+        sized.slot_css_width = Some(100.0);
+        assert_eq!(chrome_scale(&sized, 1280), 12.8);
+        assert_eq!(square(&sized, 1280), 77);
+        // Absurd or unusable slot widths fall back to `scale`, then clamp.
+        for slot in [0.0, -5.0, f64::NAN, f64::INFINITY] {
+            sized.slot_css_width = Some(slot);
+            assert_eq!(chrome_scale(&sized, 1024), 3.75, "slot {slot}");
+        }
+        sized.slot_css_width = Some(1.0);
+        assert_eq!(chrome_scale(&sized, 1024), MAX_SCALE, "clamped ceiling");
+        sized.slot_css_width = Some(100_000.0);
+        assert_eq!(chrome_scale(&sized, 1024), MIN_SCALE, "clamped floor");
     }
 
     #[test]
@@ -479,13 +532,13 @@ mod tests {
         assert_eq!(quads[0].tone, ChromeTone::Dark);
         assert_eq!(quads[1].tone, ChromeTone::Light);
         assert_eq!((vertical_light.y, vertical_light.height), (0, 720));
-        assert_eq!(vertical_light.width, 2);
-        assert_eq!(vertical_light.x, 639, "centred on x = 640");
-        assert_eq!((vertical_dark.x, vertical_dark.width), (638, 4));
+        assert_eq!(vertical_light.width, 1);
+        assert_eq!(vertical_light.x, 640, "on x = 640");
+        assert_eq!((vertical_dark.x, vertical_dark.width), (639, 3));
         let horizontal_light = quads[3].rect;
         assert_eq!((horizontal_light.x, horizontal_light.width), (0, 1280));
-        assert_eq!(horizontal_light.y, 179);
-        assert_eq!(horizontal_light.height, 2);
+        assert_eq!(horizontal_light.y, 180);
+        assert_eq!(horizontal_light.height, 1);
     }
 
     #[test]

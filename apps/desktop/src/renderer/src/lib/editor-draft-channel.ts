@@ -110,6 +110,7 @@ const sameChrome = (a: EditorChrome, b: EditorChrome): boolean =>
   a.handles === b.handles &&
   a.activeHandle === b.activeHandle &&
   a.scale === b.scale &&
+  a.slotCssWidth === b.slotCssWidth &&
   a.guides.length === b.guides.length &&
   a.guides.every(
     (guide, index) =>
