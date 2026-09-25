@@ -209,6 +209,8 @@ starts.
 
 ### L6 — AppImage, release lane, and acceptance
 
+- Status (Plan 0008, 2026-09-25): `electron-builder.yml` has a Linux AppImage+dir target; `pnpm package:desktop:linux` + `preflight-linux-package.mjs` stage the release backend and pinned LGPL FFmpeg. `release-linux-alpha.yml` and the Ubuntu 24.04 packaged smoke/updater proof are still owed.
+
 - Build an Ubuntu 24.04 x64 AppImage with the verified LGPL FFmpeg payload.
 - Use an isolated Linux Alpha lane with candidate, pilot, then public
   promotion; never reuse or mutate the macOS Beta or Windows Alpha manifests.

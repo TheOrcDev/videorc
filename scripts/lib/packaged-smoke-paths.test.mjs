@@ -4,7 +4,8 @@ import { describe, it } from 'node:test'
 import {
   assertPackagedSmokePlatform,
   bundledFfmpegPathForPackagedApp,
-  defaultPackagedAppExecutable
+  defaultPackagedAppExecutable,
+  isLinuxAppImageExecutable
 } from './packaged-smoke-paths.mjs'
 
 // resolve() emits platform separators (and resolves POSIX-style roots against
@@ -38,8 +39,22 @@ describe('packaged smoke paths', () => {
     )
   })
 
+  it('resolves the default Linux unpacked executable and bundled FFmpeg', () => {
+    const executable = defaultPackagedAppExecutable({ repoRoot: '/repo', platform: 'linux' })
+
+    assert.match(posixPath(executable), /\/repo\/apps\/desktop\/release\/linux-unpacked\/videorc$/)
+    assert.match(
+      posixPath(bundledFfmpegPathForPackagedApp({ appExecutable: executable, platform: 'linux' })),
+      /\/repo\/apps\/desktop\/release\/linux-unpacked\/resources\/ffmpeg\/bin\/ffmpeg$/
+    )
+    assert.equal(isLinuxAppImageExecutable('/x/Videorc-0.9.108-linux-x86_64.AppImage', 'linux'), true)
+    assert.equal(isLinuxAppImageExecutable(executable, 'linux'), false)
+    assert.equal(isLinuxAppImageExecutable('/x/Videorc.AppImage', 'win32'), false)
+    assert.doesNotThrow(() => assertPackagedSmokePlatform('linux'))
+  })
+
   it('rejects unsupported packaged smoke platforms', () => {
-    assert.throws(() => assertPackagedSmokePlatform('linux'), /supports macOS and Windows/)
-    assert.throws(() => defaultPackagedAppExecutable({ repoRoot: '/repo', platform: 'linux' }), /does not support linux/)
+    assert.throws(() => assertPackagedSmokePlatform('freebsd'), /supports macOS, Windows and Linux/)
+    assert.throws(() => defaultPackagedAppExecutable({ repoRoot: '/repo', platform: 'freebsd' }), /does not support freebsd/)
   })
 })
