@@ -183,6 +183,13 @@ starts.
 - Model portal consent, cancellation, revoked sessions, missing sources, and
   reconnects as explicit states and diagnostics.
 - Prove source switching and lifecycle behavior on the real Linux desktop.
+- Status (Plan 0006, 2026-09-25): first cut landed. `linux_portal_capture.rs`
+  (state model, restore-token store, BGRA copy, device entries; unit-tested
+  on every platform), `linux_portal_session.rs` (ashpd session runner) and
+  `linux_pipewire_stream.rs` (pipewire reader) feed the shared screen frame
+  store; `pnpm smoke:linux-portal-capture` is the box gate. Reconnect after
+  revoke is a restart with the saved token, not an in-place reconnect, and
+  DMA-BUF import is not done.
 
 ### L5 — CPU composition and JPEG preview
 
