@@ -546,6 +546,51 @@ export interface SceneTransformUpdateParams {
   snap?: 'none' | 'legacy'
 }
 
+/** Resize handle ids of the Scene editor's selection frame (mirrors `StageHandleId`). */
+export type EditorHandleId = 'n' | 's' | 'e' | 'w' | 'ne' | 'nw' | 'se' | 'sw'
+
+/** A snap guide across the whole canvas; `position` is a canvas fraction (0..1). */
+export interface EditorGuide {
+  axis: 'x' | 'y'
+  position: number
+}
+
+/**
+ * Selection chrome the compositor draws over the preview during a Scene
+ * editor drag (plan 058): frame, handles and snap guides in normalized canvas
+ * coordinates. `scale` = preview output pixels per CSS pixel of the on-screen
+ * slot, so line thickness stays constant on screen.
+ */
+export interface EditorChrome {
+  selected: CameraTransform
+  handles: boolean
+  activeHandle?: EditorHandleId
+  guides: EditorGuide[]
+  scale: number
+}
+
+/** One frame of a live drag: the ghost rect plus the chrome to draw. Never committed. */
+export interface SceneEditorDraftParams {
+  sourceId: string
+  transform: CameraTransform
+  chrome: EditorChrome
+}
+
+/** The draft the compositor is currently applying (`CompositorStatus.editorDraft`). */
+export interface SceneEditorDraftStatus {
+  sourceId: string
+  transform: CameraTransform
+  /** Scene revision whose install ends the draft; absent until the commit stamps it. */
+  releaseAtRevision?: number
+}
+
+/** Result of `scene.editor.draft.set` / `scene.editor.draft.clear`. */
+export interface SceneEditorDraftAck {
+  /** Whether a draft is live after the call. */
+  active: boolean
+  editorDraft?: SceneEditorDraftStatus
+}
+
 export interface SceneSourceParams {
   sourceId: string
 }
@@ -1686,6 +1731,11 @@ export interface CompositorStatus {
   metalTargetHeight?: number
   imageCache?: CompositorImageCacheStatus
   framePipeline?: CompositorFramePipelineStatus
+  /**
+   * The Scene editor draft this run is applying (plan 058). Absent or null
+   * while no drag is live; never present during a session.
+   */
+  editorDraft?: SceneEditorDraftStatus | null
   updatedAt: string
   message?: string
 }
@@ -3264,11 +3314,20 @@ export type DockHiddenReason =
   | 'main-window-hidden'
   | 'main-window-fullscreen'
 
+// Which DOM slot a docked preview glues to: the Studio preview card or the
+// Scene tab's canvas (plan 058). Only one tab mounts at a time, so the two
+// reporters never fight; the field lets main state which slot owns the surface
+// and lets the Scene stage know when it is the live canvas.
+export type DockSlot = 'studio' | 'scene'
+
+export const DOCK_SLOTS = ['studio', 'scene'] as const satisfies readonly DockSlot[]
+
 // Renderer → main slot measurement for docked mode. WINDOW-RELATIVE CSS pixels
 // only: the renderer must never compute screen coordinates (main owns the
 // window-position math synchronously; see preview-dock.ts).
 export interface DockSlotReport {
   epoch: number
+  slot: DockSlot
   x: number
   y: number
   width: number
@@ -3413,6 +3472,10 @@ export interface PreviewWindowState {
   // epoch were measured before the latest dock engage and are dropped by main.
   dockEpoch: number
   dockHiddenReason: DockHiddenReason | null
+  // The slot of the last ACCEPTED report (current epoch), null when none has
+  // landed yet or the preview is not docked; the Scene stage becomes the live
+  // canvas only while this reads 'scene'.
+  dockSlot: DockSlot | null
   supervisor: PreviewSupervisorState
 }
 

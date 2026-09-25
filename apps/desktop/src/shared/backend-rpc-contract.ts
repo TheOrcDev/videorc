@@ -17,6 +17,9 @@ import type {
   CohostState,
   CompositorFrameReady,
   CompositorStatus,
+  SceneEditorDraftAck,
+  SceneEditorDraftParams,
+  SceneEditorDraftStatus,
   DeviceList,
   DiagnosticStats,
   EntitlementsSnapshot,
@@ -199,6 +202,8 @@ export interface BackendRpcMethodMap {
     LayoutTransactionResult
   >
   'compositor.status': BackendRpcDefinition<undefined, CompositorStatus>
+  'scene.editor.draft.set': BackendRpcDefinition<SceneEditorDraftParams, SceneEditorDraftAck>
+  'scene.editor.draft.clear': BackendRpcDefinition<undefined, SceneEditorDraftAck>
   'preview.live.status': BackendRpcDefinition<undefined, PreviewLiveStatus>
   'preview.surface.status': BackendRpcDefinition<undefined, PreviewSurfaceStatus>
   'preview.camera.status': BackendRpcDefinition<undefined, PreviewCameraStatus>
@@ -848,6 +853,57 @@ const sceneSchema = objectSchema(
   { allowUnknown: false }
 ) as RuntimeSchema<Scene>
 
+const canvasFraction = numberSchema({ min: -8, max: 8 })
+const cameraTransformSchema = objectSchema(
+  {
+    x: canvasFraction,
+    y: canvasFraction,
+    width: canvasFraction,
+    height: canvasFraction
+  },
+  { allowUnknown: false }
+)
+const editorChromeSchema = objectSchema(
+  {
+    selected: cameraTransformSchema,
+    handles: booleanSchema,
+    activeHandle: optionalSchema(enumSchema(['n', 's', 'e', 'w', 'ne', 'nw', 'se', 'sw'])),
+    guides: arraySchema(
+      objectSchema(
+        { axis: enumSchema(['x', 'y']), position: canvasFraction },
+        { allowUnknown: false }
+      ),
+      { maxLength: 16 }
+    ),
+    scale: numberSchema({ min: 0, max: 64 })
+  },
+  { allowUnknown: false }
+)
+const sceneEditorDraftParamsSchema = objectSchema(
+  {
+    sourceId: boundedString,
+    transform: cameraTransformSchema,
+    chrome: editorChromeSchema
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SceneEditorDraftParams>
+const sceneEditorDraftStatusSchema = objectSchema(
+  {
+    sourceId: boundedString,
+    transform: cameraTransformSchema,
+    releaseAtRevision: optionalSchema(numberSchema({ integer: true, min: 0 }))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SceneEditorDraftStatus>
+const sceneEditorDraftAckSchema = objectSchema(
+  {
+    active: booleanSchema,
+    // Rust skips a None here; null is tolerated for defence in depth.
+    editorDraft: optionalSchema(nullableSchema(sceneEditorDraftStatusSchema))
+  },
+  { allowUnknown: false }
+) as RuntimeSchema<SceneEditorDraftAck>
+
 const compositorStatusSchema = objectSchema(
   {
     state: enumSchema(['stopped', 'starting', 'live', 'failed']),
@@ -873,6 +929,7 @@ const compositorStatusSchema = objectSchema(
     metalTargetHeight: optionalSchema(numberSchema({ integer: true, min: 0 })),
     imageCache: optionalSchema(boundedBackendPayloadSchema),
     framePipeline: optionalSchema(boundedBackendPayloadSchema),
+    editorDraft: optionalSchema(nullableSchema(sceneEditorDraftStatusSchema)),
     updatedAt: timestamp,
     message: optionalText
   },
@@ -2177,6 +2234,11 @@ const runtimeContracts = {
     result: layoutTransactionResultSchema
   },
   'compositor.status': { params: undefinedSchema, result: compositorStatusSchema },
+  'scene.editor.draft.set': {
+    params: sceneEditorDraftParamsSchema,
+    result: sceneEditorDraftAckSchema
+  },
+  'scene.editor.draft.clear': { params: undefinedSchema, result: sceneEditorDraftAckSchema },
   'preview.live.status': { params: undefinedSchema, result: previewLiveStatusSchema },
   'preview.surface.status': { params: undefinedSchema, result: previewSurfaceStatusSchema },
   'preview.camera.status': { params: undefinedSchema, result: previewCameraStatusSchema },
