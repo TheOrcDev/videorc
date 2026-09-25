@@ -1,13 +1,22 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { dirname, join } from 'node:path'
 import { describe, it } from 'node:test'
+import { fileURLToPath } from 'node:url'
+
+import { load as loadYaml } from 'js-yaml'
 
 import {
   assertIsolatedLinuxObjectKey,
   assertLinuxAlphaReleaseManifest,
+  assertLinuxAppImageArtifactNameTemplate,
   assertLinuxAppImageFilename,
   buildLinuxAlphaReleaseManifest,
   buildLinuxUpdateFeedYml,
+  findLatestLinuxAppImage,
   LinuxAlphaReleaseError,
+  linuxAlphaAppImageFilename,
   parseLinuxAlphaReleaseId,
   parseLinuxUpdateFeed,
   updateFeedArtifactNameFromYml,
@@ -111,6 +120,53 @@ describe('Linux alpha release manifest', () => {
 })
 
 describe('Linux AppImage and updater names', () => {
+  it('pins the desktop Linux artifactName to the x64 contract', async () => {
+    const builderConfig = loadYaml(
+      await readFile(
+        join(dirname(fileURLToPath(import.meta.url)), '../../apps/desktop/electron-builder.yml'),
+        'utf8'
+      )
+    )
+    assert.equal(
+      builderConfig.linux.artifactName,
+      '${productName}-${version}-${os}-x64.${ext}'
+    )
+    assert.equal(
+      assertLinuxAppImageArtifactNameTemplate(builderConfig.linux.artifactName),
+      builderConfig.linux.artifactName
+    )
+    assert.equal(linuxAlphaAppImageFilename('0.10.0'), 'Videorc-0.10.0-linux-x64.AppImage')
+    assert.throws(
+      () =>
+        assertLinuxAppImageArtifactNameTemplate(
+          '${productName}-${version}-${os}-${arch}.${ext}'
+        ),
+      (error) =>
+        error instanceof LinuxAlphaReleaseError && error.code === 'linux-artifact-name-uses-arch'
+    )
+    assert.throws(
+      () =>
+        assertLinuxAppImageArtifactNameTemplate(
+          '${productName}-${version}-${os}-x86_64.${ext}'
+        ),
+      (error) =>
+        error instanceof LinuxAlphaReleaseError && error.code === 'linux-artifact-name-mismatch'
+    )
+  })
+
+  it('ignores electron-builder AppImage names that use x86_64', async () => {
+    const releaseDir = await mkdtemp(join(tmpdir(), 'linux-alpha-appimage-'))
+    try {
+      await writeFile(join(releaseDir, 'Videorc-0.10.0-linux-x86_64.AppImage'), 'stale')
+      assert.equal(await findLatestLinuxAppImage(releaseDir), null)
+      await writeFile(join(releaseDir, 'Videorc-0.10.0-linux-x64.AppImage'), 'ok')
+      const found = await findLatestLinuxAppImage(releaseDir)
+      assert.equal(found?.path, join(releaseDir, 'Videorc-0.10.0-linux-x64.AppImage'))
+    } finally {
+      await rm(releaseDir, { recursive: true, force: true })
+    }
+  })
+
   it('accepts only the x64 AppImage product name', () => {
     assert.equal(
       assertLinuxAppImageFilename('/tmp/Videorc-0.10.0-linux-x64.AppImage'),

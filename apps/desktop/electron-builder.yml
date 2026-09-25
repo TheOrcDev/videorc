@@ -130,7 +130,13 @@ win:
 # h264_vaapi + libopenh264 encoder table) ride as extraResources, so the
 # packaged app resolves them from process.resourcesPath exactly like the
 # macOS and Windows builds. The icon is derived from icon.icns.
+#
+# Hardcode x64 in the AppImage filename. On Linux AppImage builds,
+# electron-builder expands ${arch} to x86_64, which produces
+# Videorc-<version>-linux-x86_64.AppImage and fails the Linux Alpha
+# release contract (Videorc-<version>-linux-x64.AppImage).
 linux:
+  artifactName: ${productName}-${version}-${os}-x64.${ext}
   category: Video
   executableName: videorc
   maintainer: TheOrcDev
