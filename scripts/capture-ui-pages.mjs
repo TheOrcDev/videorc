@@ -36,5 +36,19 @@ for (const tab of ['studio', 'sources', 'layout', 'streaming', 'recording', 'lib
     console.log(shot.file)
   } catch (e) { console.log(`SKIP ${tab}: ${e.message}`) }
 }
+// Settings has tabs (plan 064): shoot each one. Radix tab triggers switch on
+// mousedown, not click.
+const settingsTabs = await cmd('eval-js', {
+  code: `return [...document.querySelectorAll('[data-videorc-settings-tab]')].map((el) => el.getAttribute('data-videorc-settings-tab'))`
+}).then(r => r.result ?? [], () => [])
+for (const id of settingsTabs) {
+  try {
+    await cmd('eval-js', {
+      code: `document.querySelector('[data-videorc-settings-tab="${id}"]').dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0 })); await sleep(600); return true`
+    })
+    const shot = await cmd('capture-page', { name: `settings-${id}` })
+    console.log(shot.file)
+  } catch (e) { console.log(`SKIP settings-${id}: ${e.message}`) }
+}
 await stopProcess(launched.process)
 process.exit(0)
