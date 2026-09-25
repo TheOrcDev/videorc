@@ -14,10 +14,11 @@ use crate::native_preview_host::{
     NativePreviewHostLifecycle, NativePreviewHostLifecycleUpdate,
 };
 use crate::protocol::{
-    CompositorState, MainOwnedPreviewSurfaceBounds, MainOwnedPreviewSurfaceBoundsParams,
-    PreviewSurfaceBacking, PreviewSurfaceBoundsParams, PreviewSurfaceCreateParams,
-    PreviewSurfacePresentParams, PreviewSurfaceSource, PreviewSurfaceState, PreviewSurfaceStatus,
-    PreviewTransport,
+    CompositorSceneSourceKind, CompositorSceneSourceStatus, CompositorState,
+    MainOwnedPreviewSurfaceBounds, MainOwnedPreviewSurfaceBoundsParams, PreviewSurfaceBacking,
+    PreviewSurfaceBoundsParams, PreviewSurfaceCreateParams, PreviewSurfacePresentParams,
+    PreviewSurfaceSource, PreviewSurfaceState, PreviewSurfaceStatus, PreviewTransport, Scene,
+    SceneOutputKind, SceneSourceKind,
 };
 use crate::state::AppState;
 #[cfg(target_os = "windows")]
@@ -1840,6 +1841,121 @@ fn preview_compositor_is_suspended(slot: &PreviewSurfaceRuntime) -> bool {
 fn capture_owns_compositor(state: &AppState) -> bool {
     let snapshot = state.ffmpeg_work.snapshot();
     snapshot.capture_active || snapshot.capture_waiting > 0
+}
+
+/// After a portal preview layout commit, the CPU/BMP proof path needs a live
+/// compositor even when Electron has not yet created a surface. Linux portal
+/// ScreenOnly failed Phase D that way: the scene applied, PipeWire frames
+/// arrived, and the proof window kept painting synthetic pixels.
+///
+/// Only portal screen/window scenes start a compositor here. Starting one on
+/// every idle commit (and then reconciling against a non-Live surface) stop/
+/// starts the spawn_blocking worker under concurrent scene commits, recording
+/// scene leases, and preview-layout public API tests.
+pub(crate) async fn ensure_preview_compositor_after_scene_commit(state: &AppState, scene: &Scene) {
+    if capture_owns_compositor(state) || !scene_needs_portal_proof_compositor(scene) {
+        return;
+    }
+    // Do not call reconcile_live_preview_compositor: with no Live proof
+    // surface it queues a just-started native-preview run as retirement debt.
+    if crate::compositor::compositor_status(state)
+        .await
+        .run_id
+        .is_some()
+    {
+        sync_preview_surface_source_from_compositor(state).await;
+        return;
+    }
+    let (width, height, target_fps) = preview_compositor_start_size(scene);
+    let _ = start_synthetic_compositor_if_idle(
+        state.clone(),
+        CompositorStartParams {
+            target_fps,
+            width,
+            height,
+            frame_consumer: CompositorFrameConsumer::NativePreview,
+            stream_output: None,
+            caption_overlay_on_primary: false,
+            caption_overlay_on_aux: false,
+            highlight_overlay_on_primary: false,
+            highlight_overlay_on_aux: false,
+        },
+    )
+    .await;
+    sync_preview_surface_source_from_compositor(state).await;
+}
+
+fn scene_needs_portal_proof_compositor(scene: &Scene) -> bool {
+    scene.sources.iter().any(|source| {
+        source.visible
+            && matches!(
+                source.kind,
+                SceneSourceKind::Screen | SceneSourceKind::Window
+            )
+            && source
+                .device_id
+                .as_deref()
+                .is_some_and(|id| crate::linux_portal_capture::parse_portal_source_id(id).is_some())
+    })
+}
+
+fn preview_compositor_start_size(scene: &Scene) -> (u32, u32, u32) {
+    let preview = scene
+        .outputs
+        .iter()
+        .find(|output| output.kind == SceneOutputKind::Preview)
+        .or_else(|| scene.outputs.first());
+    preview
+        .map(|output| {
+            (
+                output.width.max(1),
+                output.height.max(1),
+                output.fps.clamp(30, 120),
+            )
+        })
+        .unwrap_or((1280, 720, 60))
+}
+
+fn preview_surface_source_from_compositor_sources(
+    sources: &[CompositorSceneSourceStatus],
+) -> Option<PreviewSurfaceSource> {
+    let mut camera = false;
+    for source in sources.iter().filter(|source| source.visible) {
+        match source.kind {
+            CompositorSceneSourceKind::Window => return Some(PreviewSurfaceSource::Window),
+            CompositorSceneSourceKind::Screen => return Some(PreviewSurfaceSource::Screen),
+            CompositorSceneSourceKind::Camera => camera = true,
+            CompositorSceneSourceKind::TestPattern
+            | CompositorSceneSourceKind::ScreenImage
+            | CompositorSceneSourceKind::BackgroundImage => {}
+        }
+    }
+    camera.then_some(PreviewSurfaceSource::Camera)
+}
+
+async fn sync_preview_surface_source_from_compositor(state: &AppState) {
+    let compositor = crate::compositor::compositor_status(state).await;
+    let Some(source) = preview_surface_source_from_compositor_sources(&compositor.scene_sources)
+    else {
+        return;
+    };
+    let status = {
+        let mut slot = state.preview_surface.lock().await;
+        if slot.status.state != PreviewSurfaceState::Live || slot.status.source == source {
+            return;
+        }
+        slot.status.source = source;
+        slot.status.updated_at = Utc::now().to_rfc3339();
+        if !capture_owns_compositor(state) {
+            slot.status.message = Some(proof_surface_running_message(
+                &slot.status.source,
+                false,
+                cfg!(target_os = "linux"),
+            ));
+        }
+        slot.status.clone()
+    };
+    state.emit_event("preview.surface.status", status);
 }
 
 fn apply_native_host_update(
@@ -4719,5 +4835,125 @@ mod tests {
             proof_surface_running_message(&PreviewSurfaceSource::Screen, true, true)
                 .contains("while recording")
         );
+    }
+
+    fn compositor_source(
+        kind: CompositorSceneSourceKind,
+        visible: bool,
+    ) -> CompositorSceneSourceStatus {
+        CompositorSceneSourceStatus {
+            id: format!("{kind:?}"),
+            name: "src".to_string(),
+            kind,
+            state: "referenced".to_string(),
+            device_id: None,
+            visible,
+            transform: crate::protocol::SceneTransform {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+                crop_left: 0.0,
+                crop_top: 0.0,
+                crop_right: 0.0,
+                crop_bottom: 0.0,
+            },
+            fit: crate::protocol::CompositorSceneSourceFit::Cover,
+            mirror: false,
+            shape: None,
+            image_path: None,
+            file_revision: None,
+            width: None,
+            height: None,
+            message: None,
+        }
+    }
+
+    #[test]
+    fn preview_surface_source_maps_visible_screen_before_camera() {
+        assert_eq!(
+            preview_surface_source_from_compositor_sources(&[
+                compositor_source(CompositorSceneSourceKind::TestPattern, true),
+                compositor_source(CompositorSceneSourceKind::Camera, true),
+                compositor_source(CompositorSceneSourceKind::Screen, true),
+            ]),
+            Some(PreviewSurfaceSource::Screen)
+        );
+        assert_eq!(
+            preview_surface_source_from_compositor_sources(&[compositor_source(
+                CompositorSceneSourceKind::Window,
+                true
+            )]),
+            Some(PreviewSurfaceSource::Window)
+        );
+        assert_eq!(
+            preview_surface_source_from_compositor_sources(&[
+                compositor_source(CompositorSceneSourceKind::Screen, false),
+                compositor_source(CompositorSceneSourceKind::Camera, true),
+            ]),
+            Some(PreviewSurfaceSource::Camera)
+        );
+        assert_eq!(
+            preview_surface_source_from_compositor_sources(&[compositor_source(
+                CompositorSceneSourceKind::TestPattern,
+                true
+            )]),
+            None
+        );
+    }
+
+    #[test]
+    fn portal_proof_compositor_starts_only_for_visible_portal_layers() {
+        let transform = crate::protocol::SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        let scene = |kind: SceneSourceKind, device_id: Option<&str>, visible: bool| Scene {
+            id: "t".into(),
+            name: "t".into(),
+            sources: vec![crate::protocol::SceneSource {
+                id: "s".into(),
+                name: "s".into(),
+                kind,
+                device_id: device_id.map(str::to_string),
+                transform: transform.clone(),
+                default_transform: transform.clone(),
+                visible,
+                locked: false,
+            }],
+            outputs: vec![],
+            background: None,
+        };
+        assert!(scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Screen,
+            Some(crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID),
+            true
+        )));
+        assert!(scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Window,
+            Some(crate::linux_portal_capture::PORTAL_WINDOW_SOURCE_ID),
+            true
+        )));
+        assert!(!scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Screen,
+            Some("screen:screencapturekit:1"),
+            true
+        )));
+        assert!(!scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Screen,
+            Some(crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID),
+            false
+        )));
+        assert!(!scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Camera,
+            Some("camera:B"),
+            true
+        )));
     }
 }

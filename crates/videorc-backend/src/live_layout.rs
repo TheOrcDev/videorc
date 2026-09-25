@@ -2399,6 +2399,19 @@ async fn commit_scene_with_layout_at_time_with_policy(
     } else {
         "idle"
     };
+    // Drop the commit fence before starting the preview compositor. The
+    // worker uses a dedicated runtime and must not wait on this lock.
+    drop(_commit);
+    // Idle portal ScreenOnly used to leave the compositor Stopped, so the
+    // Electron BMP surface kept painting synthetic pixels after PipeWire
+    // frames arrived. Start the CPU preview compositor for portal scenes
+    // only — every idle commit must not spawn the worker.
+    let compositor_status = if mode == "idle" {
+        crate::preview_surface::ensure_preview_compositor_after_scene_commit(state, scene).await;
+        crate::compositor::compositor_status(state).await
+    } else {
+        compositor_status
+    };
     Ok(SceneCommitStatus {
         applied: true,
         mode: mode.to_string(),
@@ -3495,6 +3508,65 @@ mod tests {
             "screen:avfoundation:7"
         )));
         assert!(!screen_source_can_feed_compositor(Some("screen:portal:0")));
+    }
+
+    #[tokio::test]
+    async fn portal_screen_only_preview_starts_cpu_compositor_with_live_pixels() {
+        let state = test_state();
+        let portal_id = crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID;
+        let video = fallback_video_settings();
+        crate::preview_screen::test_install_live_screen_generation(
+            &state, portal_id, 3, 11, &video,
+        )
+        .await;
+        crate::preview_screen::test_publish_screen_pixels(
+            &state,
+            12,
+            [0x20, 0x40, 0x80, 0xff],
+            std::time::Instant::now(),
+        )
+        .await;
+
+        let mut params = config(LayoutPreset::ScreenOnly, false, true);
+        params.sources.screen_id = Some(portal_id.to_string());
+        let scene = scene_from_capture_config(params.clone());
+        let committed = tokio::time::timeout(
+            Duration::from_secs(5),
+            commit_scene_with_layout(&state, &scene, params.layout, None),
+        )
+        .await
+        .expect("idle portal ScreenOnly commit must not block on portal start")
+        .expect("portal ScreenOnly preview scene must commit");
+
+        assert!(committed.applied);
+        assert_eq!(committed.mode, "idle");
+        assert!(!screen_source_is_native(Some(portal_id)));
+        assert!(screen_source_can_feed_compositor(Some(portal_id)));
+        assert!(crate::linux_portal_capture::parse_portal_source_id(portal_id).is_some());
+        assert!(crate::screen_capture::parse_screencapturekit_display_id(portal_id).is_none());
+
+        let compositor = committed.compositor_status;
+        assert_eq!(
+            compositor.state,
+            crate::protocol::CompositorState::Live,
+            "idle portal ScreenOnly must start the CPU preview compositor, not leave it stopped"
+        );
+        assert!(compositor.run_id.is_some());
+        assert!(
+            compositor.scene_sources.iter().any(|source| {
+                source.visible
+                    && source.kind == crate::protocol::CompositorSceneSourceKind::Screen
+                    && source.device_id.as_deref() == Some(portal_id)
+            }),
+            "compositor scene must keep the portal screen layer: {:?}",
+            compositor.scene_sources
+        );
+
+        let _ = tokio::time::timeout(
+            Duration::from_secs(2),
+            crate::compositor::stop_compositor(&state),
+        )
+        .await;
     }
 
     #[test]

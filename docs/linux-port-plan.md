@@ -204,8 +204,11 @@ starts.
   and the L4 portal screen store. Backend, supervisor, renderer and waiting
   copy name it "Linux CPU preview" and never a native surface;
   `pnpm probe:preview-lifecycle:linux` (`VIDEORC_EXPECT_LINUX_PROOF=1`) is
-  the box gate. A composed-frame (single BMP) transport is not done; the
-  proof surface layers per-source BMPs like Windows.
+  the box gate. `pnpm smoke:portal-preview-proof` is the Phase D gate:
+  granted `screen:portal:monitor` + ScreenOnly must show
+  `sourcePixelsPresent=true` on `electron-proof-surface` (not synthetic).
+  A composed-frame (single BMP) transport is not done; the proof surface
+  layers per-source BMPs like Windows.
 
 ### L6 — AppImage, release lane, and acceptance
 

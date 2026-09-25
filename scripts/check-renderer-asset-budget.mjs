@@ -30,9 +30,14 @@ const htmlPath = resolve(
 // Studio provider correctness logic rather than a newly eager dependency; the
 // rounded ceilings retain the same ~2.5% challenge margin. Entry ceilings stay
 // unchanged so an accidental dashboard collapse into the main entry still fails.
+// Recalibrated 2026-09-25: Linux CPU/BMP proof present-policy helper
+// (compositorStatusCanDriveProofScene) + Studio wiring tipped CI Linux gzip to
+// 385,123 against the 385,000 ceiling. Prefer keeping the proof-path honesty in
+// the eager Studio chunk over a split for ~123 bytes; raise gzip with the same
+// ~2.5% challenge margin. Prefer re-splitting if this trips again on net-new UI.
 const budget = {
   maxTotalRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_RAW_BYTES ?? 2_000_000),
-  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 385_000),
+  maxTotalGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_EAGER_GZIP_BYTES ?? 390_000),
   maxEntryRawBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_RAW_BYTES ?? 1_200_000),
   maxEntryGzipBytes: Number(process.env.VIDEORC_RENDERER_MAX_ENTRY_GZIP_BYTES ?? 235_000)
 }

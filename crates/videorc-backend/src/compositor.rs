@@ -467,6 +467,13 @@ impl CompositorFrameConsumer {
         !matches!(self, Self::NativePreview)
     }
 
+    /// Native preview is Metal-only on macOS. Off macOS — and whenever no GPU
+    /// compositor exists — it is the Electron proof surface, so the CPU path
+    /// must sample live BGRA (Linux portal PipeWire frames included).
+    const fn composes_cpu_pixels(self, gpu_available: bool) -> bool {
+        self.requires_cpu_fallback() || (!gpu_available && matches!(self, Self::NativePreview))
+    }
+
     const fn label(self) -> &'static str {
         match self {
             Self::NativePreview => "native-preview",
@@ -7437,17 +7444,26 @@ async fn publish_compositor_frame(
                 compositor_backend = CompositorBackend::Metal;
             }
             Err(reason) => {
+                let gpu_available = gpu.is_some();
                 let failed_gpu_timings = take_failed_gpu_timings(gpu);
                 timings.merge_gpu(failed_gpu_timings);
-                // On macOS a Metal miss is a real degradation worth surfacing;
-                // off macOS the CPU compositor IS the path, so the "why not
-                // Metal" reason is noise (backend already set to Cpu above).
-                if cfg!(target_os = "macos") {
+                // Native preview with no GPU is the Electron proof surface
+                // (Linux portal BGRA included). That is the CPU path, not a
+                // Metal miss — even on a macOS host that ran the test with
+                // gpu=None. A real Metal miss (GPU present, compose failed)
+                // still surfaces as CpuFallback on macOS.
+                if !gpu_available
+                    && matches!(frame_consumer, CompositorFrameConsumer::NativePreview)
+                {
+                    compositor_backend = CompositorBackend::Cpu;
+                    compositor_fallback_reason = None;
+                    let _ = reason;
+                } else if cfg!(target_os = "macos") {
                     compositor_fallback_reason = Some(reason);
                 } else {
                     let _ = reason;
                 }
-                if frame_consumer.requires_cpu_fallback() {
+                if frame_consumer.composes_cpu_pixels(gpu_available) {
                     bytes = {
                         let mut store = frame_store
                             .lock()
@@ -10869,7 +10885,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_preview_skips_cpu_fallback_while_explicit_jpeg_consumer_gets_fresh_yuv() {
+    async fn native_preview_cpu_composes_when_gpu_is_absent_and_jpeg_consumer_still_gets_yuv() {
         let state = test_state();
         let mut live_sources = CompositorLiveSources::default();
         let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
@@ -10897,8 +10913,8 @@ mod tests {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .latest()
-            .expect("native preview metadata frame");
-        assert!(native.bytes.is_empty());
+            .expect("native preview CPU frame");
+        assert_eq!(native.bytes.len(), raw_yuv420p_len(16, 8));
 
         publish_compositor_frame(
             &state,
@@ -10926,6 +10942,102 @@ mod tests {
         assert_eq!(jpeg_source.sequence, 2);
         assert_eq!(jpeg_source.bytes.len(), raw_yuv420p_len(16, 8));
         assert!(jpeg_source.bytes.iter().any(|byte| *byte != 0));
+    }
+
+    #[tokio::test]
+    async fn native_preview_cpu_composes_portal_screen_bgra_when_gpu_is_absent() {
+        let state = test_state();
+        let video = VideoSettings {
+            preset: VideoPreset::Custom,
+            width: 8,
+            height: 4,
+            fps: 30,
+            bitrate_kbps: 2000,
+        };
+        let portal_id = crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID;
+        crate::preview_screen::test_install_live_screen_generation(
+            &state, portal_id, 3, 11, &video,
+        )
+        .await;
+        crate::preview_screen::test_publish_screen_pixels(
+            &state,
+            12,
+            [0x20, 0x40, 0x80, 0xff],
+            Instant::now(),
+        )
+        .await;
+
+        let layout = crate::protocol::default_layout_settings();
+        let scene = crate::scene::scene_from_capture_config(SceneConfigParams {
+            transition_ms: None,
+            sources: crate::protocol::SourceSelection {
+                screen_id: Some(portal_id.to_string()),
+                window_id: None,
+                camera_id: None,
+                microphone_id: None,
+                test_pattern: false,
+            },
+            layout: LayoutSettings {
+                layout_preset: LayoutPreset::ScreenOnly,
+                ..layout
+            },
+            video: Some(video.clone()),
+            background: None,
+            protected_overlay_window_ids: Vec::new(),
+        });
+        {
+            let mut compositor = state.compositor.lock().await;
+            compositor.scene = Some(CompositorSceneSnapshot {
+                revision: 7,
+                scene: Some(scene),
+                layout: LayoutSettings {
+                    layout_preset: LayoutPreset::ScreenOnly,
+                    ..crate::protocol::default_layout_settings()
+                },
+                active_screen: None,
+            });
+        }
+
+        let mut live_sources = CompositorLiveSources::refresh(&state).await;
+        let mut render_cache = CompositorRenderCache::refresh_initial(&state).await;
+        let result = publish_compositor_frame(
+            &state,
+            "portal-preview-test",
+            4,
+            16,
+            8,
+            &mut live_sources,
+            &mut render_cache,
+            None,
+            CompositorFrameConsumer::NativePreview,
+            None,
+            None,
+            false,
+            false,
+            false,
+            false,
+        )
+        .await;
+
+        assert_eq!(result.compositor_backend, CompositorBackend::Cpu);
+        assert!(result.compositor_fallback_reason.is_none());
+        assert!(
+            result.fingerprint.has_real_source(),
+            "portal BGRA must attach to the CPU preview screen layer"
+        );
+        let store = compositor_frame_store(&state).await;
+        let latest = store
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .latest()
+            .expect("CPU-composed portal preview frame");
+        assert_eq!(latest.bytes.len(), raw_yuv420p_len(16, 8));
+        assert!(
+            latest.bytes.iter().any(|byte| *byte != 0),
+            "portal pixels must survive CPU composition; empty/black means the proof surface stays synthetic"
+        );
+        assert!(crate::linux_portal_capture::parse_portal_source_id(portal_id).is_some());
+        assert!(crate::screen_capture::parse_screencapturekit_display_id(portal_id).is_none());
     }
 
     #[cfg(target_os = "macos")]
