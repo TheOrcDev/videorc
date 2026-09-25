@@ -80,8 +80,8 @@ import {
   legacyStreamKeyMigrationCandidates,
   loadCaptureConfig,
   loadJson,
-  isNativeScreenSourceId,
-  isNativeWindowSourceId,
+  isPreviewFeedableScreenSourceId,
+  isPreviewFeedableWindowSourceId,
   patchPreparedStreamTarget,
   patchStreamTargetForEdit,
   streamOutputVideoForTarget,
@@ -1690,13 +1690,13 @@ function selectedPreviewScreenBlockedStatus(
   } satisfies Omit<PreviewScreenStatus, 'state' | 'message'>
 
   if (
-    (sourceKind === 'screen' && !isNativeScreenSourceId(sourceId)) ||
-    (sourceKind === 'window' && !isNativeWindowSourceId(sourceId))
+    (sourceKind === 'screen' && !isPreviewFeedableScreenSourceId(sourceId)) ||
+    (sourceKind === 'window' && !isPreviewFeedableWindowSourceId(sourceId))
   ) {
     return {
       ...base,
       state: 'source-missing',
-      message: 'Native preview requires a Display or app window source.'
+      message: 'Preview requires a display, app window, or desktop-portal source.'
     }
   }
 

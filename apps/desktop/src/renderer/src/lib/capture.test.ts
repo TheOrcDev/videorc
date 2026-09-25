@@ -19,9 +19,14 @@ import {
   hasSelectedScreenSource,
   isCapturePickerDevice,
   isNativeCaptureDevice,
+  isPortalCaptureDevice,
+  isPreviewFeedableScreenSourceId,
+  isPreviewFeedableWindowSourceId,
   microphonePickerDevices,
   isScreenCaptureKitCaptureDevice,
   isSelectableCaptureDevice,
+  PORTAL_MONITOR_SOURCE_ID,
+  PORTAL_WINDOW_SOURCE_ID,
   HORIZONTAL_LAYOUT_PRESETS,
   VERTICAL_LAYOUT_PRESETS,
   coerceVideoToOrientation,
@@ -597,6 +602,77 @@ describe('ScreenCaptureKit capture device filtering', () => {
 
     expect(capturePickerDevices([camera, legacyDisplay])).toEqual([legacyDisplay])
   })
+
+  it('lists Linux portal sources as picker and layout-feedable without treating them as native', () => {
+    const portalMonitor: Device = {
+      id: PORTAL_MONITOR_SOURCE_ID,
+      name: 'Screen (portal)',
+      kind: 'screen',
+      status: 'available'
+    }
+    const portalWindow: Device = {
+      id: PORTAL_WINDOW_SOURCE_ID,
+      name: 'Window (portal)',
+      kind: 'window',
+      status: 'available'
+    }
+    const camera: Device = {
+      id: 'camera:v4l2:0',
+      name: 'Camera',
+      kind: 'camera',
+      status: 'available'
+    }
+
+    expect(isPortalCaptureDevice(portalMonitor)).toBe(true)
+    expect(isPortalCaptureDevice(portalWindow)).toBe(true)
+    expect(isScreenCaptureKitCaptureDevice(portalMonitor)).toBe(false)
+    expect(isNativeCaptureDevice(portalMonitor)).toBe(false)
+    expect(isNativeCaptureDevice(portalWindow)).toBe(false)
+    expect(isCapturePickerDevice(portalMonitor)).toBe(true)
+    expect(isCapturePickerDevice(portalWindow)).toBe(true)
+    expect(isSelectableCaptureDevice(portalMonitor)).toBe(true)
+    expect(isSelectableCaptureDevice(portalWindow)).toBe(true)
+    expect(capturePickerDevices([camera, portalMonitor, portalWindow])).toEqual([
+      portalMonitor,
+      portalWindow
+    ])
+  })
+
+  it('keeps a remembered Linux portal selection across device refresh', () => {
+    const portalMonitor: Device = {
+      id: PORTAL_MONITOR_SOURCE_ID,
+      name: 'Screen (portal)',
+      kind: 'screen',
+      status: 'available'
+    }
+    const portalWindow: Device = {
+      id: PORTAL_WINDOW_SOURCE_ID,
+      name: 'Window (portal)',
+      kind: 'window',
+      status: 'available'
+    }
+
+    expect(
+      reconcileSourceSelection(
+        { screenId: PORTAL_MONITOR_SOURCE_ID, screenName: 'Screen (portal)' },
+        [portalMonitor, portalWindow]
+      )
+    ).toMatchObject({
+      screenId: PORTAL_MONITOR_SOURCE_ID,
+      screenName: 'Screen (portal)',
+      windowId: undefined
+    })
+    expect(
+      reconcileSourceSelectionForLayoutTransaction(
+        { windowId: PORTAL_WINDOW_SOURCE_ID, windowName: 'Window (portal)' },
+        [portalMonitor, portalWindow]
+      )
+    ).toMatchObject({
+      windowId: PORTAL_WINDOW_SOURCE_ID,
+      windowName: 'Window (portal)',
+      screenId: undefined
+    })
+  })
 })
 
 describe('smokePreviewCompositorCaptureConfig', () => {
@@ -795,6 +871,28 @@ describe('layout preset source requirements', () => {
     expect(hasSelectedScreenSource({ testPattern: true })).toBe(true)
     expect(hasSelectedScreenSource({ screenId: 'screen:avfoundation:7' })).toBe(true)
     expect(hasSelectedScreenSource({ cameraId: 'camera:1' })).toBe(false)
+  })
+
+  it('treats Linux portal monitor and window ids as screen-capable for layouts without calling them native', () => {
+    expect(hasSelectedScreenSource({ screenId: PORTAL_MONITOR_SOURCE_ID })).toBe(true)
+    expect(hasSelectedScreenSource({ windowId: PORTAL_WINDOW_SOURCE_ID })).toBe(true)
+    expect(hasSelectedScreenSource({ screenId: 'screen:portal:0' })).toBe(false)
+    expect(isPreviewFeedableScreenSourceId(PORTAL_MONITOR_SOURCE_ID)).toBe(true)
+    expect(isPreviewFeedableWindowSourceId(PORTAL_WINDOW_SOURCE_ID)).toBe(true)
+    expect(isPreviewFeedableScreenSourceId('screen:avfoundation:7')).toBe(false)
+    expect(isPreviewFeedableScreenSourceId('screen:screencapturekit:1')).toBe(true)
+    expect(isNativeCaptureDevice({
+      id: PORTAL_MONITOR_SOURCE_ID,
+      name: 'Screen (portal)',
+      kind: 'screen',
+      status: 'available'
+    })).toBe(false)
+    expect(isNativeCaptureDevice({
+      id: PORTAL_WINDOW_SOURCE_ID,
+      name: 'Window (portal)',
+      kind: 'window',
+      status: 'available'
+    })).toBe(false)
   })
 
   it('requires a concrete camera id for camera layouts', () => {

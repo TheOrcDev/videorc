@@ -412,9 +412,8 @@ export function studioModeTogglePreset(
 
 export function hasSelectedScreenSource(sources: SourceSelection): boolean {
   return Boolean(
-    isNativeScreenSourceId(sources.screenId) ||
-    isAvFoundationScreenSourceId(sources.screenId) ||
-    isNativeWindowSourceId(sources.windowId) ||
+    isCompositorFeedableScreenSourceId(sources.screenId) ||
+    isCompositorFeedableWindowSourceId(sources.windowId) ||
     sources.testPattern
   )
 }
@@ -2269,6 +2268,46 @@ export function isNativeWindowSourceId(sourceId: string | undefined): boolean {
   return sourceId?.startsWith('window:screencapturekit:') === true
 }
 
+/** Linux desktop-portal monitor id. Not a native-surface source. */
+export const PORTAL_MONITOR_SOURCE_ID = 'screen:portal:monitor'
+/** Linux desktop-portal window id. Not a native-surface source. */
+export const PORTAL_WINDOW_SOURCE_ID = 'window:portal:window'
+
+export function isPortalScreenSourceId(sourceId: string | undefined): boolean {
+  return sourceId === PORTAL_MONITOR_SOURCE_ID
+}
+
+export function isPortalWindowSourceId(sourceId: string | undefined): boolean {
+  return sourceId === PORTAL_WINDOW_SOURCE_ID
+}
+
+export function isPortalCaptureDevice(device: Device): boolean {
+  return (
+    (device.kind === 'screen' && isPortalScreenSourceId(device.id)) ||
+    (device.kind === 'window' && isPortalWindowSourceId(device.id))
+  )
+}
+
+/** Screen ids that can start preview (native GPU path or Linux portal proof path). */
+export function isPreviewFeedableScreenSourceId(sourceId: string | undefined): boolean {
+  return isNativeScreenSourceId(sourceId) || isPortalScreenSourceId(sourceId)
+}
+
+/** Window ids that can start preview (native GPU path or Linux portal proof path). */
+export function isPreviewFeedableWindowSourceId(sourceId: string | undefined): boolean {
+  return isNativeWindowSourceId(sourceId) || isPortalWindowSourceId(sourceId)
+}
+
+/** Screen ids accepted by live layout presets, including recording-only avfoundation. */
+export function isCompositorFeedableScreenSourceId(sourceId: string | undefined): boolean {
+  return isPreviewFeedableScreenSourceId(sourceId) || isAvFoundationScreenSourceId(sourceId)
+}
+
+/** Window ids accepted by live layout presets. */
+export function isCompositorFeedableWindowSourceId(sourceId: string | undefined): boolean {
+  return isPreviewFeedableWindowSourceId(sourceId)
+}
+
 function isAvFoundationScreenSourceId(sourceId: string | undefined): boolean {
   return sourceId?.startsWith('screen:avfoundation:') === true
 }
@@ -2321,7 +2360,9 @@ export function isNativeCaptureDevice(device: Device): boolean {
 export function isSelectableCaptureDevice(device: Device): boolean {
   return (
     device.status === 'available' &&
-    (isNativeCaptureDevice(device) || isAvFoundationScreenCaptureDevice(device))
+    (isNativeCaptureDevice(device) ||
+      isAvFoundationScreenCaptureDevice(device) ||
+      isPortalCaptureDevice(device))
   )
 }
 
@@ -2335,7 +2376,11 @@ export function isScreenCaptureKitCaptureDevice(device: Device): boolean {
 }
 
 export function isCapturePickerDevice(device: Device): boolean {
-  return isScreenCaptureKitCaptureDevice(device) || isAvFoundationScreenCaptureDevice(device)
+  return (
+    isScreenCaptureKitCaptureDevice(device) ||
+    isAvFoundationScreenCaptureDevice(device) ||
+    isPortalCaptureDevice(device)
+  )
 }
 
 // The macOS login window belongs to a different GUI session: building a
@@ -2356,6 +2401,11 @@ export function capturePickerDevices(devices: Device[]): Device[] {
   )
   if (nativeCaptureDevices.length > 0) {
     return screenCaptureKitDevices
+  }
+
+  const portalCaptureDevices = devices.filter(isPortalCaptureDevice)
+  if (portalCaptureDevices.some((device) => device.status === 'available')) {
+    return portalCaptureDevices
   }
 
   const legacyScreenCaptureDevices = devices.filter(isAvFoundationScreenCaptureDevice)
@@ -2456,12 +2506,19 @@ export function reconcileSourceSelection(
   const nativeCaptureDevices = screenCaptureKitDevices.filter(
     (device) => device.status === 'available' && isNativeCaptureDevice(device)
   )
+  const portalCaptureDevices = devices.filter(
+    (device) => device.status === 'available' && isPortalCaptureDevice(device)
+  )
   const legacyScreenCaptureDevices =
-    nativeCaptureDevices.length === 0
+    nativeCaptureDevices.length === 0 && portalCaptureDevices.length === 0
       ? captureDevices.filter(isAvFoundationScreenCaptureDevice)
       : []
   const selectableCaptureDevices =
-    nativeCaptureDevices.length > 0 ? nativeCaptureDevices : legacyScreenCaptureDevices
+    nativeCaptureDevices.length > 0
+      ? nativeCaptureDevices
+      : portalCaptureDevices.length > 0
+        ? portalCaptureDevices
+        : legacyScreenCaptureDevices
   const cameras = devices.filter(
     (device) => device.kind === 'camera' && device.status === 'available'
   )
