@@ -70,6 +70,8 @@ jobs:
           rustup default stable
 
       - name: Install Linux packaging dependencies
+        # pkg-config, clang, libpipewire-0.3-dev, and libspa-0.2-dev match
+        # linux.yml so libspa-sys / pipewire can compile.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -79,7 +81,11 @@ jobs:
             libatk-bridge2.0-0t64 \
             libgtk-3-0t64 \
             libnss3 \
-            xz-utils
+            xz-utils \
+            pkg-config \
+            clang \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
