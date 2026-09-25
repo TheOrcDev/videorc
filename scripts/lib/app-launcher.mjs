@@ -1055,9 +1055,12 @@ export function devBackendPrebuildSpec({ env = process.env, platform = process.p
   const timeoutMs = Number(
     env?.VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS ?? DEV_BACKEND_PREBUILD_TIMEOUT_MS
   )
+  // Mirrors the desktop main process: VIDEORC_DEV_BACKEND_PROFILE=release
+  // makes `pnpm dev` run the optimized backend (Plan 0005).
+  const release = env?.VIDEORC_DEV_BACKEND_PROFILE === 'release'
   return {
     command: platform === 'win32' ? 'cargo.exe' : 'cargo',
-    args: ['build', '-p', 'videorc-backend'],
+    args: ['build', ...(release ? ['--release'] : []), '-p', 'videorc-backend'],
     cwd: repoRoot,
     timeoutMs:
       Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEV_BACKEND_PREBUILD_TIMEOUT_MS

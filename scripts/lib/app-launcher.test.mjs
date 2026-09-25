@@ -912,6 +912,10 @@ test('dev backend prebuild builds the whole backend package unless opted out', (
   )
   assert.equal(devBackendPrebuildSpec({ env: { VIDEORC_SMOKE_SKIP_PREBUILD: '1' } }), null)
   assert.equal(devBackendPrebuildSpec({ env: {}, platform: 'win32' }).command, 'cargo.exe')
+  assert.deepEqual(
+    devBackendPrebuildSpec({ env: { VIDEORC_DEV_BACKEND_PROFILE: 'release' } }).args,
+    ['build', '--release', '-p', 'videorc-backend']
+  )
 })
 
 test('dev backend prebuild failures name the compile race instead of GPU noise', () => {
