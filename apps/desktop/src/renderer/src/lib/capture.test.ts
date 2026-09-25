@@ -881,18 +881,22 @@ describe('layout preset source requirements', () => {
     expect(isPreviewFeedableWindowSourceId(PORTAL_WINDOW_SOURCE_ID)).toBe(true)
     expect(isPreviewFeedableScreenSourceId('screen:avfoundation:7')).toBe(false)
     expect(isPreviewFeedableScreenSourceId('screen:screencapturekit:1')).toBe(true)
-    expect(isNativeCaptureDevice({
-      id: PORTAL_MONITOR_SOURCE_ID,
-      name: 'Screen (portal)',
-      kind: 'screen',
-      status: 'available'
-    })).toBe(false)
-    expect(isNativeCaptureDevice({
-      id: PORTAL_WINDOW_SOURCE_ID,
-      name: 'Window (portal)',
-      kind: 'window',
-      status: 'available'
-    })).toBe(false)
+    expect(
+      isNativeCaptureDevice({
+        id: PORTAL_MONITOR_SOURCE_ID,
+        name: 'Screen (portal)',
+        kind: 'screen',
+        status: 'available'
+      })
+    ).toBe(false)
+    expect(
+      isNativeCaptureDevice({
+        id: PORTAL_WINDOW_SOURCE_ID,
+        name: 'Window (portal)',
+        kind: 'window',
+        status: 'available'
+      })
+    ).toBe(false)
   })
 
   it('requires a concrete camera id for camera layouts', () => {
