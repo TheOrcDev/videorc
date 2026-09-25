@@ -5,6 +5,7 @@ import {
   DarkModeIcon,
   DesktopIcon,
   LightModeIcon,
+  SettingsIcon,
   StopIcon
 } from '@/components/icons'
 import { useTheme } from 'next-themes'
@@ -22,6 +23,7 @@ import {
 } from '@/components/ui/command'
 import { Kbd } from '@/components/ui/kbd'
 import { displayKeyGlyph } from '@/lib/platform'
+import { SETTINGS_TABS } from '@/lib/settings-tabs'
 import {
   STUDIO_PANELS,
   WORKSPACE_TABS,
@@ -39,7 +41,7 @@ export function CommandPalette({
   open: boolean
   onOpenChange: (open: boolean) => void
 }): ReactElement {
-  const { setActive, openStudioPanel } = useWorkspaceNav()
+  const { setActive, openStudioPanel, openSettings } = useWorkspaceNav()
   const {
     runtimeInfo,
     savedScenes,
@@ -148,6 +150,23 @@ export function CommandPalette({
               </CommandItem>
             )
           })}
+        </CommandGroup>
+
+        <CommandSeparator />
+
+        {/* Plan 064: every Settings tab is one jump away, so no search field is
+            needed inside Settings. */}
+        <CommandGroup heading="Settings">
+          {SETTINGS_TABS.map((tab) => (
+            <CommandItem
+              key={tab.id}
+              value={`Settings ${tab.label}`}
+              onSelect={() => run(() => openSettings(tab.id))}
+            >
+              <SettingsIcon className="size-4" />
+              {tab.label}
+            </CommandItem>
+          ))}
         </CommandGroup>
 
         <CommandSeparator />

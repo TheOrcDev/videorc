@@ -20,6 +20,7 @@ import {
 import { videoProfileCompatibility } from '@/lib/capture'
 import { goLiveEntitlementGate } from '@/lib/entitlement-ui'
 import { entitlementDisabledReason } from '@/lib/entitlements'
+import type { SettingsTabId } from '@/lib/settings-tabs'
 import { studioHealth } from '@/lib/studio-health'
 import {
   isSessionTransportActive,
@@ -220,7 +221,7 @@ export function StudioTab(): ReactElement {
             active={active}
             blockedJump={
               banner?.jumpTo && banner.jumpLabel
-                ? { label: banner.jumpLabel, to: banner.jumpTo }
+                ? { label: banner.jumpLabel, to: banner.jumpTo, settingsTab: banner.settingsTab }
                 : null
             }
             blockedReason={visibleStartBlockedReason}
@@ -360,6 +361,8 @@ function StudioPreviewPanel(): ReactElement {
 function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
   title: string
   jumpTo?: WorkspaceTab | StudioPanel
+  /** With `jumpTo: 'settings'`, the Settings tab that owns the fix. */
+  settingsTab?: SettingsTabId
   jumpLabel?: string
 } | null {
   const { wsStatus, outputEnabled, captureConfig, streamReady, health, entitlements } = studio
@@ -384,7 +387,12 @@ function studioBlocker(studio: ReturnType<typeof useStudioCore>): {
     return { title: 'Stream target incomplete', jumpTo: 'live', jumpLabel: 'Open Live' }
   }
   if (health && !health.ffmpeg.available) {
-    return { title: 'FFmpeg unavailable', jumpTo: 'settings', jumpLabel: 'Open Settings' }
+    return {
+      title: 'FFmpeg unavailable',
+      jumpTo: 'settings',
+      settingsTab: 'recording',
+      jumpLabel: 'Open Settings'
+    }
   }
   return { title: 'Finish setup to start' }
 }

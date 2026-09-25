@@ -23,6 +23,7 @@ import {
   type WorkspaceTab
 } from '@/components/workspace-nav'
 import type { EntitlementTier } from '@/lib/backend'
+import type { SettingsTabId } from '@/lib/settings-tabs'
 import { cn } from '@/lib/utils'
 
 function NavRow({
@@ -144,6 +145,7 @@ export function Sidebar({
   accountTier,
   onSelect,
   onSelectStudioPanel,
+  onOpenSettings,
   statusTone,
   statusLabel,
   live,
@@ -155,6 +157,8 @@ export function Sidebar({
   accountTier: EntitlementTier | null
   onSelect: (tab: WorkspaceTab) => void
   onSelectStudioPanel: (panel: StudioPanel) => void
+  /** Opens Settings on a named tab (plan 064), or on the one used last. */
+  onOpenSettings: (tab?: SettingsTabId) => void
   statusTone: StatusDotTone
   statusLabel: string
   live: boolean
@@ -268,7 +272,7 @@ export function Sidebar({
           <GroupLabel>System</GroupLabel>
           {/* Health (Diagnostics) is dev/forensic — kept out of the sidebar
               entirely. It stays reachable via ⌘K and the account menu; the
-              support-bundle export lives in Settings. */}
+              support-bundle export lives in Settings → About. */}
           {tabsIn('system')
             .filter((tab) => tab.id !== 'diagnostics')
             .map((tab) => (
@@ -288,7 +292,7 @@ export function Sidebar({
         </div>
       </nav>
 
-      <SidebarUpdateChip captureActive={live} onOpenSettings={() => onSelect('settings')} />
+      <SidebarUpdateChip captureActive={live} onOpenSettings={() => onOpenSettings('about')} />
 
       <div className="flex min-h-11 items-center justify-between gap-2 border-t px-3 py-1.5">
         {/* Videorc product-account control. Backend status is secondary (a small

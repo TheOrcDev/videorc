@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { STORAGE_KEYS } from '@/lib/capture'
 
@@ -6,6 +6,7 @@ import {
   DEFAULT_SETTINGS_TAB,
   SETTINGS_TABS,
   isSettingsTabId,
+  openSettingsTab,
   readLastSettingsTab,
   writeLastSettingsTab
 } from './settings-tabs'
@@ -107,5 +108,22 @@ describe('writeLastSettingsTab', () => {
 
   it('never throws when storage refuses the write', () => {
     expect(() => writeLastSettingsTab('remote', throwingStorage)).not.toThrow()
+  })
+})
+
+describe('openSettingsTab', () => {
+  it('asks the shell to open Settings on the tab, on the workspace navigation event', () => {
+    const target = new EventTarget()
+    const opened: unknown[] = []
+    target.addEventListener('videorc:navigate-workspace', (event) =>
+      opened.push((event as CustomEvent).detail)
+    )
+    vi.stubGlobal('window', target)
+    try {
+      openSettingsTab('permissions')
+    } finally {
+      vi.unstubAllGlobals()
+    }
+    expect(opened).toEqual([{ tab: 'settings', settingsTab: 'permissions' }])
   })
 })

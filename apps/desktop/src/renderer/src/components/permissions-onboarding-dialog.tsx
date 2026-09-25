@@ -82,8 +82,8 @@ export function PermissionsOnboardingDialog({
               <DialogTitle>Let Videorc capture your {deviceNoun}</DialogTitle>
               <DialogDescription>
                 {isWindows
-                  ? `Turn on camera and microphone access in ${settingsName}. You can change any of this later in Settings.`
-                  : 'macOS asks once per permission. Grant what you need. You can change any of this later in Settings.'}
+                  ? `Turn on camera and microphone access in ${settingsName}. You can change any of this later in Settings → Permissions.`
+                  : 'macOS asks once per permission. Grant what you need. You can change any of this later in Settings → Permissions.'}
               </DialogDescription>
             </div>
           </div>

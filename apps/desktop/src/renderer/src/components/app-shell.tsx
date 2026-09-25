@@ -353,6 +353,7 @@ export function AppShell(): ReactElement {
           accountTier={entitlementTier}
           onSelect={setActive}
           onSelectStudioPanel={openStudioPanel}
+          onOpenSettings={openSettings}
           statusTone={statusTone}
           statusLabel={statusLabel}
           live={live}

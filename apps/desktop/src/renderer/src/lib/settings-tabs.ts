@@ -41,6 +41,16 @@ export function readLastSettingsTab(
   }
 }
 
+/**
+ * Opens Settings on `tab` from outside React (a toast action, a lib). The shell
+ * handles it on the event every page is opened with from outside React.
+ */
+export function openSettingsTab(tab: SettingsTabId): void {
+  window.dispatchEvent(
+    new CustomEvent('videorc:navigate-workspace', { detail: { tab: 'settings', settingsTab: tab } })
+  )
+}
+
 export function writeLastSettingsTab(
   tab: SettingsTabId,
   storage: Pick<Storage, 'setItem'> | undefined = globalThis.localStorage
