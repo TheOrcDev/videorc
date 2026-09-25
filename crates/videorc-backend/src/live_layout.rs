@@ -28,6 +28,7 @@ use tokio::sync::oneshot;
 use tokio::time::{Instant, sleep};
 
 use crate::compositor::update_compositor_scene;
+use crate::linux_portal_capture::parse_portal_source_id;
 use crate::live_scene::{ApplyMode, MutationContext, MutationKind, classify_mutation};
 #[cfg(test)]
 use crate::preview_camera::preview_camera_status_and_starting_identity;
@@ -325,8 +326,8 @@ pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<String> {
     );
     let camera_selected = params.sources.camera_id.is_some();
     let screen_selected = params.sources.test_pattern
-        || screen_source_is_native(params.sources.screen_id.as_deref())
-        || window_source_is_native(params.sources.window_id.as_deref());
+        || screen_source_can_feed_compositor(params.sources.screen_id.as_deref())
+        || window_source_can_feed_compositor(params.sources.window_id.as_deref());
     if needs_camera && !camera_selected {
         return Some(format!(
             "Layout preset {preset:?} needs a camera, but no camera is selected. Pick a camera, then switch."
@@ -343,6 +344,21 @@ pub fn preset_selection_blocker(params: &SceneConfigParams) -> Option<String> {
         ));
     }
     None
+}
+
+/// Whether this screen id can feed the live compositor: native GPU-backed
+/// capture on macOS/Windows, or a Linux desktop-portal source on the CPU/BMP
+/// proof path. Portal ids are not native-surface sources.
+fn screen_source_can_feed_compositor(screen_id: Option<&str>) -> bool {
+    screen_source_is_native(screen_id) || source_id_is_portal(screen_id)
+}
+
+fn window_source_can_feed_compositor(window_id: Option<&str>) -> bool {
+    window_source_is_native(window_id) || source_id_is_portal(window_id)
+}
+
+fn source_id_is_portal(source_id: Option<&str>) -> bool {
+    source_id.is_some_and(|id| parse_portal_source_id(id).is_some())
 }
 
 fn screen_source_is_native(screen_id: Option<&str>) -> bool {
@@ -3429,6 +3445,56 @@ mod tests {
         let mut windows_gdigrab = config(LayoutPreset::ScreenOnly, false, false);
         windows_gdigrab.sources.screen_id = Some("screen:gdigrab:desktop".to_string());
         assert_eq!(preset_selection_blocker(&windows_gdigrab), None);
+
+        let mut macos_screencapturekit = config(LayoutPreset::ScreenOnly, false, false);
+        macos_screencapturekit.sources.screen_id = Some("screen:screencapturekit:1".to_string());
+        assert_eq!(preset_selection_blocker(&macos_screencapturekit), None);
+
+        // Linux portal sources feed the CPU/BMP proof compositor, not a
+        // native CAMetalLayer / DXGI surface.
+        let mut linux_portal_monitor = config(LayoutPreset::ScreenOnly, false, false);
+        linux_portal_monitor.sources.screen_id =
+            Some(crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID.to_string());
+        assert_eq!(preset_selection_blocker(&linux_portal_monitor), None);
+
+        let mut linux_portal_window = config(LayoutPreset::ScreenOnly, false, false);
+        linux_portal_window.sources.window_id =
+            Some(crate::linux_portal_capture::PORTAL_WINDOW_SOURCE_ID.to_string());
+        assert_eq!(preset_selection_blocker(&linux_portal_window), None);
+
+        let mut linux_portal_screen_camera = config(LayoutPreset::ScreenCamera, true, false);
+        linux_portal_screen_camera.sources.screen_id =
+            Some(crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID.to_string());
+        assert_eq!(preset_selection_blocker(&linux_portal_screen_camera), None);
+
+        let mut bogus_portal = config(LayoutPreset::ScreenOnly, false, false);
+        bogus_portal.sources.screen_id = Some("screen:portal:0".to_string());
+        assert!(
+            preset_selection_blocker(&bogus_portal)
+                .is_some_and(|message| message.contains("cannot feed the native compositor"))
+        );
+
+        assert!(screen_source_is_native(Some("screen:screencapturekit:1")));
+        assert!(screen_source_is_native(Some(
+            "screen:dxgi:00000000000003f1:2"
+        )));
+        assert!(screen_source_is_native(Some("screen:gdigrab:desktop")));
+        assert!(!screen_source_is_native(Some(
+            crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID
+        )));
+        assert!(!window_source_is_native(Some(
+            crate::linux_portal_capture::PORTAL_WINDOW_SOURCE_ID
+        )));
+        assert!(screen_source_can_feed_compositor(Some(
+            crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID
+        )));
+        assert!(window_source_can_feed_compositor(Some(
+            crate::linux_portal_capture::PORTAL_WINDOW_SOURCE_ID
+        )));
+        assert!(!screen_source_can_feed_compositor(Some(
+            "screen:avfoundation:7"
+        )));
+        assert!(!screen_source_can_feed_compositor(Some("screen:portal:0")));
     }
 
     #[test]
