@@ -94,7 +94,27 @@ describe('readLastSettingsTab', () => {
 
   it('falls back to General when storage throws or is missing', () => {
     expect(readLastSettingsTab(throwingStorage)).toBe('general')
-    expect(readLastSettingsTab(undefined)).toBe('general')
+    expect(readLastSettingsTab(null)).toBe('general')
+  })
+
+  it('falls back to General when even reading localStorage throws', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage')
+    Object.defineProperty(globalThis, 'localStorage', {
+      configurable: true,
+      get() {
+        throw new Error('SecurityError: access denied')
+      }
+    })
+    try {
+      expect(readLastSettingsTab()).toBe('general')
+      expect(() => writeLastSettingsTab('about')).not.toThrow()
+    } finally {
+      if (descriptor) {
+        Object.defineProperty(globalThis, 'localStorage', descriptor)
+      } else {
+        delete (globalThis as { localStorage?: Storage }).localStorage
+      }
+    }
   })
 })
 

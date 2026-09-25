@@ -25,13 +25,22 @@ export function isSettingsTabId(value: unknown): value is SettingsTabId {
   return SETTINGS_TABS.some((tab) => tab.id === value)
 }
 
+/** The page's localStorage, or null where reading the property itself throws. */
+function pageStorage(): Storage | null {
+  try {
+    return globalThis.localStorage ?? null
+  } catch {
+    return null
+  }
+}
+
 /**
  * The tab Settings opens on: the last one used on this device, else General.
  * The choice is a convenience, so storage that is missing, holds an unknown
  * id, or throws falls back instead of breaking Settings.
  */
 export function readLastSettingsTab(
-  storage: Pick<Storage, 'getItem'> | undefined = globalThis.localStorage
+  storage: Pick<Storage, 'getItem'> | null = pageStorage()
 ): SettingsTabId {
   try {
     const stored = storage?.getItem(STORAGE_KEYS.settingsTab)
@@ -53,7 +62,7 @@ export function openSettingsTab(tab: SettingsTabId): void {
 
 export function writeLastSettingsTab(
   tab: SettingsTabId,
-  storage: Pick<Storage, 'setItem'> | undefined = globalThis.localStorage
+  storage: Pick<Storage, 'setItem'> | null = pageStorage()
 ): void {
   try {
     storage?.setItem(STORAGE_KEYS.settingsTab, tab)
