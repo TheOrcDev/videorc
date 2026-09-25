@@ -3,6 +3,7 @@ export type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 import { toast } from 'sonner'
 
 import type { GlobalShortcutsConfig, GlobalShortcutsResult } from '@/lib/backend'
+import { openSettingsTab } from '@/lib/settings-tabs'
 
 type RegisterFn = (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
 
@@ -129,7 +130,8 @@ export class GlobalShortcutsRegistrar {
         if (failed.length > 0) {
           toast.error('Some global shortcuts could not be registered', {
             id: 'global-shortcuts-conflict',
-            description: `${failed.join(', ')}: invalid, duplicate or already used by another app. Pick different bindings in Settings.`
+            description: `${failed.join(', ')}: invalid, duplicate or already used by another app. Pick different bindings in Settings → Shortcuts.`,
+            action: { label: 'Open Shortcuts', onClick: () => openSettingsTab('shortcuts') }
           })
         }
       })

@@ -10,7 +10,7 @@ export function sourceSelectPlaceholder(deviceCount: number, discoveryPending: b
     return 'Finding devices…'
   }
   if (deviceCount === 0) {
-    return 'No devices found. Check System Access in Settings'
+    return 'No devices found. Check Settings → Permissions'
   }
   return 'Select a device'
 }

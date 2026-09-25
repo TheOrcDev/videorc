@@ -14,9 +14,7 @@ describe('source select state', () => {
     expect(sourceSelectPlaceholder(0, true)).toBe('Finding devices…')
     // Pending wins even if a stale count lingers.
     expect(sourceSelectPlaceholder(3, true)).toBe('Finding devices…')
-    expect(sourceSelectPlaceholder(0, false)).toBe(
-      'No devices found. Check System Access in Settings'
-    )
+    expect(sourceSelectPlaceholder(0, false)).toBe('No devices found. Check Settings → Permissions')
     expect(sourceSelectPlaceholder(2, false)).toBe('Select a device')
   })
 

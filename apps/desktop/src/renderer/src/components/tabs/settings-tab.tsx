@@ -1,185 +1,46 @@
-import { findAcceleratorOwner, acceleratorDisplayKeys } from '../../../../shared/accelerator'
-import {
-  globalShortcutEntries,
-  globalShortcutLayout,
-  withGlobalShortcut,
-  type GlobalShortcutAction
-} from '../../../../shared/global-shortcuts'
-import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
-import {
-  BugIcon,
-  ChevronDownIcon,
-  ClapperboardIcon,
-  DisabledIcon,
-  DownloadIcon,
-  ErrorIcon,
-  FolderIcon,
-  KeyboardIcon,
-  LivestreamIcon,
-  LockIcon,
-  RefreshIcon,
-  SettingsIcon,
-  SparkleIcon,
-  SpinnerIcon,
-  SuccessIcon,
-  ThemeIcon,
-  WarningIcon
-} from '@/components/icons'
-import { useTheme } from 'next-themes'
-import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react'
+import { useEffect, type ReactElement } from 'react'
 
-import logoUrl from '@/assets/videorc-logo.png'
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
-import { NavigableRow } from '@/components/navigable-row'
-import { StatusBadge } from '@/components/status-badge'
-import { Kbd, KbdGroup } from '@/components/ui/kbd'
-import { ConfigGrid } from '@/components/page'
-import { ObsImportDialog } from '@/components/obs-import-dialog'
-import { PanelSection } from '@/components/panel-section'
-import { PhoneRemoteSection } from '@/components/phone-remote-section'
-import { ShortcutRecorderField } from '@/components/shortcut-recorder'
-import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
-import { Badge } from '@/components/ui/badge'
-import { Button } from '@/components/ui/button'
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { Field, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field'
-import { Switch } from '@/components/ui/switch'
-import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import { useWorkspaceNav } from '@/components/workspace-nav'
-import { useStudioAudio, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
-import type { RemoteControlStatus } from '@/lib/backend'
-import { useUpdater } from '@/hooks/use-updater'
-import { globalShortcutRegistration } from '@/lib/global-shortcuts'
-import type { DirectoryFacts, RuntimeInfo, UpdateStatus } from '@/lib/backend'
-import { isActiveRecordingState } from '@/lib/format'
-import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
-import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
-import { shortcutsByGroup } from '@/lib/shortcuts'
-import { displayKeyGlyphs, isMacPlatform, osSettingsName } from '@/lib/platform'
-import { releaseTrackLabel } from '@/lib/release-track'
-import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
-import { isUpdateInstallable } from '@/lib/update-ui'
+import { ConfigGrid, PageStack } from '@/components/page'
+import { AboutSettings } from '@/components/settings/about-settings'
+import { GeneralSettings } from '@/components/settings/general-settings'
+import { PermissionsSettings } from '@/components/settings/permissions-settings'
+import { RecordingSettings } from '@/components/settings/recording-settings'
+import { RemoteSettings } from '@/components/settings/remote-settings'
+import { ShortcutsSettings } from '@/components/settings/shortcuts-settings'
+import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { useStudioCore } from '@/hooks/use-studio'
+import { SETTINGS_TABS, isSettingsTabId, type SettingsTabId } from '@/lib/settings-tabs'
 
 /**
- * Remote control is off by default, and an empty body made the card render as a
- * bare header. One muted line says what the switch is for instead.
+ * A tab with two sections: side by side at `lg`, stacked below it with a
+ * hairline between them. At `lg` the pair fills the visible height and its one
+ * row stretches, so the config grid's column hairline runs the full height
+ * however short the tab is, and neither section needs its bottom hairline.
+ * Stacked, the rows keep their content height (stretching two rows would push
+ * the hairline between them down the page).
  */
-export const REMOTE_CONTROL_OFF_HINT = 'Off. Turn on to pair a Stream Deck or the Videorc remote.'
+const SECTION_PAIR = 'flex-1 content-start lg:content-stretch lg:[&>*]:border-b-0'
 
-const GLOBAL_ACTION_ROWS = [
-  'record-toggle',
-  'stream-toggle',
-  'mic-toggle',
-  'layout-next',
-  'layout-previous'
-] as const satisfies readonly GlobalShortcutAction[]
-
-const GLOBAL_ACTION_LABELS: Record<(typeof GLOBAL_ACTION_ROWS)[number], string> = {
-  'record-toggle': 'Start / stop recording',
-  'stream-toggle': 'Go live / end stream',
-  'mic-toggle': 'Mute / unmute mic',
-  'layout-next': 'Next layout',
-  'layout-previous': 'Previous layout'
-}
-
-function globalShortcutActionLabel(action: GlobalShortcutAction): string {
-  const layout = globalShortcutLayout(action)
-  if (layout) {
-    return BUILTIN_LAYOUTS.find(({ id }) => id === layout)?.label ?? layout
-  }
-  return GLOBAL_ACTION_LABELS[action as (typeof GLOBAL_ACTION_ROWS)[number]]
-}
-
-// ST1 (UX rework): Settings holds app-level facts and tools only. Session
-// capture settings have ONE home each (Output ⌘6, Livestream ⌘5) — the rows
-// below NAVIGATE there instead of duplicating the controls, which is what the
-// old "Defaults" selects did (they edited the live captureConfig).
+/**
+ * Settings (plan 064): seven tabs in a segmented strip under the toolbar, one
+ * tab's sections below it. The strip never scrolls away: Settings owns its
+ * scroll (app-shell turns the pane body's off), and only the region under the
+ * strip scrolls. The selected tab lives in app-shell, so links can open a
+ * named tab and Settings reopens on the one used last.
+ */
 export function SettingsTab({
+  tab,
+  onTabChange,
   onOpenPermissionsSetup,
   onShowWhatsNew
 }: {
+  tab: SettingsTabId
+  onTabChange: (tab: SettingsTabId) => void
   onOpenPermissionsSetup: () => void
   onShowWhatsNew: () => void
 }): ReactElement {
-  const {
-    settings,
-    setSettings,
-    health,
-    captureConfig,
-    deviceList,
-    mediaAccess,
-    refreshBackend,
-    handleSystemPermission,
-    openSystemPermissionSettings,
-    exportSupportBundle,
-    scheduleHardwareAccelerationRetry,
-    supportBundleExportPending,
-    runtimeInfo,
-    remoteControl
-  } = useStudioCore()
-  const { audioMeter } = useStudioAudio()
-  const { openStudioPanel } = useWorkspaceNav()
-  const { theme, setTheme } = useTheme()
-
-  // Plan 062: shortcuts are recorded by pressing them, not typed.
-  const shortcutRegistration = useSyncExternalStore(
-    globalShortcutRegistration.subscribe,
-    globalShortcutRegistration.getSnapshot
-  )
-  const globalShortcutValue = (action: GlobalShortcutAction): string | undefined =>
-    globalShortcutEntries(settings.globalShortcuts ?? {}).find(([id]) => id === action)?.[1]
-  const setGlobalShortcut = (action: GlobalShortcutAction, accelerator: string): void =>
-    setSettings((current) => ({
-      ...current,
-      globalShortcuts: withGlobalShortcut(current.globalShortcuts, action, accelerator)
-    }))
-  const validateGlobalShortcut =
-    (action: GlobalShortcutAction) =>
-    (accelerator: string): string | null => {
-      const owner = findAcceleratorOwner(
-        settings.globalShortcuts ?? {},
-        accelerator,
-        action,
-        runtimeInfo?.platform
-      )
-      return owner ? `Already used by ${globalShortcutActionLabel(owner)}.` : null
-    }
-
-  // ST2: validate the output directory as it changes — a typo here used to
-  // fail silently at record time. Blank means the platform default.
-  const [directoryFacts, setDirectoryFacts] = useState<DirectoryFacts | null>(null)
-  const [obsImportOpen, setObsImportOpen] = useState(false)
-  const outputDirectory = settings.outputDirectory.trim()
-  const outputDirectoryHandle = settings.outputDirectoryHandle
-  useEffect(() => {
-    if (!outputDirectoryHandle || !window.videorc?.checkDirectory) {
-      setDirectoryFacts(null)
-      return
-    }
-    let cancelled = false
-    const timer = setTimeout(() => {
-      void window.videorc?.checkDirectory?.(outputDirectoryHandle).then((facts) => {
-        if (!cancelled) {
-          setDirectoryFacts(facts)
-        }
-      })
-    }, 350)
-    return () => {
-      cancelled = true
-      clearTimeout(timer)
-    }
-  }, [outputDirectoryHandle])
-
-  const browseOutputDirectory = async (): Promise<void> => {
-    const selection = await window.videorc?.pickDirectory?.()
-    if (selection) {
-      setSettings((current) => ({
-        ...current,
-        outputDirectory: selection.displayName,
-        outputDirectoryHandle: selection.directoryHandleId
-      }))
-    }
-  }
+  const { refreshBackend } = useStudioCore()
 
   // ST3: permission grants change in System Settings while we're backgrounded —
   // re-enumerate when the window comes back so the chips stay honest.
@@ -189,780 +50,71 @@ export function SettingsTab({
     return () => window.removeEventListener('focus', onFocus)
   }, [refreshBackend])
 
-  // Remote-control status is pushed into the studio context by the backend
-  // (remote.control.status events) — this tab only renders it and fires
-  // actions; the switch settles when the backend confirms.
-  const remoteStatus = remoteControl.status
-  const [remotePending, setRemotePending] = useState(false)
-  const runRemoteAction = async (
-    action: () => Promise<RemoteControlStatus | null>
-  ): Promise<void> => {
-    setRemotePending(true)
-    try {
-      await action()
-    } finally {
-      setRemotePending(false)
-    }
-  }
-
-  const accessRows = systemAccessRows({
-    deviceList,
-    audioMeter,
-    platform: runtimeInfo?.platform,
-    mediaAccess
-  })
-
   return (
-    <div className="flex flex-col">
-      {/* ONE grid, two continuous columns. A grid row is as tall as its tallest
-        column and a second grid could not start until the first ended, so when
-        the taller column outgrew the other, the short one stopped early and a
-        void stretched down the page. Two independent stacks cannot do that.
-
-        Column order is the NARROW-WINDOW reading order: below `lg` the grid
-        collapses and the left stack is read before the right, so the left
-        carries the cards people come to Settings for (storage, permissions,
-        co-host, shortcuts, remote) and the right carries preferences and
-        reference. The window can be resized to 960px, under the `lg`
-        breakpoint, so this order ships. */}
-      <ConfigGrid>
-        <div className="flex flex-col">
-          <PanelSection
-            description="Where recordings are written and what new sessions use."
-            icon={SettingsIcon}
-            title="Recording & storage"
-          >
-            <FieldGroup variant="grouped">
-              <Field>
-                <FieldLabel htmlFor="output-directory">Output directory</FieldLabel>
-                <div className="flex gap-2">
-                  <div
-                    id="output-directory"
-                    className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-foreground/[0.03] px-2.5 text-sm text-muted-foreground"
-                  >
-                    {outputDirectory || 'Videorc default recordings folder'}
-                  </div>
-                  <Button size="sm" variant="outline" onClick={() => void browseOutputDirectory()}>
-                    <FolderIcon data-icon="inline-start" />
-                    Browse
-                  </Button>
-                  <Button
-                    disabled={!directoryFacts?.exists}
-                    size="sm"
-                    variant="outline"
-                    onClick={() => {
-                      if (outputDirectoryHandle) {
-                        void window.videorc?.revealSelectedResource?.(outputDirectoryHandle)
-                      }
-                    }}
-                  >
-                    <FolderIcon data-icon="inline-start" />
-                    Reveal
-                  </Button>
-                </div>
-                {!outputDirectory ? (
-                  <p className="text-xs text-muted-foreground">
-                    Blank uses the default: ~/Movies/Videorc/Recordings.
-                  </p>
-                ) : directoryFacts && !directoryFacts.exists ? (
-                  <div className="flex flex-wrap items-center gap-2 text-xs text-warning">
-                    <WarningIcon className="size-3.5 shrink-0" weight="fill" />
-                    <span>This folder authorization expired. Choose it again.</span>
-                  </div>
-                ) : directoryFacts && !directoryFacts.writable ? (
-                  <p className="flex items-center gap-1.5 text-xs text-warning">
-                    <WarningIcon className="size-3.5 shrink-0" weight="fill" />
-                    This folder is not writable. Recordings will fail to save here.
-                  </p>
-                ) : directoryFacts ? (
-                  <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                    <SuccessIcon className="size-3.5 shrink-0 text-success" weight="fill" />
-                    Folder writable
-                    {typeof directoryFacts.freeBytes === 'number'
-                      ? ` · ${formatFreeSpace(directoryFacts.freeBytes)} free`
-                      : ''}
-                  </p>
-                ) : null}
-              </Field>
-              <Field>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 flex-col gap-0.5">
-                    <FieldLabel htmlFor="keep-original-recording">
-                      Keep original recording
-                    </FieldLabel>
-                    <p className="text-xs text-muted-foreground">
-                      Keeps the capture MKV (lossless audio) next to the exported MP4 instead of
-                      deleting it. Uses more disk space.
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.keepOriginalRecording}
-                    id="keep-original-recording"
-                    onCheckedChange={(checked) =>
-                      setSettings((current) => ({ ...current, keepOriginalRecording: checked }))
-                    }
-                  />
-                </div>
-              </Field>
-              <Field>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 flex-col gap-0.5">
-                    <FieldLabel htmlFor="keep-microphone-warm">
-                      Keep microphone ready while Studio is visible
-                    </FieldLabel>
-                    <p className="text-xs text-muted-foreground">
-                      Opens the selected microphone as soon as Studio is on screen so Record starts
-                      instantly. macOS shows its microphone indicator while Studio is visible;
-                      hiding the window releases the microphone.
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.keepMicrophoneWarm !== false}
-                    id="keep-microphone-warm"
-                    onCheckedChange={(checked) =>
-                      setSettings((current) => ({ ...current, keepMicrophoneWarm: checked }))
-                    }
-                  />
-                </div>
-              </Field>
-              <Field>
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex min-w-0 flex-col gap-0.5">
-                    <FieldLabel htmlFor="animate-scene-changes">Animate scene changes</FieldLabel>
-                    <p className="text-xs text-muted-foreground">
-                      Layout switches glide into place instead of cutting, visible live on stream
-                      and in recordings.
-                    </p>
-                  </div>
-                  <Switch
-                    checked={settings.animateSceneChanges === true}
-                    id="animate-scene-changes"
-                    onCheckedChange={(checked) =>
-                      setSettings((current) => ({ ...current, animateSceneChanges: checked }))
-                    }
-                  />
-                </div>
-              </Field>
-            </FieldGroup>
-
-            <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
-              <NavigableRow
-                icon={ClapperboardIcon}
-                label="Recording preset"
-                value={recordingQuality(captureConfig.video)}
-                onNavigate={() => openStudioPanel('recording')}
-              />
-              <NavigableRow
-                icon={LivestreamIcon}
-                label="Stream destinations"
-                value={streamingSummary(
-                  captureConfig.streamEnabled,
-                  captureConfig.streaming.targets
-                )}
-                onNavigate={() => openStudioPanel('live')}
-              />
-            </div>
-
-            {/* FFmpeg ships bundled with the packaged app, so normal users never set
-              a path. Show a quiet status; surface a friendly, actionable card only
-              when it is genuinely missing; keep the manual override in Advanced. */}
-            {health?.ffmpeg.available ? (
-              <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                <SuccessIcon className="size-3.5 shrink-0 text-success" weight="fill" />
-                <span className="truncate">
-                  FFmpeg ready{health.ffmpeg.version ? ` · ${health.ffmpeg.version}` : ''}
-                </span>
-              </div>
-            ) : health ? (
-              <Alert variant="warning">
-                <WarningIcon weight="fill" />
-                <AlertTitle>Recording needs FFmpeg</AlertTitle>
-                <AlertDescription>
-                  {import.meta.env.DEV
-                    ? 'For local development, install it with \u201cbrew install ffmpeg\u201d.'
-                    : 'FFmpeg ships with Videorc, so this usually means the install is damaged. Reinstall Videorc.'}
-                </AlertDescription>
-              </Alert>
-            ) : (
-              <p className="text-xs text-muted-foreground">Checking for FFmpeg\u2026</p>
-            )}
-
-            <Collapsible>
-              <CollapsibleTrigger className="group flex w-fit items-center gap-2 rounded-row px-2 py-1.5 text-sm text-muted-foreground transition-colors hover:bg-accent hover:text-foreground">
-                <ChevronDownIcon className="size-3.5 shrink-0 transition-transform group-data-[state=open]:rotate-180" />
-                <span>Advanced</span>
-              </CollapsibleTrigger>
-              <CollapsibleContent className="flex flex-col gap-3 pt-2">
-                <div className="flex items-center gap-2 rounded-row border border-border bg-foreground/[0.03] px-3 py-2 text-xs">
-                  <span className="shrink-0 font-medium">Session database</span>
-                  <span className="min-w-0 flex-1 truncate text-muted-foreground">
-                    Managed privately in Videorc app data
-                  </span>
-                </div>
-              </CollapsibleContent>
-            </Collapsible>
-          </PanelSection>
-
-          <PanelSection
-            description={`What ${osSettingsName(runtimeInfo?.platform)} lets Videorc capture right now.`}
-            icon={LockIcon}
-            title="System access"
-            action={
-              <Button size="sm" variant="ghost" onClick={() => void refreshBackend()}>
-                <RefreshIcon data-icon="inline-start" />
-                Refresh
-              </Button>
-            }
-          >
-            <div className="flex flex-col divide-y divide-border overflow-hidden rounded-row border border-border bg-foreground/[0.03]">
-              {accessRows.map((row) => {
-                const action = systemAccessAction({
-                  pane: row.id,
-                  state: row.state,
-                  platform: runtimeInfo?.platform,
-                  mediaAccessStatus:
-                    row.id === 'camera' || row.id === 'microphone'
-                      ? mediaAccess?.[row.id]
-                      : undefined
-                })
-                return (
-                  <div
-                    key={row.id}
-                    className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2 text-sm"
-                  >
-                    <span className="w-32 shrink-0 font-medium">{row.label}</span>
-                    {/* Q4 (plan 022): the permission TARGET is the actionable part —
-                        truncation clipped it to "Captur…"/"Voice a…". The row
-                        flex-wraps, so let the detail take a full line when tight
-                        instead of truncating; tooltip keeps the hover affordance. */}
-                    <span
-                      className="min-w-0 flex-1 basis-56 text-xs text-muted-foreground"
-                      title={`${row.purpose} ${row.detail}`}
-                    >
-                      {row.purpose} {row.detail}
-                    </span>
-                    {action ? (
-                      <Button
-                        size="xs"
-                        variant="outline"
-                        onClick={() => void handleSystemPermission(row.id)}
-                      >
-                        {action === 'request-media-access' ? 'Enable' : 'Open settings'}
-                      </Button>
-                    ) : row.state === 'granted' ? (
-                      <Button
-                        size="xs"
-                        variant="outline"
-                        onClick={() => void openSystemPermissionSettings(row.id)}
-                      >
-                        Manage
-                      </Button>
-                    ) : null}
-                    {row.state === 'granted' ? (
-                      <SuccessIcon
-                        aria-label={`${row.label} granted`}
-                        className="size-4 shrink-0 text-success"
-                        weight="fill"
-                      />
-                    ) : row.state === 'not-granted' || row.state === 'device-issue' ? (
-                      <ErrorIcon
-                        aria-label={
-                          row.state === 'device-issue'
-                            ? `${row.label} device issue`
-                            : `${row.label} not granted`
-                        }
-                        className="size-4 shrink-0 text-destructive"
-                        weight="fill"
-                      />
-                    ) : (
-                      <DisabledIcon
-                        aria-label={`${row.label} checked on first use`}
-                        className="size-4 shrink-0 text-muted-foreground"
-                        weight="fill"
-                      />
-                    )}
-                  </div>
-                )
-              })}
-            </div>
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <Button size="sm" variant="outline" onClick={onOpenPermissionsSetup}>
-                <LockIcon data-icon="inline-start" />
-                Set up permissions
-              </Button>
-              <p className="text-xs text-muted-foreground">
-                Grants live in {osSettingsName(runtimeInfo?.platform)}. After changing one, come
-                back here. Rows refresh automatically.
-              </p>
-            </div>
-          </PanelSection>
-
-          <CohostSettingsSection />
-
-          <PanelSection
-            description="Work system-wide, even when Videorc is in the background. Click a field and press the keys. Stream Deck hotkeys and F13 to F24 work too."
-            icon={SettingsIcon}
-            title="Global shortcuts"
-          >
-            <FieldGroup variant="grouped">
-              {GLOBAL_ACTION_ROWS.map((action) => (
-                <ShortcutRecorderField
-                  key={action}
-                  id={`global-shortcut-${action}`}
-                  label={globalShortcutActionLabel(action)}
-                  platform={runtimeInfo?.platform}
-                  validate={validateGlobalShortcut(action)}
-                  registrationFailed={shortcutRegistration[action] === false}
-                  value={globalShortcutValue(action)}
-                  onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
-                />
-              ))}
-            </FieldGroup>
-            {/* One inset group per orientation, rows shaped like the ones
-                above: the headers and fields used to sit loose inside the
-                group, flush against its border. */}
-            {(['horizontal', 'vertical'] as const).map((orientation) => (
-              <FieldSet key={orientation} className="min-w-0 gap-0">
-                <FieldLegend className="mb-1.5 px-1 text-xs text-muted-foreground" variant="label">
-                  {orientation === 'horizontal' ? 'Horizontal layouts' : 'Vertical layouts'}
-                </FieldLegend>
-                <FieldGroup variant="grouped">
-                  {BUILTIN_LAYOUTS.filter(
-                    ({ id }) => id.startsWith('vertical-') === (orientation === 'vertical')
-                  ).map(({ id, label }) => {
-                    const action = `layout:${id}` as const
-                    return (
-                      <ShortcutRecorderField
-                        key={id}
-                        id={`global-layout-${id}`}
-                        label={label}
-                        platform={runtimeInfo?.platform}
-                        validate={validateGlobalShortcut(action)}
-                        registrationFailed={shortcutRegistration[action] === false}
-                        value={globalShortcutValue(action)}
-                        onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
-                      />
-                    )
-                  })}
-                </FieldGroup>
-              </FieldSet>
-            ))}
-            <p className="flex flex-wrap items-center gap-1 px-1 text-xs text-muted-foreground">
-              <Kbd>Esc</Kbd> cancels,{' '}
-              <Kbd>{isMacPlatform(runtimeInfo?.platform) ? '⌫' : 'Backspace'}</Kbd> clears.
-            </p>
-          </PanelSection>
-
-          <PanelSection
-            action={
-              <Switch
-                aria-label="Enable remote control"
-                checked={remoteStatus?.enabled ?? false}
-                disabled={remotePending}
-                onCheckedChange={(checked) =>
-                  void runRemoteAction(checked ? remoteControl.enable : remoteControl.disable)
-                }
-              />
-            }
-            description="Let a Stream Deck or other local remote start recordings, switch scenes, and mute your mic. Off by default; clients pair with the token below on this Mac only."
-            icon={SettingsIcon}
-            title="Remote control"
-          >
-            {remoteStatus?.enabled ? (
-              <FieldGroup variant="grouped">
-                <Field>
-                  <FieldLabel htmlFor="remote-token">Pairing token</FieldLabel>
-                  <div className="flex gap-2">
-                    <div
-                      id="remote-token"
-                      className="flex h-control min-w-0 flex-1 items-center truncate rounded-chip border border-border bg-foreground/[0.03] px-2.5 font-mono text-xs text-muted-foreground"
-                    >
-                      {remoteStatus.token
-                        ? `${remoteStatus.token.slice(0, 8)}…${remoteStatus.token.slice(-4)}`
-                        : '-'}
-                    </div>
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      onClick={() => {
-                        if (remoteStatus.token) {
-                          void navigator.clipboard.writeText(remoteStatus.token)
-                        }
-                      }}
-                    >
-                      Copy
-                    </Button>
-                    <Button
-                      disabled={remotePending}
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void runRemoteAction(remoteControl.regenerate)}
-                    >
-                      Regenerate
-                    </Button>
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {remoteStatus.connectedClients > 0
-                      ? `${remoteStatus.connectedClients} client${remoteStatus.connectedClients === 1 ? '' : 's'} connected.`
-                      : 'No clients connected.'}{' '}
-                    Regenerating disconnects every paired client. The Stream Deck plugin pairs
-                    automatically on this Mac.
-                  </p>
-                </Field>
-              </FieldGroup>
-            ) : (
-              <p className="text-xs text-muted-foreground">{REMOTE_CONTROL_OFF_HINT}</p>
-            )}
-          </PanelSection>
-
-          <PhoneRemoteSection />
-        </div>
-
-        <div className="flex flex-col">
-          <PanelSection
-            description="How Videorc looks and behaves on this device."
-            icon={ThemeIcon}
-            title="Appearance & behavior"
-          >
-            <FieldGroup variant="grouped">
-              <Field>
-                <FieldLabel>Theme</FieldLabel>
-                <ToggleGroup
-                  type="single"
-                  value={theme ?? 'system'}
-                  variant="outline"
-                  onValueChange={(value) => value && setTheme(value)}
-                >
-                  <ToggleGroupItem value="light">Light</ToggleGroupItem>
-                  <ToggleGroupItem value="dark">Dark</ToggleGroupItem>
-                  <ToggleGroupItem value="system">System</ToggleGroupItem>
-                </ToggleGroup>
-              </Field>
-              {runtimeInfo?.commentsWindowEnabled !== false ? (
-                <Field>
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex min-w-0 flex-col gap-0.5">
-                      <FieldLabel htmlFor="open-stream-manager-on-live">
-                        Open Stream Manager when I go live
-                      </FieldLabel>
-                      <p className="text-xs text-muted-foreground">
-                        Chat, viewers, followers and activity for the whole stream, in their own
-                        window.
-                      </p>
-                    </div>
-                    <Switch
-                      checked={settings.openStreamManagerOnLive === true}
-                      id="open-stream-manager-on-live"
-                      onCheckedChange={(checked) =>
-                        setSettings((current) => ({ ...current, openStreamManagerOnLive: checked }))
-                      }
-                    />
-                  </div>
-                </Field>
-              ) : null}
-              {runtimeInfo?.platform === 'win32' ? (
-                <Field>
-                  <div className="flex items-center justify-between gap-3">
-                    <FieldLabel>Graphics acceleration</FieldLabel>
-                    <StatusBadge
-                      tone={runtimeInfo.hardwareAccelerationDisabled ? 'warn' : 'good'}
-                      value={gpuRenderingLabel(runtimeInfo)}
-                    />
-                  </div>
-                  <p className="text-xs text-muted-foreground">
-                    {graphicsAccelerationDescription(runtimeInfo)}
-                  </p>
-                  {runtimeInfo.hardwareAccelerationDisabled &&
-                  runtimeInfo.gpuFallback.source !== 'env' ? (
-                    <Button
-                      className="w-fit"
-                      disabled={runtimeInfo.gpuFallback.retryScheduled}
-                      size="sm"
-                      variant="outline"
-                      onClick={() => void scheduleHardwareAccelerationRetry()}
-                    >
-                      <RefreshIcon data-icon="inline-start" />
-                      {runtimeInfo.gpuFallback.retryScheduled
-                        ? 'Retry scheduled'
-                        : 'Retry on next launch'}
-                    </Button>
-                  ) : null}
-                </Field>
-              ) : null}
-            </FieldGroup>
-          </PanelSection>
-
-          <PanelSection
-            description="Coming from OBS Studio? Bring your scenes and settings across."
-            icon={DownloadIcon}
-            title="Import"
-          >
-            {/* O4 (OBS import plan): the wizard previews the truthful
-                imported/approximated/skipped report BEFORE anything applies. */}
-            <div>
-              <Button size="sm" variant="outline" onClick={() => setObsImportOpen(true)}>
-                <DownloadIcon data-icon="inline-start" />
-                Import from OBS…
-              </Button>
-            </div>
-            <ObsImportDialog open={obsImportOpen} onOpenChange={setObsImportOpen} />
-          </PanelSection>
-
-          <PanelSection description="Get help or report a problem." icon={BugIcon} title="Support">
-            <div className="flex flex-col gap-2">
-              <div className="flex flex-wrap gap-2">
-                <Button
-                  disabled={supportBundleExportPending}
-                  size="sm"
-                  variant="outline"
-                  onClick={() => void exportSupportBundle()}
-                >
-                  <BugIcon data-icon="inline-start" />
-                  {supportBundleExportPending ? 'Exporting\u2026' : 'Export support bundle'}
-                </Button>
-              </div>
-              <p className="text-xs text-muted-foreground">
-                Reporting a problem? Export a support bundle (redacted logs + diagnostics) to share
-                with us.
-              </p>
-            </div>
-          </PanelSection>
-
-          <AboutAndUpdates onShowWhatsNew={onShowWhatsNew} />
-          <PanelSection
-            description="Every keyboard shortcut in Videorc."
-            icon={KeyboardIcon}
-            title="Shortcuts"
-          >
-            <div className="flex flex-col gap-3">
-              {globalShortcutEntries(settings.globalShortcuts ?? {})
-                .filter(([, key]) => key?.trim())
-                .map(([action, key]) => (
-                  <div key={action} className="flex items-center justify-between gap-3">
-                    <span className="text-sm text-muted-foreground">
-                      Global · {globalShortcutActionLabel(action)}
-                    </span>
-                    <KbdGroup>
-                      {acceleratorDisplayKeys(key, runtimeInfo?.platform).map((glyph, index) => (
-                        <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
-                      ))}
-                    </KbdGroup>
-                  </div>
-                ))}
-              {[...shortcutsByGroup().entries()].map(([group, entries]) => (
-                <div key={group} className="flex flex-col gap-1">
-                  <span className="text-[12.5px] leading-none font-medium text-subtle">
-                    {group}
-                  </span>
-                  {entries.map((entry) => (
-                    <div
-                      key={entry.id}
-                      className="flex items-center gap-3 rounded-row px-2.5 py-1.5 text-sm"
-                    >
-                      <span className="flex-1 truncate text-muted-foreground">{entry.label}</span>
-                      <KbdGroup>
-                        {displayKeyGlyphs(entry.keys, runtimeInfo?.platform).map((key, index) => (
-                          <Kbd key={`${entry.id}-${index}`}>{key}</Kbd>
-                        ))}
-                      </KbdGroup>
-                    </div>
-                  ))}
-                </div>
-              ))}
-            </div>
-          </PanelSection>
-        </div>
-      </ConfigGrid>
-    </div>
-  )
-}
-
-function AboutAndUpdates({ onShowWhatsNew }: { onShowWhatsNew: () => void }): ReactElement {
-  const { runtimeInfo } = useStudioCore()
-  const { recording } = useStudioRecordingState()
-  const { status, check, install } = useUpdater()
-  const captureActive = isActiveRecordingState(recording.state)
-
-  return (
-    <PanelSection
-      description="Check for new versions of Videorc and install them."
-      icon={SparkleIcon}
-      title="About & updates"
+    <Tabs
+      className="min-h-0 flex-1 gap-0"
+      value={tab}
+      onValueChange={(value) => {
+        if (isSettingsTabId(value)) {
+          onTabChange(value)
+        }
+      }}
     >
-      <div className="flex flex-col gap-4">
-        {/* The app's identity, like a macOS About panel: the icon, the name,
-            and the version with its release track. The PNG carries its own
-            rounded tile and transparent margin, so it needs no mask or shadow. */}
-        <div className="flex items-center gap-3">
-          <img alt="" className="size-16 shrink-0" src={logoUrl} />
-          <div className="flex min-w-0 flex-col gap-1">
-            <span className="text-sm font-semibold text-foreground">Videorc</span>
-            <span className="flex items-center gap-2 text-xs text-muted-foreground">
-              <span>
-                Version <span className="font-mono">{runtimeInfo?.version ?? '-'}</span>
-              </span>
-              {runtimeInfo ? (
-                <Badge variant="outline">
-                  {releaseTrackLabel(runtimeInfo.platform, runtimeInfo.isPackaged)}
-                </Badge>
-              ) : null}
-            </span>
-          </div>
-        </div>
-        <UpdateControl
-          captureActive={captureActive}
-          status={status}
-          onCheck={check}
-          onInstall={install}
-        />
-        <div className="flex items-center justify-between gap-3">
-          <span className="text-sm text-muted-foreground">Release notes</span>
-          <Button size="sm" variant="outline" onClick={onShowWhatsNew}>
-            What&apos;s new
-          </Button>
-        </div>
+      {/* Built like the Livestream page's Setup / Upcoming strip; the toolbar
+          carries only the title (owner call, 2026-09-23). */}
+      <div className="shrink-0 border-b border-border px-gutter py-2">
+        <TabsList aria-label="Settings sections">
+          {SETTINGS_TABS.map(({ id, label }) => (
+            <TabsTrigger key={id} data-videorc-settings-tab={id} value={id}>
+              {label}
+            </TabsTrigger>
+          ))}
+        </TabsList>
       </div>
-    </PanelSection>
+      {/* Keyed by tab, so every tab change (a click, the arrow keys, or a link
+          that opens a named tab) starts the new tab at the top. A flex column,
+          so a tab panel can fill the visible height (see SECTION_PAIR). */}
+      <div
+        key={tab}
+        className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain"
+        data-slot="settings-scroll"
+      >
+        <TabsContent className="flex flex-col" value="general">
+          <ConfigGrid className={SECTION_PAIR}>
+            <GeneralSettings />
+          </ConfigGrid>
+        </TabsContent>
+        <TabsContent className="flex flex-col" value="recording">
+          <PageStack>
+            <RecordingSettings />
+          </PageStack>
+        </TabsContent>
+        <TabsContent className="flex flex-col" value="permissions">
+          <PageStack>
+            <PermissionsSettings onOpenPermissionsSetup={onOpenPermissionsSetup} />
+          </PageStack>
+        </TabsContent>
+        <TabsContent className="flex flex-col" value="shortcuts">
+          <ConfigGrid className={SECTION_PAIR}>
+            <ShortcutsSettings />
+          </ConfigGrid>
+        </TabsContent>
+        <TabsContent className="flex flex-col" value="remote">
+          <ConfigGrid className={SECTION_PAIR}>
+            <RemoteSettings />
+          </ConfigGrid>
+        </TabsContent>
+        <TabsContent className="flex flex-col" value="orcle">
+          <PageStack>
+            <CohostSettingsSection />
+          </PageStack>
+        </TabsContent>
+        <TabsContent className="flex flex-col" value="about">
+          <ConfigGrid className={SECTION_PAIR}>
+            <AboutSettings onShowWhatsNew={onShowWhatsNew} />
+          </ConfigGrid>
+        </TabsContent>
+      </div>
+    </Tabs>
   )
-}
-
-function graphicsAccelerationDescription(runtimeInfo: RuntimeInfo): string {
-  const age = gpuFallbackAge(runtimeInfo.gpuFallback.updatedAt)
-  const fallbackAge = age ? ` ${age}` : ''
-
-  if (runtimeInfo.gpuFallback.source === 'retry') {
-    return `This launch is testing hardware acceleration after a fallback${fallbackAge}. Two GPU-process crashes restore software rendering automatically; a stable minute clears the fallback.`
-  }
-  if (runtimeInfo.gpuFallback.source === 'env') {
-    return 'Software rendering was requested with VIDEORC_DISABLE_GPU. Remove that environment override and reopen Videorc to use hardware acceleration.'
-  }
-  if (runtimeInfo.hardwareAccelerationDisabled) {
-    if (runtimeInfo.gpuFallback.retryScheduled) {
-      return `The GPU fallback began${fallbackAge}. Hardware acceleration will be retried after you quit and reopen Videorc; this launch stays in software rendering mode.`
-    }
-    return `Videorc switched to software rendering${fallbackAge} after ${runtimeInfo.gpuFallback.crashCount} GPU-process crashes. A retry affects only the next launch, and repeated crashes restore this safe mode.`
-  }
-  return 'Chromium hardware acceleration is active. Repeated GPU-process crashes still fall back to software rendering on the next launch.'
-}
-
-function UpdateControl({
-  status,
-  captureActive,
-  onCheck,
-  onInstall
-}: {
-  status: UpdateStatus
-  captureActive: boolean
-  onCheck: () => void
-  onInstall: () => void
-}): ReactElement {
-  switch (status.phase) {
-    case 'unsupported':
-      return (
-        <p className="text-xs text-muted-foreground">
-          {status.reason === 'windows-feed-unpublished'
-            ? 'No Windows update is published for you yet. Sign in to get Windows Alpha pilot updates automatically, or download the newest build from your account page.'
-            : 'Automatic updates aren’t available for this build yet. Grab new versions from the downloads page.'}
-        </p>
-      )
-    case 'checking':
-      return (
-        <Button disabled className="w-fit" size="sm" variant="outline">
-          <SpinnerIcon className="animate-spin" data-icon="inline-start" />
-          Checking for updates…
-        </Button>
-      )
-    case 'available':
-      return (
-        <div className="flex items-center gap-2 text-sm text-muted-foreground">
-          <DownloadIcon className="size-4 shrink-0" />
-          <span>Version {status.version} available. Starting download…</span>
-        </div>
-      )
-    case 'downloading':
-      return (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between text-xs text-muted-foreground">
-            <span>Downloading update…</span>
-            <span className="font-mono">{status.percent}%</span>
-          </div>
-          <div
-            aria-label="Update download progress"
-            aria-valuemax={100}
-            aria-valuemin={0}
-            aria-valuenow={status.percent}
-            className="h-1.5 w-full overflow-hidden rounded-full bg-muted"
-            role="progressbar"
-          >
-            <div
-              className="h-full rounded-full bg-primary transition-[width] duration-200"
-              style={{ width: `${status.percent}%` }}
-            />
-          </div>
-        </div>
-      )
-    case 'downloaded':
-      return (
-        <div className="flex flex-col gap-2">
-          <Button
-            className="w-fit"
-            disabled={!isUpdateInstallable(status, captureActive)}
-            size="sm"
-            onClick={onInstall}
-          >
-            <RefreshIcon data-icon="inline-start" />
-            Restart &amp; install {status.version}
-          </Button>
-          <p className="text-xs text-muted-foreground">
-            {captureActive
-              ? 'Finish your recording first. Installing restarts Videorc.'
-              : 'Videorc will restart to finish updating.'}
-          </p>
-        </div>
-      )
-    case 'not-available':
-      return (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-            <SuccessIcon className="size-3.5 shrink-0 text-success" weight="fill" />
-            <span>You’re on the latest version ({status.currentVersion}).</span>
-          </div>
-          <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-            <RefreshIcon data-icon="inline-start" />
-            Check again
-          </Button>
-        </div>
-      )
-    case 'error':
-      return (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-start gap-1.5 text-xs text-warning-foreground dark:text-warning">
-            <WarningIcon className="size-3.5 shrink-0" weight="fill" />
-            <span>Couldn’t check for updates: {status.message}</span>
-          </div>
-          <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-            <RefreshIcon data-icon="inline-start" />
-            Try again
-          </Button>
-        </div>
-      )
-    default:
-      return (
-        <Button className="w-fit" size="sm" variant="outline" onClick={onCheck}>
-          <RefreshIcon data-icon="inline-start" />
-          Check for updates
-        </Button>
-      )
-  }
-}
-
-function formatFreeSpace(bytes: number): string {
-  const gb = bytes / 1024 ** 3
-  if (gb >= 100) {
-    return `${Math.round(gb)} GB`
-  }
-  if (gb >= 1) {
-    return `${gb.toFixed(1)} GB`
-  }
-  return `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`
 }

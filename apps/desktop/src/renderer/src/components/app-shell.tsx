@@ -21,6 +21,12 @@ import { StudioMicVisualProvider } from '@/hooks/use-studio-mic-visual'
 import { useWhatsNew } from '@/hooks/use-whats-new'
 import { ONBOARDING_DISMISSED_VALUE, STORAGE_KEYS } from '@/lib/capture'
 import { displayKeyGlyph } from '@/lib/platform'
+import {
+  isSettingsTabId,
+  readLastSettingsTab,
+  writeLastSettingsTab,
+  type SettingsTabId
+} from '@/lib/settings-tabs'
 import { isActiveRecordingState } from '@/lib/format'
 import {
   isMediaAccessSnapshotReady,
@@ -182,6 +188,23 @@ export function AppShell(): ReactElement {
     setActive('studio')
   }, [])
 
+  // Plan 064: Settings reopens on the tab used last; a link that names a tab
+  // (update chip, FFmpeg banner, ⌘K, toasts) selects it before opening.
+  const [settingsTab, setSettingsTab] = useState<SettingsTabId>(readLastSettingsTab)
+  const selectSettingsTab = useCallback((tab: SettingsTabId) => {
+    setSettingsTab(tab)
+    writeLastSettingsTab(tab)
+  }, [])
+  const openSettings = useCallback(
+    (tab?: SettingsTabId) => {
+      if (tab) {
+        selectSettingsTab(tab)
+      }
+      setActive('settings')
+    },
+    [selectSettingsTab]
+  )
+
   const completeOnboarding = useCallback(() => {
     localStorage.setItem(STORAGE_KEYS.onboarding, ONBOARDING_DISMISSED_VALUE)
     setOnboardingOpen(false)
@@ -283,14 +306,17 @@ export function AppShell(): ReactElement {
 
   useEffect(() => {
     const onWorkspaceNavigate = (event: Event): void => {
-      const tab = (event as CustomEvent<{ tab?: unknown }>).detail?.tab
-      if (isWorkspaceTab(tab)) {
+      const detail = (event as CustomEvent<{ tab?: unknown; settingsTab?: unknown }>).detail
+      const tab = detail?.tab
+      if (tab === 'settings') {
+        openSettings(isSettingsTabId(detail?.settingsTab) ? detail.settingsTab : undefined)
+      } else if (isWorkspaceTab(tab)) {
         setActive(tab)
       }
     }
     window.addEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
     return () => window.removeEventListener('videorc:navigate-workspace', onWorkspaceNavigate)
-  }, [])
+  }, [openSettings])
 
   const live = isActiveRecordingState(recordingState)
   const statusTone: StatusDotTone = live
@@ -309,7 +335,8 @@ export function AppShell(): ReactElement {
         setActive,
         activeStudioPanel: isStudioPanel(active) ? active : null,
         openStudioPanel,
-        closeStudioPanel
+        closeStudioPanel,
+        openSettings
       }}
     >
       {/* The window family's shell (plan 050, D4): the sidebar sits on the
@@ -326,6 +353,7 @@ export function AppShell(): ReactElement {
           accountTier={entitlementTier}
           onSelect={setActive}
           onSelectStudioPanel={openStudioPanel}
+          onOpenSettings={openSettings}
           statusTone={statusTone}
           statusLabel={statusLabel}
           live={live}
@@ -337,8 +365,10 @@ export function AppShell(): ReactElement {
           <Pane>
             <Toolbar title={workspaceTabLabel(active)} />
             {/* Library manages its own scroll (pinned header and toolbar,
-                  only the table scrolls); every other tab scrolls as one. */}
-            <PaneBody scroll={active !== 'library'}>
+                  only the table scrolls), and so does Settings (its tab strip
+                  stays pinned, only the tab under it scrolls); every other tab
+                  scrolls as one. */}
+            <PaneBody scroll={active !== 'library' && active !== 'settings'}>
               <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
                 <Suspense fallback={<WorkspaceTabFallback />}>
                   {active === 'studio' ? <StudioTab /> : null}
@@ -358,8 +388,10 @@ export function AppShell(): ReactElement {
                   {active === 'diagnostics' ? <DiagnosticsTab /> : null}
                   {active === 'settings' ? (
                     <SettingsTab
+                      tab={settingsTab}
                       onOpenPermissionsSetup={openPermissionsSetup}
                       onShowWhatsNew={whatsNew.showLatest}
+                      onTabChange={selectSettingsTab}
                     />
                   ) : null}
                 </Suspense>

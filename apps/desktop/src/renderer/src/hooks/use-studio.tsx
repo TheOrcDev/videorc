@@ -11719,7 +11719,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             : null
           if (settings.outputDirectoryHandle && !outputDirectory) {
             throw new Error(
-              'The selected output folder is unavailable. Choose it again in Settings.'
+              'The selected output folder is unavailable. Choose it again in Settings → Recording.'
             )
           }
           const sessionParams = buildStartSessionParams({
@@ -12764,7 +12764,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       ? await window.videorc?.authorizeOutputDirectory?.(settings.outputDirectoryHandle)
       : null
     if (settings.outputDirectoryHandle && !outputDirectory) {
-      throw new Error('The selected output folder is unavailable. Choose it again in Settings.')
+      throw new Error(
+        'The selected output folder is unavailable. Choose it again in Settings → Recording.'
+      )
     }
     // Blank means the platform default — the backend resolves and creates it,
     // exactly like recording does (Settings: "Blank uses the default").

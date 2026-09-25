@@ -29,6 +29,7 @@ import {
 import { cohostPresenceView } from '@/lib/cohost-presence'
 import type { SessionRuntimeNotice } from '@/lib/session-runtime-notice'
 import type { SessionStartFailure } from '@/lib/session-start-failure'
+import type { SettingsTabId } from '@/lib/settings-tabs'
 import { outputSummary, sessionClockLabel, streamingSummary } from '@/lib/studio-session-view'
 
 /**
@@ -155,6 +156,8 @@ export function SessionPanel({
   blockedJump?: {
     label: string
     to: Parameters<ReturnType<typeof useWorkspaceNav>['setActive']>[0]
+    /** With `to: 'settings'`, the Settings tab to open (plan 064). */
+    settingsTab?: SettingsTabId
   } | null
   /** The last refused Record / Go Live (B0): stays until the user starts
    * again or dismisses it; a 4s toast was the only signal. */
@@ -167,7 +170,7 @@ export function SessionPanel({
   onDismissRuntimeNotice?: () => void
 }): ReactElement {
   const { captureConfig } = useStudioCore()
-  const { openStudioPanel, setActive } = useWorkspaceNav()
+  const { openStudioPanel, setActive, openSettings } = useWorkspaceNav()
   const video = captureConfig.video
 
   return (
@@ -199,7 +202,11 @@ export function SessionPanel({
             <button
               className="shrink-0 font-medium text-foreground underline-offset-2 hover:underline"
               type="button"
-              onClick={() => setActive(blockedJump.to)}
+              onClick={() =>
+                blockedJump.to === 'settings'
+                  ? openSettings(blockedJump.settingsTab)
+                  : setActive(blockedJump.to)
+              }
             >
               {blockedJump.label}
             </button>

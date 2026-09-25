@@ -29,6 +29,7 @@ function renderSidebar(): string {
       accountTier: null,
       onSelect: noop,
       onSelectStudioPanel: noop,
+      onOpenSettings: noop,
       statusTone: 'good',
       statusLabel: 'Connected',
       live: false,

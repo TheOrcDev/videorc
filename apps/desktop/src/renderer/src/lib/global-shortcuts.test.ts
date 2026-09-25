@@ -1,7 +1,8 @@
 import { nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { describe, expect, it, vi } from 'vitest'
 vi.mock('sonner', () => ({ toast: { error: vi.fn(), info: vi.fn() } }))
-import { executeGlobalShortcut } from './global-shortcuts'
+import { toast } from 'sonner'
+import { executeGlobalShortcut, GlobalShortcutsRegistrar } from './global-shortcuts'
 import {
   GLOBAL_SHORTCUT_ACTIONS,
   globalShortcutEntries,
@@ -68,5 +69,34 @@ describe('withGlobalShortcut', () => {
     })
     expect(withGlobalShortcut(config, 'record-toggle', '').recordToggle).toBe('')
     expect(withGlobalShortcut(undefined, 'layout-next', 'F13')).toEqual({ layoutNext: 'F13' })
+  })
+})
+
+describe('GlobalShortcutsRegistrar conflicts', () => {
+  it('names the Shortcuts tab and offers a button that opens it (plan 064)', async () => {
+    const target = new EventTarget()
+    const opened: unknown[] = []
+    target.addEventListener('videorc:navigate-workspace', (event) =>
+      opened.push((event as CustomEvent).detail)
+    )
+    const setGlobalShortcuts = vi.fn(async () => ({ registered: { 'record-toggle': false } }))
+    vi.stubGlobal('window', Object.assign(target, { videorc: { setGlobalShortcuts } }))
+    vi.mocked(toast.error).mockClear()
+    try {
+      new GlobalShortcutsRegistrar().sync({ recordToggle: 'Cmd+Shift+R' })
+      await vi.waitFor(() => expect(toast.error).toHaveBeenCalledTimes(1))
+
+      const [title, options] = vi.mocked(toast.error).mock.calls[0] ?? []
+      expect(title).toBe('Some global shortcuts could not be registered')
+      expect(options?.description).toBe(
+        'record-toggle: invalid, duplicate or already used by another app. Pick different bindings in Settings → Shortcuts.'
+      )
+      const action = options?.action as { label: string; onClick: () => void }
+      expect(action.label).toBe('Open Shortcuts')
+      action.onClick()
+      expect(opened).toEqual([{ tab: 'settings', settingsTab: 'shortcuts' }])
+    } finally {
+      vi.unstubAllGlobals()
+    }
   })
 })

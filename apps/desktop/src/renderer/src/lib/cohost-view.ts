@@ -192,7 +192,7 @@ export function cohostPaneMode({
     }
   }
   if (!enabled) {
-    return { kind: 'disabled', reason: 'Orcle is off. Turn it on in Settings.' }
+    return { kind: 'disabled', reason: 'Orcle is off. Turn it on in Settings → Orcle.' }
   }
   return { kind: 'live' }
 }
