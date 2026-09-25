@@ -42,7 +42,7 @@ export interface ObsImportPlanResult {
     | { kind: 'rtmp-custom'; serverUrl: string; hasKey: boolean }
     | {
         kind: 'rtmp-platform'
-        platform: 'youtube'
+        platform: 'youtube' | 'kick'
         serviceLabel: string
         serverUrl: string
         hasKey: boolean
@@ -151,9 +151,18 @@ function volumeToGainDb(volume: number): number {
   return Math.max(-20, Math.min(20, Math.round(20 * Math.log10(volume))))
 }
 
-function detectPlatform(serviceLabel: string): 'youtube' | 'twitch' | 'other' {
+// Kick's ingest is an IVS `*.live-video.net` host, which Twitch's newer ingest
+// shares, so the host alone never means Kick: it counts only with "kick" in
+// the service label or the server URL.
+function detectPlatform(
+  serviceLabel: string,
+  serverUrl?: string
+): 'youtube' | 'twitch' | 'kick' | 'other' {
   if (fuzzyIncludes(serviceLabel, 'youtube')) {
     return 'youtube'
+  }
+  if (fuzzyIncludes(serviceLabel, 'kick') || fuzzyIncludes(serverUrl ?? '', 'kick')) {
+    return 'kick'
   }
   if (fuzzyIncludes(serviceLabel, 'twitch')) {
     return 'twitch'
@@ -412,8 +421,9 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
       })
     } else {
       const label = setup.service.service ?? 'streaming service'
-      const platform = detectPlatform(label)
-      if (platform === 'youtube' && setup.service.server) {
+      const platform = detectPlatform(label, setup.service.server)
+      const platformName = platform === 'kick' ? 'Kick' : 'YouTube'
+      if ((platform === 'youtube' || platform === 'kick') && setup.service.server) {
         result.stream = {
           kind: 'rtmp-platform',
           platform,
@@ -425,14 +435,14 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
           verdict: 'imported',
           subject: label,
           note: setup.service.hasKey
-            ? 'server and stream key imported to YouTube Manual RTMP'
-            : 'server imported to YouTube Manual RTMP (no key found)'
+            ? `server and stream key imported to ${platformName} Manual RTMP`
+            : `server imported to ${platformName} Manual RTMP (no key found)`
         })
-      } else if (platform === 'youtube') {
+      } else if (platform === 'youtube' || platform === 'kick') {
         report.push({
           verdict: 'approximated',
           subject: label,
-          note: 'set up YouTube Manual RTMP in Livestream; OBS did not include a server URL'
+          note: `set up ${platformName} Manual RTMP in Livestream; OBS did not include a server URL`
         })
       } else {
         result.stream = {

@@ -369,6 +369,68 @@ describe('stats bar items (plan 057)', () => {
     })
   })
 
+  it('counts Kick follows as new followers, never a total (plan 063)', () => {
+    const kickOnly = reduceDashboardAudience(
+      live(),
+      {
+        sessionId: 's',
+        updatedAt: at(10),
+        platforms: [{ platform: 'kick', metric: 'followers', capability: 'delta-only', delta: 3 }]
+      },
+      at(10)
+    )
+    const followers = find(
+      statItems({
+        dashboard: kickOnly,
+        viewerSample: null,
+        messages: [],
+        providers: [provider('kick')],
+        nowMs: T0
+      }),
+      'followers'
+    )
+    expect(followers).toMatchObject({
+      value: '3',
+      unit: 'new followers',
+      description: '3 new followers this stream'
+    })
+    expect(followers?.details.map((row) => [row.label, row.value, row.note])).toEqual([
+      ['Kick followers', '–', 'New follows only: 3 new followers this stream']
+    ])
+
+    const withTwitch = reduceDashboardAudience(
+      live(),
+      {
+        sessionId: 's',
+        updatedAt: at(10),
+        platforms: [
+          {
+            platform: 'twitch',
+            metric: 'followers',
+            capability: 'available',
+            total: 100,
+            baseline: 98,
+            delta: 2
+          },
+          { platform: 'kick', metric: 'followers', capability: 'delta-only', delta: 1 }
+        ]
+      },
+      at(10)
+    )
+    expect(
+      find(
+        statItems({
+          dashboard: withTwitch,
+          viewerSample: null,
+          messages: [],
+          providers: [provider('twitch'), provider('kick')],
+          nowMs: T0
+        }),
+        'followers'
+      )
+    ).toMatchObject({ value: '100', delta: '+3' })
+  })
+
   it('counts subs, tips and chat pace as short numbers', () => {
     const messages = [
       message({ id: 'a', authorId: 'a', receivedAt: at(20) }),

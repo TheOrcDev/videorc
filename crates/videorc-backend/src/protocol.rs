@@ -1036,6 +1036,7 @@ pub enum RtmpPreset {
     #[serde(rename = "youtube")]
     YouTube,
     Twitch,
+    Kick,
     X,
     Custom,
 }

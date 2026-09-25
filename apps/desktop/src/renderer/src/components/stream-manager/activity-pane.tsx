@@ -66,6 +66,9 @@ export function activityCapabilityNote(
   if (platforms.includes('x')) {
     notes.push("X doesn't share who followed or tips, so new X followers show as a count.")
   }
+  if (platforms.includes('kick')) {
+    notes.push("Kick shows new follows only, not a follower total, and doesn't share tips.")
+  }
   const twitch = audience?.platforms.find((entry) => entry.platform === 'twitch')
   if (platforms.includes('twitch') && twitch?.audienceScopes === false) {
     notes.push('Reconnect Twitch in Livestream → Setup to see who followed.')

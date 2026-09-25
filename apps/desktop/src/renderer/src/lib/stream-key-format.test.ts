@@ -17,6 +17,16 @@ describe('stream-key-format', () => {
     expect(detectStreamKeyPlatform('a1b2-c3d4-e5f6-g7h8-i9j0')).toBe('youtube')
   })
 
+  it('detects kick-shaped keys', () => {
+    expect(
+      detectStreamKeyPlatform('sk_us-west-2_AbC123dEf456_GhIjKlMnOpQrStUvWxYz0123456789')
+    ).toBe('kick')
+    expect(streamKeyPlatformMismatch('twitch', 'sk_us-west-2_abc_def')).toMatch(
+      /looks like a Kick stream key, but you are saving it to Twitch/
+    )
+    expect(streamKeyPlatformMismatch('kick', 'sk_us-west-2_abc_def')).toBeNull()
+  })
+
   it('stays quiet on ambiguous keys', () => {
     expect(detectStreamKeyPlatform('some-arbitrary-rtmp-key')).toBeNull()
     expect(detectStreamKeyPlatform('sk_live_stripe_looking')).toBeNull()

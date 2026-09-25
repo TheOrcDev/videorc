@@ -482,14 +482,16 @@ export const defaultSettings: SettingsState = {
 export const rtmpDefaults: Record<RtmpPreset, string> = {
   youtube: 'rtmp://a.rtmp.youtube.com/live2',
   twitch: 'rtmp://live.twitch.tv/app',
+  kick: 'rtmps://fa723fc1b171.global-contribute.live-video.net:443/app',
   x: '',
   custom: ''
 }
 
-// Fixed destination order for the Streaming tab (YouTube, Twitch, X, Custom).
+// Fixed destination order for the Streaming tab (YouTube, Twitch, Kick, X, Custom).
 export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
   'youtube',
   'twitch',
+  'kick',
   'x',
   'tiktok',
   'instagram',
@@ -499,6 +501,7 @@ export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
 const STREAM_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   youtube: 'YouTube',
   twitch: 'Twitch',
+  kick: 'Kick',
   x: 'X / Twitter',
   tiktok: 'TikTok',
   instagram: 'Instagram',
@@ -507,7 +510,7 @@ const STREAM_PLATFORM_LABELS: Record<StreamPlatform, string> = {
 
 /**
  * The built-in destination cards, ID-keyed (two YouTube cards share one
- * platform): the horizontal trio, the vertical trio (YouTube Vertical is a
+ * platform): the horizontal group (YouTube, Twitch, Kick, X), the vertical trio (YouTube Vertical is a
  * SECOND broadcast on the same channel; TikTok and Instagram are manual-key
  * only), then Custom RTMP.
  */
@@ -520,6 +523,7 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
 }> = [
   { id: 'youtube', platform: 'youtube', label: 'YouTube', serverUrl: rtmpDefaults.youtube },
   { id: 'twitch', platform: 'twitch', label: 'Twitch', serverUrl: rtmpDefaults.twitch },
+  { id: 'kick', platform: 'kick', label: 'Kick', serverUrl: rtmpDefaults.kick },
   { id: 'x', platform: 'x', label: 'X / Twitter', serverUrl: '' },
   {
     id: 'youtube-vertical',
@@ -751,6 +755,15 @@ export const streamPlatformOutputCapabilities: Record<
     true4k: true
   },
   twitch: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 60,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
+  // Kick ingests H.264 up to 1080p60; 6,000 kbps matches the shared
+  // non-YouTube cap in recording.rs (Kick allows up to 8,000).
+  kick: {
     maxWidth: 1920,
     maxHeight: 1080,
     maxFps: 60,

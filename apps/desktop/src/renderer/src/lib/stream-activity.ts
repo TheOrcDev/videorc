@@ -312,7 +312,9 @@ function itemFromDestination(event: DestinationEvent): ActivityItem {
 function itemsFromFollowerGains(audience: AudienceSnapshot | null | undefined): ActivityItem[] {
   const items: ActivityItem[] = []
   for (const entry of audience?.platforms ?? []) {
-    const named = entry.platform === 'twitch' && entry.audienceScopes === true
+    // Kick sends named follow rows and never a total, so it has no gains.
+    const named =
+      (entry.platform === 'twitch' && entry.audienceScopes === true) || entry.platform === 'kick'
     if (named || entry.metric !== 'followers') continue
     for (const gain of entry.followerGains ?? []) {
       items.push({

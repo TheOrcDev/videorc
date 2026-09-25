@@ -79,7 +79,7 @@ export const DEFAULT_STAT_ORDER: readonly StatId[] = [
 ]
 
 const TIP_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube'])
-const VIEWER_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube', 'x'])
+const VIEWER_PLATFORMS = new Set<StreamPlatform>(['twitch', 'youtube', 'kick', 'x'])
 
 export function formatClock(elapsedMs: number): string {
   const total = Math.max(0, Math.floor(elapsedMs / 1000))
@@ -321,6 +321,8 @@ function audienceNote(entry: PlatformAudience): string | undefined {
       return entry.message
     case 'available':
       return entry.delta ? `${signed(entry.delta)} this stream` : undefined
+    case 'delta-only':
+      return `New follows only: ${plural(entry.delta ?? 0, 'new follower', 'new followers')} this stream`
   }
 }
 
@@ -331,8 +333,11 @@ function followersItem(audience: AudienceSnapshot | null): StatItemModel | null 
   const available = reporting.filter(
     (entry) => entry.capability === 'available' && entry.total !== undefined
   )
+  // Kick reports follow events, not a total (plan 063 S6).
+  const deltaOnly = reporting.filter((entry) => entry.capability === 'delta-only')
+  const newFollows = deltaOnly.reduce((sum, entry) => sum + (entry.delta ?? 0), 0)
   const total = available.reduce((sum, entry) => sum + (entry.total ?? 0), 0)
-  const delta = available.reduce((sum, entry) => sum + (entry.delta ?? 0), 0)
+  const delta = available.reduce((sum, entry) => sum + (entry.delta ?? 0), 0) + newFollows
   const pending = reporting.every((entry) => entry.capability === 'pending')
   const blocked = reporting.find((entry) => entry.capability === 'needs-reconnect')
   const details = platforms.map((entry) => {
@@ -344,6 +349,17 @@ function followersItem(audience: AudienceSnapshot | null): StatItemModel | null 
       ...(note ? { note } : {})
     }
   })
+  if (available.length === 0 && deltaOnly.length > 0) {
+    return {
+      id: 'followers',
+      label: 'New followers',
+      value: newFollows.toLocaleString(),
+      unit: newFollows === 1 ? 'new follower' : 'new followers',
+      tone: newFollows ? 'neutral' : 'subtle',
+      details,
+      description: `${plural(newFollows, 'new follower', 'new followers')} this stream`
+    }
+  }
   if (available.length === 0) {
     const reason = blocked?.message ?? (pending ? 'Reading…' : 'Not shared')
     return {

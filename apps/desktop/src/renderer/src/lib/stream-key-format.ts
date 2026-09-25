@@ -9,6 +9,9 @@ import type { StreamPlatform } from '@/lib/backend'
 const TWITCH_KEY_PATTERN = /^live_\d+_[A-Za-z0-9]+$/
 // YouTube keys are dash-grouped quads like `abcd-efgh-ijkl-mnop` (4-6 groups).
 const YOUTUBE_KEY_PATTERN = /^[a-z0-9]{4}(?:-[a-z0-9]{4}){3,5}$/i
+// Kick keys look like `sk_us-west-2_AbCd…_EfGh…`: an `sk_` prefix, an AWS
+// region, then two opaque segments. Kept permissive on segment lengths.
+const KICK_KEY_PATTERN = /^sk_[a-z]{2}-[a-z]+-\d_[A-Za-z0-9]+_[A-Za-z0-9]+$/
 
 /** Best-effort guess at which platform a pasted key belongs to. */
 export function detectStreamKeyPlatform(key: string): StreamPlatform | null {
@@ -19,12 +22,16 @@ export function detectStreamKeyPlatform(key: string): StreamPlatform | null {
   if (YOUTUBE_KEY_PATTERN.test(trimmed)) {
     return 'youtube'
   }
+  if (KICK_KEY_PATTERN.test(trimmed)) {
+    return 'kick'
+  }
   return null
 }
 
 const PLATFORM_LABEL: Record<string, string> = {
   twitch: 'Twitch',
   youtube: 'YouTube',
+  kick: 'Kick',
   x: 'X',
   custom: 'Custom RTMP'
 }

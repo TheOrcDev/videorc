@@ -30,7 +30,7 @@ const maxDestinations = Math.max(1, Number(process.env.VIDEORC_SMOKE_MAX_DESTINA
 const targetCount = Math.min(
   5,
   maxDestinations,
-  Math.max(1, Number(process.env.VIDEORC_SMOKE_TARGETS ?? Math.min(2, maxDestinations)))
+  Math.max(1, Number(process.env.VIDEORC_SMOKE_TARGETS ?? Math.min(3, maxDestinations)))
 )
 const basePort = Number(process.env.VIDEORC_SMOKE_RTMP_PORT ?? 11935)
 const streamMs = Number(process.env.VIDEORC_SMOKE_STREAM_MS ?? 5000)
@@ -39,6 +39,7 @@ const listenerBindMs = Number(process.env.VIDEORC_SMOKE_LISTENER_BIND_MS ?? 2500
 const PLATFORMS = [
   { id: 'youtube', label: 'YouTube' },
   { id: 'twitch', label: 'Twitch' },
+  { id: 'kick', label: 'Kick' },
   { id: 'x', label: 'X / Twitter' },
   { id: 'custom', label: 'Custom RTMP' }
 ]
@@ -47,7 +48,7 @@ const targets = Array.from({ length: targetCount }, (_, index) => {
   const port = basePort + index
   const platform = PLATFORMS[index % PLATFORMS.length]
   const streamKey = `smoke${index}`
-  // Beyond the four built-in platforms the cap is filled with extra rows of
+  // Beyond the five built-in platforms the cap is filled with extra rows of
   // the same platforms; target ids must stay unique per session.
   const round = Math.floor(index / PLATFORMS.length)
   return {

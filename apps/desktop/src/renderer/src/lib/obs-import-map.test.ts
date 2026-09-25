@@ -224,6 +224,41 @@ describe('mapping table rows', () => {
     expect(result.stream).toMatchObject({ kind: 'rtmp-custom', serverUrl: 'rtmp://my.server/live' })
   })
 
+  it('a Kick rtmp_common service imports to Kick Manual RTMP', () => {
+    const result = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_common',
+          service: 'Kick',
+          server: 'rtmps://fa723fc1b171.global-contribute.live-video.net:443/app',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(result.stream).toMatchObject({ kind: 'rtmp-platform', platform: 'kick', hasKey: true })
+    expect(reportNotes(result, 'imported').join('\n')).toContain('Kick Manual RTMP')
+  })
+
+  it('an IVS live-video.net host alone never reads as Kick', () => {
+    const result = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_common',
+          service: 'Twitch',
+          server: 'rtmps://ingest.global-contribute.live-video.net/app',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(result.stream).toMatchObject({ kind: 'oauth-suggest', platform: 'twitch' })
+  })
+
   it('browser/text/media sources are skipped with human reasons; desktop audio names the roadmap', () => {
     const browser = { name: 'Chat overlay', kind: 'browser' as const, obsKind: 'browser_source' }
     const result = mapObsSetup(

@@ -62,6 +62,52 @@ export function bundledXOauth1ConsumerCheckTargets(appPath) {
   }))
 }
 
+// Kick (plan 063): the client secret is baked into the Rust backend only (the
+// token exchange runs there). It must never reach the Electron bundle, where
+// app.asar is a plain archive anyone can unzip. An unset release env means
+// Kick ships dark and there is nothing to leak.
+export const BUNDLED_KICK_CLIENT_SECRET_ENV = 'VIDEORC_BUNDLED_KICK_CLIENT_SECRET'
+
+export function bundledKickSecretLeakCheckTargets(appPath) {
+  return [
+    {
+      id: 'bundled-kick-client-secret-not-in-asar',
+      label: 'bundled Kick client secret absent from app.asar',
+      type: 'file-excludes-env-secret',
+      envName: BUNDLED_KICK_CLIENT_SECRET_ENV,
+      path: `${appPath}/Contents/Resources/app.asar`
+    }
+  ]
+}
+
+export function evaluateFileExcludesEnvSecretCheck(
+  check,
+  { env = process.env, readFile = readFileSync } = {}
+) {
+  if (check.type !== 'file-excludes-env-secret') {
+    throw new Error(`Unsupported release validation check type: ${check.type}`)
+  }
+  const secret = typeof env[check.envName] === 'string' ? env[check.envName].trim() : ''
+  if (!secret) {
+    return { ok: true, output: '' }
+  }
+  let contents
+  try {
+    contents = readFile(check.path)
+  } catch (error) {
+    return {
+      ok: false,
+      output: `could not read ${check.path}: ${error?.message ?? 'unknown error'}`
+    }
+  }
+  return contents.includes(Buffer.from(secret, 'utf8'))
+    ? {
+        ok: false,
+        output: `${check.path} contains the ${check.envName} value in plain text`
+      }
+    : { ok: true, output: '' }
+}
+
 export function evaluateBinaryContainsEnvSecretCheck(
   check,
   { env = process.env, readFile = readFileSync } = {}
@@ -215,7 +261,8 @@ export function buildMacosReleaseArtifactChecks(path) {
           `${path}/Contents/Resources/videorc_native_preview.node`
         ]
       },
-      ...bundledXOauth1ConsumerCheckTargets(path)
+      ...bundledXOauth1ConsumerCheckTargets(path),
+      ...bundledKickSecretLeakCheckTargets(path)
     ]
   }
 

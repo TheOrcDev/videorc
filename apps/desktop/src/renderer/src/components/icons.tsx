@@ -263,3 +263,26 @@ export const XPlatformIcon: AppIcon = XLogo
 export const YoutubeIcon: AppIcon = YoutubeLogo
 export const TiktokIcon: AppIcon = TiktokLogo
 export const InstagramIcon: AppIcon = InstagramLogo
+
+/**
+ * Kick's mark (plan 063). Phosphor has no Kick logo, so this is a hand-drawn,
+ * simplified version: the stepped "K" knocked out of a rounded square, drawn
+ * in currentColor on Phosphor's 256 grid so it sizes and tints like the other
+ * brand marks. `weight` is accepted and ignored (one weight only).
+ */
+export const KickIcon: AppIcon = ({ size, weight: _weight, children, ...props }) => (
+  <svg
+    xmlns="http://www.w3.org/2000/svg"
+    viewBox="0 0 256 256"
+    width={size ?? '1em'}
+    height={size ?? '1em'}
+    fill="currentColor"
+    {...props}
+  >
+    {children}
+    <path
+      fillRule="evenodd"
+      d="M56 16h144a40 40 0 0 1 40 40v144a40 40 0 0 1-40 40H56a40 40 0 0 1-40-40V56a40 40 0 0 1 40-40ZM64 56v144h44v-44h20v22h22v22h44v-56h-22v-32h22V56h-44v22h-22v22h-20V56Z"
+    />
+  </svg>
+)

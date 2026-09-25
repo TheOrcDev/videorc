@@ -692,7 +692,7 @@ export interface ActiveSceneState {
   updatedAt: string
 }
 
-export type RtmpPreset = 'youtube' | 'twitch' | 'x' | 'custom'
+export type RtmpPreset = 'youtube' | 'twitch' | 'kick' | 'x' | 'custom'
 export type VideoPreset =
   | 'tutorial-720p30'
   | 'tutorial-1080p30'
@@ -725,7 +725,7 @@ export interface RtmpSettings {
 // Multi-platform streaming (per-target) model. Session start consumes it
 // (recording.rs reads params.streaming for the per-target fan-out); the legacy
 // single-RTMP fields remain only as the no-settings fallback.
-export type StreamPlatform = 'youtube' | 'twitch' | 'x' | 'tiktok' | 'instagram' | 'custom'
+export type StreamPlatform = 'youtube' | 'twitch' | 'kick' | 'x' | 'tiktok' | 'instagram' | 'custom'
 /**
  * Which composed leg a destination consumes in a dual-orientation session.
  * Explicit per-target property — never inferred from resolution equality.
@@ -851,6 +851,9 @@ export interface StreamTargetMetadataDraft {
   twitchCategoryId?: string
   twitchCategoryName?: string
   twitchLanguage?: string
+  /** Kick category (plan 063). A platform setting: applies without a custom title. */
+  kickCategoryId?: number
+  kickCategoryName?: string
   /**
    * X has no unlisted/private concept — the only reach lever is suppressing
    * the announcement post. Undefined means announce (the platform default).
@@ -1008,6 +1011,51 @@ export interface PreparedTwitchBroadcast {
   categoryId?: string
   categoryName?: string
   language?: string
+}
+
+export interface KickPrepareParams {
+  accountId?: string
+}
+
+export interface KickCategorySearchParams {
+  accountId?: string
+  query: string
+  limit?: number
+}
+
+export interface KickCategory {
+  id: number
+  name: string
+  thumbnail?: string
+}
+
+export interface KickCategorySearchResult {
+  categories: KickCategory[]
+}
+
+/** Result of `streamTargets.kick.applyMetadata` — title/category pushed without touching the stream key. */
+export interface KickAppliedMetadata {
+  platform: 'kick'
+  accountId: string
+  accountLabel: string
+  title: string
+  categoryId?: number
+  categoryName?: string
+}
+
+export interface PreparedKickBroadcast {
+  platform: 'kick'
+  accountId: string
+  accountLabel: string
+  serverUrl: string
+  streamKeySecretRef: string
+  streamKeyPresent: boolean
+  redactedUrl: string
+  broadcasterUserId: string
+  slug?: string
+  title: string
+  categoryId?: number
+  categoryName?: string
 }
 
 export type XNativeLiveCapabilityState =
@@ -4667,6 +4715,8 @@ export type AudienceCapability =
   | 'hidden'
   | 'needs-reconnect'
   | 'unavailable'
+  /** No total exists; `delta` counts follow events this stream (Kick). */
+  | 'delta-only'
 
 export interface PlatformAudience {
   platform: StreamPlatform

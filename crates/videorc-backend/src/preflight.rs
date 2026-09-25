@@ -362,6 +362,20 @@ fn destination_chat_preflight(
             CommentsReadState::Unavailable,
             CommentsWriteState::MissingScope,
         ) => "Reconnect Twitch to read comments and send from Videorc.".to_string(),
+        (StreamPlatform::Kick, CommentsReadState::Ready, CommentsWriteState::Ready) => {
+            "Kick comments are ready to read and send.".to_string()
+        }
+        (StreamPlatform::Kick, CommentsReadState::Ready, CommentsWriteState::MissingScope) => {
+            "Kick comments are readable. Reconnect Kick to send from Videorc.".to_string()
+        }
+        (StreamPlatform::Kick, CommentsReadState::Unavailable, CommentsWriteState::Ready) => {
+            "Reconnect Kick to read comments; sending permission is already granted.".to_string()
+        }
+        (
+            StreamPlatform::Kick,
+            CommentsReadState::Unavailable,
+            CommentsWriteState::MissingScope,
+        ) => "Reconnect Kick to read comments and send from Videorc.".to_string(),
         _ => capability.message,
     };
     (capability.read, capability.write, message)
@@ -463,6 +477,68 @@ mod tests {
         PlatformAccountStatus, StreamMode, StreamPlatform, StreamPrivacy,
         default_stream_metadata_draft, default_stream_targets,
     };
+
+    #[test]
+    fn kick_chat_preflight_reports_the_read_and_write_matrix() {
+        let target = default_stream_targets()
+            .into_iter()
+            .find(|target| target.platform == StreamPlatform::Kick)
+            .expect("default Kick target");
+        let account = |scopes: &[&str]| PlatformAccount {
+            id: "kick-acct".to_string(),
+            platform: StreamPlatform::Kick,
+            account_id: "4242".to_string(),
+            account_label: "orcdev".to_string(),
+            account_handle: None,
+            avatar_url: None,
+            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            access_token_present: true,
+            refresh_token_present: true,
+            stream_key_present: false,
+            expires_at: None,
+            connected_at: "2026-09-25T00:00:00Z".to_string(),
+            updated_at: "2026-09-25T00:00:00Z".to_string(),
+            status: PlatformAccountStatus::Connected,
+        };
+        let cases = [
+            (
+                vec!["events:subscribe", "chat:write"],
+                CommentsReadState::Ready,
+                CommentsWriteState::Ready,
+                "ready to read and send",
+            ),
+            (
+                vec!["events:subscribe"],
+                CommentsReadState::Ready,
+                CommentsWriteState::MissingScope,
+                "Reconnect Kick to send",
+            ),
+            (
+                vec!["chat:write"],
+                CommentsReadState::Unavailable,
+                CommentsWriteState::Ready,
+                "Reconnect Kick to read",
+            ),
+            (
+                vec![],
+                CommentsReadState::Unavailable,
+                CommentsWriteState::MissingScope,
+                "Reconnect Kick to read comments and send",
+            ),
+        ];
+        for (scopes, read, write, message) in cases {
+            let accounts = [account(&scopes)];
+            let (actual_read, actual_write, actual_message) =
+                destination_chat_preflight(&target, &accounts);
+            assert_eq!(actual_read, read, "{scopes:?}");
+            assert_eq!(actual_write, write, "{scopes:?}");
+            assert!(actual_message.contains(message), "{actual_message}");
+        }
+        let (read, write, message) = destination_chat_preflight(&target, &[]);
+        assert_eq!(read, CommentsReadState::Unavailable);
+        assert_eq!(write, CommentsWriteState::Unavailable);
+        assert!(message.contains("Connect Kick"));
+    }
 
     #[test]
     fn scheduled_metadata_is_per_destination_and_does_not_fill_instant_title() {
@@ -826,6 +902,7 @@ mod tests {
         match platform {
             StreamPlatform::Youtube => "youtube",
             StreamPlatform::Twitch => "twitch",
+            StreamPlatform::Kick => "kick",
             StreamPlatform::X => "x",
             StreamPlatform::Tiktok => "tiktok",
             StreamPlatform::Instagram => "instagram",

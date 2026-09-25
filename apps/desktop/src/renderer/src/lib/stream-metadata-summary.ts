@@ -7,10 +7,10 @@ import type {
 } from '@/lib/backend'
 
 /** The platforms that carry a per-destination row in Broadcast info. */
-export type MetadataPlatform = 'youtube' | 'twitch' | 'x'
+export type MetadataPlatform = 'youtube' | 'twitch' | 'kick' | 'x'
 
 export function isMetadataPlatform(platform: StreamPlatform): platform is MetadataPlatform {
-  return platform === 'youtube' || platform === 'twitch' || platform === 'x'
+  return platform === 'youtube' || platform === 'twitch' || platform === 'kick' || platform === 'x'
 }
 
 export function metadataPlatformLabel(platform: StreamPlatform): string {
@@ -19,6 +19,8 @@ export function metadataPlatformLabel(platform: StreamPlatform): string {
       return 'YouTube'
     case 'twitch':
       return 'Twitch'
+    case 'kick':
+      return 'Kick'
     case 'x':
       return 'X'
     case 'tiktok':
@@ -102,6 +104,13 @@ export function metadataOverrideSummary(
       const language = override.twitchLanguage?.trim().toLowerCase()
       if (language && language !== 'en') {
         parts.push(language)
+      }
+      break
+    }
+    case 'kick': {
+      const category = override.kickCategoryName?.trim()
+      if (category) {
+        parts.push(category)
       }
       break
     }

@@ -127,6 +127,36 @@ try {
   assert.equal(persistedManualTwitch.streamKeySecretRef, 'stream-target:twitch:manual-stream-key')
   assert.equal(persistedManualTwitch.streamKeyPresent, true)
 
+  // Kick (plan 063) is a manual-key destination too: once its key has a
+  // secret ref, the raw key never reaches the persisted config.
+  const persistedKick = persistableCaptureConfig({
+    ...defaultCaptureConfig,
+    rtmpPreset: 'kick',
+    streamKey: 'raw-kick-key',
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      targets: defaultCaptureConfig.streaming.targets.map((target) =>
+        target.platform === 'kick'
+          ? {
+              ...target,
+              enabled: true,
+              authMode: 'manual-rtmp',
+              streamKey: 'raw-kick-key',
+              streamKeySecretRef: 'stream-target:kick:manual-stream-key',
+              streamKeyPresent: true
+            }
+          : target
+      )
+    }
+  })
+  const persistedManualKick = persistedKick.streaming.targets.find(
+    (target) => target.platform === 'kick'
+  )
+  assert.ok(persistedManualKick, 'the built-in Kick card must exist')
+  assert.equal(persistedKick.streamKey, '')
+  assert.equal(persistedManualKick.streamKey, '')
+  assert.equal(persistedManualKick.streamKeySecretRef, 'stream-target:kick:manual-stream-key')
+
   const persistedManualDraft = persistableCaptureConfig({
     ...defaultCaptureConfig,
     rtmpPreset: 'twitch',

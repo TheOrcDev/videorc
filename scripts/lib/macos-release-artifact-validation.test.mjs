@@ -6,6 +6,8 @@ import {
   buildMacosReleaseArtifactChecks,
   BUNDLED_X_OAUTH1_CONSUMER_ENVS,
   bundledXOauth1ConsumerCheckTargets,
+  bundledKickSecretLeakCheckTargets,
+  evaluateFileExcludesEnvSecretCheck,
   captureEntitlementCheckTargets,
   evaluateBinaryContainsEnvSecretCheck,
   EXPECTED_MACOS_BUNDLE_IDENTIFIER,
@@ -52,7 +54,8 @@ describe('buildMacosReleaseArtifactChecks', () => {
         'capture entitlements (ffprobe)',
         'native preview addon signature',
         'bundled X OAuth1 consumer key (videorc-backend)',
-        'bundled X OAuth1 consumer secret (videorc-backend)'
+        'bundled X OAuth1 consumer secret (videorc-backend)',
+        'bundled Kick client secret absent from app.asar'
       ]
     )
     assert.deepEqual(checks[0].args, [
@@ -265,6 +268,42 @@ describe('capture entitlement gate', () => {
       evaluateBinaryContainsEnvSecretCheck(keyCheck, {
         env: { [keyCheck.envName]: secret },
         readFile: () => Buffer.from(`binary prefix ${secret} binary suffix`)
+      }),
+      { ok: true, output: '' }
+    )
+  })
+
+  it('fails when the Kick client secret leaks into app.asar, and passes when Kick is dark', () => {
+    const checks = buildMacosReleaseArtifactChecks('/release/Videorc.app').filter(
+      (check) => check.type === 'file-excludes-env-secret'
+    )
+    assert.deepEqual(checks, bundledKickSecretLeakCheckTargets('/release/Videorc.app'))
+    const [check] = checks
+    assert.equal(check.path, '/release/Videorc.app/Contents/Resources/app.asar')
+    const secret = 'fake-kick-secret'
+
+    assert.deepEqual(
+      evaluateFileExcludesEnvSecretCheck(check, {
+        env: {},
+        readFile: () => Buffer.from(secret)
+      }),
+      { ok: true, output: '' }
+    )
+    assert.deepEqual(
+      evaluateFileExcludesEnvSecretCheck(check, {
+        env: { [check.envName]: secret },
+        readFile: () => Buffer.from(`asar ${secret} asar`)
+      }),
+      {
+        ok: false,
+        output:
+          '/release/Videorc.app/Contents/Resources/app.asar contains the VIDEORC_BUNDLED_KICK_CLIENT_SECRET value in plain text'
+      }
+    )
+    assert.deepEqual(
+      evaluateFileExcludesEnvSecretCheck(check, {
+        env: { [check.envName]: secret },
+        readFile: () => Buffer.from('clean asar')
       }),
       { ok: true, output: '' }
     )

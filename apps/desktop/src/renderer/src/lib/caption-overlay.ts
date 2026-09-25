@@ -543,8 +543,8 @@ export async function renderCommentHighlightPng(params: {
     context.strokeStyle = 'rgba(255, 255, 255, 0.28)'
     context.lineWidth = Math.max(1, Math.round(badgeSize * 0.06))
     context.stroke()
-    context.strokeStyle = '#FFFFFF'
-    context.fillStyle = '#FFFFFF'
+    context.strokeStyle = platformBadge.ink ?? '#FFFFFF'
+    context.fillStyle = platformBadge.ink ?? '#FFFFFF'
     context.lineWidth = Math.max(1.5, badgeSize * 0.1)
     context.lineCap = 'round'
     context.lineJoin = 'round'
@@ -563,6 +563,14 @@ export async function renderCommentHighlightPng(params: {
       context.lineTo(centerX + badgeSize * 0.18, centerY + badgeSize * 0.22)
       context.moveTo(centerX + badgeSize * 0.16, centerY - badgeSize * 0.22)
       context.lineTo(centerX - badgeSize * 0.16, centerY + badgeSize * 0.22)
+      context.stroke()
+    } else if (platformBadge.glyph === 'kick') {
+      context.beginPath()
+      context.moveTo(centerX - badgeSize * 0.14, centerY - badgeSize * 0.22)
+      context.lineTo(centerX - badgeSize * 0.14, centerY + badgeSize * 0.22)
+      context.moveTo(centerX + badgeSize * 0.16, centerY - badgeSize * 0.22)
+      context.lineTo(centerX - badgeSize * 0.1, centerY)
+      context.lineTo(centerX + badgeSize * 0.16, centerY + badgeSize * 0.22)
       context.stroke()
     } else if (platformBadge.glyph === 'twitch') {
       context.strokeRect(

@@ -51,6 +51,20 @@ export const PROVIDERS = [
     ]
   },
   {
+    label: 'Kick',
+    clientIdVars: ['VIDEORC_KICK_CLIENT_ID', 'VIDEORC_BUNDLED_KICK_CLIENT_ID'],
+    // Kick's token endpoint takes client_secret alongside the PKCE verifier
+    // (plan 063), so the secret is required and, like Google's, bundled.
+    secretVars: ['VIDEORC_KICK_CLIENT_SECRET', 'VIDEORC_BUNDLED_KICK_CLIENT_SECRET'],
+    secretRequired: true,
+    accountChecks: [
+      {
+        label: 'test Kick channel available',
+        env: 'VIDEORC_SMOKE_KICK_ACCOUNT_READY'
+      }
+    ]
+  },
+  {
     label: 'X',
     clientIdVars: ['VIDEORC_X_CLIENT_ID', 'VIDEORC_BUNDLED_X_CLIENT_ID'],
     secretVars: ['VIDEORC_X_CLIENT_SECRET'],

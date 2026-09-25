@@ -20,6 +20,9 @@ function completeEnv(overrides = {}) {
     VIDEORC_BUNDLED_TWITCH_CLIENT_ID: 'twitch-bundled-client-value',
     VIDEORC_TWITCH_CLIENT_SECRET: 'twitch-secret-value',
     VIDEORC_SMOKE_TWITCH_ACCOUNT_READY: '1',
+    VIDEORC_BUNDLED_KICK_CLIENT_ID: 'kick-bundled-client-value',
+    VIDEORC_BUNDLED_KICK_CLIENT_SECRET: 'kick-bundled-secret-value',
+    VIDEORC_SMOKE_KICK_ACCOUNT_READY: '1',
     VIDEORC_BUNDLED_X_CLIENT_ID: 'x-bundled-client-value',
     VIDEORC_SMOKE_X_LIVESTREAM_OAUTH1_READY: '1',
     VIDEORC_SMOKE_X_NATIVE_LIVE_ACCESS: '1',
@@ -123,6 +126,18 @@ describe('provider readiness evidence', () => {
     assert.match(consoleReport, /PLACEHOLDER/)
     // Never echo the value itself, only the variable name.
     assert.doesNotMatch(consoleReport, /paste-your-client-id-here/)
+  })
+
+  it('requires the Kick client secret alongside its client ID', () => {
+    const result = evaluateProviderReadiness({
+      env: completeEnv({ VIDEORC_BUNDLED_KICK_CLIENT_SECRET: '' }),
+      generatedAt: '2026-06-13T00:00:00Z',
+      commit: 'abc123'
+    })
+    const kick = result.providers.find((provider) => provider.label === 'Kick')
+    assert.equal(kick.ready, false)
+    assert.ok(kick.missing.some((line) => line.includes('VIDEORC_KICK_CLIENT_SECRET')))
+    assert.equal(result.ready, false)
   })
 
   it('accepts a real-looking client ID', () => {

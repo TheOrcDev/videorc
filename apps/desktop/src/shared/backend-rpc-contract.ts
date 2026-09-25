@@ -609,7 +609,15 @@ const streamOutputTopologyProbeResultSchema = boundedSemanticValue(
 // Instagram are manual-key vertical destinations, so they show up in stream
 // target snapshots, OAuth callback results (refused, but typed) and co-host
 // question provenance exactly like the OAuth platforms.
-const STREAM_PLATFORMS = ['youtube', 'twitch', 'x', 'tiktok', 'instagram', 'custom'] as const
+const STREAM_PLATFORMS = [
+  'youtube',
+  'twitch',
+  'kick',
+  'x',
+  'tiktok',
+  'instagram',
+  'custom'
+] as const
 const streamPlatformSchema = enumSchema(STREAM_PLATFORMS) as RuntimeSchema<StreamPlatform>
 
 const audienceSnapshotSchema = objectSchema(
@@ -625,7 +633,8 @@ const audienceSnapshotSchema = objectSchema(
             'available',
             'hidden',
             'needs-reconnect',
-            'unavailable'
+            'unavailable',
+            'delta-only'
           ] as const),
           total: optionalSchema(numberSchema({ integer: true, min: 0 })),
           baseline: optionalSchema(numberSchema({ integer: true, min: 0 })),
@@ -650,7 +659,7 @@ const audienceSnapshotSchema = objectSchema(
         },
         { allowUnknown: false }
       ),
-      { maxLength: 6 }
+      { maxLength: 7 }
     ),
     updatedAt: boundedString
   },
@@ -665,7 +674,7 @@ const viewerSampleSchema = objectSchema(
         { platform: streamPlatformSchema, count: numberSchema({ integer: true, min: 0 }) },
         { allowUnknown: false }
       ),
-      { maxLength: 6 }
+      { maxLength: 7 }
     ),
     total: numberSchema({ integer: true, min: 0 }),
     at: boundedString
@@ -1834,7 +1843,7 @@ const cohostQuestionSchema = objectSchema(
     text: stringSchema({ maxLength: 2000 }),
     messageIds: arraySchema(boundedString, { maxLength: 500 }),
     askers: arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 500 }),
-    platforms: arraySchema(streamPlatformSchema, { maxLength: 6 }),
+    platforms: arraySchema(streamPlatformSchema, { maxLength: 7 }),
     priority: enumSchema(['high', 'normal', 'low']),
     suggestedReply: stringSchema({ maxLength: 2000 }),
     fromNotes: booleanSchema,

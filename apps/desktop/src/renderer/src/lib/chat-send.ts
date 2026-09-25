@@ -19,6 +19,8 @@ export const CHAT_SEND_MAX_CHARS = 200
 export const CHAT_SEND_PLATFORM_MAX_CHARS: Record<StreamPlatform, number> = {
   youtube: CHAT_SEND_MAX_CHARS,
   twitch: CHAT_SEND_MAX_CHARS,
+  // Kick chat takes 500 graphemes (plan 063); the backend checks it too.
+  kick: 500,
   x: 140,
   // No public chat API — never reached by a send, kept for the strict Record.
   tiktok: CHAT_SEND_MAX_CHARS,

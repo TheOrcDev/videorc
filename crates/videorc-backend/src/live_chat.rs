@@ -453,6 +453,32 @@ pub fn chat_capability(
                 message: crate::x_chat::x_chat_message(x_live_ready).to_string(),
             }
         }
+        // Kick chat is read through the videorc-web relay (webhooks need a
+        // public endpoint) and sent straight to Kick (plan 063, S5).
+        StreamPlatform::Kick => {
+            let mut capability = scope_capability(
+                platform,
+                account,
+                crate::kick_chat::KICK_EVENTS_SCOPE,
+                "Kick live comments are ready.",
+                "Reconnect Kick to enable live comments.",
+                "Connect Kick to read live comments.",
+            );
+            capability.write = match account {
+                Some(account)
+                    if account.status == crate::streaming::PlatformAccountStatus::Connected
+                        && account
+                            .scopes
+                            .iter()
+                            .any(|scope| scope == crate::kick_chat::KICK_CHAT_WRITE_SCOPE) =>
+                {
+                    CommentsWriteState::Ready
+                }
+                Some(_) => CommentsWriteState::MissingScope,
+                None => CommentsWriteState::Unavailable,
+            };
+            capability
+        }
         StreamPlatform::Tiktok | StreamPlatform::Instagram => ChatCapability {
             platform,
             state: ChatCapabilityState::Unsupported,
@@ -544,13 +570,14 @@ fn scope_capability(
     }
 }
 
-/// Chat capability for every native platform (YouTube, Twitch, X), preferring a connected
+/// Chat capability for every native platform (YouTube, Twitch, X, Kick), preferring a connected
 /// account over stale saved rows. Custom RTMP has no platform comments and is omitted.
 pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
     [
         StreamPlatform::Youtube,
         StreamPlatform::Twitch,
         StreamPlatform::X,
+        StreamPlatform::Kick,
     ]
     .into_iter()
     .map(|platform| {
@@ -624,6 +651,7 @@ pub enum ChatSenderConfig {
         token_source: crate::session_token::SessionTokenSource,
     },
     Twitch(crate::twitch_chat::TwitchChatSenderConfig),
+    Kick(crate::kick_chat::KickChatSenderConfig),
     /// X live-broadcast chat (closed-beta Livestream API). Credentials are
     /// resolved per send so a rotated token is picked up without restarting
     /// the session.
@@ -881,6 +909,31 @@ impl LiveChatCoordinator {
 
     pub fn register_sender(&mut self, destination_id: String, sender: ChatSenderConfig) {
         self.senders.insert(destination_id, sender);
+    }
+
+    /// Whether this session sends to Kick (its subscriptions are in use).
+    pub fn has_kick_sender(&self) -> bool {
+        self.session_id.is_some()
+            && self
+                .senders
+                .values()
+                .any(|sender| matches!(sender, ChatSenderConfig::Kick(_)))
+    }
+
+    /// The stored Kick account whose event subscriptions this session owns,
+    /// for cleanup at stop. Fixture tokens own nothing.
+    fn kick_cleanup_account(&self) -> Option<String> {
+        self.senders.values().find_map(|sender| match sender {
+            ChatSenderConfig::Kick(config)
+                if matches!(
+                    config.token_source,
+                    crate::session_token::SessionTokenSource::Account { .. }
+                ) =>
+            {
+                Some(config.account_id.clone())
+            }
+            _ => None,
+        })
     }
 
     pub fn sender(&self, destination_id: &str) -> Option<ChatSenderConfig> {
@@ -1329,6 +1382,8 @@ pub struct LiveChatStartParams {
     pub twitch: Option<crate::twitch_chat::TwitchChatConfig>,
     #[serde(default)]
     pub x: Option<crate::x_chat::XChatConfig>,
+    #[serde(default)]
+    pub kick: Option<crate::kick_chat::KickChatConfig>,
     /// Follower and subscriber sources (plan 055, S3). Built by the backend
     /// from the session's destinations; never read from RPC params, because
     /// they resolve stored credentials.
@@ -1458,6 +1513,10 @@ where
                 .and_then(|config| config.target_id.clone()),
             StreamPlatform::X => params
                 .x
+                .as_ref()
+                .and_then(|config| config.target_id.clone()),
+            StreamPlatform::Kick => params
+                .kick
                 .as_ref()
                 .and_then(|config| config.target_id.clone()),
             StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => None,
@@ -1600,13 +1659,23 @@ where
                     api_base_url: config.api_base_url.clone(),
                     token_source: config.token_source.clone(),
                 });
-        if youtube_viewers.is_some() || twitch_viewers.is_some() {
+        let kick_viewers =
+            params
+                .kick
+                .as_ref()
+                .map(|config| crate::viewer_stats::KickViewerConfig {
+                    access_token: config.access_token.clone(),
+                    api_base_url: config.overrides.kick_api_base_url.clone(),
+                    token_source: config.token_source.clone(),
+                });
+        if youtube_viewers.is_some() || twitch_viewers.is_some() || kick_viewers.is_some() {
             let handle = tokio::spawn(crate::viewer_stats::run_viewer_sampler(
                 state.clone(),
                 params.session_id.clone(),
                 youtube_viewers,
                 twitch_viewers,
                 None,
+                kick_viewers,
             ));
             let mut coordinator = state.live_chat.lock().await;
             coordinator.attach_task(handle);
@@ -1631,6 +1700,26 @@ where
                 sender_user_id: twitch.user_id,
                 api_base_url: twitch.api_base_url,
                 token_source: twitch.token_source,
+            }),
+        );
+    }
+    if let Some(kick) = params.kick.clone() {
+        let handle = tokio::spawn(crate::kick_chat::run_kick_chat_connector(
+            state.clone(),
+            params.session_id.clone(),
+            session_generation,
+            kick.clone(),
+        ));
+        let mut coordinator = state.live_chat.lock().await;
+        coordinator.attach_task(handle);
+        coordinator.register_sender(
+            comments_destination_id(StreamPlatform::Kick, kick.target_id.as_deref()),
+            ChatSenderConfig::Kick(crate::kick_chat::KickChatSenderConfig {
+                access_token: kick.access_token,
+                account_id: kick.account_id,
+                broadcaster_user_id: kick.broadcaster_user_id,
+                api_base_url: kick.overrides.kick_api_base_url,
+                token_source: kick.token_source,
             }),
         );
     }
@@ -1735,6 +1824,7 @@ where
             broadcast_id: config.broadcast_id.clone(),
             api_base_url: None,
         }),
+        None,
     ));
     let sender_destination_id =
         comments_destination_id(StreamPlatform::X, config.target_id.as_deref());
@@ -2190,6 +2280,14 @@ async fn with_current_sender_token(
             config.access_token = token.ensure_fresh(state, client).await.to_string();
             ChatSenderConfig::Twitch(config)
         }
+        ChatSenderConfig::Kick(mut config) => {
+            let mut token = crate::session_token::SessionToken::unchecked(
+                config.access_token.clone(),
+                config.token_source.clone(),
+            );
+            config.access_token = token.ensure_fresh(state, client).await.to_string();
+            ChatSenderConfig::Kick(config)
+        }
         other => other,
     }
 }
@@ -2220,6 +2318,9 @@ async fn send_to_destination(
         } => Err("YouTube live chat is not resolved yet. Try again in a moment.".to_string()),
         ChatSenderConfig::Twitch(config) => {
             crate::twitch_chat::send_twitch_chat_message(client, &config, text).await
+        }
+        ChatSenderConfig::Kick(config) => {
+            crate::kick_chat::send_kick_chat_message(client, &config, text).await
         }
         ChatSenderConfig::X { broadcast_id } => {
             // X caps messages at 140 chars while the shared composer allows
@@ -2300,10 +2401,13 @@ where
     F: std::future::Future<Output = ()>,
 {
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
-    {
+    let kick_cleanup = {
         let mut coordinator = state.live_chat.lock().await;
+        let kick_cleanup = coordinator.kick_cleanup_account();
         coordinator.stop_session();
-    }
+        kick_cleanup
+    };
+    spawn_kick_cleanup(state, kick_cleanup);
     crate::cohost::stop_cohost_for_session_end_under_lifecycle_fence(state, &lifecycle_delivery)
         .await;
     let snapshot = current_status(state).await;
@@ -2342,15 +2446,15 @@ where
     let stopped = {
         let mut coordinator = state.live_chat.lock().await;
         if coordinator.session_id() == Some(expected_session_id) {
+            let kick_cleanup = coordinator.kick_cleanup_account();
             coordinator.stop_session();
-            true
+            Some(kick_cleanup)
         } else {
-            false
+            None
         }
     };
-    if !stopped {
-        return None;
-    }
+    let kick_cleanup = stopped?;
+    spawn_kick_cleanup(state, kick_cleanup);
 
     crate::cohost::stop_cohost_for_session_end_if_matching_before_emit(
         state,
@@ -2363,6 +2467,45 @@ where
     state.emit_event("liveChat.snapshot", snapshot.clone());
     drop(lifecycle_delivery);
     Some(snapshot)
+}
+
+/// Kick event subscriptions and the relay binding end with the session
+/// (plan 063, S5). Best effort, off the stop path.
+fn spawn_kick_cleanup(state: &AppState, account_id: Option<String>) {
+    if let Some(account_id) = account_id {
+        tokio::spawn(crate::kick_chat::end_kick_chat_session(
+            state.clone(),
+            account_id,
+        ));
+    }
+}
+
+/// Whether the active view already holds this message id.
+pub(crate) async fn has_message(state: &AppState, message_id: &str) -> bool {
+    state.live_chat.lock().await.seen.contains(message_id)
+}
+
+/// The parent of a reply, when this session already holds it. Platforms that
+/// relay only the parent id (Kick) get the author and text from here.
+pub(crate) async fn find_reply_parent(
+    state: &AppState,
+    platform: StreamPlatform,
+    target_id: Option<&str>,
+    parent_provider_message_id: &str,
+) -> Option<LiveChatReply> {
+    let coordinator = state.live_chat.lock().await;
+    let session_id = coordinator.session_id()?;
+    let id = live_chat_message_id(session_id, platform, target_id, parent_provider_message_id);
+    coordinator
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.id == id)
+        .map(|parent| LiveChatReply {
+            parent_message_id: parent_provider_message_id.to_string(),
+            parent_author_name: parent.author_name.clone(),
+            parent_text: parent.message_text.clone(),
+        })
 }
 
 /// Clear the local message view (not platform messages) and emit `liveChat.cleared`.
@@ -2876,6 +3019,14 @@ fn fake_events(
                 None,
             ),
         ],
+        StreamPlatform::Kick => vec![event(
+            "channel.followed",
+            "kick_fan",
+            LiveChatEventType::Follow,
+            LiveChatEventDetails::Follow,
+            "kick_fan followed",
+            None,
+        )],
         StreamPlatform::Youtube => vec![
             event(
                 "super-chat",
@@ -3622,6 +3773,7 @@ mod tests {
                     youtube: None,
                     twitch: None,
                     x: None,
+                    kick: None,
                     audience: Vec::new(),
                     fake_audience: Vec::new(),
                 },
@@ -5135,13 +5287,40 @@ mod tests {
     fn capabilities_cover_every_native_platform() {
         let accounts = vec![account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE])];
         let capabilities = chat_capabilities(&accounts);
-        assert_eq!(capabilities.len(), 3);
+        assert_eq!(capabilities.len(), 4);
         assert_eq!(capabilities[0].platform, StreamPlatform::Youtube);
         assert_eq!(capabilities[0].state, ChatCapabilityState::Unsupported);
         assert_eq!(capabilities[1].platform, StreamPlatform::Twitch);
         assert_eq!(capabilities[1].state, ChatCapabilityState::NotConnected);
         assert_eq!(capabilities[2].platform, StreamPlatform::X);
         assert_eq!(capabilities[2].state, ChatCapabilityState::NotConnected);
+        assert_eq!(capabilities[3].platform, StreamPlatform::Kick);
+        assert_eq!(capabilities[3].state, ChatCapabilityState::NotConnected);
+    }
+
+    #[test]
+    fn kick_read_and_write_scopes_are_modeled_separately() {
+        let both = account(
+            StreamPlatform::Kick,
+            &[
+                crate::kick_chat::KICK_EVENTS_SCOPE,
+                crate::kick_chat::KICK_CHAT_WRITE_SCOPE,
+            ],
+        );
+        let capability = chat_capability(StreamPlatform::Kick, Some(&both));
+        assert_eq!(capability.state, ChatCapabilityState::Available);
+        assert_eq!(capability.read, CommentsReadState::Ready);
+        assert_eq!(capability.write, CommentsWriteState::Ready);
+
+        let read_only = account(StreamPlatform::Kick, &[crate::kick_chat::KICK_EVENTS_SCOPE]);
+        let capability = chat_capability(StreamPlatform::Kick, Some(&read_only));
+        assert_eq!(capability.read, CommentsReadState::Ready);
+        assert_eq!(capability.write, CommentsWriteState::MissingScope);
+
+        let neither = account(StreamPlatform::Kick, &[]);
+        let capability = chat_capability(StreamPlatform::Kick, Some(&neither));
+        assert_eq!(capability.state, ChatCapabilityState::NeedsReconnect);
+        assert!(capability.message.contains("Reconnect Kick"));
     }
 
     #[tokio::test]
@@ -5172,6 +5351,7 @@ mod tests {
                 youtube: None,
                 twitch: None,
                 x: None,
+                kick: None,
                 audience: Vec::new(),
                 fake_audience: Vec::new(),
             },
@@ -5257,7 +5437,7 @@ mod tests {
     fn initial_snapshot_maps_capabilities_to_provider_rows() {
         let accounts = vec![account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE])];
         let snapshot = initial_chat_snapshot(&accounts, "now".to_string());
-        assert_eq!(snapshot.providers.len(), 3);
+        assert_eq!(snapshot.providers.len(), 4);
         assert!(snapshot.messages.is_empty());
         assert_eq!(snapshot.providers[0].platform, StreamPlatform::Youtube);
         assert_eq!(

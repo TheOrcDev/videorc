@@ -2873,6 +2873,7 @@ dependencies = [
  "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
+ "unicode-segmentation",
  "uuid",
  "windows",
  "windows-core",
