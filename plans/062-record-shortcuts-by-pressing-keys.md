@@ -6,7 +6,12 @@
 
 ## Status and decisions
 
-- Status: PLANNED 2026-09-25.
+- Status: EXECUTED 2026-09-25 on `feat/shortcut-recorder` (S1 to S4, one
+  commit each). Deviation: the desktop vitest runs in a `node` environment
+  with no DOM, so the S3 "component tests" live in the pure
+  `lib/shortcut-recorder.ts` step function (every outcome and its copy);
+  the component only applies the step. By-eye was a CDP-driven run of the
+  dev app (see the PR).
 - Priority: P2. Effort: S to M (about 1 to 1.5 days). Risk: low to medium.
   The only risky part is the main-process key capture in S2, because a bug
   there can leave global shortcuts switched off.

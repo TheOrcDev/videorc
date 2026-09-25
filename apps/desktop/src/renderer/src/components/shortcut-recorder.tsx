@@ -113,8 +113,8 @@ export function ShortcutRecorderField({
     teardownRef.current = teardown
     void api.setShortcutRecorderArmed(true).then(
       (result) => {
-        // Main refuses when the window is not focused; the DOM handlers
-        // still work, but a bound global combo would fire, so stop.
+        // Main refused (no main window): a bound global combo would still
+        // fire instead of reaching the field, so stop.
         if (!result.armed && teardownRef.current === teardown) disarm()
       },
       () => {

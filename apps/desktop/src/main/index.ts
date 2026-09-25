@@ -563,8 +563,10 @@ function disarmShortcutRecorder(notifyRenderer: boolean): void {
 }
 
 function setShortcutRecorderArmed(armed: boolean): ShortcutRecorderArmResult {
+  // Only a click or keypress in the Settings field arms, so no focus check:
+  // blur and the idle timer are what hand the keys back.
   const window = mainWindow
-  if (armed && window && !window.isDestroyed() && window.isFocused()) {
+  if (armed && window && !window.isDestroyed()) {
     globalShortcutGate.arm()
     touchShortcutRecorderIdleTimer()
   } else {
