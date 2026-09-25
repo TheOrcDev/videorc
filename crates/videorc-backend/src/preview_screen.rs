@@ -27,6 +27,7 @@ use crate::diagnostics::{
 };
 use crate::ffmpeg::resolve_ffmpeg_path;
 use crate::frame_store::{FrameHandle, FrameStore, FrameStoreStats, SurfaceBackingTrackerHandle};
+use crate::linux_portal_capture::parse_portal_source_id;
 use crate::preview_bmp::{LatestPreviewBmpPoll, PreviewBmpCursor, encode_latest_bgra_bmp};
 use crate::protocol::{
     PreviewScreenFrameStatusStats, PreviewScreenSourceKind, PreviewScreenStartParams,
@@ -3225,6 +3226,17 @@ fn should_exclude_protected_overlay_window(window_id: u32, protected_ids: &[u32]
 
 fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedScreenSource> {
     if let Some(window_id) = params.sources.window_id.clone() {
+        // Linux portal window: the portal's picker names the window, so the
+        // id carries no native handle (Plan 0006).
+        if parse_portal_source_id(&window_id).is_some() {
+            return Some(SelectedScreenSource {
+                source_id: window_id,
+                source_kind: PreviewScreenSourceKind::Window,
+                callback_cadence: ScreenCaptureCallbackCadence::DamageDriven,
+                display_id: None,
+                window_id: None,
+            });
+        }
         return parse_screencapturekit_window_id(&window_id).map(|native_window_id| {
             SelectedScreenSource {
                 source_id: window_id,
@@ -3255,7 +3267,11 @@ fn selected_screen_source(params: &PreviewScreenStartParams) -> Option<SelectedS
                 window_id: None,
             });
         }
-        if is_windows_gdigrab_desktop_screen_id(&screen_id) {
+        // Linux portal monitor (Plan 0006). PipeWire only delivers buffers on
+        // damage, so its cadence cannot prove a capture-rate collapse.
+        if is_windows_gdigrab_desktop_screen_id(&screen_id)
+            || parse_portal_source_id(&screen_id).is_some()
+        {
             return Some(SelectedScreenSource {
                 source_id: screen_id,
                 source_kind: PreviewScreenSourceKind::Screen,
@@ -4032,14 +4048,223 @@ fn run_native_screen_preview(
         windows::run_native_screen_preview(config, shared, stop_rx, startup_tx);
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        linux::run_native_screen_preview(config, shared, stop_rx, startup_tx);
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = config;
         let _ = shared;
         let _ = stop_rx;
         let _ = startup_tx.send(NativeScreenStartup::Failed(
-            "Native screen preview is only available on macOS.".to_string(),
+            "Native screen preview is only available on macOS, Windows and Linux.".to_string(),
         ));
+    }
+}
+
+/// Linux: `org.freedesktop.portal.ScreenCast` consent + a PipeWire read on
+/// this thread (Plan 0006, L4). The portal owns the picker; a persisted
+/// restore token makes later starts silent. Frames are memcpy'd into the
+/// shared BGRA frame store the CPU compositor already consumes.
+#[cfg(target_os = "linux")]
+mod linux {
+    use std::sync::atomic::Ordering;
+
+    use super::*;
+    use crate::linux_pipewire_stream::run_pipewire_capture;
+    use crate::linux_portal_capture::{
+        PortalCaptureState, RestoreTokenStore, parse_portal_source_id, portal_environment_available,
+    };
+    use crate::linux_portal_session::{PortalStart, start_portal_session};
+
+    pub fn run_native_screen_preview(
+        config: NativeScreenPreviewConfig,
+        shared: Arc<StdMutex<PreviewScreenShared>>,
+        stop_rx: std_mpsc::Receiver<()>,
+        startup_tx: std_mpsc::Sender<NativeScreenStartup>,
+    ) {
+        let Some(source_type) = parse_portal_source_id(&config.source_id) else {
+            let _ = startup_tx.send(NativeScreenStartup::SourceMissing(format!(
+                "Linux screen preview only supports desktop portal sources; {} is not one.",
+                config.source_id
+            )));
+            return;
+        };
+        if let Err(reason) = portal_environment_available(&|key| std::env::var(key).ok()) {
+            let _ = startup_tx.send(NativeScreenStartup::Failed(
+                PortalCaptureState::MissingSource { reason }.message(),
+            ));
+            return;
+        }
+        let runtime = match tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+        {
+            Ok(runtime) => runtime,
+            Err(error) => {
+                let _ = startup_tx.send(NativeScreenStartup::Failed(format!(
+                    "portal capture runtime could not start: {error}"
+                )));
+                return;
+            }
+        };
+        let store = RestoreTokenStore::new(RestoreTokenStore::default_directory());
+        let saved_token = store.token_for(&config.source_id);
+        tracing::info!(
+            source_id = %config.source_id,
+            has_restore_token = saved_token.is_some(),
+            "portal screen capture: requesting consent"
+        );
+        let mut outcome = runtime.block_on(start_portal_session(
+            source_type,
+            saved_token.clone(),
+            config.include_cursor,
+        ));
+        // A refused token (revoked elsewhere, another session) shows the
+        // picker once instead of failing forever.
+        if saved_token.is_some()
+            && matches!(
+                outcome,
+                PortalStart::Denied(PortalCaptureState::MissingSource { .. })
+            )
+        {
+            let _ = store.forget(&config.source_id);
+            outcome = runtime.block_on(start_portal_session(
+                source_type,
+                None,
+                config.include_cursor,
+            ));
+        }
+        let grant = match outcome {
+            PortalStart::Granted(grant) => grant,
+            PortalStart::Denied(state) => {
+                let message = state.message();
+                let _ = startup_tx.send(match state.lifecycle_status() {
+                    SourceLifecycleStatus::PermissionNeeded => {
+                        NativeScreenStartup::PermissionNeeded(message)
+                    }
+                    SourceLifecycleStatus::SourceMissing => {
+                        NativeScreenStartup::SourceMissing(message)
+                    }
+                    _ => NativeScreenStartup::Failed(message),
+                });
+                return;
+            }
+        };
+        if let Err(error) = store.remember(&config.source_id, grant.restore_token.as_deref()) {
+            tracing::warn!(error = %error, "portal restore token could not be saved");
+        }
+        tracing::info!(
+            node_id = grant.node_id,
+            size = ?grant.size,
+            "portal screen capture: granted"
+        );
+
+        let revoked = Arc::clone(&grant.revoked);
+        let startup = std::cell::RefCell::new(Some(startup_tx.clone()));
+        let fps = config.video.fps.max(1);
+        let publish_shared = Arc::clone(&shared);
+        let result = run_pipewire_capture(
+            grant.fd.try_clone().expect("portal PipeWire fd clone"),
+            grant.node_id,
+            fps,
+            stop_rx,
+            move || revoked.load(Ordering::SeqCst),
+            move |frame| {
+                publish_bgra_frame(&publish_shared, frame.width, frame.height, frame.bgra);
+                if let Some(tx) = startup.borrow_mut().take() {
+                    let _ = tx.send(NativeScreenStartup::Live {
+                        native_width: frame.width,
+                        native_height: frame.height,
+                        requested_width: frame.width,
+                        requested_height: frame.height,
+                        width: frame.width,
+                        height: frame.height,
+                        selected_fps: fps as f64,
+                        message: Some(
+                            PortalCaptureState::Granted {
+                                node_id: 0,
+                                restore_token: None,
+                                width: Some(frame.width),
+                                height: Some(frame.height),
+                            }
+                            .message(),
+                        ),
+                    });
+                }
+            },
+        );
+        // Keep the session alive until the read ends: dropping the grant
+        // closes the portal session.
+        let was_revoked = grant.revoked.load(Ordering::SeqCst);
+        drop(grant);
+        drop(runtime);
+        match result {
+            Ok(()) if was_revoked => {
+                let message = PortalCaptureState::Revoked.message();
+                tracing::warn!("{message}");
+                let _ = startup_tx.send(NativeScreenStartup::SourceMissing(message.clone()));
+                let mut guard = shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.last_error = Some(message);
+            }
+            Ok(()) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "portal PipeWire capture failed");
+                let _ = startup_tx.send(NativeScreenStartup::Failed(error.clone()));
+                let mut guard = shared
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                guard.last_error = Some(error);
+            }
+        }
+    }
+
+    fn publish_bgra_frame(
+        shared: &Arc<StdMutex<PreviewScreenShared>>,
+        width: u32,
+        height: u32,
+        bgra: &[u8],
+    ) {
+        let callback_started_at = Instant::now();
+        let mut guard = shared
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        guard
+            .capture_timings
+            .record_callback_at(callback_started_at);
+        let now = Instant::now();
+        guard.frames_captured = guard.frames_captured.saturating_add(1);
+        guard.frames_in_window = guard.frames_in_window.saturating_add(1);
+        let window_started = *guard.window_started_at.get_or_insert(now);
+        let elapsed = window_started.elapsed();
+        if elapsed >= Duration::from_millis(500) {
+            guard.source_fps =
+                Some(guard.frames_in_window as f64 / elapsed.as_secs_f64().max(0.001));
+            guard.frames_in_window = 0;
+            guard.window_started_at = Some(now);
+        }
+        let sequence = guard.frames_captured;
+        let mut buffer = guard.frame_store.checkout_overwrite_buffer(bgra.len());
+        buffer.clear();
+        buffer.extend_from_slice(bgra);
+        let publish_started_at = Instant::now();
+        guard.frame_store.publish_with_metadata(
+            sequence,
+            width,
+            height,
+            PreviewScreenPixelFormat::Bgra8,
+            (),
+            now,
+            buffer,
+        );
+        let publish_ms = publish_started_at.elapsed().as_secs_f64() * 1000.0;
+        guard
+            .capture_timings
+            .record_valid_frame(0.0, 0.0, publish_ms, bgra.len() as u64);
     }
 }
 

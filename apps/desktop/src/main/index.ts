@@ -192,6 +192,7 @@ import {
   buildRuntimeInfo,
   permissionUrlForPane
 } from './runtime-info'
+import { devBackendCargoProfile } from './dev-backend-profile'
 import {
   requestMediaAccessWithRestart,
   type MediaAccessRestartResult,
@@ -1013,7 +1014,7 @@ function clearNativePreviewNativePlacementAuthority(): void {
 const FIRST_FRAME_TICK_MS = 750
 const PREVIEW_WAIT_DETAIL_DEFAULT =
   process.platform === 'linux'
-    ? 'Recording still works. A Linux preview arrives in a later port phase.'
+    ? 'Linux CPU preview: the Electron proof surface shows the scene as soon as a source publishes frames.'
     : 'The native surface appears here as soon as the compositor presents.'
 let firstFrameWatchdogTimer: NodeJS.Timeout | null = null
 let firstFrameWatchdogStartedAtMs = 0
@@ -3505,11 +3506,10 @@ async function reconcileNativePreviewSurfaceForPreviewWindow(
   )
 }
 
-// Linux has no native preview surface yet (port plan L5), so the frame must
-// not promise one: the waiting copy there names the missing phase instead of
-// a compositor that will never present.
-const PREVIEW_WAIT_TITLE =
-  process.platform === 'linux' ? "Preview isn't built for Linux yet" : 'Waiting for preview'
+// Linux has no native preview surface (port plan L5, Plan 0007): the Electron
+// proof surface IS the preview there, so the waiting copy names the CPU proof
+// path instead of promising a native surface.
+const PREVIEW_WAIT_TITLE = 'Waiting for preview'
 
 const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   /* The whole window is a drag surface: the native video floats above the area
@@ -7837,7 +7837,7 @@ function resolveDevBackendBinary(root = workspaceRoot()): string {
   return join(
     root,
     'target',
-    'debug',
+    devBackendCargoProfile(),
     process.platform === 'win32' ? 'videorc-backend.exe' : 'videorc-backend'
   )
 }
@@ -8143,11 +8143,22 @@ function startBackendWithRegistryLock(): void {
   const command = app.isPackaged ? resolvePackagedBackendBinary() : resolveCargoBinary()
   const args = app.isPackaged
     ? []
-    : ['run', '--quiet', '-p', 'videorc-backend', '--bin', 'videorc-backend']
+    : [
+        'run',
+        '--quiet',
+        ...(devBackendCargoProfile() === 'release' ? ['--release'] : []),
+        '-p',
+        'videorc-backend',
+        '--bin',
+        'videorc-backend'
+      ]
   backendPermissionTargetPath = app.isPackaged ? command : resolveDevBackendBinary(root)
   const pathEntries = [ffmpegBinDir, cargoBinDir, process.env.PATH].filter(Boolean)
 
-  logBackend('info', `Launching backend from ${root}`)
+  logBackend(
+    'info',
+    `Launching backend from ${root}${app.isPackaged ? '' : ` (cargo profile ${devBackendCargoProfile()})`}`
+  )
   if (ffmpegBinDir) {
     logBackend('info', `Using bundled FFmpeg from ${ffmpegBinDir}`)
   }
@@ -13300,7 +13311,8 @@ app.whenReady().then(async () => {
       if (
         (command.kind !== 'answered' &&
           command.kind !== 'dismiss-question' &&
-          command.kind !== 'dismiss-flag') ||
+          command.kind !== 'dismiss-flag' &&
+          command.kind !== 'restore') ||
         typeof command.targetId !== 'string' ||
         !command.targetId.trim()
       ) {

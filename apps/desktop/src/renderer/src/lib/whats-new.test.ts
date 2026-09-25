@@ -11,7 +11,7 @@ import {
 
 const entry = (
   version: string,
-  platforms?: Array<'macos' | 'windows'>
+  platforms?: Array<'macos' | 'windows' | 'linux'>
 ): Record<string, unknown> => ({
   version,
   date: '2026-07-01',
@@ -61,13 +61,15 @@ describe('parseChangelogEntries', () => {
         entry('0.10.0-alpha.2', ['macos', 'windows']),
         { ...entry('0.10.0-alpha.3'), platforms: [] },
         { ...entry('0.10.0-alpha.4'), platforms: ['linux'] },
-        { ...entry('0.10.0-alpha.5'), platforms: ['windows', 'windows'] }
+        { ...entry('0.10.0-alpha.5'), platforms: ['android'] },
+        { ...entry('0.10.0-alpha.6'), platforms: ['windows', 'windows'] }
       ]
     })
 
     expect(parsed.map(({ version, platforms }) => ({ version, platforms }))).toEqual([
       { version: '0.10.0-alpha.1', platforms: ['windows'] },
-      { version: '0.10.0-alpha.2', platforms: ['macos', 'windows'] }
+      { version: '0.10.0-alpha.2', platforms: ['macos', 'windows'] },
+      { version: '0.10.0-alpha.4', platforms: ['linux'] }
     ])
   })
 
@@ -130,6 +132,7 @@ describe('platform filtering', () => {
   const entries = parseChangelogEntries({
     entries: [
       entry('0.10.0-alpha.1', ['windows']),
+      entry('0.10.0-alpha.2', ['linux']),
       entry('0.9.2-beta.1', ['macos']),
       entry('0.9.3-beta.1', ['macos', 'windows']),
       entry('0.9.1-beta.1')
@@ -139,7 +142,7 @@ describe('platform filtering', () => {
   it('maps Electron runtime platform identifiers to changelog identifiers', () => {
     expect(changelogPlatformForRuntime('darwin')).toBe('macos')
     expect(changelogPlatformForRuntime('win32')).toBe('windows')
-    expect(changelogPlatformForRuntime('linux')).toBeNull()
+    expect(changelogPlatformForRuntime('linux')).toBe('linux')
     expect(changelogPlatformForRuntime(undefined)).toBeNull()
   })
 
@@ -152,6 +155,9 @@ describe('platform filtering', () => {
     expect(
       filterChangelogEntriesByPlatform(entries, 'windows').map((item) => item.version)
     ).toEqual(['0.10.0-alpha.1', '0.9.3-beta.1'])
+    expect(filterChangelogEntriesByPlatform(entries, 'linux').map((item) => item.version)).toEqual([
+      '0.10.0-alpha.2'
+    ])
   })
 })
 

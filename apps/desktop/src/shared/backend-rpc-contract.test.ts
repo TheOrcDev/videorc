@@ -1674,6 +1674,46 @@ describe('backend RPC contract', () => {
     expect(() => validateBackendEventPayload('cohost.state', { ...v2, moodScores: null })).toThrow(
       'cohost.state'
     )
+    // Plan 060 S3: spotlight + recently resolved are absent-or-typed, never
+    // null; the spotlight's questionId is optional; at most three resolved.
+    const spotlit = {
+      ...v2,
+      spotlight: {
+        messageId: 'session-1:twitch:default:m-3',
+        score: 0.9,
+        at: '2026-08-22T10:00:21Z',
+        expiresAt: '2026-08-22T10:00:36Z'
+      },
+      recentlyResolved: [
+        { question: state.questions[0], reason: 'voice', resolvedAt: '2026-08-22T10:00:21Z' }
+      ]
+    }
+    expect(validateBackendEventPayload('cohost.state', spotlit)).toEqual(spotlit)
+    expect(validateBackendRpcResult('cohost.question.restore', spotlit)).toEqual(spotlit)
+    expect(
+      validateBackendRpcParams('cohost.question.restore', {
+        sessionId: 'live-1',
+        questionId: 'q-1'
+      })
+    ).toEqual({ sessionId: 'live-1', questionId: 'q-1' })
+    expect(() => validateBackendEventPayload('cohost.state', { ...v2, spotlight: null })).toThrow(
+      'cohost.state'
+    )
+    expect(() =>
+      validateBackendEventPayload('cohost.state', { ...v2, recentlyResolved: null })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...spotlit,
+        spotlight: { ...spotlit.spotlight, score: 1.5 }
+      })
+    ).toThrow('cohost.state')
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...spotlit,
+        recentlyResolved: Array(4).fill(spotlit.recentlyResolved[0])
+      })
+    ).toThrow('cohost.state')
     expect(validateBackendRpcResult('cohost.status', working)).toEqual(working)
     expect(validateBackendEventPayload('cohost.state', { ...working, nextTickAt: null })).toEqual({
       ...working,
@@ -1773,6 +1813,7 @@ describe('backend RPC contract', () => {
       tone: 'short',
       notes: 'Keychron Q1',
       autoHighlight: false,
+      voiceHighlight: false,
       rules: ['No spoilers']
     }
     expect(validateBackendRpcResult('cohost.settings.get', settings)).toEqual(settings)

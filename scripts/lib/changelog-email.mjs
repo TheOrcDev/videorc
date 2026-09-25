@@ -81,7 +81,19 @@ function releasePresentation(entry, base) {
   }
 
   const windowsOnly = platforms.length === 1 && platforms[0] === 'windows'
+  const linuxOnly = platforms.length === 1 && platforms[0] === 'linux'
   const platformLabel = formatPlatforms(platforms)
+  if (linuxOnly) {
+    return {
+      audience: ` for ${platformLabel}`,
+      changelogLabel:
+        entry.channel === 'alpha'
+          ? 'Videorc Linux Alpha changelog'
+          : `Videorc ${platformLabel} changelog`,
+      ctaLabel: 'Linux Alpha is not public yet',
+      downloadUrl: `${base}/download`
+    }
+  }
   return {
     audience: ` for ${platformLabel}`,
     changelogLabel:
@@ -99,7 +111,13 @@ function releasePresentation(entry, base) {
 }
 
 function formatPlatforms(platforms) {
-  return platforms.map((platform) => (platform === 'macos' ? 'macOS' : 'Windows')).join(' and ')
+  return platforms
+    .map((platform) => {
+      if (platform === 'macos') return 'macOS'
+      if (platform === 'linux') return 'Linux'
+      return 'Windows'
+    })
+    .join(' and ')
 }
 
 // The changelog body is a constrained markdown subset (see changelog/README.md):

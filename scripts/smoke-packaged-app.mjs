@@ -7,7 +7,8 @@ import { spawn } from 'node:child_process'
 import {
   assertPackagedSmokePlatform,
   bundledFfmpegPathForPackagedApp,
-  defaultPackagedAppExecutable
+  defaultPackagedAppExecutable,
+  isLinuxAppImageExecutable
 } from './lib/packaged-smoke-paths.mjs'
 import { smokeAppEnv, stopProcess } from './lib/app-launcher.mjs'
 import { requestSmokeCommand } from './lib/smoke-command-client.mjs'
@@ -28,6 +29,11 @@ const outputDirectory = resolve(
   process.env.VIDEORC_SMOKE_OUTPUT_DIR ?? join(tmpdir(), `videorc-packaged-smoke-${Date.now()}`)
 )
 const bundledFfmpegPath = bundledFfmpegPathForPackagedApp({ appExecutable })
+if (isLinuxAppImageExecutable(appExecutable) && !process.env.VIDEORC_SMOKE_FFMPEG_PATH) {
+  throw new Error(
+    'An AppImage mounts its payload privately; pass VIDEORC_SMOKE_FFMPEG_PATH (the pinned vendor/ffmpeg/linux-x64/bin/ffmpeg) for the analyzer, or smoke the linux-unpacked dir.'
+  )
+}
 const ffmpegPath =
   process.env.VIDEORC_SMOKE_FFMPEG_PATH ??
   (existsSync(bundledFfmpegPath) ? bundledFfmpegPath : 'ffmpeg')
@@ -87,7 +93,8 @@ try {
     onHealth: async () => {
       if (
         process.env.VIDEORC_SMOKE_REQUIRE_BUNDLED_FFMPEG === '1' &&
-        ffmpegPath !== bundledFfmpegPath
+        ffmpegPath !== bundledFfmpegPath &&
+        !isLinuxAppImageExecutable(appExecutable)
       ) {
         throw new Error(
           `Expected bundled FFmpeg at ${bundledFfmpegPath}, but smoke is using ${ffmpegPath}.`
@@ -140,6 +147,12 @@ function launchAndReadConnections() {
 
     appProcess = spawn(appExecutable, [], {
       env: smokeAppEnv({
+        // Linux (Plan 0008): the packaged smoke never probes a render node;
+        // the software encoder is the acceptance path until the Linux Alpha
+        // lane names a VAAPI box.
+        ...(process.platform === 'linux'
+          ? { VIDEORC_LINUX_H264_ENCODER: process.env.VIDEORC_LINUX_H264_ENCODER ?? 'openh264' }
+          : {}),
         VIDEORC_USER_DATA_DIR: join(outputDirectory, 'user-data'),
         VIDEORC_SMOKE_OUTPUT_DIR: outputDirectory,
         VIDEORC_SMOKE_PRINT_BACKEND_READY: '1',

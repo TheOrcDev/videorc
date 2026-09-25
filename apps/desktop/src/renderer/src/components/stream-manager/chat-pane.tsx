@@ -51,6 +51,7 @@ import {
   chatPaneMessages,
   followChatOnResize,
   pickedSendProviders,
+  spotlightScrollAllowed,
   writableProviders,
   type ChatPaneFilter
 } from '@/lib/stream-manager-chat'
@@ -59,6 +60,7 @@ import { ABOVE_NARROW, NARROW_ONLY } from '@/lib/stream-manager-layout'
 import { cn } from '@/lib/utils'
 
 const BOTTOM_THRESHOLD_PX = 64
+const SCROLL_KEYS = new Set(['ArrowUp', 'ArrowDown', 'PageUp', 'PageDown', 'Home', 'End'])
 
 export interface ChatPrefill {
   seq: number
@@ -83,6 +85,7 @@ export function ChatPane({
   highlightFailure = null,
   cohostFlags,
   cohostSuggested,
+  cohostSpotlight = null,
   questionMessageIds,
   mentionNames,
   onHighlight,
@@ -108,6 +111,8 @@ export function ChatPane({
   highlightFailure?: { messageId: string; reason: string } | null
   cohostFlags?: ReadonlyMap<string, CohostFlag>
   cohostSuggested?: ReadonlySet<string>
+  /** The message the streamer is talking about: marked, and pulled into view. */
+  cohostSpotlight?: string | null
   /** Messages behind Orcle's open questions (the Questions filter). */
   questionMessageIds: ReadonlySet<string>
   /** The streamer's own account names (the Mentions filter). */
@@ -186,6 +191,9 @@ export function ChatPane({
   const [unread, setUnread] = useState(0)
   const pinnedRef = useRef(true)
   const previousCount = useRef(shown.length)
+  // When the streamer last scrolled by hand (wheel, touch, keys, the
+  // scrollbar); programmatic follow and jump scrolls never count.
+  const lastUserScrollAtRef = useRef<number | null>(null)
   useEffect(() => {
     if (!viewport) return
     const onScroll = (): void => {
@@ -195,8 +203,30 @@ export function ChatPane({
       setPinned(atBottom)
       if (atBottom) setUnread(0)
     }
+    const onUserScroll = (): void => {
+      lastUserScrollAtRef.current = Date.now()
+    }
+    const onKeyDown = (event: KeyboardEvent): void => {
+      if (SCROLL_KEYS.has(event.key)) onUserScroll()
+    }
+    const onPointerDown = (event: PointerEvent): void => {
+      if ((event.target as Element | null)?.closest?.('[data-slot="scroll-area-scrollbar"]')) {
+        onUserScroll()
+      }
+    }
+    const root = rootRef.current
     viewport.addEventListener('scroll', onScroll, { passive: true })
-    return () => viewport.removeEventListener('scroll', onScroll)
+    viewport.addEventListener('wheel', onUserScroll, { passive: true })
+    viewport.addEventListener('touchmove', onUserScroll, { passive: true })
+    viewport.addEventListener('keydown', onKeyDown)
+    root?.addEventListener('pointerdown', onPointerDown)
+    return () => {
+      viewport.removeEventListener('scroll', onScroll)
+      viewport.removeEventListener('wheel', onUserScroll)
+      viewport.removeEventListener('touchmove', onUserScroll)
+      viewport.removeEventListener('keydown', onKeyDown)
+      root?.removeEventListener('pointerdown', onPointerDown)
+    }
   }, [viewport])
 
   // A resize (the window, the composer's notes, a row whose emotes loaded)
@@ -243,6 +273,40 @@ export function ChatPane({
     setPinned(false)
     virtualizer.scrollToIndex(index, { align: 'center' })
   }, [filtering, jumpTo, shown, virtualizer])
+
+  // Orcle's pull-up: scroll the comment being talked about into view once per
+  // spotlight, unless the streamer is reading back (spotlightScrollAllowed).
+  // If it took them away from the latest, they go back there when it ends,
+  // unless they scrolled in the meantime.
+  const handledSpotlightRef = useRef<string | null>(null)
+  const spotlightLeftLatestAtRef = useRef<number | null>(null)
+  useEffect(() => {
+    if (!cohostSpotlight) {
+      handledSpotlightRef.current = null
+      const leftAt = spotlightLeftLatestAtRef.current
+      spotlightLeftLatestAtRef.current = null
+      if (leftAt !== null && (lastUserScrollAtRef.current ?? 0) < leftAt) jumpToLatest()
+      return
+    }
+    if (handledSpotlightRef.current === cohostSpotlight) return
+    const index = shown.findIndex((message) => message.id === cohostSpotlight)
+    if (index < 0) return
+    handledSpotlightRef.current = cohostSpotlight
+    const nowMs = Date.now()
+    if (
+      !spotlightScrollAllowed({
+        pinned: pinnedRef.current,
+        lastUserScrollAtMs: lastUserScrollAtRef.current,
+        nowMs
+      })
+    ) {
+      return
+    }
+    if (pinnedRef.current) spotlightLeftLatestAtRef.current = nowMs
+    pinnedRef.current = false
+    setPinned(false)
+    virtualizer.scrollToIndex(index, { align: 'center' })
+  }, [cohostSpotlight, jumpToLatest, shown, virtualizer])
 
   const searchRef = useRef<HTMLInputElement>(null)
   useEffect(() => {
@@ -437,6 +501,7 @@ export function ChatPane({
                     key={item.key}
                     ref={virtualizer.measureElement}
                     cohostFlag={cohostFlags?.get(message.id)}
+                    cohostSpotlight={cohostSpotlight === message.id}
                     cohostSuggested={cohostSuggested?.has(message.id) ?? false}
                     density="comfortable"
                     timestamps={live ? 'hover' : 'always'}

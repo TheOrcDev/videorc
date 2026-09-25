@@ -9,7 +9,7 @@
 // Harnesses default to isolated app/user data and ledger reaping. Product launches
 // still use the normal app data path unless a smoke explicitly opts into this helper.
 
-import { execFileSync, spawn } from 'node:child_process'
+import { execFileSync, spawn, spawnSync } from 'node:child_process'
 import { randomBytes } from 'node:crypto'
 import {
   closeSync,
@@ -344,6 +344,23 @@ export function launchDevApp({
     }
     if (spawnSpec.appOwnership) {
       mkdirSync(dirname(spawnSpec.appOwnership.path), { recursive: true })
+    }
+
+    if (!launchViaMacosLaunchServices && !requestedSpawnSpec) {
+      // `pnpm dev` runs `cargo run --quiet`, which prints nothing while the
+      // debug backend recompiles (5-7 min on ogre after a pull), so the
+      // launch clock used to race the compiler and fail with misleading GPU
+      // noise from a SIGTERMed Electron (Plan 0009). Build first, with its
+      // own bounded deadline, then start the launch clock.
+      const prebuild = devBackendPrebuildSpec({ env: process.env })
+      if (prebuild) {
+        const failure = runDevBackendPrebuild(prebuild, { onLine, env: childEnv })
+        if (failure) {
+          settled = true
+          rejectLaunch(new Error(failure))
+          return
+        }
+      }
     }
 
     const child = spawn(spawnSpec.command, spawnSpec.args, spawnSpec.options)
@@ -1023,6 +1040,86 @@ export function appSpawnSpec({
       cwd
     }
   }
+}
+
+export const DEV_BACKEND_PREBUILD_TIMEOUT_MS = 20 * 60 * 1000
+
+/**
+ * The synchronous `cargo build` that runs before a dev-app smoke launch, or
+ * `null` when the caller opted out with `VIDEORC_SMOKE_SKIP_PREBUILD=1`.
+ * The whole package builds (every bin `pnpm dev` may `cargo run`), so the
+ * later `cargo run --quiet` only links what is already compiled.
+ */
+export function devBackendPrebuildSpec({ env = process.env, platform = process.platform } = {}) {
+  if (env?.VIDEORC_SMOKE_SKIP_PREBUILD === '1') return null
+  const timeoutMs = Number(
+    env?.VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS ?? DEV_BACKEND_PREBUILD_TIMEOUT_MS
+  )
+  // Mirrors the desktop main process: VIDEORC_DEV_BACKEND_PROFILE=release
+  // makes `pnpm dev` run the optimized backend (Plan 0005).
+  const release = env?.VIDEORC_DEV_BACKEND_PROFILE === 'release'
+  return {
+    command: platform === 'win32' ? 'cargo.exe' : 'cargo',
+    args: ['build', ...(release ? ['--release'] : []), '-p', 'videorc-backend'],
+    cwd: repoRoot,
+    timeoutMs:
+      Number.isFinite(timeoutMs) && timeoutMs > 0 ? timeoutMs : DEV_BACKEND_PREBUILD_TIMEOUT_MS
+  }
+}
+
+/**
+ * Formats the prebuild's failure for the smoke log, or `null` when it built.
+ * Pure so the timeout and non-zero paths are unit-testable.
+ */
+export function devBackendPrebuildFailure(spec, { status, signal, error, stderrTail = [] }) {
+  const tail = stderrTail
+    .filter((line) => line.trim())
+    .slice(-20)
+    .join('\n')
+  const suffix = tail ? `\n\nLast cargo output:\n${tail}` : ''
+  if (error?.code === 'ETIMEDOUT' || signal === 'SIGTERM') {
+    return (
+      `Backend still compiling after ${Math.round(spec.timeoutMs / 1000)}s; ` +
+      `run \`cargo build -p videorc-backend\` first ` +
+      `(or set VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS / VIDEORC_SMOKE_SKIP_PREBUILD=1).${suffix}`
+    )
+  }
+  if (error) {
+    return `Backend prebuild could not start (${spec.command} ${spec.args.join(' ')}): ${error.message}${suffix}`
+  }
+  if (status !== 0) {
+    return `Backend prebuild failed (${spec.command} ${spec.args.join(' ')} exited ${status ?? signal}); fix the build before running the smoke.${suffix}`
+  }
+  return null
+}
+
+function runDevBackendPrebuild(spec, { onLine, env }) {
+  const startedAt = Date.now()
+  const describe = `${spec.command} ${spec.args.join(' ')}`
+  onLine?.(`[smoke:prebuild] ${describe} (timeout ${Math.round(spec.timeoutMs / 1000)}s)`)
+  const result = spawnSync(spec.command, spec.args, {
+    cwd: spec.cwd,
+    env,
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+    timeout: spec.timeoutMs,
+    killSignal: 'SIGTERM',
+    maxBuffer: 64 * 1024 * 1024
+  })
+  const stderrTail = `${result.stdout ?? ''}${result.stderr ?? ''}`.split(/\r?\n/)
+  for (const line of stderrTail.slice(-20)) {
+    if (line.trim()) onLine?.(`[smoke:prebuild] ${line}`)
+  }
+  const failure = devBackendPrebuildFailure(spec, {
+    status: result.status,
+    signal: result.signal,
+    error: result.error,
+    stderrTail
+  })
+  if (!failure) {
+    onLine?.(`[smoke:prebuild] backend built in ${Math.round((Date.now() - startedAt) / 1000)}s`)
+  }
+  return failure
 }
 
 export function devAppSpawnOptions({ env, platform = process.platform } = {}) {

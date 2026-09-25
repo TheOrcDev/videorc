@@ -34,6 +34,10 @@ mod fifo;
 mod frame_store;
 mod h264_profile;
 #[cfg(any(test, target_os = "linux"))]
+mod linux_pipewire_stream;
+mod linux_portal_capture;
+mod linux_portal_session;
+#[cfg(any(test, target_os = "linux"))]
 mod linux_vaapi;
 mod live_chat;
 mod live_chat_persistence;
@@ -200,8 +204,8 @@ use crate::streaming::{
     PlatformAccountValidation, PlatformAccountValidationState, StoreManualStreamKeyParams,
     StoreManualStreamKeyResult, StreamAuthMode, StreamMetadataDraft, StreamPlatform,
     UpsertPlatformAccount, manual_stream_key_previous_secret_ref, manual_stream_key_secret_ref,
-    manual_stream_key_state, plan_manual_stream_key_restore, plan_manual_stream_key_store,
-    validate_stream_metadata_draft,
+    manual_stream_key_state, normalize_stream_metadata_draft, plan_manual_stream_key_restore,
+    plan_manual_stream_key_store, validate_stream_metadata_draft,
 };
 use crate::twitch::{
     PreparedTwitchBroadcast, TwitchCategorySearchParams, TwitchCategorySearchRequest,
@@ -4855,6 +4859,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.stop"
         | "cohost.question.answered"
         | "cohost.question.dismiss"
+        | "cohost.question.restore"
         | "cohost.flag.dismiss"
         | "cohost.settings.set"
         | "captions.overlay.clear"
@@ -8489,6 +8494,19 @@ async fn handle_text_message_with_role(
                 }
             }
         }
+        "cohost.question.restore" => {
+            match serde_json::from_value::<protocol::CohostQuestionParams>(command.params) {
+                Ok(params) => match cohost::restore_question(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
         "cohost.flag.dismiss" => {
             match serde_json::from_value::<protocol::CohostFlagParams>(command.params) {
                 Ok(params) => match cohost::dismiss_flag(state, params).await {
@@ -10261,7 +10279,10 @@ async fn handle_text_message_with_role(
         }
         "streamTargets.metadata.validate" => {
             match serde_json::from_value::<StreamMetadataDraft>(command.params) {
-                Ok(draft) => ServerResponse::ok(command.id, validate_stream_metadata_draft(&draft)),
+                Ok(mut draft) => {
+                    normalize_stream_metadata_draft(&mut draft);
+                    ServerResponse::ok(command.id, validate_stream_metadata_draft(&draft))
+                }
                 Err(error) => {
                     ServerResponse::error(command.id, "invalid-params", error.to_string())
                 }
@@ -11649,6 +11670,25 @@ mod tests {
     fn hard_exit_child_helper() {
         if std::env::var(HARD_EXIT_CHILD_ENV).as_deref() != Ok("1") {
             return;
+        }
+        // Plan 0003: the parent measures a 3 s wall-clock bound on this
+        // abort. With core dumps enabled, `wait()` only returns after the
+        // host's handler has consumed the core (systemd-coredump on
+        // Omarchy/Arch took 3.08 s to zstd + symbolise the 617 MB debug test
+        // binary), so the bound measured the coredump handler, not the exit
+        // path. Skip the core for THIS child only; the production
+        // `hard_abort_after_delay` is untouched and a real backend still
+        // dumps core for `diagnose-crash`. Do not "fix" this by raising the
+        // parent's deadline.
+        #[cfg(unix)]
+        // SAFETY: setrlimit on the calling process with a valid, fully
+        // initialised rlimit struct; no memory is shared or retained.
+        unsafe {
+            let no_core = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            libc::setrlimit(libc::RLIMIT_CORE, &no_core);
         }
         std::thread::spawn(|| hard_abort_after_delay(Duration::from_millis(150)));
         // The parent deliberately never drains this pipe. Hold stderr's lock

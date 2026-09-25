@@ -3,6 +3,7 @@ import test from 'node:test'
 
 import {
   parseWindowsPreviewLifecycleMode,
+  previewLifecycleModePlatform,
   windowsPreviewLifecycleDiagnosticFailures,
   windowsPreviewLifecycleOpenFailures,
   windowsPreviewPresenterFailures
@@ -138,4 +139,59 @@ test('presenter readback proves styles, ownership, bounds, focus, and sequence p
     'presenter sequence 44 did not advance beyond 44',
     'presenter x=130 did not match content x=120'
   ])
+})
+
+test('linux proof mode asserts the Electron proof surface and never a native claim', () => {
+  assert.equal(
+    parseWindowsPreviewLifecycleMode(['--gate'], { VIDEORC_EXPECT_LINUX_PROOF: '1' }),
+    'linux-proof'
+  )
+  assert.equal(previewLifecycleModePlatform('linux-proof'), 'linux')
+  assert.equal(previewLifecycleModePlatform('windows-fallback'), 'win32')
+  assert.equal(previewLifecycleModePlatform('default'), null)
+  assert.throws(
+    () =>
+      parseWindowsPreviewLifecycleMode([], {
+        VIDEORC_EXPECT_LINUX_PROOF: '1',
+        VIDEORC_EXPECT_WINDOWS_D3D11: '1'
+      }),
+    /mutually exclusive/
+  )
+  const state = {
+    surface: { exists: true, visible: true },
+    framePollingSuppressedFlag: false,
+    nativeOwnsPlacement: false,
+    surfaceStatus: {
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface',
+      framePollingSuppressed: false
+    }
+  }
+  assert.deepEqual(windowsPreviewLifecycleOpenFailures(state, 'linux-proof'), [])
+  const native = {
+    ...state,
+    nativeOwnsPlacement: true,
+    framePollingSuppressedFlag: true,
+    surfaceStatus: { ...state.surfaceStatus, transport: 'native-surface', backing: 'cametal-layer' }
+  }
+  const failures = windowsPreviewLifecycleOpenFailures(native, 'linux-proof')
+  assert.match(failures.join('\n'), /transport=native-surface/)
+  assert.match(failures.join('\n'), /backing=cametal-layer/)
+  assert.match(failures.join('\n'), /polling is suppressed/)
+  assert.match(failures.join('\n'), /native presenter claims placement/)
+  assert.deepEqual(
+    windowsPreviewLifecycleDiagnosticFailures(
+      { previewTransport: 'electron-proof-surface', compositorBackend: 'cpu' },
+      'linux-proof'
+    ),
+    []
+  )
+  assert.match(
+    windowsPreviewLifecycleDiagnosticFailures(
+      { previewTransport: 'native-surface', compositorBackend: 'cpu-fallback' },
+      'linux-proof'
+    ).join('\n'),
+    /native-surface.*linux[\s\S]*cpu-fallback/
+  )
 })

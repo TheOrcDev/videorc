@@ -1145,6 +1145,10 @@ pub struct AppState {
     /// Live Co-host engine: per-session open questions, flags, mood, and the
     /// tick scheduler. Settings are loaded from `app_settings` at startup.
     pub cohost: crate::cohost::CohostSlot,
+    /// The last seconds of live-caption finals for the co-host spotlight lane
+    /// (plan 060 S3). A std mutex on purpose: the caption coordinator appends
+    /// without ever waiting on the engine's async lock.
+    pub cohost_transcript: crate::cohost::CohostTranscriptSlot,
 }
 
 impl AppState {
@@ -1259,6 +1263,7 @@ impl AppState {
             comment_highlight: crate::comment_highlight::new_comment_highlight_slot(),
             comment_highlight_commit: Arc::new(tokio::sync::Mutex::new(())),
             cohost: crate::cohost::new_cohost_slot(cohost_settings),
+            cohost_transcript: crate::cohost::new_cohost_transcript_slot(),
         }
     }
 

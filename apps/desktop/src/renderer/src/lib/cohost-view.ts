@@ -21,6 +21,13 @@ import type { EntitlementUiGate } from './entitlement-ui'
 // is a pure derivation of the last `cohost.state` event so the pane, the
 // destination chip and the detached Comments window cannot disagree.
 
+/**
+ * What Orcle sends, in one sentence (plan 060 D11). Every consent surface
+ * (Settings, the pane notice, the status popover) repeats it verbatim.
+ */
+export const COHOST_CONSENT_SENTENCE =
+  'Orcle reads live chat with Videorc cloud AI; while live captions are on, it also reads short windows of what you say, as text (never audio), which are not kept.'
+
 export const EMPTY_COHOST_STATE: CohostState = {
   sessionId: null,
   status: 'off',
@@ -192,7 +199,7 @@ export function cohostPaneMode({
   if (!consented) {
     return {
       kind: 'consent',
-      reason: 'Orcle reads live chat with Videorc cloud AI. Turn on cloud AI to use it.'
+      reason: `${COHOST_CONSENT_SENTENCE} Turn on cloud AI to use it.`
     }
   }
   if (!enabled) {
@@ -417,33 +424,6 @@ export function cohostStateForSensitivity<T extends CohostState | null>(
   if (!state) return state
   const flags = state.flags.filter((flag) => cohostFlagVisible(flag, sensitivity))
   return flags.length === state.flags.length ? state : { ...state, flags }
-}
-
-// --- Comment-row marks -------------------------------------------------------
-
-export interface CohostCommentMarks {
-  /** Flag per flagged message id. */
-  flags: ReadonlyMap<string, CohostFlag>
-  /** Message ids the co-host suggests showing on stream. */
-  suggested: ReadonlySet<string>
-}
-
-export const EMPTY_COHOST_COMMENT_MARKS: CohostCommentMarks = {
-  flags: new Map(),
-  suggested: new Set()
-}
-
-/** What the message list needs from `cohost.state`. A flagged message is never
- * also suggested (the backend enforces it; this keeps the row honest anyway). */
-export function cohostCommentMarks(state: CohostState | null): CohostCommentMarks {
-  if (!state || state.status === 'off') return EMPTY_COHOST_COMMENT_MARKS
-  const highlights = state.highlights ?? []
-  if (state.flags.length === 0 && highlights.length === 0) return EMPTY_COHOST_COMMENT_MARKS
-  const flags = new Map(state.flags.map((flag) => [flag.messageId, flag]))
-  const suggested = new Set(
-    highlights.map((highlight) => highlight.messageId).filter((id) => !flags.has(id))
-  )
-  return { flags, suggested }
 }
 
 // --- Attention alerts ----------------------------------------------------------

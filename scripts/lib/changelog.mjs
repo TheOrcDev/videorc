@@ -4,7 +4,7 @@ import { basename, join } from 'node:path'
 export const CHANGELOG_SCHEMA_VERSION = 1
 
 const ALLOWED_CHANNELS = ['alpha', 'beta', 'stable']
-const ALLOWED_PLATFORMS = ['macos', 'windows']
+const ALLOWED_PLATFORMS = ['macos', 'windows', 'linux']
 const ALLOWED_FRONTMATTER_KEYS = [
   'version',
   'date',
@@ -70,7 +70,7 @@ export function parseChangelogEntry(markdown, { filename }) {
   // Preserve them while ensuring every parsed/published entry carries a list.
   const platforms = explicitPlatforms ?? ['macos']
   if (explicitPlatforms && explicitPlatforms.length === 0) {
-    errors.push('platforms must contain at least one of macos, windows')
+    errors.push('platforms must contain at least one of macos, windows, linux')
   }
   const unsupportedPlatforms = platforms.filter((platform) => !ALLOWED_PLATFORMS.includes(platform))
   if (unsupportedPlatforms.length > 0) {

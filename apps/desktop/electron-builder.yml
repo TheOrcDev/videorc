@@ -123,6 +123,34 @@ win:
     - dir
     - nsis
 
+# Linux x64 AppImage (port plan L6, Plan 0008). Unsigned; the Linux Alpha
+# lane is candidate-only until the Ubuntu 24.04 tester box proves it (see
+# docs/linux-port-plan.md). The release backend and the pinned LGPL Linux
+# FFmpeg pair (fetch-ffmpeg-linux.mjs verifies configure flags and the
+# h264_vaapi + libopenh264 encoder table) ride as extraResources, so the
+# packaged app resolves them from process.resourcesPath exactly like the
+# macOS and Windows builds. The icon is derived from icon.icns.
+linux:
+  category: Video
+  executableName: videorc
+  maintainer: TheOrcDev
+  extraResources:
+    - from: ../../target/release/videorc-backend
+      to: videorc-backend
+      filter:
+        - videorc-backend
+    - from: ../../vendor/ffmpeg/linux-x64
+      to: ffmpeg
+      filter:
+        - bin/ffmpeg
+        - bin/ffprobe
+        - LICENSE.txt
+        - SOURCE.txt
+        - BUILD-CONFIG.txt
+  target:
+    - dir
+    - AppImage
+
 nsis:
   oneClick: false
   perMachine: false

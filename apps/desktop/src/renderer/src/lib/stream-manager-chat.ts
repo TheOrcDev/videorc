@@ -79,3 +79,24 @@ export function followChatOnResize(
   if (viewport.firstElementChild) observer.observe(viewport.firstElementChild)
   return () => observer.disconnect()
 }
+
+/** How long a streamer's own scroll holds off a pull-up (plan 060, S4). */
+export const SPOTLIGHT_SCROLL_QUIET_MS = 5_000
+
+/**
+ * May the list scroll the comment being talked about into view? Following the
+ * latest (pinned) always may; a streamer who scrolled in the last five seconds
+ * and is not at the latest is reading back, and a pull-up never fights them.
+ */
+export function spotlightScrollAllowed({
+  pinned,
+  lastUserScrollAtMs,
+  nowMs
+}: {
+  pinned: boolean
+  lastUserScrollAtMs: number | null
+  nowMs: number
+}): boolean {
+  if (pinned || lastUserScrollAtMs === null) return true
+  return nowMs - lastUserScrollAtMs >= SPOTLIGHT_SCROLL_QUIET_MS
+}

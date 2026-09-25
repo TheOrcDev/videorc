@@ -115,14 +115,19 @@ describe('parseChangelogEntry', () => {
         parseChangelogEntry(validEntryMarkdown({ platforms: [] }), {
           filename: '0.9.2-beta.1.md'
         }),
-      /platforms must contain at least one of macos, windows/
+      /platforms must contain at least one of macos, windows, linux/
+    )
+    assert.doesNotThrow(() =>
+      parseChangelogEntry(validEntryMarkdown({ platforms: ['linux'] }), {
+        filename: '0.9.2-beta.1.md'
+      })
     )
     assert.throws(
       () =>
-        parseChangelogEntry(validEntryMarkdown({ platforms: ['linux'] }), {
+        parseChangelogEntry(validEntryMarkdown({ platforms: ['android'] }), {
           filename: '0.9.2-beta.1.md'
         }),
-      /platforms must contain only macos, windows/
+      /platforms must contain only macos, windows, linux/
     )
     assert.throws(
       () =>

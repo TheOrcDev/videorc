@@ -183,6 +183,13 @@ starts.
 - Model portal consent, cancellation, revoked sessions, missing sources, and
   reconnects as explicit states and diagnostics.
 - Prove source switching and lifecycle behavior on the real Linux desktop.
+- Status (Plan 0006, 2026-09-25): first cut landed. `linux_portal_capture.rs`
+  (state model, restore-token store, BGRA copy, device entries; unit-tested
+  on every platform), `linux_portal_session.rs` (ashpd session runner) and
+  `linux_pipewire_stream.rs` (pipewire reader) feed the shared screen frame
+  store; `pnpm smoke:linux-portal-capture` is the box gate. Reconnect after
+  revoke is a restart with the saved token, not an in-place reconnect, and
+  DMA-BUF import is not done.
 
 ### L5 — CPU composition and JPEG preview
 
@@ -191,8 +198,27 @@ starts.
   backpressure, detach/reattach, and truthful fallback diagnostics.
 - Prove composed recording and preview behavior without claiming a GPU-native
   preview surface.
+- Status (Plan 0007, 2026-09-25): the Electron proof surface (uncompressed
+  latest-wins BMP per source, `electron-proof-surface` /
+  `electron-browser-window`) is the Linux preview, fed by the CPU compositor
+  and the L4 portal screen store. Backend, supervisor, renderer and waiting
+  copy name it "Linux CPU preview" and never a native surface;
+  `pnpm probe:preview-lifecycle:linux` (`VIDEORC_EXPECT_LINUX_PROOF=1`) is
+  the box gate. A composed-frame (single BMP) transport is not done; the
+  proof surface layers per-source BMPs like Windows.
 
 ### L6 — AppImage, release lane, and acceptance
+
+- Status (Plan 0008/0009, 2026-09-25): `electron-builder.yml` has a Linux
+  AppImage+dir target; `pnpm package:desktop:linux` +
+  `preflight-linux-package.mjs` stage the release backend and pinned LGPL
+  FFmpeg. `.github/workflows/release-linux-alpha.yml` now builds an unsigned
+  Ubuntu 24.04 x64 AppImage candidate, writes isolated
+  `release.json` / `latest-linux.yml` under `releases/linux-alpha/<releaseId>/`
+  (stored at `candidates/linux-alpha/<releaseId>/<sourceCommit>/`), and uploads
+  only to private candidate prefixes. Public download, website manifests,
+  `promote-linux-alpha.yml`, Ubuntu 24.04 named-box packaged smoke, and the
+  videorc-web download button are still owed.
 
 - Build an Ubuntu 24.04 x64 AppImage with the verified LGPL FFmpeg payload.
 - Use an isolated Linux Alpha lane with candidate, pilot, then public

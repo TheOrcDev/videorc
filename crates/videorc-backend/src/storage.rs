@@ -29,8 +29,8 @@ use crate::protocol::{
 use crate::repair::{GateStatus, RepairJob, RepairJobStatus};
 use crate::streaming::{
     PlatformAccount, PlatformAccountStatus, StreamMetadataDraft, StreamPlatform,
-    UpsertPlatformAccount, default_stream_metadata_draft, stream_platform_from_id,
-    stream_platform_id,
+    UpsertPlatformAccount, default_stream_metadata_draft, normalize_stream_metadata_draft,
+    stream_platform_from_id, stream_platform_id,
 };
 
 const MAX_NOISE_CLEANUP_JOB_LIST: usize = 1_000;
@@ -5094,11 +5094,13 @@ impl Database {
                 |row| row.get::<_, String>(0),
             )
             .optional()?;
-        match value_json {
-            Some(value) => Ok(serde_json::from_str::<StreamMetadataDraft>(&value)
-                .unwrap_or_else(|_| default_stream_metadata_draft(Utc::now().to_rfc3339()))),
-            None => Ok(default_stream_metadata_draft(Utc::now().to_rfc3339())),
-        }
+        let mut draft = match value_json {
+            Some(value) => serde_json::from_str::<StreamMetadataDraft>(&value)
+                .unwrap_or_else(|_| default_stream_metadata_draft(Utc::now().to_rfc3339())),
+            None => default_stream_metadata_draft(Utc::now().to_rfc3339()),
+        };
+        normalize_stream_metadata_draft(&mut draft);
+        Ok(draft)
     }
 
     pub fn save_stream_metadata_draft(
@@ -5107,6 +5109,7 @@ impl Database {
     ) -> Result<StreamMetadataDraft> {
         let now = Utc::now().to_rfc3339();
         draft.updated_at = now.clone();
+        normalize_stream_metadata_draft(&mut draft);
         for target in &mut draft.target_overrides {
             target.updated_at = now.clone();
         }
@@ -10945,6 +10948,92 @@ mod tests {
             },
             "the transition owner must still be able to observe and retire it"
         );
+    }
+
+    #[test]
+    fn stream_metadata_draft_backfills_missing_platform_rows_on_load() {
+        let database = test_database();
+
+        // An empty override list parses, so the default fallback never fired
+        // and the Livestream page drew no per-destination rows for months.
+        database
+            .save_setting(
+                "streamMetadataDraft",
+                &serde_json::json!({
+                    "title": "Reviewing projects",
+                    "description": "Global description",
+                    "defaultPrivacy": "public",
+                    "targetOverrides": [],
+                    "updatedAt": "2026-09-24T21:31:42Z"
+                }),
+            )
+            .unwrap();
+
+        let loaded = database.stream_metadata_draft().unwrap();
+        assert_eq!(loaded.title, "Reviewing projects");
+        assert_eq!(loaded.description, "Global description");
+        assert_eq!(loaded.default_privacy, StreamPrivacy::Public);
+        assert_eq!(
+            loaded
+                .target_overrides
+                .iter()
+                .map(|target| target.platform)
+                .collect::<Vec<_>>(),
+            vec![
+                StreamPlatform::Youtube,
+                StreamPlatform::Twitch,
+                StreamPlatform::X
+            ]
+        );
+        assert!(
+            loaded
+                .target_overrides
+                .iter()
+                .all(|target| !target.customize)
+        );
+    }
+
+    #[test]
+    fn stream_metadata_draft_keeps_customized_rows_and_adds_the_missing_ones() {
+        let database = test_database();
+
+        let mut draft = default_stream_metadata_draft("old".to_string());
+        draft.title = "Launch stream".to_string();
+        draft
+            .target_overrides
+            .retain(|target| target.platform == StreamPlatform::Twitch);
+        let twitch = draft.target_overrides.first_mut().unwrap();
+        twitch.customize = true;
+        twitch.title = "Twitch launch".to_string();
+        twitch.twitch_category_name = Some("Just Chatting".to_string());
+
+        let saved = database.save_stream_metadata_draft(draft).unwrap();
+        assert_eq!(
+            saved
+                .target_overrides
+                .iter()
+                .map(|target| target.platform)
+                .collect::<Vec<_>>(),
+            vec![
+                StreamPlatform::Twitch,
+                StreamPlatform::Youtube,
+                StreamPlatform::X
+            ]
+        );
+        let twitch = &saved.target_overrides[0];
+        assert!(twitch.customize);
+        assert_eq!(twitch.title, "Twitch launch");
+        assert_eq!(
+            twitch.twitch_category_name.as_deref(),
+            Some("Just Chatting")
+        );
+        assert!(
+            saved
+                .target_overrides
+                .iter()
+                .all(|target| target.updated_at == saved.updated_at)
+        );
+        assert_eq!(database.stream_metadata_draft().unwrap(), saved);
     }
 
     #[test]

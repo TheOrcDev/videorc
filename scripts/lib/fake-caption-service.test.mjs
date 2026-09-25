@@ -65,6 +65,59 @@ describe('fake caption service', () => {
     }
   })
 
+  it('pushes scripted realtime finals and can skip the canned transcript', async () => {
+    const realtimeToken = 'fake-caption-realtime'
+    const fake = await startFakeCaptionService({
+      smokeSessionToken: 'fake-caption-session',
+      smokeRealtimeToken: realtimeToken,
+      autoTranscript: false
+    })
+
+    try {
+      assert.equal(await fake.emitRealtimeFinal('Nobody is listening.'), 0)
+      const socket = new WebSocket(`${fake.httpOrigin.replace('http:', 'ws:')}/realtime`, [
+        'ai-gateway-realtime.v1',
+        `ai-gateway-auth.${realtimeToken}`
+      ])
+      const received = []
+      socket.on('message', (data) => received.push(JSON.parse(data.toString())))
+      await new Promise((resolveOpen, rejectOpen) => {
+        socket.once('open', resolveOpen)
+        socket.once('error', rejectOpen)
+      })
+      socket.send(JSON.stringify({ type: 'input_audio_buffer.append', audio: 'AAAA' }))
+      await waitFor(() => fake.state.audioAppends === 1)
+
+      assert.equal(await fake.emitRealtimeFinal('First scripted final.'), 1)
+      assert.equal(await fake.emitRealtimeFinal('Second scripted final.'), 1)
+      await waitFor(() => received.length === 4)
+      socket.close()
+
+      assert.deepEqual(
+        received.map((event) => [event.type, event.itemId]),
+        [
+          ['speech-started', 'scripted-item-2'],
+          ['input-transcription-completed', 'scripted-item-2'],
+          ['speech-started', 'scripted-item-3'],
+          ['input-transcription-completed', 'scripted-item-3']
+        ]
+      )
+      assert.equal(received[1].transcript, 'First scripted final.')
+      assert.equal(received[3].transcript, 'Second scripted final.')
+      assert.equal(received[0].raw.item_id, 'scripted-item-2')
+      assert.ok(received[0].raw.audio_start_ms >= 0)
+      assert.deepEqual(
+        fake.state.emittedFinals.map((final) => [final.text, final.reached]),
+        [
+          ['First scripted final.', 1],
+          ['Second scripted final.', 1]
+        ]
+      )
+    } finally {
+      await fake.close()
+    }
+  })
+
   it('inspects uploaded WAV amplitude and can withhold captions for muted audio', async () => {
     const sessionToken = 'fake-caption-session'
     const fake = await startFakeCaptionService({
@@ -165,4 +218,12 @@ function pcm16Wav(samples) {
   wav.writeUInt32LE(pcm.length, 40)
   pcm.copy(wav, 44)
   return wav
+}
+
+async function waitFor(probe, timeoutMs = 5_000) {
+  const deadline = Date.now() + timeoutMs
+  while (!probe()) {
+    if (Date.now() > deadline) throw new Error('Timed out waiting for the fake caption service.')
+    await new Promise((resolveWait) => setTimeout(resolveWait, 10))
+  }
 }

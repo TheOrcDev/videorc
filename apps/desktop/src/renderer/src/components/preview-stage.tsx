@@ -135,18 +135,19 @@ export type PreviewDisabledCopy = {
   tone: 'expected' | 'warn'
 }
 
-/** Copy for the card when no native preview surface is enabled. On Linux the
- * surface is not built yet (port plan L5), so the honest message names the
- * missing phase instead of implying a fault the user could fix. */
+/** Copy for the card when no native preview surface is enabled. On Linux there
+ * is no native surface by design (port plan L5, Plan 0007): the Electron proof
+ * surface is the preview, so the message names that path and stays calm. */
 export function previewDisabledCopy(
   platform: string | undefined,
   disabledMessage: string
 ): PreviewDisabledCopy {
   if (platform === 'linux') {
     return {
-      title: "Preview isn't built for Linux yet",
-      detail: 'Recording still works. A Linux preview arrives in a later port phase.',
-      retryable: false,
+      title: 'Linux CPU preview',
+      detail:
+        'Open the Preview window to see the Electron proof surface (CPU composition, not a native surface).',
+      retryable: true,
       tone: 'expected'
     }
   }
@@ -359,7 +360,8 @@ function DetachedPreviewCard({
       previewTransportLabel(
         previewSurfaceStatus?.transport ?? 'unavailable',
         previewSurfaceStatus?.backing,
-        previewSurfaceStatus?.nativePreviewHostKind
+        previewSurfaceStatus?.nativePreviewHostKind,
+        platform
       ))
     : null
   const disabledCopy = previewDisabledCopy(
@@ -613,7 +615,8 @@ function previewTransportLabel(
   backing?: PreviewSurfaceStatus['backing'] | PreviewSupervisorState['backing'],
   hostKind?:
     | PreviewSurfaceStatus['nativePreviewHostKind']
-    | PreviewSupervisorState['nativePreviewHostKind']
+    | PreviewSupervisorState['nativePreviewHostKind'],
+  platform?: string
 ): string | null {
   switch (transport) {
     case 'native-surface':
@@ -623,7 +626,7 @@ function previewTransportLabel(
         ? 'Native preview'
         : 'Surface proof'
     case 'electron-proof-surface':
-      return 'Electron proof'
+      return platform === 'linux' ? 'Linux CPU preview' : 'Electron proof'
     case 'latest-jpeg-polling':
       return 'JPEG fallback'
     case 'mjpeg-stream':

@@ -10,6 +10,8 @@ import {
   chatPaneMessages,
   followChatOnResize,
   pickedSendProviders,
+  spotlightScrollAllowed,
+  SPOTLIGHT_SCROLL_QUIET_MS,
   type ChatPaneFilter
 } from './stream-manager-chat'
 
@@ -195,5 +197,30 @@ describe('followChatOnResize (plan 057, P4)', () => {
     expect(chat.viewport.scrollTop).toBe(100)
     chat.cleanup()
     expect(chat.isDisconnected()).toBe(true)
+  })
+})
+
+describe('spotlightScrollAllowed', () => {
+  const now = 1_000_000
+  it('always pulls up while the list follows the latest', () => {
+    expect(
+      spotlightScrollAllowed({ pinned: true, lastUserScrollAtMs: now - 100, nowMs: now })
+    ).toBe(true)
+  })
+
+  it('never fights a streamer who scrolled up in the last five seconds', () => {
+    expect(
+      spotlightScrollAllowed({ pinned: false, lastUserScrollAtMs: now - 4_999, nowMs: now })
+    ).toBe(false)
+    expect(
+      spotlightScrollAllowed({
+        pinned: false,
+        lastUserScrollAtMs: now - SPOTLIGHT_SCROLL_QUIET_MS,
+        nowMs: now
+      })
+    ).toBe(true)
+    expect(spotlightScrollAllowed({ pinned: false, lastUserScrollAtMs: null, nowMs: now })).toBe(
+      true
+    )
   })
 })

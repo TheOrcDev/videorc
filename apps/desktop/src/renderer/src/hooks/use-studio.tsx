@@ -357,12 +357,7 @@ import {
   type EntitlementUiGate
 } from '@/lib/entitlement-ui'
 import { commentCanHighlight, CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
-import {
-  applyCohostState,
-  cohostErrorToast,
-  cohostHighlightMessageId,
-  sortedCohostQuestions
-} from '@/lib/cohost-view'
+import { applyCohostState, cohostErrorToast, cohostHighlightMessageId } from '@/lib/cohost-view'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-view'
 import {
@@ -1047,6 +1042,8 @@ export type StudioContextValue = {
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
   dismissCohostQuestion: (questionId: string, sessionId?: string) => void
+  /** Put a voice-resolved question back (`cohost.question.restore`, plan 060 D9). */
+  restoreCohostQuestion: (questionId: string, sessionId?: string) => void
   dismissCohostFlag: (messageId: string, sessionId?: string) => void
   showCohostQuestionOnStream: (question: CohostQuestion) => void
   streamMetadataDraft: StreamMetadataDraft | null
@@ -3678,7 +3675,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [cohostSettings, setCohostSettings] = useState<CohostSettings | null>(null)
   const [cohostActionPending, setCohostActionPending] = useState(false)
   const cohostStateRef = useRef<CohostState | null>(null)
-  const cohostAutoHighlightedRef = useRef<Set<string>>(new Set())
   const streamTitleRef = useRef<string | null>(null)
   streamTitleRef.current =
     captureConfig.streaming.targets.find((target) => target.enabled && target.scheduledEventId)
@@ -3755,10 +3751,6 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     wsStatus
   ])
 
-  useEffect(() => {
-    cohostAutoHighlightedRef.current.clear()
-  }, [cohostLiveSessionId])
-
   const patchCohostSettings = useCallback(
     async (patch: CohostSettingsPatch): Promise<void> => {
       if (!client) throw new Error('Backend socket is not connected.')
@@ -3770,7 +3762,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const runCohostAction = useCallback(
     async (
-      method: 'cohost.question.answered' | 'cohost.question.dismiss' | 'cohost.flag.dismiss',
+      method:
+        | 'cohost.question.answered'
+        | 'cohost.question.dismiss'
+        | 'cohost.question.restore'
+        | 'cohost.flag.dismiss',
       params: CohostQuestionParams | CohostFlagParams
     ): Promise<CohostState> => {
       if (!client) throw new Error('Backend socket is not connected.')
@@ -3808,6 +3804,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [reportError, runCohostAction]
   )
 
+  const restoreCohostQuestion = useCallback(
+    (questionId: string, sessionId?: string): void => {
+      const target = sessionId ?? cohostStateRef.current?.sessionId
+      if (!target) return
+      void runCohostAction('cohost.question.restore', { sessionId: target, questionId }).catch(
+        (error: unknown) => reportError(error)
+      )
+    },
+    [reportError, runCohostAction]
+  )
+
   const dismissCohostFlag = useCallback(
     (messageId: string, sessionId?: string): void => {
       const target = sessionId ?? cohostStateRef.current?.sessionId
@@ -3834,28 +3841,46 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [toggleCommentHighlight]
   )
 
-  // "Show questions on stream automatically" (default off): highlight ONE new
-  // high-priority question, once, and only when the stream is not already
-  // showing a comment — it must never fight a highlight the streamer set by
-  // hand, and never re-show a question it already showed.
-  useEffect(() => {
-    if (!cohostSettings?.autoHighlight) return
-    if (!cohostState || cohostState.status !== 'listening') return
-    const alreadyShown = cohostAutoHighlightedRef.current
-    const candidate = sortedCohostQuestions(cohostState.questions).find(
-      (question) => question.priority === 'high' && !alreadyShown.has(question.id)
+  // Orcle's automatic card (plan 060 S1): the ENGINE decides (cadence, roles,
+  // safety gate, one command per decision with an engine-wide generation) and
+  // the renderer only executes it. Always-set semantics: an automatic path
+  // must never read a repeat as "un-pin" (the H key keeps its toggle). No
+  // renderer history: a command the message list cannot serve is simply not
+  // executed, and the engine never asks for the same message twice. Failures
+  // stay quiet; the backend's status is the truth either way.
+  const cohostAutoHighlightGeneration = cohostState?.autoHighlight?.generation ?? 0
+  const cohostAutoHighlightMessageId = cohostState?.autoHighlight?.messageId ?? null
+  const executeCohostAutoHighlightRef = useRef<(messageId: string) => void>(() => {})
+  executeCohostAutoHighlightRef.current = (messageId) => {
+    // A card the streamer is setting by hand (H pressed, PNG still
+    // rendering) always wins: the engine only sees the backend phase, which
+    // is still idle while the manual apply is in flight. The engine reclaims
+    // an unserved command after its apply timeout.
+    if (commentHighlightApplyingId !== null) return
+    const message = liveChatSnapshotRef.current.messages.find(
+      (candidate) => candidate.id === messageId
     )
-    if (!candidate) return
-    alreadyShown.add(candidate.id)
-    if (commentHighlightState.phase === 'live' || commentHighlightApplyingId !== null) return
-    showCohostQuestionOnStream(candidate)
-  }, [
-    cohostSettings?.autoHighlight,
-    cohostState,
-    commentHighlightApplyingId,
-    commentHighlightState.phase,
-    showCohostQuestionOnStream
-  ])
+    if (!message || !commentCanHighlight(message)) return
+    const intent = ++commentHighlightIntentRef.current
+    void applyCommentHighlight(message, undefined, intent, { alwaysSet: true })
+      .then((state) => {
+        if (state && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(state)
+        }
+      })
+      .catch(async () => {
+        const authoritative = await client
+          ?.request<CommentHighlightState>('comments.highlight.status')
+          .catch(() => null)
+        if (authoritative && commentHighlightIntentRef.current === intent) {
+          publishCommentHighlightState(authoritative)
+        }
+      })
+  }
+  useEffect(() => {
+    if (cohostAutoHighlightGeneration === 0 || !cohostAutoHighlightMessageId) return
+    executeCohostAutoHighlightRef.current(cohostAutoHighlightMessageId)
+  }, [cohostAutoHighlightGeneration, cohostAutoHighlightMessageId])
 
   // One relayed value for the detached Comments window: the window never
   // re-derives Premium or consent, it renders what the main renderer resolved.
@@ -3924,10 +3949,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             messageId: command.targetId
           })
         }
-        return runCohostAction(
-          command.kind === 'answered' ? 'cohost.question.answered' : 'cohost.question.dismiss',
-          { sessionId: command.sessionId, questionId: command.targetId }
-        )
+        const method =
+          command.kind === 'answered'
+            ? 'cohost.question.answered'
+            : command.kind === 'restore'
+              ? 'cohost.question.restore'
+              : 'cohost.question.dismiss'
+        return runCohostAction(method, {
+          sessionId: command.sessionId,
+          questionId: command.targetId
+        })
       })()
         .then(async (state) => {
           await window.videorc?.pushCohostActionResult?.({
@@ -13998,6 +14029,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchCohostSettings,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
+      restoreCohostQuestion,
       dismissCohostFlag,
       showCohostQuestionOnStream,
       streamMetadataDraft,
@@ -14221,6 +14253,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchCohostSettings,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
+      restoreCohostQuestion,
       dismissCohostFlag,
       showCohostQuestionOnStream,
       streamMetadataDraft,

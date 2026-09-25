@@ -24,6 +24,20 @@ send-result honesty, highlight slot, and event protocol end to end over a real W
       with Retry-After and the backoff ladder honored, dismiss-never-returns, the 20 s trickle rule,
       `liveChat.send` + `inReplyToQuestionId` answering, and 30 s of idle chat without a tick.
       Askers are keyed on author + destination because the fake connector cannot script authors.
+      A second scenario (plan 060) runs a headless stream session (test pattern into a local
+      `ffmpeg -listen` RTMP sink) and live captions through the fake caption service behind the
+      same API origin (scripted realtime finals; the debug caption-contract audio seam stands in
+      for a microphone). It asserts: a final that mentions a comment puts it in `spotlight`
+      within 4 s; every `POST /api/ai/cohost/spotlight` body has consent, at most 20 candidates,
+      a transcript of at most 800 chars and never the flagged message; in "What I talk about"
+      mode the engine emits `autoHighlight {source: voice}` and the card goes live with
+      always-set semantics (the smoke plays the renderer's executor), refreshes at most once and
+      leaves by expiry, never a clear; a question enters `recentlyResolved` only on the second
+      "answered" hit and `cohost.question.restore` puts it back; a queued 404 closes the lane
+      (no spotlight request for 6 s) without touching the tick status; in "What I talk about and
+      Orcle's picks" mode no card fires for 45 s after the previous card left the stream, then
+      the first pick is never the flagged message (which the fake suggests first on purpose),
+      the one already shown, or the previous card's author. Whole run: about 4 minutes.
 
 ## Capture-performance regression
 
@@ -110,3 +124,33 @@ web has `VIDEORC_AI_COHOST_DISABLED` off. Offline proof: `pnpm smoke:cohost-fake
       web): chip reads `quota` and resumes after `Retry-After`.
 - [ ] Verify in the web ops dashboard that `ai_usage_events` gained one `cohost-tick` row per
       tick with model + tokens.
+
+### Show on stream automatically (plan 060)
+
+Prerequisites: live captions ON with a working microphone (the "What I talk about" modes read the
+caption transcript), a real stream going out, and at least one viewer account that can post.
+
+- [ ] Settings → Streaming → Orcle → "Show on stream automatically" offers exactly Off, What I
+      talk about, and What I talk about and Orcle's picks, with the helper line "What I talk
+      about needs live captions." The row is disabled without Premium like the rest of Orcle.
+- [ ] Off: chat, questions and highlights keep working and nothing ever goes on stream by itself.
+- [ ] What I talk about: have a viewer post a comment, then talk about it in your own words
+      (do not read it out). Within a few seconds the comment row shows the quiet "Talking about
+      this" mark, the Comments window scrolls it into view (unless you scrolled up in the last
+      5 s), the matching question row carries the same mark, and the card appears on the
+      viewer-facing output. Close the Comments window and confirm the pull-up still shows in
+      the Stream Manager.
+- [ ] While the card is up, keep talking about the same comment: it stays up (one refresh at
+      most) and is never taken down and put back. Press `H` on another comment: your manual card
+      wins and the automatic one never replaces it.
+- [ ] Answer an open question out loud, twice in a row. After the second answer it leaves the
+      open list and shows as one collapsed "Answered on air: <text>" line with Restore. Press
+      Restore: the question returns to the open list and the line disappears. Without Restore
+      the line is gone after 60 s.
+- [ ] What I talk about and Orcle's picks: after a card leaves the stream, nothing new goes on
+      stream by itself for 45 s (time it); after that Orcle may put one of its picks up, never
+      the author of the previous automatic card and never a comment already shown.
+- [ ] Post a flagged (toxic or spammy) message and then talk about it on air: it gets no
+      "Talking about this" mark and never appears on stream in any mode, even if it was suggested.
+- [ ] Turn captions off mid-stream: the pull-up stops, nothing errors or toasts, and picks mode
+      keeps working without captions.

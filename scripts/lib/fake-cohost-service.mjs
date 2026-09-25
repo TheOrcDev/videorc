@@ -22,6 +22,15 @@ export const COHOST_PROMPT_VERSIONS = Object.freeze([1, 2])
 export const COHOST_RULES_MAX = 10
 export const COHOST_RULE_MAX_CHARS = 120
 export const COHOST_TICK_PATH = '/api/ai/cohost/tick'
+/**
+ * Plan 060 S3: the spotlight lane. Served on the SAME origin as the tick, so
+ * the backend's `VIDEORC_API_BASE_URL` override (dev builds only) points both
+ * lanes at this fake; no second env var exists.
+ */
+export const COHOST_SPOTLIGHT_PATH = '/api/ai/cohost/spotlight'
+export const COHOST_SPOTLIGHT_MAX_BODY_BYTES = 32 * 1024
+export const COHOST_SPOTLIGHT_CANDIDATES_CAP = 20
+export const COHOST_SPOTLIGHT_TRANSCRIPT_MAX_CHARS = 800
 export const COHOST_TICK_MESSAGE_CAP = 60
 export const COHOST_TICK_OPEN_QUESTIONS_CAP = 40
 
@@ -202,12 +211,220 @@ function invalid(message) {
   return { status: 400, code: 'invalid-request', message }
 }
 
+export const COHOST_SPOTLIGHT_REQUEST_KEYS = Object.freeze([
+  'candidates',
+  'clientVersion',
+  'consentToProcessChat',
+  'seq',
+  'sessionClientId',
+  'transcript'
+])
+
+const SPOTLIGHT_CANDIDATE_KEYS = new Set([
+  'at',
+  'author',
+  'id',
+  'questionId',
+  'questionText',
+  'roles',
+  'text'
+])
+
+/**
+ * Validate a spotlight request body the way `cohost-spotlight.ts` does
+ * (zod, trimmed lengths, unique ids). Returns an error envelope or null.
+ */
+export function validateCohostSpotlightRequest(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return invalid('Request body must be a JSON object.')
+  }
+  if (body.consentToProcessChat !== true) {
+    return {
+      status: 400,
+      code: 'consent-required',
+      message: 'Chat processing consent is required.'
+    }
+  }
+  const keys = Object.keys(body).sort()
+  const unexpected = keys.filter((key) => !COHOST_SPOTLIGHT_REQUEST_KEYS.includes(key))
+  const missing = COHOST_SPOTLIGHT_REQUEST_KEYS.filter((key) => !(key in body))
+  if (unexpected.length > 0 || missing.length > 0) {
+    return invalid(
+      `Spotlight keys do not match the contract (missing: ${missing.join(',') || '-'}; unexpected: ${unexpected.join(',') || '-'}).`
+    )
+  }
+  const trimmedLength = (value) => (typeof value === 'string' ? value.trim().length : -1)
+  if (trimmedLength(body.clientVersion) < 1 || body.clientVersion.length > 64) {
+    return invalid('clientVersion must be a string of 1-64 characters.')
+  }
+  if (trimmedLength(body.sessionClientId) < 1 || body.sessionClientId.length > 128) {
+    return invalid('sessionClientId must be a string of 1-128 characters.')
+  }
+  if (
+    trimmedLength(body.transcript) < 1 ||
+    body.transcript.trim().length > COHOST_SPOTLIGHT_TRANSCRIPT_MAX_CHARS
+  ) {
+    return invalid(
+      `transcript must be a string of 1-${COHOST_SPOTLIGHT_TRANSCRIPT_MAX_CHARS} characters.`
+    )
+  }
+  if (!Number.isInteger(body.seq) || body.seq < 0) {
+    return invalid('seq must be a non-negative integer.')
+  }
+  if (
+    !Array.isArray(body.candidates) ||
+    body.candidates.length < 1 ||
+    body.candidates.length > COHOST_SPOTLIGHT_CANDIDATES_CAP
+  ) {
+    return invalid(`candidates must be an array of 1-${COHOST_SPOTLIGHT_CANDIDATES_CAP}.`)
+  }
+  const ids = new Set()
+  for (const candidate of body.candidates) {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return invalid('candidates entries must be objects.')
+    }
+    const extra = Object.keys(candidate).filter((key) => !SPOTLIGHT_CANDIDATE_KEYS.has(key))
+    if (extra.length > 0) {
+      return invalid(`candidate carries unexpected keys: ${extra.join(',')}.`)
+    }
+    if (trimmedLength(candidate.id) < 1 || candidate.id.length > 200) {
+      return invalid('candidate.id must be a string of 1-200 characters.')
+    }
+    if (ids.has(candidate.id)) {
+      return invalid('candidate ids must be unique.')
+    }
+    ids.add(candidate.id)
+    if (trimmedLength(candidate.text) < 1 || candidate.text.trim().length > 500) {
+      return invalid('candidate.text must be a string of 1-500 characters.')
+    }
+    if (trimmedLength(candidate.author) < 1 || candidate.author.trim().length > 120) {
+      return invalid('candidate.author must be a string of 1-120 characters.')
+    }
+    if (typeof candidate.at !== 'string' || Number.isNaN(Date.parse(candidate.at))) {
+      return invalid('candidate.at must be an ISO-8601 timestamp.')
+    }
+    if (
+      candidate.roles !== undefined &&
+      (!Array.isArray(candidate.roles) ||
+        candidate.roles.length > 8 ||
+        candidate.roles.some(
+          (role) => typeof role !== 'string' || role.trim().length < 1 || role.length > 32
+        ))
+    ) {
+      return invalid('candidate.roles must be at most 8 strings of 1-32 characters.')
+    }
+    if (
+      candidate.questionId !== undefined &&
+      (trimmedLength(candidate.questionId) < 1 || candidate.questionId.length > 80)
+    ) {
+      return invalid('candidate.questionId must be a string of 1-80 characters.')
+    }
+    if (
+      candidate.questionText !== undefined &&
+      (trimmedLength(candidate.questionText) < 1 || candidate.questionText.trim().length > 500)
+    ) {
+      return invalid('candidate.questionText must be a string of 1-500 characters.')
+    }
+  }
+  return null
+}
+
+/**
+ * Deterministic spotlight planner (pure). `matches` scripts the answer:
+ * `[{ whenTranscriptIncludes, messageId, about, questionId?, answered? }]`.
+ * A rule fires when the transcript contains its substring (case-insensitive)
+ * AND the message is among the candidates; `questionId`/`answered` are only
+ * echoed for a candidate that carried that `questionId`. Unscripted
+ * candidates get `about: 0` (and `answered: 0` when they have a question),
+ * like a judge that saw nothing — the desktop must treat both the same.
+ */
+export function planCohostSpotlight(body, matches = []) {
+  const transcript = String(body.transcript ?? '').toLocaleLowerCase('en-US')
+  const scripted = new Map()
+  for (const rule of matches) {
+    if (!rule || typeof rule.whenTranscriptIncludes !== 'string' || !rule.messageId) continue
+    if (!transcript.includes(rule.whenTranscriptIncludes.toLocaleLowerCase('en-US'))) continue
+    scripted.set(rule.messageId, rule)
+  }
+  const out = []
+  for (const candidate of body.candidates ?? []) {
+    const rule = scripted.get(candidate.id)
+    const match = { messageId: candidate.id, about: clampUnit(rule?.about ?? 0) }
+    if (candidate.questionId) {
+      match.questionId = candidate.questionId
+      match.answered =
+        rule && rule.questionId === candidate.questionId ? clampUnit(rule.answered ?? 0) : 0
+    }
+    out.push(match)
+  }
+  return {
+    seq: body.seq ?? 0,
+    matches: out,
+    usage: {
+      inputTokens: (body.candidates?.length ?? 0) * 20,
+      outputTokens: out.length,
+      model: 'smoke/fake-cohost-spotlight'
+    }
+  }
+}
+
+function clampUnit(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 0
+  return Math.min(1, Math.max(0, number))
+}
+
+/**
+ * Scripted wire-v2 `highlights` for one tick (pure, plan 060 S5). With a rule
+ * `{ score = 0.9, type = 'insight', byMarker = {} }` EVERY message of the
+ * batch is suggested, and a message carrying the flag marker is ranked first
+ * at 0.99: the fake deliberately suggests what it also flags, so the smoke
+ * proves the desktop never puts a flagged message on stream whatever the
+ * server ranked. `byMarker` maps a text token (`'#1'`) to that message's
+ * score, so a smoke can make the rows a rule must skip OUTRANK the row it
+ * should pick; a flagged message keeps 0.99 whatever the map says. The
+ * remaining messages follow in batch order from `score`, 0.01 apart. The
+ * result is sorted by score, highest first (stable). `null` means no
+ * `highlights` key.
+ */
+export function planTickHighlights(messages, rule, flagMarker = null) {
+  if (!rule) return null
+  const baseScore = clampUnit(rule.score ?? 0.9)
+  const type = typeof rule.type === 'string' ? rule.type : 'insight'
+  const byMarker = Object.entries(rule.byMarker ?? {})
+  const flagged = []
+  const scripted = []
+  const clean = []
+  for (const message of messages ?? []) {
+    if (messageHasMarker(message.text, flagMarker)) {
+      flagged.push(message)
+      continue
+    }
+    const entry = byMarker.find(([marker]) => messageHasMarker(message.text, marker))
+    if (entry) scripted.push({ message, score: clampUnit(entry[1]) })
+    else clean.push(message)
+  }
+  return [
+    ...flagged.map((message) => ({ messageId: message.id, score: 0.99, type })),
+    ...scripted.map(({ message, score }) => ({ messageId: message.id, score, type })),
+    ...clean.map((message, index) => ({
+      messageId: message.id,
+      score: clampUnit(baseScore - index * 0.01),
+      type
+    }))
+  ].sort((a, b) => b.score - a.score)
+}
+
 /**
  * Deterministic tick planner (pure). `memory` carries the per-question asker
  * and platform unions across ticks because the request's `openQuestions` only
- * echo id/text/count; `mintId` supplies new `q_<n>` ids.
+ * echo id/text/count; `mintId` supplies new `q_<n>` ids. `highlights` scripts
+ * the v2 `highlights` array (see `planTickHighlights`); absent by default.
  */
-export function planCohostTick(body, { mintId, flagMarker = null, memory = new Map() } = {}) {
+export function planCohostTick(
+  body,
+  { mintId, flagMarker = null, memory = new Map(), highlights = null } = {}
+) {
   const openByKey = new Map()
   for (const open of body.openQuestions ?? []) {
     openByKey.set(normalizeQuestionText(open.text), open)
@@ -265,7 +482,7 @@ export function planCohostTick(body, { mintId, flagMarker = null, memory = new M
     }))
 
   const messageCount = body.messages?.length ?? 0
-  return {
+  const response = {
     promptVersion: body.promptVersion ?? COHOST_PROMPT_VERSION,
     questions,
     resolved: [],
@@ -273,6 +490,9 @@ export function planCohostTick(body, { mintId, flagMarker = null, memory = new M
     mood: messageCount >= 5 ? 'hype' : 'calm',
     usage: { inputTokens: messageCount * 10, outputTokens: 5, model: 'smoke/fake-cohost' }
   }
+  const scriptedHighlights = planTickHighlights(body.messages, highlights, flagMarker)
+  if (scriptedHighlights) response.highlights = scriptedHighlights
+  return response
 }
 
 /**
@@ -283,22 +503,47 @@ export function planCohostTick(body, { mintId, flagMarker = null, memory = new M
  *   { status: 503, code: 'cohost-disabled' | 'ai-gateway-not-configured' }
  *   { status: 502, code: 'ai-gateway-error' }
  *   { status: 401, code: 'unauthorized' }
+ *
+ * The spotlight route (plan 060 S3) is scripted by `spotlightMatches` (see
+ * `planCohostSpotlight`; replace at runtime with `setSpotlightMatches`),
+ * records every request in `state.spotlightRequests` (separate from the tick
+ * records, so tick assertions never see them), and takes its own queued
+ * failures via `queueSpotlightFailure` (same shapes plus
+ * `{ status: 503, code: 'spotlight-disabled' | 'judge-unconfigured' }`,
+ * `{ status: 504, code: 'judge-timeout' }` and `{ status: 404 }`).
+ *
+ * `tickHighlights` (plan 060 S5; replace at runtime with `setTickHighlights`)
+ * scripts the tick's v2 `highlights` (see `planTickHighlights`); every
+ * successful tick record then carries the suggested ids as `highlightIds`
+ * (highest score first) and their scores as `highlightScores` (id -> score).
  */
-export async function startFakeCohostService({ smokeSessionToken, flagMarker = null }) {
+export async function startFakeCohostService({
+  smokeSessionToken,
+  flagMarker = null,
+  spotlightMatches = [],
+  tickHighlights = null
+}) {
   if (typeof smokeSessionToken !== 'string' || smokeSessionToken.length < 8) {
     throw new Error('startFakeCohostService requires a smoke-only session token.')
   }
   const state = {
     requests: [],
+    spotlightRequests: [],
+    spotlightMatches: [...spotlightMatches],
     unauthorized: 0,
     unknownRoutes: 0,
     queuedFailures: [],
+    queuedSpotlightFailures: [],
+    tickHighlights,
     nextQuestionNumber: 1,
     memory: new Map()
   }
   const mintId = () => `q_${state.nextQuestionNumber++}`
 
   const server = createServer(async (req, res) => {
+    if (req.method === 'POST' && req.url === COHOST_SPOTLIGHT_PATH) {
+      return serveSpotlight(req, res)
+    }
     if (req.method !== 'POST' || req.url !== COHOST_TICK_PATH) {
       await drain(req)
       state.unknownRoutes += 1
@@ -343,8 +588,108 @@ export async function startFakeCohostService({ smokeSessionToken, flagMarker = n
         headers
       )
     }
-    return json(res, 200, planCohostTick(body, { mintId, flagMarker, memory: state.memory }))
+    const planned = planCohostTick(body, {
+      mintId,
+      flagMarker,
+      memory: state.memory,
+      highlights: state.tickHighlights
+    })
+    if (planned.highlights) {
+      record.highlightIds = planned.highlights.map((highlight) => highlight.messageId)
+      record.highlightScores = Object.fromEntries(
+        planned.highlights.map((highlight) => [highlight.messageId, highlight.score])
+      )
+    }
+    return json(res, 200, planned)
   })
+
+  async function serveSpotlight(req, res) {
+    if (req.headers.authorization !== `Bearer ${smokeSessionToken}`) {
+      await drain(req)
+      state.unauthorized += 1
+      return json(res, 401, { error: { code: 'unauthorized', message: 'Smoke auth failed.' } })
+    }
+    // Like the real route: the byte budget is checked on the body before
+    // anything is parsed.
+    const declared = Number(req.headers['content-length'])
+    if (Number.isFinite(declared) && declared > COHOST_SPOTLIGHT_MAX_BODY_BYTES) {
+      await drain(req)
+      const record = {
+        at: Date.now(),
+        body: null,
+        bytes: declared,
+        status: 400,
+        code: 'invalid-request'
+      }
+      state.spotlightRequests.push(record)
+      return json(res, 400, {
+        error: {
+          code: 'invalid-request',
+          message: 'A JSON request body of at most 32 KB is required.'
+        }
+      })
+    }
+    let raw
+    let body
+    try {
+      raw = await readRequestBody(req)
+      body = JSON.parse(raw)
+    } catch (error) {
+      return json(res, 400, {
+        error: { code: 'invalid-request', message: `Body is not JSON: ${error.message}` }
+      })
+    }
+    const record = {
+      at: Date.now(),
+      body,
+      bytes: Buffer.byteLength(raw),
+      status: 200,
+      code: null
+    }
+    state.spotlightRequests.push(record)
+    if (record.bytes > COHOST_SPOTLIGHT_MAX_BODY_BYTES) {
+      record.status = 400
+      record.code = 'invalid-request'
+      return json(res, 400, {
+        error: {
+          code: 'invalid-request',
+          message: 'A JSON request body of at most 32 KB is required.'
+        }
+      })
+    }
+    const failure = validateCohostSpotlightRequest(body)
+    if (failure) {
+      record.status = failure.status
+      record.code = failure.code
+      return json(res, failure.status, {
+        error: { code: failure.code, message: failure.message }
+      })
+    }
+    const queued = state.queuedSpotlightFailures.shift()
+    if (queued) {
+      record.status = queued.status
+      record.code = queued.code ?? null
+      const headers = {}
+      if (Number.isFinite(queued.retryAfterSeconds)) {
+        headers['retry-after'] = String(queued.retryAfterSeconds)
+      }
+      if (queued.status === 404 && !queued.code) {
+        return json(
+          res,
+          404,
+          { error: { code: 'not-found', message: 'No spotlight route.' } },
+          headers
+        )
+      }
+      return json(
+        res,
+        queued.status,
+        { error: { code: queued.code, message: queued.message ?? `Scripted ${queued.code}.` } },
+        headers
+      )
+    }
+    return json(res, 200, planCohostSpotlight(body, state.spotlightMatches))
+  }
 
   await new Promise((resolveListen, rejectListen) => {
     server.once('error', rejectListen)
@@ -364,6 +709,37 @@ export async function startFakeCohostService({ smokeSessionToken, flagMarker = n
         throw new Error('queueFailure requires { status, code }.')
       }
       state.queuedFailures.push(failure)
+    },
+    queueSpotlightFailure(failure) {
+      if (
+        !failure ||
+        !Number.isInteger(failure.status) ||
+        (failure.status !== 404 && typeof failure.code !== 'string')
+      ) {
+        throw new Error('queueSpotlightFailure requires { status, code } (code optional for 404).')
+      }
+      state.queuedSpotlightFailures.push(failure)
+    },
+    setTickHighlights(rule) {
+      if (rule !== null && (typeof rule !== 'object' || Array.isArray(rule))) {
+        throw new Error('setTickHighlights requires a rule object or null.')
+      }
+      if (
+        rule?.byMarker !== undefined &&
+        (typeof rule.byMarker !== 'object' ||
+          rule.byMarker === null ||
+          Array.isArray(rule.byMarker) ||
+          !Object.values(rule.byMarker).every(Number.isFinite))
+      ) {
+        throw new Error('setTickHighlights byMarker must map markers to finite scores.')
+      }
+      state.tickHighlights = rule
+    },
+    setSpotlightMatches(matches) {
+      if (!Array.isArray(matches)) {
+        throw new Error('setSpotlightMatches requires an array of rules.')
+      }
+      state.spotlightMatches = [...matches]
     },
     close() {
       return new Promise((resolveClose) => {

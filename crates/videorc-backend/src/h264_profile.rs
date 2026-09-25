@@ -47,9 +47,40 @@ pub fn h264_high_level_label(width: u32, height: u32, fps: u32) -> Option<&'stat
         .map(|(label, _, _)| *label)
 }
 
+/// The `-level` spelling `h264_vaapi` accepts for a `h264_high_level_label`.
+///
+/// `h264_vaapi`'s `-level` is an integer option whose named constants are
+/// `1, 1.1, 1.2, 1.3, 2, 2.1, 2.2, 3, 3.1, 3.2, 4, 4.1, 4.2, 5, 5.1, 5.2, 6,
+/// 6.1, 6.2` (bundled FFmpeg n8.1.2). `"4.0"` is NOT a constant: libavutil
+/// parses it as the number 4 and stores `level_idc = 4`, an illegal level
+/// that Intel iHD rejects at end-of-picture with "encode issue: 24" (ogre,
+/// Plan 0001). VideoToolbox spells the same level `4.0`, so only the VAAPI
+/// arm maps through here.
+pub fn h264_vaapi_level_arg(label: &str) -> String {
+    label.strip_suffix(".0").unwrap_or(label).to_string()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vaapi_level_arg_strips_only_the_dot_zero_labels() {
+        for (label, _, _) in H264_HIGH_LEVELS {
+            let arg = h264_vaapi_level_arg(label);
+            if label.ends_with(".0") {
+                assert_eq!(arg, &label[..label.len() - 2], "{label}");
+            } else {
+                assert_eq!(arg, label, "{label}");
+            }
+        }
+        assert_eq!(h264_vaapi_level_arg("4.0"), "4");
+        assert_eq!(h264_vaapi_level_arg("5.0"), "5");
+        assert_eq!(h264_vaapi_level_arg("3.0"), "3");
+        assert_eq!(h264_vaapi_level_arg("4.1"), "4.1");
+        assert_eq!(h264_vaapi_level_arg("4.2"), "4.2");
+        assert_eq!(h264_vaapi_level_arg("5.2"), "5.2");
+    }
 
     #[test]
     fn levels_match_the_shipping_recording_matrix() {

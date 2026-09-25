@@ -46,11 +46,35 @@ pub async fn list_devices(ffmpeg_path: &str) -> DeviceList {
         list_windows_devices()
     }
 
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(target_os = "linux")]
+    {
+        let _ = ffmpeg_path;
+        list_linux_devices()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
     {
         let _ = ffmpeg_path;
         unsupported_device_list()
     }
+}
+
+/// Linux (Plan 0006): the portal screen/window entries plus the system
+/// audio placeholder. Cameras and microphones stay unlisted until their
+/// Linux arms (L2/L3 of the port plan) exist, and the warning says so.
+#[cfg(target_os = "linux")]
+fn list_linux_devices() -> DeviceList {
+    let native_capture_sources = list_native_capture_sources();
+    let mut devices = Vec::new();
+    let mut warnings = Vec::new();
+    warnings.extend(native_capture_sources.warnings);
+    devices.extend(native_capture_sources.devices);
+    devices.push(system_audio_placeholder());
+    warnings.push(
+        "Camera and microphone probing is not implemented on Linux yet (port plan L2/L3)."
+            .to_string(),
+    );
+    DeviceList { devices, warnings }
 }
 
 #[cfg(target_os = "macos")]
@@ -182,7 +206,7 @@ fn windows_device_list_from_parts(
     DeviceList { devices, warnings }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn unsupported_device_list() -> DeviceList {
     let mut devices = Vec::new();
     let mut warnings = Vec::new();

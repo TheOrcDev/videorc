@@ -21,15 +21,78 @@ export function parseWindowsPreviewLifecycleMode(argv = [], env = process.env) {
     throw new Error(`Unknown preview-lifecycle argument: ${values[0]}`)
   }
   const expectD3d11 = env.VIDEORC_EXPECT_WINDOWS_D3D11 === '1'
-  if (expectD3d11 && expectFallback) {
-    throw new Error('Windows D3D11 and natural-fallback preview modes are mutually exclusive.')
+  // Linux (port plan L5, Plan 0007): the Electron proof surface IS the
+  // preview; the mode asserts it is live, visible, polling, and never native.
+  const expectLinuxProof = env.VIDEORC_EXPECT_LINUX_PROOF === '1'
+  if ([expectD3d11, expectFallback, expectLinuxProof].filter(Boolean).length > 1) {
+    throw new Error(
+      'Windows D3D11, natural-fallback and Linux proof preview modes are mutually exclusive.'
+    )
   }
-  return expectD3d11 ? 'windows-d3d11' : expectFallback ? 'windows-fallback' : 'default'
+  return expectD3d11
+    ? 'windows-d3d11'
+    : expectFallback
+      ? 'windows-fallback'
+      : expectLinuxProof
+        ? 'linux-proof'
+        : 'default'
+}
+
+/** The platform a lifecycle mode may run on, or null when it runs anywhere. */
+export function previewLifecycleModePlatform(mode) {
+  if (mode === 'windows-d3d11' || mode === 'windows-fallback') return 'win32'
+  if (mode === 'linux-proof') return 'linux'
+  return null
+}
+
+export function linuxProofPreviewOpenFailures(state) {
+  const status = state?.surfaceStatus ?? {}
+  const failures = []
+  if (status.transport !== 'electron-proof-surface') {
+    failures.push(`transport=${status.transport ?? 'missing'}`)
+  }
+  if (status.backing !== 'electron-browser-window') {
+    failures.push(`backing=${status.backing ?? 'missing'}`)
+  }
+  if (status.nativePreviewHostKind !== 'proof-surface') {
+    failures.push(`host=${status.nativePreviewHostKind ?? 'missing'}`)
+  }
+  if (state?.surface?.exists !== true || state?.surface?.visible !== true) {
+    failures.push('Electron proof surface is not visible')
+  }
+  if (state?.framePollingSuppressedFlag !== false || status.framePollingSuppressed === true) {
+    failures.push('proof frame polling is suppressed')
+  }
+  if (state?.nativeOwnsPlacement === true) {
+    failures.push('a native presenter claims placement on linux')
+  }
+  return failures
+}
+
+export function linuxProofPreviewDiagnosticFailures(diagnostics) {
+  const failures = []
+  const transport = diagnostics?.previewTransport
+  if (transport === 'native-surface' || transport === 'd3d11-shared-texture') {
+    failures.push(`previewTransport=${transport} claims a native surface on linux`)
+  }
+  const backing = diagnostics?.previewSurfaceBacking
+  if (backing === 'cametal-layer' || backing === 'directcomposition-swapchain') {
+    failures.push(`previewSurfaceBacking=${backing} claims a native surface on linux`)
+  }
+  if (diagnostics?.compositorBackend === 'cpu-fallback') {
+    failures.push(
+      'compositorBackend=cpu-fallback (Linux CPU composition must not read as a fallback)'
+    )
+  }
+  return failures
 }
 
 export function windowsPreviewLifecycleOpenFailures(state, mode) {
   if (mode === 'default') {
     return state?.framePollingSuppressedFlag === false ? [] : ['frame polling did not resume']
+  }
+  if (mode === 'linux-proof') {
+    return linuxProofPreviewOpenFailures(state)
   }
 
   const status = state?.surfaceStatus ?? {}
@@ -150,6 +213,7 @@ export function windowsPreviewPresenterFailures(
 
 export function windowsPreviewLifecycleDiagnosticFailures(diagnostics, mode) {
   if (mode === 'default') return []
+  if (mode === 'linux-proof') return linuxProofPreviewDiagnosticFailures(diagnostics)
   const media = diagnostics?.windowsD3d11Media
   if (!media) return ['windowsD3d11Media diagnostics missing']
   if (mode === 'windows-fallback') {

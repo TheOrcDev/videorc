@@ -43,6 +43,17 @@ jobs:
         # configure flags and encoder table prove LGPL-only VAAPI + OpenH264.
         run: node scripts/fetch-ffmpeg-linux.mjs
 
+      - name: Install PipeWire/SPA compile dependencies
+        # The Linux-only `pipewire` crate (libspa-sys) finds libpipewire-0.3
+        # via pkg-config and generates bindings with clang/bindgen.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config \
+            clang \
+            libpipewire-0.3-dev \
+            libspa-0.2-dev
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@stable
         with:

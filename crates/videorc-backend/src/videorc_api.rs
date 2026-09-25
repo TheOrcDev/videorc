@@ -27,6 +27,15 @@ const DESKTOP_AUTH_EXCHANGE_TIMEOUT: std::time::Duration = std::time::Duration::
 /// simply delays the next one.
 pub(crate) const COHOST_TICK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(12);
 const COHOST_TICK_PATH: &str = "/api/ai/cohost/tick";
+/// The spotlight lane (plan 060 S3) is a fast lane: one evaluation-model call
+/// every few seconds while the streamer talks. A slow answer is worth nothing
+/// (the transcript has moved on), so the client gives up early and the engine
+/// reads the timeout as "no signal", never as a co-host error.
+pub(crate) const COHOST_SPOTLIGHT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
+const COHOST_SPOTLIGHT_PATH: &str = "/api/ai/cohost/spotlight";
+/// The server rejects a larger body (checked on content-length bytes) as
+/// `invalid-request`; the engine trims candidates until the JSON fits.
+pub(crate) const COHOST_SPOTLIGHT_MAX_BODY_BYTES: usize = 32 * 1024;
 const WINDOWS_PILOT_UPDATE_TOKEN_PATH: &str = "/api/desktop/updates/windows-pilot-token";
 /// Bounded well inside the provider-mutation RPC envelope: an update check must
 /// never wait on a slow web edge for long.
@@ -323,6 +332,68 @@ pub struct CohostTickUsage {
     pub model: String,
 }
 
+// --- Live Co-host spotlight wire types (plan 060 S2/S3; field names are load-bearing) ---
+
+/// `POST /api/ai/cohost/spotlight`: the last seconds of the streamer's live
+/// captions plus the chat messages they might be talking about. `seq` is the
+/// lane's own counter (echoed back), independent of the tick's `tickSeq`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSpotlightRequest {
+    pub client_version: String,
+    pub session_client_id: String,
+    pub consent_to_process_chat: bool,
+    pub transcript: String,
+    pub seq: u64,
+    pub candidates: Vec<CohostSpotlightCandidate>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSpotlightCandidate {
+    pub id: String,
+    pub text: String,
+    pub author: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roles: Option<Vec<String>>,
+    pub at: String,
+    /// Present when the candidate is the first message of an open question:
+    /// the server then also judges whether the transcript answers it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_text: Option<String>,
+}
+
+/// Raw probabilities in request order; a candidate the server could not judge
+/// is simply absent. Thresholds are desktop-owned. Item-wise tolerant like the
+/// tick response: one unreadable match never fails the call.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSpotlightResponse {
+    #[serde(default)]
+    pub seq: u64,
+    #[serde(default, deserialize_with = "lenient_items")]
+    pub matches: Vec<CohostSpotlightMatch>,
+    #[serde(default)]
+    pub usage: Option<CohostTickUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSpotlightMatch {
+    pub message_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_id: Option<String>,
+    /// Is the streamer talking about this message right now (0..1).
+    #[serde(default)]
+    pub about: f64,
+    /// Does the transcript answer the candidate's question (0..1); only for a
+    /// candidate that carried a `questionId`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub answered: Option<f64>,
+}
+
 /// Every failed tick outcome: the classification the engine acts on
 /// (`kind` → status/backoff, `reason()` → renderer reason) plus the server's
 /// own diagnosis (`detail`) that rides `cohost.state` so "AI returned an
@@ -414,10 +485,14 @@ impl CohostApiError {
     }
 
     pub(crate) fn from_transport(error: reqwest::Error) -> Self {
+        Self::from_transport_within(error, COHOST_TICK_TIMEOUT)
+    }
+
+    fn from_transport_within(error: reqwest::Error, timeout: std::time::Duration) -> Self {
         if error.is_timeout() {
             Self::timeout(format!(
                 "Orcle did not answer within {} s.",
-                COHOST_TICK_TIMEOUT.as_secs()
+                timeout.as_secs()
             ))
         } else {
             Self::network(format!("Could not reach Orcle: {error}"))
@@ -687,6 +762,49 @@ impl VideorcApiClient {
                 CohostApiError::malformed_response(
                     status.as_u16(),
                     format!("Could not read Orcle's response: {error}"),
+                )
+            });
+        }
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_string);
+        let (code, message) = read_error_code_and_message(response).await;
+        Err(classify_cohost_failure(
+            status.as_u16(),
+            &code,
+            message,
+            retry_after.as_deref(),
+        ))
+    }
+
+    /// One spotlight call (plan 060 S3). Same failure mapping as the tick so
+    /// the engine's breaker can read the envelope code and the HTTP status;
+    /// the lane itself decides what each class means (never a paused engine).
+    pub async fn post_cohost_spotlight(
+        &self,
+        bearer_token: &str,
+        request: &CohostSpotlightRequest,
+    ) -> std::result::Result<CohostSpotlightResponse, CohostApiError> {
+        let response = self
+            .http
+            .post(self.endpoint(COHOST_SPOTLIGHT_PATH))
+            .bearer_auth(bearer_token)
+            .json(request)
+            .timeout(COHOST_SPOTLIGHT_TIMEOUT)
+            .send()
+            .await
+            .map_err(|error| {
+                CohostApiError::from_transport_within(error, COHOST_SPOTLIGHT_TIMEOUT)
+            })?;
+
+        let status = response.status();
+        if status.is_success() {
+            return response.json().await.map_err(|error| {
+                CohostApiError::malformed_response(
+                    status.as_u16(),
+                    format!("Could not read Orcle's spotlight response: {error}"),
                 )
             });
         }
@@ -1586,6 +1704,107 @@ mod tests {
         assert_eq!(malformed.reason(), CohostReason::GatewayError);
         assert_eq!(malformed.detail.code, COHOST_DETAIL_CODE_MALFORMED_RESPONSE);
         assert_eq!(malformed.detail.status, Some(200));
+    }
+
+    #[test]
+    fn cohost_spotlight_wire_shapes_match_the_route_and_tolerate_bad_items() {
+        // Request: camelCase keys, optional candidate extras absent (never
+        // null) so the zod schema on the server accepts the body verbatim.
+        let request = CohostSpotlightRequest {
+            client_version: "videorc-desktop/0.9.108".to_string(),
+            session_client_id: "session-1".to_string(),
+            consent_to_process_chat: true,
+            transcript: "so about the keyboard".to_string(),
+            seq: 3,
+            candidates: vec![
+                CohostSpotlightCandidate {
+                    id: "m-1".to_string(),
+                    text: "what keyboard is that".to_string(),
+                    author: "Viewer".to_string(),
+                    roles: Some(vec!["mod".to_string()]),
+                    at: "2026-08-22T10:00:00Z".to_string(),
+                    question_id: Some("q-1".to_string()),
+                    question_text: Some("What keyboard is that?".to_string()),
+                },
+                CohostSpotlightCandidate {
+                    id: "m-2".to_string(),
+                    text: "lol".to_string(),
+                    author: "Other".to_string(),
+                    roles: None,
+                    at: "2026-08-22T10:00:01Z".to_string(),
+                    question_id: None,
+                    question_text: None,
+                },
+            ],
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({
+                "clientVersion": "videorc-desktop/0.9.108",
+                "sessionClientId": "session-1",
+                "consentToProcessChat": true,
+                "transcript": "so about the keyboard",
+                "seq": 3,
+                "candidates": [
+                    {
+                        "id": "m-1",
+                        "text": "what keyboard is that",
+                        "author": "Viewer",
+                        "roles": ["mod"],
+                        "at": "2026-08-22T10:00:00Z",
+                        "questionId": "q-1",
+                        "questionText": "What keyboard is that?"
+                    },
+                    {
+                        "id": "m-2",
+                        "text": "lol",
+                        "author": "Other",
+                        "at": "2026-08-22T10:00:01Z"
+                    }
+                ]
+            })
+        );
+        let round_trip: CohostSpotlightRequest = serde_json::from_value(json).unwrap();
+        assert_eq!(round_trip, request);
+
+        // Response: raw probabilities, `answered`/`questionId` optional, an
+        // unreadable item skipped, unknown keys ignored, `matches` missing
+        // reads as empty.
+        let response: CohostSpotlightResponse = serde_json::from_value(serde_json::json!({
+            "seq": 3,
+            "matches": [
+                { "messageId": "m-1", "questionId": "q-1", "about": 0.9, "answered": 0.85 },
+                { "messageId": "m-2", "about": 0.1, "extra": true },
+                { "about": 0.5 },
+                null
+            ],
+            "usage": { "inputTokens": 120, "outputTokens": 4, "model": "jev" },
+            "future": 1
+        }))
+        .unwrap();
+        assert_eq!(response.seq, 3);
+        assert_eq!(response.matches.len(), 2);
+        assert_eq!(response.matches[0].question_id.as_deref(), Some("q-1"));
+        assert_eq!(response.matches[0].answered, Some(0.85));
+        assert_eq!(response.matches[1].answered, None);
+        assert_eq!(
+            response.usage.as_ref().map(|usage| usage.model.as_str()),
+            Some("jev")
+        );
+        let empty: CohostSpotlightResponse = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(empty, CohostSpotlightResponse::default());
+        assert_eq!(COHOST_SPOTLIGHT_TIMEOUT, std::time::Duration::from_secs(3));
+        assert_eq!(COHOST_SPOTLIGHT_PATH, "/api/ai/cohost/spotlight");
+        assert_eq!(COHOST_SPOTLIGHT_MAX_BODY_BYTES, 32 * 1024);
+        // The route's own codes classify by status when the code is new to
+        // the tick's table: the lane reads the code itself for its breaker.
+        let disabled = classify_cohost_failure(503, "spotlight-disabled", "off".to_string(), None);
+        assert_eq!(disabled.kind, CohostApiErrorKind::ServerUnconfigured);
+        assert_eq!(disabled.detail.code, "spotlight-disabled");
+        let timeout = classify_cohost_failure(504, "judge-timeout", "slow".to_string(), None);
+        assert_eq!(timeout.kind, CohostApiErrorKind::GatewayError);
+        assert_eq!(timeout.detail.status, Some(504));
     }
 
     #[test]

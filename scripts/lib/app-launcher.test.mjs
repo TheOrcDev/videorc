@@ -17,6 +17,8 @@ import {
   createLineBuffer,
   devAppFailureMessage,
   devAppSpawnOptions,
+  devBackendPrebuildFailure,
+  devBackendPrebuildSpec,
   devAppSpawnSpec,
   launchDevApp,
   macosAppBundlePath,
@@ -894,3 +896,54 @@ function withCleanSmokeEnv(callback) {
     }
   }
 }
+
+test('dev backend prebuild builds the whole backend package unless opted out', () => {
+  const spec = devBackendPrebuildSpec({ env: {}, platform: 'linux' })
+  assert.deepEqual(spec.args, ['build', '-p', 'videorc-backend'])
+  assert.equal(spec.command, 'cargo')
+  assert.equal(spec.timeoutMs, 20 * 60 * 1000)
+  assert.equal(
+    devBackendPrebuildSpec({ env: { VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS: '1000' } }).timeoutMs,
+    1000
+  )
+  assert.equal(
+    devBackendPrebuildSpec({ env: { VIDEORC_SMOKE_PREBUILD_TIMEOUT_MS: 'nope' } }).timeoutMs,
+    20 * 60 * 1000
+  )
+  assert.equal(devBackendPrebuildSpec({ env: { VIDEORC_SMOKE_SKIP_PREBUILD: '1' } }), null)
+  assert.equal(devBackendPrebuildSpec({ env: {}, platform: 'win32' }).command, 'cargo.exe')
+  assert.deepEqual(
+    devBackendPrebuildSpec({ env: { VIDEORC_DEV_BACKEND_PROFILE: 'release' } }).args,
+    ['build', '--release', '-p', 'videorc-backend']
+  )
+})
+
+test('dev backend prebuild failures name the compile race instead of GPU noise', () => {
+  const spec = devBackendPrebuildSpec({ env: {}, platform: 'linux' })
+  assert.equal(devBackendPrebuildFailure(spec, { status: 0, signal: null, error: undefined }), null)
+  const timedOut = devBackendPrebuildFailure(spec, {
+    status: null,
+    signal: 'SIGTERM',
+    error: Object.assign(new Error('spawnSync cargo ETIMEDOUT'), { code: 'ETIMEDOUT' }),
+    stderrTail: ['   Compiling videorc-backend v0.1.0']
+  })
+  assert.match(
+    timedOut,
+    /Backend still compiling after 1200s; run `cargo build -p videorc-backend` first/
+  )
+  assert.match(timedOut, /Compiling videorc-backend/)
+  const failed = devBackendPrebuildFailure(spec, {
+    status: 101,
+    signal: null,
+    error: undefined,
+    stderrTail: ['error[E0425]: cannot find value']
+  })
+  assert.match(failed, /Backend prebuild failed .*exited 101/)
+  assert.match(failed, /E0425/)
+  const missing = devBackendPrebuildFailure(spec, {
+    status: null,
+    signal: null,
+    error: new Error('spawnSync cargo ENOENT')
+  })
+  assert.match(missing, /could not start/)
+})
