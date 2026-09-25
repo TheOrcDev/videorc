@@ -1013,7 +1013,7 @@ function clearNativePreviewNativePlacementAuthority(): void {
 const FIRST_FRAME_TICK_MS = 750
 const PREVIEW_WAIT_DETAIL_DEFAULT =
   process.platform === 'linux'
-    ? 'Recording still works. A Linux preview arrives in a later port phase.'
+    ? 'Linux CPU preview: the Electron proof surface shows the scene as soon as a source publishes frames.'
     : 'The native surface appears here as soon as the compositor presents.'
 let firstFrameWatchdogTimer: NodeJS.Timeout | null = null
 let firstFrameWatchdogStartedAtMs = 0
@@ -3498,11 +3498,10 @@ async function reconcileNativePreviewSurfaceForPreviewWindow(
   )
 }
 
-// Linux has no native preview surface yet (port plan L5), so the frame must
-// not promise one: the waiting copy there names the missing phase instead of
-// a compositor that will never present.
-const PREVIEW_WAIT_TITLE =
-  process.platform === 'linux' ? "Preview isn't built for Linux yet" : 'Waiting for preview'
+// Linux has no native preview surface (port plan L5, Plan 0007): the Electron
+// proof surface IS the preview there, so the waiting copy names the CPU proof
+// path instead of promising a native surface.
+const PREVIEW_WAIT_TITLE = 'Waiting for preview'
 
 const PREVIEW_WINDOW_HTML = `<!doctype html><html><head><meta charset="utf-8"><style>
   /* The whole window is a drag surface: the native video floats above the area

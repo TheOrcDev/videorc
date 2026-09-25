@@ -153,6 +153,19 @@ Frames are memcpy'd BGRA into the shared screen frame store; DMA-BUF import
 is a follow-up. Hyprland needs `xdg-desktop-portal-hyprland`; GNOME and KDE
 use their own portal backends.
 
+## Preview (L5)
+
+Linux has no native preview surface by design. The Preview window shows the
+Electron proof surface (`electron-proof-surface` / `electron-browser-window`,
+the same uncompressed latest-wins BMP presenter Windows ships as its
+fallback), fed by the CPU compositor and the portal screen store. Status,
+supervisor and health copy say "Linux CPU preview" and never claim
+`native-surface` or a CAMetalLayer. Gate:
+
+```bash
+pnpm probe:preview-lifecycle:linux   # VIDEORC_EXPECT_LINUX_PROOF=1, asserts proof surface live, polling on, no native claim
+```
+
 ## Verify gates that work on Linux
 
 Cheap, no Electron (run these first):

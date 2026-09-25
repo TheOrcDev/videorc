@@ -142,7 +142,10 @@ export class PreviewSupervisorModel {
         backing: 'electron-browser-window',
         nativePreviewHostKind: 'proof-surface',
         permissionStatus: 'ok',
-        fallbackReason: `Preview transport ${event.transport}/${event.backing} is not native on ${this.platform}.`,
+        fallbackReason:
+          this.platform === 'linux'
+            ? `Linux CPU preview: transport ${event.transport}/${event.backing} is the Electron proof surface; no native surface exists on linux.`
+            : `Preview transport ${event.transport}/${event.backing} is not native on ${this.platform}.`,
         lastError: undefined
       })
     }
