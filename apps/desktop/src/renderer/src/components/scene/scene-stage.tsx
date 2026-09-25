@@ -50,7 +50,29 @@ import {
 } from './stage-transform'
 
 const STAGE_W = 160
+/** Window chrome kept on screen beside the tallest canvas: the pane toolbar
+ * and status bar, the stage's toolbar and footer rows, the 28 px handle
+ * gutter above and below, and the section padding. The docked surface only
+ * shows while ~all of the slot is in view (`DOCK_SLOT_MIN_VISIBLE_FRACTION`),
+ * so a canvas taller than the pane could never be live. */
+const CANVAS_CHROME_PX = 248
+/** Matches DOCKED_PREVIEW_CORNER_RADIUS (and `rounded-panel`): the native
+ * surface clips itself to it, so the schematic canvas rounds the same way. */
+const CANVAS_RADIUS_PX = 12
 const NO_COMMIT: StageCommit = async () => ({ ok: false })
+
+/** The canvas box: the full column width at the output aspect, never taller
+ * than the pane can show whole. Portrait canvases keep the LANDSCAPE (16:9)
+ * footprint, as the Studio preview strip does, so a 9:16 canvas stands as tall
+ * as a landscape one instead of towering ~3× over the column. */
+function canvasBoxStyle(aspect: number, stageH: number): React.CSSProperties {
+  const footprint = aspect < 1 ? 16 / 9 : aspect
+  const columnShare = Math.min(1, aspect / footprint) * 100
+  return {
+    aspectRatio: `${STAGE_W} / ${stageH}`,
+    width: `min(${columnShare.toFixed(3)}%, calc((100vh - ${CANVAS_CHROME_PX}px) * ${aspect.toFixed(4)}))`
+  }
+}
 type ActiveGesture = {
   motion: StageGesture
   mapping: StageMapping
@@ -430,6 +452,7 @@ export function SceneStage({
   }
   const selectedSource = sources.find((source) => source.id === selectedSourceId)
   const gutter = 28 / pixelScale
+  const canvasRadius = Math.min(CANVAS_RADIUS_PX / pixelScale, stageH / 2)
   const activeMotion = gestureRef.current
   const activeHandle =
     activeMotion && activeMotion.motion.kind !== 'move'
@@ -480,20 +503,11 @@ export function SceneStage({
             </ToggleGroupItem>
           ))}
         </ToggleGroup>
-        {freeform ? (
-          <Toggle
-            aria-label="Snap"
-            disabled={!dragEnabled || phase === 'dragging'}
-            pressed={snap}
-            size="sm"
-            onPressedChange={setSnap}
-          >
-            Snap
-          </Toggle>
-        ) : null}
       </div>
       <Separator />
-      <div className="flex justify-center p-7">
+      {/* The 28 px ring around the canvas is the handle gutter: quiet (no
+          fill, no stroke) so the canvas reads as the one object here. */}
+      <div className="p-7">
         {/* The dock slot is the CANVAS rect only (the output-aspect box), never
             the 28px handle gutter around it: main glues the native surface to
             exactly this element. rounded-panel matches the surface's
@@ -501,9 +515,9 @@ export function SceneStage({
             targets live in the gutter and must stay reachable. */}
         <div
           ref={slotRef}
-          className="relative w-full rounded-panel"
+          className="relative mx-auto rounded-panel"
           data-videorc-dock-slot="scene"
-          style={{ maxWidth: (420 * STAGE_W) / stageH, aspectRatio: `${STAGE_W} / ${stageH}` }}
+          style={canvasBoxStyle(STAGE_W / stageH, stageH)}
         >
           <svg
             ref={svgRef}
@@ -523,7 +537,7 @@ export function SceneStage({
           >
             <defs>
               <clipPath id={clipId}>
-                <rect x={0} y={0} width={STAGE_W} height={stageH} />
+                <rect x={0} y={0} width={STAGE_W} height={stageH} rx={canvasRadius} />
               </clipPath>
             </defs>
             <rect
@@ -533,6 +547,7 @@ export function SceneStage({
               y={0}
               width={STAGE_W}
               height={stageH}
+              rx={canvasRadius}
               strokeWidth={1}
               vectorEffect="non-scaling-stroke"
             />
@@ -681,57 +696,81 @@ export function SceneStage({
           No sources in the scene yet
         </p>
       ) : null}
-      {liveHint ? (
-        <p className="px-3 pb-3 text-center text-xs text-subtle" data-videorc-stage-live-hint>
-          {liveHint}
-        </p>
-      ) : null}
       <Separator />
+      {/* Footer: what the keys do on the left (or, while the docked surface is
+          hidden, why), the canvas's own actions on the right. The hint takes
+          the key chips' place so a menu opening elsewhere never reflows the
+          stage. */}
       <div
-        className="flex flex-wrap items-center justify-between gap-2 p-2"
+        className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 p-2"
         data-videorc-stage-footer
       >
-        {dragEnabled ? (
-          <div className="flex flex-wrap items-center gap-2 text-xs text-muted-foreground">
-            <span>
-              <Kbd>Shift</Kbd> constrain / aspect
+        <div className="flex min-h-7 min-w-0 flex-1 items-center pl-1 text-xs text-subtle">
+          {liveHint ? (
+            <span className="truncate" data-videorc-stage-live-hint title={liveHint}>
+              {liveHint}
             </span>
-            {effectiveSnap ? (
-              <span>
-                <Kbd>Alt / ⌥</Kbd> no snap
+          ) : dragEnabled ? (
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <span className="inline-flex items-center gap-1.5">
+                <Kbd>Shift</Kbd>
+                constrain / aspect
               </span>
-            ) : null}
-            <span>
-              <Kbd>Esc</Kbd> cancel
-            </span>
-          </div>
-        ) : null}
-        {showFreeformHint && onRequestFreeform ? (
-          <Button size="sm" variant="ghost" onClick={onRequestFreeform}>
-            Make freeform
-          </Button>
-        ) : null}
-        {/* Live canvas (macOS): the docked surface is the picture, so the
-            footer offers where it lives — here or in its own window. Elsewhere
-            the plain preview toggle stays. */}
-        {onPopOut && onShowLive ? (
-          liveDocked ? (
-            <Button data-videorc-stage-pop-out size="sm" variant="ghost" onClick={onPopOut}>
-              <ExternalLinkIcon data-icon="inline-start" />
-              Pop out
+              {effectiveSnap ? (
+                <span className="inline-flex items-center gap-1.5">
+                  <Kbd>Alt / ⌥</Kbd>
+                  no snap
+                </span>
+              ) : null}
+              <span className="inline-flex items-center gap-1.5">
+                <Kbd>Esc</Kbd>
+                cancel
+              </span>
+            </div>
+          ) : null}
+        </div>
+        <div className="flex h-7 items-center gap-1">
+          {showFreeformHint && onRequestFreeform ? (
+            <Button size="sm" variant="ghost" onClick={onRequestFreeform}>
+              Make freeform
             </Button>
+          ) : null}
+          {freeform ? (
+            <>
+              <Toggle
+                aria-label="Snap"
+                disabled={!dragEnabled || phase === 'dragging'}
+                pressed={snap}
+                size="sm"
+                onPressedChange={setSnap}
+              >
+                Snap
+              </Toggle>
+              <Separator className="mx-1 my-1.5" orientation="vertical" />
+            </>
+          ) : null}
+          {/* Live canvas (macOS): the docked surface is the picture, so the
+              footer offers where it lives — here or in its own window.
+              Elsewhere the plain preview toggle stays. */}
+          {onPopOut && onShowLive ? (
+            liveDocked ? (
+              <Button data-videorc-stage-pop-out size="sm" variant="ghost" onClick={onPopOut}>
+                <ExternalLinkIcon data-icon="inline-start" />
+                Pop out
+              </Button>
+            ) : (
+              <Button data-videorc-stage-show-live size="sm" variant="ghost" onClick={onShowLive}>
+                <PreviewIcon data-icon="inline-start" />
+                Show live here
+              </Button>
+            )
           ) : (
-            <Button data-videorc-stage-show-live size="sm" variant="ghost" onClick={onShowLive}>
-              <PreviewIcon data-icon="inline-start" />
-              Show live here
+            <Button size="sm" variant="ghost" onClick={onTogglePreview}>
+              <ExternalLinkIcon data-icon="inline-start" />
+              {previewOpen ? 'Close preview' : 'Open preview'}
             </Button>
-          )
-        ) : (
-          <Button size="sm" variant="ghost" onClick={onTogglePreview}>
-            <ExternalLinkIcon data-icon="inline-start" />
-            {previewOpen ? 'Close preview' : 'Open preview'}
-          </Button>
-        )}
+          )}
+        </div>
       </div>
     </div>
   )

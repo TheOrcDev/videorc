@@ -191,10 +191,14 @@ export function LayoutTab(): ReactElement {
     liveCanvasActive &&
     previewWindow.dockSlot === 'scene' &&
     previewWindow.dockHiddenReason === null
-  const liveHidden = liveCanvasActive && !liveSurface
-  const liveHint = liveHidden
-    ? (dockHiddenDisplay(previewWindow.dockHiddenReason ?? 'no-slot-report')?.detail ?? null)
-    : null
+  // While docked here but hidden, the stage footer states why with the Studio
+  // slot's own copy (title, then what brings it back): one tertiary line,
+  // never a new reason and never a toast.
+  const liveHidden =
+    liveCanvasActive && !liveSurface
+      ? dockHiddenDisplay(previewWindow.dockHiddenReason ?? 'no-slot-report')
+      : null
+  const liveHint = liveHidden ? `${liveHidden.title}. ${liveHidden.detail}` : null
   // Decision 6: entering the tab with the preview CLOSED opens it docked into
   // the canvas; an open floating preview stays floating (the footer offers
   // "Show live here"); leaving the tab changes nothing. Once per tab entry,
@@ -294,9 +298,10 @@ export function LayoutTab(): ReactElement {
             ) : null}
           </PanelSection>
 
-          {/* SC1: schematic stage — the committed composition rendered from the
-              real normalized transforms (pure SVG, zero idle IPC). Live pixels
-              stay in the detached preview window. */}
+          {/* The Scene canvas: on macOS the docked native preview is the
+              picture and the SVG stage owns pointer input (plan 058);
+              elsewhere, or while the surface is hidden or floating, the SVG
+              draws the committed composition as a schematic (zero idle IPC). */}
           <div className="flex flex-col gap-3 border-b border-border p-gutter">
             <ScenePresetControls toolbar />
             <SceneStage
