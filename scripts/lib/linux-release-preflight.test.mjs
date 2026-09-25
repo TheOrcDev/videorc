@@ -4,6 +4,8 @@ import { describe, it } from 'node:test'
 import {
   evaluateLinuxReleasePreflight,
   formatLinuxReleasePreflightReport,
+  isHttpsReleaseUploadEndpoint,
+  linuxReleaseUploadEndpoint,
   missingLinuxReleaseUploadEnv
 } from './linux-release-preflight.mjs'
 
@@ -68,6 +70,85 @@ describe('Linux release preflight', () => {
         VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: 'secret'
       }),
       [
+        'VIDEORC_RELEASE_UPLOAD_S3_BUCKET',
+        'VIDEORC_RELEASE_UPLOAD_S3_REGION',
+        'VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL'
+      ]
+    )
+  })
+
+  it('accepts the legacy primary S3 slot or VIDEORC_DOWNLOAD_S3_* fallbacks', () => {
+    assert.deepEqual(
+      missingLinuxReleaseUploadEnv({
+        VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: 'id',
+        VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_RELEASE_UPLOAD_S3_BUCKET: 'releases',
+        VIDEORC_RELEASE_UPLOAD_S3_REGION: 'auto',
+        VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: 'https://example.r2.cloudflarestorage.com'
+      }),
+      []
+    )
+    assert.deepEqual(
+      missingLinuxReleaseUploadEnv({
+        VIDEORC_DOWNLOAD_S3_ACCESS_KEY_ID: 'id',
+        VIDEORC_DOWNLOAD_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_DOWNLOAD_S3_BUCKET: 'releases',
+        VIDEORC_DOWNLOAD_S3_REGION: 'auto',
+        VIDEORC_DOWNLOAD_S3_ENDPOINT_URL: 'https://example.r2.cloudflarestorage.com'
+      }),
+      []
+    )
+  })
+
+  it('accepts Neon-only credentials when the primary origin is neon', () => {
+    const neonOnly = {
+      VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'NEON',
+      VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: 'id',
+      VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: 'secret',
+      VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET: 'releases',
+      VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION: 'eu-central-1',
+      VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL:
+        'https://example.storage.eu-central-1.aws.neon.tech'
+    }
+    assert.deepEqual(missingLinuxReleaseUploadEnv(neonOnly), [])
+    assert.equal(
+      linuxReleaseUploadEndpoint(neonOnly),
+      'https://example.storage.eu-central-1.aws.neon.tech'
+    )
+    assert.equal(
+      isHttpsReleaseUploadEndpoint(linuxReleaseUploadEndpoint(neonOnly)),
+      true
+    )
+  })
+
+  it('reports missing Neon upload fields without printing secret values', () => {
+    assert.deepEqual(
+      missingLinuxReleaseUploadEnv({
+        VIDEORC_DOWNLOAD_STORAGE_PRIMARY: 'neon',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: 'id',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: 'secret'
+      }),
+      [
+        'VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET',
+        'VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION',
+        'VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL'
+      ]
+    )
+  })
+
+  it('does not treat Neon credentials as complete when the primary origin is unset', () => {
+    assert.deepEqual(
+      missingLinuxReleaseUploadEnv({
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: 'id',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: 'secret',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET: 'releases',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION: 'eu-central-1',
+        VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL:
+          'https://example.storage.eu-central-1.aws.neon.tech'
+      }),
+      [
+        'VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID',
+        'VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY',
         'VIDEORC_RELEASE_UPLOAD_S3_BUCKET',
         'VIDEORC_RELEASE_UPLOAD_S3_REGION',
         'VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL'

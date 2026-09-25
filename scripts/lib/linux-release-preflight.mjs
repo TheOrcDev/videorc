@@ -6,6 +6,17 @@ export const LINUX_RELEASE_CANDIDATE_UPLOAD_ENV = [
   ['VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL', 'VIDEORC_DOWNLOAD_S3_ENDPOINT_URL']
 ]
 
+// Neon-only candidate upload. Field names match
+// scripts/lib/release-upload-origins.mjs (ACCESS_KEY_ID / SECRET_ACCESS_KEY /
+// BUCKET / REGION / ENDPOINT_URL).
+export const LINUX_RELEASE_NEON_UPLOAD_ENV = [
+  'VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID',
+  'VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY',
+  'VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET',
+  'VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION',
+  'VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL'
+]
+
 export function evaluateLinuxReleasePreflight({
   arch,
   changelogEntrySupportsLinux,
@@ -71,7 +82,24 @@ export function formatLinuxReleasePreflightReport(result) {
   return lines.join('\n')
 }
 
+export function isNeonReleaseUploadPrimary(env = process.env) {
+  return (nonEmpty(env.VIDEORC_DOWNLOAD_STORAGE_PRIMARY) ?? '').toLowerCase() === 'neon'
+}
+
+export function linuxReleaseUploadEndpoint(env = process.env) {
+  if (isNeonReleaseUploadPrimary(env)) {
+    return nonEmpty(env.VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL)
+  }
+  return (
+    nonEmpty(env.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL) ??
+    nonEmpty(env.VIDEORC_DOWNLOAD_S3_ENDPOINT_URL)
+  )
+}
+
 export function missingLinuxReleaseUploadEnv(env = process.env) {
+  if (isNeonReleaseUploadPrimary(env)) {
+    return LINUX_RELEASE_NEON_UPLOAD_ENV.filter((name) => !nonEmpty(env[name]))
+  }
   return LINUX_RELEASE_CANDIDATE_UPLOAD_ENV.filter(
     (names) => !names.some((name) => nonEmpty(env[name]))
   ).map((names) => names[0])
