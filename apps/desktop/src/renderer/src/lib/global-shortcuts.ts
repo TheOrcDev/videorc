@@ -44,6 +44,27 @@ export function executeGlobalShortcut(
   if (action === 'mic-toggle') context.toggleMicrophoneMute()
 }
 
+// Plan 062: the latest per-action registration outcome, so Settings can mark
+// the one row another app owns instead of only toasting a list.
+type RegistrationSnapshot = Readonly<Record<string, boolean>>
+let registrationSnapshot: RegistrationSnapshot = {}
+const registrationListeners = new Set<() => void>()
+
+function publishRegistration(registered: RegistrationSnapshot): void {
+  registrationSnapshot = registered
+  for (const listener of registrationListeners) listener()
+}
+
+export const globalShortcutRegistration = {
+  subscribe(listener: () => void): () => void {
+    registrationListeners.add(listener)
+    return () => registrationListeners.delete(listener)
+  },
+  getSnapshot(): RegistrationSnapshot {
+    return registrationSnapshot
+  }
+}
+
 /**
  * Keeps the OS-level shortcut registration in step with Settings.
  *
@@ -95,7 +116,13 @@ export class GlobalShortcutsRegistrar {
     const body = JSON.stringify(shortcuts)
     register(shortcuts)
       .then((result) => {
+        // Held by main while the shortcut recorder is armed: leave the body
+        // unmarked so the next render re-syncs and learns the real outcome.
+        if (result?.deferred) {
+          return
+        }
         this.lastRegisteredBody = body
+        publishRegistration({ ...result?.registered })
         const failed = Object.entries(result?.registered ?? {})
           .filter(([, ok]) => !ok)
           .map(([action]) => action)

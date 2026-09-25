@@ -5,7 +5,8 @@ import { executeGlobalShortcut } from './global-shortcuts'
 import {
   GLOBAL_SHORTCUT_ACTIONS,
   globalShortcutEntries,
-  isGlobalShortcutAction
+  isGlobalShortcutAction,
+  withGlobalShortcut
 } from '../../../shared/global-shortcuts'
 import type { GlobalShortcutAction } from '../../../shared/global-shortcuts'
 
@@ -51,5 +52,21 @@ describe('layout cycle order', () => {
       nextEligibleLayout('vertical-camera-top', -1, ['vertical-camera-top', 'vertical-camera-only'])
     ).toBe('vertical-camera-only')
     expect(nextEligibleLayout('screen-only', 1, ['screen-only'])).toBeNull()
+  })
+})
+
+describe('withGlobalShortcut', () => {
+  it('writes an action row or a layout row and keeps every other binding', () => {
+    const config = { recordToggle: 'Cmd+Shift+R', layouts: { 'screen-only': 'Ctrl+Alt+2' } }
+    expect(withGlobalShortcut(config, 'mic-toggle', 'Cmd+Shift+M')).toEqual({
+      ...config,
+      micToggle: 'Cmd+Shift+M'
+    })
+    expect(withGlobalShortcut(config, 'layout:camera-only', 'Ctrl+Alt+3')).toEqual({
+      recordToggle: 'Cmd+Shift+R',
+      layouts: { 'screen-only': 'Ctrl+Alt+2', 'camera-only': 'Ctrl+Alt+3' }
+    })
+    expect(withGlobalShortcut(config, 'record-toggle', '').recordToggle).toBe('')
+    expect(withGlobalShortcut(undefined, 'layout-next', 'F13')).toEqual({ layoutNext: 'F13' })
   })
 })

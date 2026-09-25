@@ -1,6 +1,11 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
-import type { GlobalShortcutsConfig } from '../shared/backend'
+import { normalizeAccelerator } from '../shared/accelerator'
+import type {
+  GlobalShortcutsConfig,
+  GlobalShortcutsResult,
+  ShortcutRecorderArmResult
+} from '../shared/backend'
 import {
   app,
   BrowserWindow,
@@ -83,10 +88,7 @@ import {
 import { runBackendInterruptingAction } from './interruption-actions'
 import { AccountSignInTransactions } from './account-sign-in-transactions'
 import { ProviderOAuthCallbacks } from './provider-oauth-callbacks'
-import {
-  replaceGlobalShortcutBindings,
-  unregisterGlobalShortcutsWhenReady
-} from './global-shortcut-lifecycle'
+import { GlobalShortcutGate, unregisterGlobalShortcutsWhenReady } from './global-shortcut-lifecycle'
 import {
   createSafeStoragePersistenceCodec,
   type SecurePersistenceCodec
@@ -506,22 +508,71 @@ let mainWindow: BrowserWindow | null = null
 // Registered system-wide so a Stream Deck's native Hotkey action can drive
 // record/stream/mic with the app unfocused. Off unless the user configures
 // accelerators in Settings; every set call replaces the previous set.
-const registeredGlobalShortcuts = new Set<string>()
+// The gate also suspends them while the Settings shortcut recorder is armed.
+const globalShortcutGate = new GlobalShortcutGate(globalShortcut, (action) => {
+  const window = mainWindow
+  if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
+    sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
+  }
+})
 
-function setGlobalShortcuts(shortcuts: GlobalShortcutsConfig): {
-  registered: Record<string, boolean>
-} {
-  return replaceGlobalShortcutBindings(
-    globalShortcut,
-    registeredGlobalShortcuts,
-    globalShortcutEntries(shortcuts),
-    (action) => {
-      const window = mainWindow
-      if (window && !window.isDestroyed() && isGlobalShortcutAction(action)) {
-        sendElectronEvent(window.webContents, 'global-shortcuts:triggered', action)
-      }
-    }
+function setGlobalShortcuts(shortcuts: GlobalShortcutsConfig): GlobalShortcutsResult {
+  // One spelling per platform: a pre-062 hand-typed `Cmd+…` binds Ctrl off
+  // macOS, which is what Settings always displayed there.
+  return globalShortcutGate.apply(
+    globalShortcutEntries(shortcuts).map(([action, value]) => [
+      action,
+      normalizeAccelerator(value, process.platform) ?? value
+    ])
   )
+}
+
+// ── Settings shortcut recorder (plan 062) ─────────────────────────────────
+// While armed, main owns key capture: registered global shortcuts, the ⌘1–9
+// navigation swallow, menu accelerators and the studio's Space handler would
+// all take the key before a page listener could record it. Main disarms on
+// its own when the window blurs, reloads or crashes, or after 30 s idle, so
+// global shortcuts never stay suspended because a renderer forgot.
+const SHORTCUT_RECORDER_IDLE_MS = 30_000
+let shortcutRecorderIdleTimer: ReturnType<typeof setTimeout> | null = null
+
+function clearShortcutRecorderIdleTimer(): void {
+  if (shortcutRecorderIdleTimer) {
+    clearTimeout(shortcutRecorderIdleTimer)
+    shortcutRecorderIdleTimer = null
+  }
+}
+
+function touchShortcutRecorderIdleTimer(): void {
+  clearShortcutRecorderIdleTimer()
+  shortcutRecorderIdleTimer = setTimeout(
+    () => disarmShortcutRecorder(true),
+    SHORTCUT_RECORDER_IDLE_MS
+  )
+}
+
+function disarmShortcutRecorder(notifyRenderer: boolean): void {
+  clearShortcutRecorderIdleTimer()
+  if (globalShortcutGate.disarm() === null || !notifyRenderer) {
+    return
+  }
+  const window = mainWindow
+  if (window && !window.isDestroyed()) {
+    sendElectronEvent(window.webContents, 'shortcut-recorder:disarmed', undefined)
+  }
+}
+
+function setShortcutRecorderArmed(armed: boolean): ShortcutRecorderArmResult {
+  // Only a click or keypress in the Settings field arms, so no focus check:
+  // blur and the idle timer are what hand the keys back.
+  const window = mainWindow
+  if (armed && window && !window.isDestroyed()) {
+    globalShortcutGate.arm()
+    touchShortcutRecorderIdleTimer()
+  } else {
+    disarmShortcutRecorder(false)
+  }
+  return { armed: globalShortcutGate.isArmed }
 }
 
 app.on('will-quit', () => {
@@ -1698,6 +1749,24 @@ function createWindow(): void {
     // before-input-event still receives every keyUp, so main stays truthful.
     publishShortcutModifier(input.meta || input.control)
 
+    if (globalShortcutGate.isArmed) {
+      // Swallow every key (page handlers and menu accelerators alike) and hand
+      // it to the Settings recorder instead.
+      event.preventDefault()
+      if ((input.type === 'keyDown' || input.type === 'keyUp') && mainWindow) {
+        touchShortcutRecorderIdleTimer()
+        sendElectronEvent(mainWindow.webContents, 'shortcut-recorder:key', {
+          type: input.type,
+          code: input.code,
+          meta: input.meta,
+          control: input.control,
+          alt: input.alt,
+          shift: input.shift
+        })
+      }
+      return
+    }
+
     if (input.type !== 'keyDown' || input.alt || input.shift) {
       return
     }
@@ -1715,7 +1784,16 @@ function createWindow(): void {
 
   // Focus leaving the window means the modifier can be released without any
   // event ever reaching us (⌘Tab is exactly that).
-  mainWindow.on('blur', () => publishShortcutModifier(false))
+  mainWindow.on('blur', () => {
+    publishShortcutModifier(false)
+    disarmShortcutRecorder(true)
+  })
+  mainWindow.webContents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) {
+      disarmShortcutRecorder(false)
+    }
+  })
+  mainWindow.webContents.on('render-process-gone', () => disarmShortcutRecorder(false))
 
   // The renderer cannot detect minimise/hide on its own: this window disables
   // backgroundThrottling (and macOS occlusion backgrounding), which also
@@ -13107,6 +13185,9 @@ app.whenReady().then(async () => {
   })
   secureIpcHandle('global-shortcuts:set', (_event, shortcuts: GlobalShortcutsConfig | undefined) =>
     setGlobalShortcuts(shortcuts ?? {})
+  )
+  secureIpcHandle('shortcut-recorder:set-armed', (_event, armed: boolean) =>
+    setShortcutRecorderArmed(armed === true)
   )
   secureIpcHandle('notes-window:open', () => openNotesWindow())
   secureIpcHandle('notes-window:close', () => closeNotesWindow())

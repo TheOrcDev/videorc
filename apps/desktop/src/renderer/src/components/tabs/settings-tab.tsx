@@ -1,4 +1,10 @@
-import { globalShortcutEntries } from '../../../../shared/global-shortcuts'
+import { findAcceleratorOwner, acceleratorDisplayKeys } from '../../../../shared/accelerator'
+import {
+  globalShortcutEntries,
+  globalShortcutLayout,
+  withGlobalShortcut,
+  type GlobalShortcutAction
+} from '../../../../shared/global-shortcuts'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import {
   BugIcon,
@@ -20,7 +26,7 @@ import {
   WarningIcon
 } from '@/components/icons'
 import { useTheme } from 'next-themes'
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
@@ -31,24 +37,25 @@ import { ConfigGrid } from '@/components/page'
 import { ObsImportDialog } from '@/components/obs-import-dialog'
 import { PanelSection } from '@/components/panel-section'
 import { PhoneRemoteSection } from '@/components/phone-remote-section'
+import { ShortcutRecorderField } from '@/components/shortcut-recorder'
 import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
 import { Field, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field'
-import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioAudio, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import type { RemoteControlStatus } from '@/lib/backend'
 import { useUpdater } from '@/hooks/use-updater'
+import { globalShortcutRegistration } from '@/lib/global-shortcuts'
 import type { DirectoryFacts, RuntimeInfo, UpdateStatus } from '@/lib/backend'
 import { isActiveRecordingState } from '@/lib/format'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
 import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 import { shortcutsByGroup } from '@/lib/shortcuts'
-import { displayAccelerator, displayKeyGlyphs, osSettingsName } from '@/lib/platform'
+import { displayKeyGlyphs, isMacPlatform, osSettingsName } from '@/lib/platform'
 import { releaseTrackLabel } from '@/lib/release-track'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isUpdateInstallable } from '@/lib/update-ui'
@@ -58,6 +65,30 @@ import { isUpdateInstallable } from '@/lib/update-ui'
  * bare header. One muted line says what the switch is for instead.
  */
 export const REMOTE_CONTROL_OFF_HINT = 'Off. Turn on to pair a Stream Deck or the Videorc remote.'
+
+const GLOBAL_ACTION_ROWS = [
+  'record-toggle',
+  'stream-toggle',
+  'mic-toggle',
+  'layout-next',
+  'layout-previous'
+] as const satisfies readonly GlobalShortcutAction[]
+
+const GLOBAL_ACTION_LABELS: Record<(typeof GLOBAL_ACTION_ROWS)[number], string> = {
+  'record-toggle': 'Start / stop recording',
+  'stream-toggle': 'Go live / end stream',
+  'mic-toggle': 'Mute / unmute mic',
+  'layout-next': 'Next layout',
+  'layout-previous': 'Previous layout'
+}
+
+function globalShortcutActionLabel(action: GlobalShortcutAction): string {
+  const layout = globalShortcutLayout(action)
+  if (layout) {
+    return BUILTIN_LAYOUTS.find(({ id }) => id === layout)?.label ?? layout
+  }
+  return GLOBAL_ACTION_LABELS[action as (typeof GLOBAL_ACTION_ROWS)[number]]
+}
 
 // ST1 (UX rework): Settings holds app-level facts and tools only. Session
 // capture settings have ONE home each (Output ⌘6, Livestream ⌘5) — the rows
@@ -89,6 +120,30 @@ export function SettingsTab({
   const { audioMeter } = useStudioAudio()
   const { openStudioPanel } = useWorkspaceNav()
   const { theme, setTheme } = useTheme()
+
+  // Plan 062: shortcuts are recorded by pressing them, not typed.
+  const shortcutRegistration = useSyncExternalStore(
+    globalShortcutRegistration.subscribe,
+    globalShortcutRegistration.getSnapshot
+  )
+  const globalShortcutValue = (action: GlobalShortcutAction): string | undefined =>
+    globalShortcutEntries(settings.globalShortcuts ?? {}).find(([id]) => id === action)?.[1]
+  const setGlobalShortcut = (action: GlobalShortcutAction, accelerator: string): void =>
+    setSettings((current) => ({
+      ...current,
+      globalShortcuts: withGlobalShortcut(current.globalShortcuts, action, accelerator)
+    }))
+  const validateGlobalShortcut =
+    (action: GlobalShortcutAction) =>
+    (accelerator: string): string | null => {
+      const owner = findAcceleratorOwner(
+        settings.globalShortcuts ?? {},
+        accelerator,
+        action,
+        runtimeInfo?.platform
+      )
+      return owner ? `Already used by ${globalShortcutActionLabel(owner)}.` : null
+    }
 
   // ST2: validate the output directory as it changes — a typo here used to
   // fail silently at record time. Blank means the platform default.
@@ -445,40 +500,22 @@ export function SettingsTab({
           <CohostSettingsSection />
 
           <PanelSection
-            description={`Work system-wide, even when Videorc is in the background. Bind them to Stream Deck keys or any macro tool. Electron accelerator syntax, e.g. ${displayAccelerator('Cmd+Shift+R', runtimeInfo?.platform)}.`}
+            description="Work system-wide, even when Videorc is in the background. Click a field and press the keys. Stream Deck hotkeys and F13 to F24 work too."
             icon={SettingsIcon}
             title="Global shortcuts"
           >
             <FieldGroup variant="grouped">
-              {(
-                [
-                  ['recordToggle', 'Start / stop recording', 'Cmd+Shift+R'],
-                  ['streamToggle', 'Go live / end stream', 'Cmd+Shift+L'],
-                  ['micToggle', 'Mute / unmute mic', 'Cmd+Shift+M'],
-                  ['layoutNext', 'Next layout', ''],
-                  ['layoutPrevious', 'Previous layout', '']
-                ] as const
-              ).map(([key, label, placeholder]) => (
-                <Field key={key}>
-                  <div className="flex items-center justify-between gap-3">
-                    <FieldLabel htmlFor={`global-shortcut-${key}`}>{label}</FieldLabel>
-                    <Input
-                      className="w-44 font-mono text-xs"
-                      id={`global-shortcut-${key}`}
-                      placeholder={displayAccelerator(placeholder, runtimeInfo?.platform)}
-                      value={settings.globalShortcuts?.[key] ?? ''}
-                      onChange={(event) =>
-                        setSettings((current) => ({
-                          ...current,
-                          globalShortcuts: {
-                            ...current.globalShortcuts,
-                            [key]: event.target.value
-                          }
-                        }))
-                      }
-                    />
-                  </div>
-                </Field>
+              {GLOBAL_ACTION_ROWS.map((action) => (
+                <ShortcutRecorderField
+                  key={action}
+                  id={`global-shortcut-${action}`}
+                  label={globalShortcutActionLabel(action)}
+                  platform={runtimeInfo?.platform}
+                  validate={validateGlobalShortcut(action)}
+                  registrationFailed={shortcutRegistration[action] === false}
+                  value={globalShortcutValue(action)}
+                  onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
+                />
               ))}
             </FieldGroup>
             {/* One inset group per orientation, rows shaped like the ones
@@ -492,36 +529,27 @@ export function SettingsTab({
                 <FieldGroup variant="grouped">
                   {BUILTIN_LAYOUTS.filter(
                     ({ id }) => id.startsWith('vertical-') === (orientation === 'vertical')
-                  ).map(({ id, label }) => (
-                    <Field key={id}>
-                      <div className="flex items-center justify-between gap-3">
-                        <FieldLabel htmlFor={`global-layout-${id}`}>{label}</FieldLabel>
-                        <Input
-                          className="w-44 font-mono text-xs"
-                          id={`global-layout-${id}`}
-                          value={settings.globalShortcuts?.layouts?.[id] ?? ''}
-                          placeholder="Unassigned"
-                          onChange={(event) =>
-                            setSettings((current) => ({
-                              ...current,
-                              globalShortcuts: {
-                                ...current.globalShortcuts,
-                                layouts: {
-                                  ...current.globalShortcuts?.layouts,
-                                  [id]: event.target.value
-                                }
-                              }
-                            }))
-                          }
-                        />
-                      </div>
-                    </Field>
-                  ))}
+                  ).map(({ id, label }) => {
+                    const action = `layout:${id}` as const
+                    return (
+                      <ShortcutRecorderField
+                        key={id}
+                        id={`global-layout-${id}`}
+                        label={label}
+                        platform={runtimeInfo?.platform}
+                        validate={validateGlobalShortcut(action)}
+                        registrationFailed={shortcutRegistration[action] === false}
+                        value={globalShortcutValue(action)}
+                        onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
+                      />
+                    )
+                  })}
                 </FieldGroup>
               </FieldSet>
             ))}
-            <p className="px-1 text-xs text-muted-foreground">
-              Leave a field empty to release the key combination.
+            <p className="flex flex-wrap items-center gap-1 px-1 text-xs text-muted-foreground">
+              <Kbd>Esc</Kbd> cancels,{' '}
+              <Kbd>{isMacPlatform(runtimeInfo?.platform) ? '⌫' : 'Backspace'}</Kbd> clears.
             </p>
           </PanelSection>
 
@@ -712,20 +740,13 @@ export function SettingsTab({
                 .map(([action, key]) => (
                   <div key={action} className="flex items-center justify-between gap-3">
                     <span className="text-sm text-muted-foreground">
-                      Global ·{' '}
-                      {action.startsWith('layout:')
-                        ? BUILTIN_LAYOUTS.find(({ id }) => id === action.slice(7))?.label
-                        : (
-                            {
-                              'layout-next': 'Next layout',
-                              'layout-previous': 'Previous layout',
-                              'record-toggle': 'Start / stop recording',
-                              'stream-toggle': 'Go live / end stream',
-                              'mic-toggle': 'Mute / unmute mic'
-                            } as Record<string, string>
-                          )[action]}
+                      Global · {globalShortcutActionLabel(action)}
                     </span>
-                    <Kbd>{displayAccelerator(key!, runtimeInfo?.platform)}</Kbd>
+                    <KbdGroup>
+                      {acceleratorDisplayKeys(key, runtimeInfo?.platform).map((glyph, index) => (
+                        <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
+                      ))}
+                    </KbdGroup>
                   </div>
                 ))}
               {[...shortcutsByGroup().entries()].map(([group, entries]) => (

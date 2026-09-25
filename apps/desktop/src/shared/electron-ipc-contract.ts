@@ -18,6 +18,7 @@ import type {
   CommentsViewSnapshot,
   CommentsWindowState,
   GlobalShortcutsConfig,
+  ShortcutRecorderKeyEvent,
   NotesDocument,
   NotesWindowState,
   OAuthCallbackEnvelope,
@@ -99,6 +100,7 @@ export const electronInvokeApiMethods = {
   'preview-window:set-aspect-ratio': 'setPreviewWindowAspectRatio',
   'notes-window:open': 'openNotesWindow',
   'global-shortcuts:set': 'setGlobalShortcuts',
+  'shortcut-recorder:set-armed': 'setShortcutRecorderArmed',
   'notes-window:close': 'closeNotesWindow',
   'notes-window:get-state': 'getNotesWindowState',
   'notes-window:set-always-on-top': 'setNotesWindowAlwaysOnTop',
@@ -207,6 +209,8 @@ export interface ElectronIpcEventMap {
   'shortcut:modifier': boolean
   'window:visible': boolean
   'global-shortcuts:triggered': GlobalShortcutAction
+  'shortcut-recorder:key': ShortcutRecorderKeyEvent
+  'shortcut-recorder:disarmed': undefined
   'preview-surface:pump-mode': boolean
   'preview-surface:resync-scene': undefined
   'app:update-status': UpdateStatus
@@ -243,6 +247,8 @@ export const electronEventChannels = [
   'shortcut:modifier',
   'window:visible',
   'global-shortcuts:triggered',
+  'shortcut-recorder:key',
+  'shortcut-recorder:disarmed',
   'preview-surface:pump-mode',
   'preview-surface:resync-scene',
   'app:update-status'
@@ -982,6 +988,10 @@ const specificRuntimeInvokeContracts = {
   'system:check-directory': invokeContract(tupleSchema([boundedIdentifier])),
   'backgrounds:asset-exists': invokeContract(tupleSchema([boundedIdentifier])),
   'global-shortcuts:set': invokeContract(tupleSchema([globalShortcutsSchema])),
+  'shortcut-recorder:set-armed': invokeContract(
+    tupleSchema([booleanSchema]),
+    objectSchema({ armed: booleanSchema })
+  ),
   'updates:install': invokeContract(noArgs, undefinedSchema)
 } satisfies Partial<Record<ElectronInvokeChannel, IpcRuntimeContract>>
 
@@ -1136,6 +1146,16 @@ const specificRuntimeEventSchemas = {
   // the window is minimised or hidden.
   'window:visible': booleanSchema,
   'global-shortcuts:triggered': enumSchema(GLOBAL_SHORTCUT_ACTIONS),
+  // Plan 062: keys main captured while the Settings shortcut recorder is armed.
+  'shortcut-recorder:key': objectSchema({
+    type: enumSchema(['keyDown', 'keyUp']),
+    code: stringSchema({ maxLength: 64 }),
+    meta: booleanSchema,
+    control: booleanSchema,
+    alt: booleanSchema,
+    shift: booleanSchema
+  }),
+  'shortcut-recorder:disarmed': undefinedSchema,
   'preview-surface:pump-mode': booleanSchema,
   'preview-surface:resync-scene': undefinedSchema,
   'captions-window:lines': runtimeSchema<unknown[]>('bounded caption lines', (value, path) => {
