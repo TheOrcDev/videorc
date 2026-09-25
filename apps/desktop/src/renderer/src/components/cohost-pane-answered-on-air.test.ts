@@ -42,6 +42,12 @@ function resolved(id: string, text: string, resolvedAt: string): CohostRecentlyR
   return { question: question(id, text), reason: 'voice', resolvedAt }
 }
 
+/** Inside the pane's 60 s recentlyResolved TTL. Hardcoded wall-clock stamps
+ * expire the section as soon as that minute passes. */
+function resolvedAtMsAgo(msAgo: number): string {
+  return new Date(Date.now() - msAgo).toISOString()
+}
+
 function state(overrides: Partial<CohostState> = {}): CohostState {
   return { ...EMPTY_COHOST_STATE, sessionId: 'session-1', status: 'listening', ...overrides }
 }
@@ -86,8 +92,8 @@ describe('CohostPane: Answered on air', () => {
         questions: [question('q-open', 'Which mic is that?')],
         // The wire is oldest first; the pane shows the newest.
         recentlyResolved: [
-          resolved('q-old', 'What keyboard is that?', '2026-09-25T12:00:10.000Z'),
-          resolved('q-new', 'When is the next stream?', '2026-09-25T12:00:20.000Z')
+          resolved('q-old', 'What keyboard is that?', resolvedAtMsAgo(20_000)),
+          resolved('q-new', 'When is the next stream?', resolvedAtMsAgo(10_000))
         ]
       }),
       onRestore
@@ -120,10 +126,10 @@ describe('CohostPane: Answered on air', () => {
     await renderPane(
       state({
         recentlyResolved: [
-          resolved('q-1', 'One?', '2026-09-25T12:00:01.000Z'),
-          resolved('q-2', 'Two?', '2026-09-25T12:00:02.000Z'),
-          resolved('q-3', 'Three?', '2026-09-25T12:00:03.000Z'),
-          resolved('q-4', 'Four?', '2026-09-25T12:00:04.000Z')
+          resolved('q-1', 'One?', resolvedAtMsAgo(40_000)),
+          resolved('q-2', 'Two?', resolvedAtMsAgo(30_000)),
+          resolved('q-3', 'Three?', resolvedAtMsAgo(20_000)),
+          resolved('q-4', 'Four?', resolvedAtMsAgo(10_000))
         ]
       })
     )
