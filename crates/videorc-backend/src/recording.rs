@@ -68,7 +68,9 @@ use crate::entitlements;
 use crate::ffmpeg::{ffprobe_path_for, resolve_ffmpeg_path};
 use crate::ffmpeg_work::ExportPermit;
 use crate::ffmpeg_work::{CapturePermit, MaintenanceCancelToken};
-use crate::h264_profile::{h264_high_level_label, quality_posture_canvas_envelope};
+use crate::h264_profile::{
+    h264_high_level_label, h264_vaapi_level_arg, quality_posture_canvas_envelope,
+};
 #[cfg(target_os = "windows")]
 use crate::mpeg_ts::{MpegTsH264Writer, timing_to_90khz};
 use crate::pipeline::{RecordingPipeline, container_for_outputs, container_key};
@@ -11805,8 +11807,10 @@ fn append_h264_encoding_args_for_platform_with_timing(
             // Driver-compat profile (Plan 053): chosen by the probe only after
             // the standard set was rejected on the same node (ogre's Coffee
             // Lake iHD returned "end picture encode issue: 24" for the
-            // standard set while a plain CLI encode passed). Constant bitrate,
-            // no B-frames, no level pin; the bisect on the box refines this.
+            // standard set while a plain CLI encode passed). The bisect
+            // (Plan 0001) showed the rejection was the `-level 4.0` spelling,
+            // now corrected for both profiles; this set stays as a driver
+            // fallback: constant bitrate, no B-frames.
             LinuxVaapiArgProfile::Compat => {
                 args.extend([
                     "-rc_mode".to_string(),
@@ -11848,20 +11852,26 @@ fn append_h264_encoding_args_for_platform_with_timing(
     // Spec-valid High profile/level (the recording-quality audit caught the
     // encoders' auto picks under-leveling 60fps streams). Media Foundation
     // exposes neither option, so the Windows arms keep the encoder default.
-    if platform == FfmpegH264Platform::LinuxVaapi && vaapi_profile == LinuxVaapiArgProfile::Compat {
-        args.extend(["-profile:v".to_string(), "high".to_string()]);
-    } else if matches!(
+    // h264_vaapi's `-level` constants are spelled `4`, not `4.0` (Plan 0001:
+    // "4.0" parses as level_idc 4 and Intel iHD rejects it with "encode
+    // issue 24"); both VAAPI profiles carry the corrected pin.
+    if matches!(
         platform,
         FfmpegH264Platform::Macos
             | FfmpegH264Platform::LinuxVaapi
             | FfmpegH264Platform::LinuxSoftware
     ) && let Some(level) = h264_high_level_label(video.width, video.height, video.fps)
     {
+        let level = if platform == FfmpegH264Platform::LinuxVaapi {
+            h264_vaapi_level_arg(level)
+        } else {
+            level.to_string()
+        };
         args.extend([
             "-profile:v".to_string(),
             "high".to_string(),
             "-level".to_string(),
-            level.to_string(),
+            level,
         ]);
     }
     args.extend([
@@ -11884,11 +11894,15 @@ fn append_h264_encoding_args_for_platform_with_timing(
     // libopenh264 writes no VUI colour description, so the flags above only
     // reach the container and ffprobe reports primaries/transfer unknown
     // (ogre, 2026-09-24). Rewrite the SPS after encoding, the same way the
-    // Windows Media Foundation copy path already does. Hardware encoders
-    // build the VUI themselves.
+    // Windows Media Foundation copy path already does. VideoToolbox builds
+    // the VUI itself; h264_vaapi on the bundled FFmpeg does NOT carry
+    // primaries/transfer from the context options (Plan 0002, run 04 proves
+    // the bsf alone fixes the tags), so the VAAPI arm rewrites too.
     if matches!(
         platform,
-        FfmpegH264Platform::LinuxSoftware | FfmpegH264Platform::WindowsSoftware
+        FfmpegH264Platform::LinuxSoftware
+            | FfmpegH264Platform::WindowsSoftware
+            | FfmpegH264Platform::LinuxVaapi
     ) {
         args.extend(h264_bt709_vui_rewrite_bsf_args());
     }
@@ -15776,7 +15790,13 @@ fn bridge_recording_video_filter_for_encoder(
 ) -> String {
     let fps = video.fps.max(1);
     let tail = match encoder.platform {
-        FfmpegH264Platform::LinuxVaapi => ",format=nv12,hwupload",
+        // Stamp BEFORE the upload: h264_vaapi (bundled n8.1.2) builds the SPS
+        // VUI from the frame properties and drops the context colour options
+        // for primaries/transfer (ogre, Plan 0002; run 05 proves the stamp is
+        // enough for the encoder to write the full VUI).
+        FfmpegH264Platform::LinuxVaapi => {
+            ",setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,format=nv12,hwupload"
+        }
         // Stamp the frames too, so the software encoder's input carries the
         // same BT.709 video-range facts the output tags and the VUI rewrite
         // claim (the legacy composed graph does the same via setparams).
@@ -20877,18 +20897,26 @@ mod tests {
         assert_eq!(arg_value(&linux_software_args, "-pix_fmt"), Some("yuv420p"));
         assert_eq!(arg_value(&linux_software_args, "-rc_mode"), Some("bitrate"));
 
-        // libopenh264 writes no VUI: both software arms rewrite the SPS to
-        // BT.709 video-range after encoding. Hardware encoders stamp it
-        // themselves and must not carry the bsf.
+        // libopenh264 writes no VUI and h264_vaapi drops primaries/transfer
+        // (Plan 0002): every Linux arm and the Windows software arm rewrite
+        // the SPS to BT.709 video-range after encoding. VideoToolbox and
+        // Media Foundation stamp it themselves and must not carry the bsf.
         const VUI_REWRITE: &str = "h264_metadata=video_full_range_flag=0:colour_primaries=1:transfer_characteristics=1:matrix_coefficients=1";
-        for args in [&linux_software_args, &windows_software_args] {
+        for args in [
+            &linux_software_args,
+            &windows_software_args,
+            &linux_vaapi_args,
+        ] {
             assert_eq!(arg_value(args, "-bsf:v"), Some(VUI_REWRITE));
             assert_eq!(arg_value(args, "-color_primaries"), Some("bt709"));
             assert_eq!(arg_value(args, "-color_trc"), Some("bt709"));
         }
-        for args in [&macos_args, &linux_vaapi_args, &windows_args] {
+        for args in [&macos_args, &windows_args] {
             assert_eq!(arg_value(args, "-bsf:v"), None);
         }
+        // Plan 0001: h264_vaapi spells level 4.0 as `4`; the standard and
+        // compat profiles both pin it.
+        assert_eq!(arg_value(&linux_vaapi_args, "-level"), Some("4"));
 
         let mut linux_vaapi_compat_args = Vec::new();
         append_h264_encoding_args_for_platform(
@@ -20908,7 +20936,11 @@ mod tests {
             arg_value(&linux_vaapi_compat_args, "-profile:v"),
             Some("high")
         );
-        assert_eq!(arg_value(&linux_vaapi_compat_args, "-level"), None);
+        assert_eq!(arg_value(&linux_vaapi_compat_args, "-level"), Some("4"));
+        assert_eq!(
+            arg_value(&linux_vaapi_compat_args, "-bsf:v"),
+            Some(VUI_REWRITE)
+        );
         assert_eq!(arg_value(&linux_vaapi_compat_args, "-b:v"), Some("6000k"));
 
         for args in [
@@ -20989,7 +21021,8 @@ mod tests {
         let args = linux_vaapi_probe_args(device, LinuxVaapiArgProfile::Standard);
         let compat_args = linux_vaapi_probe_args(device, LinuxVaapiArgProfile::Compat);
         assert_eq!(arg_value(&compat_args, "-rc_mode"), Some("CBR"));
-        assert_eq!(arg_value(&compat_args, "-level"), None);
+        assert_eq!(arg_value(&compat_args, "-level"), Some("4"));
+        assert_eq!(arg_value(&args, "-level"), Some("4"));
         assert_eq!(
             arg_value(&args, "-vaapi_device"),
             Some("/dev/dri/renderD128")
@@ -21000,7 +21033,9 @@ mod tests {
         );
         assert_eq!(
             arg_value(&args, "-vf"),
-            Some("setpts=PTS-STARTPTS,fps=30,format=nv12,hwupload")
+            Some(
+                "setpts=PTS-STARTPTS,fps=30,setparams=color_primaries=bt709:color_trc=bt709:colorspace=bt709:range=tv,format=nv12,hwupload"
+            )
         );
         assert_eq!(arg_value(&args, "-frames:v"), Some("30"));
         // The session's own VAAPI arguments, not a probe-only subset.
@@ -25672,7 +25707,7 @@ mod tests {
         assert_eq!(arg_value(&bridge_args, "-c:v"), Some("h264_vaapi"));
         assert!(
             arg_value(&bridge_args, "-filter_complex")
-                .is_some_and(|filter| filter.contains("format=nv12,hwupload[v_main]"))
+                .is_some_and(|filter| filter.contains("range=tv,format=nv12,hwupload[v_main]"))
         );
         let device_position = bridge_args
             .iter()
@@ -25696,7 +25731,7 @@ mod tests {
         assert_eq!(arg_value(&legacy_args, "-c:v"), Some("h264_vaapi"));
         assert!(
             arg_value(&legacy_args, "-filter_complex")
-                .is_some_and(|filter| filter.contains("format=nv12,hwupload[v_main]"))
+                .is_some_and(|filter| filter.contains("range=tv,format=nv12,hwupload[v_main]"))
         );
         assert!(
             arg_value(&legacy_args, "-filter_complex")
@@ -25789,7 +25824,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_filter_stamps_bt709_for_software_encoders_only() {
+    fn bridge_filter_stamps_bt709_for_every_linux_arm_and_software_encoders() {
         let video = VideoSettings {
             preset: VideoPreset::Tutorial1080p30,
             width: 1920,
@@ -25824,9 +25859,10 @@ mod tests {
                 "[0:v]setpts=PTS-STARTPTS,fps=30[v_main]"
             );
         }
+        // The VAAPI arm stamps BEFORE the upload (Plan 0002).
         assert_eq!(
             filter_for(FfmpegH264Platform::LinuxVaapi),
-            "[0:v]setpts=PTS-STARTPTS,fps=30,format=nv12,hwupload[v_main]"
+            format!("[0:v]setpts=PTS-STARTPTS,fps=30,{STAMP},format=nv12,hwupload[v_main]")
         );
     }
 
