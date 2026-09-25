@@ -4,10 +4,9 @@ How to develop and verify Videorc on a Linux box. First run on real hardware
 2026-09-24 (ogre: T2 MacBook Pro, Omarchy 4.0.4, Hyprland/Wayland, Intel UHD
 630 plus Radeon Pro 555X).
 
-Linux is an incremental port (`linux-port-plan.md`). L1 (compile gate) and
-L1.5 (encoder policy) exist; audio, camera, portal screen capture, preview,
-and packaging do not. A dev run on Linux proves the encoder bridge and the
-shared session machinery, nothing more. Nothing in this document is release
+Linux is an incremental port (`linux-port-plan.md`). L1 through L6 packaging
+exist as engineering paths. A private Linux Alpha candidate can be stored
+from protected `main`; nothing in this document is public release
 authorization.
 
 ## One-time setup
@@ -168,7 +167,7 @@ pnpm probe:preview-lifecycle:linux   # VIDEORC_EXPECT_LINUX_PROOF=1, asserts pro
 
 ## Packaged run (L6 / Plan 0008)
 
-`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Updater promotion and `release-linux-alpha.yml` are still owed.
+`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate. Public updater promotion and the videorc-web download button are still owed.
 
 ## Verify gates that work on Linux
 

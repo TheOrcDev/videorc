@@ -6,8 +6,24 @@ repeatable per-release process. For one-time signing setup see
 [../distribution.md](../distribution.md).
 
 This runbook publishes the **macOS Beta only**. Windows is a separate,
-default-deny **Alpha** track. Do not rename these artifacts, reuse the macOS
-storage keys, or treat a Windows CI artifact as a release.
+default-deny **Alpha** track. Linux is a third, candidate-only **Alpha**
+track. Do not rename these artifacts, reuse the macOS or Windows storage
+keys, or treat a CI artifact as a public release.
+
+## Linux Alpha Is A Separate Candidate-Only Track
+
+Linux x64 AppImage builds stay private until a promote workflow, Ubuntu 24.04
+named-box packaged smoke, and videorc-web download state exist. The candidate
+lane is `.github/workflows/release-linux-alpha.yml`. It writes only:
+
+- `candidates/linux-alpha/<releaseId>/<sourceCommit>/` in private storage
+- intended later public keys under `releases/linux-alpha/<releaseId>/`
+- the updater filename `latest-linux.yml`
+
+It must never write `releases/macos/`, `releases/windows/`, `updates/macos/`,
+`updates/windows/`, `latest-mac.yml`, or the Windows `latest.yml` feed. Public
+download remains disabled. See [../distribution.md](../distribution.md) and
+[../linux-port-plan.md](../linux-port-plan.md).
 
 ## Windows Alpha Is A Separate Gated Track
 
