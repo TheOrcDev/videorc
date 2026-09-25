@@ -1,0 +1,174 @@
+name: Build Linux Alpha Candidate
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_id:
+        description: Exact <package version>-alpha.N id matching apps/desktop/package.json
+        required: true
+        type: string
+
+concurrency:
+  group: linux-alpha-candidate
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  candidate:
+    name: Package, validate, and store private Linux Alpha candidate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: Check out dispatch commit
+        # actions/checkout v4.2.2, pinned from the verified upstream tag.
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+
+      - name: Verify current protected-main source
+        env:
+          EXPECTED_SOURCE_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "${GITHUB_REF}" != "refs/heads/main" ]; then
+            echo "Linux candidate builds must be dispatched from the protected main branch."
+            exit 1
+          fi
+          actual="$(git rev-parse HEAD)"
+          if [ "${actual}" != "${EXPECTED_SOURCE_COMMIT}" ]; then
+            echo "Checked out ${actual}, expected ${EXPECTED_SOURCE_COMMIT}."
+            exit 1
+          fi
+          git fetch --no-tags origin main
+          current_main="$(git rev-parse origin/main)"
+          if [ "${actual}" != "${current_main}" ]; then
+            echo "Main advanced to ${current_main}. Re-dispatch the candidate build from current main."
+            exit 1
+          fi
+
+      - name: Set up pnpm
+        # pnpm/action-setup v4.1.0, pinned from the verified upstream tag.
+        uses: pnpm/action-setup@a7487c7e89a18df4991f7f222e4898a00d66ddda
+        with:
+          version: 11.0.9
+          run_install: false
+
+      - name: Set up Node
+        # actions/setup-node v4.4.0, pinned from the verified upstream tag.
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: '24.6.0'
+          cache: pnpm
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component clippy --no-self-update
+          rustup default stable
+
+      - name: Install Linux packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential \
+            ca-certificates \
+            libasound2t64 \
+            libatk-bridge2.0-0t64 \
+            libgtk-3-0t64 \
+            libnss3 \
+            xz-utils
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Test Linux FFmpeg policy
+        run: node --test scripts/lib/ffmpeg-linux-pin.test.mjs
+
+      - name: Fetch and verify pinned Linux FFmpeg
+        run: node scripts/fetch-ffmpeg-linux.mjs
+
+      - name: Run Linux unit and clippy gates
+        run: |
+          set -euo pipefail
+          cargo clippy -p videorc-backend -- -D warnings -A dead_code -A unused_imports -A unused_variables -A unused_mut
+          cargo test -p videorc-backend
+          pnpm test:scripts
+
+      - name: Preflight Linux Alpha candidate
+        env:
+          VIDEORC_LINUX_ACCEPTANCE_STATUS: pending
+          VIDEORC_LINUX_RELEASE_STAGE: candidate
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+        run: pnpm release:preflight:linux
+
+      - name: Build unsigned Linux AppImage
+        env:
+          VIDEORC_LINUX_ACCEPTANCE_STATUS: pending
+          VIDEORC_LINUX_RELEASE_STAGE: candidate
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+        run: pnpm package:desktop:linux
+
+      - name: Generate isolated Linux Alpha manifests
+        env:
+          VIDEORC_LINUX_ACCEPTANCE_STATUS: pending
+          VIDEORC_LINUX_RELEASE_STAGE: candidate
+          VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+        run: pnpm release:manifest:linux
+
+      - name: Validate AppImage, sha256, feed, and bundled LGPL FFmpeg
+        env:
+          VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
+        run: pnpm release:validate:linux
+
+      - name: Record Ubuntu 24.04 packaged-smoke follow-up
+        run: |
+          echo "GitHub-hosted ubuntu-24.04 can package and validate the AppImage."
+          echo "Named-box packaged smoke, updater proof, and videorc-web promotion remain follow-ups."
+
+      - name: Check private candidate upload secrets
+        env:
+          VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_S3_FORCE_PATH_STYLE: 'true'
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_NEON_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_NEON_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_HETZNER_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_HETZNER_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ENDPOINT_URL }}
+        run: pnpm release:secrets:linux
+
+      - name: Store immutable private Linux Alpha candidate
+        env:
+          VIDEORC_LINUX_FFMPEG_LICENSE_PATH: apps/desktop/release/linux-unpacked/resources/ffmpeg/LICENSE.txt
+          VIDEORC_LINUX_FFMPEG_SOURCE_PATH: apps/desktop/release/linux-unpacked/resources/ffmpeg/SOURCE.txt
+          VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_S3_FORCE_PATH_STYLE: 'true'
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_NEON_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_NEON_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_HETZNER_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_LINUX_CANDIDATE_WRITE_HETZNER_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_HETZNER_S3_ENDPOINT_URL }}
+        run: pnpm release:candidate:upload:linux

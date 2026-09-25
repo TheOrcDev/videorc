@@ -6,10 +6,11 @@ Current release policy:
 | ----------------------- | --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | macOS 13+ Apple Silicon | **Beta**  | Publish only the signed, notarized, stapled DMG after the macOS clean-machine gate.                                                                                                          |
 | Windows 11 x64          | **Alpha** | Default deny. Publish only a signed installer whose exact publisher and timestamp, digest and byte size, malware scan, real-device acceptance, update feed, and uninstall evidence all pass. |
+| Ubuntu 24.04 LTS x64    | **Alpha** | Default deny. The candidate workflow may store a private unsigned AppImage. Do not publish a public download, website button, or updater pointer until promote and named-box proof exist.     |
 
 Hosted CI and local unsigned packages are engineering evidence, not public
-Windows Alpha releases. Keep the Windows download unavailable when any required
-gate is missing, failed, or blocked.
+Windows or Linux Alpha releases. Keep those downloads unavailable when any
+required gate is missing, failed, or blocked.
 
 ## Local Packaging
 
@@ -92,6 +93,48 @@ The development smoke test opens the Electron app through `electron-vite`, waits
 - Production DMG target: signed and notarized when release secrets are present
 - App icon: generated from the current Videorc logo
 - FFmpeg: bundled LGPL-compatible executable for packaged macOS builds, with Settings override preserved
+
+## Current Linux Alpha Target
+
+- Packaging tool: Electron Builder
+- Supported candidate target: Ubuntu 24.04 LTS x64 AppImage only
+- Signing: unsigned (no Linux code-signing lane yet)
+- FFmpeg: the SHA-256-pinned LGPL Linux x64 bundle fetched by
+  `pnpm ffmpeg:fetch:linux`, including `ffmpeg`, `ffprobe`, license,
+  source-offer, and build-config metadata. `libx264` is forbidden.
+- Candidate workflow: `.github/workflows/release-linux-alpha.yml`,
+  `workflow_dispatch` from protected `main` only
+- Private storage prefix:
+  `candidates/linux-alpha/<releaseId>/<sourceCommit>/`
+- Intended later public prefix:
+  `releases/linux-alpha/<releaseId>/`
+- Updater feed filename: `latest-linux.yml` only
+- Public download, videorc-web button, and `updates/linux-alpha/` pointers
+  stay disabled until `promote-linux-alpha.yml` and Ubuntu 24.04 named-box
+  packaged/updater proof exist
+
+Build a local AppImage with:
+
+```sh
+pnpm package:desktop:linux
+```
+
+Prepare candidate metadata after packaging:
+
+```sh
+VIDEORC_RELEASE_ID=<version>-alpha.N \
+VIDEORC_RELEASE_SOURCE_COMMIT=<40-character-sha> \
+pnpm release:preflight:linux && pnpm release:manifest:linux && pnpm release:validate:linux
+```
+
+Store the private candidate (does not flip public feeds):
+
+```sh
+pnpm release:secrets:linux && pnpm release:candidate:upload:linux
+```
+
+Never reuse macOS Beta or Windows Alpha prefixes, `latest-mac.yml`, or
+`latest.yml`.
 
 ## Current Windows Alpha Target
 

@@ -39,10 +39,12 @@ care. Screenshots via public URLs only.
 `0.10.0` release uses `stable`.
 
 `platforms` is a non-empty, duplicate-free block list containing `macos`,
-`windows`, or both. Every new entry must declare it explicitly. Entries written
-before platform metadata was added omit the field and are interpreted as
-`platforms: [macos]`, so the existing macOS history remains valid. A Windows
-Alpha entry starts like this:
+`windows`, `linux`, or a combination. Every new entry must declare it
+explicitly. Entries written before platform metadata was added omit the field
+and are interpreted as `platforms: [macos]`, so the existing macOS history
+remains valid. A Linux Alpha entry is withheld from macOS and Windows
+publication until a Linux promote path exists. A Windows Alpha entry starts
+like this:
 
 ```markdown
 ---

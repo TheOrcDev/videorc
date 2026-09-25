@@ -6,7 +6,7 @@ import { VIDEORC_WEB_LINKS } from '@/lib/videorc-web-links'
 
 export const WHATS_NEW_STORAGE_KEY = 'videorc.whatsNewLastSeenVersion'
 
-export const CHANGELOG_PLATFORMS = ['macos', 'windows'] as const
+export const CHANGELOG_PLATFORMS = ['macos', 'windows', 'linux'] as const
 
 export type ChangelogPlatform = (typeof CHANGELOG_PLATFORMS)[number]
 
@@ -146,6 +146,9 @@ export function changelogPlatformForRuntime(
   }
   if (runtimePlatform === 'win32') {
     return 'windows'
+  }
+  if (runtimePlatform === 'linux') {
+    return 'linux'
   }
   return null
 }
