@@ -4857,6 +4857,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "cohost.stop"
         | "cohost.question.answered"
         | "cohost.question.dismiss"
+        | "cohost.question.restore"
         | "cohost.flag.dismiss"
         | "cohost.settings.set"
         | "captions.overlay.clear"
@@ -8479,6 +8480,19 @@ async fn handle_text_message_with_role(
         "cohost.question.dismiss" => {
             match serde_json::from_value::<protocol::CohostQuestionParams>(command.params) {
                 Ok(params) => match cohost::dismiss_question(state, params).await {
+                    Ok(status) => ServerResponse::ok(command.id, status),
+                    Err(error) => {
+                        ServerResponse::error(command.id, error.code(), error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "cohost.question.restore" => {
+            match serde_json::from_value::<protocol::CohostQuestionParams>(command.params) {
+                Ok(params) => match cohost::restore_question(state, params).await {
                     Ok(status) => ServerResponse::ok(command.id, status),
                     Err(error) => {
                         ServerResponse::error(command.id, error.code(), error.to_string())

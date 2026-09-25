@@ -419,6 +419,7 @@ class StudioBackend {
     tone: 'friendly',
     notes: '',
     autoHighlight: false,
+    voiceHighlight: false,
     rules: []
   }
   cohostState: CohostState = {

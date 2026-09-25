@@ -13267,7 +13267,8 @@ app.whenReady().then(async () => {
       if (
         (command.kind !== 'answered' &&
           command.kind !== 'dismiss-question' &&
-          command.kind !== 'dismiss-flag') ||
+          command.kind !== 'dismiss-flag' &&
+          command.kind !== 'restore') ||
         typeof command.targetId !== 'string' ||
         !command.targetId.trim()
       ) {

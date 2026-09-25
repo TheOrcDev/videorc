@@ -234,6 +234,7 @@ export interface BackendRpcMethodMap {
   'cohost.stop': BackendRpcDefinition<undefined, CohostState>
   'cohost.question.answered': BackendRpcDefinition<CohostQuestionParams, CohostState>
   'cohost.question.dismiss': BackendRpcDefinition<CohostQuestionParams, CohostState>
+  'cohost.question.restore': BackendRpcDefinition<CohostQuestionParams, CohostState>
   'cohost.flag.dismiss': BackendRpcDefinition<CohostFlagParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
@@ -1738,6 +1739,7 @@ const cohostSettingsSchema = objectSchema(
     tone: cohostToneSchema,
     notes: cohostNotesSchema,
     autoHighlight: booleanSchema,
+    voiceHighlight: booleanSchema,
     rules: cohostRulesSchema
   },
   { allowUnknown: false }
@@ -1748,6 +1750,7 @@ const cohostSettingsPatchSchema = objectSchema(
     tone: optionalSchema(cohostToneSchema),
     notes: optionalSchema(cohostNotesSchema),
     autoHighlight: optionalSchema(booleanSchema),
+    voiceHighlight: optionalSchema(booleanSchema),
     // The patch is what the streamer typed; the backend trims and caps it.
     rules: optionalSchema(arraySchema(stringSchema({ maxLength: 2000 }), { maxLength: 100 }))
   },
@@ -1825,6 +1828,37 @@ const cohostMoodScoresSchema = objectSchema(
   { hype: unitInterval, tension: unitInterval, confusion: unitInterval },
   { allowUnknown: false }
 )
+// The source vocabulary will grow (plan 060 S3 adds `voice`); a source this
+// build does not know must still validate, or the whole state event drops.
+const cohostAutoHighlightSchema = objectSchema(
+  {
+    generation: nonNegativeInteger,
+    messageId: boundedString,
+    source: stringSchema({ minLength: 1, maxLength: 32 }),
+    refresh: booleanSchema
+  },
+  { allowUnknown: false }
+)
+// Plan 060 S3: the spotlight and the voice-resolved questions. The resolve
+// reason vocabulary may grow; an unknown one still validates.
+const cohostSpotlightSchema = objectSchema(
+  {
+    messageId: boundedString,
+    questionId: optionalSchema(boundedString),
+    score: unitInterval,
+    at: timestamp,
+    expiresAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const cohostRecentlyResolvedSchema = objectSchema(
+  {
+    question: cohostQuestionSchema,
+    reason: stringSchema({ minLength: 1, maxLength: 32 }),
+    resolvedAt: timestamp
+  },
+  { allowUnknown: false }
+)
 const cohostErrorDetailSchema = objectSchema(
   {
     code: stringSchema({ minLength: 1, maxLength: 128 }),
@@ -1867,7 +1901,12 @@ const cohostStateSchema = objectSchema(
     // Tick wire v2: omitted by the backend while empty.
     highlights: optionalSchema(arraySchema(cohostHighlightSchema, { maxLength: 5 })),
     alerts: optionalSchema(arraySchema(cohostAlertSchema, { maxLength: 8 })),
-    moodScores: optionalSchema(cohostMoodScoresSchema)
+    moodScores: optionalSchema(cohostMoodScoresSchema),
+    // Plan 060 S1: absent until the engine made an automatic command.
+    autoHighlight: optionalSchema(cohostAutoHighlightSchema),
+    // Plan 060 S3: absent while there is no spotlight / nothing resolved.
+    spotlight: optionalSchema(cohostSpotlightSchema),
+    recentlyResolved: optionalSchema(arraySchema(cohostRecentlyResolvedSchema, { maxLength: 3 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>
@@ -2315,6 +2354,7 @@ const runtimeContracts = {
   'cohost.stop': { params: undefinedSchema, result: cohostStateSchema },
   'cohost.question.answered': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
   'cohost.question.dismiss': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
+  'cohost.question.restore': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
   'cohost.flag.dismiss': { params: cohostFlagParamsSchema, result: cohostStateSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema }

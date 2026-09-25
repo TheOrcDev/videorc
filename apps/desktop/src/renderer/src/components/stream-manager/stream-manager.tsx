@@ -41,8 +41,8 @@ import type {
 import type { ChatSendFailure } from '@/lib/chat-send'
 import { useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { cohostGroupedDeltaFlash } from '@/lib/cohost-presence'
+import { activeCohostSpotlight, cohostCommentMarks } from '@/lib/cohost-marks'
 import {
-  cohostCommentMarks,
   cohostNudgeVisible,
   cohostQuestionToast,
   cohostStateForSensitivity,
@@ -179,6 +179,7 @@ export interface StreamManagerProps {
   onCohostNudgeDismiss?: () => void
   onCohostShowOnStream?: (question: CohostQuestion) => void
   onCohostAnswered?: (question: CohostQuestion) => void
+  onCohostRestoreQuestion?: (question: CohostQuestion) => void
   onCohostDismissQuestion?: (question: CohostQuestion) => void
   onCohostDismissFlag?: (flag: CohostFlag) => void
   onCohostEnableConsent?: () => void
@@ -221,6 +222,7 @@ export function StreamManager({
   onCohostNudgeDismiss,
   onCohostShowOnStream,
   onCohostAnswered,
+  onCohostRestoreQuestion,
   onCohostDismissQuestion,
   onCohostDismissFlag,
   onCohostEnableConsent,
@@ -247,7 +249,14 @@ export function StreamManager({
     () => cohostStateForSensitivity(cohostState, cohostSensitivity),
     [cohostSensitivity, cohostState]
   )
-  const cohostMarks = useMemo(() => cohostCommentMarks(shownCohostState), [shownCohostState])
+  // The spotlight also expires on the window's clock, so a missed clearing
+  // event never leaves a stale "Talking about this" behind. Keyed on a boolean,
+  // not the clock, so the list only re-renders when the mark changes.
+  const spotlightLive = activeCohostSpotlight(shownCohostState, nowMs) !== null
+  const cohostMarks = useMemo(() => {
+    const marks = cohostCommentMarks(shownCohostState)
+    return spotlightLive || !marks.spotlight ? marks : { ...marks, spotlight: null }
+  }, [shownCohostState, spotlightLive])
   const cohostPresent = cohostGate !== undefined
   const cohostVisible = cohostState !== null && cohostPresent && mode === 'Live'
   const [cohostFlash, setCohostFlash] = useState<string | null>(null)
@@ -442,6 +451,9 @@ export function StreamManager({
             starting={cohostStarting}
             state={shownCohostState}
             onAnswered={(question) => onCohostAnswered?.(question)}
+            onRestoreQuestion={
+              onCohostRestoreQuestion ? (question) => onCohostRestoreQuestion(question) : undefined
+            }
             onDismissFlag={(flag) => onCohostDismissFlag?.(flag)}
             onDismissQuestion={(question) => onCohostDismissQuestion?.(question)}
             onEnableConsent={onCohostEnableConsent}
@@ -580,6 +592,7 @@ export function StreamManager({
             className="flex"
             cohostFlags={cohostVisible ? cohostMarks.flags : undefined}
             cohostNudge={cohostNudge}
+            cohostSpotlight={cohostVisible ? cohostMarks.spotlight : null}
             cohostSuggested={cohostVisible ? cohostMarks.suggested : undefined}
             highlightApplyingId={highlightApplyingId}
             highlightFailure={highlightFailure}

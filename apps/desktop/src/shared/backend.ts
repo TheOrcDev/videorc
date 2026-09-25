@@ -4083,8 +4083,17 @@ export interface CohostSettings {
   tone: CohostTone
   /** Streamer notes the model answers from; at most 4000 characters. */
   notes: string
-  /** "Show questions on stream automatically" (default off). */
+  /**
+   * Orcle's picks go on stream by themselves: the server's suggested
+   * comments and high-priority questions, under the engine's cadence rules
+   * (default off).
+   */
   autoHighlight: boolean
+  /**
+   * The comment the streamer is talking about goes on stream by itself
+   * (default off; needs live captions, wired in plan 060 S3).
+   */
+  voiceHighlight: boolean
   /** Plain-language chat rules the co-host flags against; ≤ 10 × 120 chars. */
   rules: string[]
 }
@@ -4095,6 +4104,7 @@ export interface CohostSettingsPatch {
   tone?: CohostTone
   notes?: string
   autoHighlight?: boolean
+  voiceHighlight?: boolean
   /** Replaces the whole list; the backend trims, drops empties and caps it. */
   rules?: string[]
 }
@@ -4155,6 +4165,54 @@ export interface CohostMoodScores {
   confusion: number
 }
 
+/** Known sources of an automatic card; the wire may carry a newer one. */
+export type CohostAutoHighlightSource = 'pick' | 'question' | 'voice'
+
+/**
+ * The engine's automatic "put this on stream" command (plan 060 S1). The
+ * BACKEND decides (cadence, roles, safety); the renderer acts on a new
+ * `generation` exactly once, renders the card and sets it with always-set
+ * semantics. It keeps no history.
+ */
+export interface CohostAutoHighlight {
+  generation: number
+  messageId: string
+  /** Tolerant on the wire: an unknown source is still executed. */
+  source: CohostAutoHighlightSource | (string & Record<never, never>)
+  /** The same message is re-set while still live (voice only, once). */
+  refresh: boolean
+}
+
+/**
+ * The comment the streamer is talking about right now (plan 060 S3): the
+ * engine's best spotlight match, refreshed while it persists, gone after 15 s.
+ * Surfaces pin and mark it (pull-up) with no setting; with `voiceHighlight`
+ * the engine also puts it on stream through `autoHighlight` (source `voice`).
+ */
+export interface CohostSpotlight {
+  messageId: string
+  /** The open question this message asked, when it is one. */
+  questionId?: string
+  /** The server's `about` probability, 0..1. */
+  score: number
+  /** ISO-8601: when this message became the spotlight. */
+  at: string
+  expiresAt: string
+}
+
+/** Why the engine resolved a question by itself; the wire may carry a newer one. */
+export type CohostResolveReason = 'voice'
+
+/**
+ * A question the engine resolved on its own, kept for a minute so the streamer
+ * can put it back with `cohost.question.restore` ("Answered on air").
+ */
+export interface CohostRecentlyResolved {
+  question: CohostQuestion
+  reason: CohostResolveReason | (string & Record<never, never>)
+  resolvedAt: string
+}
+
 /**
  * What the last failed tick actually said. `code` is the server's error
  * envelope code verbatim (`ai-gateway-error`, `quota-exhausted`, ...) or a
@@ -4212,6 +4270,21 @@ export interface CohostState {
   highlights?: CohostHighlight[]
   alerts?: CohostAlert[]
   moodScores?: CohostMoodScores
+  /**
+   * The engine's latest automatic on-stream command; absent until it made one
+   * this session (never null).
+   */
+  autoHighlight?: CohostAutoHighlight
+  /**
+   * The comment the streamer is talking about (plan 060 S3); absent while
+   * there is none or once it expired (never null).
+   */
+  spotlight?: CohostSpotlight
+  /**
+   * Questions the engine resolved by itself in the last minute, oldest first,
+   * at most three; absent while empty (never null).
+   */
+  recentlyResolved?: CohostRecentlyResolved[]
 }
 
 /**
@@ -4250,7 +4323,7 @@ export interface CohostStartParams {
   streamTitle?: string | null
 }
 
-/** `cohost.question.answered` / `cohost.question.dismiss`. */
+/** `cohost.question.answered` / `cohost.question.dismiss` / `cohost.question.restore`. */
 export interface CohostQuestionParams {
   sessionId: string
   questionId: string
@@ -4296,7 +4369,7 @@ export function offCohostWindowState(): CohostWindowState {
   }
 }
 
-export type CohostActionKind = 'answered' | 'dismiss-question' | 'dismiss-flag'
+export type CohostActionKind = 'answered' | 'dismiss-question' | 'dismiss-flag' | 'restore'
 
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */
