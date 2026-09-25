@@ -49,9 +49,9 @@ channel:write chat:write streamkey:read events:subscribe`.
 | --- | --- | --- |
 | Stream key and ingest | `GET /public/v1/channels` (no params, user token) → `stream.url` and `stream.key` (the key needs `streamkey:read`). Videorc stores the key as a secret at Go Live (`kick.rs`). | Channels |
 | Title and category | `PATCH /public/v1/channels` {`stream_title`, `category_id`, `custom_tags`} → 204, under `channel:write`. Categories from `GET /public/v2/categories?q=` (v1 `/public/v1/categories?q=` fallback). | Channels, Categories |
-| Viewer count | `stream.viewer_count` on the same channel read. Planned for S6. | Channels |
-| Chat | Read via Kick webhooks (`chat.message.sent`) relayed by videorc-web; send via `POST /public/v1/chat` under `chat:write`. Planned for S4/S5; not in Videorc yet. | Events, Chat |
-| Followers | No total in the channel read; `channel.followed` events give deltas only. Planned for S6. | Events |
+| Viewer count | `stream.viewer_count` on the same channel read, polled every 30 s by the viewer sampler (`viewer_stats.rs`); 0 while `stream.is_live` is false. | Channels |
+| Chat | Read via Kick webhooks (`chat.message.sent`) relayed by videorc-web (`/api/desktop/kick-chat`, long-poll); send via `POST /public/v1/chat` under `chat:write` (500 graphemes, 2,048 bytes, 429 on limit). The desktop creates the `chat.message.sent`, `livestream.status.updated` and `channel.followed` webhook subscriptions with the user token (`events:subscribe`) at Go Live, stores their ids in the secret store (`platform:kick:{account}:event-subscriptions`), and deletes them at stream end and on disconnect (`kick_chat.rs`). | Events, Chat |
+| Followers | No total in the channel read. `channel.followed` relay events arrive as named follow rows in Activity and count up the `stream-audience` row, which reports `capability: "delta-only"` (new follows since the stream started, never a total). No subscribers or tips. | Events |
 
 ## TikTok, Instagram, custom RTMP
 

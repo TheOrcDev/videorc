@@ -81,6 +81,9 @@ export function providerCapabilityTitle(
   ]
   const entry = audience?.platforms.find((candidate) => candidate.platform === provider.platform)
   if (entry?.message && entry.capability !== 'available') lines.push(entry.message)
+  if (entry?.capability === 'delta-only') {
+    lines.push('Kick shows new follows only, not a follower total.')
+  }
   if (provider.platform === 'twitch' && entry?.audienceScopes === false) {
     lines.push(
       'Follow alerts and the sub count need one more Twitch permission: Reconnect Twitch in Livestream → Setup.'

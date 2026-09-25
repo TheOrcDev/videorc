@@ -34,6 +34,7 @@ tokio = { version = "1.48", features = ["fs", "io-util", "macros", "net", "proce
 tokio-tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+unicode-segmentation = "1.13"
 uuid = { version = "1.19", features = ["v4"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

@@ -87,6 +87,28 @@ web side documented in `videorcweb/docs/x-chat.md`). Requires a signed-in Videor
 - [ ] Disconnect X and confirm the `broadcast.chat` subscription is gone
       (`GET /2/activity/subscriptions`).
 
+## Kick live smoke
+
+Kick delivers chat only through webhooks; videorc.com receives them and the backend long-polls
+the relay (`crates/videorc-backend/src/kick_chat.rs`, web side in
+`videorcweb/docs/kick-chat.md`). Requires a signed-in Videorc account and Kick connected over
+OAuth with `events:subscribe` and `chat:write`.
+
+- [ ] Connect Kick (Livestream → Setup); preflight reports Kick comments ready to read and send.
+- [ ] Go Live to Kick; the Kick provider goes from connecting to `Kick live chat connected.`
+- [ ] Post from a separate kick.com viewer account; the comment shows in Comments within ~2 s
+      with the viewer's name, badges and avatar (the avatar renders, not a fallback initial).
+- [ ] Send from Videorc; the message appears on kick.com once and the Kick destination result
+      reports `sent`. Spam sends until Kick answers 429 and confirm the receipt says "Kick is
+      rate limiting messages, try again in a moment".
+- [ ] Follow the channel from the viewer account; a named follow row appears in the Stream
+      Manager Activity and the Followers stat counts it (`delta-only`, no total).
+- [ ] The viewer count in the stats bar matches kick.com within one 30 s sample.
+- [ ] Stop the stream; `GET https://api.kick.com/public/v1/events/subscriptions` with the
+      account's token returns no subscriptions for the app.
+- [ ] Go live again, then Disconnect Kick; the subscriptions are gone again and the relay
+      binding is removed.
+
 ## Multistream + partial release
 
 - [ ] Go Live to YouTube Manual RTMP + Twitch + X simultaneously; confirm a single unified panel shows

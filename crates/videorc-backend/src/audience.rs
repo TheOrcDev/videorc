@@ -60,6 +60,9 @@ pub enum AudienceCapability {
     NeedsReconnect,
     /// This build or account cannot read it; `message` says why.
     Unavailable,
+    /// No total exists; `delta` counts follow events since the session
+    /// started (Kick, plan 063 S6).
+    DeltaOnly,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -132,6 +135,8 @@ pub enum AudienceReading {
     Hidden,
     NeedsReconnect(String),
     Unavailable(String),
+    /// The platform has no total; follow events feed `delta` instead.
+    DeltaOnly,
     /// Transient: keep the last total and retry with backoff.
     Failed(String),
 }
@@ -145,7 +150,9 @@ impl AudienceReading {
                 .map(|backoff| (backoff * 2).min(AUDIENCE_MAX_BACKOFF))
                 .unwrap_or(AUDIENCE_FIRST_BACKOFF),
             // Retried slowly in case the user reconnects or unhides mid-stream.
-            Self::Hidden | Self::NeedsReconnect(_) | Self::Unavailable(_) => AUDIENCE_MAX_BACKOFF,
+            Self::Hidden | Self::NeedsReconnect(_) | Self::Unavailable(_) | Self::DeltaOnly => {
+                AUDIENCE_MAX_BACKOFF
+            }
         }
     }
 }
@@ -272,6 +279,12 @@ impl AudienceHub {
                 entry.delta = None;
                 entry.message = Some(message.clone());
             }
+            AudienceReading::DeltaOnly => {
+                entry.capability = AudienceCapability::DeltaOnly;
+                entry.total = None;
+                entry.delta = Some(entry.delta.unwrap_or(0));
+                entry.message = None;
+            }
             // A transient failure keeps the last total; a first read that
             // fails stays pending rather than claiming a capability.
             AudienceReading::Failed(_) => {}
@@ -334,6 +347,35 @@ impl AudienceHub {
         Some(snapshot.clone())
     }
 
+    /// One follow event from a platform that reports no total (Kick). The
+    /// follow row itself is in chat, so no gain entry is added here.
+    pub fn record_follow(
+        &mut self,
+        session_id: &str,
+        platform: StreamPlatform,
+        now: &str,
+    ) -> Option<AudienceSnapshot> {
+        let snapshot = self
+            .snapshot
+            .as_mut()
+            .filter(|snapshot| snapshot.session_id == session_id)?;
+        let entry = snapshot
+            .platforms
+            .iter_mut()
+            .find(|entry| entry.platform == platform)?;
+        if matches!(
+            entry.capability,
+            AudienceCapability::Pending | AudienceCapability::DeltaOnly
+        ) {
+            entry.capability = AudienceCapability::DeltaOnly;
+            entry.message = None;
+        }
+        entry.delta = Some(entry.delta.unwrap_or(0).saturating_add(1));
+        entry.at = Some(now.to_string());
+        snapshot.updated_at = now.to_string();
+        Some(snapshot.clone())
+    }
+
     pub fn snapshot(&self) -> Option<AudienceSnapshot> {
         self.snapshot.clone()
     }
@@ -384,6 +426,7 @@ impl FakeAudienceConfig {
             Some(AudienceCapability::Unavailable) => {
                 AudienceReading::Unavailable("Fake audience source is unavailable.".to_string())
             }
+            Some(AudienceCapability::DeltaOnly) => AudienceReading::DeltaOnly,
             Some(AudienceCapability::Pending) | Some(AudienceCapability::Available) | None => self
                 .totals
                 .get(read_index)
@@ -399,6 +442,7 @@ fn reconnect_message(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Twitch => "Reconnect Twitch to show followers.",
         StreamPlatform::Youtube => "Reconnect YouTube to show subscribers.",
         StreamPlatform::X => "Reconnect X to show followers.",
+        StreamPlatform::Kick => "Reconnect Kick to show new follows.",
         _ => "Reconnect this account to show its audience.",
     }
 }
@@ -619,6 +663,28 @@ async fn read_source(
             return reading.into();
         }
     }
+    // Kick has no follower total; follow events from the chat relay feed a
+    // delta, which needs the events scope (plan 063, S6).
+    if source.platform == StreamPlatform::Kick {
+        return match credential {
+            None => AudienceReading::Unavailable("Connect Kick to show new follows.".to_string()),
+            Some(credential)
+                if credential.account.status
+                    == crate::streaming::PlatformAccountStatus::Connected
+                    && credential
+                        .account
+                        .scopes
+                        .iter()
+                        .any(|scope| scope == crate::kick_chat::KICK_EVENTS_SCOPE) =>
+            {
+                AudienceReading::DeltaOnly
+            }
+            Some(_) => {
+                AudienceReading::NeedsReconnect(reconnect_message(StreamPlatform::Kick).to_string())
+            }
+        }
+        .into();
+    }
     let Some(credential) = credential else {
         return AudienceReading::Unavailable(format!(
             "Connect {} to show its audience.",
@@ -759,6 +825,19 @@ fn apply_reading(
         .lock()
         .ok()
         .and_then(|mut hub| hub.apply(session_id, platform, reading, &now));
+    if let Some(snapshot) = snapshot {
+        publish(state, snapshot, true);
+    }
+}
+
+/// A follow event arrived from a platform without a follower total.
+pub fn record_follow(state: &AppState, session_id: &str, platform: StreamPlatform) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let snapshot = state
+        .audience
+        .lock()
+        .ok()
+        .and_then(|mut hub| hub.record_follow(session_id, platform, &now));
     if let Some(snapshot) = snapshot {
         publish(state, snapshot, true);
     }
@@ -1203,6 +1282,47 @@ mod tests {
         assert_eq!(
             wire["platforms"][0]["followerGains"],
             json!([{ "at": "t10", "count": 1 }])
+        );
+    }
+
+    #[test]
+    fn kick_is_delta_only_and_counts_follow_events() {
+        let mut hub = AudienceHub::default();
+        hub.begin("s1", &[StreamPlatform::Kick], "t0");
+        let snapshot = hub
+            .apply(
+                "s1",
+                StreamPlatform::Kick,
+                &AudienceReading::DeltaOnly,
+                "t1",
+            )
+            .unwrap();
+        let kick = &snapshot.platforms[0];
+        assert_eq!(kick.capability, AudienceCapability::DeltaOnly);
+        assert_eq!(kick.delta, Some(0));
+        assert_eq!(kick.total, None);
+        assert_eq!(
+            serde_json::to_value(kick).unwrap()["capability"],
+            serde_json::json!("delta-only")
+        );
+
+        hub.record_follow("s1", StreamPlatform::Kick, "t2");
+        let snapshot = hub.record_follow("s1", StreamPlatform::Kick, "t3").unwrap();
+        assert_eq!(snapshot.platforms[0].delta, Some(2));
+        assert!(snapshot.platforms[0].follower_gains.is_empty());
+        // A re-read keeps the running delta.
+        let snapshot = hub.apply(
+            "s1",
+            StreamPlatform::Kick,
+            &AudienceReading::DeltaOnly,
+            "t4",
+        );
+        assert!(snapshot.is_none());
+        assert_eq!(hub.snapshot().unwrap().platforms[0].delta, Some(2));
+        // Another session is ignored.
+        assert!(
+            hub.record_follow("s2", StreamPlatform::Kick, "t5")
+                .is_none()
         );
     }
 

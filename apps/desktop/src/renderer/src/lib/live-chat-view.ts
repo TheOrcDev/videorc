@@ -12,7 +12,7 @@ import type {
 } from '@/lib/backend'
 
 /** Platforms that can appear in the unified feed, in display order. */
-export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'x']
+export const LIVE_CHAT_PLATFORMS: StreamPlatform[] = ['youtube', 'twitch', 'kick', 'x']
 
 /** Max persisted messages projected into the renderer at once; SQLite remains authoritative. */
 export const MAX_LIVE_CHAT_VIEW_MESSAGES = 2000

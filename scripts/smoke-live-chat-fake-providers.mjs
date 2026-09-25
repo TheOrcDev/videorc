@@ -28,7 +28,7 @@ try {
     // shipped, but an empty smoke profile has no connected X account and X remains read-only.
     const capability = await request(ws, timeoutMs, 'liveChat.capability', {})
     const platforms = capability.map((entry) => entry.platform)
-    for (const platform of ['youtube', 'twitch', 'x']) {
+    for (const platform of ['youtube', 'twitch', 'kick', 'x']) {
       if (!platforms.includes(platform)) {
         throw new Error(`liveChat.capability missing ${platform}: ${JSON.stringify(platforms)}`)
       }
@@ -36,6 +36,16 @@ try {
     const x = capability.find((entry) => entry.platform === 'x')
     if (x.state !== 'not-connected' || x.chatReadAvailable) {
       throw new Error(`X chat should be available but not connected, got ${JSON.stringify(x)}`)
+    }
+
+    // Kick reads through the web relay and sends direct; an empty profile has no account.
+    const kick = capability.find((entry) => entry.platform === 'kick')
+    if (
+      kick.state !== 'not-connected' ||
+      kick.chatReadAvailable ||
+      kick.requiredScope !== 'events:subscribe'
+    ) {
+      throw new Error(`Kick chat should need a connected account, got ${JSON.stringify(kick)}`)
     }
 
     const readiness = await request(ws, timeoutMs, 'liveChat.xCommentsReadiness', {})
@@ -366,11 +376,12 @@ try {
     const audience = collectEvent(ws, 'stream.audience')
     const eventDestinations = [
       { platform: 'twitch', targetId: 'smoke-twitch-events' },
-      { platform: 'youtube', targetId: 'smoke-youtube-events' }
+      { platform: 'youtube', targetId: 'smoke-youtube-events' },
+      { platform: 'kick', targetId: 'smoke-kick-events' }
     ]
     await request(ws, timeoutMs, 'liveChat.start', {
       sessionId: eventsSessionId,
-      platforms: ['twitch', 'youtube'],
+      platforms: ['twitch', 'youtube', 'kick'],
       destinations: eventDestinations.map(({ platform, targetId }) => ({
         platform,
         targetId,
@@ -383,7 +394,10 @@ try {
         intervalMs: 60,
         events: true
       })),
-      fakeAudience: [{ platform: 'twitch', totals: [500, 512], intervalMs: 150 }]
+      fakeAudience: [
+        { platform: 'twitch', totals: [500, 512], intervalMs: 150 },
+        { platform: 'kick', capability: 'delta-only', intervalMs: 150 }
+      ]
     })
     const expectedKinds = [
       'subscription',
@@ -427,6 +441,25 @@ try {
       timeoutMs,
       'the audience poller baseline (500) and delta (+12)'
     )
+    const kickFollow = eventRows.find(
+      (message) => message.platform === 'kick' && message.details?.kind === 'follow'
+    )
+    if (kickFollow?.authorName !== 'kick_fan' || kickFollow.targetId !== 'smoke-kick-events') {
+      throw new Error(`Kick follow row missing: ${JSON.stringify(eventRows)}`)
+    }
+    await waitFor(
+      () =>
+        audience.payloads.some((snapshot) =>
+          snapshot.platforms?.some(
+            (entry) =>
+              entry.platform === 'kick' &&
+              entry.capability === 'delta-only' &&
+              entry.total === undefined
+          )
+        ),
+      timeoutMs,
+      'the Kick audience row reporting delta-only'
+    )
     const audienceSnapshot = await request(ws, timeoutMs, 'stream.audience.snapshot')
     const twitchAudience = audienceSnapshot?.platforms?.find((entry) => entry.platform === 'twitch')
     if (
@@ -454,7 +487,8 @@ try {
       `Unified-comments fake-provider smoke OK - ${diagnostics.messagesReceived} messages, ` +
         `${diagnostics.duplicatesSkipped} duplicate(s) skipped, sent/failed/read-only/timeout ` +
         `fan-out preserved, websocket snapshot recovered, X receive-only as "${x.message}", ` +
-        `${expectedKinds.length} activity kinds with details, audience baseline and delta.`
+        `${expectedKinds.length} activity kinds with details, audience baseline and delta, ` +
+        `Kick follow row and delta-only audience.`
     )
   } finally {
     ws.close()

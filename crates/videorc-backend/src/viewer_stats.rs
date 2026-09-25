@@ -58,6 +58,16 @@ pub struct TwitchViewerConfig {
     pub token_source: crate::session_token::SessionTokenSource,
 }
 
+/// Kick reads the connected user's own channel (`GET /public/v1/channels`
+/// with no params), so only the user token is needed (plan 063, S6).
+#[derive(Debug, Clone)]
+pub struct KickViewerConfig {
+    pub access_token: String,
+    pub api_base_url: Option<String>,
+    /// Renews `access_token` mid-stream; never from params.
+    pub token_source: crate::session_token::SessionTokenSource,
+}
+
 /// One count poll: a refused token is told apart from a missing count so
 /// the sampler can renew it (plan 055, B2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -146,6 +156,20 @@ pub fn parse_twitch_viewer_count(body: &Value) -> Option<u64> {
         .first()?
         .get("viewer_count")?
         .as_u64()
+}
+
+/// Kick `GET /public/v1/channels` → `data[0].stream.viewer_count`; 0 while
+/// the channel is not live (Kick keeps the last count on an offline stream).
+pub fn parse_kick_viewer_count(body: &Value) -> Option<u64> {
+    let stream = body.get("data")?.as_array()?.first()?.get("stream")?;
+    if !stream
+        .get("is_live")
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+    {
+        return Some(0);
+    }
+    stream.get("viewer_count")?.as_u64()
 }
 
 pub fn merge_viewer_sample(
@@ -306,6 +330,26 @@ async fn fetch_twitch_count(
     CountFetch::Count(body.as_ref().and_then(parse_twitch_viewer_count))
 }
 
+async fn fetch_kick_count(
+    client: &reqwest::Client,
+    config: &KickViewerConfig,
+    access_token: &str,
+) -> CountFetch {
+    let base = config
+        .api_base_url
+        .as_deref()
+        .unwrap_or("https://api.kick.com");
+    let url = format!("{}/public/v1/channels", base.trim_end_matches('/'));
+    let Ok(response) = client.get(url).bearer_auth(access_token).send().await else {
+        return CountFetch::Count(None);
+    };
+    if let Some(outcome) = count_fetch_for_status(response.status()) {
+        return outcome;
+    }
+    let body: Option<Value> = response.json().await.ok();
+    CountFetch::Count(body.as_ref().and_then(parse_kick_viewer_count))
+}
+
 /// Session log code for an X viewer poll that produced no count (plan 054).
 pub const X_VIEWER_LOG_CODE: &str = "stream-viewers-x";
 
@@ -376,8 +420,9 @@ pub async fn run_viewer_sampler(
     youtube: Option<YouTubeViewerConfig>,
     twitch: Option<TwitchViewerConfig>,
     x: Option<XViewerConfig>,
+    kick: Option<KickViewerConfig>,
 ) {
-    if youtube.is_none() && twitch.is_none() && x.is_none() {
+    if youtube.is_none() && twitch.is_none() && x.is_none() && kick.is_none() {
         return;
     }
     let client = reqwest::Client::new();
@@ -399,6 +444,12 @@ pub async fn run_viewer_sampler(
             config.token_source.clone(),
         )
     });
+    let mut kick_token = kick.as_ref().map(|config| {
+        crate::session_token::SessionToken::new(
+            config.access_token.clone(),
+            config.token_source.clone(),
+        )
+    });
     loop {
         let mut counts: Vec<(StreamPlatform, Option<u64>)> = Vec::new();
         let client_ref = &client;
@@ -415,6 +466,13 @@ pub async fn run_viewer_sampler(
             })
             .await;
             counts.push((StreamPlatform::Twitch, count));
+        }
+        if let (Some(config), Some(token)) = (kick.as_ref(), kick_token.as_mut()) {
+            let count = poll_with_renewal(&state, &client, token, |access_token| async move {
+                fetch_kick_count(client_ref, config, &access_token).await
+            })
+            .await;
+            counts.push((StreamPlatform::Kick, count));
         }
         if let Some(config) = x.as_ref() {
             let count =
@@ -471,6 +529,55 @@ mod tests {
         assert_eq!(parse_twitch_viewer_count(&body), Some(87));
         // Offline channel: empty data.
         assert_eq!(parse_twitch_viewer_count(&json!({ "data": [] })), None);
+    }
+
+    #[test]
+    fn parses_kick_viewer_count() {
+        let live = json!({ "data": [{ "stream": { "is_live": true, "viewer_count": 42 } }] });
+        assert_eq!(parse_kick_viewer_count(&live), Some(42));
+        let offline = json!({ "data": [{ "stream": { "is_live": false, "viewer_count": 9 } }] });
+        assert_eq!(parse_kick_viewer_count(&offline), Some(0));
+        assert_eq!(parse_kick_viewer_count(&json!({ "data": [] })), None);
+        let no_count = json!({ "data": [{ "stream": { "is_live": true } }] });
+        assert_eq!(parse_kick_viewer_count(&no_count), None);
+    }
+
+    #[tokio::test]
+    async fn fetch_kick_count_reads_the_self_channel_and_flags_refusals() {
+        use axum::{Json, Router, http::HeaderMap, http::StatusCode, routing::get};
+        async fn channels(headers: HeaderMap) -> (StatusCode, Json<Value>) {
+            match headers.get("authorization").and_then(|v| v.to_str().ok()) {
+                Some("Bearer good") => (
+                    StatusCode::OK,
+                    Json(
+                        json!({ "data": [{ "stream": { "is_live": true, "viewer_count": 17 } }] }),
+                    ),
+                ),
+                _ => (StatusCode::UNAUTHORIZED, Json(json!({}))),
+            }
+        }
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/public/v1/channels", get(channels));
+        tokio::spawn(async move {
+            let _ = axum::serve(listener, app).await;
+        });
+        let config = KickViewerConfig {
+            access_token: "good".to_string(),
+            api_base_url: Some(format!("http://{addr}")),
+            token_source: Default::default(),
+        };
+        let client = reqwest::Client::new();
+        assert_eq!(
+            fetch_kick_count(&client, &config, "good").await,
+            CountFetch::Count(Some(17))
+        );
+        assert_eq!(
+            fetch_kick_count(&client, &config, "stale").await,
+            CountFetch::Refused
+        );
     }
 
     fn at(seconds: i64) -> chrono::DateTime<chrono::Utc> {

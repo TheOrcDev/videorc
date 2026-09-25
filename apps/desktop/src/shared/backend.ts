@@ -4715,6 +4715,8 @@ export type AudienceCapability =
   | 'hidden'
   | 'needs-reconnect'
   | 'unavailable'
+  /** No total exists; `delta` counts follow events this stream (Kick). */
+  | 'delta-only'
 
 export interface PlatformAudience {
   platform: StreamPlatform

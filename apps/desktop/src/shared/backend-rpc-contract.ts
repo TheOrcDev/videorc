@@ -633,7 +633,8 @@ const audienceSnapshotSchema = objectSchema(
             'available',
             'hidden',
             'needs-reconnect',
-            'unavailable'
+            'unavailable',
+            'delta-only'
           ] as const),
           total: optionalSchema(numberSchema({ integer: true, min: 0 })),
           baseline: optionalSchema(numberSchema({ integer: true, min: 0 })),
