@@ -57,6 +57,7 @@ import { recordingQuality, streamingSummary } from '@/lib/studio-session-view'
 import { shortcutsByGroup } from '@/lib/shortcuts'
 import { displayKeyGlyphs, isMacPlatform, osSettingsName } from '@/lib/platform'
 import { releaseTrackLabel } from '@/lib/release-track'
+import type { SettingsTabId } from '@/lib/settings-tabs'
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import { isUpdateInstallable } from '@/lib/update-ui'
 
@@ -98,6 +99,9 @@ export function SettingsTab({
   onOpenPermissionsSetup,
   onShowWhatsNew
 }: {
+  /** The selected tab; app-shell owns it so links can open a named tab. */
+  tab: SettingsTabId
+  onTabChange: (tab: SettingsTabId) => void
   onOpenPermissionsSetup: () => void
   onShowWhatsNew: () => void
 }): ReactElement {

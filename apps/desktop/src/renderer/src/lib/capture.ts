@@ -459,7 +459,9 @@ export const STORAGE_KEYS = {
   backgroundAssets: 'videorc.backgroundAssets',
   // Set once the user picks an output themselves; from then on a performance
   // check only suggests, never applies.
-  outputChosenByUser: 'videorc.outputChosenByUser'
+  outputChosenByUser: 'videorc.outputChosenByUser',
+  // The Settings tab used last (plan 064), so Settings reopens where it was left.
+  settingsTab: 'videorc.settingsTab'
 } as const
 
 // Permissions onboarding: ANY stored value means "seen/dismissed" — the gate

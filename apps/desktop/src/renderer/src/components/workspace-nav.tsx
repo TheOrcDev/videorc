@@ -14,6 +14,8 @@ import {
 } from '@/components/icons'
 import { createContext, useContext } from 'react'
 
+import type { SettingsTabId } from '@/lib/settings-tabs'
+
 // Studio control pages, grouped under "Studio" in the sidebar: one click away, but
 // they are FULL pages — studio content renders only on the Studio tab (user decision
 // 2026-06-09, overriding the earlier push-rail idea). Sources is the single home for
@@ -118,6 +120,8 @@ type WorkspaceNavValue = {
   activeStudioPanel: StudioPanel | null
   openStudioPanel: (panel: StudioPanel) => void
   closeStudioPanel: () => void
+  /** Opens Settings on `tab`, or on the tab used last when none is named. */
+  openSettings: (tab?: SettingsTabId) => void
 }
 
 export const WorkspaceNavContext = createContext<WorkspaceNavValue | null>(null)
