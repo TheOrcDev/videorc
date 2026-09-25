@@ -17,7 +17,9 @@ jobs:
   gates:
     name: Linux gates (FFmpeg policy + Rust compile/test)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Warm-cache Rust tests on this job sit near the old 30m wall; portal
+    # proof-surface PRs were cancelled mid-run. Match the macOS Rust gate.
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v4

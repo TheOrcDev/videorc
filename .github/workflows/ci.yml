@@ -19,7 +19,9 @@ jobs:
   rust:
     name: Rust (test + clippy + fmt)
     runs-on: macos-15
-    timeout-minutes: 30
+    # Warm-cache runs on this job sit in the mid-20s to ~29m; 30m cancelled
+    # Linux portal proof-surface PRs mid-test. Keep headroom for that suite.
+    timeout-minutes: 45
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
