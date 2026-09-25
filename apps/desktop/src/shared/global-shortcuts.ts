@@ -47,3 +47,27 @@ export function nextEligibleLayout(
   }
   return null
 }
+
+const ACTION_CONFIG_KEYS = {
+  'record-toggle': 'recordToggle',
+  'stream-toggle': 'streamToggle',
+  'mic-toggle': 'micToggle',
+  'layout-next': 'layoutNext',
+  'layout-previous': 'layoutPrevious'
+} as const satisfies Partial<Record<GlobalShortcutAction, keyof GlobalShortcutsConfig>>
+
+/** The config with one action's binding replaced ('' releases it). */
+export function withGlobalShortcut(
+  config: GlobalShortcutsConfig | undefined,
+  action: GlobalShortcutAction,
+  accelerator: string
+): GlobalShortcutsConfig {
+  const layout = globalShortcutLayout(action)
+  if (layout) {
+    return { ...config, layouts: { ...config?.layouts, [layout]: accelerator } }
+  }
+  return {
+    ...config,
+    [ACTION_CONFIG_KEYS[action as keyof typeof ACTION_CONFIG_KEYS]]: accelerator
+  }
+}
