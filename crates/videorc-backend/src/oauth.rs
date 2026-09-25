@@ -35,6 +35,11 @@ const BUNDLED_X_CLIENT_ID: Option<&str> = match option_env!("VIDEORC_BUNDLED_X_C
     Some(bundled) => Some(bundled),
     None => Some("S0NBMDhTQll6cGp1am5HUFRySE86MTpjaQ"),
 };
+// Kick (plan 063). Kick's token endpoint takes `client_secret` alongside the
+// PKCE verifier, so both are build-injected like Google's. Until a build bakes
+// them in (or the runtime vars are set) Kick stays Manual RTMP only.
+const BUNDLED_KICK_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_KICK_CLIENT_ID");
+const BUNDLED_KICK_CLIENT_SECRET: Option<&str> = option_env!("VIDEORC_BUNDLED_KICK_CLIENT_SECRET");
 pub const YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE: &str = "YouTube OAuth is temporarily unavailable while Videorc awaits Google approval. Use Manual RTMP for YouTube for now.";
 
 pub fn provider_oauth_unavailable_message(platform: StreamPlatform) -> Option<&'static str> {
@@ -43,6 +48,7 @@ pub fn provider_oauth_unavailable_message(platform: StreamPlatform) -> Option<&'
             Some(YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE)
         }
         StreamPlatform::Twitch
+        | StreamPlatform::Kick
         | StreamPlatform::X
         | StreamPlatform::Tiktok
         | StreamPlatform::Instagram
@@ -90,6 +96,7 @@ pub struct OAuthSessions {
     store_load_error: Option<String>,
     youtube_finalization: std::sync::Arc<Mutex<()>>,
     twitch_finalization: std::sync::Arc<Mutex<()>>,
+    kick_finalization: std::sync::Arc<Mutex<()>>,
     x_finalization: std::sync::Arc<Mutex<()>>,
     custom_finalization: std::sync::Arc<Mutex<()>>,
 }
@@ -551,6 +558,7 @@ impl OAuthSessions {
             store_load_error,
             youtube_finalization: std::sync::Arc::new(Mutex::new(())),
             twitch_finalization: std::sync::Arc::new(Mutex::new(())),
+            kick_finalization: std::sync::Arc::new(Mutex::new(())),
             x_finalization: std::sync::Arc::new(Mutex::new(())),
             custom_finalization: std::sync::Arc::new(Mutex::new(())),
         }
@@ -583,6 +591,7 @@ impl OAuthSessions {
         let lock = match platform {
             StreamPlatform::Youtube => &self.youtube_finalization,
             StreamPlatform::Twitch => &self.twitch_finalization,
+            StreamPlatform::Kick => &self.kick_finalization,
             StreamPlatform::X => &self.x_finalization,
             StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {
                 &self.custom_finalization
@@ -2523,6 +2532,7 @@ fn parse_provider_profile(
         StreamPlatform::Youtube => parse_youtube_profile(value),
         StreamPlatform::Twitch => parse_twitch_profile(value),
         StreamPlatform::X => parse_x_profile(value),
+        StreamPlatform::Kick => anyhow::bail!("Kick OAuth is not configured in this build."),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth profiles."),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
             "{} livestreams use a manual stream key. There is no OAuth to connect.",
@@ -2857,6 +2867,7 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
             extra_params: HashMap::new(),
             pkce: true,
         }),
+        StreamPlatform::Kick => anyhow::bail!("Kick OAuth is not configured in this build."),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth."),
     }
 }
@@ -2972,6 +2983,17 @@ pub fn provider_credential_statuses() -> Vec<OAuthProviderCredentialStatus> {
             "VIDEORC_X_CLIENT_SECRET",
             BUNDLED_X_CLIENT_ID,
             None,
+            true,
+            false,
+        ),
+        // Kick needs its client secret in the token exchange even with PKCE
+        // (plan 063); both halves are build-injected like Google's.
+        provider_credential_status(
+            StreamPlatform::Kick,
+            "VIDEORC_KICK_CLIENT_ID",
+            "VIDEORC_KICK_CLIENT_SECRET",
+            BUNDLED_KICK_CLIENT_ID,
+            BUNDLED_KICK_CLIENT_SECRET,
             true,
             false,
         ),
@@ -5236,7 +5258,7 @@ mod tests {
     fn provider_credential_statuses_cover_native_platforms_without_secret_values() {
         let statuses = provider_credential_statuses();
 
-        assert_eq!(statuses.len(), 3);
+        assert_eq!(statuses.len(), 4);
         let youtube = statuses
             .iter()
             .find(|status| status.platform == StreamPlatform::Youtube)
@@ -5257,8 +5279,23 @@ mod tests {
         assert!(
             statuses
                 .iter()
+                .any(|status| status.platform == StreamPlatform::Kick && status.pkce)
+        );
+        assert!(
+            statuses
+                .iter()
                 .all(|status| !status.message.contains("CLIENT_SECRET"))
         );
+    }
+
+    #[test]
+    fn kick_is_dark_until_credentials_are_configured() {
+        assert_eq!(
+            provider_oauth_unavailable_message(StreamPlatform::Kick),
+            None
+        );
+        let error = provider_config(StreamPlatform::Kick).unwrap_err();
+        assert!(error.to_string().contains("Kick OAuth is not configured"));
     }
 
     fn device_exchange_fixture(device_code: Option<&str>) -> PendingOAuthExchange {

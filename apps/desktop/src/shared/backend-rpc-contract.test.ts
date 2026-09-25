@@ -1637,6 +1637,17 @@ describe('backend RPC contract', () => {
     expect(validateBackendEventPayload('cohost.state', state)).toEqual(state)
     expect(validateBackendRpcResult('cohost.status', state)).toEqual(state)
 
+    // One question can gather askers from every platform, Kick included.
+    const everyPlatform = ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom']
+    const widest = { ...state, questions: [{ ...state.questions[0], platforms: everyPlatform }] }
+    expect(validateBackendEventPayload('cohost.state', widest)).toEqual(widest)
+    expect(() =>
+      validateBackendEventPayload('cohost.state', {
+        ...state,
+        questions: [{ ...state.questions[0], platforms: [...everyPlatform, 'kick'] }]
+      })
+    ).toThrow()
+
     // Presence fields (W1): optional so a pre-presence backend still
     // validates (`state` above omits them), typed when present.
     const working = {

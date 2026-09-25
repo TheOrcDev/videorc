@@ -3110,7 +3110,10 @@ async fn prepare_session_live_chat(
                     params.platforms.push(StreamPlatform::X);
                 }
             }
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {}
+            StreamPlatform::Kick
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => {}
         }
     }
     params.audience = session_audience_sources(streaming, &enabled);

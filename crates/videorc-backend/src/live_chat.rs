@@ -453,6 +453,21 @@ pub fn chat_capability(
                 message: crate::x_chat::x_chat_message(x_live_ready).to_string(),
             }
         }
+        // Kick chat arrives through the videorc-web relay (plan 063, S5);
+        // until then Kick destinations stream without Comments.
+        StreamPlatform::Kick => ChatCapability {
+            platform,
+            state: ChatCapabilityState::Unsupported,
+            read: CommentsReadState::Unavailable,
+            write: CommentsWriteState::Unavailable,
+            chat_read_available: false,
+            required_scope: None,
+            account_id: account.map(|account| account.account_id.clone()),
+            account_label: account.map(|account| account.account_label.clone()),
+            message:
+                "Kick comments are not in Videorc yet. Watch chat on kick.com while you stream."
+                    .to_string(),
+        },
         StreamPlatform::Tiktok | StreamPlatform::Instagram => ChatCapability {
             platform,
             state: ChatCapabilityState::Unsupported,
@@ -1460,7 +1475,10 @@ where
                 .x
                 .as_ref()
                 .and_then(|config| config.target_id.clone()),
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => None,
+            StreamPlatform::Kick
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => None,
         };
         let configured_target_id = configured_target_id.or_else(|| {
             params

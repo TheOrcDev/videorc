@@ -1,6 +1,7 @@
 import {
   type AppIcon,
   InstagramIcon,
+  KickIcon,
   LivestreamIcon,
   TiktokIcon,
   TwitchIcon,
@@ -15,6 +16,7 @@ import { cn } from '@/lib/utils'
 const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
   youtube: YoutubeIcon,
   twitch: TwitchIcon,
+  kick: KickIcon,
   x: XPlatformIcon,
   tiktok: TiktokIcon,
   instagram: InstagramIcon,
@@ -26,6 +28,9 @@ const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
 const PLATFORM_GLYPH_TINT: Record<StreamPlatform, string> = {
   youtube: 'bg-platform-youtube/15 text-platform-youtube',
   twitch: 'bg-platform-twitch/15 text-platform-twitch-ink',
+  // A solid brand-green tile with the glyph in dark ink (the K shows through
+  // in green): a 15% green wash would vanish in light mode.
+  kick: 'bg-platform-kick text-platform-kick-ink',
   x: 'bg-foreground/10 text-foreground',
   tiktok: 'bg-foreground/10 text-foreground',
   instagram: 'bg-platform-instagram/15 text-platform-instagram',

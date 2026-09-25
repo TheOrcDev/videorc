@@ -1,6 +1,7 @@
 import {
   type AppIcon,
   InstagramIcon,
+  KickIcon,
   LivestreamIcon,
   TiktokIcon,
   TwitchIcon,
@@ -23,6 +24,7 @@ import { cn } from '@/lib/utils'
 const CHAT_PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
   youtube: YoutubeIcon,
   twitch: TwitchIcon,
+  kick: KickIcon,
   x: XPlatformIcon,
   tiktok: TiktokIcon,
   instagram: InstagramIcon,
@@ -32,6 +34,7 @@ const CHAT_PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
 const CHAT_PLATFORM_TINT: Record<StreamPlatform, string> = {
   youtube: 'text-platform-youtube',
   twitch: 'text-platform-twitch-ink',
+  kick: 'text-platform-kick',
   x: 'text-foreground',
   tiktok: 'text-foreground',
   instagram: 'text-platform-instagram',

@@ -826,6 +826,7 @@ mod tests {
         match platform {
             StreamPlatform::Youtube => "youtube",
             StreamPlatform::Twitch => "twitch",
+            StreamPlatform::Kick => "kick",
             StreamPlatform::X => "x",
             StreamPlatform::Tiktok => "tiktok",
             StreamPlatform::Instagram => "instagram",

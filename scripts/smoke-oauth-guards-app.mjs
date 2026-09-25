@@ -116,6 +116,19 @@ function assertProviderCredentials(credentials) {
   if (!x.ready || !x.pkce || !x.clientIdPresent || x.clientSecretPresent) {
     throw new Error(`X PKCE readiness mismatch: ${JSON.stringify(x)}`)
   }
+
+  // Kick ships dark (plan 063, S1): no client id in the smoke env, so the
+  // card falls back to Manual RTMP with the credentials-not-ready message.
+  const kick = byPlatform.get('kick')
+  if (
+    !kick ||
+    kick.ready ||
+    !kick.pkce ||
+    kick.clientIdPresent ||
+    !String(kick.message).includes('VIDEORC_KICK_CLIENT_ID')
+  ) {
+    throw new Error(`Kick dark-readiness mismatch: ${JSON.stringify(kick)}`)
+  }
 }
 
 function requireCredential(byPlatform, platform) {
@@ -374,7 +387,9 @@ function launchAndReadConnection() {
         VIDEORC_SECRETS_PATH: join(stateRoot, 'videorc-secrets.json'),
         VIDEORC_TWITCH_CLIENT_ID: 'smoke-twitch-client-id',
         VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',
-        VIDEORC_TWITCH_CLIENT_SECRET: ''
+        VIDEORC_TWITCH_CLIENT_SECRET: '',
+        VIDEORC_KICK_CLIENT_ID: '',
+        VIDEORC_KICK_CLIENT_SECRET: ''
       }),
       stdio: ['ignore', 'pipe', 'pipe']
     })

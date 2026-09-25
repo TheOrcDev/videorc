@@ -19,6 +19,8 @@ export function metadataPlatformLabel(platform: StreamPlatform): string {
       return 'YouTube'
     case 'twitch':
       return 'Twitch'
+    case 'kick':
+      return 'Kick'
     case 'x':
       return 'X'
     case 'tiktok':

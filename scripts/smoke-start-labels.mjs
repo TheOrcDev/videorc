@@ -56,6 +56,38 @@ try {
     'Start Livestream'
   )
 
+  // Kick (plan 063) is Manual RTMP until its OAuth ships: the built-in card
+  // carries Kick's public ingest, so a pasted key alone makes it start-ready
+  // and it bridges to the legacy `kick` preset.
+  const kickManual = bridgeStreamingToLegacy({
+    ...defaultCaptureConfig,
+    recordEnabled: false,
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      mode: 'single',
+      enabledTargetIds: ['kick'],
+      targets: defaultCaptureConfig.streaming.targets.map((target) =>
+        target.platform === 'kick'
+          ? {
+              ...target,
+              enabled: true,
+              authMode: 'manual-rtmp',
+              streamKey: 'sk_us-west-2_smoke_key',
+              streamKeyPresent: true
+            }
+          : target
+      )
+    }
+  })
+  assert.equal(kickManual.streamEnabled, true)
+  assert.equal(kickManual.rtmpPreset, 'kick')
+  assert.equal(
+    kickManual.rtmpServerUrl,
+    'rtmps://fa723fc1b171.global-contribute.live-video.net:443/app'
+  )
+  assert.equal(areEnabledStreamTargetsStartReady(kickManual.streaming), true)
+
   const youtubeOauthReady = bridgeStreamingToLegacy({
     ...defaultCaptureConfig,
     recordEnabled: false,

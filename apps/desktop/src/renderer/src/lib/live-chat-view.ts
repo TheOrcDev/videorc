@@ -462,6 +462,7 @@ export function visibleMessages(messages: LiveChatMessage[], max: number): LiveC
 export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   youtube: 'YouTube',
   twitch: 'Twitch',
+  kick: 'Kick',
   x: 'X',
   tiktok: 'TikTok',
   instagram: 'Instagram',

@@ -951,6 +951,12 @@ function manualKeyGuidance(
         url: 'https://www.instagram.com/live/producer/',
         linkLabel: 'Live Producer'
       }
+    case 'kick':
+      return {
+        copy: 'Kick keys live in Creator Dashboard → Settings → Stream Key. Copy the key from',
+        url: 'https://dashboard.kick.com/channel/stream',
+        linkLabel: 'kick.com'
+      }
     default:
       return null
   }
@@ -1788,6 +1794,8 @@ function platformLabel(platform: StreamPlatform): string {
       return 'YouTube'
     case 'twitch':
       return 'Twitch'
+    case 'kick':
+      return 'Kick'
     case 'x':
       return 'X'
     default:

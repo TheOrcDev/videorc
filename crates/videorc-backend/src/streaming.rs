@@ -18,6 +18,7 @@ use crate::protocol::{RtmpPreset, RtmpSettings, VideoPreset};
 pub enum StreamPlatform {
     Youtube,
     Twitch,
+    Kick,
     X,
     Tiktok,
     Instagram,
@@ -444,6 +445,7 @@ pub(crate) fn stream_platform_id(platform: StreamPlatform) -> &'static str {
     match platform {
         StreamPlatform::Youtube => "youtube",
         StreamPlatform::Twitch => "twitch",
+        StreamPlatform::Kick => "kick",
         StreamPlatform::X => "x",
         StreamPlatform::Tiktok => "tiktok",
         StreamPlatform::Instagram => "instagram",
@@ -455,7 +457,10 @@ pub(crate) fn stream_platform_from_id(platform: &str) -> Option<StreamPlatform> 
     match platform {
         "youtube" => Some(StreamPlatform::Youtube),
         "twitch" => Some(StreamPlatform::Twitch),
+        "kick" => Some(StreamPlatform::Kick),
         "x" => Some(StreamPlatform::X),
+        "tiktok" => Some(StreamPlatform::Tiktok),
+        "instagram" => Some(StreamPlatform::Instagram),
         "custom" => Some(StreamPlatform::Custom),
         _ => None,
     }
@@ -549,6 +554,7 @@ pub(crate) fn stream_platform_label(platform: StreamPlatform) -> &'static str {
     match platform {
         StreamPlatform::Youtube => "YouTube",
         StreamPlatform::Twitch => "Twitch",
+        StreamPlatform::Kick => "Kick",
         StreamPlatform::X => "X / Twitter",
         StreamPlatform::Tiktok => "TikTok",
         StreamPlatform::Instagram => "Instagram",
@@ -560,6 +566,7 @@ pub(crate) fn stream_platform_from_preset(preset: &RtmpPreset) -> StreamPlatform
     match preset {
         RtmpPreset::YouTube => StreamPlatform::Youtube,
         RtmpPreset::Twitch => StreamPlatform::Twitch,
+        RtmpPreset::Kick => StreamPlatform::Kick,
         RtmpPreset::X => StreamPlatform::X,
         RtmpPreset::Custom => StreamPlatform::Custom,
     }
@@ -618,8 +625,8 @@ fn default_stream_target_with_id(
     }
 }
 
-/// The fixed built-in destinations in display order: the horizontal trio
-/// (YouTube, Twitch, X), the vertical trio (YouTube Vertical — a SECOND
+/// The fixed built-in destinations in display order: the horizontal group
+/// (YouTube, Twitch, Kick, X), the vertical trio (YouTube Vertical — a SECOND
 /// broadcast on the same channel — TikTok, Instagram), then Custom RTMP.
 /// Vertical destinations are pinned to the vertical leg; TikTok and
 /// Instagram are manual-key only (no public ingest APIs).
@@ -634,6 +641,11 @@ pub fn default_stream_targets() -> Vec<StreamTargetSettings> {
             StreamPlatform::Twitch,
             "Twitch",
             "rtmp://live.twitch.tv/app",
+        ),
+        default_stream_target(
+            StreamPlatform::Kick,
+            "Kick",
+            "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app",
         ),
         default_stream_target(StreamPlatform::X, "X / Twitter", ""),
         default_stream_target_with_id(
@@ -706,6 +718,44 @@ mod tests {
             server_url: server.to_string(),
             stream_key: key.to_string(),
         }
+    }
+
+    #[test]
+    fn every_stream_platform_id_round_trips() {
+        for platform in [
+            StreamPlatform::Youtube,
+            StreamPlatform::Twitch,
+            StreamPlatform::Kick,
+            StreamPlatform::X,
+            StreamPlatform::Tiktok,
+            StreamPlatform::Instagram,
+            StreamPlatform::Custom,
+        ] {
+            assert_eq!(
+                stream_platform_from_id(stream_platform_id(platform)),
+                Some(platform),
+                "{platform:?} must reload as itself, never as Custom"
+            );
+            let serde_id = serde_json::to_value(platform).unwrap();
+            assert_eq!(serde_id, stream_platform_id(platform));
+        }
+        assert_eq!(stream_platform_from_id("mixer"), None);
+    }
+
+    #[test]
+    fn kick_is_a_horizontal_default_after_twitch() {
+        let targets = default_stream_targets();
+        let ids: Vec<&str> = targets.iter().map(|t| t.id.as_str()).collect();
+        let twitch = ids.iter().position(|id| *id == "twitch").unwrap();
+        assert_eq!(ids[twitch + 1], "kick");
+        let kick = &targets[twitch + 1];
+        assert_eq!(kick.platform, StreamPlatform::Kick);
+        assert_eq!(kick.label, "Kick");
+        assert!(kick.server_url.starts_with("rtmps://"));
+        assert_ne!(
+            kick.output_orientation,
+            Some(StreamOutputOrientation::Vertical)
+        );
     }
 
     #[test]

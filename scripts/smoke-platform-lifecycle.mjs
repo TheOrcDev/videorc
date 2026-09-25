@@ -29,6 +29,7 @@ try {
       'youtube-ready',
       'youtube-no-stream',
       'twitch-ready',
+      'kick-manual',
       'youtube-disabled',
       'youtube-manual',
       'x-missing'
@@ -43,6 +44,11 @@ try {
         platformBroadcastId: 'broadcast-no-stream'
       }),
       target('twitch-ready', 'twitch', 'oauth', true, {
+        platformBroadcastId: undefined,
+        platformStreamId: undefined
+      }),
+      target('kick-manual', 'kick', 'manual-rtmp', true, {
+        serverUrl: 'rtmps://fa723fc1b171.global-contribute.live-video.net:443/app',
         platformBroadcastId: undefined,
         platformStreamId: undefined
       }),
@@ -74,6 +80,7 @@ try {
     'youtube-ready',
     'youtube-no-stream',
     'twitch-ready',
+    'kick-manual',
     'youtube-manual'
   ])
 
