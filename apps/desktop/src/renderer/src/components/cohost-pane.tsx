@@ -18,8 +18,9 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/component
 import { Command, CommandList } from '@/components/ui/command'
 import { Kbd } from '@/components/ui/kbd'
 import { Separator } from '@/components/ui/separator'
-import type { CohostFlag, CohostQuestion, CohostState } from '@/lib/backend'
+import type { CohostFlag, CohostQuestion, CohostRecentlyResolved, CohostState } from '@/lib/backend'
 import { cohostEmptyStateCopy, cohostPresenceView, cohostQuestionIds } from '@/lib/cohost-presence'
+import { activeCohostSpotlight } from '@/lib/cohost-marks'
 import {
   activeCohostAlerts,
   cohostAlertLabel,
@@ -67,6 +68,7 @@ export function CohostPane({
   onReply,
   onShowOnStream,
   onAnswered,
+  onRestoreQuestion,
   onDismissQuestion,
   onDismissFlag,
   onJumpToMessage,
@@ -89,6 +91,8 @@ export function CohostPane({
   onReply: (question: CohostQuestion) => void
   onShowOnStream?: (question: CohostQuestion) => void
   onAnswered: (question: CohostQuestion) => void
+  /** Put back a question the engine resolved from what the streamer said. */
+  onRestoreQuestion?: (question: CohostQuestion) => void
   onDismissQuestion: (question: CohostQuestion) => void
   onDismissFlag: (flag: CohostFlag) => void
   onJumpToMessage?: (messageId: string) => void
@@ -114,6 +118,12 @@ export function CohostPane({
   const activeKey = resolveCohostSelection(rows, selectedKey)
   const activeRow = cohostRowAt(rows, selectedKey)
   const questionIds = useMemo(() => cohostQuestionIds(state), [state])
+  // "Answered on air" (plan 060 D9): newest first, gone with the state's 60 s.
+  const answeredOnAir = useMemo(
+    () => [...(state?.recentlyResolved ?? [])].reverse().slice(0, 3),
+    [state?.recentlyResolved]
+  )
+  const spotlightQuestionId = activeCohostSpotlight(state, nowMs)?.questionId ?? null
   // Viewers saying something is broken. A persistent chip, never a toast: it
   // stays while the backend still counts two corroborating viewers.
   const alerts = activeCohostAlerts(state, nowMs)
@@ -196,7 +206,9 @@ export function CohostPane({
   if (mode.kind === 'consent') {
     return (
       <CohostNotice label="Orcle">
-        <span className="min-w-0 flex-1 truncate">{mode.reason}</span>
+        <span className="min-w-0 flex-1 truncate" title={mode.reason}>
+          {mode.reason}
+        </span>
         {onEnableConsent ? (
           <Button size="xs" variant="ghost" onClick={onEnableConsent}>
             Turn on cloud AI
@@ -393,6 +405,7 @@ export function CohostPane({
                     }
                     question={question}
                     selected={activeKey === cohostQuestionRowKey(question.id)}
+                    talkingAbout={spotlightQuestionId === question.id}
                     onReply={onReply}
                     onSelect={setSelectedKey}
                   />
@@ -411,6 +424,13 @@ export function CohostPane({
             )}
           </CommandList>
         </Command>
+        {answeredOnAir.length > 0 ? (
+          <AnsweredOnAir
+            disabled={actionPending || !onRestoreQuestion}
+            items={answeredOnAir}
+            onRestore={(question) => onRestoreQuestion?.(question)}
+          />
+        ) : null}
 
         {activeRow ? (
           <>
@@ -494,6 +514,70 @@ export function CohostPane({
           </>
         ) : null}
       </CollapsibleContent>
+    </Collapsible>
+  )
+}
+
+/**
+ * Questions the engine resolved because the streamer answered them out loud:
+ * one quiet line for the newest, the others (at most two) one click away.
+ * Restore puts a question back; no toast, the line simply leaves.
+ */
+function AnsweredOnAir({
+  items,
+  disabled,
+  onRestore
+}: {
+  items: readonly CohostRecentlyResolved[]
+  disabled: boolean
+  onRestore: (question: CohostQuestion) => void
+}): ReactElement | null {
+  const [newest, ...older] = items
+  if (!newest) return null
+  const line = (item: CohostRecentlyResolved, more?: ReactNode): ReactElement => (
+    <div key={item.question.id} className="flex h-7 min-w-0 items-center gap-1 px-2 text-xs">
+      <span
+        className="min-w-0 flex-1 truncate text-muted-foreground"
+        data-slot="cohost-answered-on-air-text"
+        title={item.question.text}
+      >
+        <span className="text-subtle">Answered on air:</span> {item.question.text}
+      </span>
+      {more}
+      <Button
+        className="shrink-0"
+        disabled={disabled}
+        size="xs"
+        type="button"
+        variant="ghost"
+        onClick={() => onRestore(item.question)}
+      >
+        Restore
+      </Button>
+    </div>
+  )
+  return (
+    <Collapsible data-slot="cohost-answered-on-air">
+      <Separator />
+      {line(
+        newest,
+        older.length > 0 ? (
+          <CollapsibleTrigger asChild>
+            <Button
+              aria-label={`${older.length} more answered on air`}
+              className="shrink-0 tabular-nums"
+              size="xs"
+              type="button"
+              variant="ghost"
+            >
+              +{older.length}
+            </Button>
+          </CollapsibleTrigger>
+        ) : undefined
+      )}
+      {older.length > 0 ? (
+        <CollapsibleContent>{older.map((item) => line(item))}</CollapsibleContent>
+      ) : null}
     </Collapsible>
   )
 }

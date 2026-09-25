@@ -161,3 +161,46 @@ describe('CommentRow', () => {
     expect(formatCommentTime('not-a-date')).toBe('')
   })
 })
+
+describe('CommentRow: Talking about this', () => {
+  it('marks the comment the streamer is talking about on the accent row block', () => {
+    const markup = renderToStaticMarkup(
+      createElement(CommentRow, {
+        cohostSpotlight: true,
+        cohostSuggested: true,
+        message: message(),
+        onHighlight: () => undefined
+      })
+    )
+    expect(markup).toContain('data-slot="cohost-comment-spotlight"')
+    expect(markup).toContain('Talking about this')
+    expect(markup).toContain('data-spotlight="true"')
+    expect(markup).toContain('bg-accent')
+    // One Orcle mark at a time: the pull-up wins over the suggestion.
+    expect(markup).not.toContain('data-slot="cohost-comment-suggested"')
+  })
+
+  it('never pulls up a flagged comment, and stays quiet without a spotlight', () => {
+    const flagged = renderToStaticMarkup(
+      createElement(CommentRow, {
+        cohostFlag: {
+          messageId: 'youtube:message-1',
+          kind: 'spam',
+          severity: 'low',
+          reason: 'Link drop.',
+          at: '2026-07-10T12:00:02.000Z'
+        },
+        cohostSpotlight: true,
+        message: message(),
+        onHighlight: () => undefined
+      })
+    )
+    expect(flagged).not.toContain('Talking about this')
+
+    const quiet = renderToStaticMarkup(
+      createElement(CommentRow, { message: message(), onHighlight: () => undefined })
+    )
+    expect(quiet).not.toContain('Talking about this')
+    expect(quiet).not.toContain('data-spotlight')
+  })
+})

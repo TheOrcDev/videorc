@@ -4,7 +4,7 @@ import { commentCanHighlight } from '@/lib/live-chat-view'
 export { commentCanHighlight } from '@/lib/live-chat-view'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
-import { CopyIcon, PreviewIcon, SendIcon, SparkleIcon } from '@/components/icons'
+import { CopyIcon, MicrophoneIcon, PreviewIcon, SendIcon, SparkleIcon } from '@/components/icons'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { Avatar, AvatarFallback, AvatarImage } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
@@ -108,10 +108,12 @@ function HighlightStatus({
  */
 function CohostMarks({
   flag,
-  suggested
+  suggested,
+  spotlight
 }: {
   flag?: CohostFlag
   suggested: boolean
+  spotlight: boolean
 }): ReactElement | null {
   if (flag) {
     const action = cohostFlagActionLabel(flag)
@@ -126,6 +128,19 @@ function CohostMarks({
         </Badge>
         {action ? <span className="shrink-0 text-[10px] text-subtle">{action}</span> : null}
       </span>
+    )
+  }
+  if (spotlight) {
+    // Pull-up (plan 060): private to the streamer, never on stream by itself.
+    return (
+      <Badge
+        data-slot="cohost-comment-spotlight"
+        title="Orcle heard you talking about this message"
+        variant="outline"
+      >
+        <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
+        Talking about this
+      </Badge>
     )
   }
   if (!suggested) return null
@@ -229,6 +244,7 @@ function CommentContent({
   highlight,
   flag,
   suggested,
+  spotlight,
   mentioned,
   timestamps
 }: {
@@ -237,6 +253,7 @@ function CommentContent({
   highlight: CommentHighlightPresentation
   flag?: CohostFlag
   suggested: boolean
+  spotlight: boolean
   mentioned: boolean
   timestamps: CommentTimestamps
 }): ReactElement {
@@ -276,7 +293,7 @@ function CommentContent({
           ) : null}
           <span className="flex-1" />
           <EventStatus message={message} />
-          <CohostMarks flag={flag} suggested={suggested} />
+          <CohostMarks flag={flag} spotlight={spotlight} suggested={suggested} />
           <HighlightStatus status={highlight} />
           {time ? (
             // While live the time waits for the pointer, like the row's ⋯:
@@ -325,6 +342,7 @@ export function CommentRow({
   highlight = { phase: 'idle' },
   cohostFlag,
   cohostSuggested = false,
+  cohostSpotlight = false,
   mentionNames = [],
   onHighlight,
   onReply,
@@ -341,6 +359,8 @@ export function CommentRow({
   cohostFlag?: CohostFlag
   /** The co-host suggests showing this comment (`cohost.state.highlights`). */
   cohostSuggested?: boolean
+  /** The streamer is talking about this comment (`cohost.state.spotlight`). */
+  cohostSpotlight?: boolean
   /** The streamer's own account names: a message naming one is a mention. */
   mentionNames?: readonly string[]
   onHighlight?: (message: LiveChatMessage) => void
@@ -363,6 +383,7 @@ export function CommentRow({
       highlight={highlight}
       mentioned={mentioned}
       message={message}
+      spotlight={cohostSpotlight && !cohostFlag}
       suggested={suggested}
       timestamps={timestamps}
     />
@@ -400,6 +421,7 @@ export function CommentRow({
       data-index={index}
       data-mention={mentioned || undefined}
       data-message-id={message.id}
+      data-spotlight={cohostSpotlight || undefined}
       style={style}
     >
       {highlightable ? (
@@ -415,6 +437,7 @@ export function CommentRow({
           disabled={highlight.phase === 'applying'}
           className={cn(
             'h-auto w-full min-w-0 flex-1 items-start justify-start gap-2 whitespace-normal px-2 py-1.5',
+            cohostSpotlight && highlight.phase !== 'live' && 'bg-accent',
             message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
           )}
           title={
@@ -430,6 +453,7 @@ export function CommentRow({
         <div
           className={cn(
             'flex min-w-0 flex-1 items-start gap-2 rounded-row px-2 py-1.5',
+            cohostSpotlight && 'bg-accent',
             message.amountText && 'bg-warning/10 ring-1 ring-warning/30'
           )}
         >

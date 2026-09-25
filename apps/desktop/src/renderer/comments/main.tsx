@@ -336,6 +336,7 @@ function CommentsWindowApp(): ReactElement {
         cohostStarting={cohostStarting}
         cohostState={cohost.state}
         onCohostAnswered={(question) => sendCohostAction('answered')(question.id)}
+        onCohostRestoreQuestion={(question) => sendCohostAction('restore')(question.id)}
         onCohostEnable={(enabled) => setCohostEnabled(enabled)}
         onCohostEnableConsent={() => setCohostEnabled(true, true)}
         onCohostNudgeDismiss={() => {

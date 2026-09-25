@@ -15,6 +15,7 @@ import {
 import { Switch } from '@/components/ui/switch'
 import type { CohostState } from '@/lib/backend'
 import { cohostPresenceView, type CohostPresenceView } from '@/lib/cohost-presence'
+import { COHOST_CONSENT_SENTENCE } from '@/lib/cohost-view'
 import { CHAT_HEADER_TIGHT_HIDDEN, CHAT_HEADER_TIGHT_SR_ONLY } from '@/lib/chat-header-tiers'
 import type { EntitlementUiGate } from '@/lib/entitlement-ui'
 import { cn } from '@/lib/utils'
@@ -123,7 +124,7 @@ export function CohostStatus({
         ) : !consented ? (
           <div className="flex flex-col gap-2">
             <p className="text-xs text-muted-foreground">
-              Orcle reads live chat with Videorc cloud AI. Turn on cloud AI to use it.
+              {COHOST_CONSENT_SENTENCE} Turn on cloud AI to use it.
             </p>
             {onEnableConsent ? (
               <Button

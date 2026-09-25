@@ -8,11 +8,15 @@ import type {
   CohostState
 } from '@/lib/backend'
 import {
+  activeCohostSpotlight,
+  cohostCommentMarks,
+  EMPTY_COHOST_COMMENT_MARKS
+} from '@/lib/cohost-marks'
+import {
   activeCohostAlerts,
   applyCohostState,
   cohostAgeLabel,
   cohostAlertLabel,
-  cohostCommentMarks,
   cohostFlagActionLabel,
   cohostFlagChipLabel,
   cohostFlagDetail,
@@ -21,7 +25,6 @@ import {
   cohostMoodScoresLabel,
   cohostSensitivityFromStorage,
   cohostStateForSensitivity,
-  EMPTY_COHOST_COMMENT_MARKS,
   cohostAskersLabel,
   cohostChipView,
   cohostErrorDetailText,
@@ -723,6 +726,41 @@ describe('tick wire v2 view', () => {
     )
     expect(marks.flags.get('m-flagged')?.kind).toBe('spam')
     expect([...marks.suggested]).toEqual(['m-good'])
+  })
+
+  it('marks the spotlit comment only while the spotlight is unexpired and not flagged', () => {
+    const at = '2026-08-22T12:00:00.000Z'
+    const expiresAt = '2026-08-22T12:00:15.000Z'
+    const nowMs = Date.parse(at) + 5_000
+    const spotlit = state({
+      spotlight: { messageId: 'm-talked', score: 0.9, at, expiresAt }
+    })
+    const marks = cohostCommentMarks(spotlit, nowMs)
+    expect(marks.spotlight).toBe('m-talked')
+    expect(marks.flags.size).toBe(0)
+    expect(marks.suggested.size).toBe(0)
+    expect(activeCohostSpotlight(spotlit, nowMs)?.messageId).toBe('m-talked')
+
+    // Expired on the renderer's clock: treated as none, even before the
+    // engine's clearing event lands.
+    const expiredMs = Date.parse(expiresAt)
+    expect(cohostCommentMarks(spotlit, expiredMs)).toBe(EMPTY_COHOST_COMMENT_MARKS)
+    expect(activeCohostSpotlight(spotlit, expiredMs)).toBeNull()
+
+    // A flagged message is never pulled up.
+    expect(
+      cohostCommentMarks(
+        state({
+          flags: [flag({ messageId: 'm-talked' })],
+          spotlight: { messageId: 'm-talked', score: 0.9, at, expiresAt }
+        }),
+        nowMs
+      ).spotlight
+    ).toBeNull()
+    // Off or absent: nothing.
+    expect(activeCohostSpotlight({ ...spotlit, status: 'off' }, nowMs)).toBeNull()
+    expect(activeCohostSpotlight(state(), nowMs)).toBeNull()
+    expect(cohostCommentMarks(state(), nowMs).spotlight).toBeNull()
   })
 
   it('shows only corroborated, unexpired alerts', () => {

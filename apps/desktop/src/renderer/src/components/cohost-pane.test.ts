@@ -129,6 +129,35 @@ describe('CohostQuestionRow', () => {
   })
 })
 
+describe('CohostQuestionRow spotlight', () => {
+  it('marks the question the streamer is talking about, quietly', () => {
+    const markup = renderRow(
+      createElement(CohostQuestionRow, {
+        nowMs: NOW,
+        question: question(),
+        selected: false,
+        talkingAbout: true,
+        onReply: () => undefined,
+        onSelect: () => undefined
+      })
+    )
+    expect(markup).toContain('data-slot="cohost-talking-about"')
+    expect(markup).toContain('Talking about this')
+    expect(markup).toContain('data-variant="outline"')
+
+    const quiet = renderRow(
+      createElement(CohostQuestionRow, {
+        nowMs: NOW,
+        question: question(),
+        selected: false,
+        onReply: () => undefined,
+        onSelect: () => undefined
+      })
+    )
+    expect(quiet).not.toContain('Talking about this')
+  })
+})
+
 describe('CohostFlagRow', () => {
   it('keeps medium and low severity monochrome', () => {
     const markup = renderRow(

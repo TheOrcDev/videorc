@@ -17,8 +17,9 @@ import { Textarea } from '@/components/ui/textarea'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import { setCohostSensitivity, useCohostSensitivity } from '@/hooks/use-cohost-sensitivity'
 import { useStudioCore } from '@/hooks/use-studio'
-import type { CohostTone } from '@/lib/backend'
+import type { CohostSettings, CohostSettingsPatch, CohostTone } from '@/lib/backend'
 import {
+  COHOST_CONSENT_SENTENCE,
   COHOST_SENSITIVITIES,
   COHOST_SENSITIVITY_LABELS,
   type CohostSensitivity
@@ -34,6 +35,41 @@ const TONE_LABELS: Record<CohostTone, string> = {
   friendly: 'Friendly',
   short: 'Short',
   professional: 'Professional'
+}
+
+/** "Show on stream automatically" (plan 060 D8): one three-way choice over the
+ * two engine flags. `autoHighlight` keeps meaning Orcle's picks and
+ * `voiceHighlight` means what the streamer talks about. */
+export type CohostShowOnStreamMode = 'off' | 'voice' | 'voice-and-picks'
+
+export const COHOST_SHOW_ON_STREAM_MODES: readonly CohostShowOnStreamMode[] = [
+  'off',
+  'voice',
+  'voice-and-picks'
+]
+
+export const COHOST_SHOW_ON_STREAM_LABELS: Record<CohostShowOnStreamMode, string> = {
+  off: 'Off',
+  voice: 'What I talk about',
+  'voice-and-picks': "What I talk about and Orcle's picks"
+}
+
+export const COHOST_SHOW_ON_STREAM_PATCHES: Record<
+  CohostShowOnStreamMode,
+  Required<Pick<CohostSettingsPatch, 'autoHighlight' | 'voiceHighlight'>>
+> = {
+  off: { autoHighlight: false, voiceHighlight: false },
+  voice: { autoHighlight: false, voiceHighlight: true },
+  'voice-and-picks': { autoHighlight: true, voiceHighlight: true }
+}
+
+/** Picks alone (stored before the voice source existed) reads as the third
+ * option; choosing it again writes both flags. */
+export function cohostShowOnStreamMode(
+  settings: Pick<CohostSettings, 'autoHighlight' | 'voiceHighlight'>
+): CohostShowOnStreamMode {
+  if (settings.autoHighlight) return 'voice-and-picks'
+  return settings.voiceHighlight ? 'voice' : 'off'
 }
 
 /**
@@ -63,6 +99,7 @@ export function CohostSettingsSection(): ReactElement | null {
   }
 
   const locked = !cohostGate.allowed
+  const showOnStream = cohostShowOnStreamMode(cohostSettings)
   const notesOverLimit = notesDraft.length > COHOST_NOTES_MAX_CHARS
   const notesDirty = notesDraft !== (cohostSettings.notes ?? '')
 
@@ -114,7 +151,7 @@ export function CohostSettingsSection(): ReactElement | null {
             <div className="flex min-w-0 flex-col gap-0.5">
               <FieldLabel htmlFor="cohost-enabled">Enable Orcle</FieldLabel>
               <p className="text-xs text-muted-foreground">
-                Starts with your next livestream. Uses cloud AI, so it also needs the cloud-AI
+                Starts with your next livestream. {COHOST_CONSENT_SENTENCE} It needs the cloud-AI
                 consent you set in Publish.
               </p>
             </div>
@@ -292,24 +329,43 @@ export function CohostSettingsSection(): ReactElement | null {
         </Field>
 
         <Field>
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <FieldLabel htmlFor="cohost-auto-highlight">
-                Show Orcle&apos;s picks on stream automatically
-              </FieldLabel>
-              <p className="text-xs text-muted-foreground">
-                Puts one of Orcle&apos;s suggested comments or a new high-priority question on the
-                stream by itself, at most one every 45 seconds. Off by default. With it off, you
-                show a question with H.
-              </p>
-            </div>
-            <Switch
-              checked={cohostSettings.autoHighlight}
-              disabled={locked}
-              id="cohost-auto-highlight"
-              onCheckedChange={(autoHighlight) => save({ autoHighlight })}
-            />
-          </div>
+          <FieldLabel htmlFor="cohost-show-on-stream">Show on stream automatically</FieldLabel>
+          <FieldDescription>
+            Puts a chat comment on your stream by itself. You can always show one yourself with H.
+          </FieldDescription>
+          <ToggleGroup
+            className="w-fit flex-wrap"
+            disabled={locked}
+            id="cohost-show-on-stream"
+            size="sm"
+            type="single"
+            value={showOnStream}
+            onValueChange={(mode) => {
+              // Radix reports a click on the pressed item as '': keep that item,
+              // which also rewrites a stored picks-only row as both flags on.
+              const patch =
+                COHOST_SHOW_ON_STREAM_PATCHES[(mode || showOnStream) as CohostShowOnStreamMode]
+              if (
+                patch.autoHighlight !== cohostSettings.autoHighlight ||
+                patch.voiceHighlight !== cohostSettings.voiceHighlight
+              ) {
+                save(patch)
+              }
+            }}
+          >
+            {COHOST_SHOW_ON_STREAM_MODES.map((mode) => (
+              <ToggleGroupItem key={mode} className="px-3 text-xs" value={mode}>
+                {COHOST_SHOW_ON_STREAM_LABELS[mode]}
+              </ToggleGroupItem>
+            ))}
+          </ToggleGroup>
+          <FieldDescription className="flex flex-col gap-0.5">
+            <span>What I talk about needs live captions.</span>
+            <span>
+              Orcle&apos;s picks: at most one card every 45 seconds; nothing Orcle flagged is ever
+              shown.
+            </span>
+          </FieldDescription>
         </Field>
       </FieldGroup>
     </PanelSection>

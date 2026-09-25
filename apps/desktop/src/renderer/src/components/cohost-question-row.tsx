@@ -1,4 +1,4 @@
-import { NoteIcon } from '@/components/icons'
+import { MicrophoneIcon, NoteIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
 import { ChatPlatformIcon } from '@/components/chat-platform-icon'
@@ -25,6 +25,7 @@ export function CohostQuestionRow({
   question,
   selected,
   onStream = false,
+  talkingAbout = false,
   nowMs,
   onSelect,
   onReply
@@ -33,6 +34,8 @@ export function CohostQuestionRow({
   selected: boolean
   /** This question's source comment is currently shown on the stream. */
   onStream?: boolean
+  /** The streamer is talking about this question right now (spotlight). */
+  talkingAbout?: boolean
   nowMs: number
   onSelect: (key: string) => void
   onReply: (question: CohostQuestion) => void
@@ -80,6 +83,18 @@ export function CohostQuestionRow({
       </span>
       {askers ? (
         <span className="max-w-32 shrink-0 truncate text-xs text-muted-foreground">{askers}</span>
+      ) : null}
+      {talkingAbout ? (
+        <Badge
+          aria-label="Talking about this"
+          className="shrink-0"
+          data-slot="cohost-talking-about"
+          title="You are talking about this question"
+          variant="outline"
+        >
+          <MicrophoneIcon aria-hidden data-icon="inline-start" weight="fill" />
+          <span className="@max-[400px]/cohost-pane:hidden">Talking about this</span>
+        </Badge>
       ) : null}
       {onStream ? <Badge variant="success">On stream</Badge> : null}
       <CommandShortcut className="tabular-nums">{age}</CommandShortcut>
