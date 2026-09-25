@@ -23,7 +23,7 @@ function draft(patch: Partial<StreamMetadataDraft> = {}): StreamMetadataDraft {
     title: 'Reviewing projects',
     description: 'Global description',
     defaultPrivacy: 'unlisted',
-    targetOverrides: [row('youtube'), row('twitch'), row('x')],
+    targetOverrides: [row('youtube'), row('twitch'), row('kick'), row('x')],
     updatedAt: '2026-09-24T00:00:00Z',
     ...patch
   }
@@ -68,6 +68,26 @@ function render(
 }
 
 describe('Broadcast info', () => {
+  it('draws a Kick row with its category and a category search when open', () => {
+    const metadata = draft()
+    const kickIndex = metadata.targetOverrides.findIndex((row) => row.platform === 'kick')
+    metadata.targetOverrides[kickIndex] = {
+      ...metadata.targetOverrides[kickIndex],
+      kickCategoryId: 15,
+      kickCategoryName: 'Just Chatting'
+    }
+    const validation: StreamMetadataValidation = {
+      valid: false,
+      issues: [{ field: 'title', message: 'x', platform: 'kick' }]
+    }
+    const markup = render(metadata, [target('kick', 'Kick')], validation)
+
+    expect(markup).toContain('Global title · Just Chatting')
+    expect(markup).toContain('id="kick-category"')
+    expect(markup).toContain('value="Just Chatting"')
+    expect(markup).not.toContain('id="twitch-language"')
+  })
+
   it('draws the global fields and one closed row per connected native destination', () => {
     const markup = render(draft(), [
       target('youtube', 'Orc TV'),
@@ -91,7 +111,7 @@ describe('Broadcast info', () => {
     const markup = render(draft(), [target('custom', 'Custom RTMP')])
 
     expect(markup).not.toContain('data-slot="accordion"')
-    expect(markup).toContain('Connect YouTube, Twitch or X to set per-destination details.')
+    expect(markup).toContain('Connect YouTube, Twitch, Kick or X to set per-destination details.')
   })
 
   it('draws no rows when the draft has no override rows', () => {

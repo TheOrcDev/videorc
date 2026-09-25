@@ -10982,6 +10982,7 @@ mod tests {
             vec![
                 StreamPlatform::Youtube,
                 StreamPlatform::Twitch,
+                StreamPlatform::Kick,
                 StreamPlatform::X
             ]
         );
@@ -11017,6 +11018,7 @@ mod tests {
             vec![
                 StreamPlatform::Twitch,
                 StreamPlatform::Youtube,
+                StreamPlatform::Kick,
                 StreamPlatform::X
             ]
         );
@@ -11051,6 +11053,7 @@ mod tests {
             vec![
                 StreamPlatform::Youtube,
                 StreamPlatform::Twitch,
+                StreamPlatform::Kick,
                 StreamPlatform::X
             ]
         );

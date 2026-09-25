@@ -37,7 +37,7 @@ try {
     }
 
     // An empty override list is what an old run of this smoke once wrote into
-    // a real database; the backend now backfills the three platform rows.
+    // a real database; the backend now backfills the four platform rows.
     const savedMetadata = await request(ws, timeoutMs, 'streamTargets.metadata.update', {
       title: 'Smoke Go Live',
       description: 'Local preflight smoke for OAuth/native guards.',
@@ -78,10 +78,10 @@ function assertBackfilledOverrides(draft) {
   const platforms = Array.isArray(draft?.targetOverrides)
     ? draft.targetOverrides.map((target) => target.platform)
     : []
-  const expected = ['youtube', 'twitch', 'x']
+  const expected = ['youtube', 'twitch', 'kick', 'x']
   if (expected.some((platform) => !platforms.includes(platform))) {
     throw new Error(
-      `Metadata update should backfill YouTube, Twitch and X override rows, got ${JSON.stringify(platforms)}`
+      `Metadata update should backfill YouTube, Twitch, Kick and X override rows, got ${JSON.stringify(platforms)}`
     )
   }
 }
@@ -117,15 +117,17 @@ function assertProviderCredentials(credentials) {
     throw new Error(`X PKCE readiness mismatch: ${JSON.stringify(x)}`)
   }
 
-  // Kick ships dark (plan 063, S1): no client id in the smoke env, so the
-  // card falls back to Manual RTMP with the credentials-not-ready message.
+  // Kick needs BOTH halves (plan 063, S2): its token exchange requires the
+  // client secret even with PKCE. The smoke env sets the id only, so Kick must
+  // stay not-ready and name the missing secret.
   const kick = byPlatform.get('kick')
   if (
     !kick ||
     kick.ready ||
     !kick.pkce ||
-    kick.clientIdPresent ||
-    !String(kick.message).includes('VIDEORC_KICK_CLIENT_ID')
+    !kick.clientIdPresent ||
+    kick.clientSecretPresent ||
+    !String(kick.message).includes('VIDEORC_KICK_CLIENT_SECRET')
   ) {
     throw new Error(`Kick dark-readiness mismatch: ${JSON.stringify(kick)}`)
   }
@@ -388,7 +390,7 @@ function launchAndReadConnection() {
         VIDEORC_TWITCH_CLIENT_ID: 'smoke-twitch-client-id',
         VIDEORC_X_CLIENT_ID: 'smoke-x-client-id',
         VIDEORC_TWITCH_CLIENT_SECRET: '',
-        VIDEORC_KICK_CLIENT_ID: '',
+        VIDEORC_KICK_CLIENT_ID: 'smoke-kick-client-id',
         VIDEORC_KICK_CLIENT_SECRET: ''
       }),
       stdio: ['ignore', 'pipe', 'pipe']

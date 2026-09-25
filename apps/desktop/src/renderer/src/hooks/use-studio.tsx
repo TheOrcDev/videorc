@@ -306,6 +306,9 @@ import type {
   SupportBundleExportResult,
   SystemPermissionPane,
   TwitchCategory,
+  KickAppliedMetadata,
+  KickCategory,
+  PreparedKickBroadcast,
   VideoPreset,
   VideoSettings,
   VideorcAccountSnapshot,
@@ -515,6 +518,7 @@ function markOutputChosenByUser(): void {
 }
 export const SESSION_DETAIL_BUFFER_LIMIT = 120
 const SESSION_DETAIL_CACHE_LIMIT = 8
+const EMPTY_KICK_CATEGORIES: KickCategory[] = []
 
 export function capSessionDetailBuffer<T>(entries: T[]): T[] {
   return entries.slice(-SESSION_DETAIL_BUFFER_LIMIT)
@@ -1007,6 +1011,8 @@ export type StudioContextValue = {
   youtubeChannelsLoading: boolean
   twitchCategories: TwitchCategory[]
   twitchCategorySearchPending: boolean
+  kickCategories: KickCategory[]
+  kickCategorySearchPending: boolean
   xNativeCapability: XNativeLiveCapability | null
   xNativeCapabilityLoading: boolean
   /** Read-only live-chat snapshot for the studio comments panel, driven by liveChat.* events. */
@@ -1186,6 +1192,7 @@ export type StudioContextValue = {
   refreshYouTubeChannels: (accountId?: string) => Promise<void>
   selectYouTubeChannel: (channelId: string, accountId?: string) => Promise<void>
   searchTwitchCategories: (query: string) => Promise<void>
+  searchKickCategories: (query: string) => Promise<void>
   refreshXNativeCapability: (accountId?: string) => Promise<void>
   authorizeXLive: () => Promise<void>
   refreshStreamMetadata: () => Promise<void>
@@ -2032,6 +2039,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const [youtubeChannelsLoading, setYoutubeChannelsLoading] = useState(false)
   const [twitchCategories, setTwitchCategories] = useState<TwitchCategory[]>([])
   const [twitchCategorySearchPending, setTwitchCategorySearchPending] = useState(false)
+  const [kickCategoryResults, setKickCategoryResults] = useState<KickCategory[]>([])
+  const [kickCategorySearchPending, setKickCategorySearchPending] = useState(false)
   const [xNativeCapability, setXNativeCapability] = useState<XNativeLiveCapability | null>(null)
   const [xNativeCapabilityLoading, setXNativeCapabilityLoading] = useState(false)
   const refreshEntitlementsForClient = useCallback(
@@ -5145,6 +5154,41 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       setTwitchCategories([])
     }
   }, [platformAccounts])
+
+  const kickAccountConnected = platformAccounts.some((item) => item.platform === 'kick')
+  // Derived, not an effect: results from a disconnected account never show.
+  const kickCategories = kickAccountConnected ? kickCategoryResults : EMPTY_KICK_CATEGORIES
+
+  const searchKickCategories = useCallback(
+    async (query: string) => {
+      const trimmed = query.trim()
+      if (!client || trimmed.length < 2) {
+        setKickCategoryResults([])
+        return
+      }
+
+      try {
+        setLastError(null)
+        setKickCategorySearchPending(true)
+        const account = platformAccounts.find((item) => item.platform === 'kick')
+        const result = await client.request<{ categories: KickCategory[] }>(
+          'streamTargets.kick.searchCategories',
+          {
+            accountId: account?.accountId,
+            query: trimmed,
+            limit: 10
+          }
+        )
+        setKickCategoryResults(result.categories)
+      } catch (error) {
+        setKickCategoryResults([])
+        reportError(error)
+      } finally {
+        setKickCategorySearchPending(false)
+      }
+    },
+    [client, platformAccounts, reportError]
+  )
 
   const refreshXNativeCapability = useCallback(
     async (accountId?: string) => {
@@ -12024,6 +12068,26 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 message: 'Twitch channel prepared.'
               }
             })
+          } else if (target.platform === 'kick') {
+            const prepared = await client.request<PreparedKickBroadcast>(
+              'streamTargets.kick.prepare',
+              {
+                accountId: target.accountId
+              }
+            )
+            nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+              accountId: prepared.accountId,
+              accountLabel: prepared.accountLabel,
+              serverUrl: prepared.serverUrl,
+              streamKeySecretRef: prepared.streamKeySecretRef,
+              streamKeyPresent: true,
+              platformBroadcastId: undefined,
+              platformStreamId: undefined,
+              status: {
+                state: 'ready',
+                message: 'Kick channel prepared.'
+              }
+            })
           } else if (target.platform === 'x') {
             const scheduledAttemptId = target.scheduledEventId ? crypto.randomUUID() : undefined
             // A saved X broadcast already owns its ingest source: prepare reads
@@ -12118,6 +12182,37 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             status: {
               state: 'ready',
               message: `Twitch channel metadata updated ("${applied.title}").`
+            }
+          })
+        } catch (error) {
+          const message = error instanceof Error ? error.message : String(error)
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'ready',
+              message: `Streaming over stream key; channel metadata update failed: ${message}`
+            }
+          })
+        }
+      }
+
+      // Manual-key Kick targets: same rule as Twitch. The public API sets the
+      // title and category whatever the ingest path; best-effort.
+      const kickAccount = platformAccounts.find((item) => item.platform === 'kick')
+      for (const target of captureConfig.streaming.targets.filter(
+        (target) => target.enabled && target.authMode !== 'oauth' && target.platform === 'kick'
+      )) {
+        if (!kickAccount) {
+          continue
+        }
+        try {
+          const applied = await client.request<KickAppliedMetadata>(
+            'streamTargets.kick.applyMetadata',
+            { accountId: kickAccount.accountId }
+          )
+          nextStreaming = patchPreparedStreamTarget(nextStreaming, target.id, {
+            status: {
+              state: 'ready',
+              message: `Kick channel metadata updated ("${applied.title}").`
             }
           })
         } catch (error) {
@@ -14000,6 +14095,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       youtubeChannelsLoading,
       twitchCategories,
       twitchCategorySearchPending,
+      kickCategories,
+      kickCategorySearchPending,
       xNativeCapability,
       xNativeCapabilityLoading,
       clearLiveChat,
@@ -14100,6 +14197,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshYouTubeChannels,
       selectYouTubeChannel,
       searchTwitchCategories,
+      searchKickCategories,
       refreshXNativeCapability,
       authorizeXLive,
       refreshStreamMetadata,
@@ -14224,6 +14322,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       youtubeChannelsLoading,
       twitchCategories,
       twitchCategorySearchPending,
+      kickCategories,
+      kickCategorySearchPending,
       xNativeCapability,
       xNativeCapabilityLoading,
       clearLiveChat,
@@ -14324,6 +14424,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       refreshYouTubeChannels,
       selectYouTubeChannel,
       searchTwitchCategories,
+      searchKickCategories,
       refreshXNativeCapability,
       authorizeXLive,
       refreshStreamMetadata,

@@ -76,6 +76,7 @@ import type {
   StreamUrlMode,
   VideoSettings,
   TwitchCategory,
+  KickCategory,
   XNativeLiveCapability,
   YouTubeChannel
 } from '@/lib/backend'
@@ -164,6 +165,9 @@ function StreamingSetup(): ReactElement {
     twitchCategories,
     twitchCategorySearchPending,
     searchTwitchCategories,
+    kickCategories,
+    kickCategorySearchPending,
+    searchKickCategories,
     xNativeCapability,
     xNativeCapabilityLoading,
     refreshXNativeCapability,
@@ -340,12 +344,15 @@ function StreamingSetup(): ReactElement {
           pending={streamMetadataSavePending}
           twitchCategories={twitchCategories}
           twitchCategorySearchPending={twitchCategorySearchPending}
+          kickCategories={kickCategories}
+          kickCategorySearchPending={kickCategorySearchPending}
           targets={streaming.targets}
           validation={streamMetadataValidation}
           onPatchDraft={patchStreamMetadataDraft}
           onPatchTarget={patchStreamTargetMetadataDraft}
           onSave={() => void saveStreamMetadataDraft()}
           onSearchTwitchCategories={searchTwitchCategories}
+          onSearchKickCategories={searchKickCategories}
         />
       </div>
 
@@ -1382,10 +1389,13 @@ export function MetadataEditor({
   pending,
   twitchCategories,
   twitchCategorySearchPending,
+  kickCategories = [],
+  kickCategorySearchPending = false,
   onPatchDraft,
   onPatchTarget,
   onSave,
-  onSearchTwitchCategories
+  onSearchTwitchCategories,
+  onSearchKickCategories
 }: {
   draft: StreamMetadataDraft | null
   validation: StreamMetadataValidation | null
@@ -1401,6 +1411,9 @@ export function MetadataEditor({
   ) => void
   onSave: () => void
   onSearchTwitchCategories: (query: string) => Promise<void>
+  kickCategories?: KickCategory[]
+  kickCategorySearchPending?: boolean
+  onSearchKickCategories?: (query: string) => Promise<void>
 }): ReactElement {
   const globalTitleIssue = metadataIssue(validation, 'title')
   // One row per connected native destination, in Destinations order. The
@@ -1518,9 +1531,12 @@ export function MetadataEditor({
                         override={override}
                         twitchCategories={twitchCategories}
                         twitchCategorySearchPending={twitchCategorySearchPending}
+                        kickCategories={kickCategories}
+                        kickCategorySearchPending={kickCategorySearchPending}
                         validation={validation}
                         onPatch={(patch) => onPatchTarget(override.platform, patch)}
                         onSearchTwitchCategories={onSearchTwitchCategories}
+                        onSearchKickCategories={onSearchKickCategories}
                       />
                     </AccordionContent>
                   </AccordionItem>
@@ -1529,7 +1545,7 @@ export function MetadataEditor({
             </Accordion>
           ) : (
             <p className="text-xs text-muted-foreground">
-              Connect YouTube, Twitch or X to set per-destination details.
+              Connect YouTube, Twitch, Kick or X to set per-destination details.
             </p>
           )}
 
@@ -1552,6 +1568,90 @@ export function MetadataEditor({
   )
 }
 
+/**
+ * Kick category: search, then pick. Kick needs the numeric id, so a typed name
+ * alone sets nothing; clearing the field clears the category.
+ */
+function KickCategoryField({
+  override,
+  categories,
+  pending,
+  disabled,
+  onPatch,
+  onSearch
+}: {
+  override: StreamMetadataDraft['targetOverrides'][number]
+  categories: KickCategory[]
+  pending: boolean
+  disabled: boolean
+  onPatch: (patch: Partial<StreamMetadataDraft['targetOverrides'][number]>) => void
+  onSearch?: (query: string) => Promise<void>
+}): ReactElement {
+  const [query, setQuery] = useState(override.kickCategoryName ?? '')
+  const selected =
+    override.kickCategoryId !== undefined
+      ? { id: override.kickCategoryId, name: override.kickCategoryName ?? '' }
+      : null
+  const options =
+    selected && !categories.some((category) => category.id === selected.id)
+      ? [selected, ...categories]
+      : categories
+
+  return (
+    <Field>
+      <FieldLabel htmlFor="kick-category">Category</FieldLabel>
+      <div className="flex gap-2">
+        <Input
+          disabled={disabled}
+          id="kick-category"
+          placeholder="Just Chatting"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value)
+            if (!event.target.value.trim()) {
+              onPatch({ kickCategoryId: undefined, kickCategoryName: undefined })
+            }
+          }}
+        />
+        <Button
+          disabled={disabled || pending || !onSearch || query.trim().length < 2}
+          size="sm"
+          variant="outline"
+          onClick={() => void onSearch?.(query)}
+        >
+          <SearchIcon data-icon="inline-start" weight="bold" />
+          {pending ? 'Searching' : 'Search'}
+        </Button>
+      </div>
+      {options.length ? (
+        <Select
+          disabled={disabled || pending}
+          value={override.kickCategoryId !== undefined ? String(override.kickCategoryId) : ''}
+          onValueChange={(value) => {
+            const category = options.find((item) => String(item.id) === value)
+            if (category) {
+              setQuery(category.name)
+              onPatch({ kickCategoryId: category.id, kickCategoryName: category.name })
+            }
+          }}
+        >
+          <SelectTrigger className="w-full">
+            <SelectValue placeholder="Select category" />
+          </SelectTrigger>
+          <SelectContent>
+            {options.map((category) => (
+              <SelectItem key={category.id} value={String(category.id)}>
+                {category.name}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      ) : null}
+      <FieldDescription>Search, then pick one. Kick needs a listed category.</FieldDescription>
+    </Field>
+  )
+}
+
 function MetadataOverride({
   override,
   draft,
@@ -1559,9 +1659,12 @@ function MetadataOverride({
   disabled,
   twitchCategories,
   twitchCategorySearchPending,
+  kickCategories,
+  kickCategorySearchPending,
   validation,
   onPatch,
-  onSearchTwitchCategories
+  onSearchTwitchCategories,
+  onSearchKickCategories
 }: {
   override: StreamMetadataDraft['targetOverrides'][number]
   draft: StreamMetadataDraft
@@ -1572,6 +1675,9 @@ function MetadataOverride({
   validation: StreamMetadataValidation | null
   onPatch: (patch: Partial<StreamMetadataDraft['targetOverrides'][number]>) => void
   onSearchTwitchCategories: (query: string) => Promise<void>
+  kickCategories: KickCategory[]
+  kickCategorySearchPending: boolean
+  onSearchKickCategories?: (query: string) => Promise<void>
 }): ReactElement {
   const titleIssue = metadataIssue(validation, 'title', override.platform)
   const twitch = override.platform === 'twitch'
@@ -1758,6 +1864,17 @@ function MetadataOverride({
             />
           </Field>
         </div>
+      ) : null}
+
+      {override.platform === 'kick' ? (
+        <KickCategoryField
+          categories={kickCategories}
+          disabled={disabled}
+          override={override}
+          pending={kickCategorySearchPending}
+          onPatch={onPatch}
+          onSearch={onSearchKickCategories}
+        />
       ) : null}
 
       {x ? (

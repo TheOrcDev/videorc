@@ -33,6 +33,7 @@ mod ffmpeg_work;
 mod fifo;
 mod frame_store;
 mod h264_profile;
+mod kick;
 #[cfg(any(test, target_os = "linux"))]
 mod linux_pipewire_stream;
 mod linux_portal_capture;
@@ -3388,6 +3389,135 @@ async fn prepare_twitch_stream_target(
     Ok(prepared)
 }
 
+fn validated_stream_metadata_draft(state: &AppState) -> anyhow::Result<StreamMetadataDraft> {
+    let metadata = state.database.stream_metadata_draft()?;
+    let validation = validate_stream_metadata_draft(&metadata);
+    if !validation.valid {
+        let message = validation
+            .issues
+            .first()
+            .map(|issue| issue.message.as_str())
+            .unwrap_or("Stream metadata is invalid.");
+        anyhow::bail!("{message}");
+    }
+    Ok(metadata)
+}
+
+/// A Kick user token, refreshed when near expiry, plus the account it belongs
+/// to. `refused` forces a refresh after Kick answered 401 with that token.
+async fn kick_access(
+    state: &AppState,
+    account_id: Option<&str>,
+    client: &reqwest::Client,
+    refused: Option<&str>,
+) -> anyhow::Result<(String, storage::PlatformAccountCredentials)> {
+    let token =
+        session_platform_access_token(state, StreamPlatform::Kick, account_id, client, refused)
+            .await?;
+    let credential = platform_account_credential(state, StreamPlatform::Kick, account_id)?;
+    Ok((token, credential))
+}
+
+async fn search_kick_categories(
+    state: &AppState,
+    params: kick::KickCategorySearchParams,
+) -> anyhow::Result<kick::KickCategorySearchResult> {
+    let client = oauth::provider_http_client();
+    let request = |access_token: String| kick::KickCategorySearchRequest {
+        access_token,
+        query: params.query.clone(),
+        limit: params.limit,
+        api_base_url: None,
+    };
+    let (token, _) = kick_access(state, params.account_id.as_deref(), &client, None).await?;
+    match kick::search_kick_categories(request(token.clone()), &client).await {
+        Err(error) if kick::is_kick_auth_error(&error) => {
+            let (token, _) =
+                kick_access(state, params.account_id.as_deref(), &client, Some(&token)).await?;
+            kick::search_kick_categories(request(token), &client).await
+        }
+        other => other,
+    }
+}
+
+/// Push title/category for a Kick target (OAuth-prepared or manual key).
+async fn apply_kick_stream_target_metadata(
+    state: &AppState,
+    params: kick::KickPrepareParams,
+) -> anyhow::Result<kick::KickAppliedMetadata> {
+    let metadata = validated_stream_metadata_draft(state)?;
+    let client = oauth::provider_http_client();
+    let (token, credential) =
+        kick_access(state, params.account_id.as_deref(), &client, None).await?;
+    let request = |access_token: String| kick::KickPrepareRequest {
+        access_token,
+        account_id: credential.account.account_id.clone(),
+        account_label: credential.account.account_label.clone(),
+        metadata: metadata.clone(),
+        api_base_url: None,
+    };
+    match kick::apply_kick_channel_metadata(&request(token.clone()), &client).await {
+        Err(error) if kick::is_kick_auth_error(&error) => {
+            let (token, _) =
+                kick_access(state, params.account_id.as_deref(), &client, Some(&token)).await?;
+            kick::apply_kick_channel_metadata(&request(token), &client).await
+        }
+        other => other,
+    }
+}
+
+async fn prepare_kick_stream_target(
+    state: &AppState,
+    params: kick::KickPrepareParams,
+) -> anyhow::Result<kick::PreparedKickBroadcast> {
+    let metadata = validated_stream_metadata_draft(state)?;
+    let client = oauth::provider_http_client();
+    let (token, credential) =
+        kick_access(state, params.account_id.as_deref(), &client, None).await?;
+    let request = |access_token: String| kick::KickPrepareRequest {
+        access_token,
+        account_id: credential.account.account_id.clone(),
+        account_label: credential.account.account_label.clone(),
+        metadata: metadata.clone(),
+        api_base_url: None,
+    };
+    let prepared =
+        match kick::prepare_kick_broadcast(request(token.clone()), &client, secrets::put_secret)
+            .await
+        {
+            Err(error) if kick::is_kick_auth_error(&error) => {
+                let (token, _) =
+                    kick_access(state, params.account_id.as_deref(), &client, Some(&token)).await?;
+                kick::prepare_kick_broadcast(request(token), &client, secrets::put_secret).await?
+            }
+            other => other?,
+        };
+
+    // Re-read the row: a refresh above may have rotated its token refs.
+    let credential =
+        platform_account_credential(state, StreamPlatform::Kick, params.account_id.as_deref())?;
+    state
+        .database
+        .upsert_platform_account(UpsertPlatformAccount {
+            platform: credential.account.platform,
+            account_id: credential.account.account_id,
+            account_label: credential.account.account_label,
+            account_handle: credential.account.account_handle,
+            avatar_url: credential.account.avatar_url,
+            scopes: credential.account.scopes,
+            token_secret_ref: credential.token_secret_ref,
+            refresh_token_secret_ref: credential.refresh_token_secret_ref,
+            stream_key_secret_ref: Some(prepared.stream_key_secret_ref.clone()),
+            expires_at: credential.account.expires_at,
+            status: PlatformAccountStatus::Connected,
+        })?;
+    if let Ok(accounts) = state.database.list_platform_accounts() {
+        state.emit_event("platformAccounts.changed", accounts);
+    }
+
+    Ok(prepared)
+}
+
 fn twitch_account_credentials(
     state: &AppState,
     account_id: Option<&str>,
@@ -4968,6 +5098,8 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.youtube.transition"
         | "streamTargets.twitch.prepare"
         | "streamTargets.twitch.applyMetadata"
+        | "streamTargets.kick.prepare"
+        | "streamTargets.kick.applyMetadata"
         | "streamTargets.x.startLiveAuthorization"
         | "streamTargets.x.prepare"
         | "streamTargets.x.publish"
@@ -5064,6 +5196,7 @@ fn websocket_method_execution_policy(method: &str) -> Option<WebSocketMethodExec
         | "streamTargets.youtube.streamStatus"
         | "platformAccounts.youtube.channels"
         | "streamTargets.twitch.searchCategories"
+        | "streamTargets.kick.searchCategories"
         | "streamTargets.x.capability"
         | "screens.list"
         | "repair.assess_file"
@@ -10199,6 +10332,31 @@ async fn handle_text_message_with_role(
                             }
                         }
                     }
+                    if params.platform == StreamPlatform::Kick
+                        && let Ok(accounts) = state.database.list_platform_account_credentials()
+                        && let Some(credentials) = accounts
+                            .into_iter()
+                            .find(|account| account.account.platform == StreamPlatform::Kick)
+                        && let Some((token_ref, hint)) = credentials
+                            .refresh_token_secret_ref
+                            .as_deref()
+                            .map(|token_ref| (token_ref, "refresh_token"))
+                            .or_else(|| {
+                                credentials
+                                    .token_secret_ref
+                                    .as_deref()
+                                    .map(|token_ref| (token_ref, "access_token"))
+                            })
+                        && let Ok(token) = secrets::get_secret(token_ref)
+                        && let Err(error) =
+                            oauth::revoke_kick_token(&token, hint, &oauth::provider_http_client())
+                                .await
+                    {
+                        // Best effort (plan 063 S2): revoking the refresh token kills
+                        // its access tokens. A failed revoke never blocks Disconnect;
+                        // the grant still dies with its refresh expiry on Kick's side.
+                        tracing::warn!("Kick access revocation failed on disconnect: {error}");
+                    }
                     match state.database.disconnect_platform_account_after_generation(
                         params.platform,
                         pending_generation,
@@ -10513,6 +10671,49 @@ async fn handle_text_message_with_role(
                     Err(error) => ServerResponse::error(
                         command.id,
                         "twitch-apply-metadata-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamTargets.kick.searchCategories" => {
+            match serde_json::from_value::<kick::KickCategorySearchParams>(command.params) {
+                Ok(params) => match search_kick_categories(state, params).await {
+                    Ok(result) => ServerResponse::ok(command.id, result),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "kick-category-search-failed",
+                        error.to_string(),
+                    ),
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamTargets.kick.prepare" => {
+            match serde_json::from_value::<kick::KickPrepareParams>(command.params) {
+                Ok(params) => match prepare_kick_stream_target(state, params).await {
+                    Ok(prepared) => ServerResponse::ok(command.id, prepared),
+                    Err(error) => {
+                        ServerResponse::error(command.id, "kick-prepare-failed", error.to_string())
+                    }
+                },
+                Err(error) => {
+                    ServerResponse::error(command.id, "invalid-params", error.to_string())
+                }
+            }
+        }
+        "streamTargets.kick.applyMetadata" => {
+            match serde_json::from_value::<kick::KickPrepareParams>(command.params) {
+                Ok(params) => match apply_kick_stream_target_metadata(state, params).await {
+                    Ok(applied) => ServerResponse::ok(command.id, applied),
+                    Err(error) => ServerResponse::error(
+                        command.id,
+                        "kick-apply-metadata-failed",
                         error.to_string(),
                     ),
                 },

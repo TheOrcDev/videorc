@@ -36,7 +36,7 @@ function target(
   } as StreamTargetSettings
 }
 
-const allOverrides = [override('youtube'), override('twitch'), override('x')]
+const allOverrides = [override('youtube'), override('twitch'), override('kick'), override('x')]
 
 describe('visibleMetadataOverrides', () => {
   it('draws one row per connected native platform, in Destinations order', () => {
@@ -51,6 +51,15 @@ describe('visibleMetadataOverrides', () => {
 
     expect(visible.map((item) => item.override.platform)).toEqual(['twitch', 'youtube'])
     expect(visible.map((item) => item.label)).toEqual(['Twitch main', 'Orc TV'])
+  })
+
+  it('draws a Kick row once a Kick destination is listed', () => {
+    const visible = visibleMetadataOverrides(
+      [target('kick', 'Kick'), target('x', 'X')],
+      allOverrides
+    )
+
+    expect(visible.map((item) => item.override.platform)).toEqual(['kick', 'x'])
   })
 
   it('draws nothing for a Custom RTMP-only setup', () => {
@@ -109,6 +118,16 @@ describe('metadataOverrideSummary', () => {
         override('twitch', { twitchCategoryName: ' Just Chatting ', twitchLanguage: 'es' })
       )
     ).toBe('Global title · Just Chatting · es')
+  })
+
+  it('Kick names the category only when set', () => {
+    expect(metadataOverrideSummary(draft, override('kick'))).toBe('Global title')
+    expect(
+      metadataOverrideSummary(
+        draft,
+        override('kick', { customize: true, kickCategoryId: 15, kickCategoryName: 'Just Chatting' })
+      )
+    ).toBe('Custom title · Just Chatting')
   })
 
   it('X says whether the announcement post goes out', () => {

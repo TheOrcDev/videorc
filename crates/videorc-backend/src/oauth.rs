@@ -40,6 +40,17 @@ const BUNDLED_X_CLIENT_ID: Option<&str> = match option_env!("VIDEORC_BUNDLED_X_C
 // them in (or the runtime vars are set) Kick stays Manual RTMP only.
 const BUNDLED_KICK_CLIENT_ID: Option<&str> = option_env!("VIDEORC_BUNDLED_KICK_CLIENT_ID");
 const BUNDLED_KICK_CLIENT_SECRET: Option<&str> = option_env!("VIDEORC_BUNDLED_KICK_CLIENT_SECRET");
+/// Kick scopes (space-separated on the wire): profile, channel read/write for
+/// title + category, chat send, stream key read, and event subscriptions for
+/// the chat relay (plan 063 S5).
+const KICK_OAUTH_SCOPES: &[&str] = &[
+    "user:read",
+    "channel:read",
+    "channel:write",
+    "chat:write",
+    "streamkey:read",
+    "events:subscribe",
+];
 pub const YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE: &str = "YouTube OAuth is temporarily unavailable while Videorc awaits Google approval. Use Manual RTMP for YouTube for now.";
 
 pub fn provider_oauth_unavailable_message(platform: StreamPlatform) -> Option<&'static str> {
@@ -2532,7 +2543,7 @@ fn parse_provider_profile(
         StreamPlatform::Youtube => parse_youtube_profile(value),
         StreamPlatform::Twitch => parse_twitch_profile(value),
         StreamPlatform::X => parse_x_profile(value),
-        StreamPlatform::Kick => anyhow::bail!("Kick OAuth is not configured in this build."),
+        StreamPlatform::Kick => parse_kick_profile(value),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth profiles."),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
             "{} livestreams use a manual stream key. There is no OAuth to connect.",
@@ -2594,6 +2605,34 @@ fn parse_twitch_profile(value: serde_json::Value) -> Result<ProviderProfile> {
         account_id,
         account_label,
         account_handle,
+        avatar_url,
+    })
+}
+
+/// Kick `GET /public/v1/users` (no params) returns the token's own user as
+/// `{ data: [{ user_id, name, email?, profile_picture }] }`. Kick has no
+/// separate display name: the channel name is both label and handle.
+fn parse_kick_profile(value: serde_json::Value) -> Result<ProviderProfile> {
+    let user = value
+        .get("data")
+        .and_then(|data| data.as_array())
+        .and_then(|items| items.first())
+        .context("Kick profile response did not include a user.")?;
+    let account_id = match user.get("user_id") {
+        Some(serde_json::Value::Number(id)) => id.to_string(),
+        other => required_json_string(other, "Kick user id")?,
+    };
+    let account_label = required_json_string(user.get("name"), "Kick channel name")?;
+    let avatar_url = user
+        .get("profile_picture")
+        .and_then(|url| url.as_str())
+        .filter(|url| !url.trim().is_empty())
+        .map(str::to_string);
+
+    Ok(ProviderProfile {
+        account_id,
+        account_handle: Some(account_label.clone()),
+        account_label,
         avatar_url,
     })
 }
@@ -2867,7 +2906,25 @@ fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
             extra_params: HashMap::new(),
             pkce: true,
         }),
-        StreamPlatform::Kick => anyhow::bail!("Kick OAuth is not configured in this build."),
+        // Kick (plan 063): authorization code + PKCE, AND a client secret in
+        // the token and refresh exchanges (Kick requires it even with PKCE).
+        StreamPlatform::Kick => Ok(OAuthProviderConfig {
+            authorization_url: "https://id.kick.com/oauth/authorize".to_string(),
+            token_url: "https://id.kick.com/oauth/token".to_string(),
+            profile_url: "https://api.kick.com/public/v1/users".to_string(),
+            client_id: required_credential("VIDEORC_KICK_CLIENT_ID", BUNDLED_KICK_CLIENT_ID)
+                .map_err(|_| anyhow::anyhow!("Kick OAuth is not configured in this build."))?,
+            client_secret: Some(
+                required_credential("VIDEORC_KICK_CLIENT_SECRET", BUNDLED_KICK_CLIENT_SECRET)
+                    .map_err(|_| anyhow::anyhow!("Kick OAuth is not configured in this build."))?,
+            ),
+            scopes: KICK_OAUTH_SCOPES
+                .iter()
+                .map(|scope| scope.to_string())
+                .collect(),
+            extra_params: HashMap::new(),
+            pkce: true,
+        }),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth."),
     }
 }
@@ -2905,7 +2962,8 @@ fn provider_redirect_uri(
             // same loopback listener — the string just has to match the
             // registered URL exactly. The other providers keep 127.0.0.1
             // (X's registered URLs use it).
-            let host = if matches!(platform, StreamPlatform::Twitch) {
+            // Kick's docs register `http://localhost:<port>/...` too.
+            let host = if matches!(platform, StreamPlatform::Twitch | StreamPlatform::Kick) {
                 "localhost"
             } else {
                 "127.0.0.1"
@@ -2984,7 +3042,7 @@ pub fn provider_credential_statuses() -> Vec<OAuthProviderCredentialStatus> {
             BUNDLED_X_CLIENT_ID,
             None,
             true,
-            false,
+            true,
         ),
         // Kick needs its client secret in the token exchange even with PKCE
         // (plan 063); both halves are build-injected like Google's.
@@ -2998,6 +3056,39 @@ pub fn provider_credential_statuses() -> Vec<OAuthProviderCredentialStatus> {
             false,
         ),
     ]
+}
+
+/// Kick revocation: `POST https://id.kick.com/oauth/revoke?token=…&token_hint_type=…`.
+/// `hint` is `access_token` or `refresh_token`. An already-invalid token is
+/// treated as revoked.
+pub async fn revoke_kick_token(token: &str, hint: &str, client: &reqwest::Client) -> Result<()> {
+    revoke_kick_token_at(token, hint, client, "https://id.kick.com/oauth/revoke").await
+}
+
+async fn revoke_kick_token_at(
+    token: &str,
+    hint: &str,
+    client: &reqwest::Client,
+    revocation_url: &str,
+) -> Result<()> {
+    if token.trim().is_empty() {
+        anyhow::bail!("Kick OAuth token is empty.");
+    }
+    let response = client
+        .post(revocation_url)
+        .query(&[("token", token), ("token_hint_type", hint)])
+        .send()
+        .await
+        .context("Could not contact Kick to revoke access")?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    if status == reqwest::StatusCode::BAD_REQUEST && body.contains("invalid") {
+        return Ok(());
+    }
+    anyhow::bail!("Kick rejected access revocation with HTTP {status}.")
 }
 
 pub async fn revoke_youtube_token(token: &str, client: &reqwest::Client) -> Result<()> {
@@ -3058,7 +3149,10 @@ fn provider_credential_status(
     let client_id_present = client_id_source != OAuthCredentialSource::Missing;
     let client_secret_present =
         optional_env(client_secret_env).is_some() || bundled_client_secret.is_some();
-    let ready = client_id_present && (pkce || secret_optional || client_secret_present);
+    // `secret_optional = false` means the secret is REQUIRED, PKCE or not:
+    // Kick and Google both demand it in the token exchange alongside the
+    // verifier. Public PKCE clients (X) pass `secret_optional = true`.
+    let ready = client_id_present && (secret_optional || client_secret_present);
     let label = stream_platform_label(platform);
     OAuthProviderCredentialStatus {
         platform,
@@ -3069,8 +3163,10 @@ fn provider_credential_status(
         pkce,
         message: if !client_id_present {
             format!("{label} OAuth requires {client_id_env}.")
-        } else if !pkce && !secret_optional && !client_secret_present {
-            format!("{label} OAuth also needs its runtime client secret before connecting.")
+        } else if !secret_optional && !client_secret_present {
+            format!(
+                "{label} OAuth also needs its client secret ({client_secret_env}) before connecting."
+            )
         } else {
             match client_id_source {
                 OAuthCredentialSource::Environment => {
@@ -5294,8 +5390,110 @@ mod tests {
             provider_oauth_unavailable_message(StreamPlatform::Kick),
             None
         );
-        let error = provider_config(StreamPlatform::Kick).unwrap_err();
-        assert!(error.to_string().contains("Kick OAuth is not configured"));
+        // No test build bakes Kick credentials and no test sets the runtime
+        // vars, so both the config and the readiness row stay dark.
+        if BUNDLED_KICK_CLIENT_ID.is_none() && optional_env("VIDEORC_KICK_CLIENT_ID").is_none() {
+            let error = provider_config(StreamPlatform::Kick).unwrap_err();
+            assert!(error.to_string().contains("Kick OAuth is not configured"));
+            let status = provider_credential_statuses()
+                .into_iter()
+                .find(|status| status.platform == StreamPlatform::Kick)
+                .unwrap();
+            assert!(!status.ready);
+        }
+    }
+
+    #[test]
+    fn pkce_provider_with_required_secret_is_not_ready_without_it() {
+        let status = provider_credential_status(
+            StreamPlatform::Kick,
+            "VIDEORC_TEST_KICK_CLIENT_ID",
+            "VIDEORC_TEST_KICK_CLIENT_SECRET",
+            Some("bundled-kick-client"),
+            None,
+            true,
+            false,
+        );
+        assert!(status.client_id_present);
+        assert!(!status.client_secret_present);
+        assert!(status.pkce);
+        assert!(!status.ready);
+        assert!(status.message.contains("VIDEORC_TEST_KICK_CLIENT_SECRET"));
+
+        let ready = provider_credential_status(
+            StreamPlatform::Kick,
+            "VIDEORC_TEST_KICK_CLIENT_ID",
+            "VIDEORC_TEST_KICK_CLIENT_SECRET",
+            Some("bundled-kick-client"),
+            Some("bundled-kick-secret"),
+            true,
+            false,
+        );
+        assert!(ready.ready);
+    }
+
+    #[test]
+    fn kick_profile_uses_numeric_user_id_and_name() {
+        let profile = parse_kick_profile(serde_json::json!({
+            "data": [{
+                "user_id": 123456,
+                "name": "orcdev",
+                "email": "hidden@example.com",
+                "profile_picture": "https://files.kick.com/images/user/123/profile.webp"
+            }],
+            "message": "OK"
+        }))
+        .unwrap();
+        assert_eq!(profile.account_id, "123456");
+        assert_eq!(profile.account_label, "orcdev");
+        assert_eq!(profile.account_handle.as_deref(), Some("orcdev"));
+        assert_eq!(
+            profile.avatar_url.as_deref(),
+            Some("https://files.kick.com/images/user/123/profile.webp")
+        );
+        assert!(parse_kick_profile(serde_json::json!({ "data": [] })).is_err());
+    }
+
+    #[test]
+    fn kick_redirect_uses_localhost_like_twitch() {
+        assert_eq!(
+            provider_redirect_uri(StreamPlatform::Kick, None, 17995).unwrap(),
+            "http://localhost:17995/oauth/callback"
+        );
+    }
+
+    #[tokio::test]
+    async fn kick_revoke_posts_token_and_hint_as_query() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = vec![0_u8; 4096];
+            let read = tokio::io::AsyncReadExt::read(&mut socket, &mut buffer)
+                .await
+                .unwrap();
+            let request = String::from_utf8_lossy(&buffer[..read]).to_string();
+            tokio::io::AsyncWriteExt::write_all(
+                &mut socket,
+                b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+            )
+            .await
+            .unwrap();
+            request
+        });
+        revoke_kick_token_at(
+            "kick-token",
+            "refresh_token",
+            &reqwest::Client::new(),
+            &format!("http://{address}/oauth/revoke"),
+        )
+        .await
+        .unwrap();
+        let request = server.await.unwrap();
+        assert!(
+            request
+                .starts_with("POST /oauth/revoke?token=kick-token&token_hint_type=refresh_token")
+        );
     }
 
     fn device_exchange_fixture(device_code: Option<&str>) -> PendingOAuthExchange {
@@ -5648,7 +5846,7 @@ mod tests {
             Some("bundled-x-client"),
             None,
             true,
-            false,
+            true,
         );
 
         assert!(status.client_id_present);

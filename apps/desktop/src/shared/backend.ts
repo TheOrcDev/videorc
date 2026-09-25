@@ -851,6 +851,9 @@ export interface StreamTargetMetadataDraft {
   twitchCategoryId?: string
   twitchCategoryName?: string
   twitchLanguage?: string
+  /** Kick category (plan 063). A platform setting: applies without a custom title. */
+  kickCategoryId?: number
+  kickCategoryName?: string
   /**
    * X has no unlisted/private concept — the only reach lever is suppressing
    * the announcement post. Undefined means announce (the platform default).
@@ -1008,6 +1011,51 @@ export interface PreparedTwitchBroadcast {
   categoryId?: string
   categoryName?: string
   language?: string
+}
+
+export interface KickPrepareParams {
+  accountId?: string
+}
+
+export interface KickCategorySearchParams {
+  accountId?: string
+  query: string
+  limit?: number
+}
+
+export interface KickCategory {
+  id: number
+  name: string
+  thumbnail?: string
+}
+
+export interface KickCategorySearchResult {
+  categories: KickCategory[]
+}
+
+/** Result of `streamTargets.kick.applyMetadata` — title/category pushed without touching the stream key. */
+export interface KickAppliedMetadata {
+  platform: 'kick'
+  accountId: string
+  accountLabel: string
+  title: string
+  categoryId?: number
+  categoryName?: string
+}
+
+export interface PreparedKickBroadcast {
+  platform: 'kick'
+  accountId: string
+  accountLabel: string
+  serverUrl: string
+  streamKeySecretRef: string
+  streamKeyPresent: boolean
+  redactedUrl: string
+  broadcasterUserId: string
+  slug?: string
+  title: string
+  categoryId?: number
+  categoryName?: string
 }
 
 export type XNativeLiveCapabilityState =

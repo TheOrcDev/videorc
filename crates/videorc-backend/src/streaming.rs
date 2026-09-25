@@ -312,6 +312,12 @@ pub struct StreamTargetMetadataDraft {
     pub twitch_category_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub twitch_language: Option<String>,
+    /// Kick category (plan 063): a platform setting like Twitch's, applied
+    /// whether or not the row customizes its title. Kick ids are numeric.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kick_category_id: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kick_category_name: Option<String>,
     /// X has no unlisted/private concept — the only reach lever the
     /// Livestream API exposes is suppressing the announcement post
     /// (`should_not_tweet`). None means announce (the platform default).
@@ -483,6 +489,8 @@ pub fn default_stream_metadata_draft(updated_at: String) -> StreamMetadataDraft 
                 twitch_category_id: None,
                 twitch_category_name: None,
                 twitch_language: (platform == StreamPlatform::Twitch).then(|| "en".to_string()),
+                kick_category_id: None,
+                kick_category_name: None,
                 x_announce: (platform == StreamPlatform::X).then_some(true),
                 updated_at: updated_at.clone(),
             })
@@ -491,11 +499,12 @@ pub fn default_stream_metadata_draft(updated_at: String) -> StreamMetadataDraft 
     }
 }
 
-/// The three native platforms every draft carries a row for, in the order the
+/// The native platforms every draft carries a row for, in the order the
 /// Livestream page lists them.
-const STREAM_METADATA_PLATFORMS: [StreamPlatform; 3] = [
+const STREAM_METADATA_PLATFORMS: [StreamPlatform; 4] = [
     StreamPlatform::Youtube,
     StreamPlatform::Twitch,
+    StreamPlatform::Kick,
     StreamPlatform::X,
 ];
 
@@ -908,6 +917,7 @@ mod tests {
             vec![
                 StreamPlatform::Youtube,
                 StreamPlatform::Twitch,
+                StreamPlatform::Kick,
                 StreamPlatform::X
             ]
         );
@@ -939,6 +949,16 @@ mod tests {
                 .x_announce,
             Some(true)
         );
+        let kick = draft
+            .target_overrides
+            .iter()
+            .find(|target| target.platform == StreamPlatform::Kick)
+            .unwrap();
+        assert_eq!(kick.kick_category_id, None);
+        // The serde-null trap: unset Kick fields are absent on the wire.
+        let wire = serde_json::to_value(kick).unwrap();
+        assert!(wire.get("kickCategoryId").is_none());
+        assert!(wire.get("kickCategoryName").is_none());
     }
 
     #[test]
@@ -957,6 +977,7 @@ mod tests {
             vec![
                 StreamPlatform::Youtube,
                 StreamPlatform::Twitch,
+                StreamPlatform::Kick,
                 StreamPlatform::X
             ]
         );
@@ -982,7 +1003,8 @@ mod tests {
             vec![
                 StreamPlatform::X,
                 StreamPlatform::Youtube,
-                StreamPlatform::Twitch
+                StreamPlatform::Twitch,
+                StreamPlatform::Kick
             ]
         );
         assert_eq!(draft.target_overrides[0].x_announce, Some(false));

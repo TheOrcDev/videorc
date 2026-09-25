@@ -1114,6 +1114,30 @@ class StudioBackend {
           lifecycleStatus: params.status,
           message: `YouTube broadcast transitioned to ${String(params.status)}.`
         }
+      case 'streamTargets.kick.searchCategories':
+        return {
+          categories: [{ id: 15, name: 'Just Chatting' }]
+        }
+      case 'streamTargets.kick.prepare':
+        return {
+          platform: 'kick',
+          accountId: String(params.accountId ?? 'kick-account-1'),
+          accountLabel: 'Kick Test Channel',
+          serverUrl: 'rtmps://kick.example.test:443/app',
+          streamKeySecretRef: 'platform:kick:kick-account-1:stream-key',
+          streamKeyPresent: true,
+          redactedUrl: 'rtmps://kick.example.test:443/app/<stream-key>',
+          broadcasterUserId: 'kick-account-1',
+          slug: 'kick-test',
+          title: 'Provider test stream'
+        }
+      case 'streamTargets.kick.applyMetadata':
+        return {
+          platform: 'kick',
+          accountId: String(params.accountId ?? 'kick-account-1'),
+          accountLabel: 'Kick Test Channel',
+          title: 'Provider test stream'
+        }
       case 'streamTargets.x.capability':
         return {
           platform: 'x',

@@ -28,6 +28,16 @@ This runbook is the release acceptance path for first-class OAuth/native livestr
   RTMPS source, wait for `is_stream_active`, publish the broadcast, and end it
   with a strict `{ "state": "END" }` body. Manual RTMP remains explicit user
   choice, not a hidden fallback.
+- **Kick (checked 2026-09-25):** authorization code + PKCE at
+  `id.kick.com`, and the token and refresh exchanges ALSO require
+  `client_secret`, so Kick is ready only with both the client id and secret.
+  Scopes: `user:read channel:read channel:write chat:write streamkey:read
+  events:subscribe`. Redirects use `http://localhost:<port>/oauth/callback`.
+  Go Live reads the stream URL and key from `GET /public/v1/channels` (the key
+  needs `streamkey:read`) and sets title and category with
+  `PATCH /public/v1/channels`. Disconnect revokes at `id.kick.com/oauth/revoke`
+  (best effort). Kick does not document a title limit; Videorc caps at 140.
+  Kick chat is not in Videorc yet (plan 063 S5).
 
 ## Local Gates First
 
@@ -170,6 +180,19 @@ time (add it to `~/.videorc-release.env`). The backend already requests
 `channel:manage:broadcast`, `channel:read:stream_key`, `user:read:chat`, and
 `user:write:chat`.
 
+Kick:
+
+```sh
+VIDEORC_KICK_CLIENT_ID=...
+VIDEORC_KICK_CLIENT_SECRET=...
+VIDEORC_BUNDLED_KICK_CLIENT_ID=...
+VIDEORC_BUNDLED_KICK_CLIENT_SECRET=...
+```
+
+Kick needs both halves: the token exchange requires the client secret even
+with PKCE. Register the `localhost` callback forms (as for Twitch). Without
+both values the Kick card stays Manual RTMP only.
+
 X:
 
 ```sh
@@ -274,6 +297,38 @@ If native access is not available:
 3. Verify manual RTMP is still available only when explicitly selected by the user.
 4. Record the release as externally blocked for first-class X native live.
 
+## Kick Acceptance
+
+Prerequisites: a Kick account with 2FA, the Videorc Kick app with the three
+`localhost` callback URLs, and both credentials in the launch environment (or
+baked in the build):
+
+```sh
+VIDEORC_KICK_CLIENT_ID=...
+VIDEORC_KICK_CLIENT_SECRET=...
+```
+
+1. Launch the app (for the shipped app, keep its TCC identity:
+   `open -n -a Videorc --env VIDEORC_KICK_CLIENT_ID=... --env VIDEORC_KICK_CLIENT_SECRET=...`).
+2. Open Streaming, switch the Kick destination to OAuth, and click Connect.
+   Approve on kick.com. Confirm the channel name and avatar appear and the row
+   says Connected.
+3. In Broadcast info, set a title, open the Kick row, search a category (for
+   example "Just Chatting"), and pick it.
+4. Enable the Kick OAuth destination. Click Start, review the Go Live
+   confirmation, then confirm. The owner never types a stream key.
+5. Verify on kick.com that the stream is live with the Videorc title and
+   category, and that video and audio arrive. Stream for 5 minutes.
+6. Stop in Videorc and verify the local session ends cleanly.
+7. Disconnect Kick and confirm the account row and stream key secret are gone.
+
+Expected evidence:
+
+- Kick connected account screenshot.
+- Category picker screenshot.
+- kick.com channel screenshot showing the matching title and category.
+- Channel URL.
+
 ## Evidence Template
 
 ```md
@@ -288,6 +343,7 @@ If native access is not available:
 - YouTube Manual RTMP: pass/fail, channel, broadcast ID/URL, notes
 - Twitch: pass/fail, channel URL, notes
 - X: pass/fail/blocked, allow-list/OAuth1 evidence, broadcast URL, notes
+- Kick: pass/fail, channel URL, notes
 - Local smokes: pass/fail
 - Screenshots/logs:
 ```

@@ -464,6 +464,10 @@ Bundled production defaults:
 ```sh
 VIDEORC_BUNDLED_TWITCH_CLIENT_ID=...
 VIDEORC_BUNDLED_X_CLIENT_ID=...
+# Kick (plan 063): id AND secret. Kick's token endpoint requires the secret
+# even with PKCE, so Kick OAuth is dark unless both are baked in.
+VIDEORC_BUNDLED_KICK_CLIENT_ID=...
+VIDEORC_BUNDLED_KICK_CLIENT_SECRET=...
 # Reviewer candidate or approved release only:
 VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID=...
 VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED=1
@@ -475,12 +479,19 @@ Runtime/self-host overrides:
 ```sh
 VIDEORC_TWITCH_CLIENT_ID=...
 VIDEORC_X_CLIENT_ID=...
+VIDEORC_KICK_CLIENT_ID=...
+VIDEORC_KICK_CLIENT_SECRET=...
 # Local Google verification only:
 VIDEORC_ENABLE_YOUTUBE_OAUTH=1
 VIDEORC_YOUTUBE_CLIENT_ID=...
 ```
 
-Runtime values take precedence over bundled defaults. Client secrets, when used for provider flows, remain runtime-only:
+Runtime values take precedence over bundled defaults. Kick is the one provider
+whose client secret is baked into the backend binary (like the X OAuth 1.0a
+consumer pair below), because Kick has no secretless flow. The release
+validator fails if `VIDEORC_BUNDLED_KICK_CLIENT_SECRET` appears in plain text in
+`app.asar`: it belongs to the Rust backend only. Other client secrets, when used
+for provider flows, remain runtime-only:
 
 ```sh
 VIDEORC_TWITCH_CLIENT_SECRET=...
@@ -537,6 +548,11 @@ OAuth callback URLs (all providers):
   (`VIDEORC_OAUTH_X_CALLBACK=app-protocol`). Do not use it by default: X auto-approves
   re-authorization without a user gesture, and browsers block gestureless custom-scheme
   navigation, leaving the consent page on an infinite spinner.
+
+- **Kick registers the `localhost` forms** (Kick's docs use `localhost`), and
+  the backend sends `localhost` for Kick as it does for Twitch:
+  `http://localhost:17995/oauth/callback`, `http://localhost:27995/oauth/callback`,
+  `http://localhost:37995/oauth/callback`.
 
 Twitch release blocker:
 

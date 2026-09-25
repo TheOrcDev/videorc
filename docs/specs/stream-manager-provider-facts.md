@@ -40,6 +40,19 @@ YouTube OAuth stays off in public builds until Google approves Videorc
 | Follower count | `GET /2/users/me?user.fields=public_metrics` → `public_metrics.followers_count`. It accepts OAuth 2.0 user context (`users.read` + `tweet.read`, both already granted) or OAuth 1.0a user context (the "Authorize X Live" token). | X API users/me |
 | Follow events, tips, moderation | No API for broadcast chat. X broadcast chat has no delete or ban endpoint in the public reference. | X API reference |
 
+## Kick (plan 063)
+
+Checked 2026-09-25 against docs.kick.com. Scopes: `user:read channel:read
+channel:write chat:write streamkey:read events:subscribe`.
+
+| Question | Answer | Source |
+| --- | --- | --- |
+| Stream key and ingest | `GET /public/v1/channels` (no params, user token) → `stream.url` and `stream.key` (the key needs `streamkey:read`). Videorc stores the key as a secret at Go Live (`kick.rs`). | Channels |
+| Title and category | `PATCH /public/v1/channels` {`stream_title`, `category_id`, `custom_tags`} → 204, under `channel:write`. Categories from `GET /public/v2/categories?q=` (v1 `/public/v1/categories?q=` fallback). | Channels, Categories |
+| Viewer count | `stream.viewer_count` on the same channel read. Planned for S6. | Channels |
+| Chat | Read via Kick webhooks (`chat.message.sent`) relayed by videorc-web; send via `POST /public/v1/chat` under `chat:write`. Planned for S4/S5; not in Videorc yet. | Events, Chat |
+| Followers | No total in the channel read; `channel.followed` events give deltas only. Planned for S6. | Events |
+
 ## TikTok, Instagram, custom RTMP
 
 These have no public live chat, viewer or follower API, and Videorc uses manual

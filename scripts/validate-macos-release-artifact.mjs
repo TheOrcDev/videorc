@@ -18,6 +18,7 @@ import {
   artifactKindFromPath,
   buildMacosReleaseArtifactChecks,
   evaluateBinaryContainsEnvSecretCheck,
+  evaluateFileExcludesEnvSecretCheck,
   formatArtifactPath,
   formatReleaseArtifactValidationReport,
   sanitizeReleaseValidationOutput,
@@ -178,6 +179,14 @@ function validateArtifact(artifactPath) {
 }
 
 function runCheck(check) {
+  if (check.type === 'file-excludes-env-secret') {
+    const result = evaluateFileExcludesEnvSecretCheck(check)
+    return {
+      label: check.label,
+      ok: result.ok,
+      output: sanitizeReleaseValidationOutput(result.output, context())
+    }
+  }
   if (check.type === 'binary-contains-env-secret') {
     const result = evaluateBinaryContainsEnvSecretCheck(check)
     return {
