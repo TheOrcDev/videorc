@@ -4659,6 +4659,14 @@ export interface PlatformAudience {
   subscriberPoints?: number
   /** Twitch only: false when follow alerts and the sub count need a reconnect. */
   audienceScopes?: boolean
+  /** Followers gained this stream, one per read that set a new high, oldest first. */
+  followerGains?: FollowerGain[]
+}
+
+/** New followers seen by one audience read; the platform never said who. */
+export interface FollowerGain {
+  at: string
+  count: number
 }
 
 /** `stream.audience` event and `stream.audience.snapshot` result (wire mirror of audience.rs). */

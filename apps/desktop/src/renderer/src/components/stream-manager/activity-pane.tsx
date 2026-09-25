@@ -15,7 +15,7 @@ import { StatusDot } from '@/components/status-dot'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import type { LiveChatProviderState, StreamPlatform } from '@/lib/backend'
+import type { AudienceSnapshot, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import {
   ACTIVITY_FILTERS,
@@ -58,9 +58,18 @@ export function relativeTime(iso: string, nowMs: number): string {
 }
 
 /** What Activity can never show for these platforms, said plainly. */
-export function activityCapabilityNote(platforms: readonly StreamPlatform[]): string | null {
+export function activityCapabilityNote(
+  platforms: readonly StreamPlatform[],
+  audience?: AudienceSnapshot | null
+): string | null {
   const notes: string[] = []
-  if (platforms.includes('x')) notes.push("X doesn't share follows or tips through its API.")
+  if (platforms.includes('x')) {
+    notes.push("X doesn't share who followed or tips, so new X followers show as a count.")
+  }
+  const twitch = audience?.platforms.find((entry) => entry.platform === 'twitch')
+  if (platforms.includes('twitch') && twitch?.audienceScopes === false) {
+    notes.push('Reconnect Twitch in Livestream → Setup to see who followed.')
+  }
   if (platforms.some((platform) => ['tiktok', 'instagram', 'custom'].includes(platform))) {
     notes.push('TikTok, Instagram and custom RTMP have no public live API.')
   }
@@ -125,7 +134,10 @@ function ActivityRow({
       </span>
       <span className="flex min-w-0 flex-1 flex-col gap-0.5">
         <span className="flex min-w-0 items-baseline gap-1.5">
-          <span className="max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground">
+          <span
+            className="max-w-[60%] shrink-0 truncate text-sm font-medium text-foreground"
+            title={item.short ? undefined : item.line}
+          >
             {item.name}
           </span>
           <span
@@ -155,6 +167,7 @@ function ActivityRow({
 
 export function ActivityPane({
   items,
+  audience,
   providers,
   nowMs,
   className,
@@ -162,6 +175,7 @@ export function ActivityPane({
   onThank
 }: {
   items: readonly ActivityItem[]
+  audience?: AudienceSnapshot | null
   providers: readonly LiveChatProviderState[]
   nowMs: number
   className?: string
@@ -177,7 +191,7 @@ export function ActivityPane({
   const shown = filterActivity(items, filter, platform)
   // Counts follow the platform pick: a chip says what a click would show.
   const counts = activityFilterCounts(filterActivity(items, 'all', platform))
-  const note = activityCapabilityNote(platforms)
+  const note = activityCapabilityNote(platforms, audience)
 
   return (
     <section

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 
-import type { LiveChatEventDetails, LiveChatMessage, StreamPlatform } from '@/lib/backend'
+import type {
+  AudienceSnapshot,
+  LiveChatEventDetails,
+  LiveChatMessage,
+  StreamPlatform
+} from '@/lib/backend'
 
 import {
   activityFilterCounts,
@@ -286,6 +291,50 @@ describe('stream activity', () => {
       ['destination-recovered', 'Back on air', 'Back on air', undefined],
       ['destination-failed', 'Destination failed', 'Failed', 'Connection dropped.']
     ])
+  })
+
+  it('lists follower gains the platform never named, and skips named Twitch follows', () => {
+    const gains = [
+      { at: '2026-09-25T10:45:13Z', count: 1 },
+      { at: '2026-09-25T10:47:14Z', count: 2 }
+    ]
+    const audience: AudienceSnapshot = {
+      sessionId: 's',
+      updatedAt: '2026-09-25T10:47:14Z',
+      platforms: [
+        {
+          platform: 'twitch',
+          metric: 'followers',
+          capability: 'available',
+          audienceScopes: false,
+          followerGains: gains
+        },
+        {
+          platform: 'x',
+          metric: 'followers',
+          capability: 'available',
+          followerGains: [{ at: '2026-09-25T10:46:00Z', count: 3 }]
+        },
+        { platform: 'youtube', metric: 'subscribers', capability: 'available' }
+      ]
+    }
+    const items = activityItems([], [], audience)
+    expect(items.map((item) => [item.platform, item.name, item.filter])).toEqual([
+      ['twitch', '2 new followers', 'follows'],
+      ['x', '3 new followers', 'follows'],
+      ['twitch', 'New follower', 'follows']
+    ])
+    expect(items[1].line).toBe("3 new followers. X doesn't share who followed.")
+    expect(thankYouDraft(items[1])).toBe('Thanks for the follows, and welcome in!')
+    expect(activityFilterCounts(items).follows).toBe(3)
+    // With the follow scope Twitch sends named follow rows; no double count.
+    const named = activityItems([], [], {
+      ...audience,
+      platforms: audience.platforms.map((entry) =>
+        entry.platform === 'twitch' ? { ...entry, audienceScopes: true } : entry
+      )
+    })
+    expect(named.map((item) => item.platform)).toEqual(['x'])
   })
 
   it('filters by kind and platform; announcements show only under All', () => {

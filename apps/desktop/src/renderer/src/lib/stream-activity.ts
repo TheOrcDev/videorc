@@ -1,4 +1,5 @@
 import type {
+  AudienceSnapshot,
   LiveChatEventDetails,
   LiveChatMessage,
   LiveChatSubscriptionKind,
@@ -55,6 +56,9 @@ export interface ActivityItem {
   authorAvatarUrl?: string
   /** A gifted sub or membership: the row shows the gift glyph. */
   gift?: boolean
+  /** Follows the platform counted but never named (X, or Twitch without
+   * the follow scope): the row thanks everyone instead of one viewer. */
+  unnamed?: boolean
 }
 
 export interface TipTotal {
@@ -301,13 +305,45 @@ function itemFromDestination(event: DestinationEvent): ActivityItem {
 }
 
 /**
+ * Follows only a follower total can show: X never names followers, and
+ * Twitch names them only with the opt-in `moderator:read:followers` scope,
+ * which sends real follow rows instead (so those gains are skipped).
+ */
+function itemsFromFollowerGains(audience: AudienceSnapshot | null | undefined): ActivityItem[] {
+  const items: ActivityItem[] = []
+  for (const entry of audience?.platforms ?? []) {
+    const named = entry.platform === 'twitch' && entry.audienceScopes === true
+    if (named || entry.metric !== 'followers') continue
+    for (const gain of entry.followerGains ?? []) {
+      items.push({
+        id: `follower-gain:${entry.platform}:${gain.at}`,
+        kind: 'follow',
+        filter: 'follows',
+        platform: entry.platform,
+        name: gain.count === 1 ? 'New follower' : `${gain.count.toLocaleString()} new followers`,
+        line: `${plural(gain.count, 'new follower', 'new followers')}. ${
+          entry.platform === 'x'
+            ? "X doesn't share who followed."
+            : 'Reconnect Twitch in Livestream → Setup to see who followed.'
+        }`,
+        short: '',
+        at: gain.at,
+        unnamed: true
+      })
+    }
+  }
+  return items
+}
+
+/**
  * Activity rows, newest first. Twitch sends one notice per single gift inside
  * a community gift as well as the community notice; the singles are dropped
  * when their community notice is present, so a gift of 5 reads once.
  */
 export function activityItems(
   messages: readonly LiveChatMessage[],
-  destinationEvents: readonly DestinationEvent[] = []
+  destinationEvents: readonly DestinationEvent[] = [],
+  audience?: AudienceSnapshot | null
 ): ActivityItem[] {
   const communityGifts = new Set<string>()
   for (const message of messages) {
@@ -335,6 +371,7 @@ export function activityItems(
     if (item) items.push(item)
   }
   for (const event of destinationEvents) items.push(itemFromDestination(event))
+  items.push(...itemsFromFollowerGains(audience))
   return items.sort((left, right) => Date.parse(right.at) - Date.parse(left.at))
 }
 
@@ -444,6 +481,7 @@ export function chatActivity(
 
 /** The action text "Thank in chat" prefills for an activity row. */
 export function thankYouDraft(item: ActivityItem): string {
+  if (item.unnamed) return 'Thanks for the follows, and welcome in!'
   const name = item.name.startsWith('@') ? item.name : `@${item.name}`
   switch (item.kind) {
     case 'follow':

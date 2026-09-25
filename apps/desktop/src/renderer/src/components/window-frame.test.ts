@@ -2,16 +2,13 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { isNativeFullscreenSize, WindowFrame } from './window-frame'
+import { TRAFFIC_LIGHT_GUTTER_CLASS, useTrafficLightGutter, WindowFrame } from './window-frame'
 
-const screen = { screenWidth: 1512, screenHeight: 982 }
-
-describe('isNativeFullscreenSize', () => {
-  it('is true only when the window covers the whole screen, menu bar included', () => {
-    expect(isNativeFullscreenSize({ outerWidth: 1512, outerHeight: 982, ...screen })).toBe(true)
-    // Zoomed (maximized) windows stop under the menu bar.
-    expect(isNativeFullscreenSize({ outerWidth: 1512, outerHeight: 949, ...screen })).toBe(false)
-    expect(isNativeFullscreenSize({ outerWidth: 1180, outerHeight: 780, ...screen })).toBe(false)
+describe('useTrafficLightGutter', () => {
+  it('keeps the traffic-light gutter whatever the window size', () => {
+    // A fullscreen header still shares its row with the lights (2026-09-25).
+    const mac = typeof navigator !== 'undefined' && /Mac/i.test(navigator.platform)
+    expect(useTrafficLightGutter()).toBe(mac ? TRAFFIC_LIGHT_GUTTER_CLASS : 'pl-3')
   })
 })
 
