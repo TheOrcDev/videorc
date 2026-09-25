@@ -165,6 +165,20 @@ supervisor and health copy say "Linux CPU preview" and never claim
 pnpm probe:preview-lifecycle:linux   # VIDEORC_EXPECT_LINUX_PROOF=1, asserts proof surface live, polling on, no native claim
 ```
 
+Phase D (portal pixels on the proof surface): after a granted
+`screen:portal:monitor` stream, apply ScreenOnly and confirm the Electron
+BMP window is no longer synthetic.
+
+```bash
+pnpm smoke:portal-preview-proof   # first run: click Share in the picker
+VIDEORC_PORTAL_EXPECT=any pnpm smoke:portal-preview-proof   # unattended: a truthful refusal passes
+```
+
+Success looks like `compositorState=live`, `sourcePixelsPresent=true`, and
+`surfaceSource` of `screen` (never `synthetic`). Portal IDs stay non-native
+(`isNative*` false); the proof path must remain `electron-proof-surface`.
+Do not enable AMD VAAPI / renderD129 for this smoke.
+
 ## Packaged run (L6 / Plan 0008)
 
 `pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate. Public updater promotion and the videorc-web download button are still owed.

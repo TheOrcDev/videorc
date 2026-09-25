@@ -5,6 +5,7 @@ import {
   PORTAL_MONITOR_SOURCE_ID,
   PORTAL_WINDOW_SOURCE_ID,
   assessPortalDeviceList,
+  assessPortalPreviewProof,
   assessPortalScreenStatus
 } from './linux-portal-capture-gates.mjs'
 
@@ -62,4 +63,68 @@ test('refusals are named states with a reason, accepted only when expected', () 
     { expect: 'any' }
   )
   assert.deepEqual(missing, { ok: true, failures: [], outcome: 'missing' })
+})
+
+test('Phase D proof requires live compositor, portal layer, and non-synthetic pixels', () => {
+  const passing = assessPortalPreviewProof({
+    compositor: {
+      state: 'live',
+      runId: 'run-1',
+      sceneSources: [
+        {
+          id: 'source:screen',
+          kind: 'screen',
+          visible: true,
+          deviceId: PORTAL_MONITOR_SOURCE_ID
+        }
+      ]
+    },
+    surface: {
+      source: 'screen',
+      sourcePixelsPresent: true,
+      transport: 'electron-proof-surface',
+      backing: 'electron-browser-window',
+      nativePreviewHostKind: 'proof-surface'
+    }
+  })
+  assert.deepEqual(passing, { ok: true, failures: [] })
+
+  const synthetic = assessPortalPreviewProof({
+    compositor: { state: 'stopped', sceneSources: [] },
+    surface: {
+      source: 'synthetic',
+      sourcePixelsPresent: false,
+      transport: 'electron-proof-surface'
+    }
+  })
+  assert.equal(synthetic.ok, false)
+  assert.match(synthetic.failures.join('\n'), /compositorState=stopped/)
+  assert.match(synthetic.failures.join('\n'), /surfaceSource=synthetic/)
+  assert.match(synthetic.failures.join('\n'), /sourcePixelsPresent=false/)
+  assert.match(synthetic.failures.join('\n'), /portal screen\/window layer/)
+
+  const nativeClaim = assessPortalPreviewProof({
+    compositor: {
+      state: 'live',
+      runId: 'run-2',
+      sceneSources: [
+        {
+          id: 'source:screen',
+          kind: 'screen',
+          visible: true,
+          deviceId: PORTAL_MONITOR_SOURCE_ID
+        }
+      ]
+    },
+    surface: {
+      source: 'screen',
+      sourcePixelsPresent: true,
+      transport: 'native-surface',
+      backing: 'cametal-layer',
+      nativePreviewHostKind: 'in-process'
+    }
+  })
+  assert.equal(nativeClaim.ok, false)
+  assert.match(nativeClaim.failures.join('\n'), /electron-proof-surface/)
+  assert.match(nativeClaim.failures.join('\n'), /cametal-layer/)
 })

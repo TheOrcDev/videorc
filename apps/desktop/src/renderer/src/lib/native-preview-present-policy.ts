@@ -127,6 +127,25 @@ export function compositorStatusHasRenderedSceneRevision(
   return status.sceneRevision === revision && status.frameSceneRevision === revision
 }
 
+export function compositorStatusCanDriveProofScene(
+  status: Pick<CompositorStatus, 'state' | 'sceneRevision' | 'frameSceneRevision' | 'sceneSources'>,
+  revision: number,
+  options: { linuxCpuProof?: boolean } = {}
+): boolean {
+  if (compositorStatusHasRenderedSceneRevision(status, revision)) {
+    return true
+  }
+  if (!options.linuxCpuProof || status.state !== 'live' || status.sceneRevision !== revision) {
+    return false
+  }
+  // Linux proof layers per-source BMPs. Once the CPU compositor is live with
+  // a visible screen/window layer, attach pollers without waiting for a
+  // Metal-style frameSceneRevision handoff.
+  return (status.sceneSources ?? []).some(
+    (source) => source.visible && (source.kind === 'screen' || source.kind === 'window')
+  )
+}
+
 export function nativePreviewDroppedFramesWithSuppressed(
   surfaceStatus: Pick<PreviewSurfaceStatus, 'droppedFrames'>,
   suppressedPresents: number

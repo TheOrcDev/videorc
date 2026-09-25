@@ -64,3 +64,55 @@ export function assessPortalScreenStatus(status, { expect = 'granted', minFrames
   }
   return { ok: failures.length === 0, failures, outcome: refusal }
 }
+
+/**
+ * Phase D: a granted portal stream plus ScreenOnly must feed the Linux
+ * Electron CPU/BMP proof surface. Synthetic stripes with compositorState
+ * stopped is the failure ogre hit after PR #435.
+ */
+export function assessPortalPreviewProof({ compositor, surface } = {}) {
+  const failures = []
+  const compositorState = compositor?.state
+  if (compositorState !== 'live') {
+    failures.push(
+      `compositorState=${compositorState ?? 'missing'} (proof path must run, not stay stopped)`
+    )
+  }
+  if (!(compositor?.runId || compositor?.run_id)) {
+    failures.push('compositor runId is missing')
+  }
+  const surfaceSource = surface?.source ?? surface?.surfaceSource
+  if (!surfaceSource || surfaceSource === 'synthetic') {
+    failures.push(
+      `surfaceSource=${surfaceSource ?? 'missing'} (must be screen/window, not synthetic)`
+    )
+  }
+  if (surface?.sourcePixelsPresent !== true) {
+    failures.push(
+      `sourcePixelsPresent=${String(surface?.sourcePixelsPresent)} (portal pixels required)`
+    )
+  }
+  const transport = surface?.transport
+  if (transport && transport !== 'electron-proof-surface') {
+    failures.push(`transport=${transport} (Linux proof must stay electron-proof-surface)`)
+  }
+  const backing = surface?.backing
+  if (backing && backing !== 'electron-browser-window') {
+    failures.push(`backing=${backing} claims a native surface`)
+  }
+  const hostKind = surface?.nativePreviewHostKind
+  if (hostKind && hostKind !== 'proof-surface') {
+    failures.push(`nativePreviewHostKind=${hostKind} claims a native host`)
+  }
+  const sceneSources = compositor?.sceneSources ?? compositor?.scene_sources ?? []
+  const portalLayer = sceneSources.find(
+    (source) =>
+      source?.visible &&
+      (source.kind === 'screen' || source.kind === 'window') &&
+      String(source.deviceId ?? source.device_id ?? source.id ?? '').includes(':portal:')
+  )
+  if (!portalLayer) {
+    failures.push('compositor sceneSources lack a visible portal screen/window layer')
+  }
+  return { ok: failures.length === 0, failures }
+}

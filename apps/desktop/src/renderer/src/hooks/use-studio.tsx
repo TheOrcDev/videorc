@@ -377,6 +377,7 @@ import {
 } from '@/lib/live-chat-view'
 import {
   buildNativePreviewCompositorUpdateParams,
+  compositorStatusCanDriveProofScene,
   compositorStatusHasRenderedSceneRevision,
   decideNativePreviewCompositorPresent,
   nativePreviewDroppedFramesWithSuppressed,
@@ -766,9 +767,10 @@ function sleep(ms: number): Promise<void> {
 async function waitForRenderedCompositorSceneRevision(
   activeClient: BackendClient,
   revision: number,
-  initialStatus: CompositorStatus
+  initialStatus: CompositorStatus,
+  options: { linuxCpuProof?: boolean } = {}
 ): Promise<CompositorStatus> {
-  if (compositorStatusHasRenderedSceneRevision(initialStatus, revision)) {
+  if (compositorStatusCanDriveProofScene(initialStatus, revision, options)) {
     return initialStatus
   }
 
@@ -781,7 +783,7 @@ async function waitForRenderedCompositorSceneRevision(
     } catch {
       return initialStatus
     }
-    if (compositorStatusHasRenderedSceneRevision(latestStatus, revision)) {
+    if (compositorStatusCanDriveProofScene(latestStatus, revision, options)) {
       return latestStatus
     }
   }
@@ -948,18 +950,21 @@ function backendLayoutTransactionScene(
 
 async function waitForPreviewLayoutProof(
   activeClient: BackendClient,
-  status: LayoutTransactionStatus
+  status: LayoutTransactionStatus,
+  platform?: string
 ): Promise<CompositorStatus> {
+  const linuxCpuProof = platform === 'linux'
   const initialStatus = status.compositorStatus
-  if (compositorStatusHasRenderedSceneRevision(initialStatus, status.sceneRevision)) {
+  if (compositorStatusCanDriveProofScene(initialStatus, status.sceneRevision, { linuxCpuProof })) {
     return initialStatus
   }
   const renderedStatus = await waitForRenderedCompositorSceneRevision(
     activeClient,
     status.sceneRevision,
-    initialStatus
+    initialStatus,
+    { linuxCpuProof }
   )
-  if (compositorStatusHasRenderedSceneRevision(renderedStatus, status.sceneRevision)) {
+  if (compositorStatusCanDriveProofScene(renderedStatus, status.sceneRevision, { linuxCpuProof })) {
     return renderedStatus
   }
   throw new Error(
@@ -7400,7 +7405,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const compositorStatus = sessionActive
         ? await waitForLiveLayoutProof(client, status)
         : idlePreviewLayoutProofRequired({ surfaceCanPresent })
-          ? await waitForPreviewLayoutProof(client, status)
+          ? await waitForPreviewLayoutProof(client, status, runtimeInfo?.platform)
           : status.compositorStatus
       if (layoutIntentIdRef.current !== intentId || status.intentId !== intentId) {
         return false
@@ -9017,9 +9022,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     const renderedStatus = await waitForRenderedCompositorSceneRevision(
       client,
       revision,
-      compositorStatus
+      compositorStatus,
+      { linuxCpuProof: runtimeInfo?.platform === 'linux' }
     )
-    if (!compositorStatusHasRenderedSceneRevision(renderedStatus, revision)) {
+    if (
+      !compositorStatusCanDriveProofScene(renderedStatus, revision, {
+        linuxCpuProof: runtimeInfo?.platform === 'linux'
+      })
+    ) {
       return
     }
     const proofOwner = nativePreviewSceneProofPresentationOwner({

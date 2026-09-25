@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 import type { CompositorStatus, PreviewSurfaceStatus } from './backend'
 import {
   buildNativePreviewCompositorUpdateParams,
+  compositorStatusCanDriveProofScene,
   compositorStatusHasRenderedSceneRevision,
   decideNativePreviewCompositorPresent,
   nativePreviewDroppedFramesWithSuppressed,
@@ -138,6 +139,59 @@ describe('native preview present policy', () => {
         4
       )
     ).toBe(true)
+  })
+
+  it('lets the Linux CPU proof path attach once a live compositor has a screen layer', () => {
+    const pendingFrame = compositorStatus({
+      state: 'live',
+      sceneRevision: 4,
+      frameSceneRevision: 3,
+      sceneSources: [
+        {
+          id: 'screen:portal:monitor',
+          name: 'Portal monitor',
+          kind: 'screen',
+          state: 'referenced',
+          visible: true,
+          transform: {
+            x: 0,
+            y: 0,
+            width: 1,
+            height: 1,
+            cropLeft: 0,
+            cropTop: 0,
+            cropRight: 0,
+            cropBottom: 0
+          },
+          fit: 'cover',
+          mirror: false
+        }
+      ]
+    })
+    expect(compositorStatusCanDriveProofScene(pendingFrame, 4)).toBe(false)
+    expect(compositorStatusCanDriveProofScene(pendingFrame, 4, { linuxCpuProof: true })).toBe(true)
+    expect(
+      compositorStatusCanDriveProofScene(
+        compositorStatus({
+          state: 'stopped',
+          sceneRevision: 4,
+          sceneSources: pendingFrame.sceneSources
+        }),
+        4,
+        { linuxCpuProof: true }
+      )
+    ).toBe(false)
+    expect(
+      compositorStatusCanDriveProofScene(
+        compositorStatus({
+          state: 'live',
+          sceneRevision: 4,
+          sceneSources: [{ ...pendingFrame.sceneSources[0], visible: false }]
+        }),
+        4,
+        { linuxCpuProof: true }
+      )
+    ).toBe(false)
   })
 
   it('adds locally suppressed presents to native dropped-frame accounting', () => {
