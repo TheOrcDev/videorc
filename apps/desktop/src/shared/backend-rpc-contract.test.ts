@@ -876,6 +876,15 @@ describe('backend RPC contract', () => {
       chrome: { selected: transform, handles: false, guides: [], scale: 2 }
     }
     expect(validateBackendRpcParams('scene.editor.draft.set', moving)).toEqual(moving)
+    // The idle selection: chrome only, no rect override (absent, never null).
+    const held = {
+      sourceId: 'source:camera',
+      chrome: { selected: transform, handles: true, guides: [], scale: 2 }
+    } satisfies SceneEditorDraftParams
+    expect(validateBackendRpcParams('scene.editor.draft.set', held)).toEqual(held)
+    expect(() =>
+      validateBackendRpcParams('scene.editor.draft.set', { ...held, transform: null })
+    ).toThrow()
     expect(validateBackendRpcParams('scene.editor.draft.clear', undefined)).toBeUndefined()
     expect(() => validateBackendRpcParams('scene.editor.draft.clear', {})).toThrow()
 
@@ -929,6 +938,19 @@ describe('backend RPC contract', () => {
           editorDraft: { sourceId: 'source:camera', transform }
         })
       ).toEqual({ active: true, editorDraft: { sourceId: 'source:camera', transform } })
+      // A chrome-only draft reports no transform at all.
+      expect(
+        validateBackendRpcResult(method, {
+          active: true,
+          editorDraft: { sourceId: 'source:camera' }
+        })
+      ).toEqual({ active: true, editorDraft: { sourceId: 'source:camera' } })
+      expect(() =>
+        validateBackendRpcResult(method, {
+          active: true,
+          editorDraft: { sourceId: 'source:camera', transform: null }
+        })
+      ).toThrow()
       expect(() =>
         validateBackendRpcResult(method, { ...ack, editorDraft: { ...draft, chrome: {} } })
       ).toThrow('chrome must be a known field')
@@ -984,10 +1006,23 @@ describe('backend RPC contract', () => {
         editorDraft: { ...draft, handles: true }
       })
     ).toThrow('handles must be a known field')
-    expect(() =>
+    // The idle selection's hold: a draft with chrome only, no transform.
+    expect(
       validateBackendRpcResult('compositor.status', {
         ...status,
         editorDraft: { sourceId: 'source:camera' }
+      })
+    ).toEqual({ ...status, editorDraft: { sourceId: 'source:camera' } })
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        editorDraft: { transform: draft.transform }
+      })
+    ).toThrow()
+    expect(() =>
+      validateBackendRpcResult('compositor.status', {
+        ...status,
+        editorDraft: { sourceId: 'source:camera', transform: { x: 0.1, y: 0.2 } }
       })
     ).toThrow()
   })

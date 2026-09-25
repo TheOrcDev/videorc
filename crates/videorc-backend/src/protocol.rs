@@ -835,23 +835,28 @@ pub struct EditorChrome {
 
 /// One frame of the Scene editor's live drag: the ghost rect of the dragged
 /// source plus the chrome to draw. Applied by the compositor at its snapshot
-/// choke point; never committed, never recorded.
+/// choke point; never committed, never recorded. Without a `transform` the
+/// draft is chrome-only: the idle selection's frame and handles over the
+/// committed picture (the stage holds one while a source is selected).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneEditorDraftParams {
     pub source_id: String,
-    pub transform: CameraTransform,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<CameraTransform>,
     pub chrome: EditorChrome,
 }
 
 /// The effective editor draft the compositor is currently applying, reported
 /// in `CompositorStatus.editor_draft` and by the draft RPCs so smokes can
-/// assert the on-screen geometry without screenshots.
+/// assert the on-screen geometry without screenshots. `transform` is absent
+/// for a chrome-only draft.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
 pub struct SceneEditorDraftStatus {
     pub source_id: String,
-    pub transform: CameraTransform,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transform: Option<CameraTransform>,
     /// Scene revision of the commit that ends this draft: the compositor
     /// drops the draft once its installed scene revision reaches it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -4651,19 +4656,57 @@ mod tests {
     }
 
     #[test]
+    fn scene_editor_draft_without_a_transform_is_chrome_only_on_the_wire() {
+        // The idle selection: chrome, no rect. Absent, not null, both ways.
+        let wire = serde_json::json!({
+            "sourceId": "source:camera",
+            "chrome": {
+                "selected": { "x": 0.1, "y": 0.2, "width": 0.3, "height": 0.4 },
+                "handles": true,
+                "scale": 2
+            }
+        });
+        let params: super::SceneEditorDraftParams = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(params.transform, None);
+        assert!(params.chrome.handles);
+        let serialized = serde_json::to_value(&params).unwrap();
+        assert!(serialized.get("transform").is_none());
+        assert_eq!(serialized["sourceId"], "source:camera");
+
+        let status = super::SceneEditorDraftStatus {
+            source_id: "source:camera".into(),
+            transform: None,
+            release_at_revision: None,
+        };
+        assert_eq!(
+            serde_json::to_value(&status).unwrap(),
+            serde_json::json!({ "sourceId": "source:camera" })
+        );
+        let parsed: super::SceneEditorDraftStatus =
+            serde_json::from_value(serde_json::json!({ "sourceId": "source:camera" })).unwrap();
+        assert_eq!(parsed, status);
+
+        // A partial rect is still a malformed draft, never a chrome-only one.
+        let mut partial = wire.clone();
+        partial["transform"] = serde_json::json!({ "x": 0.1, "y": 0.2 });
+        assert!(serde_json::from_value::<super::SceneEditorDraftParams>(partial).is_err());
+    }
+
+    #[test]
     fn scene_editor_draft_status_never_serializes_null_release_revision() {
         let status = super::SceneEditorDraftStatus {
             source_id: "source:camera".into(),
-            transform: super::CameraTransform {
+            transform: Some(super::CameraTransform {
                 x: 0.0,
                 y: 0.0,
                 width: 0.5,
                 height: 0.5,
-            },
+            }),
             release_at_revision: None,
         };
         let wire = serde_json::to_value(&status).unwrap();
         assert!(wire.get("releaseAtRevision").is_none());
+        assert!(wire.get("transform").is_some());
         let ack = super::SceneEditorDraftAck {
             active: false,
             editor_draft: None,

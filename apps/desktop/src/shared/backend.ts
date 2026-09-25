@@ -569,17 +569,22 @@ export interface EditorChrome {
   scale: number
 }
 
-/** One frame of a live drag: the ghost rect plus the chrome to draw. Never committed. */
+/**
+ * One frame of a live drag: the ghost rect plus the chrome to draw. Never
+ * committed. Without `transform` the draft is chrome-only: the idle
+ * selection's frame and handles over the committed picture.
+ */
 export interface SceneEditorDraftParams {
   sourceId: string
-  transform: CameraTransform
+  transform?: CameraTransform
   chrome: EditorChrome
 }
 
 /** The draft the compositor is currently applying (`CompositorStatus.editorDraft`). */
 export interface SceneEditorDraftStatus {
   sourceId: string
-  transform: CameraTransform
+  /** Absent for a chrome-only draft (the idle selection). */
+  transform?: CameraTransform
   /** Scene revision whose install ends the draft; absent until the commit stamps it. */
   releaseAtRevision?: number
 }

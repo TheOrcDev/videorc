@@ -93,7 +93,9 @@ type StageGhost = GhostResult & { sourceId: string }
  * visual and the gestures below never branch on it. While it is live, every
  * ghost frame also goes to the compositor as an editor draft (`onDraft`) so
  * the real picture and its chrome follow the pointer; release still makes
- * exactly one authoritative commit through `StageEdits`. */
+ * exactly one authoritative commit through `StageEdits`. Between gestures the
+ * selected source's frame and handles are HELD on the live picture as a
+ * chrome-only draft (`channel.hold`), so there is something to see and grab. */
 export function SceneStage({
   scene,
   selectedSourceId,
@@ -309,13 +311,15 @@ export function SceneStage({
       : edits.draft?.sourceId === source.id
         ? edits.draft.rect
         : source.transform
-  /** One live-draft frame: the ghost plus the chrome the compositor draws for
-   * it. `scale` is output pixels per CSS pixel of the canvas (the schema caps
-   * it at 64; a canvas that small has no visible chrome anyway). */
+  /** Output pixels per CSS pixel of the canvas, so the compositor's hairline
+   * is a hairline on screen (the schema caps it at 64; a canvas that small has
+   * no visible chrome anyway). */
+  const chromeScale = (canvasWidth: number): number =>
+    outputWidth && canvasWidth > 0 ? Math.min(64, Math.max(0, outputWidth / canvasWidth)) : 1
+  /** One live-draft frame: the ghost plus the chrome the compositor draws for it. */
   const draftOf = (gesture: ActiveGesture, ghost: GhostResult): EditorDraftSample => {
     const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
     const kind = gesture.motion.kind
-    const canvasWidth = gesture.motion.pixels.width
     return {
       transform: ghost.rect,
       chrome: {
@@ -323,11 +327,56 @@ export function SceneStage({
         handles: resizeEnabled && Boolean(source && editable(source)),
         ...(kind !== 'move' ? { activeHandle: kind } : {}),
         guides: ghost.guides,
-        scale:
-          outputWidth && canvasWidth > 0 ? Math.min(64, Math.max(0, outputWidth / canvasWidth)) : 1
+        scale: chromeScale(gesture.motion.pixels.width)
       }
     }
   }
+  const selectedSource = sources.find((source) => source.id === selectedSourceId)
+  // The idle selection on the live canvas: hold a chrome-only draft for the
+  // selected source so its frame and handles stay on the real picture between
+  // gestures. Keyed on the DISPLAYED rect minus the ghost (a gesture suspends
+  // the hold in the channel; its samples must not fight it here), and paused
+  // while this stage's own commit is pending: the released draft carries the
+  // new rect until that commit installs, and a hold sent before then would
+  // replace it and let the picture snap back. When the committed scene lands
+  // the rect changes, and the hold follows it.
+  const ownCommitPending = edits.draft?.sourceId === selectedSourceId
+  const heldId = draftEnabled && selectedSource ? selectedSource.id : null
+  const heldRect = selectedSource
+    ? edits.draft?.sourceId === selectedSource.id
+      ? edits.draft.rect
+      : selectedSource.transform
+    : null
+  const heldX = heldRect?.x ?? 0
+  const heldY = heldRect?.y ?? 0
+  const heldWidth = heldRect?.width ?? 0
+  const heldHeight = heldRect?.height ?? 0
+  const heldHandles = Boolean(selectedSource && resizeEnabled && editable(selectedSource))
+  const heldScale = chromeScale(pixelScale * STAGE_W)
+  useEffect(() => {
+    if (ownCommitPending) return
+    if (heldId === null) {
+      channel.hold(null)
+      return
+    }
+    channel.hold(heldId, {
+      selected: { x: heldX, y: heldY, width: heldWidth, height: heldHeight },
+      handles: heldHandles,
+      guides: [],
+      scale: heldScale
+    })
+  }, [
+    channel,
+    ownCommitPending,
+    heldId,
+    heldX,
+    heldY,
+    heldWidth,
+    heldHeight,
+    heldHandles,
+    heldScale
+  ])
+  useEffect(() => () => channel.hold(null), [channel])
   const beginGesture = (
     source: SceneSource,
     kind: 'move' | StageHandleId,
@@ -450,7 +499,6 @@ export function SceneStage({
     }
     edits.submit(gesture.motion.sourceId, final.rect)
   }
-  const selectedSource = sources.find((source) => source.id === selectedSourceId)
   const gutter = 28 / pixelScale
   const canvasRadius = Math.min(CANVAS_RADIUS_PX / pixelScale, stageH / 2)
   const activeMotion = gestureRef.current

@@ -4,6 +4,7 @@ import {
   evaluateFreeformArtifact,
   evaluateFreeformChrome,
   evaluateFreeformGesture,
+  evaluateIdleHold,
   evaluateLiveDraftGesture,
   evaluatePreviewCadence,
   summarizeFreeformTiming
@@ -312,6 +313,102 @@ describe('live canvas draft gate', () => {
     assert.match(
       evaluateLiveDraftGesture({ ...value, goneMs: 900 }).failures.join(),
       /after cancel/
+    )
+  })
+
+  const hold = { sourceId: 'source:test-pattern' }
+  it('ignores the idle hold on the wire before, after and around the gesture', () => {
+    const value = liveGesture()
+    value.wireDrafts = [
+      { sourceId: hold.sourceId, afterRelease: false, chrome: { guides: [] } },
+      ...value.wireDrafts,
+      { sourceId: hold.sourceId, afterRelease: true, chrome: { guides: [] } }
+    ]
+    value.settled = hold
+    value.holdAfter = hold
+    assert.deepEqual(evaluateLiveDraftGesture(value), { ok: true, failures: [] })
+    // A cancelled gesture re-holds at once: the hold may be sent before the
+    // pointer even lifts, and is what the backend settles on.
+    const cancelled = {
+      ...value,
+      cancelled: true,
+      wireDrafts: [
+        { transform: draftRect, afterRelease: false },
+        { sourceId: hold.sourceId, afterRelease: false, chrome: { guides: [] } }
+      ],
+      wireClears: [{}],
+      commits: [],
+      goneMs: 40,
+      applied: [{ sourceId: hold.sourceId, transform: draftRect }],
+      settled: hold
+    }
+    assert.deepEqual(evaluateLiveDraftGesture(cancelled), { ok: true, failures: [] })
+    // Right after the release the backend may hold nothing yet.
+    assert.equal(evaluateLiveDraftGesture({ ...value, settled: null }).ok, true)
+  })
+  it('never lets a hold stand in for the gesture drafts', () => {
+    const onlyHolds = liveGesture()
+    onlyHolds.wireDrafts = [{ sourceId: hold.sourceId, afterRelease: false }]
+    assert.match(evaluateLiveDraftGesture(onlyHolds).failures.join(), /no scene.editor.draft.set with a rect/)
+    const chromeFinal = liveGesture()
+    chromeFinal.final.draft = hold
+    assert.match(evaluateLiveDraftGesture(chromeFinal).failures.join(), /final draft is chrome-only/)
+    const holdApplied = liveGesture()
+    holdApplied.applied = [hold]
+    assert.match(evaluateLiveDraftGesture(holdApplied).failures.join(), /reported as an applied/)
+    const otherHold = liveGesture()
+    otherHold.wireDrafts.push({ sourceId: 'source:camera', afterRelease: true })
+    assert.match(evaluateLiveDraftGesture(otherHold).failures.join(), /hold names source:camera/)
+  })
+  it('after release every applied rect is the commit, and what settles is nothing or the hold', () => {
+    const drifted = liveGesture()
+    drifted.applied = [
+      { sourceId: hold.sourceId, transform: rounded },
+      { sourceId: hold.sourceId, transform: { ...rounded, x: 0.4 }, releaseAtRevision: 12 }
+    ]
+    assert.match(evaluateLiveDraftGesture(drifted).failures.join(), /differs from the committed transform/)
+    const stamped = liveGesture()
+    stamped.applied = [{ sourceId: hold.sourceId, transform: rounded, releaseAtRevision: 11 }]
+    assert.match(evaluateLiveDraftGesture(stamped).failures.join(), /stamped for revision 11/)
+    const settledRect = liveGesture()
+    settledRect.settled = { sourceId: hold.sourceId, transform: rounded }
+    assert.match(evaluateLiveDraftGesture(settledRect).failures.join(), /carries a transform/)
+    const settledOther = liveGesture()
+    settledOther.settled = { sourceId: 'source:camera' }
+    assert.match(evaluateLiveDraftGesture(settledOther).failures.join(), /idle hold names source:camera/)
+    const noHoldAfter = liveGesture()
+    noHoldAfter.holdAfter = null
+    assert.match(evaluateLiveDraftGesture(noHoldAfter).failures.join(), /after the gesture, no chrome-only hold/)
+  })
+})
+
+describe('idle selection hold gate', () => {
+  it('accepts a chrome-only draft naming the selection', () => {
+    assert.deepEqual(evaluateIdleHold({ sourceId: 'source:camera', draft: { sourceId: 'source:camera' } }), {
+      ok: true,
+      failures: []
+    })
+    assert.equal(
+      evaluateIdleHold({
+        sourceId: 'source:camera',
+        draft: { sourceId: 'source:camera', releaseAtRevision: 3 }
+      }).ok,
+      true
+    )
+  })
+  it('rejects nothing, another source, and a draft with a rect', () => {
+    assert.match(evaluateIdleHold({ sourceId: 'source:camera', draft: null }).failures.join(), /no chrome-only hold/)
+    assert.equal(evaluateIdleHold({ sourceId: 'source:camera', draft: null, allowNone: true }).ok, true)
+    assert.match(
+      evaluateIdleHold({ sourceId: 'source:camera', draft: { sourceId: 'source:screen' } }).failures.join(),
+      /names source:screen/
+    )
+    assert.match(
+      evaluateIdleHold({
+        sourceId: 'source:camera',
+        draft: { sourceId: 'source:camera', transform: draftRect }
+      }).failures.join(),
+      /carries a transform/
     )
   })
 })

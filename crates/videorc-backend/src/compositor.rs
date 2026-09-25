@@ -1400,10 +1400,14 @@ pub const EDITOR_DRAFT_REFUSED_CODE: &str = "editor-draft-refused";
 /// `scene.source.transform.update`; that handler stamps `release_at_revision`
 /// so the draft drops exactly when the committed scene installs — no flash
 /// back to the old rect, and no draft outliving its commit.
+///
+/// A draft without a `transform` is *chrome-only*: the idle selection. The
+/// stage holds one for the selected source between gestures so the frame and
+/// handles stay on the live picture; the committed geometry is untouched.
 #[derive(Debug, Clone, PartialEq)]
 pub struct EditorDraft {
     pub source_id: String,
-    pub transform: CameraTransform,
+    pub transform: Option<CameraTransform>,
     pub chrome: EditorChrome,
     pub refreshed_at: Instant,
     pub release_at_revision: Option<u64>,
@@ -1474,14 +1478,16 @@ fn editor_draft_applies(frame_consumer: CompositorFrameConsumer, has_stream_outp
 
 /// Replace the named source's rect with the draft rect, keeping the committed
 /// crops (the same rule as `scene::apply_transform_override`). Other sources
-/// and a snapshot without that source are untouched.
+/// and a snapshot without that source are untouched, and a chrome-only draft
+/// (no `transform`) leaves every rect as committed.
 fn snapshot_with_editor_draft(
     snapshot: Option<CompositorSceneSnapshot>,
     draft: Option<&EditorDraft>,
 ) -> Option<CompositorSceneSnapshot> {
-    let Some(draft) = draft else {
+    let Some(transform) = draft.and_then(|draft| draft.transform.as_ref()) else {
         return snapshot;
     };
+    let draft = draft?;
     let mut snapshot = snapshot?;
     if let Some(scene) = snapshot.scene.as_mut()
         && let Some(source) = scene
@@ -1489,10 +1495,10 @@ fn snapshot_with_editor_draft(
             .iter_mut()
             .find(|source| source.id == draft.source_id)
     {
-        source.transform.x = draft.transform.x;
-        source.transform.y = draft.transform.y;
-        source.transform.width = draft.transform.width;
-        source.transform.height = draft.transform.height;
+        source.transform.x = transform.x;
+        source.transform.y = transform.y;
+        source.transform.width = transform.width;
+        source.transform.height = transform.height;
     }
     Some(snapshot)
 }
@@ -1524,7 +1530,7 @@ impl CompositorRuntime {
         self.editor_draft_generation = self.editor_draft_generation.wrapping_add(1);
         self.editor_draft = Some(EditorDraft {
             source_id: params.source_id,
-            transform: sanitize_editor_draft_transform(params.transform),
+            transform: params.transform.map(sanitize_editor_draft_transform),
             chrome: params.chrome,
             refreshed_at: now,
             release_at_revision: None,
@@ -1701,20 +1707,30 @@ mod editor_draft_tests {
     fn params(source_id: &str) -> SceneEditorDraftParams {
         SceneEditorDraftParams {
             source_id: source_id.to_string(),
-            transform: CameraTransform {
+            transform: Some(CameraTransform {
                 x: 0.1,
                 y: 0.2,
                 width: 0.3,
                 height: 0.4,
-            },
+            }),
             chrome: chrome(),
+        }
+    }
+
+    /// The idle selection: chrome for the source, no rect override.
+    fn chrome_only_params(source_id: &str) -> SceneEditorDraftParams {
+        SceneEditorDraftParams {
+            transform: None,
+            ..params(source_id)
         }
     }
 
     fn draft(source_id: &str, now: Instant) -> EditorDraft {
         EditorDraft {
             source_id: source_id.to_string(),
-            transform: sanitize_editor_draft_transform(params(source_id).transform),
+            transform: params(source_id)
+                .transform
+                .map(sanitize_editor_draft_transform),
             chrome: chrome(),
             refreshed_at: now,
             release_at_revision: None,
@@ -1773,6 +1789,66 @@ mod editor_draft_tests {
         assert_eq!(
             snapshot_with_editor_draft(Some(snapshot(3)), None),
             Some(snapshot(3))
+        );
+    }
+
+    #[test]
+    fn chrome_only_editor_draft_draws_chrome_and_leaves_every_transform_untouched() {
+        let now = Instant::now();
+        let mut runtime = initial_compositor_state();
+        runtime.scene = Some(snapshot(3));
+        let ack = runtime.set_editor_draft(chrome_only_params("source:camera"), now);
+        assert!(ack.active);
+        let status = ack.editor_draft.expect("the hold is reported");
+        assert_eq!(status.source_id, "source:camera");
+        assert_eq!(
+            status.transform, None,
+            "a chrome-only draft carries no rect"
+        );
+        assert_eq!(status.release_at_revision, None);
+        assert_eq!(runtime.status.editor_draft, Some(status));
+
+        let held = runtime.editor_draft.as_ref().expect("held");
+        assert_eq!(held.transform, None);
+        assert_eq!(held.chrome, chrome(), "the chrome is drawn as sent");
+        assert!(
+            !editor_chrome_quads(&held.chrome, 1280, 720).is_empty(),
+            "the idle selection still produces frame and handle quads"
+        );
+        assert_eq!(
+            snapshot_with_editor_draft(Some(snapshot(3)), Some(held)),
+            Some(snapshot(3)),
+            "no source rect changes under a chrome-only draft"
+        );
+
+        // It lives by the same rules: TTL, refresh, clear, release-at-revision.
+        assert!(!runtime.reap_editor_draft(now + Duration::from_millis(1_900)));
+        assert!(runtime.reap_editor_draft(now + Duration::from_millis(2_001)));
+        assert_eq!(runtime.status.editor_draft, None);
+        runtime.set_editor_draft(chrome_only_params("source:camera"), now);
+        let generation = runtime
+            .editor_draft_generation_for("source:camera")
+            .expect("held again");
+        runtime.scene = Some(snapshot(4));
+        assert!(runtime.release_editor_draft_at(generation, 4, now));
+        assert!(runtime.editor_draft.is_none());
+
+        // A drag replaces the hold with a rect, and the hold can replace it back.
+        runtime.set_editor_draft(params("source:camera"), now);
+        assert!(
+            runtime
+                .editor_draft
+                .as_ref()
+                .and_then(|draft| draft.transform)
+                .is_some()
+        );
+        runtime.set_editor_draft(chrome_only_params("source:camera"), now);
+        assert_eq!(
+            runtime
+                .editor_draft
+                .as_ref()
+                .and_then(|draft| draft.transform),
+            None
         );
     }
 

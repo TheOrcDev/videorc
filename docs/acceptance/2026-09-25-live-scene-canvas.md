@@ -75,6 +75,17 @@ gestures pass the live gate, 96/96 DOM gates pass.
 | Slow `compositor.status` round trips | 0–1 per portrait run (84–94 ms) in both live and control runs, so not caused by drafts; recorded, not gated |
 | Presenter | mean 60.0–60.1 fps, present p95 19–20 ms (recorded, not gated) |
 
+### Idle selection chrome (follow-up to S4)
+
+A merely selected source on the live canvas holds a *chrome-only* draft
+(`scene.editor.draft.set` without `transform`): the compositor draws the frame
+and the eight handles around the committed rect without overriding it, the
+channel heartbeats it every 500 ms, a gesture suspends it and the stage re-holds
+with the acknowledged rect after the commit installs. The Freeform smoke
+asserts the hold is present (`sourceId` = selection, no `transform`) after every
+gesture (96/96) and while idle; composited OS screenshot inspected: frame and
+handles visible around the selected camera on the live picture.
+
 ### Circle in Freeform (S1)
 
 Rust: `scene_geometry::camera_mask` freeform rows, `scene::tests`

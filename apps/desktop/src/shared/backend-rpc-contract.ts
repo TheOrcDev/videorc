@@ -882,7 +882,8 @@ const editorChromeSchema = objectSchema(
 const sceneEditorDraftParamsSchema = objectSchema(
   {
     sourceId: boundedString,
-    transform: cameraTransformSchema,
+    // Absent = chrome-only (the idle selection holds the frame and handles).
+    transform: optionalSchema(cameraTransformSchema),
     chrome: editorChromeSchema
   },
   { allowUnknown: false }
@@ -890,7 +891,7 @@ const sceneEditorDraftParamsSchema = objectSchema(
 const sceneEditorDraftStatusSchema = objectSchema(
   {
     sourceId: boundedString,
-    transform: cameraTransformSchema,
+    transform: optionalSchema(cameraTransformSchema),
     releaseAtRevision: optionalSchema(numberSchema({ integer: true, min: 0 }))
   },
   { allowUnknown: false }

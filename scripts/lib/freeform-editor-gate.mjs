@@ -254,6 +254,33 @@ export function summarizeFreeformTiming(gestures) {
   }
 }
 
+/** A draft that moves the picture: it carries a rect. A chrome-only draft
+ * (no `transform`) is the idle selection's frame and handles, nothing more. */
+export function draftCarriesRect(draft) {
+  return Boolean(draft?.transform)
+}
+
+/**
+ * Live canvas: the idle selection. While a source is selected and no gesture
+ * runs, `compositor.status.editorDraft` must be a chrome-only draft naming
+ * that source: present, `sourceId` = the selection, and NO `transform` (the
+ * committed picture, with the frame and handles drawn over it). `allowNone`
+ * accepts the moment right after a release/cancel, before the stage holds
+ * again; a draft that carries a rect is never an idle hold.
+ */
+export function evaluateIdleHold({ sourceId, draft, allowNone = false }) {
+  const failures = []
+  if (!draft) {
+    if (!allowNone) failures.push(`no chrome-only hold on the backend for the selected ${sourceId}`)
+  } else {
+    if (draft.sourceId !== sourceId)
+      failures.push(`idle hold names ${draft.sourceId}, the selection is ${sourceId}`)
+    if (draftCarriesRect(draft))
+      failures.push('idle selection draft carries a transform (must be chrome-only)')
+  }
+  return { ok: failures.length === 0, failures }
+}
+
 /**
  * Live canvas (plan 058 S4): one gesture's editor-draft evidence.
  *
@@ -263,6 +290,14 @@ export function summarizeFreeformTiming(gestures) {
  * evidence (`wireDrafts`, `wireClears`, `commits`) comes from the renderer's
  * socket hook, so the bit-identical draft/commit check never depends on
  * backend sanitizing. Timings are milliseconds from release/cancel.
+ *
+ * Holds: the selected source's chrome-only draft may be on the wire and on
+ * the backend at any time outside the gesture (heartbeats before it, the
+ * re-hold after a cancel, the hold that follows the committed scene). They
+ * never count as gesture drafts: `goneMs` is the time until no draft CARRYING
+ * A RECT is applied, `applied` (or `lastPresent`) are the rect-carrying drafts
+ * seen until then, `settled` is what the backend held at that moment (nothing
+ * or the idle hold), and `holdAfter` is the draft once the stage went idle.
  */
 export function evaluateLiveDraftGesture({
   sourceId,
@@ -275,6 +310,9 @@ export function evaluateLiveDraftGesture({
   revisionAfter,
   goneMs,
   lastPresent,
+  applied,
+  settled,
+  holdAfter,
   cancelled = false,
   noop = false,
   tolerance = 1e-3,
@@ -285,21 +323,33 @@ export function evaluateLiveDraftGesture({
   for (const sample of samples)
     if (sample.draft && sample.draft.sourceId !== sourceId)
       failures.push(`draft names ${sample.draft.sourceId}, gesture edits ${sourceId}`)
-  if (!wireDrafts.length) failures.push('no scene.editor.draft.set left the renderer')
+  const rectDrafts = wireDrafts.filter(draftCarriesRect)
+  if (!rectDrafts.length) failures.push('no scene.editor.draft.set with a rect left the renderer')
+  for (const hold of wireDrafts.filter((draft) => !draftCarriesRect(draft)))
+    if (hold.sourceId !== undefined && hold.sourceId !== sourceId)
+      failures.push(`a chrome-only hold names ${hold.sourceId}, the selection is ${sourceId}`)
   if (!final?.draft) failures.push('no draft on the backend at the last pointer position')
   else if (final.draft.sourceId !== sourceId) failures.push('final draft names another source')
+  else if (!draftCarriesRect(final.draft))
+    failures.push('final draft is chrome-only: the last pointer position never reached the backend')
   else if (rectError(final.draft.transform, final.ghost) > tolerance)
     failures.push(
       `final draft misses the DOM ghost by ${rectError(final.draft.transform, final.ghost).toFixed(5)}`
     )
   const expectClear = cancelled || noop
-  const releaseDrafts = wireDrafts.filter((draft) => draft.afterRelease)
+  const releaseDrafts = rectDrafts.filter((draft) => draft.afterRelease)
+  const trail = applied ?? (lastPresent ? [lastPresent] : [])
+  for (const draft of trail)
+    if (!draftCarriesRect(draft))
+      failures.push('a chrome-only hold was reported as an applied gesture draft')
   if (expectClear) {
     if (wireClears.length !== 1)
       failures.push(`expected one scene.editor.draft.clear, received ${wireClears.length}`)
     if (releaseDrafts.length) failures.push('a cancelled gesture still sent a release draft')
     if (!Number.isFinite(goneMs) || goneMs > clearBudgetMs)
-      failures.push(`draft still applied ${describeMs(goneMs)} after cancel (budget ${clearBudgetMs}ms)`)
+      failures.push(
+        `a draft with a rect still applied ${describeMs(goneMs)} after cancel (budget ${clearBudgetMs}ms)`
+      )
   } else {
     if (wireClears.length) failures.push('a released gesture must not clear its draft')
     if (releaseDrafts.length !== 1)
@@ -314,19 +364,30 @@ export function evaluateLiveDraftGesture({
         failures.push('release draft still carries guides or an active handle')
     }
     if (!Number.isFinite(goneMs) || goneMs > goneBudgetMs)
-      failures.push(`draft still applied ${describeMs(goneMs)} after release (budget ${goneBudgetMs}ms)`)
-    if (lastPresent) {
-      if (
-        lastPresent.releaseAtRevision !== undefined &&
-        lastPresent.releaseAtRevision !== revisionAfter
+      failures.push(
+        `a draft with a rect still applied ${describeMs(goneMs)} after release (budget ${goneBudgetMs}ms)`
       )
+    // Between release and the commit's install the backend may only ever show
+    // the released rect (= the commit), stamped for the revision it installs.
+    for (const draft of trail.filter(draftCarriesRect)) {
+      if (draft.releaseAtRevision !== undefined && draft.releaseAtRevision !== revisionAfter)
         failures.push(
-          `draft was stamped for revision ${lastPresent.releaseAtRevision}, scene installed ${revisionAfter}`
+          `draft was stamped for revision ${draft.releaseAtRevision}, scene installed ${revisionAfter}`
         )
-      if (committedTransform && rectError(lastPresent.transform, committedTransform) > tolerance)
-        failures.push('last applied draft differs from the committed transform')
+      if (committedTransform && rectError(draft.transform, committedTransform) > tolerance)
+        failures.push('an applied draft after release differs from the committed transform')
     }
   }
+  // Once the gesture's rect is gone the backend holds nothing, or the idle
+  // selection: never a rect for this or another source.
+  if (settled !== undefined)
+    failures.push(...evaluateIdleHold({ sourceId, draft: settled, allowNone: true }).failures)
+  if (holdAfter !== undefined)
+    failures.push(
+      ...evaluateIdleHold({ sourceId, draft: holdAfter }).failures.map(
+        (failure) => `after the gesture, ${failure}`
+      )
+    )
   return { ok: failures.length === 0, failures: [...new Set(failures)] }
 }
 

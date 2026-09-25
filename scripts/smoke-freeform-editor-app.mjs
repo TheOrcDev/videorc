@@ -6,10 +6,13 @@
 // canvas, so every drag also streams an editor draft to the compositor. Per
 // gesture this smoke asserts the backend's `compositor.status.editorDraft`
 // tracks the DOM ghost, the release draft and the single commit are
-// bit-identical on the wire, the draft is gone once the scene installs, Esc
-// clears it, and a stale draft expires on the backend's TTL. The preview's
-// `framesRendered` cadence is sampled through the whole 20 move + 20 resize
-// matrix and gated for stalls.
+// bit-identical on the wire, the released rect is gone once the scene
+// installs, Esc clears it, and a stale rect never outlives the renderer's
+// heartbeat. Between gestures the selected source is HELD as a chrome-only
+// draft (frame and handles on the live picture, no rect): the smoke asserts
+// that hold is on the backend whenever the stage is idle with a selection.
+// The preview's `framesRendered` cadence is sampled through the whole
+// 20 move + 20 resize matrix and gated for stalls.
 import assert from 'node:assert/strict'
 import { execFileSync } from 'node:child_process'
 import { appendFileSync, mkdtempSync, writeFileSync } from 'node:fs'
@@ -21,6 +24,7 @@ import {
   evaluateFreeformArtifact,
   evaluateFreeformChrome,
   evaluateFreeformGesture,
+  evaluateIdleHold,
   evaluateLiveDraftGesture,
   evaluatePreviewCadence,
   summarizeFreeformTiming
@@ -105,6 +109,7 @@ const report = {
     cadenceDefinition:
       'compositor.status.framesRendered read ~every 15 ms from the smoke socket during the 20 move + 20 resize matrix, each reading stamped with its request and reply times. Gate: the longest stall between two counter advances, taken as the PROVEN lower bound from the readings around it, must stay within 2 frames at targetFps; the upper bound, slow status round trips (> 30 ms, a backend hitch), and the worst 1 s window (steady under-rate, not gated) are recorded. The presenter counters and present metrics come from native-preview-surface-status and are recorded, not gated. VIDEORC_FREEFORM_LIVE_CONTROL=1 runs the same matrix with the preview floating (no drafts) for an A/B against the same machine.',
     cadence: {},
+    idleHolds: [],
     ttl: null,
     refusal: null,
     control: process.env.VIDEORC_FREEFORM_LIVE_CONTROL === '1'
@@ -176,8 +181,10 @@ try {
       'false',
       'Freeform must default to Snap off'
     )
-    if (liveSupported) await ensureLiveSurface(orientation)
-    else if (report.live.control) await ensureFloatingPreview(orientation)
+    if (liveSupported) {
+      await ensureLiveSurface(orientation)
+      await assertIdleHold(`${orientation} live surface, ${baseSourceId} selected`)
+    } else if (report.live.control) await ensureFloatingPreview(orientation)
     const cadence = cadenceSupported ? startCadenceSamplers() : null
     for (let index = 0; index < 20; index++) {
       await gesture({ orientation, kind: 'move', index, delayMs: index % 2 ? 50 : 250 })
@@ -562,6 +569,9 @@ async function gesture({
   await waitUntil(
     `document.querySelector('[data-videorc-stage-phase]')?.dataset.videorcStagePhase === 'idle'`
   )
+  // Idle again with the source still selected: the stage holds its chrome-only
+  // draft (re-held after a cancel, held anew once the committed scene landed).
+  const holdAfter = live ? await waitForIdleHold(sourceId, 1500) : null
   const observation = await cdp.eval('window.__freeformSmoke.finish()')
   const accepted = await request(backend, timeoutMs, 'scene.get')
   const status = await request(backend, timeoutMs, 'compositor.status')
@@ -607,6 +617,9 @@ async function gesture({
         revisionAfter: status.sceneRevision,
         goneMs: liveEnd.goneMs,
         lastPresent: liveEnd.lastPresent,
+        applied: liveEnd.applied,
+        settled: liveEnd.settled,
+        holdAfter: holdAfter.draft,
         cancelled: Boolean(cancellation),
         noop,
         goneBudgetMs: delayMs + 1000,
@@ -616,7 +629,9 @@ async function gesture({
   report.gestures.push({
     ...data,
     gate,
-    live: live ? { samples: liveSamples, final: liveFinal, end: liveEnd, gate: liveGate } : null
+    live: live
+      ? { samples: liveSamples, final: liveFinal, end: liveEnd, holdAfter, gate: liveGate }
+      : null
   })
   if (!gate.ok && process.env.VIDEORC_FREEFORM_FAIL_FAST === '1')
     throw new Error(JSON.stringify(gate))
@@ -704,7 +719,7 @@ function startCadenceSamplers() {
           repeatedFrames: status.repeatedFrames,
           droppedFrames: status.droppedFrames,
           frameAgeMs: status.frameAgeMs ?? null,
-          draft: status.editorDraft ? status.editorDraft.transform : null
+          draft: status.editorDraft?.transform ?? null
         }
       },
       15
@@ -787,8 +802,10 @@ async function waitForDraftMatch(sourceId, sinceAt) {
   do {
     sample = await liveDraftSample(sourceId)
     polls++
+    // A chrome-only hold (no transform) is the idle selection, not a match.
     if (
       sample.draft?.sourceId === sourceId &&
+      sample.draft.transform &&
       ['x', 'y', 'width', 'height'].every(
         (key) => Math.abs(sample.draft.transform[key] - sample.ghost[key]) <= 1e-3
       )
@@ -799,45 +816,103 @@ async function waitForDraftMatch(sourceId, sinceAt) {
   return { ...sample, matchMs: null, polls }
 }
 
+/** Until no draft CARRYING A RECT is applied. The idle hold (chrome-only) may
+ * be there instead of nothing: `settled` records which. `applied` keeps every
+ * distinct rect-carrying draft seen on the way, so the gate can check that
+ * nothing but the released rect was ever shown. */
 async function waitForDraftGone(sinceAt, budgetMs) {
   const deadline = sinceAt + budgetMs
+  const applied = []
   let lastPresent = null
   let polls = 0
   for (;;) {
     const status = await request(backend, timeoutMs, 'compositor.status')
     polls++
-    if (!status.editorDraft) return { goneMs: performance.now() - sinceAt, lastPresent, polls }
-    lastPresent = status.editorDraft
-    if (performance.now() > deadline) return { goneMs: Infinity, lastPresent, polls }
+    const draft = status.editorDraft ?? null
+    if (!draft?.transform)
+      return { goneMs: performance.now() - sinceAt, lastPresent, applied, settled: draft, polls }
+    lastPresent = draft
+    if (!applied.some((seen) => JSON.stringify(seen) === JSON.stringify(draft))) applied.push(draft)
+    if (performance.now() > deadline)
+      return { goneMs: Infinity, lastPresent, applied, settled: draft, polls }
     await new Promise((resolve) => setTimeout(resolve, 5))
   }
 }
 
-/** Decision 4: a draft nobody refreshes dies on the backend within 2 s. */
+/** Until the backend holds the chrome-only draft for `sourceId`; returns the
+ * last draft seen either way so a failure names what was there instead. */
+async function waitForIdleHold(sourceId, budgetMs) {
+  const since = performance.now()
+  const deadline = since + budgetMs
+  let polls = 0
+  for (;;) {
+    const status = await request(backend, timeoutMs, 'compositor.status')
+    polls++
+    const draft = status.editorDraft ?? null
+    const held = evaluateIdleHold({ sourceId, draft }).ok
+    if (held || performance.now() > deadline)
+      return { draft, held, heldMs: held ? performance.now() - since : Infinity, polls }
+    await new Promise((resolve) => setTimeout(resolve, 10))
+  }
+}
+
+/** The idle selection on the live canvas: `compositor.status.editorDraft` is
+ * a chrome-only draft naming the selected source (present, no transform). */
+async function assertIdleHold(label) {
+  const hold = await waitForIdleHold(baseSourceId, 2000)
+  const gate = evaluateIdleHold({ sourceId: baseSourceId, draft: hold.draft })
+  report.live.idleHolds.push({ label, ...hold, gate })
+  if (!gate.ok) {
+    const message = `idle hold (${label}): ${gate.failures.join('; ')}`
+    if (process.env.VIDEORC_FREEFORM_FAIL_FAST === '1') throw new Error(message)
+    report.failures.push(message)
+  }
+}
+
+/** Decision 4: a rect nobody refreshes never survives on the backend. Set a
+ * raw draft WITH a rect from this socket while a source is selected on the
+ * live canvas: 2.5 s later no draft carries that rect. The backend's 2 s TTL
+ * (unit-tested in `compositor.rs`) or the renderer's 500 ms hold heartbeat,
+ * which replaces it with the chrome-only hold, may be what ended it; both are
+ * recorded. */
 async function staleDraftExpires() {
-  console.log('Freeform: stale editor draft expires without a heartbeat')
+  console.log('Freeform: stale editor draft never outlives the heartbeat')
+  await selectSource(baseSourceId)
+  await assertIdleHold(`stale-draft step, ${baseSourceId} selected`)
   const transform = { x: 0.11, y: 0.12, width: 0.3, height: 0.3 }
   const params = {
     sourceId: baseSourceId,
     transform,
     chrome: { selected: transform, handles: true, guides: [], scale: 1 }
   }
+  const carriesRawRect = (draft) =>
+    Boolean(draft?.transform) &&
+    ['x', 'y', 'width', 'height'].every((key) => Math.abs(draft.transform[key] - transform[key]) < 1e-9)
   const ack = await request(backend, timeoutMs, 'scene.editor.draft.set', params)
   assert.equal(ack.active, true, 'a direct draft must be accepted while idle')
-  const applied = await request(backend, timeoutMs, 'compositor.status')
-  assert.equal(applied.editorDraft?.sourceId, baseSourceId, 'draft not reported by compositor.status')
+  assert.ok(carriesRawRect(ack.editorDraft), `raw draft not acknowledged: ${JSON.stringify(ack)}`)
   const setAt = performance.now()
   await new Promise((resolve) => setTimeout(resolve, 2500))
   const later = await request(backend, timeoutMs, 'compositor.status')
-  const ttl = { goneAfterMs: performance.now() - setAt, editorDraft: later.editorDraft ?? null }
+  const ttl = {
+    checkedAfterMs: performance.now() - setAt,
+    editorDraft: later.editorDraft ?? null,
+    endedBy: !later.editorDraft ? 'ttl' : later.editorDraft.transform ? 'other-rect' : 'hold-heartbeat'
+  }
   report.live.ttl = ttl
-  assert.equal(ttl.editorDraft, null, `stale draft survived 2.5 s: ${JSON.stringify(ttl)}`)
-  // And an explicit clear ends one immediately.
+  assert.ok(
+    !carriesRawRect(later.editorDraft),
+    `stale draft rect survived 2.5 s: ${JSON.stringify(ttl)}`
+  )
+  // And an explicit clear ends one immediately (the hold may re-land after).
   await request(backend, timeoutMs, 'scene.editor.draft.set', params)
   const cleared = await request(backend, timeoutMs, 'scene.editor.draft.clear')
   assert.equal(cleared.active, false)
   const afterClear = await request(backend, timeoutMs, 'compositor.status')
-  assert.equal(afterClear.editorDraft ?? null, null, 'draft survived scene.editor.draft.clear')
+  assert.ok(
+    !carriesRawRect(afterClear.editorDraft),
+    `draft rect survived scene.editor.draft.clear: ${JSON.stringify(afterClear.editorDraft)}`
+  )
 }
 
 /** Decision 4: drafts never reach a recording; the RPC is refused outright. */
