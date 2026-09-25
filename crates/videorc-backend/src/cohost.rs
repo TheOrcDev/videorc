@@ -16,6 +16,7 @@ use thiserror::Error;
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tokio::task::JoinHandle;
 
+use crate::captions::{CaptionUpdateKind, CaptionsUpdate};
 use crate::comment_highlight::{CommentHighlightPhase, CommentHighlightState};
 use crate::live_chat::{LiveChatEventType, LiveChatMessage};
 use crate::protocol::{
@@ -25,7 +26,8 @@ use crate::state::AppState;
 use crate::storage::Database;
 use crate::streaming::StreamPlatform;
 use crate::videorc_api::{
-    CohostApiError, CohostApiErrorKind, CohostTickMessage, CohostTickOpenQuestion,
+    COHOST_SPOTLIGHT_MAX_BODY_BYTES, CohostApiError, CohostApiErrorKind, CohostSpotlightCandidate,
+    CohostSpotlightRequest, CohostSpotlightResponse, CohostTickMessage, CohostTickOpenQuestion,
     CohostTickQuestion, CohostTickRequest, CohostTickResponse, VideorcApiClient,
 };
 
@@ -92,6 +94,40 @@ const AUTO_HIGHLIGHT_VOICE_REFRESH_WINDOW: Duration = Duration::from_secs(2);
 /// A decision the renderer never turned into a live card stops counting as
 /// "applying" after this long (the message may have left the snapshot).
 const AUTO_HIGHLIGHT_APPLY_TIMEOUT: Duration = Duration::from_secs(8);
+/// The spotlight lane (plan 060 S3, D7, D12): what the streamer says, from the
+/// live-caption finals, against the comments they might be talking about. A
+/// fast lane with its own cadence and breaker; it never touches the tick.
+pub(crate) const SPOTLIGHT_TRANSCRIPT_WINDOW: Duration = Duration::from_secs(20);
+pub(crate) const SPOTLIGHT_TRANSCRIPT_MAX_CHARS: usize = 800;
+/// A call waits this long after the latest final (the next final is usually
+/// on its way) and never comes closer than the min gap to the previous call.
+pub(crate) const SPOTLIGHT_DEBOUNCE: Duration = Duration::from_secs(1);
+pub(crate) const SPOTLIGHT_MIN_GAP: Duration = Duration::from_millis(2500);
+const SPOTLIGHT_QUESTION_CANDIDATES_CAP: usize = 10;
+const SPOTLIGHT_CANDIDATES_CAP: usize = 20;
+/// Server caps on one candidate (`cohost-spotlight.ts`); a candidate that
+/// cannot fit is left out rather than failing the whole call.
+const SPOTLIGHT_CANDIDATE_ID_MAX_CHARS: usize = 200;
+const SPOTLIGHT_AUTHOR_MAX_CHARS: usize = 120;
+const SPOTLIGHT_QUESTION_ID_MAX_CHARS: usize = 80;
+pub(crate) const SPOTLIGHT_MESSAGE_MAX_AGE: Duration = Duration::from_secs(120);
+/// A match stays the spotlight this long unless a later call refreshes it.
+pub(crate) const SPOTLIGHT_EXPIRY: Duration = Duration::from_secs(15);
+/// Desktop-owned thresholds on the server's raw probabilities. UNVALIDATED
+/// starting values (plan 060 P7): mirror `SPOTLIGHT_REFERENCE_THRESHOLDS`.
+const SPOTLIGHT_ABOUT_THRESHOLD: f64 = 0.75;
+const SPOTLIGHT_ANSWERED_THRESHOLD: f64 = 0.8;
+/// Consecutive calls that must say "answered" before a question is resolved.
+const SPOTLIGHT_ANSWERED_STREAK: u32 = 2;
+/// Breaker: this many failures in a row close the lane for `SPOTLIGHT_BREAKER_OFF`;
+/// "not on this server" answers (404, disabled, unconfigured, no Premium)
+/// close it for `SPOTLIGHT_UNAVAILABLE_OFF`; a quota answer for Retry-After.
+const SPOTLIGHT_BREAKER_FAILURES: usize = 3;
+const SPOTLIGHT_BREAKER_OFF: Duration = Duration::from_secs(60);
+const SPOTLIGHT_UNAVAILABLE_OFF: Duration = Duration::from_secs(300);
+/// Voice-resolved questions the streamer can still put back (D9).
+const RECENTLY_RESOLVED_CAP: usize = 3;
+const RECENTLY_RESOLVED_TTL: Duration = Duration::from_secs(60);
 
 // --- Wire enums --------------------------------------------------------------
 
@@ -259,6 +295,41 @@ pub struct CohostAutoHighlight {
     pub source: CohostAutoHighlightSource,
     /// The same message is re-set while still live (voice only, once).
     pub refresh: bool,
+}
+
+/// The comment the streamer is talking about right now (plan 060 S3): the
+/// best spotlight match at or above the `about` threshold, refreshed while it
+/// persists, gone after `SPOTLIGHT_EXPIRY`. The renderer pins and marks it
+/// (pull-up); with `voiceHighlight` the engine also puts it on stream.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostSpotlight {
+    pub message_id: String,
+    /// The open question this message asked, when it is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub question_id: Option<String>,
+    /// The server's `about` probability (0..1).
+    pub score: f64,
+    /// When this message became the spotlight (ISO-8601).
+    pub at: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum CohostResolveReason {
+    /// The streamer answered it on air (two spotlight calls in a row agreed).
+    Voice,
+}
+
+/// A question the engine resolved by itself, kept for a minute so the streamer
+/// can put it back with `cohost.question.restore` (D9).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CohostRecentlyResolved {
+    pub question: CohostQuestion,
+    pub reason: CohostResolveReason,
+    pub resolved_at: String,
 }
 
 // --- Settings ----------------------------------------------------------------
@@ -508,6 +579,14 @@ pub struct CohostState {
     /// `generation` only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_highlight: Option<CohostAutoHighlight>,
+    /// The comment the streamer is talking about (plan 060 S3). Omitted
+    /// while there is none, or once it expired.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spotlight: Option<CohostSpotlight>,
+    /// Questions the engine resolved on its own in the last minute, oldest
+    /// first, at most three. Omitted while empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub recently_resolved: Vec<CohostRecentlyResolved>,
 }
 
 impl CohostState {
@@ -532,6 +611,8 @@ impl CohostState {
             alerts: Vec::new(),
             mood_scores: None,
             auto_highlight: None,
+            spotlight: None,
+            recently_resolved: Vec::new(),
         }
     }
 }
@@ -567,6 +648,114 @@ pub fn new_cohost_slot(settings: CohostSettings) -> CohostSlot {
     Arc::new(Mutex::new(CohostEngine::new(settings)))
 }
 
+// --- Transcript window (plan 060 S3) -------------------------------------------
+
+/// The last seconds of the streamer's live captions, as the spotlight lane
+/// sends them: finals only, at most `SPOTLIGHT_TRANSCRIPT_WINDOW` old and
+/// `SPOTLIGHT_TRANSCRIPT_MAX_CHARS` long (oldest finals leave first). Behind a
+/// std mutex on `AppState`, never the engine's async lock: the caption
+/// coordinator appends and returns, and never waits on a tick.
+#[derive(Debug, Default)]
+pub struct TranscriptWindow {
+    finals: VecDeque<TranscriptFinal>,
+    chars: usize,
+    /// Bumped per appended final; the lane calls once per change.
+    version: u64,
+    last_final_at: Option<Instant>,
+}
+
+#[derive(Debug, Clone)]
+struct TranscriptFinal {
+    at: Instant,
+    text: String,
+    chars: usize,
+}
+
+/// What the lane reads on a pass: the joined window text and its identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct TranscriptSnapshot {
+    pub(crate) text: String,
+    pub(crate) version: u64,
+    pub(crate) last_final_at: Option<Instant>,
+}
+
+impl TranscriptWindow {
+    /// Append one final. Whitespace is collapsed; an empty final is ignored;
+    /// a single final longer than the cap keeps its tail. Amortised constant
+    /// time: every final is trimmed out at most once.
+    pub(crate) fn push(&mut self, text: &str, now: Instant) {
+        let mut text: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            return;
+        }
+        let mut chars = text.chars().count();
+        if chars > SPOTLIGHT_TRANSCRIPT_MAX_CHARS {
+            text = text
+                .chars()
+                .skip(chars - SPOTLIGHT_TRANSCRIPT_MAX_CHARS)
+                .collect();
+            chars = SPOTLIGHT_TRANSCRIPT_MAX_CHARS;
+        }
+        self.trim_older_than(now);
+        self.finals.push_back(TranscriptFinal {
+            at: now,
+            text,
+            chars,
+        });
+        self.chars += chars;
+        // The cap is on the joined text the server sees: the separators count.
+        while self.joined_chars() > SPOTLIGHT_TRANSCRIPT_MAX_CHARS {
+            if let Some(oldest) = self.finals.pop_front() {
+                self.chars -= oldest.chars;
+            }
+        }
+        self.version = self.version.wrapping_add(1);
+        self.last_final_at = Some(now);
+    }
+
+    fn joined_chars(&self) -> usize {
+        self.chars + self.finals.len().saturating_sub(1)
+    }
+
+    fn trim_older_than(&mut self, now: Instant) {
+        while self.finals.front().is_some_and(|oldest| {
+            now.saturating_duration_since(oldest.at) >= SPOTLIGHT_TRANSCRIPT_WINDOW
+        }) {
+            if let Some(oldest) = self.finals.pop_front() {
+                self.chars -= oldest.chars;
+            }
+        }
+    }
+
+    pub(crate) fn snapshot(&self, now: Instant) -> TranscriptSnapshot {
+        let text = self
+            .finals
+            .iter()
+            .filter(|final_| now.saturating_duration_since(final_.at) < SPOTLIGHT_TRANSCRIPT_WINDOW)
+            .map(|final_| final_.text.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
+        TranscriptSnapshot {
+            text,
+            version: self.version,
+            last_final_at: self.last_final_at,
+        }
+    }
+
+    pub(crate) fn clear(&mut self) {
+        self.finals.clear();
+        self.chars = 0;
+        self.last_final_at = None;
+        self.version = self.version.wrapping_add(1);
+    }
+}
+
+pub type CohostTranscriptSlot = Arc<std::sync::Mutex<TranscriptWindow>>;
+
+pub fn new_cohost_transcript_slot() -> CohostTranscriptSlot {
+    Arc::new(std::sync::Mutex::new(TranscriptWindow::default()))
+}
+
 /// Why the scheduler did not send a request on this pass.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum TickGate {
@@ -582,6 +771,35 @@ pub(crate) enum TickGate {
 pub(crate) struct PreparedTick {
     pub(crate) request: CohostTickRequest,
     pub(crate) generation: u64,
+}
+
+/// What the spotlight lane does on this pass.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum SpotlightPass {
+    /// Its session/generation was replaced or the co-host was turned off.
+    Stopped,
+    Idle,
+    Send(PreparedSpotlight),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct PreparedSpotlight {
+    pub(crate) request: CohostSpotlightRequest,
+    pub(crate) generation: u64,
+}
+
+/// What one spotlight answer (or failure) changed, for the emit and the log.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct SpotlightOutcome {
+    /// The state snapshot differs: spotlight set, refreshed or cleared, or a
+    /// question resolved.
+    pub(crate) changed: bool,
+    /// A new message became the spotlight: `(message_id, about)`.
+    pub(crate) spotlight_set: Option<(String, f64)>,
+    /// Question ids resolved by voice on this answer.
+    pub(crate) resolved: Vec<String>,
+    /// The breaker closed the lane for this long.
+    pub(crate) lane_off_for: Option<Duration>,
 }
 
 /// One viewer saying "something is broken" (`alerts[]`), kept until it expires
@@ -652,6 +870,10 @@ struct CohostSession {
     /// Automatic on-stream cards (plan 060 S1). All of it is per session: a
     /// new session starts with no history, like the dismissed sets.
     auto: AutoHighlightLedger,
+    /// The spotlight lane (plan 060 S3), per session like the tick state.
+    spotlight: SpotlightLane,
+    /// Voice-resolved questions the streamer can put back, oldest first.
+    recently_resolved: Vec<ResolvedRecord>,
 }
 
 /// What the engine remembers about one chat row it noted.
@@ -659,9 +881,47 @@ struct CohostSession {
 struct KnownMessage {
     /// Platform-qualified author key (`alert_author_key`).
     author: String,
+    /// Display name, as the tick sent it.
+    author_name: String,
     /// Normalised roles (`normalize_role`).
     roles: Vec<String>,
+    /// Text as the tick sent it (trimmed, capped), for spotlight candidates.
+    text: String,
+    /// Provider timestamp as the tick sent it.
+    at: String,
     noted_at: Instant,
+}
+
+/// The spotlight lane's per-session memory: cadence, breaker, the current
+/// spotlight and the "answered" streaks behind a voice resolve.
+#[derive(Debug, Default)]
+struct SpotlightLane {
+    seq: u64,
+    in_flight: bool,
+    last_call_at: Option<Instant>,
+    /// Transcript version the last call sent; `None` before the first call.
+    last_version: Option<u64>,
+    failures: usize,
+    off_until: Option<Instant>,
+    /// Calls in a row that said "answered" per open question id.
+    answered_streak: HashMap<String, u32>,
+    current: Option<SpotlightRecord>,
+}
+
+#[derive(Debug, Clone)]
+struct SpotlightRecord {
+    message_id: String,
+    question_id: Option<String>,
+    score: f64,
+    at_iso: String,
+    expires_at: Instant,
+    expires_at_iso: String,
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedRecord {
+    entry: CohostRecentlyResolved,
+    at: Instant,
 }
 
 /// A card the engine saw live on the overlay.
@@ -749,6 +1009,8 @@ impl CohostSession {
             alert_reports: Vec::new(),
             mood_scores: None,
             auto: AutoHighlightLedger::default(),
+            spotlight: SpotlightLane::default(),
+            recently_resolved: Vec::new(),
         }
     }
 
@@ -785,6 +1047,8 @@ impl CohostSession {
             alerts: self.alerts_at(now),
             mood_scores: self.mood_scores,
             auto_highlight: self.auto.latest.clone(),
+            spotlight: self.spotlight_at(now),
+            recently_resolved: self.recently_resolved_at(now),
         }
     }
 
@@ -876,11 +1140,13 @@ impl CohostSession {
         for message in ordered {
             if message.is_deleted || message.event_type == LiveChatEventType::Deleted {
                 self.pending.retain(|pending| pending.id != message.id);
-                // A deleted comment is never suggested for the stream.
+                // A deleted comment is never suggested for the stream, and
+                // never stays the spotlight.
                 if self.known_set.contains(&message.id) {
                     self.deleted_ids.insert(message.id.clone());
                     self.highlights
                         .retain(|highlight| highlight.message_id != message.id);
+                    self.drop_spotlight_for(&message.id);
                 }
                 continue;
             }
@@ -898,7 +1164,10 @@ impl CohostSession {
                 &message.id,
                 KnownMessage {
                     author: alert_author_key(message),
+                    author_name: mapped.author.clone(),
                     roles: mapped.roles.clone().unwrap_or_default(),
+                    text: mapped.text.clone(),
+                    at: mapped.at.clone(),
                     noted_at: now,
                 },
             );
@@ -1054,6 +1323,16 @@ impl CohostSession {
         }
         while self.flags.len() > FLAGS_CAP {
             self.flags.remove(0);
+        }
+        // A tick may flag what the spotlight lane matched a moment ago.
+        if let Some(flagged) = self
+            .spotlight
+            .current
+            .as_ref()
+            .map(|current| current.message_id.clone())
+            .filter(|id| self.flags.iter().any(|flag| &flag.message_id == id))
+        {
+            self.drop_spotlight_for(&flagged);
         }
 
         // Latest set wins. A flagged (or flag-dismissed) or deleted message is
@@ -1228,7 +1507,381 @@ impl CohostSession {
             .retain(|highlight| highlight.message_id != message_id);
         self.flags.retain(|flag| flag.message_id != message_id);
         self.dismissed_flags.insert(message_id.to_string());
+        self.drop_spotlight_for(message_id);
         before != self.flags.len()
+    }
+
+    // --- Spotlight lane (plan 060 S3) ----------------------------------------
+
+    /// The spotlight as the wire sees it: `None` once it expired.
+    fn spotlight_at(&self, now: Instant) -> Option<CohostSpotlight> {
+        self.spotlight
+            .current
+            .as_ref()
+            .filter(|current| now < current.expires_at)
+            .map(|current| CohostSpotlight {
+                message_id: current.message_id.clone(),
+                question_id: current.question_id.clone(),
+                score: current.score,
+                at: current.at_iso.clone(),
+                expires_at: current.expires_at_iso.clone(),
+            })
+    }
+
+    /// The message the Voice source may put on stream right now.
+    fn spotlight_message_id(&self, now: Instant) -> Option<&str> {
+        self.spotlight
+            .current
+            .as_ref()
+            .filter(|current| now < current.expires_at)
+            .map(|current| current.message_id.as_str())
+    }
+
+    fn drop_spotlight_for(&mut self, message_id: &str) {
+        if self
+            .spotlight
+            .current
+            .as_ref()
+            .is_some_and(|current| current.message_id == message_id)
+        {
+            self.spotlight.current = None;
+        }
+    }
+
+    /// Clear an expired spotlight. True when one just left (news for the
+    /// renderer: the pull-up must go).
+    fn expire_spotlight(&mut self, now: Instant) -> bool {
+        if self
+            .spotlight
+            .current
+            .as_ref()
+            .is_some_and(|current| now >= current.expires_at)
+        {
+            self.spotlight.current = None;
+            return true;
+        }
+        false
+    }
+
+    fn recently_resolved_at(&self, now: Instant) -> Vec<CohostRecentlyResolved> {
+        self.recently_resolved
+            .iter()
+            .filter(|record| now.saturating_duration_since(record.at) < RECENTLY_RESOLVED_TTL)
+            .map(|record| record.entry.clone())
+            .collect()
+    }
+
+    /// Resolve an open question because the streamer answered it on air:
+    /// it leaves the open set like `mark_answered`, and is kept for a minute
+    /// so the streamer can put it back.
+    fn resolve_by_voice(&mut self, question_id: &str, now: Instant, now_iso: &str) -> bool {
+        let Some(question) = self
+            .questions
+            .iter()
+            .find(|question| question.id == question_id)
+            .cloned()
+        else {
+            return false;
+        };
+        self.mark_answered(question_id);
+        self.recently_resolved
+            .retain(|record| now.saturating_duration_since(record.at) < RECENTLY_RESOLVED_TTL);
+        self.recently_resolved.push(ResolvedRecord {
+            entry: CohostRecentlyResolved {
+                question,
+                reason: CohostResolveReason::Voice,
+                resolved_at: now_iso.to_string(),
+            },
+            at: now,
+        });
+        while self.recently_resolved.len() > RECENTLY_RESOLVED_CAP {
+            self.recently_resolved.remove(0);
+        }
+        true
+    }
+
+    /// `cohost.question.restore`: a recently voice-resolved question goes back
+    /// to the open set, may return from later ticks again, and leaves the
+    /// recently-resolved list. False when it is not there (or too old).
+    fn restore_question(&mut self, question_id: &str, now: Instant) -> bool {
+        self.recently_resolved
+            .retain(|record| now.saturating_duration_since(record.at) < RECENTLY_RESOLVED_TTL);
+        let Some(index) = self
+            .recently_resolved
+            .iter()
+            .position(|record| record.entry.question.id == question_id)
+        else {
+            return false;
+        };
+        let record = self.recently_resolved.remove(index);
+        self.dismissed_questions.remove(question_id);
+        self.spotlight.answered_streak.remove(question_id);
+        if !self
+            .questions
+            .iter()
+            .any(|question| question.id == question_id)
+        {
+            self.questions.push(record.entry.question);
+        }
+        true
+    }
+
+    /// Safety at send time and at receipt: known, not deleted, not flagged or
+    /// flag-dismissed, never the broadcaster.
+    fn spotlight_eligible(&self, message_id: &str) -> Option<&KnownMessage> {
+        let known = self.known.get(message_id)?;
+        if self.deleted_ids.contains(message_id)
+            || self.dismissed_flags.contains(message_id)
+            || self.flags.iter().any(|flag| flag.message_id == message_id)
+            || known.roles.iter().any(|role| role == "owner")
+        {
+            return None;
+        }
+        Some(known)
+    }
+
+    fn spotlight_candidate(
+        &self,
+        message_id: &str,
+        question: Option<&CohostQuestion>,
+    ) -> Option<CohostSpotlightCandidate> {
+        if message_id.chars().count() > SPOTLIGHT_CANDIDATE_ID_MAX_CHARS {
+            return None;
+        }
+        let known = self.spotlight_eligible(message_id)?;
+        let author = truncate_chars(known.author_name.trim(), SPOTLIGHT_AUTHOR_MAX_CHARS);
+        // A question id the server would reject makes the row a plain
+        // candidate: still "about", no "answered".
+        let question = question
+            .filter(|question| question.id.chars().count() <= SPOTLIGHT_QUESTION_ID_MAX_CHARS);
+        Some(CohostSpotlightCandidate {
+            id: message_id.to_string(),
+            text: known.text.clone(),
+            author: if author.is_empty() {
+                "Viewer".to_string()
+            } else {
+                author
+            },
+            roles: (!known.roles.is_empty()).then(|| known.roles.clone()),
+            at: known.at.clone(),
+            question_id: question.map(|question| question.id.clone()),
+            question_text: question
+                .map(|question| truncate_chars(question.text.trim(), TICK_MESSAGE_TEXT_MAX_CHARS))
+                .filter(|text| !text.is_empty()),
+        })
+    }
+
+    /// Open questions first (the first `SPOTLIGHT_QUESTION_CANDIDATES_CAP`
+    /// eligible ones by priority, then recency; the first message carries
+    /// the question), then
+    /// the newest eligible messages of the last `SPOTLIGHT_MESSAGE_MAX_AGE`,
+    /// `SPOTLIGHT_CANDIDATES_CAP` in total. Ids are unique.
+    fn spotlight_candidates(&self, now: Instant) -> Vec<CohostSpotlightCandidate> {
+        let mut candidates: Vec<CohostSpotlightCandidate> = Vec::new();
+        let mut ids: HashSet<&str> = HashSet::new();
+        let mut questions: Vec<&CohostQuestion> = self.questions.iter().collect();
+        questions.sort_by(|a, b| {
+            priority_rank(a.priority)
+                .cmp(&priority_rank(b.priority))
+                .then_with(|| b.updated_at.cmp(&a.updated_at))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        for question in questions {
+            if candidates.len() >= SPOTLIGHT_QUESTION_CANDIDATES_CAP {
+                break;
+            }
+            let Some(message_id) = question.message_ids.first() else {
+                continue;
+            };
+            if ids.contains(message_id.as_str()) {
+                continue;
+            }
+            if let Some(candidate) = self.spotlight_candidate(message_id, Some(question)) {
+                ids.insert(message_id.as_str());
+                candidates.push(candidate);
+            }
+        }
+        // `known_ids` is note order, so the tail is the newest.
+        for message_id in self.known_ids.iter().rev() {
+            if candidates.len() >= SPOTLIGHT_CANDIDATES_CAP {
+                break;
+            }
+            let Some(known) = self.known.get(message_id) else {
+                continue;
+            };
+            if now.saturating_duration_since(known.noted_at) > SPOTLIGHT_MESSAGE_MAX_AGE {
+                break;
+            }
+            if ids.contains(message_id.as_str()) {
+                continue;
+            }
+            if let Some(candidate) = self.spotlight_candidate(message_id, None) {
+                ids.insert(message_id.as_str());
+                candidates.push(candidate);
+            }
+        }
+        candidates
+    }
+
+    fn build_spotlight_request(
+        &mut self,
+        transcript: &TranscriptSnapshot,
+        candidates: Vec<CohostSpotlightCandidate>,
+        now: Instant,
+    ) -> CohostSpotlightRequest {
+        self.spotlight.seq = self.spotlight.seq.saturating_add(1);
+        self.spotlight.in_flight = true;
+        self.spotlight.last_call_at = Some(now);
+        self.spotlight.last_version = Some(transcript.version);
+        let mut request = CohostSpotlightRequest {
+            client_version: DESKTOP_CLIENT_VERSION.to_string(),
+            session_client_id: self.session_id.clone(),
+            consent_to_process_chat: self.consent,
+            transcript: transcript.text.clone(),
+            seq: self.spotlight.seq,
+            candidates,
+        };
+        trim_spotlight_request_to_budget(&mut request, COHOST_SPOTLIGHT_MAX_BODY_BYTES);
+        request
+    }
+
+    /// Merge one spotlight answer. The best `about` at or above the threshold
+    /// becomes (or refreshes) the spotlight — highest score, tie to the
+    /// earliest message; a match on a message that is flagged, deleted or
+    /// unknown by now is dropped. `answered` at or above its threshold on
+    /// `SPOTLIGHT_ANSWERED_STREAK` calls in a row resolves the question.
+    fn apply_spotlight_response(
+        &mut self,
+        response: CohostSpotlightResponse,
+        now: Instant,
+        now_iso: &str,
+    ) -> SpotlightOutcome {
+        self.spotlight.in_flight = false;
+        self.spotlight.failures = 0;
+        self.spotlight.off_until = None;
+        let mut outcome = SpotlightOutcome::default();
+
+        let mut best: Option<(String, Option<String>, f64, String)> = None;
+        let mut hits: HashSet<String> = HashSet::new();
+        for matched in &response.matches {
+            let Some(known) = self.spotlight_eligible(&matched.message_id) else {
+                continue;
+            };
+            let about = unit_interval(matched.about).unwrap_or(0.0);
+            if about >= SPOTLIGHT_ABOUT_THRESHOLD {
+                let better = match &best {
+                    None => true,
+                    Some((_, _, best_about, best_at)) => {
+                        about > *best_about || (about == *best_about && known.at < *best_at)
+                    }
+                };
+                if better {
+                    best = Some((
+                        matched.message_id.clone(),
+                        matched.question_id.clone(),
+                        about,
+                        known.at.clone(),
+                    ));
+                }
+            }
+            if let (Some(question_id), Some(answered)) = (
+                &matched.question_id,
+                matched.answered.and_then(unit_interval),
+            ) && answered >= SPOTLIGHT_ANSWERED_THRESHOLD
+                && self
+                    .questions
+                    .iter()
+                    .any(|question| &question.id == question_id)
+            {
+                hits.insert(question_id.clone());
+            }
+        }
+
+        if self.expire_spotlight(now) {
+            outcome.changed = true;
+        }
+        if let Some((message_id, question_id, about, _)) = best {
+            let expires_at = now + SPOTLIGHT_EXPIRY;
+            let expires_at_iso = iso_after(now, expires_at);
+            match self.spotlight.current.as_mut() {
+                Some(current) if current.message_id == message_id => {
+                    current.score = about;
+                    current.question_id = question_id;
+                    current.expires_at = expires_at;
+                    current.expires_at_iso = expires_at_iso;
+                }
+                _ => {
+                    self.spotlight.current = Some(SpotlightRecord {
+                        message_id: message_id.clone(),
+                        question_id,
+                        score: about,
+                        at_iso: now_iso.to_string(),
+                        expires_at,
+                        expires_at_iso,
+                    });
+                    outcome.spotlight_set = Some((message_id, about));
+                }
+            }
+            outcome.changed = true;
+        }
+
+        // A call that does not say "answered" breaks the streak.
+        self.spotlight
+            .answered_streak
+            .retain(|question_id, _| hits.contains(question_id));
+        let mut resolve: Vec<String> = Vec::new();
+        for question_id in hits {
+            let streak = self
+                .spotlight
+                .answered_streak
+                .entry(question_id.clone())
+                .or_insert(0);
+            *streak += 1;
+            if *streak >= SPOTLIGHT_ANSWERED_STREAK {
+                resolve.push(question_id);
+            }
+        }
+        resolve.sort();
+        for question_id in resolve {
+            self.spotlight.answered_streak.remove(&question_id);
+            if self.resolve_by_voice(&question_id, now, now_iso) {
+                outcome.changed = true;
+                outcome.resolved.push(question_id);
+            }
+        }
+        outcome
+    }
+
+    /// The lane's breaker (D12: degrade to nothing). Nothing here touches the
+    /// tick's status, reason, detail or backoff.
+    fn apply_spotlight_failure(
+        &mut self,
+        error: &CohostApiError,
+        now: Instant,
+    ) -> SpotlightOutcome {
+        self.spotlight.in_flight = false;
+        let unavailable = error.detail.status == Some(404)
+            || error.kind == CohostApiErrorKind::PremiumRequired
+            || matches!(
+                error.detail.code.as_str(),
+                "spotlight-disabled" | "judge-unconfigured" | "premium-required"
+            );
+        let off = if unavailable {
+            Some(SPOTLIGHT_UNAVAILABLE_OFF)
+        } else if let CohostApiErrorKind::QuotaExhausted { retry_after } = error.kind {
+            Some(retry_after.unwrap_or(SPOTLIGHT_UNAVAILABLE_OFF))
+        } else {
+            self.spotlight.failures += 1;
+            (self.spotlight.failures >= SPOTLIGHT_BREAKER_FAILURES).then_some(SPOTLIGHT_BREAKER_OFF)
+        };
+        if let Some(off) = off {
+            self.spotlight.failures = 0;
+            self.spotlight.off_until = Some(now + off);
+        }
+        SpotlightOutcome {
+            lane_off_for: off,
+            ..SpotlightOutcome::default()
+        }
     }
 
     // --- Automatic on-stream cards (plan 060 S1) -----------------------------
@@ -1677,6 +2330,66 @@ pub(crate) fn tick_due(
     now.duration_since(anchor) >= TICK_IDLE_INTERVAL
 }
 
+/// Spotlight cadence, pure for the test matrix (D7): a call goes out when the
+/// transcript window changed since the last call, at least
+/// `SPOTLIGHT_DEBOUNCE` after the latest final, at least `SPOTLIGHT_MIN_GAP`
+/// after the previous call, never while one is outstanding, never while the
+/// breaker holds the lane, never on an empty window.
+pub(crate) fn spotlight_due(
+    window: &TranscriptSnapshot,
+    last_version: Option<u64>,
+    last_call_at: Option<Instant>,
+    in_flight: bool,
+    off_until: Option<Instant>,
+    now: Instant,
+) -> bool {
+    if in_flight || window.text.is_empty() {
+        return false;
+    }
+    if off_until.is_some_and(|until| now < until) {
+        return false;
+    }
+    if last_version == Some(window.version) {
+        return false;
+    }
+    let Some(last_final) = window.last_final_at else {
+        return false;
+    };
+    if now.saturating_duration_since(last_final) < SPOTLIGHT_DEBOUNCE {
+        return false;
+    }
+    if last_call_at.is_some_and(|last| now.saturating_duration_since(last) < SPOTLIGHT_MIN_GAP) {
+        return false;
+    }
+    true
+}
+
+/// Drop candidates from the end (the oldest plain messages go first, the
+/// questions last) until the JSON body fits the server's byte budget. At
+/// least one candidate always stays.
+pub(crate) fn trim_spotlight_request_to_budget(
+    request: &mut CohostSpotlightRequest,
+    max_bytes: usize,
+) {
+    while request.candidates.len() > 1
+        && serde_json::to_vec(request)
+            .map(|body| body.len())
+            .unwrap_or(0)
+            > max_bytes
+    {
+        request.candidates.pop();
+    }
+}
+
+fn priority_rank(priority: CohostPriority) -> u8 {
+    match priority {
+        CohostPriority::High => 0,
+        CohostPriority::Normal => 1,
+        CohostPriority::Low => 2,
+        CohostPriority::Unknown => 3,
+    }
+}
+
 /// Earliest instant the scheduler could send the next tick, pure for the test
 /// matrix and `None` on an empty delta. The burst rule (>= 5 pending) fires as
 /// soon as the 8 s min gap allows; the trickle rule fires at anchor + 20 s; a
@@ -1790,6 +2503,9 @@ pub struct CohostEngine {
     generation: u64,
     session: Option<CohostSession>,
     scheduler: Option<JoinHandle<()>>,
+    /// The spotlight lane's own poll loop (plan 060 S3): it shares the engine
+    /// lock but never the tick's await, so a slow tick cannot delay it.
+    spotlight_scheduler: Option<JoinHandle<()>>,
     /// Engine-wide counter for automatic-card commands: never repeats across
     /// sessions, so the renderer can key on it alone.
     auto_highlight_generation: u64,
@@ -1802,6 +2518,7 @@ impl CohostEngine {
             generation: 0,
             session: None,
             scheduler: None,
+            spotlight_scheduler: None,
             auto_highlight_generation: 0,
         }
     }
@@ -1847,6 +2564,9 @@ impl CohostEngine {
         if let Some(handle) = self.scheduler.take() {
             handle.abort();
         }
+        if let Some(handle) = self.spotlight_scheduler.take() {
+            handle.abort();
+        }
         self.generation = self.generation.wrapping_add(1);
         self.session.take().is_some()
     }
@@ -1865,12 +2585,12 @@ impl CohostEngine {
     /// One scheduler pass of the automatic-card policy (plan 060 S1). The
     /// overlay is observed on every pass (so the ledger stays true while the
     /// setting is off); the pick runs only while listening with picks or
-    /// voice enabled. Returns the new command when the engine decided.
+    /// voice enabled. The Voice source is the session's live spotlight (S3).
+    /// Returns the new command when the engine decided.
     pub(crate) fn evaluate_auto_highlight(
         &mut self,
         generation: u64,
         overlay: &OverlayObservation,
-        voice_message_id: Option<&str>,
         now: Instant,
     ) -> Option<CohostAutoHighlight> {
         let picks_enabled = self.settings.auto_highlight;
@@ -1883,19 +2603,30 @@ impl CohostEngine {
         if session.status != CohostStatus::Listening || !(picks_enabled || voice_enabled) {
             return None;
         }
-        let voice = voice_message_id.and_then(|message_id| {
-            session.auto_candidate(
-                message_id,
-                CohostAutoHighlightSource::Voice,
-                CohostHighlightType::Other,
-                0.0,
-                now,
-            )
-        });
+        let voice = session
+            .spotlight_message_id(now)
+            .map(str::to_string)
+            .and_then(|message_id| {
+                session.auto_candidate(
+                    &message_id,
+                    CohostAutoHighlightSource::Voice,
+                    CohostHighlightType::Other,
+                    0.0,
+                    now,
+                )
+            });
         let input = session.auto_highlight_input(picks_enabled, voice_enabled, voice, now);
         let decision = auto_highlight_pick(&input)?;
         self.auto_highlight_generation = self.auto_highlight_generation.wrapping_add(1).max(1);
         Some(session.apply_auto_decision(decision, self.auto_highlight_generation, now))
+    }
+
+    #[cfg(test)]
+    fn snapshot_at_for_test(&self, now: Instant) -> CohostState {
+        self.session
+            .as_ref()
+            .map(|session| session.snapshot_at(now))
+            .unwrap_or_else(CohostState::off)
     }
 
     /// Messages buffered for the next tick (0 without a session).
@@ -1911,6 +2642,99 @@ impl CohostEngine {
             .as_ref()
             .map(|session| session.highlights.len())
             .unwrap_or(0)
+    }
+
+    fn has_spotlight(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|session| session.spotlight.current.is_some())
+    }
+
+    /// One pass of the spotlight lane (plan 060 S3, D7). Same run
+    /// preconditions as the tick (enabled, Premium, consent, signed in) but a
+    /// silent `Idle` instead of a paused reason: the tick owns the pause and
+    /// its copy. Sends only while listening, on the lane's own cadence, with
+    /// at least one candidate.
+    pub(crate) fn prepare_spotlight(
+        &mut self,
+        generation: u64,
+        signed_in: bool,
+        premium: bool,
+        transcript: &TranscriptSnapshot,
+        now: Instant,
+    ) -> SpotlightPass {
+        if !self.settings.enabled {
+            return SpotlightPass::Stopped;
+        }
+        let Some(session) = self.session.as_mut() else {
+            return SpotlightPass::Stopped;
+        };
+        if session.generation != generation {
+            return SpotlightPass::Stopped;
+        }
+        if session.status != CohostStatus::Listening || !premium || !session.consent || !signed_in {
+            return SpotlightPass::Idle;
+        }
+        if !spotlight_due(
+            transcript,
+            session.spotlight.last_version,
+            session.spotlight.last_call_at,
+            session.spotlight.in_flight,
+            session.spotlight.off_until,
+            now,
+        ) {
+            return SpotlightPass::Idle;
+        }
+        let candidates = session.spotlight_candidates(now);
+        if candidates.is_empty() {
+            return SpotlightPass::Idle;
+        }
+        SpotlightPass::Send(PreparedSpotlight {
+            request: session.build_spotlight_request(transcript, candidates, now),
+            generation,
+        })
+    }
+
+    /// Merge a spotlight outcome. `None` (and nothing changes) when the
+    /// answer belongs to a replaced session or generation.
+    pub(crate) fn apply_spotlight_result(
+        &mut self,
+        generation: u64,
+        result: Result<CohostSpotlightResponse, CohostApiError>,
+        now: Instant,
+        now_iso: &str,
+    ) -> Option<SpotlightOutcome> {
+        let session = self.session.as_mut()?;
+        if session.generation != generation {
+            return None;
+        }
+        Some(match result {
+            Ok(response) => session.apply_spotlight_response(response, now, now_iso),
+            Err(error) => session.apply_spotlight_failure(&error, now),
+        })
+    }
+
+    /// Drop an expired spotlight; true when the state just changed.
+    pub(crate) fn expire_spotlight(&mut self, generation: u64, now: Instant) -> bool {
+        self.session
+            .as_mut()
+            .filter(|session| session.generation == generation)
+            .is_some_and(|session| session.expire_spotlight(now))
+    }
+
+    fn restore_question(
+        &mut self,
+        session_id: &str,
+        question_id: &str,
+        now: Instant,
+    ) -> Result<bool, CohostError> {
+        let Some(session) = self.session.as_mut() else {
+            return Err(CohostError::SessionMismatch);
+        };
+        if session.session_id != session_id {
+            return Err(CohostError::SessionMismatch);
+        }
+        Ok(session.restore_question(question_id, now))
     }
 
     /// Decide whether the scheduler owning `generation` should send a tick now.
@@ -2011,6 +2835,26 @@ fn emit_state(state: &AppState, snapshot: &CohostState, _lifecycle_delivery: &Ow
     state.emit_event(COHOST_STATE_EVENT, snapshot.clone());
 }
 
+/// Caption-coordinator hook (plan 060 S3): a settled caption joins the
+/// transcript window. Finals only — a partial is replaced by its final. Lock,
+/// append, return: no await, no engine lock, nothing the audio path waits on.
+pub(crate) fn note_caption_final(state: &AppState, update: &CaptionsUpdate) {
+    if update.kind != CaptionUpdateKind::Final {
+        return;
+    }
+    if let Ok(mut window) = state.cohost_transcript.lock() {
+        window.push(&update.text, Instant::now());
+    }
+}
+
+/// A session boundary forgets what was said: the next session's spotlight
+/// never sees the previous stream's words.
+fn clear_transcript(state: &AppState) {
+    if let Ok(mut window) = state.cohost_transcript.lock() {
+        window.clear();
+    }
+}
+
 pub async fn cohost_status(state: &AppState) -> CohostState {
     state.cohost.lock().await.snapshot()
 }
@@ -2038,6 +2882,7 @@ pub async fn set_cohost_settings(
     let snapshot = engine.snapshot();
     drop(engine);
     if stopped {
+        clear_transcript(state);
         state.emit_log("info", "Orcle stopped: turned off in Settings.");
         emit_state(state, &snapshot, &lifecycle_delivery);
     }
@@ -2109,8 +2954,10 @@ where
         Instant::now(),
     );
     engine.scheduler = Some(spawn_scheduler(state.clone(), generation));
+    engine.spotlight_scheduler = Some(spawn_spotlight_scheduler(state.clone(), generation));
     let snapshot = engine.snapshot();
     drop(engine);
+    clear_transcript(state);
     before_state_emit.await;
     state.emit_log("info", format!("Orcle listening for session {session_id}."));
     emit_state(state, &snapshot, &lifecycle_delivery);
@@ -2135,6 +2982,9 @@ where
     let stopped = engine.stop_session();
     let snapshot = engine.snapshot();
     drop(engine);
+    if stopped {
+        clear_transcript(state);
+    }
     before_state_emit.await;
     if stopped {
         state.emit_log("info", "Orcle stopped.");
@@ -2187,6 +3037,9 @@ async fn stop_cohost_for_session_end_if_matching_impl<F>(
     let stopped = engine.stop_session();
     let snapshot = engine.snapshot();
     drop(engine);
+    if stopped {
+        clear_transcript(state);
+    }
     before_state_emit.await;
     if stopped {
         state.emit_log("info", "Orcle stopped.");
@@ -2213,11 +3066,16 @@ pub(crate) async fn note_messages_under_lifecycle_fence(
         }
         let bucket_before = pending_bucket(engine.pending_len());
         let highlights_before = engine.highlights_len();
+        let spotlight_before = engine.has_spotlight();
         engine.note_messages(messages);
         let bucket_after = pending_bucket(engine.pending_len());
-        // A tombstone that pulled a suggested comment is also news: the
-        // renderer must stop offering it now, not at the next tick.
-        if bucket_before == bucket_after && highlights_before == engine.highlights_len() {
+        // A tombstone that pulled a suggested comment (or the spotlight) is
+        // also news: the renderer must stop offering it now, not at the
+        // next tick.
+        if bucket_before == bucket_after
+            && highlights_before == engine.highlights_len()
+            && spotlight_before == engine.has_spotlight()
+        {
             return;
         }
         engine.snapshot()
@@ -2256,6 +3114,29 @@ pub async fn dismiss_question(
     params: CohostQuestionParams,
 ) -> Result<CohostState, CohostError> {
     mark_question_answered(state, params).await
+}
+
+/// `cohost.question.restore` (D9): put a voice-resolved question back. The
+/// open set gets it, the dismissed set forgets it, the recently-resolved list
+/// drops it; a question that is not there (or older than a minute) is a
+/// no-op with the current state.
+pub async fn restore_question(
+    state: &AppState,
+    params: CohostQuestionParams,
+) -> Result<CohostState, CohostError> {
+    if params.session_id.trim().is_empty() || params.question_id.trim().is_empty() {
+        return Err(CohostError::InvalidParams);
+    }
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let mut engine = state.cohost.lock().await;
+    let changed =
+        engine.restore_question(&params.session_id, &params.question_id, Instant::now())?;
+    let snapshot = engine.snapshot();
+    drop(engine);
+    if changed {
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
+    Ok(snapshot)
 }
 
 /// `liveChat.send` completion hook: a terminal sent/partial delivery that
@@ -2321,13 +3202,13 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
     let premium = premium_entitled();
     let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
     // Automatic on-stream cards: read the overlay first (its own lock, never
-    // nested with the engine's), then let the engine decide. The voice
-    // spotlight arrives with plan 060 S3; until then the Voice source is idle.
+    // nested with the engine's), then let the engine decide. The Voice
+    // source is the session's live spotlight (plan 060 S3).
     let overlay = OverlayObservation::from_highlight(&*state.comment_highlight.lock().await);
     let auto_command = {
         let mut engine = state.cohost.lock().await;
         engine
-            .evaluate_auto_highlight(generation, &overlay, None, Instant::now())
+            .evaluate_auto_highlight(generation, &overlay, Instant::now())
             .map(|command| (command, engine.snapshot()))
     };
     if let Some((command, snapshot)) = auto_command {
@@ -2445,6 +3326,117 @@ async fn run_scheduler_pass(state: &AppState, generation: u64) -> bool {
         state.emit_log(level, message);
     }
     emit_state(state, &snapshot, &lifecycle_delivery);
+    true
+}
+
+fn spawn_spotlight_scheduler(state: AppState, generation: u64) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(SCHEDULER_POLL).await;
+            if !run_spotlight_pass(&state, generation).await {
+                break;
+            }
+        }
+    })
+}
+
+/// One pass of the spotlight lane (plan 060 S3). Its own loop, not the tick
+/// scheduler's: that pass awaits the tick request inline (up to 12 s) and
+/// D7 says the lane never waits on the tick. Both share the engine lock, so
+/// a tick and a spotlight answer merge in whichever order they land.
+/// Returns false when the lane must exit.
+async fn run_spotlight_pass(state: &AppState, generation: u64) -> bool {
+    let token = crate::account::stored_session_token();
+    let premium = premium_entitled();
+    let now = Instant::now();
+    let transcript = state
+        .cohost_transcript
+        .lock()
+        .map(|window| window.snapshot(now))
+        .unwrap_or_default();
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let (expired, pass) = {
+        let mut engine = state.cohost.lock().await;
+        // The pull-up leaves the state the second it is stale, whether or
+        // not a call goes out.
+        let expired = engine
+            .expire_spotlight(generation, now)
+            .then(|| engine.snapshot());
+        let pass = engine.prepare_spotlight(generation, token.is_some(), premium, &transcript, now);
+        (expired, pass)
+    };
+    if let Some(snapshot) = expired {
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
+    let prepared = match pass {
+        SpotlightPass::Stopped => return false,
+        SpotlightPass::Idle => return true,
+        SpotlightPass::Send(prepared) => prepared,
+    };
+    drop(lifecycle_delivery);
+    let result = match (token, VideorcApiClient::new()) {
+        (Some(token), Ok(client)) => {
+            client
+                .post_cohost_spotlight(&token, &prepared.request)
+                .await
+        }
+        (None, _) => Err(CohostApiError::network(
+            "Signed out before the spotlight call.",
+        )),
+        (_, Err(error)) => Err(CohostApiError::network(error.to_string())),
+    };
+    let failure = result.as_ref().err().map(|error| {
+        format!(
+            "{}{}",
+            error.detail.code,
+            error
+                .detail
+                .status
+                .map(|status| format!(", HTTP {status}"))
+                .unwrap_or_default()
+        )
+    });
+    let lifecycle_delivery = state.live_chat_persistence.begin_delivery().await;
+    let (outcome, snapshot) = {
+        let mut engine = state.cohost.lock().await;
+        let Some(outcome) = engine.apply_spotlight_result(
+            prepared.generation,
+            result,
+            Instant::now(),
+            &chrono::Utc::now().to_rfc3339(),
+        ) else {
+            return false;
+        };
+        let snapshot = outcome.changed.then(|| engine.snapshot());
+        (outcome, snapshot)
+    };
+    if let Some((message_id, about)) = &outcome.spotlight_set {
+        state.emit_log(
+            "info",
+            format!(
+                "Orcle spotlight: the streamer is talking about {message_id} (about {about:.2})."
+            ),
+        );
+    }
+    for question_id in &outcome.resolved {
+        state.emit_log(
+            "info",
+            format!("Orcle marks question {question_id} answered on air."),
+        );
+    }
+    if let (Some(off), Some(failure)) = (outcome.lane_off_for, failure) {
+        // Quiet by design (D12): a log line, never a toast, never the tick.
+        state.emit_log(
+            "info",
+            format!(
+                "Orcle spotlight lane paused for {} s after {failure}.",
+                off.as_secs()
+            ),
+        );
+    }
+    if let Some(snapshot) = snapshot {
+        emit_state(state, &snapshot, &lifecycle_delivery);
+    }
     true
 }
 
@@ -2928,7 +3920,7 @@ mod tests {
 
         // The best pick fires once and rides the snapshot.
         let command = engine
-            .evaluate_auto_highlight(generation, &idle, None, t)
+            .evaluate_auto_highlight(generation, &idle, t)
             .unwrap();
         assert_eq!(
             command,
@@ -2947,30 +3939,30 @@ mod tests {
         // Applying: nothing else fires until the card shows up.
         assert!(
             engine
-                .evaluate_auto_highlight(generation, &idle, None, t + secs(1))
+                .evaluate_auto_highlight(generation, &idle, t + secs(1))
                 .is_none()
         );
         // Live: nothing fires while it is on stream.
         let live = live_card(&rows[1].id, secs(10));
         assert!(
             engine
-                .evaluate_auto_highlight(generation, &live, None, t + secs(2))
+                .evaluate_auto_highlight(generation, &live, t + secs(2))
                 .is_none()
         );
         // It expires at t+12; the next pick waits 45 s from then and skips
         // the previous author's row if it were the same person (it is not).
         assert!(
             engine
-                .evaluate_auto_highlight(generation, &idle, None, t + secs(13))
+                .evaluate_auto_highlight(generation, &idle, t + secs(13))
                 .is_none()
         );
         assert!(
             engine
-                .evaluate_auto_highlight(generation, &idle, None, t + secs(56))
+                .evaluate_auto_highlight(generation, &idle, t + secs(56))
                 .is_none()
         );
         let second = engine
-            .evaluate_auto_highlight(generation, &idle, None, t + secs(57))
+            .evaluate_auto_highlight(generation, &idle, t + secs(57))
             .unwrap();
         assert_eq!(second.message_id, rows[0].id);
         assert_eq!(second.generation, 2);
@@ -2979,7 +3971,7 @@ mod tests {
         // A replaced generation never decides.
         assert!(
             engine
-                .evaluate_auto_highlight(generation + 1, &idle, None, t + secs(120))
+                .evaluate_auto_highlight(generation + 1, &idle, t + secs(120))
                 .is_none()
         );
     }
@@ -3009,21 +4001,21 @@ mod tests {
         let manual = live_card(&rows[0].id, secs(4));
         assert!(
             engine
-                .evaluate_auto_highlight(generation, &manual, None, t)
+                .evaluate_auto_highlight(generation, &manual, t)
                 .is_none()
         );
         assert!(
             engine
-                .evaluate_auto_highlight(generation, &idle, None, t + secs(5))
+                .evaluate_auto_highlight(generation, &idle, t + secs(5))
                 .is_none()
         );
         assert!(
             engine
-                .evaluate_auto_highlight(generation, &idle, None, t + secs(48))
+                .evaluate_auto_highlight(generation, &idle, t + secs(48))
                 .is_none()
         );
         let first = engine
-            .evaluate_auto_highlight(generation, &idle, None, t + secs(49))
+            .evaluate_auto_highlight(generation, &idle, t + secs(49))
             .unwrap();
         assert_eq!(first.message_id, rows[1].id);
 
@@ -3031,11 +4023,11 @@ mod tests {
         // and the policy moves on without re-asking for the same message.
         assert!(
             engine
-                .evaluate_auto_highlight(generation, &idle, None, t + secs(50))
+                .evaluate_auto_highlight(generation, &idle, t + secs(50))
                 .is_none()
         );
         let next = engine
-            .evaluate_auto_highlight(generation, &idle, None, t + secs(58))
+            .evaluate_auto_highlight(generation, &idle, t + secs(58))
             .unwrap();
         assert_eq!(next.message_id, rows[2].id);
         assert_eq!(next.generation, 2);
@@ -3056,7 +4048,7 @@ mod tests {
         // No history carried over: the new session fires at once, with the
         // engine-wide generation still counting up.
         let command = engine
-            .evaluate_auto_highlight(generation, &idle, None, t + secs(1))
+            .evaluate_auto_highlight(generation, &idle, t + secs(1))
             .unwrap();
         assert_eq!(command.message_id, rows[1].id);
         assert_eq!(command.generation, 3);
@@ -3069,15 +4061,993 @@ mod tests {
         let mut tick = response(Vec::new());
         tick.highlights = vec![tick_highlight(&rows[0].id, 0.9, CohostHighlightType::Joke)];
         assert!(off.apply_tick_result(generation, 0, Ok(tick), t, "2026-08-22T10:00:20Z"));
-        assert!(
-            off.evaluate_auto_highlight(generation, &idle, None, t)
-                .is_none()
-        );
+        assert!(off.evaluate_auto_highlight(generation, &idle, t).is_none());
         assert_eq!(off.snapshot().auto_highlight, None);
         assert!(
             serde_json::to_value(off.snapshot())
                 .unwrap()
                 .get("autoHighlight")
+                .is_none()
+        );
+    }
+
+    // --- Spotlight lane (plan 060 S3) ------------------------------------------
+
+    const ISO: &str = "2026-08-22T10:00:20Z";
+
+    fn transcript(text: &str, version: u64, last_final_at: Instant) -> TranscriptSnapshot {
+        TranscriptSnapshot {
+            text: text.to_string(),
+            version,
+            last_final_at: Some(last_final_at),
+        }
+    }
+
+    fn spotlight_match(
+        message_id: &str,
+        about: f64,
+        question: Option<(&str, f64)>,
+    ) -> crate::videorc_api::CohostSpotlightMatch {
+        crate::videorc_api::CohostSpotlightMatch {
+            message_id: message_id.to_string(),
+            question_id: question.map(|(id, _)| id.to_string()),
+            about,
+            answered: question.map(|(_, answered)| answered),
+        }
+    }
+
+    fn spotlight_response(
+        matches: Vec<crate::videorc_api::CohostSpotlightMatch>,
+    ) -> CohostSpotlightResponse {
+        CohostSpotlightResponse {
+            seq: 1,
+            matches,
+            usage: None,
+        }
+    }
+
+    /// Drive one spotlight call through `prepare_spotlight`; the transcript
+    /// changed (`version`) and its last final landed one second ago. A fresh
+    /// chat row lands first so the 120 s candidate window is never empty
+    /// however far the test clock has moved.
+    fn send_spotlight(
+        engine: &mut CohostEngine,
+        generation: u64,
+        version: u64,
+        now: Instant,
+    ) -> Option<PreparedSpotlight> {
+        let seq = 1000 + u32::try_from(version).unwrap_or(0);
+        let fresh = chat_message(
+            "session-1",
+            seq,
+            &format!("2026-08-22T12:{:02}:{:02}Z", (seq / 60) % 60, seq % 60),
+        );
+        engine.note_messages_at(&[fresh], now);
+        match engine.prepare_spotlight(
+            generation,
+            true,
+            true,
+            &transcript("so about the keyboard", version, now - secs(1)),
+            now,
+        ) {
+            SpotlightPass::Send(prepared) => Some(prepared),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn transcript_window_trims_by_time_and_chars() {
+        let start = Instant::now();
+        let mut window = TranscriptWindow::default();
+        window.push("  hello   world ", start);
+        assert_eq!(window.snapshot(start).text, "hello world");
+        assert_eq!(window.snapshot(start).version, 1);
+        // An empty final is not news.
+        window.push("   ", start + secs(1));
+        assert_eq!(window.snapshot(start + secs(1)).version, 1);
+        window.push("second", start + secs(5));
+        let snapshot = window.snapshot(start + secs(5));
+        assert_eq!(snapshot.text, "hello world second");
+        assert_eq!(snapshot.version, 2);
+        assert_eq!(snapshot.last_final_at, Some(start + secs(5)));
+        // Time: a final leaves the snapshot 20 s after it landed, and is
+        // trimmed for real on the next push.
+        assert_eq!(window.snapshot(start + secs(19)).text, "hello world second");
+        assert_eq!(window.snapshot(start + secs(20)).text, "second");
+        window.push("third", start + secs(21));
+        assert_eq!(window.finals.len(), 2);
+        assert_eq!(window.snapshot(start + secs(21)).text, "second third");
+        assert_eq!(window.snapshot(start + secs(60)).text, "");
+        window.clear();
+        assert_eq!(window.snapshot(start + secs(21)).text, "");
+        assert_eq!(window.snapshot(start + secs(21)).last_final_at, None);
+        assert_eq!(window.finals.len(), 0);
+
+        // Chars: the joined text never exceeds 800; the oldest finals go.
+        let mut window = TranscriptWindow::default();
+        for step in 0..10u64 {
+            window.push(&"a".repeat(100), start + Duration::from_millis(step));
+        }
+        let text = window.snapshot(start + secs(1)).text;
+        assert!(text.chars().count() <= SPOTLIGHT_TRANSCRIPT_MAX_CHARS);
+        assert_eq!(window.finals.len(), 7);
+        assert_eq!(text.chars().count(), 7 * 100 + 6);
+        // One oversized final keeps its tail.
+        let mut window = TranscriptWindow::default();
+        window.push(&format!("{}TAIL", "b".repeat(900)), start);
+        let text = window.snapshot(start).text;
+        assert_eq!(text.chars().count(), SPOTLIGHT_TRANSCRIPT_MAX_CHARS);
+        assert!(text.ends_with("TAIL"));
+    }
+
+    #[test]
+    fn spotlight_cadence_matrix_matches_the_contract() {
+        let start = Instant::now();
+        let empty = TranscriptSnapshot {
+            text: String::new(),
+            version: 3,
+            last_final_at: Some(start),
+        };
+        // Nothing said: never.
+        assert!(!spotlight_due(
+            &empty,
+            None,
+            None,
+            false,
+            None,
+            start + secs(5)
+        ));
+        // First call: one second after the final.
+        let first = transcript("words", 1, start);
+        assert!(!spotlight_due(
+            &first,
+            None,
+            None,
+            false,
+            None,
+            start + Duration::from_millis(999)
+        ));
+        assert!(spotlight_due(
+            &first,
+            None,
+            None,
+            false,
+            None,
+            start + secs(1)
+        ));
+        // Never while one is outstanding.
+        assert!(!spotlight_due(
+            &first,
+            None,
+            None,
+            true,
+            None,
+            start + secs(5)
+        ));
+        // The window did not change since the last call: never.
+        assert!(!spotlight_due(
+            &first,
+            Some(1),
+            Some(start + secs(1)),
+            false,
+            None,
+            start + secs(30)
+        ));
+        // Changed, but within 2.5 s of the previous call: wait.
+        let second = transcript("more words", 2, start + secs(1));
+        let last_call = Some(start + secs(1));
+        assert!(!spotlight_due(
+            &second,
+            Some(1),
+            last_call,
+            false,
+            None,
+            start + secs(3)
+        ));
+        assert!(spotlight_due(
+            &second,
+            Some(1),
+            last_call,
+            false,
+            None,
+            start + Duration::from_millis(3500)
+        ));
+        // Breaker: closed until `off_until`, then open.
+        let off = Some(start + secs(60));
+        assert!(!spotlight_due(
+            &second,
+            Some(1),
+            None,
+            false,
+            off,
+            start + secs(59)
+        ));
+        assert!(spotlight_due(
+            &second,
+            Some(1),
+            None,
+            false,
+            off,
+            start + secs(60)
+        ));
+    }
+
+    #[test]
+    fn spotlight_breaker_transitions_including_retry_after() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..3);
+        engine.note_messages_at(&rows, start);
+        let mut t = start + secs(2);
+        let mut version = 1;
+        let mut fail =
+            |engine: &mut CohostEngine, t: Instant, version: u64, error: CohostApiError| {
+                let prepared = send_spotlight(engine, generation, version, t).expect("lane open");
+                assert_eq!(prepared.generation, generation);
+                engine
+                    .apply_spotlight_result(generation, Err(error), t, ISO)
+                    .unwrap()
+            };
+
+        // Two failures in a row: the lane stays open.
+        for _ in 0..2 {
+            let outcome = fail(
+                &mut engine,
+                t,
+                version,
+                server_error(502, "ai-gateway-error", "boom"),
+            );
+            assert_eq!(outcome.lane_off_for, None);
+            assert!(!outcome.changed);
+            t += secs(3);
+            version += 1;
+        }
+        // The third closes it for 60 s.
+        let outcome = fail(
+            &mut engine,
+            t,
+            version,
+            server_error(502, "ai-gateway-error", "boom"),
+        );
+        assert_eq!(outcome.lane_off_for, Some(secs(60)));
+        t += secs(3);
+        version += 1;
+        assert!(send_spotlight(&mut engine, generation, version, t).is_none());
+        t += secs(60);
+        version += 1;
+        assert!(send_spotlight(&mut engine, generation, version, t).is_some());
+        // A success resets the count: two more failures keep it open.
+        assert!(
+            engine
+                .apply_spotlight_result(generation, Ok(spotlight_response(Vec::new())), t, ISO)
+                .unwrap()
+                .lane_off_for
+                .is_none()
+        );
+        t += secs(3);
+        version += 1;
+        for _ in 0..2 {
+            let outcome = fail(
+                &mut engine,
+                t,
+                version,
+                CohostApiError::timeout("Orcle did not answer within 3 s."),
+            );
+            assert_eq!(outcome.lane_off_for, None);
+            t += secs(3);
+            version += 1;
+        }
+        // The tick's state never moved: still listening, no reason, no detail.
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.status, CohostStatus::Listening);
+        assert_eq!(snapshot.reason, None);
+        assert_eq!(snapshot.detail, None);
+        assert!(!snapshot.tick_in_flight);
+
+        // "Not on this server" answers close the lane for five minutes.
+        for error in [
+            server_error(404, "not-found", "no route"),
+            server_error(503, "spotlight-disabled", "off"),
+            server_error(503, "judge-unconfigured", "no model"),
+            server_error(403, "premium-required", "upgrade"),
+        ] {
+            let outcome = fail(&mut engine, t, version, error);
+            assert_eq!(outcome.lane_off_for, Some(secs(300)));
+            t += secs(3);
+            version += 1;
+            assert!(send_spotlight(&mut engine, generation, version, t).is_none());
+            t += secs(300);
+            version += 1;
+            assert!(send_spotlight(&mut engine, generation, version, t).is_some());
+            engine.apply_spotlight_result(generation, Ok(spotlight_response(Vec::new())), t, ISO);
+            t += secs(3);
+            version += 1;
+        }
+        // Quota: off until Retry-After; without one, the unavailable window.
+        let quota = crate::videorc_api::classify_cohost_failure(
+            429,
+            "quota-exhausted",
+            "later".to_string(),
+            Some("42"),
+        );
+        let outcome = fail(&mut engine, t, version, quota);
+        assert_eq!(outcome.lane_off_for, Some(secs(42)));
+        t += secs(3);
+        version += 1;
+        assert!(send_spotlight(&mut engine, generation, version, t).is_none());
+        t += secs(40);
+        version += 1;
+        assert!(send_spotlight(&mut engine, generation, version, t).is_some());
+        let outcome = engine
+            .apply_spotlight_result(
+                generation,
+                Err(server_error(429, "quota-exhausted", "later")),
+                t,
+                ISO,
+            )
+            .unwrap();
+        assert_eq!(outcome.lane_off_for, Some(secs(300)));
+        assert_eq!(engine.snapshot().status, CohostStatus::Listening);
+        assert_eq!(engine.snapshot().reason, None);
+    }
+
+    #[test]
+    fn spotlight_preconditions_and_stop_conditions() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..2);
+        engine.note_messages_at(&rows, start);
+        let t = start + secs(2);
+        let window = transcript("words", 1, t - secs(1));
+        // Not Premium / signed out: idle, never a pause of its own.
+        assert_eq!(
+            engine.prepare_spotlight(generation, true, false, &window, t),
+            SpotlightPass::Idle
+        );
+        assert_eq!(
+            engine.prepare_spotlight(generation, false, true, &window, t),
+            SpotlightPass::Idle
+        );
+        assert_eq!(engine.snapshot().status, CohostStatus::Listening);
+        // A replaced generation stops the lane.
+        assert_eq!(
+            engine.prepare_spotlight(generation + 1, true, true, &window, t),
+            SpotlightPass::Stopped
+        );
+        // Paused engine (tick precondition): idle.
+        engine
+            .session
+            .as_mut()
+            .unwrap()
+            .pause(CohostReason::SignedOut, t);
+        assert_eq!(
+            engine.prepare_spotlight(generation, true, true, &window, t),
+            SpotlightPass::Idle
+        );
+        engine.session.as_mut().unwrap().status = CohostStatus::Listening;
+        // No candidates (nothing noted in the last 120 s): idle.
+        let mut empty = CohostEngine::new(enabled_settings());
+        let empty_generation = empty.start_session("session-2".to_string(), true, None, start);
+        assert_eq!(
+            empty.prepare_spotlight(empty_generation, true, true, &window, t),
+            SpotlightPass::Idle
+        );
+        // All good: the request carries the transcript, the seq and consent.
+        let SpotlightPass::Send(prepared) =
+            engine.prepare_spotlight(generation, true, true, &window, t)
+        else {
+            panic!("expected a spotlight call");
+        };
+        assert_eq!(prepared.request.seq, 1);
+        assert_eq!(prepared.request.transcript, "words");
+        assert!(prepared.request.consent_to_process_chat);
+        assert_eq!(prepared.request.session_client_id, "session-1");
+        assert_eq!(prepared.request.candidates.len(), 2);
+        let json = serde_json::to_value(&prepared.request).unwrap();
+        assert_eq!(
+            json.as_object().unwrap().keys().collect::<Vec<_>>(),
+            [
+                "candidates",
+                "clientVersion",
+                "consentToProcessChat",
+                "seq",
+                "sessionClientId",
+                "transcript"
+            ]
+        );
+        assert_eq!(json["candidates"][0]["roles"], serde_json::json!(["mod"]));
+        assert!(json["candidates"][0].get("questionId").is_none());
+        // Turned off: stopped.
+        engine.settings.enabled = false;
+        assert_eq!(
+            engine.prepare_spotlight(generation, true, true, &window, t),
+            SpotlightPass::Stopped
+        );
+    }
+
+    #[test]
+    fn spotlight_merges_with_a_concurrent_tick() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..6);
+        engine.note_messages_at(&rows, start);
+        let t = start + secs(2);
+        // The spotlight call goes out first...
+        let prepared = send_spotlight(&mut engine, generation, 1, t).unwrap();
+        // ...then a burst tick goes out and lands while it is outstanding.
+        let tick = engine.prepare_tick(generation, true, true, t).unwrap();
+        assert!(engine.snapshot().tick_in_flight);
+        assert!(engine.apply_tick_result(
+            tick.generation,
+            0,
+            Ok(response(vec![question("q-1", &[&rows[0].id])])),
+            t + secs(1),
+            ISO
+        ));
+        // The spotlight answer lands last: both merge by message id.
+        let outcome = engine
+            .apply_spotlight_result(
+                prepared.generation,
+                Ok(spotlight_response(vec![
+                    spotlight_match(&rows[0].id, 0.9, Some(("q-1", 0.85))),
+                    spotlight_match(&rows[1].id, 0.7, None),
+                ])),
+                t + secs(2),
+                ISO,
+            )
+            .unwrap();
+        assert!(outcome.changed);
+        assert_eq!(outcome.spotlight_set, Some((rows[0].id.clone(), 0.9)));
+        assert!(outcome.resolved.is_empty());
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.questions.len(), 1);
+        assert_eq!(snapshot.tick_seq, 1);
+        assert!(!snapshot.tick_in_flight);
+        assert_eq!(snapshot.status, CohostStatus::Listening);
+        let spotlight = snapshot.spotlight.unwrap();
+        assert_eq!(spotlight.message_id, rows[0].id);
+        assert_eq!(spotlight.question_id.as_deref(), Some("q-1"));
+        assert_eq!(spotlight.score, 0.9);
+        assert_eq!(spotlight.at, ISO);
+        assert!(chrono::DateTime::parse_from_rfc3339(&spotlight.expires_at).is_ok());
+
+        // The other order: a tick that flags the spotlit message while the
+        // next spotlight call is outstanding clears the spotlight, and the
+        // spotlight answer for that message is dropped on receipt.
+        let t2 = t + secs(5);
+        let prepared = send_spotlight(&mut engine, generation, 2, t2).unwrap();
+        let tick = engine
+            .prepare_tick(generation, true, true, t2 + secs(10))
+            .unwrap_err();
+        assert_eq!(tick, TickGate::Idle);
+        let mut flagged = response(Vec::new());
+        flagged.keep_questions = true;
+        flagged.flags = vec![flag(
+            &rows[0].id,
+            CohostFlagKind::Harassment,
+            CohostFlagSeverity::High,
+        )];
+        engine.session.as_mut().unwrap().in_flight = true;
+        assert!(engine.apply_tick_result(generation, 0, Ok(flagged), t2 + secs(1), ISO));
+        assert_eq!(engine.snapshot().spotlight, None);
+        let outcome = engine
+            .apply_spotlight_result(
+                prepared.generation,
+                Ok(spotlight_response(vec![spotlight_match(
+                    &rows[0].id,
+                    0.99,
+                    None,
+                )])),
+                t2 + secs(2),
+                ISO,
+            )
+            .unwrap();
+        assert_eq!(outcome.spotlight_set, None);
+        assert_eq!(engine.snapshot().spotlight, None);
+        assert_eq!(engine.snapshot().questions.len(), 1);
+        // A late answer for a replaced session changes nothing.
+        assert!(
+            engine
+                .apply_spotlight_result(
+                    generation + 1,
+                    Ok(spotlight_response(vec![spotlight_match(
+                        &rows[1].id,
+                        0.99,
+                        None
+                    )])),
+                    t2 + secs(3),
+                    ISO,
+                )
+                .is_none()
+        );
+        assert_eq!(engine.snapshot().spotlight, None);
+    }
+
+    #[test]
+    fn spotlight_candidates_cap_exclude_owner_flagged_deleted_old_and_fit_the_budget() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        // An old row (noted 121 s ago), the broadcaster, a row that gets
+        // flagged, a row that gets deleted, then 30 fresh rows.
+        let old = messages("session-1", 0..1);
+        engine.note_messages_at(&old, start - secs(121));
+        let mut owner = chat_message("session-1", 1, "2026-08-22T10:01:01Z");
+        owner.author_roles = vec!["broadcaster".to_string()];
+        engine.note_messages_at(&[owner.clone()], start - secs(60));
+        let rows = messages("session-1", 2..34);
+        engine.note_messages_at(&rows, start - secs(30));
+        let flagged_id = rows[0].id.clone();
+        let deleted_id = rows[1].id.clone();
+        // Twelve open questions with mixed priorities; each first message is a
+        // fresh row. The tick also flags one row.
+        let mut tick = response(
+            (0..12)
+                .map(|index| {
+                    let mut item = question(&format!("q-{index:02}"), &[&rows[2 + index].id]);
+                    item.priority = if index % 3 == 0 {
+                        CohostPriority::High
+                    } else if index % 3 == 1 {
+                        CohostPriority::Normal
+                    } else {
+                        CohostPriority::Low
+                    };
+                    item
+                })
+                .collect(),
+        );
+        tick.flags = vec![flag(
+            &flagged_id,
+            CohostFlagKind::Spam,
+            CohostFlagSeverity::Medium,
+        )];
+        // A question whose first message is the flagged row: no candidate.
+        tick.questions.push(question("q-flagged", &[&flagged_id]));
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), start - secs(20), ISO));
+        let mut tombstone = rows[1].clone();
+        tombstone.is_deleted = true;
+        engine.note_messages_at(&[tombstone], start - secs(10));
+
+        let now = start;
+        let candidates = engine.session.as_ref().unwrap().spotlight_candidates(now);
+        assert_eq!(candidates.len(), SPOTLIGHT_CANDIDATES_CAP);
+        let ids: HashSet<&str> = candidates.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids.len(), candidates.len(), "ids are unique");
+        assert!(!ids.contains(old[0].id.as_str()), "older than 120 s");
+        assert!(!ids.contains(owner.id.as_str()), "the broadcaster");
+        assert!(!ids.contains(flagged_id.as_str()), "flagged");
+        assert!(!ids.contains(deleted_id.as_str()), "deleted");
+        // Questions first: ten of them, high priority first, then normal.
+        let with_question: Vec<&CohostSpotlightCandidate> = candidates
+            .iter()
+            .filter(|c| c.question_id.is_some())
+            .collect();
+        assert_eq!(with_question.len(), SPOTLIGHT_QUESTION_CANDIDATES_CAP);
+        assert!(
+            candidates[..SPOTLIGHT_QUESTION_CANDIDATES_CAP]
+                .iter()
+                .all(|c| c.question_id.is_some())
+        );
+        let question_ids: Vec<&str> = with_question
+            .iter()
+            .map(|c| c.question_id.as_deref().unwrap())
+            .collect();
+        assert_eq!(
+            question_ids,
+            [
+                "q-00", "q-03", "q-06", "q-09", "q-01", "q-04", "q-07", "q-10", "q-02", "q-05"
+            ]
+        );
+        assert_eq!(
+            with_question[0].question_text.as_deref(),
+            Some("What keyboard is that?")
+        );
+        assert_eq!(with_question[0].text, rows[2].message_text.trim());
+        // Then the newest plain messages, newest first.
+        let plain: Vec<&str> = candidates[SPOTLIGHT_QUESTION_CANDIDATES_CAP..]
+            .iter()
+            .map(|c| c.id.as_str())
+            .collect();
+        assert_eq!(plain.len(), 10);
+        assert_eq!(plain[0], rows[31].id);
+        let mut sorted = plain.clone();
+        sorted.sort_by(|a, b| b.cmp(a));
+        assert_eq!(plain, sorted, "newest first");
+        assert!(plain.iter().all(|id| !question_ids.contains(id)));
+
+        // Byte budget: candidates leave from the end until the body fits;
+        // at least one always stays.
+        let mut request = CohostSpotlightRequest {
+            client_version: "videorc-desktop/test".to_string(),
+            session_client_id: "session-1".to_string(),
+            consent_to_process_chat: true,
+            transcript: "t".repeat(800),
+            seq: 1,
+            candidates: (0..20)
+                .map(|index| CohostSpotlightCandidate {
+                    id: format!("m-{index}"),
+                    text: "x".repeat(500),
+                    author: "y".repeat(120),
+                    roles: None,
+                    at: ISO.to_string(),
+                    question_id: None,
+                    question_text: None,
+                })
+                .collect(),
+        };
+        let full = serde_json::to_vec(&request).unwrap().len();
+        assert!(
+            full <= COHOST_SPOTLIGHT_MAX_BODY_BYTES,
+            "20 max candidates fit: {full}"
+        );
+        trim_spotlight_request_to_budget(&mut request, COHOST_SPOTLIGHT_MAX_BODY_BYTES);
+        assert_eq!(request.candidates.len(), 20);
+        trim_spotlight_request_to_budget(&mut request, 4000);
+        assert!(request.candidates.len() < 20 && !request.candidates.is_empty());
+        assert!(serde_json::to_vec(&request).unwrap().len() <= 4000);
+        assert_eq!(request.candidates[0].id, "m-0");
+        trim_spotlight_request_to_budget(&mut request, 10);
+        assert_eq!(request.candidates.len(), 1);
+    }
+
+    #[test]
+    fn voice_resolve_needs_two_consecutive_hits_and_restore_puts_it_back() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..3);
+        engine.note_messages_at(&rows, start);
+        let t = start + secs(2);
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(vec![
+                question("q-1", &[&rows[0].id]),
+                question("q-2", &[&rows[1].id]),
+            ])),
+            t,
+            ISO
+        ));
+        let template = engine.snapshot().questions[0].clone();
+        let answered = |engine: &mut CohostEngine, at: Instant, hits: &[(&str, &str, f64)]| {
+            engine
+                .apply_spotlight_result(
+                    generation,
+                    Ok(spotlight_response(
+                        hits.iter()
+                            .map(|(id, question_id, answered)| {
+                                spotlight_match(id, 0.9, Some((question_id, *answered)))
+                            })
+                            .collect(),
+                    )),
+                    at,
+                    ISO,
+                )
+                .unwrap()
+        };
+        // One hit does nothing.
+        let outcome = answered(&mut engine, t + secs(3), &[(&rows[0].id, "q-1", 0.9)]);
+        assert!(outcome.resolved.is_empty());
+        assert_eq!(engine.snapshot().questions.len(), 2);
+        assert!(engine.snapshot().recently_resolved.is_empty());
+        // A call without the hit breaks the streak; the next hit starts over.
+        answered(&mut engine, t + secs(6), &[(&rows[0].id, "q-1", 0.3)]);
+        let outcome = answered(&mut engine, t + secs(9), &[(&rows[0].id, "q-1", 0.95)]);
+        assert!(outcome.resolved.is_empty());
+        assert_eq!(engine.snapshot().questions.len(), 2);
+        // Two in a row: resolved with reason voice, kept for a minute.
+        let outcome = answered(
+            &mut engine,
+            t + secs(12),
+            &[(&rows[0].id, "q-1", 0.8), (&rows[1].id, "q-2", 0.79)],
+        );
+        assert_eq!(outcome.resolved, vec!["q-1".to_string()]);
+        assert!(outcome.changed);
+        let snapshot = engine.snapshot();
+        assert_eq!(
+            snapshot
+                .questions
+                .iter()
+                .map(|q| q.id.as_str())
+                .collect::<Vec<_>>(),
+            ["q-2"]
+        );
+        assert_eq!(snapshot.recently_resolved.len(), 1);
+        assert_eq!(snapshot.recently_resolved[0].question.id, "q-1");
+        assert_eq!(
+            snapshot.recently_resolved[0].reason,
+            CohostResolveReason::Voice
+        );
+        assert_eq!(snapshot.recently_resolved[0].resolved_at, ISO);
+        let json = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(json["recentlyResolved"][0]["reason"], "voice");
+        assert_eq!(json["recentlyResolved"][0]["resolvedAt"], ISO);
+        assert!(json["recentlyResolved"][0]["question"]["messageIds"].is_array());
+        // A later tick cannot bring it back: it is dismissed.
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(vec![
+                question("q-1", &[&rows[0].id]),
+                question("q-2", &[&rows[1].id]),
+            ])),
+            t + secs(20),
+            ISO
+        ));
+        assert_eq!(engine.snapshot().questions.len(), 1);
+
+        // Restore: back in the open set, out of the dismissed set and the
+        // recently-resolved list; a second restore is a no-op.
+        assert_eq!(
+            engine.restore_question("session-x", "q-1", t + secs(21)),
+            Err(CohostError::SessionMismatch)
+        );
+        assert_eq!(
+            engine.restore_question("session-1", "q-1", t + secs(21)),
+            Ok(true)
+        );
+        let snapshot = engine.snapshot();
+        assert_eq!(snapshot.questions.len(), 2);
+        assert!(snapshot.questions.iter().any(|q| q.id == "q-1"));
+        assert!(snapshot.recently_resolved.is_empty());
+        assert!(
+            !engine
+                .session
+                .as_ref()
+                .unwrap()
+                .dismissed_questions
+                .contains("q-1")
+        );
+        assert!(
+            serde_json::to_value(&snapshot)
+                .unwrap()
+                .get("recentlyResolved")
+                .is_none()
+        );
+        assert_eq!(
+            engine.restore_question("session-1", "q-1", t + secs(22)),
+            Ok(false)
+        );
+        // The next tick keeps it (not dismissed any more).
+        assert!(engine.apply_tick_result(
+            generation,
+            0,
+            Ok(response(vec![question("q-1", &[&rows[0].id])])),
+            t + secs(30),
+            ISO
+        ));
+        assert_eq!(engine.snapshot().questions.len(), 1);
+        assert_eq!(engine.snapshot().questions[0].id, "q-1");
+
+        // Resolve again; after the minute it can no longer be restored and
+        // leaves the state; at most three are kept.
+        answered(&mut engine, t + secs(33), &[(&rows[0].id, "q-1", 0.9)]);
+        answered(&mut engine, t + secs(36), &[(&rows[0].id, "q-1", 0.9)]);
+        assert_eq!(
+            engine
+                .snapshot_at_for_test(t + secs(36))
+                .recently_resolved
+                .len(),
+            1
+        );
+        assert!(
+            engine
+                .snapshot_at_for_test(t + secs(96))
+                .recently_resolved
+                .is_empty()
+        );
+        assert_eq!(
+            engine.restore_question("session-1", "q-1", t + secs(96)),
+            Ok(false)
+        );
+        let session = engine.session.as_mut().unwrap();
+        for index in 0..5 {
+            session.questions.push(CohostQuestion {
+                id: format!("q-many-{index}"),
+                ..template.clone()
+            });
+            assert!(session.resolve_by_voice(&format!("q-many-{index}"), t + secs(100), ISO));
+        }
+        assert_eq!(session.recently_resolved.len(), RECENTLY_RESOLVED_CAP);
+        assert_eq!(session.recently_resolved[0].entry.question.id, "q-many-2");
+    }
+
+    #[test]
+    fn spotlight_expiry_refresh_tombstone_and_dismissed_flag() {
+        let start = Instant::now();
+        let (mut engine, generation) = running_engine(start);
+        let rows = messages("session-1", 0..3);
+        engine.note_messages_at(&rows, start);
+        let t = start + secs(2);
+        let outcome = engine
+            .apply_spotlight_result(
+                generation,
+                Ok(spotlight_response(vec![
+                    // Same score: the earliest message wins the tie.
+                    spotlight_match(&rows[1].id, 0.8, None),
+                    spotlight_match(&rows[0].id, 0.8, None),
+                    spotlight_match(&rows[2].id, 0.74, None),
+                    spotlight_match("unknown-id", 1.0, None),
+                ])),
+                t,
+                ISO,
+            )
+            .unwrap();
+        assert_eq!(outcome.spotlight_set, Some((rows[0].id.clone(), 0.8)));
+        let json = serde_json::to_value(engine.snapshot_at_for_test(t)).unwrap();
+        assert_eq!(json["spotlight"]["messageId"], rows[0].id);
+        assert!(json["spotlight"].get("questionId").is_none());
+        assert_eq!(json["spotlight"]["score"], 0.8);
+        // Below the threshold: nothing changes, the spotlight stays.
+        let outcome = engine
+            .apply_spotlight_result(
+                generation,
+                Ok(spotlight_response(vec![spotlight_match(
+                    &rows[2].id,
+                    0.5,
+                    None,
+                )])),
+                t + secs(3),
+                ISO,
+            )
+            .unwrap();
+        assert!(!outcome.changed);
+        assert_eq!(
+            engine
+                .snapshot_at_for_test(t + secs(3))
+                .spotlight
+                .unwrap()
+                .message_id,
+            rows[0].id
+        );
+        // A repeat match refreshes: still the same id, later expiry, no "set".
+        let outcome = engine
+            .apply_spotlight_result(
+                generation,
+                Ok(spotlight_response(vec![spotlight_match(
+                    &rows[0].id,
+                    0.95,
+                    None,
+                )])),
+                t + secs(10),
+                ISO,
+            )
+            .unwrap();
+        assert!(outcome.changed);
+        assert_eq!(outcome.spotlight_set, None);
+        assert!(!engine.expire_spotlight(generation, t + secs(24)));
+        let spotlight = engine.snapshot_at_for_test(t + secs(24)).spotlight.unwrap();
+        assert_eq!(spotlight.message_id, rows[0].id);
+        assert_eq!(spotlight.score, 0.95);
+        assert_eq!(spotlight.at, ISO);
+        // Expiry: gone 15 s after the last refresh, reported exactly once.
+        assert!(
+            engine
+                .expire_spotlight(generation + 1, t + secs(25))
+                .eq(&false)
+        );
+        assert_eq!(
+            engine.snapshot_at_for_test(t + secs(25)).spotlight,
+            None,
+            "the snapshot never shows an expired spotlight"
+        );
+        assert!(engine.expire_spotlight(generation, t + secs(25)));
+        assert!(!engine.expire_spotlight(generation, t + secs(26)));
+        assert!(!engine.has_spotlight());
+
+        // Tombstone: the spotlit message is deleted → the spotlight leaves.
+        engine.apply_spotlight_result(
+            generation,
+            Ok(spotlight_response(vec![spotlight_match(
+                &rows[1].id,
+                0.9,
+                None,
+            )])),
+            t + secs(30),
+            ISO,
+        );
+        assert!(engine.has_spotlight());
+        let mut tombstone = rows[1].clone();
+        tombstone.is_deleted = true;
+        engine.note_messages_at(&[tombstone], t + secs(31));
+        assert!(!engine.has_spotlight());
+        assert_eq!(engine.snapshot_at_for_test(t + secs(31)).spotlight, None);
+        // A deleted message never matches again.
+        let outcome = engine
+            .apply_spotlight_result(
+                generation,
+                Ok(spotlight_response(vec![spotlight_match(
+                    &rows[1].id,
+                    0.9,
+                    None,
+                )])),
+                t + secs(34),
+                ISO,
+            )
+            .unwrap();
+        assert_eq!(outcome.spotlight_set, None);
+        assert!(!engine.has_spotlight());
+
+        // Dismissing a flag on the spotlit message clears it too.
+        engine.apply_spotlight_result(
+            generation,
+            Ok(spotlight_response(vec![spotlight_match(
+                &rows[2].id,
+                0.9,
+                None,
+            )])),
+            t + secs(37),
+            ISO,
+        );
+        assert!(engine.has_spotlight());
+        engine.dismiss_flag("session-1", &rows[2].id).unwrap();
+        assert!(!engine.has_spotlight());
+    }
+
+    #[test]
+    fn spotlight_match_on_a_flagged_message_is_dropped_and_voice_feeds_the_pick() {
+        let start = Instant::now();
+        let mut engine = CohostEngine::new(CohostSettings {
+            voice_highlight: true,
+            ..enabled_settings()
+        });
+        let generation = engine.start_session("session-1".to_string(), true, None, start);
+        let rows = messages("session-1", 0..3);
+        engine.note_messages_at(&rows, start);
+        let t = start + secs(2);
+        let mut tick = response(Vec::new());
+        tick.flags = vec![flag(
+            &rows[1].id,
+            CohostFlagKind::Harassment,
+            CohostFlagSeverity::High,
+        )];
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), t, ISO));
+        let outcome = engine
+            .apply_spotlight_result(
+                generation,
+                Ok(spotlight_response(vec![
+                    spotlight_match(&rows[1].id, 0.99, None),
+                    spotlight_match(&rows[2].id, 0.8, None),
+                ])),
+                t + secs(1),
+                ISO,
+            )
+            .unwrap();
+        assert_eq!(outcome.spotlight_set, Some((rows[2].id.clone(), 0.8)));
+
+        // The Voice source reads the live spotlight: with `voiceHighlight`
+        // the engine puts it on stream at once (no cooldown, no age rule).
+        let idle = OverlayObservation::default();
+        let command = engine
+            .evaluate_auto_highlight(generation, &idle, t + secs(2))
+            .unwrap();
+        assert_eq!(command.message_id, rows[2].id);
+        assert_eq!(command.source, CohostAutoHighlightSource::Voice);
+        assert!(!command.refresh);
+        // Once expired, nothing more fires.
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, t + secs(40))
+                .is_none()
+        );
+        // The setting off: the spotlight still rides the state (pull-up is
+        // always on), but never goes on stream.
+        let mut quiet = CohostEngine::new(enabled_settings());
+        let generation = quiet.start_session("session-2".to_string(), true, None, start);
+        let rows = messages("session-2", 0..1);
+        quiet.note_messages_at(&rows, start);
+        quiet.apply_spotlight_result(
+            generation,
+            Ok(spotlight_response(vec![spotlight_match(
+                &rows[0].id,
+                0.9,
+                None,
+            )])),
+            t,
+            ISO,
+        );
+        assert!(quiet.snapshot_at_for_test(t).spotlight.is_some());
+        assert!(
+            quiet
+                .evaluate_auto_highlight(generation, &idle, t + secs(1))
                 .is_none()
         );
     }

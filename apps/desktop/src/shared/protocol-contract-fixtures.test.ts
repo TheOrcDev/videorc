@@ -156,7 +156,11 @@ describe('shared high-risk protocol fixture', () => {
     expect(validateBackendRpcParams('cohost.start', fixtures.cohost.startParams)).toStrictEqual(
       fixtures.cohost.startParams
     )
-    for (const method of ['cohost.question.answered', 'cohost.question.dismiss'] as const) {
+    for (const method of [
+      'cohost.question.answered',
+      'cohost.question.dismiss',
+      'cohost.question.restore'
+    ] as const) {
       expect(validateBackendRpcParams(method, fixtures.cohost.questionParams)).toStrictEqual(
         fixtures.cohost.questionParams
       )
@@ -176,6 +180,7 @@ describe('shared high-risk protocol fixture', () => {
       'cohost.stop',
       'cohost.question.answered',
       'cohost.question.dismiss',
+      'cohost.question.restore',
       'cohost.flag.dismiss'
     ] as const) {
       expect(validateBackendRpcResult(method, fixtures.cohost.state)).toStrictEqual(
@@ -252,6 +257,35 @@ describe('shared high-risk protocol fixture', () => {
     }
     expect(validateBackendEventPayload('cohost.state', futureSource)).toStrictEqual(futureSource)
     expect(fixtures.cohost.legacyState).not.toHaveProperty('autoHighlight')
+    // Plan 060 S3: the spotlight (the comment the streamer is talking about)
+    // and the voice-resolved questions. Absent until they exist (null is the
+    // serde trap); an unknown resolve reason still validates.
+    expect(fixtures.cohost.stateV2.spotlight).toStrictEqual({
+      messageId: 'session-fixture:twitch:default:message-highlight',
+      questionId: 'q_fixture',
+      score: 0.91,
+      at: '2026-08-22T10:00:20Z',
+      expiresAt: '2026-08-22T10:00:35Z'
+    })
+    expect(fixtures.cohost.stateV2.recentlyResolved).toHaveLength(1)
+    expect(fixtures.cohost.stateV2.recentlyResolved?.[0]).toMatchObject({
+      reason: 'voice',
+      resolvedAt: '2026-08-22T10:00:20Z',
+      question: fixtures.cohost.state.questions[0]
+    })
+    for (const key of ['spotlight', 'recentlyResolved'] as const) {
+      expect(() =>
+        validateBackendEventPayload('cohost.state', { ...fixtures.cohost.stateV2, [key]: null })
+      ).toThrow('cohost.state')
+      expect(fixtures.cohost.legacyState).not.toHaveProperty(key)
+    }
+    const futureReason = {
+      ...fixtures.cohost.stateV2,
+      recentlyResolved: [
+        { ...fixtures.cohost.stateV2.recentlyResolved![0], reason: 'moderator-v9' }
+      ]
+    }
+    expect(validateBackendEventPayload('cohost.state', futureReason)).toStrictEqual(futureReason)
     // `voiceHighlight` (plan 060) is part of the settings shape both ways.
     expect(fixtures.cohost.settings.voiceHighlight).toBe(false)
     expect(fixtures.cohost.settingsPatch.voiceHighlight).toBe(true)

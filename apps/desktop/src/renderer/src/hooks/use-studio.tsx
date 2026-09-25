@@ -1040,6 +1040,8 @@ export type StudioContextValue = {
   patchCohostSettings: (patch: CohostSettingsPatch) => Promise<void>
   markCohostQuestionAnswered: (questionId: string, sessionId?: string) => void
   dismissCohostQuestion: (questionId: string, sessionId?: string) => void
+  /** Put a voice-resolved question back (`cohost.question.restore`, plan 060 D9). */
+  restoreCohostQuestion: (questionId: string, sessionId?: string) => void
   dismissCohostFlag: (messageId: string, sessionId?: string) => void
   showCohostQuestionOnStream: (question: CohostQuestion) => void
   streamMetadataDraft: StreamMetadataDraft | null
@@ -3755,7 +3757,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
 
   const runCohostAction = useCallback(
     async (
-      method: 'cohost.question.answered' | 'cohost.question.dismiss' | 'cohost.flag.dismiss',
+      method:
+        | 'cohost.question.answered'
+        | 'cohost.question.dismiss'
+        | 'cohost.question.restore'
+        | 'cohost.flag.dismiss',
       params: CohostQuestionParams | CohostFlagParams
     ): Promise<CohostState> => {
       if (!client) throw new Error('Backend socket is not connected.')
@@ -3787,6 +3793,17 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const target = sessionId ?? cohostStateRef.current?.sessionId
       if (!target) return
       void runCohostAction('cohost.question.dismiss', { sessionId: target, questionId }).catch(
+        (error: unknown) => reportError(error)
+      )
+    },
+    [reportError, runCohostAction]
+  )
+
+  const restoreCohostQuestion = useCallback(
+    (questionId: string, sessionId?: string): void => {
+      const target = sessionId ?? cohostStateRef.current?.sessionId
+      if (!target) return
+      void runCohostAction('cohost.question.restore', { sessionId: target, questionId }).catch(
         (error: unknown) => reportError(error)
       )
     },
@@ -3922,10 +3939,16 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
             messageId: command.targetId
           })
         }
-        return runCohostAction(
-          command.kind === 'answered' ? 'cohost.question.answered' : 'cohost.question.dismiss',
-          { sessionId: command.sessionId, questionId: command.targetId }
-        )
+        const method =
+          command.kind === 'answered'
+            ? 'cohost.question.answered'
+            : command.kind === 'restore'
+              ? 'cohost.question.restore'
+              : 'cohost.question.dismiss'
+        return runCohostAction(method, {
+          sessionId: command.sessionId,
+          questionId: command.targetId
+        })
       })()
         .then(async (state) => {
           await window.videorc?.pushCohostActionResult?.({
@@ -13978,6 +14001,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchCohostSettings,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
+      restoreCohostQuestion,
       dismissCohostFlag,
       showCohostQuestionOnStream,
       streamMetadataDraft,
@@ -14199,6 +14223,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       patchCohostSettings,
       markCohostQuestionAnswered,
       dismissCohostQuestion,
+      restoreCohostQuestion,
       dismissCohostFlag,
       showCohostQuestionOnStream,
       streamMetadataDraft,

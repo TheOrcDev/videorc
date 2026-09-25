@@ -557,7 +557,32 @@
         "messageId": "session-fixture:twitch:default:message-highlight",
         "source": "pick",
         "refresh": false
-      }
+      },
+      "spotlight": {
+        "messageId": "session-fixture:twitch:default:message-highlight",
+        "questionId": "q_fixture",
+        "score": 0.91,
+        "at": "2026-08-22T10:00:20Z",
+        "expiresAt": "2026-08-22T10:00:35Z"
+      },
+      "recentlyResolved": [
+        {
+          "question": {
+            "id": "q_fixture",
+            "text": "What keyboard is that?",
+            "messageIds": ["session-fixture:twitch:default:message-fixture"],
+            "askers": ["Viewer"],
+            "platforms": ["twitch"],
+            "priority": "high",
+            "suggestedReply": "Keychron Q1!",
+            "fromNotes": true,
+            "firstSeenAt": "2026-08-22T10:00:00Z",
+            "updatedAt": "2026-08-22T10:00:20Z"
+          },
+          "reason": "voice",
+          "resolvedAt": "2026-08-22T10:00:20Z"
+        }
+      ]
     },
     "legacyState": {
       "sessionId": null,

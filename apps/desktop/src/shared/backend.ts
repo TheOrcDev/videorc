@@ -4184,6 +4184,36 @@ export interface CohostAutoHighlight {
 }
 
 /**
+ * The comment the streamer is talking about right now (plan 060 S3): the
+ * engine's best spotlight match, refreshed while it persists, gone after 15 s.
+ * Surfaces pin and mark it (pull-up) with no setting; with `voiceHighlight`
+ * the engine also puts it on stream through `autoHighlight` (source `voice`).
+ */
+export interface CohostSpotlight {
+  messageId: string
+  /** The open question this message asked, when it is one. */
+  questionId?: string
+  /** The server's `about` probability, 0..1. */
+  score: number
+  /** ISO-8601: when this message became the spotlight. */
+  at: string
+  expiresAt: string
+}
+
+/** Why the engine resolved a question by itself; the wire may carry a newer one. */
+export type CohostResolveReason = 'voice'
+
+/**
+ * A question the engine resolved on its own, kept for a minute so the streamer
+ * can put it back with `cohost.question.restore` ("Answered on air").
+ */
+export interface CohostRecentlyResolved {
+  question: CohostQuestion
+  reason: CohostResolveReason | (string & Record<never, never>)
+  resolvedAt: string
+}
+
+/**
  * What the last failed tick actually said. `code` is the server's error
  * envelope code verbatim (`ai-gateway-error`, `quota-exhausted`, ...) or a
  * desktop-assigned `network` / `timeout` / `malformed-response`; `status` is
@@ -4245,6 +4275,16 @@ export interface CohostState {
    * this session (never null).
    */
   autoHighlight?: CohostAutoHighlight
+  /**
+   * The comment the streamer is talking about (plan 060 S3); absent while
+   * there is none or once it expired (never null).
+   */
+  spotlight?: CohostSpotlight
+  /**
+   * Questions the engine resolved by itself in the last minute, oldest first,
+   * at most three; absent while empty (never null).
+   */
+  recentlyResolved?: CohostRecentlyResolved[]
 }
 
 /**
@@ -4283,7 +4323,7 @@ export interface CohostStartParams {
   streamTitle?: string | null
 }
 
-/** `cohost.question.answered` / `cohost.question.dismiss`. */
+/** `cohost.question.answered` / `cohost.question.dismiss` / `cohost.question.restore`. */
 export interface CohostQuestionParams {
   sessionId: string
   questionId: string
@@ -4329,7 +4369,7 @@ export function offCohostWindowState(): CohostWindowState {
   }
 }
 
-export type CohostActionKind = 'answered' | 'dismiss-question' | 'dismiss-flag'
+export type CohostActionKind = 'answered' | 'dismiss-question' | 'dismiss-flag' | 'restore'
 
 /** Correlated co-host action from the Comments window, brokered through main
  * to the main renderer (which makes the actual `cohost.*` RPC). */

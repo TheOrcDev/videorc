@@ -245,7 +245,7 @@ function CommentsWindowApp(): ReactElement {
   // backend socket and makes the real `cohost.*` RPC, exactly like send and
   // highlight.
   const sendCohostAction =
-    (kind: 'answered' | 'dismiss-question' | 'dismiss-flag') =>
+    (kind: 'answered' | 'dismiss-question' | 'dismiss-flag' | 'restore') =>
     (targetId: string): void => {
       if (!snapshot.sessionId) return
       setCohostActionPending(true)

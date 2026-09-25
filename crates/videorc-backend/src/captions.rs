@@ -4931,17 +4931,18 @@ async fn handle_realtime_event(
                     "Coalesced a repeated realtime caption completion."
                 );
             }
-            session.state.emit_event(
-                "captions.update",
-                CaptionsUpdate {
-                    session_client_id: session.session_client_id.clone(),
-                    seq: item_seq,
-                    kind: CaptionUpdateKind::Final,
-                    text: transcript,
-                    chunk_seconds: (end - offset).ceil() as u64,
-                    remaining_seconds: None,
-                },
-            );
+            let update = CaptionsUpdate {
+                session_client_id: session.session_client_id.clone(),
+                seq: item_seq,
+                kind: CaptionUpdateKind::Final,
+                text: transcript,
+                chunk_seconds: (end - offset).ceil() as u64,
+                remaining_seconds: None,
+            };
+            session.state.emit_event("captions.update", update.clone());
+            // Orcle's spotlight lane reads finals only (plan 060 S3): a
+            // lock-append-return on the coordinator's task, after the emit.
+            crate::cohost::note_caption_final(&session.state, &update);
         }
         RealtimeCaptionEvent::ConfigurationAcknowledged
         | RealtimeCaptionEvent::Error(_)
@@ -5359,17 +5360,17 @@ async fn run_chunked_caption_session(
                                 coordinator.capture_epoch
                             };
                             if chunk.capture_epoch == current_epoch {
-                                session.state.emit_event(
-                                    "captions.update",
-                                    CaptionsUpdate {
-                                        session_client_id: session.session_client_id.clone(),
-                                        seq: chunk.seq,
-                                        kind: CaptionUpdateKind::Final,
-                                        text: response.text.trim().to_string(),
-                                        chunk_seconds: response.chunk_seconds,
-                                        remaining_seconds: Some(response.remaining_seconds),
-                                    },
-                                );
+                                let update = CaptionsUpdate {
+                                    session_client_id: session.session_client_id.clone(),
+                                    seq: chunk.seq,
+                                    kind: CaptionUpdateKind::Final,
+                                    text: response.text.trim().to_string(),
+                                    chunk_seconds: response.chunk_seconds,
+                                    remaining_seconds: Some(response.remaining_seconds),
+                                };
+                                session.state.emit_event("captions.update", update.clone());
+                                // Same tap as the realtime final (plan 060 S3).
+                                crate::cohost::note_caption_final(&session.state, &update);
                             } else {
                                 tracing::info!(
                                     "Suppressed a caption update from a previous recording (epoch {} < {}).",

@@ -234,6 +234,7 @@ export interface BackendRpcMethodMap {
   'cohost.stop': BackendRpcDefinition<undefined, CohostState>
   'cohost.question.answered': BackendRpcDefinition<CohostQuestionParams, CohostState>
   'cohost.question.dismiss': BackendRpcDefinition<CohostQuestionParams, CohostState>
+  'cohost.question.restore': BackendRpcDefinition<CohostQuestionParams, CohostState>
   'cohost.flag.dismiss': BackendRpcDefinition<CohostFlagParams, CohostState>
   'cohost.settings.get': BackendRpcDefinition<undefined, CohostSettings>
   'cohost.settings.set': BackendRpcDefinition<CohostSettingsPatch, CohostSettings>
@@ -1838,6 +1839,26 @@ const cohostAutoHighlightSchema = objectSchema(
   },
   { allowUnknown: false }
 )
+// Plan 060 S3: the spotlight and the voice-resolved questions. The resolve
+// reason vocabulary may grow; an unknown one still validates.
+const cohostSpotlightSchema = objectSchema(
+  {
+    messageId: boundedString,
+    questionId: optionalSchema(boundedString),
+    score: unitInterval,
+    at: timestamp,
+    expiresAt: timestamp
+  },
+  { allowUnknown: false }
+)
+const cohostRecentlyResolvedSchema = objectSchema(
+  {
+    question: cohostQuestionSchema,
+    reason: stringSchema({ minLength: 1, maxLength: 32 }),
+    resolvedAt: timestamp
+  },
+  { allowUnknown: false }
+)
 const cohostErrorDetailSchema = objectSchema(
   {
     code: stringSchema({ minLength: 1, maxLength: 128 }),
@@ -1882,7 +1903,10 @@ const cohostStateSchema = objectSchema(
     alerts: optionalSchema(arraySchema(cohostAlertSchema, { maxLength: 8 })),
     moodScores: optionalSchema(cohostMoodScoresSchema),
     // Plan 060 S1: absent until the engine made an automatic command.
-    autoHighlight: optionalSchema(cohostAutoHighlightSchema)
+    autoHighlight: optionalSchema(cohostAutoHighlightSchema),
+    // Plan 060 S3: absent while there is no spotlight / nothing resolved.
+    spotlight: optionalSchema(cohostSpotlightSchema),
+    recentlyResolved: optionalSchema(arraySchema(cohostRecentlyResolvedSchema, { maxLength: 3 }))
   },
   { allowUnknown: false }
 ) as RuntimeSchema<CohostState>
@@ -2330,6 +2354,7 @@ const runtimeContracts = {
   'cohost.stop': { params: undefinedSchema, result: cohostStateSchema },
   'cohost.question.answered': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
   'cohost.question.dismiss': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
+  'cohost.question.restore': { params: cohostQuestionParamsSchema, result: cohostStateSchema },
   'cohost.flag.dismiss': { params: cohostFlagParamsSchema, result: cohostStateSchema },
   'cohost.settings.get': { params: undefinedSchema, result: cohostSettingsSchema },
   'cohost.settings.set': { params: cohostSettingsPatchSchema, result: cohostSettingsSchema }

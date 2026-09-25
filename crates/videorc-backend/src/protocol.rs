@@ -3968,7 +3968,8 @@ pub struct CohostStartParams {
     pub stream_title: Option<String>,
 }
 
-/// `cohost.question.answered` / `cohost.question.dismiss`.
+/// `cohost.question.answered` / `cohost.question.dismiss` /
+/// `cohost.question.restore`.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct CohostQuestionParams {
@@ -5332,6 +5333,26 @@ mod tests {
                 refresh: false,
             })
         );
+        // Plan 060 S3: the spotlight (the comment the streamer is talking
+        // about) and the voice-resolved questions ride the state; both are
+        // absent (never null / never `[]`) until they exist.
+        assert_eq!(
+            v2.spotlight,
+            Some(crate::cohost::CohostSpotlight {
+                message_id: "session-fixture:twitch:default:message-highlight".to_string(),
+                question_id: Some("q_fixture".to_string()),
+                score: 0.91,
+                at: "2026-08-22T10:00:20Z".to_string(),
+                expires_at: "2026-08-22T10:00:35Z".to_string(),
+            })
+        );
+        assert_eq!(v2.recently_resolved.len(), 1);
+        assert_eq!(
+            v2.recently_resolved[0].reason,
+            crate::cohost::CohostResolveReason::Voice
+        );
+        assert_eq!(v2.recently_resolved[0].question.id, "q_fixture");
+        assert_eq!(v2.recently_resolved[0].resolved_at, "2026-08-22T10:00:20Z");
         assert_eq!(serde_json::to_value(v2).unwrap(), v2_wire);
         // `voiceHighlight` (plan 060) defaults off on a settings row or patch
         // from before the field.
@@ -5354,9 +5375,16 @@ mod tests {
         assert!(legacy_wire.get("messagesSeen").is_none());
         assert!(legacy_wire.get("questionsTotal").is_none());
         assert!(legacy_wire.get("autoHighlight").is_none());
+        assert!(legacy_wire.get("spotlight").is_none());
+        assert!(legacy_wire.get("recentlyResolved").is_none());
         let legacy: crate::cohost::CohostState = serde_json::from_value(legacy_wire).unwrap();
         assert_eq!(legacy, crate::cohost::CohostState::off());
         assert_eq!(legacy.auto_highlight, None);
+        assert_eq!(legacy.spotlight, None);
+        assert!(legacy.recently_resolved.is_empty());
+        // The restore RPC reuses the question params verbatim.
+        let restore: CohostQuestionParams = serde_json::from_value(question_wire).unwrap();
+        assert_eq!(restore.question_id, "q_fixture");
     }
 
     #[test]
