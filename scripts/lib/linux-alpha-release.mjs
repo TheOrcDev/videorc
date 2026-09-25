@@ -13,6 +13,35 @@ const RELEASE_ID = /^(\d+\.\d+\.\d+)-alpha\.(\d+)$/
 export const LINUX_ALPHA_PUBLIC_PREFIX = 'releases/linux-alpha'
 export const LINUX_ALPHA_UPDATE_FEED_NAME = 'latest-linux.yml'
 
+export function linuxAlphaAppImageFilename(bundleVersion) {
+  return `Videorc-${bundleVersion}-linux-x64.AppImage`
+}
+
+export function assertLinuxAppImageArtifactNameTemplate(template) {
+  const value = requireNonEmpty(template, 'linux artifactName')
+  if (value.includes('${arch}')) {
+    throw new LinuxAlphaReleaseError(
+      'linux-artifact-name-uses-arch',
+      'Linux artifactName must hardcode x64. electron-builder expands ${arch} to x86_64 for AppImage.'
+    )
+  }
+  const expanded = expandElectronBuilderArtifactName(value, {
+    arch: 'x86_64',
+    ext: 'AppImage',
+    os: 'linux',
+    productName: 'Videorc',
+    version: '0.10.0'
+  })
+  const expected = linuxAlphaAppImageFilename('0.10.0')
+  if (expanded !== expected) {
+    throw new LinuxAlphaReleaseError(
+      'linux-artifact-name-mismatch',
+      `Linux artifactName must produce ${expected}, got ${expanded}.`
+    )
+  }
+  return value
+}
+
 export class LinuxAlphaReleaseError extends Error {
   constructor(code, message) {
     super(message)
@@ -178,7 +207,7 @@ export function assertLinuxAlphaReleaseManifest(manifest, { requireAccepted = fa
       `release.json displayVersion must be ${releaseId} or ${bundleVersion} Alpha ${parsed.prereleaseNumber}.`
     )
   }
-  const expectedFilename = `Videorc-${bundleVersion}-linux-x64.AppImage`
+  const expectedFilename = linuxAlphaAppImageFilename(bundleVersion)
   if (filename !== expectedFilename) {
     throw new LinuxAlphaReleaseError(
       'stale-appimage-filename',
@@ -421,6 +450,15 @@ export function assertIsolatedLinuxObjectKey(objectKey) {
     )
   }
   return key
+}
+
+function expandElectronBuilderArtifactName(template, vars) {
+  return template
+    .replaceAll('${productName}', vars.productName)
+    .replaceAll('${version}', vars.version)
+    .replaceAll('${os}', vars.os)
+    .replaceAll('${arch}', vars.arch)
+    .replaceAll('${ext}', vars.ext)
 }
 
 function tryParseLinuxUpdateFeed(ymlText) {
