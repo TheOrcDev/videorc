@@ -188,6 +188,24 @@ describe('fake co-host tick highlights', () => {
       { messageId: batch[1].id, score: 0.89, type: 'praise' }
     ])
 
+    // byMarker lets the rows a rule must skip outrank the one it should pick;
+    // the flagged message keeps 0.99 whatever the map says.
+    const five = [0, 1, 2, 3, 4].map((seq) => message('lane-a', seq))
+    assert.deepEqual(
+      planTickHighlights(
+        five,
+        { score: 0.9, byMarker: { '#1': 0.98, '#0': 0.97, '#4': 0.96, '#2': 0.1 } },
+        '#2'
+      ),
+      [
+        { messageId: five[2].id, score: 0.99, type: 'insight' },
+        { messageId: five[1].id, score: 0.98, type: 'insight' },
+        { messageId: five[0].id, score: 0.97, type: 'insight' },
+        { messageId: five[4].id, score: 0.96, type: 'insight' },
+        { messageId: five[3].id, score: 0.9, type: 'insight' }
+      ]
+    )
+
     let next = 1
     const mintId = () => `q_${next++}`
     const plain = planCohostTick(tickBody({ messages: batch }), { mintId, flagMarker: '#2' })
@@ -403,7 +421,12 @@ describe('fake co-host service', () => {
         [batch[1].id, batch[0].id]
       )
       assert.deepEqual(fake.state.requests[1].highlightIds, [batch[1].id, batch[0].id])
+      assert.deepEqual(fake.state.requests[1].highlightScores, {
+        [batch[1].id]: 0.99,
+        [batch[0].id]: 0.7
+      })
       assert.throws(() => fake.setTickHighlights([]), /rule object or null/)
+      assert.throws(() => fake.setTickHighlights({ byMarker: { '#1': 'high' } }), /finite scores/)
     } finally {
       await fake.close()
     }

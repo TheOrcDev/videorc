@@ -51,9 +51,11 @@ import { connectBackend, request } from './smoke-recording-session.mjs'
 //   always-set semantics (this smoke plays the renderer's executor) -> a
 //   question resolves only on the SECOND "answered" hit and
 //   `cohost.question.restore` puts it back -> a queued 404 opens the lane's
-//   breaker (no spotlight request for 5 s+) -> picks mode fires nothing for
-//   45 s after the previous card left the stream, then a pick that is never
-//   the flagged message, the shown one, or the previous author.
+//   breaker (no spotlight request for 5 s+) -> the voice card refreshes
+//   exactly once and leaves by expiry -> picks mode fires nothing for 45 s
+//   after the previous card left the stream, then picks the LOWEST-ranked
+//   suggestion: the flagged one, the two already shown (by voice and by a
+//   manual card) and the previous card's author all outrank it.
 //
 // No production bearer, real account, or external network is involved. The
 // API base override is honored by debug backends only; a local router puts
@@ -93,6 +95,15 @@ const SPOTLIGHT_LANE = {
   intervalMs: 400,
   send: 'sent'
 }
+// Tick scores for the spotlight lane's five messages (authors repeat every
+// three: #0/#3, #1/#4). Every row a pick rule must skip OUTRANKS the one it
+// may pick, so each rule is load-bearing: #2 is flagged (0.99, the fake's
+// fixed flagged score), #1 goes on stream by voice (shown, and the previous
+// automatic card's author), #0 goes on stream by hand before the voice card
+// (shown only: a manual card never sets the previous author), #4 shares #1's
+// author (previous author only). The pick must be #3.
+const PICK_SCORE_BY_MARKER = Object.freeze({ '#1': 0.98, '#0': 0.97, '#4': 0.96 })
+const PICK_BASE_SCORE = 0.9
 const MENTION_PHRASE = 'mechanical keyboard'
 const ANSWER_PHRASE = 'sixty percent layout'
 const SPOTLIGHT_FINALS = Object.freeze({
@@ -790,7 +801,11 @@ async function runSpotlightScenario({ ready, startedAt }) {
         voiceSettings.autoHighlight === false,
       `Voice-only settings did not apply: ${JSON.stringify(voiceSettings)}`
     )
-    fake.setTickHighlights({ score: 0.9, type: 'insight' })
+    fake.setTickHighlights({
+      score: PICK_BASE_SCORE,
+      type: 'insight',
+      byMarker: PICK_SCORE_BY_MARKER
+    })
     fake.setSpotlightMatches([])
 
     phase('stream session: test pattern to the local RTMP listener')
@@ -859,10 +874,18 @@ async function runSpotlightScenario({ ready, startedAt }) {
       return message.id
     }
     const ids = [0, 1, 2, 3, 4].map(idFor)
-    const [, mentionId, flaggedId, answerId, sameAuthorId] = ids
+    const [manualId, mentionId, flaggedId, answerId, sameAuthorId] = ids
+    // The scripted ranking: flagged > shown by voice > shown by hand > the
+    // previous author's other message > the only legitimate pick.
+    const rankedTick = sessionTicks.find((record) => record.highlightIds?.includes(answerId))
+    const rankedScores = [flaggedId, mentionId, manualId, sameAuthorId, answerId].map(
+      (id) => rankedTick?.highlightScores?.[id]
+    )
     expect(
-      sessionTicks.some((record) => record.highlightIds?.[0] === flaggedId),
-      `The fake must suggest the flagged message first: ${JSON.stringify(sessionTicks.map((record) => record.highlightIds))}`
+      rankedTick?.highlightIds?.[0] === flaggedId &&
+        rankedScores.every(Number.isFinite) &&
+        rankedScores.every((score, index) => index === 0 || score < rankedScores[index - 1]),
+      `The fake must rank flagged > shown > previous author > the pick: ${JSON.stringify(sessionTicks.map((record) => record.highlightScores))}`
     )
     expect(
       tickState.highlights.length > 0 &&
@@ -889,6 +912,19 @@ async function runSpotlightScenario({ ready, startedAt }) {
       }
     ])
 
+    // --- The streamer shows #0 by hand (H): shown, but no previous author -----
+    phase('manual card: the streamer puts the #0 comment on stream by hand')
+    const manualSet = await request(backend, timeoutMs, 'comments.highlight.set', {
+      sessionId: streamSessionId,
+      messageId: manualId,
+      pngBase64: captionStimulusPngBase64({ width: 600, height: 120 })
+    })
+    expect(
+      manualSet?.phase === 'live' && manualSet.messageId === manualId,
+      `The manual card did not go live: ${JSON.stringify(manualSet)}`
+    )
+    const manualLiveAt = Date.now()
+
     // --- Live captions through the fake caption service ---------------------
     phase('captions: fake realtime transcription, injected audio')
     const configurationsBefore = captionFake.state.configurations.length
@@ -900,6 +936,24 @@ async function runSpotlightScenario({ ready, startedAt }) {
         captionFake.state.audioAppends > 0,
       20_000,
       'the realtime caption session to configure and receive audio'
+    )
+
+    // Voice never replaces a card set by hand: wait for it to expire.
+    const manualEnd = await waitForEvent(
+      events,
+      'comments.highlight.status',
+      (status) => status.phase !== 'live' && status.phase !== 'applying',
+      'the manual card leaving the stream',
+      20_000,
+      manualLiveAt
+    )
+    expect(
+      manualEnd.payload.reason === 'expired',
+      `The manual card must leave by expiry: ${JSON.stringify(manualEnd.payload)}`
+    )
+    expect(
+      distinctCommands(events).length === 0,
+      `No automatic card may fire before the mention: ${JSON.stringify(distinctCommands(events))}`
     )
 
     // --- A final mentions a comment: spotlight within 4 s -------------------
@@ -1077,7 +1131,13 @@ async function runSpotlightScenario({ ready, startedAt }) {
     )
 
     // --- The voice card leaves the stream without a clear --------------------
-    phase('voice card: at most one refresh, then it expires')
+    // Exactly one refresh is deterministic: the spotlight holds 15 s from the
+    // mention's match (longer: the answer finals re-match it inside the 20 s
+    // transcript window), the card goes live after that match with a 10 s
+    // life, and the engine refreshes its own voice card once when <= 2 s is
+    // left while the match persists; the executor's set moves the expiry
+    // forward, which is what fulfils the refresh. A second refresh is barred.
+    phase('voice card: exactly one refresh, then it expires')
     const cardEnd = await waitForEvent(
       events,
       'comments.highlight.status',
@@ -1093,8 +1153,18 @@ async function runSpotlightScenario({ ready, startedAt }) {
     const voiceCommands = distinctCommands(events).filter((command) => command.source === 'voice')
     const refreshes = voiceCommands.filter((command) => command.refresh)
     expect(
-      voiceCommands.every((command) => command.messageId === mentionId) && refreshes.length <= 1,
-      `Voice commands must target the spotlight and refresh at most once: ${JSON.stringify(voiceCommands)}`
+      voiceCommands.every((command) => command.messageId === mentionId) &&
+        voiceCommands.length === 2 &&
+        refreshes.length === 1 &&
+        refreshes[0].generation > firstVoiceGeneration,
+      `Voice commands must target the spotlight and refresh exactly once: ${JSON.stringify(voiceCommands)}`
+    )
+    const refreshExecution = executor.executions.find(
+      (execution) => execution.generation === refreshes[0].generation
+    )
+    expect(
+      refreshExecution?.result?.phase === 'live' && !refreshExecution.error,
+      `The refresh's comments.highlight.set did not re-set the card: ${JSON.stringify(refreshExecution)}`
     )
     const lastLive = [...events.list]
       .reverse()
@@ -1136,11 +1206,11 @@ async function runSpotlightScenario({ ready, startedAt }) {
     )
     const pick = pickState.autoHighlight
     const pickDelayMs = Date.now() - cardEndAt
+    // Every higher-ranked row is barred by exactly one rule it would break:
+    // flagged (#2), shown (#1 by voice, #0 by hand), previous author (#4).
     expect(
-      pick.source === 'pick' &&
-        ![flaggedId, mentionId, sameAuthorId].includes(pick.messageId) &&
-        ids.includes(pick.messageId),
-      `The pick must be a fresh, unflagged message by another author: ${JSON.stringify({ pick, flaggedId, mentionId, sameAuthorId })}`
+      pick.source === 'pick' && pick.messageId === answerId,
+      `The pick must skip the flagged, shown and previous-author rows that outrank it and take ${answerId}: ${JSON.stringify({ pick, flaggedId, mentionId, manualId, sameAuthorId })}`
     )
 
     // --- Whole-scenario safety invariants ---------------------------------------
@@ -1169,10 +1239,11 @@ async function runSpotlightScenario({ ready, startedAt }) {
     console.log(
       `Spotlight fake smoke PASS - spotlight ${spotlightLatencyMs} ms after the final, ` +
         `${sessionCalls.length} valid spotlight request(s) without the flagged message, ` +
-        `voice card live (${refreshes.length} refresh, left by expiry), question resolved on hit 2 ` +
+        `voice card live (exactly ${refreshes.length} refresh, left by expiry), question resolved on hit 2 ` +
         `and restored, 404 breaker held ${BREAKER_PROOF_MS / 1000} s, first pick ` +
-        `${(pickDelayMs / 1000).toFixed(1)} s after the previous card left (cooldown 45 s), ` +
-        `flagged suggestion never shown.`
+        `${(pickDelayMs / 1000).toFixed(1)} s after the previous card left (cooldown 45 s) ` +
+        `took the lowest-ranked suggestion: the flagged (0.99), shown by voice, shown by hand ` +
+        `and previous-author rows all outranked it and were skipped.`
     )
   } finally {
     await stopSpotlightResources().catch(() => {})

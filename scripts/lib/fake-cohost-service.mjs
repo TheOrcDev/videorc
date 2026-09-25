@@ -376,29 +376,43 @@ function clampUnit(value) {
 
 /**
  * Scripted wire-v2 `highlights` for one tick (pure, plan 060 S5). With a rule
- * `{ score = 0.9, type = 'insight' }` EVERY message of the batch is suggested,
- * and a message carrying the flag marker is ranked first at 0.99: the fake
- * deliberately suggests what it also flags, so the smoke proves the desktop
- * never puts a flagged message on stream whatever the server ranked. The
- * others follow in batch order, 0.01 apart. `null` means no `highlights` key.
+ * `{ score = 0.9, type = 'insight', byMarker = {} }` EVERY message of the
+ * batch is suggested, and a message carrying the flag marker is ranked first
+ * at 0.99: the fake deliberately suggests what it also flags, so the smoke
+ * proves the desktop never puts a flagged message on stream whatever the
+ * server ranked. `byMarker` maps a text token (`'#1'`) to that message's
+ * score, so a smoke can make the rows a rule must skip OUTRANK the row it
+ * should pick; a flagged message keeps 0.99 whatever the map says. The
+ * remaining messages follow in batch order from `score`, 0.01 apart. The
+ * result is sorted by score, highest first (stable). `null` means no
+ * `highlights` key.
  */
 export function planTickHighlights(messages, rule, flagMarker = null) {
   if (!rule) return null
   const baseScore = clampUnit(rule.score ?? 0.9)
   const type = typeof rule.type === 'string' ? rule.type : 'insight'
+  const byMarker = Object.entries(rule.byMarker ?? {})
   const flagged = []
+  const scripted = []
   const clean = []
   for (const message of messages ?? []) {
-    ;(messageHasMarker(message.text, flagMarker) ? flagged : clean).push(message)
+    if (messageHasMarker(message.text, flagMarker)) {
+      flagged.push(message)
+      continue
+    }
+    const entry = byMarker.find(([marker]) => messageHasMarker(message.text, marker))
+    if (entry) scripted.push({ message, score: clampUnit(entry[1]) })
+    else clean.push(message)
   }
   return [
     ...flagged.map((message) => ({ messageId: message.id, score: 0.99, type })),
+    ...scripted.map(({ message, score }) => ({ messageId: message.id, score, type })),
     ...clean.map((message, index) => ({
       messageId: message.id,
       score: clampUnit(baseScore - index * 0.01),
       type
     }))
-  ]
+  ].sort((a, b) => b.score - a.score)
 }
 
 /**
@@ -500,7 +514,8 @@ export function planCohostTick(
  *
  * `tickHighlights` (plan 060 S5; replace at runtime with `setTickHighlights`)
  * scripts the tick's v2 `highlights` (see `planTickHighlights`); every
- * successful tick record then carries the suggested ids as `highlightIds`.
+ * successful tick record then carries the suggested ids as `highlightIds`
+ * (highest score first) and their scores as `highlightScores` (id -> score).
  */
 export async function startFakeCohostService({
   smokeSessionToken,
@@ -581,6 +596,9 @@ export async function startFakeCohostService({
     })
     if (planned.highlights) {
       record.highlightIds = planned.highlights.map((highlight) => highlight.messageId)
+      record.highlightScores = Object.fromEntries(
+        planned.highlights.map((highlight) => [highlight.messageId, highlight.score])
+      )
     }
     return json(res, 200, planned)
   })
@@ -705,6 +723,15 @@ export async function startFakeCohostService({
     setTickHighlights(rule) {
       if (rule !== null && (typeof rule !== 'object' || Array.isArray(rule))) {
         throw new Error('setTickHighlights requires a rule object or null.')
+      }
+      if (
+        rule?.byMarker !== undefined &&
+        (typeof rule.byMarker !== 'object' ||
+          rule.byMarker === null ||
+          Array.isArray(rule.byMarker) ||
+          !Object.values(rule.byMarker).every(Number.isFinite))
+      ) {
+        throw new Error('setTickHighlights byMarker must map markers to finite scores.')
       }
       state.tickHighlights = rule
     },
