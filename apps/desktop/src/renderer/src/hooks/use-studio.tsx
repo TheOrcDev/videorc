@@ -360,7 +360,7 @@ import {
   type EntitlementUiGate
 } from '@/lib/entitlement-ui'
 import { commentCanHighlight, CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
-import { applyCohostState, cohostErrorToast, cohostHighlightMessageId } from '@/lib/cohost-view'
+import { applyCohostState, cohostErrorToast, cohostHighlightMessageId } from '@/lib/cohost-state'
 import { entitlementDisabledReason } from '@/lib/entitlements'
 import { upsertNoiseCleanupJob } from '@/lib/noise-cleanup-view'
 import {
