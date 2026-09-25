@@ -1,7 +1,7 @@
 use crate::protocol::{
-    CameraAspect, CameraCorner, CameraFit, CameraShape, CameraSize, CameraTransformMode,
-    EffectiveSceneBackground, LayoutPreset, LayoutSettings, SceneSourceKind, SceneTransform,
-    SideBySideSplit,
+    ArrangementMode, CameraAspect, CameraCorner, CameraFit, CameraShape, CameraSize,
+    CameraTransformMode, EffectiveSceneBackground, LayoutPreset, LayoutSettings, SceneSourceKind,
+    SceneTransform, SideBySideSplit,
 };
 
 const CAMERA_REFERENCE_WIDTH: u32 = 1280;
@@ -240,15 +240,21 @@ pub fn scene_source_fit(kind: &SceneSourceKind, layout: &LayoutSettings) -> Scen
     }
 }
 
-/// Camera masks are overlay policy, not renderer policy: only screen+camera
-/// applies the selected bubble shape. Camera-only and side-by-side stay plain.
+/// Camera masks are overlay policy, not renderer policy. The inset presets
+/// (screen+camera) apply the selected bubble shape, and so does Freeform:
+/// once the user drags the camera out of a preset it is their own bubble
+/// everywhere, not just on the two inset presets it happened to start from.
+/// Camera-only and side-by-side stay plain in Preset mode.
 pub fn camera_mask(layout: &LayoutSettings) -> SceneMask {
-    // Only the inset scenes draw the camera as a shaped bubble; band and
-    // region presets keep the camera rectangular (maskless).
-    if !matches!(
+    // Inset presets draw the camera as a shaped bubble regardless of
+    // arrangement mode; every other preset keeps the camera rectangular
+    // (maskless) in Preset mode, but in Freeform the camera is always the
+    // user-owned bubble, so the shape still applies.
+    let is_inset_preset = matches!(
         layout.layout_preset,
         LayoutPreset::ScreenCamera | LayoutPreset::VerticalScreenCamera
-    ) {
+    );
+    if !is_inset_preset && layout.arrangement_mode != ArrangementMode::Freeform {
         return SceneMask::None;
     }
     match layout.camera_shape {
@@ -619,7 +625,7 @@ pub fn resolved_camera_transform(
 /// Shaped cameras (circle, forced square/portrait aspect) keep their pixel
 /// ratio: the requested width drives and the height follows, clamped so both
 /// axes stay within [5%, 100%] of the canvas.
-fn custom_camera_box_fractions(
+pub(crate) fn custom_camera_box_fractions(
     layout: &LayoutSettings,
     custom: crate::protocol::CameraTransform,
     preset: &SceneTransform,
@@ -867,6 +873,39 @@ mod tests {
     }
 
     #[test]
+    fn camera_mask_applies_in_freeform_for_any_preset_but_not_preset_side_by_side() {
+        // Freeform is the user-owned bubble everywhere: once the camera is
+        // dragged out of a preset, the mask shape applies regardless of which
+        // preset it was entered from. Preset mode keeps the existing rule
+        // (SideBySide stays maskless).
+        let mut side_by_side_preset = layout();
+        side_by_side_preset.layout_preset = LayoutPreset::SideBySide;
+        side_by_side_preset.camera_shape = CameraShape::Circle;
+        assert_eq!(
+            camera_mask(&side_by_side_preset),
+            SceneMask::None,
+            "Preset SideBySide stays maskless"
+        );
+
+        let mut side_by_side_freeform = side_by_side_preset.clone();
+        side_by_side_freeform.arrangement_mode = ArrangementMode::Freeform;
+        assert_eq!(
+            camera_mask(&side_by_side_freeform),
+            SceneMask::Circle,
+            "Freeform entered from SideBySide still shows the selected Circle"
+        );
+
+        let mut side_by_side_rounded = side_by_side_freeform.clone();
+        side_by_side_rounded.camera_shape = CameraShape::Rounded;
+        side_by_side_rounded.camera_corner_radius_pct = 20;
+        assert_eq!(
+            camera_mask(&side_by_side_rounded),
+            SceneMask::Rounded { radius_pct: 20 },
+            "Freeform Rounded also applies regardless of preset"
+        );
+    }
+
+    #[test]
     fn parse_hex_rgb_accepts_rrggbb_with_or_without_hash() {
         assert_eq!(parse_hex_rgb("#00FF00"), Some([0, 255, 0]));
         assert_eq!(parse_hex_rgb("00b4ff"), Some([0, 180, 255]));
@@ -1083,6 +1122,21 @@ mod tests {
             layout.camera_corner_radius_pct = radius_pct;
             assert_eq!(camera_mask(&layout), expected);
         }
+    }
+
+    #[test]
+    fn shape_and_radius_policy_applies_in_freeform_too() {
+        // Same clamp-once policy, but entered from a non-inset preset via
+        // Freeform instead of ScreenCamera.
+        let mut layout = layout();
+        layout.layout_preset = LayoutPreset::CameraOnly;
+        layout.arrangement_mode = ArrangementMode::Freeform;
+        layout.camera_shape = CameraShape::Circle;
+        assert_eq!(camera_mask(&layout), SceneMask::Circle);
+
+        layout.camera_shape = CameraShape::Rounded;
+        layout.camera_corner_radius_pct = 400;
+        assert_eq!(camera_mask(&layout), SceneMask::Rounded { radius_pct: 50 });
     }
 
     #[test]
