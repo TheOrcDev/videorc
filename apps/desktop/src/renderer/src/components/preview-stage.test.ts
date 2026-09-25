@@ -111,11 +111,12 @@ describe('previewSupervisorDisplay', () => {
 })
 
 describe('previewDisabledCopy', () => {
-  it('names the unbuilt Linux phase instead of a fault to retry', () => {
+  it('names the Linux CPU proof preview instead of a fault or a native surface', () => {
     expect(previewDisabledCopy('linux', 'Native preview addon is not built on linux')).toEqual({
-      title: "Preview isn't built for Linux yet",
-      detail: 'Recording still works. A Linux preview arrives in a later port phase.',
-      retryable: false,
+      title: 'Linux CPU preview',
+      detail:
+        'Open the Preview window to see the Electron proof surface (CPU composition, not a native surface).',
+      retryable: true,
       tone: 'expected'
     })
   })

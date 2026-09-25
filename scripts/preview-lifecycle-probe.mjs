@@ -50,14 +50,18 @@ import {
 import { requestSmokeCommandWithRetry } from './lib/smoke-command-client.mjs'
 import {
   parseWindowsPreviewLifecycleMode,
+  previewLifecycleModePlatform,
   windowsPreviewLifecycleDiagnosticFailures,
   windowsPreviewLifecycleOpenFailures
 } from './lib/windows-preview-lifecycle-gates.mjs'
 
 const timeoutMs = Number(process.env.VIDEORC_SMOKE_TIMEOUT_MS ?? 180000)
 const windowsPreviewMode = parseWindowsPreviewLifecycleMode(process.argv.slice(2), process.env)
-if (windowsPreviewMode !== 'default' && process.platform !== 'win32') {
-  throw new Error('Windows preview lifecycle modes must run on Windows.')
+{
+  const requiredPlatform = previewLifecycleModePlatform(windowsPreviewMode)
+  if (requiredPlatform && process.platform !== requiredPlatform) {
+    throw new Error(`Preview lifecycle mode ${windowsPreviewMode} must run on ${requiredPlatform}.`)
+  }
 }
 const mode = performanceMode()
 const reportScenario = process.env.VIDEORC_PERF_SCENARIO ?? 'preview-lifecycle'
@@ -566,11 +570,17 @@ async function assertExpectedWindowsPreviewDiagnostics(label) {
     timeoutMs
   })
   const failures = windowsPreviewLifecycleDiagnosticFailures(diagnostics, windowsPreviewMode)
-  assertProbe(
-    failures.length === 0,
-    `${label}: Windows preview diagnostics match ${windowsPreviewMode}`,
-    { failures, diagnostics: diagnostics?.windowsD3d11Media }
-  )
+  assertProbe(failures.length === 0, `${label}: preview diagnostics match ${windowsPreviewMode}`, {
+    failures,
+    diagnostics:
+      windowsPreviewMode === 'linux-proof'
+        ? {
+            previewTransport: diagnostics?.previewTransport,
+            previewSurfaceBacking: diagnostics?.previewSurfaceBacking,
+            compositorBackend: diagnostics?.compositorBackend
+          }
+        : diagnostics?.windowsD3d11Media
+  })
 }
 
 async function assertPermissionRequiredStopsSurface(label) {

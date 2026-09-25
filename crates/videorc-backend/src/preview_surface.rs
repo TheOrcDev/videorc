@@ -693,24 +693,8 @@ async fn create_preview_surface_with_reconcile_hook(
             }
 
             let now = Utc::now().to_rfc3339();
-            let message = if capture_active {
-                "Native preview surface attached while recording; compositor ownership stays with the recording."
-            } else {
-                match &source {
-                    PreviewSurfaceSource::Camera => {
-                        "Electron proof camera preview surface running."
-                    }
-                    PreviewSurfaceSource::Screen => {
-                        "Electron proof screen preview surface running."
-                    }
-                    PreviewSurfaceSource::Window => {
-                        "Electron proof window preview surface running."
-                    }
-                    PreviewSurfaceSource::Synthetic => {
-                        "Synthetic Electron proof preview surface running."
-                    }
-                }
-            };
+            let message =
+                proof_surface_running_message(&source, capture_active, cfg!(target_os = "linux"));
             let mut next = PreviewSurfaceStatus {
                 state: PreviewSurfaceState::Live,
                 source,
@@ -744,7 +728,7 @@ async fn create_preview_surface_with_reconcile_hook(
                 windows_d3d11_presenter: None,
                 started_at: Some(now.clone()),
                 updated_at: now,
-                message: Some(message.to_string()),
+                message: Some(message),
             };
             let host_update = slot.native_host.create(&bounds);
             apply_native_host_update(
@@ -1954,6 +1938,38 @@ fn surface_render_dimension(value: f64, scale_factor: f64) -> u32 {
         1.0
     };
     surface_dimension(value * scale)
+}
+
+/// The message a fresh Electron proof surface carries. On Linux the proof
+/// surface IS the preview (port plan L5, Plan 0007): CPU composition shown
+/// through the BMP proof transport, never a native surface, so the copy
+/// names that path instead of reading like a fallback.
+fn proof_surface_running_message(
+    source: &PreviewSurfaceSource,
+    capture_active: bool,
+    linux: bool,
+) -> String {
+    if capture_active {
+        return "Native preview surface attached while recording; compositor ownership stays with the recording."
+            .to_string();
+    }
+    let kind = match source {
+        PreviewSurfaceSource::Camera => "camera",
+        PreviewSurfaceSource::Screen => "screen",
+        PreviewSurfaceSource::Window => "window",
+        PreviewSurfaceSource::Synthetic => "synthetic",
+    };
+    if linux {
+        return format!(
+            "Linux CPU preview: Electron proof {kind} preview surface running (CPU composition, not a native surface)."
+        );
+    }
+    match source {
+        PreviewSurfaceSource::Synthetic => {
+            "Synthetic Electron proof preview surface running.".to_string()
+        }
+        _ => format!("Electron proof {kind} preview surface running."),
+    }
 }
 
 fn unavailable_status(message: Option<String>) -> PreviewSurfaceStatus {
@@ -4677,5 +4693,31 @@ mod tests {
         assert!(!diagnostics.preview_source_pixels_present);
         assert_eq!(diagnostics.preview_render_frame_time_p95_ms, None);
         assert_eq!(diagnostics.preview_dropped_frames, 0);
+    }
+
+    #[test]
+    fn linux_proof_surface_message_names_cpu_preview_never_native() {
+        for source in [
+            PreviewSurfaceSource::Camera,
+            PreviewSurfaceSource::Screen,
+            PreviewSurfaceSource::Window,
+            PreviewSurfaceSource::Synthetic,
+        ] {
+            let linux = proof_surface_running_message(&source, false, true);
+            assert!(linux.starts_with("Linux CPU preview"), "{linux}");
+            assert!(linux.contains("not a native surface"), "{linux}");
+            assert!(!linux.to_lowercase().contains("cametal"), "{linux}");
+            let other = proof_surface_running_message(&source, false, false);
+            assert!(other.contains("Electron proof"), "{other}");
+            assert!(!other.starts_with("Linux"), "{other}");
+        }
+        assert_eq!(
+            proof_surface_running_message(&PreviewSurfaceSource::Screen, false, false),
+            "Electron proof screen preview surface running."
+        );
+        assert!(
+            proof_surface_running_message(&PreviewSurfaceSource::Screen, true, true)
+                .contains("while recording")
+        );
     }
 }

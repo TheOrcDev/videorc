@@ -198,6 +198,14 @@ starts.
   backpressure, detach/reattach, and truthful fallback diagnostics.
 - Prove composed recording and preview behavior without claiming a GPU-native
   preview surface.
+- Status (Plan 0007, 2026-09-25): the Electron proof surface (uncompressed
+  latest-wins BMP per source, `electron-proof-surface` /
+  `electron-browser-window`) is the Linux preview, fed by the CPU compositor
+  and the L4 portal screen store. Backend, supervisor, renderer and waiting
+  copy name it "Linux CPU preview" and never a native surface;
+  `pnpm probe:preview-lifecycle:linux` (`VIDEORC_EXPECT_LINUX_PROOF=1`) is
+  the box gate. A composed-frame (single BMP) transport is not done; the
+  proof surface layers per-source BMPs like Windows.
 
 ### L6 — AppImage, release lane, and acceptance
 
