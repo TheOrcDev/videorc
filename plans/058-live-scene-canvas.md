@@ -8,7 +8,14 @@
 
 ## Status and decisions
 
-- Status: **PLANNED 2026-09-24**. Nothing implemented.
+- Status: **EXECUTED 2026-09-25** on `feat/scene-live-editor` (PR pending
+  review; owner by-eye pending, see
+  `docs/acceptance/2026-09-25-live-scene-canvas.md`). S0 was folded into S2/S3
+  and its result is recorded under S0 below; S1–S5 are done and every local
+  gate listed in S6 passes except the fixed renderer gzip ceiling, which clean
+  `origin/main` already exceeds on this Mac (386 098 vs 385 000; CI's Linux gzip
+  reads ~1.6 KB lower) — the branch adds +101 B gzip (386 199) and no eager code
+  beyond two context callbacks in `use-studio.tsx`.
 - Priority P1. Effort L: about 6 agent-days over 7 slices. Risk MED–HIGH: the
   work touches the native CAMetalLayer preview placement and the compositor's
   per-tick scene snapshot. Every slice keeps `probe:preview-lifecycle`,

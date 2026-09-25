@@ -133,6 +133,18 @@ hot-path churn.
 Verified: `pnpm test:scripts` (118 pass incl. 8 new parity cases), auto-wired via the
 `scripts/lib/*.test.mjs` glob.
 
+**Editor drafts and chrome are preview-tick state, never recorded (plan 058).**
+The Scene editor's in-flight ghost rect and selection chrome reach the compositor as an
+*editor draft* (`scene.editor.draft.set` / `.clear`) and are applied only in
+`publish_compositor_frame` on the native-preview run without an auxiliary output
+(`editor_draft_applies`), right after the scene-transition snapshot. The committed scene and
+its revision are untouched: release still commits once through `scene.source.transform.update`,
+and the draft drops the moment that revision installs, so the frame the recording would encode
+and the frame the preview shows are identical again at commit time. A draft is refused while a
+session is active and expires 2 s after its last refresh, so parity holds for every recorded or
+streamed frame by construction; the live-canvas smoke (`pnpm smoke:freeform-editor`) asserts the
+refusal during a real recording.
+
 ## Slice 5 — Developer-only synthetic diagnostic source ✅
 
 A new `crates/videorc-backend/src/synthetic_diagnostic.rs` module draws, over the existing
