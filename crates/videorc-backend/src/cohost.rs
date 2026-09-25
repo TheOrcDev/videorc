@@ -1899,7 +1899,10 @@ impl CohostSession {
                     .as_ref()
                     .is_some_and(|request| request.message_id == message_id);
                 if requested {
+                    // Fulfilled: the wire command leaves the snapshot so a
+                    // renderer that (re)connects later never replays it.
                     self.auto.requested = None;
+                    self.auto.latest = None;
                 }
                 let engine_set = requested
                     || self
@@ -1926,6 +1929,7 @@ impl CohostSession {
             now.saturating_duration_since(request.asked_at) > AUTO_HIGHLIGHT_APPLY_TIMEOUT
         }) {
             self.auto.requested = None;
+            self.auto.latest = None;
         }
     }
 
@@ -3942,13 +3946,16 @@ mod tests {
                 .evaluate_auto_highlight(generation, &idle, t + secs(1))
                 .is_none()
         );
-        // Live: nothing fires while it is on stream.
+        // Live: nothing fires while it is on stream, and the fulfilled
+        // command leaves the snapshot (a reconnecting renderer must never
+        // replay it).
         let live = live_card(&rows[1].id, secs(10));
         assert!(
             engine
                 .evaluate_auto_highlight(generation, &live, t + secs(2))
                 .is_none()
         );
+        assert_eq!(engine.snapshot().auto_highlight, None);
         // It expires at t+12; the next pick waits 45 s from then and skips
         // the previous author's row if it were the same person (it is not).
         assert!(
@@ -3972,6 +3979,53 @@ mod tests {
         assert!(
             engine
                 .evaluate_auto_highlight(generation + 1, &idle, t + secs(120))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn engine_auto_highlight_command_is_dropped_when_the_renderer_never_serves_it() {
+        let start = Instant::now();
+        let mut engine = CohostEngine::new(CohostSettings {
+            auto_highlight: true,
+            ..enabled_settings()
+        });
+        let generation = engine.start_session("session-1".to_string(), true, None, start);
+        let rows = messages("session-1", 0..2);
+        engine.note_messages_at(&rows, start);
+        let mut tick = response(Vec::new());
+        tick.highlights = vec![tick_highlight(&rows[0].id, 0.9, CohostHighlightType::Joke)];
+        let t = start + secs(20);
+        assert!(engine.apply_tick_result(generation, 0, Ok(tick), t, "2026-08-22T10:00:20Z"));
+        let idle = OverlayObservation::default();
+        let command = engine
+            .evaluate_auto_highlight(generation, &idle, t)
+            .unwrap();
+        assert_eq!(engine.snapshot().auto_highlight, Some(command));
+
+        // The card never shows up (message gone from the renderer's list):
+        // after the apply timeout the command leaves the snapshot, and the
+        // message is not asked for again.
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, t + AUTO_HIGHLIGHT_APPLY_TIMEOUT)
+                .is_none()
+        );
+        assert!(engine.snapshot().auto_highlight.is_some());
+        assert!(
+            engine
+                .evaluate_auto_highlight(
+                    generation,
+                    &idle,
+                    t + AUTO_HIGHLIGHT_APPLY_TIMEOUT + secs(1)
+                )
+                .is_none()
+        );
+        assert_eq!(engine.snapshot().auto_highlight, None);
+        // Still the only suggestion, still not asked for again.
+        assert!(
+            engine
+                .evaluate_auto_highlight(generation, &idle, t + secs(60))
                 .is_none()
         );
     }
