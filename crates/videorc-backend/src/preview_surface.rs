@@ -18,7 +18,7 @@ use crate::protocol::{
     MainOwnedPreviewSurfaceBounds, MainOwnedPreviewSurfaceBoundsParams, PreviewSurfaceBacking,
     PreviewSurfaceBoundsParams, PreviewSurfaceCreateParams, PreviewSurfacePresentParams,
     PreviewSurfaceSource, PreviewSurfaceState, PreviewSurfaceStatus, PreviewTransport, Scene,
-    SceneOutputKind,
+    SceneOutputKind, SceneSourceKind,
 };
 use crate::state::AppState;
 #[cfg(target_os = "windows")]
@@ -1843,15 +1843,21 @@ fn capture_owns_compositor(state: &AppState) -> bool {
     snapshot.capture_active || snapshot.capture_waiting > 0
 }
 
-/// After a preview layout commit, the CPU/BMP proof path needs a live
+/// After a portal preview layout commit, the CPU/BMP proof path needs a live
 /// compositor even when Electron has not yet created a surface. Linux portal
 /// ScreenOnly failed Phase D that way: the scene applied, PipeWire frames
 /// arrived, and the proof window kept painting synthetic pixels.
+///
+/// Only portal screen/window scenes start a compositor here. Starting one on
+/// every idle commit (and then reconciling against a non-Live surface) stop/
+/// starts the spawn_blocking worker under concurrent scene commits, recording
+/// scene leases, and preview-layout public API tests.
 pub(crate) async fn ensure_preview_compositor_after_scene_commit(state: &AppState, scene: &Scene) {
-    if capture_owns_compositor(state) {
+    if capture_owns_compositor(state) || !scene_needs_portal_proof_compositor(scene) {
         return;
     }
-    reconcile_live_preview_compositor(state).await;
+    // Do not call reconcile_live_preview_compositor: with no Live proof
+    // surface it queues a just-started native-preview run as retirement debt.
     if crate::compositor::compositor_status(state)
         .await
         .run_id
@@ -1877,6 +1883,20 @@ pub(crate) async fn ensure_preview_compositor_after_scene_commit(state: &AppStat
     )
     .await;
     sync_preview_surface_source_from_compositor(state).await;
+}
+
+fn scene_needs_portal_proof_compositor(scene: &Scene) -> bool {
+    scene.sources.iter().any(|source| {
+        source.visible
+            && matches!(
+                source.kind,
+                SceneSourceKind::Screen | SceneSourceKind::Window
+            )
+            && source
+                .device_id
+                .as_deref()
+                .is_some_and(|id| crate::linux_portal_capture::parse_portal_source_id(id).is_some())
+    })
 }
 
 fn preview_compositor_start_size(scene: &Scene) -> (u32, u32, u32) {
@@ -4880,5 +4900,60 @@ mod tests {
             )]),
             None
         );
+    }
+
+    #[test]
+    fn portal_proof_compositor_starts_only_for_visible_portal_layers() {
+        let transform = crate::protocol::SceneTransform {
+            x: 0.0,
+            y: 0.0,
+            width: 1.0,
+            height: 1.0,
+            crop_left: 0.0,
+            crop_top: 0.0,
+            crop_right: 0.0,
+            crop_bottom: 0.0,
+        };
+        let scene = |kind: SceneSourceKind, device_id: Option<&str>, visible: bool| Scene {
+            id: "t".into(),
+            name: "t".into(),
+            sources: vec![crate::protocol::SceneSource {
+                id: "s".into(),
+                name: "s".into(),
+                kind,
+                device_id: device_id.map(str::to_string),
+                transform: transform.clone(),
+                default_transform: transform.clone(),
+                visible,
+                locked: false,
+            }],
+            outputs: vec![],
+            background: None,
+        };
+        assert!(scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Screen,
+            Some(crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID),
+            true
+        )));
+        assert!(scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Window,
+            Some(crate::linux_portal_capture::PORTAL_WINDOW_SOURCE_ID),
+            true
+        )));
+        assert!(!scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Screen,
+            Some("screen:screencapturekit:1"),
+            true
+        )));
+        assert!(!scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Screen,
+            Some(crate::linux_portal_capture::PORTAL_MONITOR_SOURCE_ID),
+            false
+        )));
+        assert!(!scene_needs_portal_proof_compositor(&scene(
+            SceneSourceKind::Camera,
+            Some("camera:B"),
+            true
+        )));
     }
 }

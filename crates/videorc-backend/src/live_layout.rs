@@ -2402,10 +2402,10 @@ async fn commit_scene_with_layout_at_time_with_policy(
     // Drop the commit fence before starting the preview compositor. The
     // worker uses a dedicated runtime and must not wait on this lock.
     drop(_commit);
-    // Idle preview commits used to leave the compositor Stopped. Linux portal
-    // ScreenOnly then kept the Electron BMP surface on synthetic pixels even
-    // after PipeWire frames arrived. Start (or adopt) the CPU preview
-    // compositor so the proof path can sample live BGRA.
+    // Idle portal ScreenOnly used to leave the compositor Stopped, so the
+    // Electron BMP surface kept painting synthetic pixels after PipeWire
+    // frames arrived. Start the CPU preview compositor for portal scenes
+    // only — every idle commit must not spawn the worker.
     let compositor_status = if mode == "idle" {
         crate::preview_surface::ensure_preview_compositor_after_scene_commit(state, scene).await;
         crate::compositor::compositor_status(state).await

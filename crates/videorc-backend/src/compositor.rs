@@ -7447,10 +7447,18 @@ async fn publish_compositor_frame(
                 let gpu_available = gpu.is_some();
                 let failed_gpu_timings = take_failed_gpu_timings(gpu);
                 timings.merge_gpu(failed_gpu_timings);
-                // On macOS a Metal miss is a real degradation worth surfacing;
-                // off macOS the CPU compositor IS the path, so the "why not
-                // Metal" reason is noise (backend already set to Cpu above).
-                if cfg!(target_os = "macos") {
+                // Native preview with no GPU is the Electron proof surface
+                // (Linux portal BGRA included). That is the CPU path, not a
+                // Metal miss — even on a macOS host that ran the test with
+                // gpu=None. A real Metal miss (GPU present, compose failed)
+                // still surfaces as CpuFallback on macOS.
+                if !gpu_available
+                    && matches!(frame_consumer, CompositorFrameConsumer::NativePreview)
+                {
+                    compositor_backend = CompositorBackend::Cpu;
+                    compositor_fallback_reason = None;
+                    let _ = reason;
+                } else if cfg!(target_os = "macos") {
                     compositor_fallback_reason = Some(reason);
                 } else {
                     let _ = reason;
@@ -7688,7 +7696,7 @@ fn publish_auxiliary_compositor_frame(
             export_handle = frame.export_handle;
             (frame.yuv, Some(frame.timings))
         }
-        Err(_) if frame_consumer.composes_cpu_pixels(gpu.is_some()) => {
+        Err(_) if frame_consumer.requires_cpu_fallback() => {
             let mut bytes = {
                 let mut store = frame_store
                     .lock()
