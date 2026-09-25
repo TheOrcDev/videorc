@@ -3643,11 +3643,35 @@ export interface GlobalShortcutsConfig {
 
 export interface GlobalShortcutsResult {
   registered: Record<string, boolean>
+  /** Main held the config because the shortcut recorder is armed; it
+   * registers on disarm and this result says nothing about conflicts. */
+  deferred?: true
+}
+
+/** A key event main captured for the Settings shortcut recorder (plan 062).
+ * `code` is the physical key; the recorder maps it, never `key`. */
+export interface ShortcutRecorderKeyEvent {
+  type: 'keyDown' | 'keyUp'
+  code: string
+  meta: boolean
+  control: boolean
+  alt: boolean
+  shift: boolean
+}
+
+export interface ShortcutRecorderArmResult {
+  armed: boolean
 }
 
 export interface VideorcApi {
   setGlobalShortcuts?: (shortcuts: GlobalShortcutsConfig) => Promise<GlobalShortcutsResult>
   onGlobalShortcut?: (callback: (action: GlobalShortcutAction) => void) => () => void
+  /** While armed, main suspends Videorc's global shortcuts and forwards every
+   * main-window key to `onShortcutRecorderKey` instead of the page. */
+  setShortcutRecorderArmed?: (armed: boolean) => Promise<ShortcutRecorderArmResult>
+  onShortcutRecorderKey?: (callback: (input: ShortcutRecorderKeyEvent) => void) => () => void
+  /** Main disarmed on its own (window blur, reload, idle timeout). */
+  onShortcutRecorderDisarmed?: (callback: () => void) => () => void
   getBackendConnection: () => Promise<BackendConnection | null>
   getBackendLogs: () => Promise<BackendLogEvent[]>
   getRuntimeInfo: () => Promise<RuntimeInfo>

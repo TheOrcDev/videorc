@@ -95,6 +95,11 @@ export class GlobalShortcutsRegistrar {
     const body = JSON.stringify(shortcuts)
     register(shortcuts)
       .then((result) => {
+        // Held by main while the shortcut recorder is armed: leave the body
+        // unmarked so the next render re-syncs and learns the real outcome.
+        if (result?.deferred) {
+          return
+        }
         this.lastRegisteredBody = body
         const failed = Object.entries(result?.registered ?? {})
           .filter(([, ok]) => !ok)

@@ -77,6 +77,7 @@ export const IPC_INVOKE_ROLES = {
   'preview-surface:status': MAIN_ONLY,
   'notes-window:open': MAIN_ONLY,
   'global-shortcuts:set': MAIN_ONLY,
+  'shortcut-recorder:set-armed': MAIN_ONLY,
   'notes-window:close': MAIN_ONLY,
   'notes-window:get-state': MAIN_AND_NOTES,
   'notes-window:set-always-on-top': MAIN_AND_NOTES,
