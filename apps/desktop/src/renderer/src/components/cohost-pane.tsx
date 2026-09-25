@@ -118,10 +118,16 @@ export function CohostPane({
   const activeKey = resolveCohostSelection(rows, selectedKey)
   const activeRow = cohostRowAt(rows, selectedKey)
   const questionIds = useMemo(() => cohostQuestionIds(state), [state])
-  // "Answered on air" (plan 060 D9): newest first, gone with the state's 60 s.
+  // "Answered on air" (plan 060 D9): newest first, gone after the backend's
+  // 60 s even when no cohost.state arrives in quiet chat (the backend only
+  // filters when it snapshots, and a Restore on an aged entry is a no-op).
   const answeredOnAir = useMemo(
-    () => [...(state?.recentlyResolved ?? [])].reverse().slice(0, 3),
-    [state?.recentlyResolved]
+    () =>
+      [...(state?.recentlyResolved ?? [])]
+        .filter((entry) => Date.parse(entry.resolvedAt) + COHOST_RECENTLY_RESOLVED_TTL_MS > nowMs)
+        .reverse()
+        .slice(0, 3),
+    [state?.recentlyResolved, nowMs]
   )
   const spotlightQuestionId = activeCohostSpotlight(state, nowMs)?.questionId ?? null
   // Viewers saying something is broken. A persistent chip, never a toast: it
@@ -611,6 +617,9 @@ function CohostAction({
 // The pane is a container: in a narrow Chat window (320px minimum) it drops
 // decoration and key chips before anything clips. Shortcuts keep working and
 // stay named in each action's title. Literal so Tailwind generates it.
+// Mirrors the backend TTL for recentlyResolved (cohost.rs).
+const COHOST_RECENTLY_RESOLVED_TTL_MS = 60_000
+
 const PANE_NARROW_HIDDEN = '@max-[400px]/cohost-pane:hidden'
 
 /** One-line explanation that REPLACES the pane (Premium, consent). Same shape

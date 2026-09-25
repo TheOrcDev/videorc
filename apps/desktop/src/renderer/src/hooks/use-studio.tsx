@@ -3847,6 +3847,11 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
   const cohostAutoHighlightMessageId = cohostState?.autoHighlight?.messageId ?? null
   const executeCohostAutoHighlightRef = useRef<(messageId: string) => void>(() => {})
   executeCohostAutoHighlightRef.current = (messageId) => {
+    // A card the streamer is setting by hand (H pressed, PNG still
+    // rendering) always wins: the engine only sees the backend phase, which
+    // is still idle while the manual apply is in flight. The engine reclaims
+    // an unserved command after its apply timeout.
+    if (commentHighlightApplyingId !== null) return
     const message = liveChatSnapshotRef.current.messages.find(
       (candidate) => candidate.id === messageId
     )

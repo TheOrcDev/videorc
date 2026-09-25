@@ -938,6 +938,10 @@ struct ObservedCard {
 struct PendingAutoRequest {
     message_id: String,
     asked_at: Instant,
+    /// A voice refresh re-sets a card that is still live: it is fulfilled
+    /// only once the observed card's expiry moves forward, never by the old
+    /// card still being there.
+    refresh: bool,
 }
 
 /// Session-scoped memory behind the automatic-card rules.
@@ -1860,6 +1864,9 @@ impl CohostSession {
         now: Instant,
     ) -> SpotlightOutcome {
         self.spotlight.in_flight = false;
+        // "Two consecutive calls" means consecutive answers: a hit, a failed
+        // call, then a hit is not a streak.
+        self.spotlight.answered_streak.clear();
         let unavailable = error.detail.status == Some(404)
             || error.kind == CohostApiErrorKind::PremiumRequired
             || matches!(
@@ -1893,11 +1900,14 @@ impl CohostSession {
     fn observe_overlay(&mut self, overlay: &OverlayObservation, now: Instant) {
         match overlay.live_message_id.as_deref() {
             Some(message_id) => {
-                let requested = self
-                    .auto
-                    .requested
-                    .as_ref()
-                    .is_some_and(|request| request.message_id == message_id);
+                let observed_expiry = now + overlay.remaining;
+                let requested = self.auto.requested.as_ref().is_some_and(|request| {
+                    request.message_id == message_id
+                        && (!request.refresh
+                            || !self.auto.card.as_ref().is_some_and(|card| {
+                                observed_expiry <= card.expires_at + Duration::from_secs(1)
+                            }))
+                });
                 if requested {
                     // Fulfilled: the wire command leaves the snapshot so a
                     // renderer that (re)connects later never replays it.
@@ -1913,7 +1923,7 @@ impl CohostSession {
                 self.auto.card = Some(ObservedCard {
                     message_id: message_id.to_string(),
                     engine_set,
-                    expires_at: now + overlay.remaining,
+                    expires_at: observed_expiry,
                 });
                 self.auto.shown.insert(message_id.to_string());
             }
@@ -2043,6 +2053,7 @@ impl CohostSession {
         self.auto.requested = Some(PendingAutoRequest {
             message_id: decision.message_id.clone(),
             asked_at: now,
+            refresh: decision.refresh,
         });
         self.auto.shown.insert(decision.message_id.clone());
         self.auto.last_author = Some(decision.author);
