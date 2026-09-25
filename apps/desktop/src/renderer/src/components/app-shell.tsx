@@ -364,8 +364,10 @@ export function AppShell(): ReactElement {
           <Pane>
             <Toolbar title={workspaceTabLabel(active)} />
             {/* Library manages its own scroll (pinned header and toolbar,
-                  only the table scrolls); every other tab scrolls as one. */}
-            <PaneBody scroll={active !== 'library'}>
+                  only the table scrolls), and so does Settings (its tab strip
+                  stays pinned, only the tab under it scrolls); every other tab
+                  scrolls as one. */}
+            <PaneBody scroll={active !== 'library' && active !== 'settings'}>
               <StudioMicVisualProvider enabled={active === 'studio' || active === 'sources'}>
                 <Suspense fallback={<WorkspaceTabFallback />}>
                   {active === 'studio' ? <StudioTab /> : null}
