@@ -166,6 +166,10 @@ supervisor and health copy say "Linux CPU preview" and never claim
 pnpm probe:preview-lifecycle:linux   # VIDEORC_EXPECT_LINUX_PROOF=1, asserts proof surface live, polling on, no native claim
 ```
 
+## Packaged run (L6 / Plan 0008)
+
+`pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Updater promotion and `release-linux-alpha.yml` are still owed.
+
 ## Verify gates that work on Linux
 
 Cheap, no Electron (run these first):

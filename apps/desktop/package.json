@@ -11,6 +11,7 @@
     "build": "electron-vite build",
     "package": "pnpm build && electron-builder --dir --config.mac.identity=null --config.mac.notarize=false",
     "dist": "pnpm build && electron-builder --config.mac.identity=null --config.mac.notarize=false --config.dmg.sign=false",
+    "package:linux": "pnpm build && electron-builder --linux dir AppImage --publish never",
     "package:windows:unsigned": "pnpm build && electron-builder --win dir --publish never --config electron-builder.windows-unsigned.cjs",
     "dist:windows:prepackaged": "electron-builder --win nsis --publish never --prepackaged release/win-unpacked --config electron-builder.windows-signed.cjs",
     "dist:windows:signed": "pnpm dist:windows:prepackaged",
