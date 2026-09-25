@@ -35,7 +35,7 @@ import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from '@/components/ui/collapsible'
-import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { Field, FieldGroup, FieldLabel, FieldLegend, FieldSet } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -480,41 +480,49 @@ export function SettingsTab({
                   </div>
                 </Field>
               ))}
-              {(['horizontal', 'vertical'] as const).map((orientation) => (
-                <div key={orientation} className="flex flex-col gap-3">
-                  <span className="text-sm font-medium">
-                    {orientation === 'horizontal' ? 'Horizontal layouts' : 'Vertical layouts'}
-                  </span>
+            </FieldGroup>
+            {/* One inset group per orientation, rows shaped like the ones
+                above: the headers and fields used to sit loose inside the
+                group, flush against its border. */}
+            {(['horizontal', 'vertical'] as const).map((orientation) => (
+              <FieldSet key={orientation} className="min-w-0 gap-0">
+                <FieldLegend className="mb-1.5 px-1 text-xs text-muted-foreground" variant="label">
+                  {orientation === 'horizontal' ? 'Horizontal layouts' : 'Vertical layouts'}
+                </FieldLegend>
+                <FieldGroup variant="grouped">
                   {BUILTIN_LAYOUTS.filter(
                     ({ id }) => id.startsWith('vertical-') === (orientation === 'vertical')
                   ).map(({ id, label }) => (
                     <Field key={id}>
-                      <FieldLabel htmlFor={`global-layout-${id}`}>{label}</FieldLabel>
-                      <Input
-                        id={`global-layout-${id}`}
-                        value={settings.globalShortcuts?.layouts?.[id] ?? ''}
-                        placeholder="Unassigned"
-                        onChange={(event) =>
-                          setSettings((current) => ({
-                            ...current,
-                            globalShortcuts: {
-                              ...current.globalShortcuts,
-                              layouts: {
-                                ...current.globalShortcuts?.layouts,
-                                [id]: event.target.value
+                      <div className="flex items-center justify-between gap-3">
+                        <FieldLabel htmlFor={`global-layout-${id}`}>{label}</FieldLabel>
+                        <Input
+                          className="w-44 font-mono text-xs"
+                          id={`global-layout-${id}`}
+                          value={settings.globalShortcuts?.layouts?.[id] ?? ''}
+                          placeholder="Unassigned"
+                          onChange={(event) =>
+                            setSettings((current) => ({
+                              ...current,
+                              globalShortcuts: {
+                                ...current.globalShortcuts,
+                                layouts: {
+                                  ...current.globalShortcuts?.layouts,
+                                  [id]: event.target.value
+                                }
                               }
-                            }
-                          }))
-                        }
-                      />
+                            }))
+                          }
+                        />
+                      </div>
                     </Field>
                   ))}
-                </div>
-              ))}
-              <p className="text-xs text-muted-foreground">
-                Leave a field empty to release the key combination.
-              </p>
-            </FieldGroup>
+                </FieldGroup>
+              </FieldSet>
+            ))}
+            <p className="px-1 text-xs text-muted-foreground">
+              Leave a field empty to release the key combination.
+            </p>
           </PanelSection>
 
           <PanelSection
