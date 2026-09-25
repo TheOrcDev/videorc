@@ -106,7 +106,12 @@ fps, consumer videotoolbox-encoder`) and the presenter shows every compositor
 frame with zero lag, so the preview runs at the session rate. A clean
 `origin/main` (`f4044b71`) checkout run the same way on the same box measures
 29.98 fps and fails identically (`VIDEORC_NATIVE_PREVIEW_MIN_FPS` default 55).
-Not caused by this branch; the floor needs a separate look.
+Not caused by this branch. Fixed in this PR: the smoke now reads the
+session log (`recording-compositor-armed` / `recording-compositor-restarted`,
+the same signal `smoke:record-latency` reports) and, when the compositor is
+armed in place, gates the preview against the session cadence (fps × 0.9, one
+frame interval + 25 % jitter for the p95 interval) instead of the idle 60 fps
+floor. Re-run: exit 0, path `armed`, 30.0 fps, p95 36 ms.
 
 ## Owner by-eye checklist (pending)
 

@@ -203,6 +203,7 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
   const ws = await connectBackend(connection, timeoutMs)
   const samples = []
   const previewSurfaceSamples = []
+  const sessionLogs = []
   try {
     ws.addEventListener('message', (event) => {
       try {
@@ -211,6 +212,8 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
           samples.push({ ...message.payload, receivedAt: Date.now() })
         } else if (message.event === 'preview.surface.status') {
           previewSurfaceSamples.push({ ...message.payload, receivedAt: Date.now() })
+        } else if (message.event === 'session.log') {
+          sessionLogs.push({ ...message.payload, receivedAt: Date.now() })
         }
       } catch {
         // Ignore non-JSON websocket messages.
@@ -274,6 +277,7 @@ async function runNativePreviewRecordingSmoke(connection, smoke) {
         smoke,
         samples,
         previewSurfaceSamples,
+        sessionLogs,
         scenario,
         previousSurface
       )
@@ -347,11 +351,13 @@ async function runNativePreviewRecordingScenario(
   smoke,
   samples,
   previewSurfaceSamples,
+  sessionLogs,
   scenario,
   previousSurface
 ) {
   samples.length = 0
   previewSurfaceSamples.length = 0
+  sessionLogs.length = 0
   const expectsPreview = scenario.previewVisible !== false
   const scenarioStartedAt = Date.now()
   const started = await request(
@@ -428,11 +434,22 @@ async function runNativePreviewRecordingScenario(
       measurementFailure = `Native preview measurement command failed: ${errorMessage(measurementResult.error)}`
     }
     if (expectsPreview && !measurementFailure) {
+      // Instant record (P4.1): when the live preview compositor is armed in
+      // place the preview shows the recording cadence (a 30 fps session is a
+      // 30 fps preview by design), so the cadence gate follows the session fps
+      // instead of the idle 60 fps floor. A restarted recording run keeps the
+      // preview on its own 60 fps loop and the idle floor still applies.
+      const compositorPath = compositorPathForSession(sessionLogs, started.sessionId)
+      console.log(
+        `[${scenario.label}] Recording compositor path: ${compositorPath.path ?? 'unknown'}${compositorPath.detail ? ` (${compositorPath.detail})` : ''}`
+      )
       console.log(
         `[${scenario.label}] Native preview steady measurement: ${JSON.stringify(measurement)}`
       )
       try {
-        assertNativeMeasurement(scenario, measurement)
+        assertNativeMeasurement(scenario, measurement, {
+          armedInPlace: compositorPath.path === 'armed'
+        })
       } catch (error) {
         measurementFailure = errorMessage(error)
         measurementFailureError = error
@@ -1018,9 +1035,9 @@ function assertNativeBootstrap(result, options = {}) {
   }
 }
 
-function assertNativeMeasurement(scenario, measurement) {
-  const minMeasurementFps = nativeMeasurementMinFps(scenario)
-  const maxMeasurementIntervalP95Ms = nativeMeasurementMaxIntervalP95Ms()
+function assertNativeMeasurement(scenario, measurement, { armedInPlace = false } = {}) {
+  const minMeasurementFps = nativeMeasurementMinFps(scenario, armedInPlace)
+  const maxMeasurementIntervalP95Ms = nativeMeasurementMaxIntervalP95Ms(scenario, armedInPlace)
   const maxInputToPresentP95Ms = previewInputToPresentP95BudgetMs()
   const maxInputToPresentP99Ms = previewInputToPresentP99BudgetMs()
   const requireAnimationCadence = expectNativePresenter || !exerciseProofFramePolling
@@ -1094,12 +1111,37 @@ function assertNativeMeasurement(scenario, measurement) {
   }
 }
 
-function nativeMeasurementMinFps(scenario) {
-  return sourceCompleteScene ? scenario.fps * 0.9 : minPreviewFps
+/**
+ * The backend logs whether the live preview compositor was armed in place
+ * (`recording-compositor-armed`) or a recording run was started instead
+ * (`recording-compositor-restarted`). Same reading as smoke-record-latency.
+ */
+function compositorPathForSession(sessionLogs, sessionId) {
+  const entry = sessionLogs.find(
+    (record) =>
+      record?.sessionId === sessionId &&
+      (record?.code === 'recording-compositor-armed' ||
+        record?.code === 'recording-compositor-restarted')
+  )
+  if (!entry) return { path: null, detail: null }
+  return {
+    path: entry.code === 'recording-compositor-armed' ? 'armed' : 'restarted',
+    detail: entry.message ?? null
+  }
 }
 
-function nativeMeasurementMaxIntervalP95Ms() {
-  return sourceCompleteScene ? Math.max(maxPreviewIntervalP95Ms, 120) : maxPreviewIntervalP95Ms
+function nativeMeasurementMinFps(scenario, armedInPlace = false) {
+  return sourceCompleteScene || armedInPlace ? scenario.fps * 0.9 : minPreviewFps
+}
+
+function nativeMeasurementMaxIntervalP95Ms(scenario, armedInPlace = false) {
+  if (sourceCompleteScene) return Math.max(maxPreviewIntervalP95Ms, 120)
+  // An armed compositor ticks at the session cadence: one frame interval plus
+  // a quarter frame of jitter is the same tolerance the idle 60 fps budget
+  // (24 ms) grants a 16.7 ms frame.
+  return armedInPlace
+    ? Math.max(maxPreviewIntervalP95Ms, Math.ceil((1000 / scenario.fps) * 1.25))
+    : maxPreviewIntervalP95Ms
 }
 
 function previewInputToPresentP95BudgetMs() {
