@@ -1,6 +1,6 @@
 import { sceneSourceProblems, visualSources } from '@/lib/scene-presets'
-import { displayAccelerator } from '@/lib/platform'
-import { Kbd } from '@/components/ui/kbd'
+import { acceleratorDisplayKeys } from '../../../../shared/accelerator'
+import { Kbd, KbdGroup } from '@/components/ui/kbd'
 import { CheckIcon, DisplayIcon, MobileIcon } from '@/components/icons'
 import { lazy, Suspense, type ReactElement } from 'react'
 const ScenePresetControls = lazy(() => import('@/components/scene-presets'))
@@ -161,12 +161,14 @@ export function ScenesGallery(): ReactElement {
                 <span className="truncate text-sm font-medium">
                   {layoutSwitchPending === preset.id ? 'Switching…' : preset.label}
                   {settings.globalShortcuts?.layouts?.[preset.id] ? (
-                    <Kbd>
-                      {displayAccelerator(
-                        settings.globalShortcuts.layouts[preset.id]!,
+                    <KbdGroup>
+                      {acceleratorDisplayKeys(
+                        settings.globalShortcuts.layouts[preset.id],
                         runtimeInfo?.platform
-                      )}
-                    </Kbd>
+                      ).map((glyph, index) => (
+                        <Kbd key={`${glyph}-${index}`}>{glyph}</Kbd>
+                      ))}
+                    </KbdGroup>
                   ) : null}
                 </span>
                 {active ? (

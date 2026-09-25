@@ -1,5 +1,6 @@
 import { importScheduledThumbnail } from './scheduled-stream-thumbnail'
 import { globalShortcutEntries, isGlobalShortcutAction } from '../shared/global-shortcuts'
+import { normalizeAccelerator } from '../shared/accelerator'
 import type {
   GlobalShortcutsConfig,
   GlobalShortcutsResult,
@@ -516,7 +517,14 @@ const globalShortcutGate = new GlobalShortcutGate(globalShortcut, (action) => {
 })
 
 function setGlobalShortcuts(shortcuts: GlobalShortcutsConfig): GlobalShortcutsResult {
-  return globalShortcutGate.apply(globalShortcutEntries(shortcuts))
+  // One spelling per platform: a pre-062 hand-typed `Cmd+…` binds Ctrl off
+  // macOS, which is what Settings always displayed there.
+  return globalShortcutGate.apply(
+    globalShortcutEntries(shortcuts).map(([action, value]) => [
+      action,
+      normalizeAccelerator(value, process.platform) ?? value
+    ])
+  )
 }
 
 // ── Settings shortcut recorder (plan 062) ─────────────────────────────────

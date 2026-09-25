@@ -26,7 +26,7 @@ import {
   WarningIcon
 } from '@/components/icons'
 import { useTheme } from 'next-themes'
-import { useEffect, useState, type ReactElement } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactElement } from 'react'
 
 import logoUrl from '@/assets/videorc-logo.png'
 import { CohostSettingsSection } from '@/components/cohost-settings-section'
@@ -49,6 +49,7 @@ import { useWorkspaceNav } from '@/components/workspace-nav'
 import { useStudioAudio, useStudioCore, useStudioRecordingState } from '@/hooks/use-studio'
 import type { RemoteControlStatus } from '@/lib/backend'
 import { useUpdater } from '@/hooks/use-updater'
+import { globalShortcutRegistration } from '@/lib/global-shortcuts'
 import type { DirectoryFacts, RuntimeInfo, UpdateStatus } from '@/lib/backend'
 import { isActiveRecordingState } from '@/lib/format'
 import { gpuFallbackAge, gpuRenderingLabel } from '@/lib/gpu-fallback-view'
@@ -121,6 +122,10 @@ export function SettingsTab({
   const { theme, setTheme } = useTheme()
 
   // Plan 062: shortcuts are recorded by pressing them, not typed.
+  const shortcutRegistration = useSyncExternalStore(
+    globalShortcutRegistration.subscribe,
+    globalShortcutRegistration.getSnapshot
+  )
   const globalShortcutValue = (action: GlobalShortcutAction): string | undefined =>
     globalShortcutEntries(settings.globalShortcuts ?? {}).find(([id]) => id === action)?.[1]
   const setGlobalShortcut = (action: GlobalShortcutAction, accelerator: string): void =>
@@ -507,6 +512,7 @@ export function SettingsTab({
                   label={globalShortcutActionLabel(action)}
                   platform={runtimeInfo?.platform}
                   validate={validateGlobalShortcut(action)}
+                  registrationFailed={shortcutRegistration[action] === false}
                   value={globalShortcutValue(action)}
                   onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
                 />
@@ -532,6 +538,7 @@ export function SettingsTab({
                         label={label}
                         platform={runtimeInfo?.platform}
                         validate={validateGlobalShortcut(action)}
+                        registrationFailed={shortcutRegistration[action] === false}
                         value={globalShortcutValue(action)}
                         onChange={(accelerator) => setGlobalShortcut(action, accelerator)}
                       />
