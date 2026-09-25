@@ -1200,9 +1200,16 @@ pub async fn fetch_broadcast_viewer_count(
 ) -> XViewerCountOutcome {
     // GET /2/broadcasts/:id — the user-prefixed route is deprecated (docs
     // verified 2026-08-19); ownership is still enforced by the auth context.
-    let Ok(url) = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}")) else {
+    let Ok(mut url) = endpoint(base_url, &format!("/2/broadcasts/{broadcast_id}")) else {
         return XViewerCountOutcome::Transport;
     };
+    // X returns only `id`, `state`, `title` and `start_ms` unless the fields
+    // are asked for (OpenAPI `BroadcastFieldsParameter`). Without this the
+    // count never arrived on a real broadcast (2026-09-25 session log: "no
+    // concurrent-viewer field (keys: id, start_ms, state, title)"). The
+    // query is part of the OAuth 1.0a signature base string.
+    url.query_pairs_mut()
+        .append_pair("broadcast.fields", X_BROADCAST_VIEWER_FIELDS);
     let Ok(authorization) = oauth1_authorization_header(
         Method::GET.as_str(),
         url.as_str(),
@@ -1231,6 +1238,10 @@ pub async fn fetch_broadcast_viewer_count(
         Err(_) => XViewerCountOutcome::Transport,
     }
 }
+
+/// The `broadcast.fields` the viewer poll asks for: the count plus `state`,
+/// so a lookup that still lacks the count logs what X did send.
+const X_BROADCAST_VIEWER_FIELDS: &str = "total_watching,state";
 
 /// Concurrent-viewer fields, current name first. `total_watched` is the
 /// cumulative count and is never used: it would inflate the chip.
@@ -1975,9 +1986,22 @@ mod tests {
                     )
                     .route(
                         "/2/broadcasts/live",
-                        get(|| async {
-                            axum::Json(serde_json::json!({"data": {"total_watching": "31"}}))
-                        }),
+                        // Like X: default fields unless `broadcast.fields`
+                        // asks for the count.
+                        get(
+                            |query: axum::extract::Query<
+                                std::collections::HashMap<String, String>,
+                            >| async move {
+                                let asked = query.get("broadcast.fields").is_some_and(|fields| {
+                                    fields.split(',').any(|field| field == "total_watching")
+                                });
+                                axum::Json(if asked {
+                                    serde_json::json!({"data": {"id": "live", "state": "running", "total_watching": "31"}})
+                                } else {
+                                    serde_json::json!({"data": {"id": "live", "start_ms": "1", "state": "running", "title": "t"}})
+                                })
+                            },
+                        ),
                     ),
             )
             .await

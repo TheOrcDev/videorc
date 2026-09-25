@@ -329,9 +329,15 @@ export function StreamManager({
     cohostPaneOpenRef.current = orcleVisible
   }, [orcleVisible])
 
+  const activityAudience = inHistory ? (history?.audience ?? null) : (dashboard?.audience ?? null)
   const items = useMemo(
-    () => activityItems(messages, inHistory ? [] : (dashboard?.destinationEvents ?? [])),
-    [dashboard?.destinationEvents, inHistory, messages]
+    () =>
+      activityItems(
+        messages,
+        inHistory ? [] : (dashboard?.destinationEvents ?? []),
+        activityAudience
+      ),
+    [activityAudience, dashboard?.destinationEvents, inHistory, messages]
   )
   const chatCount = useMemo(
     () => messages.filter((message) => message.eventType !== 'follow').length,
@@ -627,6 +633,7 @@ export function StreamManager({
             className="flex"
             items={items}
             nowMs={nowMs}
+            audience={activityAudience}
             providers={snapshot.providers}
             onShowOnStream={live && onHighlight ? showActivityOnStream : undefined}
             onThank={live && onSend ? thankInChat : undefined}

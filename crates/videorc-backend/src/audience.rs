@@ -92,7 +92,23 @@ pub struct PlatformAudience {
     /// reconnect when this is false.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub audience_scopes: Option<bool>,
+    /// Followers gained this stream, one entry per read that rose above the
+    /// session's highest total, oldest first. X never says who followed and
+    /// Twitch only does with the opt-in scope, so Activity lists these.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub follower_gains: Vec<FollowerGain>,
 }
+
+/// New followers seen by one read (`at` is the read time).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FollowerGain {
+    pub at: String,
+    pub count: u64,
+}
+
+/// Gains kept per platform; the oldest drop first.
+pub const MAX_FOLLOWER_GAINS: usize = 100;
 
 /// Twitch `Get Broadcaster Subscriptions` totals.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -138,6 +154,9 @@ impl AudienceReading {
 #[derive(Debug, Default)]
 pub struct AudienceHub {
     snapshot: Option<AudienceSnapshot>,
+    /// Highest follower total per platform this session: a gain counts only
+    /// above it, so an unfollow and a refollow never read as a new follower.
+    peaks: Vec<(StreamPlatform, u64)>,
 }
 
 impl AudienceHub {
@@ -151,11 +170,14 @@ impl AudienceHub {
     ) -> AudienceSnapshot {
         let snapshot = match self.snapshot.as_mut() {
             Some(snapshot) if snapshot.session_id == session_id => snapshot,
-            _ => self.snapshot.insert(AudienceSnapshot {
-                session_id: session_id.to_string(),
-                platforms: Vec::new(),
-                updated_at: now.to_string(),
-            }),
+            _ => {
+                self.peaks.clear();
+                self.snapshot.insert(AudienceSnapshot {
+                    session_id: session_id.to_string(),
+                    platforms: Vec::new(),
+                    updated_at: now.to_string(),
+                })
+            }
         };
         for platform in platforms {
             if snapshot
@@ -175,6 +197,7 @@ impl AudienceHub {
                     subscribers: None,
                     subscriber_points: None,
                     audience_scopes: None,
+                    follower_gains: Vec::new(),
                 });
             }
         }
@@ -204,6 +227,27 @@ impl AudienceHub {
         match reading {
             AudienceReading::Count(total) => {
                 let baseline = *entry.baseline.get_or_insert(*total);
+                if entry.metric == AudienceMetric::Followers {
+                    let peak = match self.peaks.iter_mut().find(|(held, _)| *held == platform) {
+                        Some((_, peak)) => peak,
+                        None => {
+                            self.peaks.push((platform, baseline));
+                            &mut self.peaks.last_mut().expect("just pushed").1
+                        }
+                    };
+                    if *total > *peak {
+                        entry.follower_gains.push(FollowerGain {
+                            at: now.to_string(),
+                            count: *total - *peak,
+                        });
+                        let excess = entry
+                            .follower_gains
+                            .len()
+                            .saturating_sub(MAX_FOLLOWER_GAINS);
+                        entry.follower_gains.drain(..excess);
+                        *peak = *total;
+                    }
+                }
                 entry.capability = AudienceCapability::Available;
                 entry.total = Some(*total);
                 entry.delta = Some(signed_difference(*total, baseline));
@@ -561,19 +605,21 @@ async fn read_source(
     }
     let account_id = source.account_id.as_deref();
     let credential = crate::platform_account_credential(state, source.platform, account_id).ok();
-    let Some(credential) = credential else {
-        if source.platform == StreamPlatform::X
-            && let Ok(Some(credentials)) = crate::x_live::x_livestream_credentials()
-        {
-            // No X OAuth account, but "Authorize X Live" signed this stream.
-            return fetch_x_followers_oauth1(
-                client,
-                crate::x_live::DEFAULT_API_BASE_URL,
-                &credentials,
-            )
-            .await
-            .into();
+    // X: the "Authorize X Live" OAuth 1.0a token signed this broadcast, so it
+    // is the streaming account and it never expires. The X OAuth 2.0 account
+    // (comments) is only the fallback: its token can lapse unseen, which hid
+    // X followers behind "Reconnect X" on a live stream (2026-09-25).
+    if source.platform == StreamPlatform::X
+        && let Ok(Some(credentials)) = crate::x_live::x_livestream_credentials()
+    {
+        let reading =
+            fetch_x_followers_oauth1(client, crate::x_live::DEFAULT_API_BASE_URL, &credentials)
+                .await;
+        if credential.is_none() || matches!(reading, AudienceReading::Count(_)) {
+            return reading.into();
         }
+    }
+    let Some(credential) = credential else {
         return AudienceReading::Unavailable(format!(
             "Connect {} to show its audience.",
             crate::streaming::stream_platform_label(source.platform)
@@ -1096,6 +1142,68 @@ mod tests {
         // Re-registering the same session keeps its baselines.
         let again = hub.begin("s", &[StreamPlatform::Twitch], "t7");
         assert_eq!(again.platforms[0].baseline, Some(100));
+    }
+
+    #[test]
+    fn follower_gains_count_only_new_highs_and_never_youtube() {
+        let mut hub = AudienceHub::default();
+        hub.begin("s", &[StreamPlatform::Youtube, StreamPlatform::X], "t0");
+        let read = |hub: &mut AudienceHub, platform, total, at: &str| {
+            hub.apply("s", platform, &AudienceReading::Count(total), at)
+        };
+        let gains = |snapshot: &AudienceSnapshot, platform| {
+            snapshot
+                .platforms
+                .iter()
+                .find(|entry| entry.platform == platform)
+                .unwrap()
+                .follower_gains
+                .iter()
+                .map(|gain| (gain.at.clone(), gain.count))
+                .collect::<Vec<_>>()
+        };
+        // The baseline read is not a gain.
+        let first = read(&mut hub, StreamPlatform::X, 900, "t1").unwrap();
+        assert!(gains(&first, StreamPlatform::X).is_empty());
+        let rose = read(&mut hub, StreamPlatform::X, 903, "t2").unwrap();
+        assert_eq!(gains(&rose, StreamPlatform::X), vec![("t2".to_string(), 3)]);
+        // An unfollow and a refollow back to the old high is not new.
+        read(&mut hub, StreamPlatform::X, 902, "t3").unwrap();
+        assert!(read(&mut hub, StreamPlatform::X, 903, "t4").is_some());
+        let later = read(&mut hub, StreamPlatform::X, 905, "t5").unwrap();
+        assert_eq!(
+            gains(&later, StreamPlatform::X),
+            vec![("t2".to_string(), 3), ("t5".to_string(), 2)]
+        );
+        // YouTube subscriber counts are rounded, so they never list gains.
+        read(&mut hub, StreamPlatform::Youtube, 1_000, "t6").unwrap();
+        let youtube = read(&mut hub, StreamPlatform::Youtube, 1_100, "t7").unwrap();
+        assert!(gains(&youtube, StreamPlatform::Youtube).is_empty());
+        // A new session starts from its own baseline.
+        hub.begin("next", &[StreamPlatform::X], "t8");
+        hub.apply(
+            "next",
+            StreamPlatform::X,
+            &AudienceReading::Count(905),
+            "t9",
+        );
+        let next = hub
+            .apply(
+                "next",
+                StreamPlatform::X,
+                &AudienceReading::Count(906),
+                "t10",
+            )
+            .unwrap();
+        assert_eq!(
+            gains(&next, StreamPlatform::X),
+            vec![("t10".to_string(), 1)]
+        );
+        let wire = serde_json::to_value(&next).unwrap();
+        assert_eq!(
+            wire["platforms"][0]["followerGains"],
+            json!([{ "at": "t10", "count": 1 }])
+        );
     }
 
     #[test]

@@ -1,4 +1,4 @@
-import { useSyncExternalStore, type ReactElement, type ReactNode } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 
 import { cn } from '@/lib/utils'
 
@@ -16,41 +16,14 @@ const MAC_RENDERER = typeof navigator !== 'undefined' && /Mac/i.test(navigator.p
 export const TRAFFIC_LIGHT_GUTTER_CLASS = 'pl-[88px]'
 
 /**
- * Native fullscreen covers the whole screen, menu bar included; a zoomed
- * window never does. No IPC needed.
+ * Left padding for a header that shares its row with the traffic lights.
+ * It stays in fullscreen too: macOS draws the lights over the header when
+ * the title bar reveals on hover, and a window filling the screen under an
+ * auto-hidden menu bar keeps them showing. Dropping the gutter there put the
+ * lights on top of the Stream Manager title (2026-09-25).
  */
-export function isNativeFullscreenSize(size: {
-  outerWidth: number
-  outerHeight: number
-  screenWidth: number
-  screenHeight: number
-}): boolean {
-  return size.outerWidth >= size.screenWidth && size.outerHeight >= size.screenHeight
-}
-
-function nativeFullscreen(): boolean {
-  return isNativeFullscreenSize({
-    outerWidth: window.outerWidth,
-    outerHeight: window.outerHeight,
-    screenWidth: window.screen.width,
-    screenHeight: window.screen.height
-  })
-}
-
-function subscribeToResize(onChange: () => void): () => void {
-  window.addEventListener('resize', onChange)
-  return () => window.removeEventListener('resize', onChange)
-}
-
-/** True while the window is in macOS native fullscreen, where the traffic lights hide. */
-export function useWindowFullscreen(): boolean {
-  return useSyncExternalStore(subscribeToResize, nativeFullscreen, () => false)
-}
-
-/** Left padding for a header that shares its row with the traffic lights. */
 export function useTrafficLightGutter(): string {
-  const fullscreen = useWindowFullscreen()
-  return MAC_RENDERER && !fullscreen ? TRAFFIC_LIGHT_GUTTER_CLASS : 'pl-3'
+  return MAC_RENDERER ? TRAFFIC_LIGHT_GUTTER_CLASS : 'pl-3'
 }
 
 /** A single-pane glass window (Chat, Captions, Notes): the content coat over the window coat. */
