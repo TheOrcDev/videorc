@@ -2,6 +2,7 @@
 
 import {
   isHttpsReleaseUploadEndpoint,
+  linuxReleaseUploadEndpoint,
   missingLinuxReleaseUploadEnv
 } from './lib/linux-release-preflight.mjs'
 
@@ -11,10 +12,7 @@ if (missing.length > 0) {
   process.exit(1)
 }
 
-const endpoint =
-  process.env.VIDEORC_RELEASE_UPLOAD_S3_ENDPOINT_URL?.trim() ||
-  process.env.VIDEORC_DOWNLOAD_S3_ENDPOINT_URL?.trim() ||
-  ''
+const endpoint = linuxReleaseUploadEndpoint(process.env) ?? ''
 if (!isHttpsReleaseUploadEndpoint(endpoint)) {
   console.error('linux-release-secrets: FAIL (upload endpoint must be HTTPS)')
   process.exit(1)
