@@ -97,6 +97,17 @@ TS: `native-preview-proof-geometry.test.ts` freeform rows. Smoke: the Freeform
 smoke enters Freeform from `screen-only` and `side-by-side`, selects Circle and
 asserts the compositor reports `shape: 'circle'` and the stage paints a circle.
 
+### Known failing gate on this box (pre-existing)
+
+`pnpm smoke:recording-native-preview` fails its `native-preview-1080p30`
+scenario with "Native preview measured 29.9 fps, below 55.00": the compositor
+is armed in place for the 30 fps session (`loop config swapped in place: 30
+fps, consumer videotoolbox-encoder`) and the presenter shows every compositor
+frame with zero lag, so the preview runs at the session rate. A clean
+`origin/main` (`f4044b71`) checkout run the same way on the same box measures
+29.98 fps and fails identically (`VIDEORC_NATIVE_PREVIEW_MIN_FPS` default 55).
+Not caused by this branch; the floor needs a separate look.
+
 ## Owner by-eye checklist (pending)
 
 - [ ] Open the Scene tab with the preview closed: the canvas shows the live
