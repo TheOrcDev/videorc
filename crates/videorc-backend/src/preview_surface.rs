@@ -1928,7 +1928,7 @@ async fn sync_preview_surface_source_from_compositor(state: &AppState) {
         slot.status.updated_at = Utc::now().to_rfc3339();
         if !capture_owns_compositor(state) {
             slot.status.message = Some(proof_surface_running_message(
-                &source,
+                &slot.status.source,
                 false,
                 cfg!(target_os = "linux"),
             ));

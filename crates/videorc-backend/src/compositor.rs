@@ -7444,6 +7444,7 @@ async fn publish_compositor_frame(
                 compositor_backend = CompositorBackend::Metal;
             }
             Err(reason) => {
+                let gpu_available = gpu.is_some();
                 let failed_gpu_timings = take_failed_gpu_timings(gpu);
                 timings.merge_gpu(failed_gpu_timings);
                 // On macOS a Metal miss is a real degradation worth surfacing;
@@ -7454,7 +7455,7 @@ async fn publish_compositor_frame(
                 } else {
                     let _ = reason;
                 }
-                if frame_consumer.composes_cpu_pixels(gpu.is_some()) {
+                if frame_consumer.composes_cpu_pixels(gpu_available) {
                     bytes = {
                         let mut store = frame_store
                             .lock()
