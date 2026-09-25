@@ -12,6 +12,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import type { ReactElement } from 'react'
 
 import { PanelSection } from '@/components/panel-section'
+import { dockHiddenDisplay } from '@/components/preview-stage'
 import { SceneStage } from '@/components/scene/scene-stage'
 import { SourceTransformFields } from '@/components/scene/source-transform-fields'
 import { PowerSlider } from '@/components/power-slider'
@@ -20,6 +21,7 @@ import { Button } from '@/components/ui/button'
 import { Field, FieldContent, FieldLabel, FieldSet } from '@/components/ui/field'
 import { Switch } from '@/components/ui/switch'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
+import { useDockSlotReporter } from '@/hooks/use-dock-slot'
 import { useStudioCore } from '@/hooks/use-studio'
 import type {
   CameraAspect,
@@ -70,6 +72,10 @@ export function LayoutTab(): ReactElement {
     applyLayoutPatch,
     previewWindow,
     togglePreviewWindow,
+    openPreviewWindow,
+    setPreviewWindowMode,
+    nativePreviewSurfaceEnabled,
+    runtimeInfo,
     scene,
     sceneEditMode,
     setSceneGesturePending,
@@ -79,6 +85,8 @@ export function LayoutTab(): ReactElement {
     resetSceneSource,
     nudgeSceneSource,
     setSceneSourceTransform,
+    setSceneEditorDraft,
+    clearSceneEditorDraft,
     applyCameraPreset,
     setSceneSourceVisible,
     isSessionActive,
@@ -169,6 +177,59 @@ export function LayoutTab(): ReactElement {
     layoutPresetOrientation(layout.layoutPreset) === 'vertical'
       ? VERTICAL_LAYOUT_TAB_PRESETS
       : HORIZONTAL_LAYOUT_TAB_PRESETS
+
+  // Live canvas (plan 058, macOS only): the docked native preview glues into
+  // the stage's canvas rect instead of the Studio slot while this tab is
+  // mounted. Only one tab mounts at a time, so the two reporters never fight.
+  const liveCanvasSupported = nativePreviewSurfaceEnabled && runtimeInfo?.platform === 'darwin'
+  const liveCanvasActive =
+    liveCanvasSupported && previewWindow.open && previewWindow.mode === 'docked'
+  const slotRef = useDockSlotReporter(liveCanvasActive, previewWindow.dockEpoch, 'scene')
+  // Hit-only mode needs main to have ACCEPTED a scene-slot report and to be
+  // showing the surface; until then the schematic stays visible.
+  const liveSurface =
+    liveCanvasActive &&
+    previewWindow.dockSlot === 'scene' &&
+    previewWindow.dockHiddenReason === null
+  const liveHidden = liveCanvasActive && !liveSurface
+  const liveHint = liveHidden
+    ? (dockHiddenDisplay(previewWindow.dockHiddenReason ?? 'no-slot-report')?.detail ?? null)
+    : null
+  // Decision 6: entering the tab with the preview CLOSED opens it docked into
+  // the canvas; an open floating preview stays floating (the footer offers
+  // "Show live here"); leaving the tab changes nothing. Once per tab entry,
+  // decided on main's fresh state so a stale renderer snapshot at app start
+  // can never re-dock a window the user left floating.
+  const autoOpenDecidedRef = useRef(false)
+  useEffect(() => {
+    if (autoOpenDecidedRef.current || !runtimeInfo) {
+      return
+    }
+    autoOpenDecidedRef.current = true
+    if (!liveCanvasSupported) {
+      return
+    }
+    let cancelled = false
+    void (async () => {
+      const fresh = await window.videorc?.getPreviewWindowState?.()
+      if (cancelled || !fresh || fresh.open) {
+        return
+      }
+      await setPreviewWindowMode('docked')
+      if (!cancelled) {
+        await openPreviewWindow()
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [liveCanvasSupported, openPreviewWindow, runtimeInfo, setPreviewWindowMode])
+  const showLiveHere = useCallback(async () => {
+    await setPreviewWindowMode('docked')
+    if (!previewWindow.open) {
+      await openPreviewWindow()
+    }
+  }, [openPreviewWindow, previewWindow.open, setPreviewWindowMode])
 
   return (
     <div className="flex flex-col">
@@ -273,6 +334,19 @@ export function LayoutTab(): ReactElement {
               }
               scene={scene}
               selectedSourceId={selectedSceneSourceId}
+              liveDocked={liveCanvasActive}
+              liveHint={liveHint}
+              liveSurface={liveSurface}
+              slotRef={liveCanvasSupported ? slotRef : undefined}
+              onPopOut={
+                liveCanvasSupported ? () => void setPreviewWindowMode('floating') : undefined
+              }
+              onShowLive={liveCanvasSupported ? () => void showLiveHere() : undefined}
+              // Live drafts (plan 058 S4): only flow while the surface is the
+              // canvas; the stage gates them on `liveSurface`.
+              onDraft={liveCanvasSupported ? setSceneEditorDraft : undefined}
+              onDraftClear={liveCanvasSupported ? clearSceneEditorDraft : undefined}
+              outputWidth={captureConfig.video.width}
               onCommitTransform={setSceneSourceTransform}
               onRequestFreeform={isFreeform || isSessionActive ? undefined : enterFreeform}
               onSelectSource={(sourceId) => {

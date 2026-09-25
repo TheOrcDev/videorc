@@ -83,7 +83,7 @@ export function PreviewStage({
     nativePreviewSurfaceEnabled && previewWindow.open && previewWindow.mode === 'docked'
   // The reporter is active exactly while the docked frame is on screen; its
   // cleanup tells main the slot unmounted (tab switch, undock, close).
-  const slotRef = useDockSlotReporter(docked, previewWindow.dockEpoch)
+  const slotRef = useDockSlotReporter(docked, previewWindow.dockEpoch, 'studio')
 
   if (docked) {
     return (
@@ -243,7 +243,7 @@ function DockedPreviewFrame({
              CAMetalLayer clips itself to the same radius, so the CSS ground
              and the video agree. A parity test pins the two. */
           className="relative h-full overflow-hidden rounded-panel"
-          data-videorc-dock-slot
+          data-videorc-dock-slot="studio"
           style={{ aspectRatio: slotRatio }}
         >
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 px-6 text-center">
@@ -280,7 +280,9 @@ function DockedPreviewFrame({
   )
 }
 
-function dockHiddenDisplay(
+/** Stated copy for every reason a docked surface is hidden; shared with the
+ * Scene canvas (plan 058), which docks the same surface into the stage. */
+export function dockHiddenDisplay(
   reason: DockHiddenReason | null
 ): { title: string; detail: string } | null {
   switch (reason) {

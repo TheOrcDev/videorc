@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from 'react'
 
-import type { DockSlotReport } from '@/lib/backend'
+import type { DockSlot, DockSlotReport } from '@/lib/backend'
 import {
   DOCK_BLOCKING_POPPER_SELECTOR,
   DOCK_BLOCKING_SCRIM_SELECTOR,
@@ -11,7 +11,8 @@ import {
   type SlotRect
 } from '@/lib/dock-slot'
 
-// Reports the Studio preview slot to main while the preview is docked.
+// Reports a dock slot (the Studio preview card or the Scene canvas) to main
+// while the preview is docked.
 //
 // CONTRACT (see main/preview-dock.ts): reports carry WINDOW-RELATIVE CSS
 // pixels and fire only when the slot's in-window geometry actually changes —
@@ -24,7 +25,8 @@ import {
 // since in-page overlays would otherwise paint UNDER the native surface.
 export function useDockSlotReporter(
   active: boolean,
-  epoch: number
+  epoch: number,
+  slot: DockSlot
 ): (element: HTMLElement | null) => void {
   const elementRef = useRef<HTMLElement | null>(null)
   const lastReportRef = useRef<DockSlotReport | null>(null)
@@ -32,8 +34,10 @@ export function useDockSlotReporter(
   const frameRef = useRef<number | null>(null)
   const activeRef = useRef(active)
   const epochRef = useRef(epoch)
+  const slotRef = useRef(slot)
   activeRef.current = active
   epochRef.current = epoch
+  slotRef.current = slot
 
   const send = useCallback((report: DockSlotReport) => {
     if (dockSlotReportChanged(lastReportRef.current, report)) {
@@ -68,7 +72,7 @@ export function useDockSlotReporter(
       width: window.innerWidth,
       height: window.innerHeight
     })
-    send(buildDockSlotReport(epochRef.current, measurement, true))
+    send(buildDockSlotReport(epochRef.current, slotRef.current, measurement, true))
 
     const scrims = document.querySelectorAll(DOCK_BLOCKING_SCRIM_SELECTOR).length
     const popperRects = Array.from(document.querySelectorAll(DOCK_BLOCKING_POPPER_SELECTOR)).map(
@@ -142,6 +146,7 @@ export function useDockSlotReporter(
       void window.videorc?.reportPreviewDockSlot?.(
         buildDockSlotReport(
           epochRef.current,
+          slotRef.current,
           { rect: { x: 0, y: 0, width: 0, height: 0 }, visibleFraction: 0 },
           false
         )
@@ -151,7 +156,7 @@ export function useDockSlotReporter(
         void window.videorc?.setPreviewDockOverlayOpen?.(false)
       }
     }
-  }, [active, epoch, measureNow, queueMeasure])
+  }, [active, epoch, slot, measureNow, queueMeasure])
 
   return useCallback(
     (element: HTMLElement | null) => {

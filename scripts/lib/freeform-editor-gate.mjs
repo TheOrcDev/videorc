@@ -253,3 +253,190 @@ export function summarizeFreeformTiming(gestures) {
     )
   }
 }
+
+/**
+ * Live canvas (plan 058 S4): one gesture's editor-draft evidence.
+ *
+ * `samples` are mid-drag pairs of the DOM ghost (normalized to the canvas) and
+ * the backend's `compositor.status.editorDraft` read right after it; `final`
+ * is the converged pair at the last pointer position before release. Wire
+ * evidence (`wireDrafts`, `wireClears`, `commits`) comes from the renderer's
+ * socket hook, so the bit-identical draft/commit check never depends on
+ * backend sanitizing. Timings are milliseconds from release/cancel.
+ */
+export function evaluateLiveDraftGesture({
+  sourceId,
+  samples = [],
+  final,
+  wireDrafts = [],
+  wireClears = [],
+  commits = [],
+  committedTransform,
+  revisionAfter,
+  goneMs,
+  lastPresent,
+  cancelled = false,
+  noop = false,
+  tolerance = 1e-3,
+  goneBudgetMs = 1000,
+  clearBudgetMs = 500
+}) {
+  const failures = []
+  for (const sample of samples)
+    if (sample.draft && sample.draft.sourceId !== sourceId)
+      failures.push(`draft names ${sample.draft.sourceId}, gesture edits ${sourceId}`)
+  if (!wireDrafts.length) failures.push('no scene.editor.draft.set left the renderer')
+  if (!final?.draft) failures.push('no draft on the backend at the last pointer position')
+  else if (final.draft.sourceId !== sourceId) failures.push('final draft names another source')
+  else if (rectError(final.draft.transform, final.ghost) > tolerance)
+    failures.push(
+      `final draft misses the DOM ghost by ${rectError(final.draft.transform, final.ghost).toFixed(5)}`
+    )
+  const expectClear = cancelled || noop
+  const releaseDrafts = wireDrafts.filter((draft) => draft.afterRelease)
+  if (expectClear) {
+    if (wireClears.length !== 1)
+      failures.push(`expected one scene.editor.draft.clear, received ${wireClears.length}`)
+    if (releaseDrafts.length) failures.push('a cancelled gesture still sent a release draft')
+    if (!Number.isFinite(goneMs) || goneMs > clearBudgetMs)
+      failures.push(`draft still applied ${describeMs(goneMs)} after cancel (budget ${clearBudgetMs}ms)`)
+  } else {
+    if (wireClears.length) failures.push('a released gesture must not clear its draft')
+    if (releaseDrafts.length !== 1)
+      failures.push(`expected one release draft, received ${releaseDrafts.length}`)
+    if (commits.length !== 1) failures.push(`expected one commit, received ${commits.length}`)
+    const releaseDraft = releaseDrafts[0]
+    const commit = commits[0]
+    if (releaseDraft && commit) {
+      if (!sameRect(releaseDraft.transform, commit.transform))
+        failures.push('release draft and commit differ on the wire (must be bit-identical)')
+      if (releaseDraft.chrome?.guides?.length || releaseDraft.chrome?.activeHandle)
+        failures.push('release draft still carries guides or an active handle')
+    }
+    if (!Number.isFinite(goneMs) || goneMs > goneBudgetMs)
+      failures.push(`draft still applied ${describeMs(goneMs)} after release (budget ${goneBudgetMs}ms)`)
+    if (lastPresent) {
+      if (
+        lastPresent.releaseAtRevision !== undefined &&
+        lastPresent.releaseAtRevision !== revisionAfter
+      )
+        failures.push(
+          `draft was stamped for revision ${lastPresent.releaseAtRevision}, scene installed ${revisionAfter}`
+        )
+      if (committedTransform && rectError(lastPresent.transform, committedTransform) > tolerance)
+        failures.push('last applied draft differs from the committed transform')
+    }
+  }
+  return { ok: failures.length === 0, failures: [...new Set(failures)] }
+}
+
+/**
+ * Preview cadence from sparse `framesRendered` readings, each stamped with
+ * `at` (reply time) and, when known, `requestedAt` (or `rttMs`).
+ *
+ * The gate is the longest STALL between two counter advances. A reading
+ * observes the counter somewhere between its request and its reply, so for a
+ * run of equal readings j..k-1 ended by the advance at k the stall lies in
+ * [request(k-1) - reply(j), reply(k) - request(j-1)]. The gate uses the LOWER
+ * bound (the stall that provably happened) against `maxGapFrames`; the upper
+ * bound is reported. A slow status round trip (> `slowRttMs`) is itself
+ * evidence of a backend hitch and is counted. Steady under-rate (a window at
+ * 55 fps instead of 60) is not a gap: it is reported as the worst window over
+ * `windowMs` and never fails the gate.
+ */
+export function evaluatePreviewCadence({
+  samples,
+  fps,
+  maxGapFrames = 2,
+  windowMs = 1000,
+  slowRttMs = 30
+}) {
+  const failures = []
+  const valid = (samples ?? [])
+    .filter((sample) => Number.isFinite(sample?.at) && Number.isFinite(sample?.framesRendered))
+    .map((sample) => ({
+      ...sample,
+      requestedAt: Number.isFinite(sample.requestedAt)
+        ? sample.requestedAt
+        : sample.at - (Number.isFinite(sample.rttMs) ? sample.rttMs : 0)
+    }))
+  if (!Number.isFinite(fps) || fps <= 0) return { ok: false, failures: ['no preview fps'] }
+  if (valid.length < 3) return { ok: false, failures: ['fewer than three cadence samples'] }
+  const frameMs = 1000 / fps
+  for (let i = 1; i < valid.length; i++) {
+    if (valid[i].at < valid[i - 1].at) return { ok: false, failures: ['cadence samples out of order'] }
+    if (valid[i].framesRendered < valid[i - 1].framesRendered)
+      return { ok: false, failures: ['framesRendered went backwards'] }
+  }
+  const intervals = valid.slice(1).map((sample, i) => sample.at - valid[i].at)
+  const medianIntervalMs = [...intervals].sort((a, b) => a - b)[Math.floor(intervals.length / 2)]
+  let worst = { provenMs: 0, boundMs: 0, at: null }
+  let advanced = 0
+  let runStart = 0
+  const consider = (j, k, open) => {
+    // Readings j..k-1 agree; k is the advance (or the end of sampling).
+    const provenMs = Math.max(0, valid[Math.max(j, k - 1)].requestedAt - valid[j].at)
+    const boundMs = valid[k].at - valid[Math.max(0, j - 1)].requestedAt
+    if (provenMs > worst.provenMs || (provenMs === worst.provenMs && boundMs > worst.boundMs))
+      worst = { provenMs, boundMs, at: valid[j].at, open }
+  }
+  for (let k = 1; k < valid.length; k++) {
+    if (valid[k].framesRendered > valid[k - 1].framesRendered) {
+      advanced++
+      consider(runStart, k, false)
+      runStart = k
+    }
+  }
+  if (runStart < valid.length - 1) consider(runStart, valid.length - 1, true)
+  let worstWindow = { missingFrames: -Infinity, spanMs: 0, at: null }
+  for (let i = 0; i < valid.length; i++)
+    for (let j = i + 1; j < valid.length; j++) {
+      const spanMs = valid[j].at - valid[i].at
+      if (spanMs > windowMs) break
+      if (spanMs < windowMs / 2) continue
+      const missingFrames = spanMs / frameMs - (valid[j].framesRendered - valid[i].framesRendered)
+      if (missingFrames > worstWindow.missingFrames)
+        worstWindow = { missingFrames, spanMs, at: valid[i].at }
+    }
+  const slowRtts = valid.filter((sample) => sample.at - sample.requestedAt > slowRttMs)
+  const budgetMs = maxGapFrames * frameMs
+  if (!advanced) failures.push('framesRendered never advanced')
+  else if (worst.provenMs > budgetMs)
+    failures.push(
+      `preview stalled at least ${worst.provenMs.toFixed(0)}ms (${(worst.provenMs / frameMs).toFixed(2)} frames, at most ${worst.boundMs.toFixed(0)}ms) against a budget of ${maxGapFrames} frames`
+    )
+  const spanMs = valid.at(-1).at - valid[0].at
+  return {
+    ok: failures.length === 0,
+    failures,
+    provenStallMs: worst.provenMs,
+    provenStallFrames: worst.provenMs / frameMs,
+    boundStallMs: worst.boundMs,
+    boundStallFrames: worst.boundMs / frameMs,
+    worstStallAt: worst.at,
+    budgetMs,
+    medianIntervalMs,
+    slowRtts: slowRtts.length,
+    maxRttMs: Math.max(0, ...valid.map((sample) => sample.at - sample.requestedAt)),
+    worstWindowMissingFrames: Number.isFinite(worstWindow.missingFrames)
+      ? worstWindow.missingFrames
+      : null,
+    minWindowFps:
+      Number.isFinite(worstWindow.missingFrames) && worstWindow.spanMs > 0
+        ? fps - (worstWindow.missingFrames * 1000) / worstWindow.spanMs
+        : null,
+    samples: valid.length,
+    spanMs,
+    meanFps:
+      spanMs > 0 ? ((valid.at(-1).framesRendered - valid[0].framesRendered) * 1000) / spanMs : null
+  }
+}
+
+function sameRect(a, b) {
+  return (
+    validBox(a) && validBox(b) && ['x', 'y', 'width', 'height'].every((key) => a[key] === b[key])
+  )
+}
+function describeMs(value) {
+  return Number.isFinite(value) ? `${value.toFixed(0)}ms` : 'indefinitely'
+}

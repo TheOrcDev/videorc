@@ -38,12 +38,29 @@ describe('measureDockSlot', () => {
 describe('dockSlotReportChanged', () => {
   const base = buildDockSlotReport(
     2,
+    'studio',
     { rect: { x: 240, y: 96, width: 800, height: 450 }, visibleFraction: 1 },
     true
   )
 
   it('always sends the first report', () => {
     expect(dockSlotReportChanged(null, base)).toBe(true)
+  })
+
+  it('carries the slot the report was measured in', () => {
+    expect(base.slot).toBe('studio')
+    expect(
+      buildDockSlotReport(
+        2,
+        'scene',
+        { rect: { x: 0, y: 0, width: 10, height: 10 }, visibleFraction: 1 },
+        true
+      ).slot
+    ).toBe('scene')
+  })
+
+  it('sends when the slot changes even at the same rect', () => {
+    expect(dockSlotReportChanged(base, { ...base, slot: 'scene' })).toBe(true)
   })
 
   it('swallows sub-pixel jitter', () => {

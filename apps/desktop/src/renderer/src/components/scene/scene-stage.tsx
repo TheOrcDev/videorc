@@ -1,4 +1,4 @@
-import { CameraIcon, DisplayIcon, ExternalLinkIcon } from '@/components/icons'
+import { CameraIcon, DisplayIcon, ExternalLinkIcon, PreviewIcon } from '@/components/icons'
 import {
   useCallback,
   useEffect,
@@ -15,8 +15,19 @@ import { Kbd } from '@/components/ui/kbd'
 import { Separator } from '@/components/ui/separator'
 import { Toggle } from '@/components/ui/toggle'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
-import type { CameraShape, EffectiveSceneBackground, Scene, SceneSource } from '@/lib/backend'
+import type {
+  CameraShape,
+  EffectiveSceneBackground,
+  Scene,
+  SceneEditorDraftParams,
+  SceneSource
+} from '@/lib/backend'
 import { backgroundAssetDisplayUrl } from '@/lib/background-assets'
+import {
+  createEditorDraftChannel,
+  type EditorDraftChannel,
+  type EditorDraftSample
+} from '@/lib/editor-draft-channel'
 import { cn } from '@/lib/utils'
 import {
   StageEdits,
@@ -29,6 +40,7 @@ import {
 import { stagePixelSize, stagePoint, type StageMapping } from './stage-viewport'
 import {
   handleCursor,
+  roundRectForCommit,
   stageHandlePoints,
   stageSnapTargets,
   stageSourceShape,
@@ -49,12 +61,31 @@ type ActiveGesture = {
 }
 type StageGhost = GhostResult & { sourceId: string }
 
-/** A schematic editor only: pointer samples never start capture or cross IPC. */
+/** A schematic editor: pointer samples never start capture; the only IPC a
+ * gesture crosses is the live draft below, and only over the live canvas.
+ *
+ * Live canvas (plan 058): on macOS the docked native preview glues itself over
+ * the canvas rect (`slotRef`, `data-videorc-dock-slot="scene"`) and the SVG
+ * runs in HIT-ONLY mode while `liveSurface` is true — every painted element is
+ * `invisible` and every pointer target stays, so the real picture is the
+ * visual and the gestures below never branch on it. While it is live, every
+ * ghost frame also goes to the compositor as an editor draft (`onDraft`) so
+ * the real picture and its chrome follow the pointer; release still makes
+ * exactly one authoritative commit through `StageEdits`. */
 export function SceneStage({
   scene,
   selectedSourceId,
   background = null,
   previewOpen,
+  liveSurface = false,
+  liveDocked = false,
+  liveHint = null,
+  slotRef,
+  onPopOut,
+  onShowLive,
+  onDraft,
+  onDraftClear,
+  outputWidth,
   cameraShape = 'rectangle',
   cameraCornerRadiusPct = 12,
   dragEnabled = false,
@@ -75,6 +106,25 @@ export function SceneStage({
   selectedSourceId: string | null
   background?: EffectiveSceneBackground | null
   previewOpen: boolean
+  /** The docked surface is showing over the canvas: hit-only mode. */
+  liveSurface?: boolean
+  /** The surface is docked into this canvas (showing or hidden with a reason). */
+  liveDocked?: boolean
+  /** Tertiary copy under the canvas while the docked surface is hidden. */
+  liveHint?: string | null
+  /** Dock-slot reporter ref for the canvas rect (macOS live canvas only). */
+  slotRef?: (element: HTMLElement | null) => void
+  /** Present only where the live canvas is supported; the footer then offers
+   * Pop out / Show live here instead of the plain open/close toggle. */
+  onPopOut?: () => void
+  onShowLive?: () => void
+  /** `scene.editor.draft.set` / `.clear` (live canvas only, plan 058 S4). Both
+   * must be present for drafts to flow; they are only used while `liveSurface`. */
+  onDraft?: (params: SceneEditorDraftParams) => Promise<unknown>
+  onDraftClear?: () => Promise<unknown>
+  /** Output width in pixels: sizes the compositor-drawn chrome so a hairline is
+   * a hairline on screen at every slot size. */
+  outputWidth?: number
   cameraShape?: CameraShape
   cameraCornerRadiusPct?: number
   dragEnabled?: boolean
@@ -117,9 +167,21 @@ export function SceneStage({
   } | null>(null)
   const mountedRef = useRef(true)
   const editsRef = useRef<StageEdits | null>(null)
+  // The draft channel outlives renders; the RPC props are read through a ref
+  // so a reconnect never rebuilds it mid-gesture.
+  const draftRpcRef = useRef({ onDraft, onDraftClear })
+  draftRpcRef.current = { onDraft, onDraftClear }
+  const channelRef = useRef<EditorDraftChannel | null>(null)
+  if (!channelRef.current)
+    channelRef.current = createEditorDraftChannel({
+      set: (params) => draftRpcRef.current.onDraft?.(params) ?? Promise.resolve(),
+      clear: () => draftRpcRef.current.onDraftClear?.() ?? Promise.resolve()
+    })
+  const channel = channelRef.current
   const cancelGesture = useCallback(() => {
     const gesture = gestureRef.current
     gestureRef.current = null
+    channelRef.current?.cancel()
     if (frameRef.current !== null) cancelAnimationFrame(frameRef.current)
     frameRef.current = null
     sampleRef.current = null
@@ -140,6 +202,12 @@ export function SceneStage({
   useLayoutEffect(() => {
     edits.observe(scene)
   }, [edits, scene])
+  const draftEnabled = liveSurface && Boolean(onDraft && onDraftClear)
+  // Unmount needs no dispose: the mount effect's cleanup cancels the gesture,
+  // which clears the channel, and an idle channel holds no timer.
+  useLayoutEffect(() => {
+    channel.enabled = draftEnabled
+  }, [channel, draftEnabled])
   const phase = ghost ? 'dragging' : edits.draft || externalPending ? 'pending' : 'idle'
   useLayoutEffect(() => {
     onBusyChange?.(phase !== 'idle')
@@ -219,6 +287,25 @@ export function SceneStage({
       : edits.draft?.sourceId === source.id
         ? edits.draft.rect
         : source.transform
+  /** One live-draft frame: the ghost plus the chrome the compositor draws for
+   * it. `scale` is output pixels per CSS pixel of the canvas (the schema caps
+   * it at 64; a canvas that small has no visible chrome anyway). */
+  const draftOf = (gesture: ActiveGesture, ghost: GhostResult): EditorDraftSample => {
+    const source = sources.find((candidate) => candidate.id === gesture.motion.sourceId)
+    const kind = gesture.motion.kind
+    const canvasWidth = gesture.motion.pixels.width
+    return {
+      transform: ghost.rect,
+      chrome: {
+        selected: ghost.rect,
+        handles: resizeEnabled && Boolean(source && editable(source)),
+        ...(kind !== 'move' ? { activeHandle: kind } : {}),
+        guides: ghost.guides,
+        scale:
+          outputWidth && canvasWidth > 0 ? Math.min(64, Math.max(0, outputWidth / canvasWidth)) : 1
+      }
+    }
+  }
   const beginGesture = (
     source: SceneSource,
     kind: 'move' | StageHandleId,
@@ -274,13 +361,19 @@ export function SceneStage({
     }
     svg.setPointerCapture(event.pointerId)
     setGhost({ sourceId: source.id, rect: initial, guides: [] })
+    // The grab itself shows the frame and handles on the live picture.
+    channel.begin(source.id)
+    channel.sample(draftOf(gestureRef.current, { rect: initial, guides: [] }))
   }
-  const flushSample = (sample: {
-    clientX: number
-    clientY: number
-    shiftKey: boolean
-    altKey: boolean
-  }): StageGhost | null => {
+  const flushSample = (
+    sample: {
+      clientX: number
+      clientY: number
+      shiftKey: boolean
+      altKey: boolean
+    },
+    { draft = true } = {}
+  ): StageGhost | null => {
     const gesture = gestureRef.current
     if (!gesture) return null
     const point = stagePoint(gesture.mapping, sample.clientX, sample.clientY)
@@ -292,6 +385,7 @@ export function SceneStage({
       gesture.moved = true
     const next = { sourceId: gesture.motion.sourceId, ...gesture.motion.sample(point, sample) }
     setGhost(next)
+    if (draft) channel.sample(draftOf(gesture, next))
     return next
   }
   const moveGesture = (event: React.PointerEvent<SVGSVGElement>): void => {
@@ -311,18 +405,26 @@ export function SceneStage({
   const endGesture = (event: React.PointerEvent<SVGSVGElement>): void => {
     const gesture = gestureRef.current
     if (!gesture || gesture.motion.pointerId !== event.pointerId) return
-    const final = flushSample(event)
+    // The release position is carried by the draft's final frame below, not
+    // by a per-sample draft of its own.
+    const final = flushSample(event, { draft: false })
+    if (!final) {
+      cancelGesture()
+      return
+    }
+    const changed = gesture.moved && !sameStageRect(final.rect, gesture.initial)
+    const corner =
+      changed && gesture.motion.kind === 'move' && onSnapCorner ? snapCornerOf(final.rect) : null
+    // The draft's last frame and the commit carry the same rounded rect, and
+    // the backend drops the draft when that commit's revision installs. A
+    // corner snap commits through a preset instead, so its draft is cleared
+    // with the gesture (cancelGesture below).
+    if (changed && !corner) channel.release(roundRectForCommit(final.rect))
     cancelGesture()
-    if (!final || sameStageRect(final.rect, gesture.initial) || !gesture.moved) return
-    if (gesture.motion.kind === 'move' && onSnapCorner) {
-      const rect = final.rect
-      if (
-        (rect.x <= 0.06 || rect.x + rect.width >= 0.94) &&
-        (rect.y <= 0.06 || rect.y + rect.height >= 0.94)
-      ) {
-        onSnapCorner(`${rect.y <= 0.06 ? 'top' : 'bottom'}-${rect.x <= 0.06 ? 'left' : 'right'}`)
-        return
-      }
+    if (!changed) return
+    if (corner) {
+      onSnapCorner?.(corner)
+      return
     }
     edits.submit(gesture.motion.sourceId, final.rect)
   }
@@ -392,177 +494,196 @@ export function SceneStage({
       </div>
       <Separator />
       <div className="flex justify-center p-7">
-        <svg
-          ref={svgRef}
-          aria-label="Scene composition editor"
-          className="block w-full touch-none overflow-visible select-none"
-          role="group"
+        {/* The dock slot is the CANVAS rect only (the output-aspect box), never
+            the 28px handle gutter around it: main glues the native surface to
+            exactly this element. rounded-panel matches the surface's
+            DOCKED_PREVIEW_CORNER_RADIUS. No overflow clip here: the handle hit
+            targets live in the gutter and must stay reachable. */}
+        <div
+          ref={slotRef}
+          className="relative w-full rounded-panel"
+          data-videorc-dock-slot="scene"
           style={{ maxWidth: (420 * STAGE_W) / stageH, aspectRatio: `${STAGE_W} / ${stageH}` }}
-          viewBox={`0 0 ${STAGE_W} ${stageH}`}
-          onPointerMove={moveGesture}
-          onPointerUp={endGesture}
-          onPointerCancel={(event) => {
-            if (event.pointerId === gestureRef.current?.motion.pointerId) cancelGesture()
-          }}
-          onLostPointerCapture={(event) => {
-            if (event.pointerId === gestureRef.current?.motion.pointerId) cancelGesture()
-          }}
         >
-          <defs>
-            <clipPath id={clipId}>
-              <rect x={0} y={0} width={STAGE_W} height={stageH} />
-            </clipPath>
-          </defs>
-          <rect
-            data-videorc-stage-canvas
-            className="fill-background/40 stroke-border"
-            x={0}
-            y={0}
-            width={STAGE_W}
-            height={stageH}
-            strokeWidth={1}
-            vectorEffect="non-scaling-stroke"
-          />
-          <g clipPath={`url(#${clipId})`}>
-            {backgroundUrl && background ? (
-              <>
-                <image
-                  href={backgroundUrl}
-                  x={0}
-                  y={0}
-                  width={STAGE_W}
-                  height={stageH}
-                  preserveAspectRatio={
-                    background.fit === 'fill'
-                      ? 'xMidYMid slice'
-                      : background.fit === 'stretch'
-                        ? 'none'
-                        : 'xMidYMid meet'
-                  }
-                  onError={() => setFailedBackgroundAssetId(background.assetId)}
-                />
-                <rect
-                  fill="black"
-                  fillOpacity={Math.min(Math.max(background.dimPercent, 0), 100) / 100}
-                  width={STAGE_W}
-                  height={stageH}
-                />
-              </>
-            ) : null}
-            {sources.map((source) => {
-              const rect = displayed(source),
-                width = rect.width * STAGE_W,
-                height = rect.height * stageH
-              const shape = stageSourceShape(
-                rect,
-                STAGE_W,
-                stageH,
-                source.kind === 'camera' ? cameraShape : 'rectangle',
-                cameraCornerRadiusPct
-              )
-              const paint = {
-                className: cn(
-                  source.kind === 'camera' ? 'fill-foreground/10' : 'fill-muted-foreground/5',
-                  'stroke-muted-foreground/40',
-                  !source.visible && 'opacity-40'
-                ),
-                strokeWidth: 1,
-                strokeDasharray: source.visible ? undefined : '4 3',
-                vectorEffect: 'non-scaling-stroke',
-                pointerEvents: 'none'
-              }
-              return (
-                <g
-                  key={source.id}
-                  data-videorc-stage-source={source.id}
-                  className={
-                    dragEnabled && editable(source)
-                      ? 'cursor-grab active:cursor-grabbing'
-                      : 'cursor-default'
-                  }
-                  onClick={(event) => {
-                    if (
-                      event.button === 0 &&
-                      !externalPending &&
-                      (!edits.draft || edits.draft.sourceId === source.id)
-                    )
-                      onSelectSource(source.id)
-                  }}
-                  onPointerDown={(event) => beginGesture(source, 'move', event)}
-                >
-                  {/* The transform owns picking and selection, including the
-                      empty corners around a circular camera mask. */}
-                  <rect
-                    data-videorc-stage-bounds
-                    x={rect.x * STAGE_W}
-                    y={rect.y * stageH}
-                    width={width}
-                    height={height}
-                    fill="transparent"
-                  />
-                  {shape.kind === 'circle' ? (
-                    <circle
-                      data-videorc-stage-painted-shape="circle"
-                      cx={shape.cx}
-                      cy={shape.cy}
-                      r={shape.r}
-                      {...paint}
-                    />
-                  ) : (
-                    <rect
-                      data-videorc-stage-painted-shape={
-                        source.kind === 'camera' ? cameraShape : 'rectangle'
-                      }
-                      x={shape.x}
-                      y={shape.y}
-                      width={shape.width}
-                      height={shape.height}
-                      rx={shape.rx}
-                      {...paint}
-                    />
-                  )}
-                </g>
-              )
-            })}
-            {ghost?.guides.map((guide) => (
-              <line
-                key={`${guide.axis}-${guide.position}`}
-                data-videorc-stage-guide={guide.axis}
-                className="stroke-ring"
-                strokeDasharray="4 3"
-                strokeWidth={1}
-                vectorEffect="non-scaling-stroke"
-                x1={guide.axis === 'x' ? guide.position * STAGE_W : 0}
-                x2={guide.axis === 'x' ? guide.position * STAGE_W : STAGE_W}
-                y1={guide.axis === 'y' ? guide.position * stageH : 0}
-                y2={guide.axis === 'y' ? guide.position * stageH : stageH}
-              />
-            ))}
-          </g>
-          {selectedSource ? (
-            <StageSelection
-              rect={displayed(selectedSource)}
-              activeHandle={activeHandle}
-              stageH={stageH}
-              scale={pixelScale}
-              enabled={resizeEnabled && editable(selectedSource)}
-              onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
+          <svg
+            ref={svgRef}
+            aria-label="Scene composition editor"
+            className="block h-full w-full touch-none overflow-visible select-none"
+            data-videorc-stage-live={liveSurface ? 'true' : undefined}
+            role="group"
+            viewBox={`0 0 ${STAGE_W} ${stageH}`}
+            onPointerMove={moveGesture}
+            onPointerUp={endGesture}
+            onPointerCancel={(event) => {
+              if (event.pointerId === gestureRef.current?.motion.pointerId) cancelGesture()
+            }}
+            onLostPointerCapture={(event) => {
+              if (event.pointerId === gestureRef.current?.motion.pointerId) cancelGesture()
+            }}
+          >
+            <defs>
+              <clipPath id={clipId}>
+                <rect x={0} y={0} width={STAGE_W} height={stageH} />
+              </clipPath>
+            </defs>
+            <rect
+              data-videorc-stage-canvas
+              className={cn('fill-background/40 stroke-border', liveSurface && 'invisible')}
+              x={0}
+              y={0}
+              width={STAGE_W}
+              height={stageH}
+              strokeWidth={1}
+              vectorEffect="non-scaling-stroke"
             />
-          ) : null}
-          {/* Keep the edge hit targets within a reserved, unobstructed gutter. */}
-          <rect
-            x={-gutter}
-            y={-gutter}
-            width={STAGE_W + gutter * 2}
-            height={stageH + gutter * 2}
-            fill="none"
-            pointerEvents="none"
-          />
-        </svg>
+            <g clipPath={`url(#${clipId})`}>
+              {backgroundUrl && background ? (
+                <g className={cn(liveSurface && 'invisible')}>
+                  <image
+                    href={backgroundUrl}
+                    x={0}
+                    y={0}
+                    width={STAGE_W}
+                    height={stageH}
+                    preserveAspectRatio={
+                      background.fit === 'fill'
+                        ? 'xMidYMid slice'
+                        : background.fit === 'stretch'
+                          ? 'none'
+                          : 'xMidYMid meet'
+                    }
+                    onError={() => setFailedBackgroundAssetId(background.assetId)}
+                  />
+                  <rect
+                    fill="black"
+                    fillOpacity={Math.min(Math.max(background.dimPercent, 0), 100) / 100}
+                    width={STAGE_W}
+                    height={stageH}
+                  />
+                </g>
+              ) : null}
+              {sources.map((source) => {
+                const rect = displayed(source),
+                  width = rect.width * STAGE_W,
+                  height = rect.height * stageH
+                const shape = stageSourceShape(
+                  rect,
+                  STAGE_W,
+                  stageH,
+                  source.kind === 'camera' ? cameraShape : 'rectangle',
+                  cameraCornerRadiusPct
+                )
+                const paint = {
+                  className: cn(
+                    source.kind === 'camera' ? 'fill-foreground/10' : 'fill-muted-foreground/5',
+                    'stroke-muted-foreground/40',
+                    !source.visible && 'opacity-40',
+                    liveSurface && 'invisible'
+                  ),
+                  strokeWidth: 1,
+                  strokeDasharray: source.visible ? undefined : '4 3',
+                  vectorEffect: 'non-scaling-stroke',
+                  pointerEvents: 'none'
+                }
+                return (
+                  <g
+                    key={source.id}
+                    data-videorc-stage-source={source.id}
+                    className={
+                      dragEnabled && editable(source)
+                        ? 'cursor-grab active:cursor-grabbing'
+                        : 'cursor-default'
+                    }
+                    onClick={(event) => {
+                      if (
+                        event.button === 0 &&
+                        !externalPending &&
+                        (!edits.draft || edits.draft.sourceId === source.id)
+                      )
+                        onSelectSource(source.id)
+                    }}
+                    onPointerDown={(event) => beginGesture(source, 'move', event)}
+                  >
+                    {/* The transform owns picking and selection, including the
+                      empty corners around a circular camera mask. */}
+                    <rect
+                      data-videorc-stage-bounds
+                      x={rect.x * STAGE_W}
+                      y={rect.y * stageH}
+                      width={width}
+                      height={height}
+                      fill="transparent"
+                    />
+                    {shape.kind === 'circle' ? (
+                      <circle
+                        data-videorc-stage-painted-shape="circle"
+                        cx={shape.cx}
+                        cy={shape.cy}
+                        r={shape.r}
+                        {...paint}
+                      />
+                    ) : (
+                      <rect
+                        data-videorc-stage-painted-shape={
+                          source.kind === 'camera' ? cameraShape : 'rectangle'
+                        }
+                        x={shape.x}
+                        y={shape.y}
+                        width={shape.width}
+                        height={shape.height}
+                        rx={shape.rx}
+                        {...paint}
+                      />
+                    )}
+                  </g>
+                )
+              })}
+              {ghost?.guides.map((guide) => (
+                <line
+                  key={`${guide.axis}-${guide.position}`}
+                  data-videorc-stage-guide={guide.axis}
+                  className={cn('stroke-ring', liveSurface && 'invisible')}
+                  strokeDasharray="4 3"
+                  strokeWidth={1}
+                  vectorEffect="non-scaling-stroke"
+                  x1={guide.axis === 'x' ? guide.position * STAGE_W : 0}
+                  x2={guide.axis === 'x' ? guide.position * STAGE_W : STAGE_W}
+                  y1={guide.axis === 'y' ? guide.position * stageH : 0}
+                  y2={guide.axis === 'y' ? guide.position * stageH : stageH}
+                />
+              ))}
+            </g>
+            {selectedSource ? (
+              <StageSelection
+                rect={displayed(selectedSource)}
+                activeHandle={activeHandle}
+                stageH={stageH}
+                scale={pixelScale}
+                enabled={resizeEnabled && editable(selectedSource)}
+                hitOnly={liveSurface}
+                onHandle={(handle, event) => beginGesture(selectedSource, handle, event)}
+              />
+            ) : null}
+            {/* Keep the edge hit targets within a reserved, unobstructed gutter. */}
+            <rect
+              x={-gutter}
+              y={-gutter}
+              width={STAGE_W + gutter * 2}
+              height={stageH + gutter * 2}
+              fill="none"
+              pointerEvents="none"
+            />
+          </svg>
+        </div>
       </div>
       {!sources.length ? (
         <p className="px-3 pb-3 text-center text-xs text-muted-foreground">
           No sources in the scene yet
+        </p>
+      ) : null}
+      {liveHint ? (
+        <p className="px-3 pb-3 text-center text-xs text-subtle" data-videorc-stage-live-hint>
+          {liveHint}
         </p>
       ) : null}
       <Separator />
@@ -590,13 +711,42 @@ export function SceneStage({
             Make freeform
           </Button>
         ) : null}
-        <Button size="sm" variant="ghost" onClick={onTogglePreview}>
-          <ExternalLinkIcon data-icon="inline-start" />
-          {previewOpen ? 'Close preview' : 'Open preview'}
-        </Button>
+        {/* Live canvas (macOS): the docked surface is the picture, so the
+            footer offers where it lives — here or in its own window. Elsewhere
+            the plain preview toggle stays. */}
+        {onPopOut && onShowLive ? (
+          liveDocked ? (
+            <Button data-videorc-stage-pop-out size="sm" variant="ghost" onClick={onPopOut}>
+              <ExternalLinkIcon data-icon="inline-start" />
+              Pop out
+            </Button>
+          ) : (
+            <Button data-videorc-stage-show-live size="sm" variant="ghost" onClick={onShowLive}>
+              <PreviewIcon data-icon="inline-start" />
+              Show live here
+            </Button>
+          )
+        ) : (
+          <Button size="sm" variant="ghost" onClick={onTogglePreview}>
+            <ExternalLinkIcon data-icon="inline-start" />
+            {previewOpen ? 'Close preview' : 'Open preview'}
+          </Button>
+        )}
       </div>
     </div>
   )
+}
+
+/** A move that ends in a canvas corner becomes a preset corner snap. */
+function snapCornerOf(
+  rect: StageRect
+): 'top-left' | 'top-right' | 'bottom-left' | 'bottom-right' | null {
+  if (
+    (rect.x <= 0.06 || rect.x + rect.width >= 0.94) &&
+    (rect.y <= 0.06 || rect.y + rect.height >= 0.94)
+  )
+    return `${rect.y <= 0.06 ? 'top' : 'bottom'}-${rect.x <= 0.06 ? 'left' : 'right'}`
+  return null
 }
 
 function StageSelection({
@@ -604,6 +754,7 @@ function StageSelection({
   stageH,
   scale,
   enabled,
+  hitOnly = false,
   activeHandle,
   onHandle
 }: {
@@ -611,6 +762,9 @@ function StageSelection({
   stageH: number
   scale: number
   enabled: boolean
+  /** Live canvas: the compositor draws the frame and handles; keep only the
+   * transparent hit targets here. */
+  hitOnly?: boolean
   activeHandle?: { id: StageHandleId; offset: number }
   onHandle: (id: StageHandleId, event: React.PointerEvent<Element>) => void
 }): ReactElement {
@@ -625,7 +779,7 @@ function StageSelection({
   return (
     <g data-videorc-stage-handles>
       <rect
-        className="fill-none stroke-foreground/70"
+        className={cn('fill-none stroke-foreground/70', hitOnly && 'invisible')}
         pointerEvents="none"
         x={rect.x * STAGE_W}
         y={rect.y * stageH}
@@ -646,7 +800,7 @@ function StageSelection({
                 <g key={point.id} style={{ cursor: handleCursor(point.id) }}>
                   {offset > 0 ? (
                     <line
-                      className="stroke-foreground/70"
+                      className={cn('stroke-foreground/70', hitOnly && 'invisible')}
                       x1={anchorX}
                       y1={anchorY}
                       x2={x}
@@ -657,7 +811,7 @@ function StageSelection({
                     />
                   ) : null}
                   <rect
-                    className="fill-background stroke-foreground/80"
+                    className={cn('fill-background stroke-foreground/80', hitOnly && 'invisible')}
                     pointerEvents="none"
                     x={x - visible / 2}
                     y={y - visible / 2}

@@ -279,6 +279,8 @@ import type {
   Scene,
   SceneCommitStatus,
   SceneConfigParams,
+  SceneEditorDraftAck,
+  SceneEditorDraftParams,
   SessionCommentsPage,
   SessionDeletionOperation,
   SessionDetails,
@@ -1224,6 +1226,9 @@ export type StudioContextValue = {
     sourceId: string,
     patch: { x?: number; y?: number; width?: number; height?: number }
   ) => Promise<TransformCommitResult>
+  /** Live drag drafts for the Scene canvas (plan 058); refused while a session runs. */
+  setSceneEditorDraft: (params: SceneEditorDraftParams) => Promise<SceneEditorDraftAck>
+  clearSceneEditorDraft: () => Promise<SceneEditorDraftAck>
   commitCameraTransform: (sourceId: string, x: number, y: number) => Promise<void>
   setSceneSourceVisible: (sourceId: string, visible: boolean) => Promise<void>
   moveSceneSource: (sourceId: string, direction: -1 | 1) => Promise<void>
@@ -7248,6 +7253,23 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     [applyCommittedScene, client, reportError, syncSourceTransformsToLayout]
   )
 
+  // Drafts are preview-tick state owned by the stage's channel: no scene
+  // bookkeeping here, and a disconnect rejects so the channel can log it.
+  const setSceneEditorDraft = useCallback(
+    (params: SceneEditorDraftParams): Promise<SceneEditorDraftAck> =>
+      client
+        ? client.request<SceneEditorDraftAck>('scene.editor.draft.set', params)
+        : Promise.reject(new Error('Backend socket is not connected.')),
+    [client]
+  )
+  const clearSceneEditorDraft = useCallback(
+    (): Promise<SceneEditorDraftAck> =>
+      client
+        ? client.request<SceneEditorDraftAck>('scene.editor.draft.clear')
+        : Promise.reject(new Error('Backend socket is not connected.')),
+    [client]
+  )
+
   const setSceneSourceVisible = useCallback(
     async (sourceId: string, visible: boolean) => {
       if (!client) {
@@ -8647,6 +8669,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     mode: 'floating',
     dockEpoch: 0,
     dockHiddenReason: null,
+    dockSlot: null,
     supervisor: idlePreviewSupervisorState()
   })
   const previewWindowRef = useRef(previewWindow)
@@ -14069,6 +14092,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       resetSceneSource,
       nudgeSceneSource,
       setSceneSourceTransform,
+      setSceneEditorDraft,
+      clearSceneEditorDraft,
       commitCameraTransform,
       applyCameraPreset,
       savedScenes: sceneLibrary.scenes,
@@ -14290,6 +14315,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       resetSceneSource,
       nudgeSceneSource,
       setSceneSourceTransform,
+      setSceneEditorDraft,
+      clearSceneEditorDraft,
       commitCameraTransform,
       applyCameraPreset,
       sceneLibrary.scenes,

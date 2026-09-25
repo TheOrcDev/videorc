@@ -57,6 +57,7 @@ export const SMOKE_COMMAND_NAMES = new Set([
   'exercise-native-preview-scene-after-surface-loss',
   'exercise-native-preview-scene-background',
   'exercise-preview-click-focus',
+  'focused-window',
   'heal-main-window',
   'inspect-native-preview-bootstrap',
   'inspect-backend-state-isolation',

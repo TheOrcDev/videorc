@@ -218,6 +218,7 @@ const previewWindowClosed: PreviewWindowState = {
   mode: 'floating',
   dockEpoch: 0,
   dockHiddenReason: null,
+  dockSlot: null,
   supervisor: {
     lifecycleState: 'closed',
     generation: 0,
@@ -247,6 +248,7 @@ const previewWindowOpen = (contentBounds: {
   mode: 'floating',
   dockEpoch: 0,
   dockHiddenReason: null,
+  dockSlot: null,
   supervisor: {
     lifecycleState: 'surface-live',
     generation: 1,

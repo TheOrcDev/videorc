@@ -254,6 +254,43 @@ Prove the two primitives everything else stands on before writing product code.
    docked mode before choosing the overlay-window alternative. Stop and report
    if neither works.
 
+**S0 result (1), recorded 2026-09-25 with the S3 code on this Mac (macOS 26.5,
+in-process CAMetalLayer addon): PASS at the DOM level; OS-level HID click not
+provable from this process.**
+
+- Command: `pnpm probe:preview-window` (run as
+  `VIDEORC_SMOKE_TIMEOUT_MS=900000 CARGO_TARGET_DIR=<private dir> pnpm
+  probe:preview-window` because another agent's builds held the shared
+  `target/` cargo lock; the private dir was pre-built with
+  `CARGO_INCREMENTAL=0 cargo build -p videorc-backend --bin videorc-backend`,
+  matching the dev app's own `cargo run` env).
+- `OK pass-through: docked preview window ignores mouse events` (main applies
+  `setIgnoreMouseEvents(true)` in `applyDockedPreviewChrome`, restored on
+  undock).
+- `OK scene-hit-only: schematic paint hidden, pointer targets visible and
+  reachable` (`document.elementFromPoint` at every source centre lands on that
+  source's `[data-videorc-stage-bounds]` while the surface is docked over the
+  canvas).
+- `OK pass-through(cdp): pointerdown reached the source hit rect under the live
+  surface`: a trusted `Input.dispatchMouseEvent` press/release at the centre of
+  `[data-videorc-stage-source="source:test-pattern"]` arrived on its
+  `[data-videorc-stage-bounds]` (`isTrusted: true`), and
+  `OK pass-through(cdp): the click selected the source` (the toolbar toggle for
+  that source turned on and the inspector title changed to its name).
+- `OK pass-through(cdp): preview window not focused after the click`
+  (`focused-window` smoke command: `role: 'main'`, `previewFocused: false`), and
+  `OK pass-through(cdp): surface still docked over the canvas`.
+- `OK pass-through(os): skipped`: the probe also posts a real CGEvent
+  left-click (`.cghidEventTap`) at the same point through a Swift helper, but
+  on this host the cursor did not move, so the process is not allowed to post
+  HID events and the OS-level path is recorded as unverified, not as a pass.
+  Owner by-eye (S6) covers it: click and drag a source on the Scene canvas with
+  the live picture showing.
+- Cursor change to grab/resize was not asserted by the probe (the `cursor-grab`
+  class on the source group and the handle `cursor` styles are unchanged by
+  hit-only mode).
+- S0 (2), blended chrome quads, is owned by S2 and not recorded here.
+
 ### S1 — Circle and Rounded apply in Freeform (Implementation, `gpt-5.5`, S)
 
 Independent of S0; may ship on its own.

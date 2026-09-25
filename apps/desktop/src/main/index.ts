@@ -244,6 +244,7 @@ import {
   parseDockSlotReport,
   parsePreviewWindowMode,
   type DockHiddenReason,
+  type DockSlot,
   type DockSlotReport,
   type PreviewWindowMode
 } from './preview-dock'
@@ -1843,6 +1844,9 @@ let previewDockEpoch = 0
 // in the main window's web contents and would be hidden UNDER the docked native
 // surface, so the surface yields while they are up.
 let previewDockOverlayOpen = false
+// Electron has no getter for setIgnoreMouseEvents; mirror it so smokes can
+// assert the docked window is click-through.
+let previewWindowMouseEventsIgnored = false
 let previewDockPlacementQueued = false
 const previewWindowMotionReconciler = new NativePreviewMotionReconciler(() => {
   const window = previewWindow
@@ -3278,6 +3282,9 @@ type PreviewWindowState = {
   // Why the docked surface is hidden right now (null = showing); the slot UI
   // turns this into stated copy — a docked preview never just vanishes.
   dockHiddenReason: DockHiddenReason | null
+  // The DOM slot of the last accepted (current-epoch) report while docked:
+  // the Studio preview card or the Scene canvas. null until a report lands.
+  dockSlot: DockSlot | null
   supervisor: PreviewSupervisorState
 }
 
@@ -3300,6 +3307,7 @@ function previewWindowState(): PreviewWindowState {
     mode,
     dockEpoch: previewDockEpoch,
     dockHiddenReason: open && mode === 'docked' ? dockVisibilityDecision().hiddenReason : null,
+    dockSlot: open && mode === 'docked' ? (previewDockSlot?.slot ?? null) : null,
     supervisor: previewSupervisor.snapshot()
   }
 }
@@ -3611,6 +3619,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   installCaptureProtectionSmokeMarker(window, 'preview')
   previewWindowClosing = false
   previewWindow = window
+  previewWindowMouseEventsIgnored = false
   if (process.platform === 'win32') {
     // A new BrowserWindow generation starts in proof mode until its fresh HWND
     // has been accepted and a live D3D11 present is reported. Never inherit
@@ -3751,6 +3760,13 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
 // Window-manager chrome for docked mode: immovable, non-resizable, no traffic
 // lights, parented to the main window so AppKit moves it atomically with the
 // app and keeps it stacked above it.
+//
+// A docked window also IGNORES MOUSE EVENTS (plan 058): the Scene canvas keeps
+// its SVG hit layer under the surface, so clicks and drags must fall through
+// to the main window's web contents, and the preview must never take focus on
+// a click. The docked frame has no interactive DOM of its own (body.docked
+// hides the drag bar), so this is safe for the Studio slot too. Floating mode
+// restores normal mouse handling.
 function applyDockedPreviewChrome(window: BrowserWindow): void {
   if (mainWindow && !mainWindow.isDestroyed()) {
     window.setParentWindow(mainWindow)
@@ -3761,10 +3777,14 @@ function applyDockedPreviewChrome(window: BrowserWindow): void {
     window.setWindowButtonVisibility(false)
   }
   window.setAlwaysOnTop(false)
+  window.setIgnoreMouseEvents(true)
+  previewWindowMouseEventsIgnored = true
 }
 
 function removeDockedPreviewChrome(window: BrowserWindow): void {
   window.setParentWindow(null)
+  window.setIgnoreMouseEvents(false)
+  previewWindowMouseEventsIgnored = false
   window.setMovable(true)
   window.setResizable(true)
   if (isMac) {
@@ -9689,6 +9709,30 @@ async function runSmokePreviewMotionCommand(
         }
       }
     })
+  }
+
+  // Which app window holds focus right now: the pass-through probe asserts a
+  // click on the docked surface lands in the main window and never focuses
+  // the preview window (plan 058 S0/S3).
+  if (command === 'focused-window') {
+    const focused = BrowserWindow.getFocusedWindow()
+    const role =
+      focused === null
+        ? null
+        : mainWindow && !mainWindow.isDestroyed() && focused === mainWindow
+          ? 'main'
+          : previewWindow && !previewWindow.isDestroyed() && focused === previewWindow
+            ? 'preview'
+            : 'other'
+    return {
+      role,
+      mainFocused: Boolean(mainWindow && !mainWindow.isDestroyed() && mainWindow.isFocused()),
+      previewFocused: Boolean(
+        previewWindow && !previewWindow.isDestroyed() && previewWindow.isFocused()
+      ),
+      previewIgnoresMouseEvents:
+        previewWindow && !previewWindow.isDestroyed() ? previewWindowMouseEventsIgnored : null
+    }
   }
 
   if (command === 'main-window-focus') {

@@ -5,9 +5,15 @@
 // movement path; that renderer-driven screen-space sync is what made the 2026-06-09
 // glue attempt (9f815a23) lag and drift, and it must not come back.
 
-import type { DockHiddenReason, DockSlotReport, PreviewWindowMode } from '../shared/backend'
+import type {
+  DockHiddenReason,
+  DockSlot,
+  DockSlotReport,
+  PreviewWindowMode
+} from '../shared/backend'
+import { DOCK_SLOTS } from '../shared/backend'
 
-export type { DockHiddenReason, DockSlotReport, PreviewWindowMode }
+export type { DockHiddenReason, DockSlot, DockSlotReport, PreviewWindowMode }
 
 // Reports below this visible fraction hide the docked surface instead of
 // clipping it: partial clip was the old glue attempt's complexity sink, and a
@@ -25,13 +31,25 @@ export function parsePreviewWindowMode(raw: unknown): PreviewWindowMode {
   return raw === 'docked' ? 'docked' : 'floating'
 }
 
+export function parseDockSlot(raw: unknown): DockSlot | null {
+  return typeof raw === 'string' && (DOCK_SLOTS as readonly string[]).includes(raw)
+    ? (raw as DockSlot)
+    : null
+}
+
 // IPC boundary validation: a malformed renderer report must never reach the
-// bounds pipeline. Numbers are required finite; the rect must have area.
+// bounds pipeline. Numbers are required finite; the rect must have area; the
+// slot must name a known DOM slot (an unknown slot is a contract drift, not a
+// placement to guess at).
 export function parseDockSlotReport(raw: unknown): DockSlotReport | null {
   if (typeof raw !== 'object' || raw === null) {
     return null
   }
   const report = raw as Record<string, unknown>
+  const slot = parseDockSlot(report.slot)
+  if (slot === null) {
+    return null
+  }
   const epoch = finite(report.epoch)
   const x = finite(report.x)
   const y = finite(report.y)
@@ -50,6 +68,7 @@ export function parseDockSlotReport(raw: unknown): DockSlotReport | null {
   }
   return {
     epoch,
+    slot,
     x,
     y,
     width: Math.max(0, width),
