@@ -192,6 +192,7 @@ import {
   buildRuntimeInfo,
   permissionUrlForPane
 } from './runtime-info'
+import { devBackendCargoProfile } from './dev-backend-profile'
 import {
   requestMediaAccessWithRestart,
   type MediaAccessRestartResult,
@@ -7817,7 +7818,7 @@ function resolveDevBackendBinary(root = workspaceRoot()): string {
   return join(
     root,
     'target',
-    'debug',
+    devBackendCargoProfile(),
     process.platform === 'win32' ? 'videorc-backend.exe' : 'videorc-backend'
   )
 }
@@ -8123,11 +8124,22 @@ function startBackendWithRegistryLock(): void {
   const command = app.isPackaged ? resolvePackagedBackendBinary() : resolveCargoBinary()
   const args = app.isPackaged
     ? []
-    : ['run', '--quiet', '-p', 'videorc-backend', '--bin', 'videorc-backend']
+    : [
+        'run',
+        '--quiet',
+        ...(devBackendCargoProfile() === 'release' ? ['--release'] : []),
+        '-p',
+        'videorc-backend',
+        '--bin',
+        'videorc-backend'
+      ]
   backendPermissionTargetPath = app.isPackaged ? command : resolveDevBackendBinary(root)
   const pathEntries = [ffmpegBinDir, cargoBinDir, process.env.PATH].filter(Boolean)
 
-  logBackend('info', `Launching backend from ${root}`)
+  logBackend(
+    'info',
+    `Launching backend from ${root}${app.isPackaged ? '' : ` (cargo profile ${devBackendCargoProfile()})`}`
+  )
   if (ffmpegBinDir) {
     logBackend('info', `Using bundled FFmpeg from ${ffmpegBinDir}`)
   }
