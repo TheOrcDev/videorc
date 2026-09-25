@@ -17,7 +17,10 @@ export async function startFakeCaptionService({
   provisionalFinalText = 'Caption contract',
   chunkText = 'Chunk fallback recovered.',
   itemId = 'caption-contract-item',
-  minSpeechPeak = null
+  minSpeechPeak = null,
+  // false: the first audio append no longer triggers the canned transcript;
+  // finals come only from `emitRealtimeFinal` (the co-host spotlight smoke).
+  autoTranscript = true
 }) {
   const state = {
     realtimeAvailable: true,
@@ -32,8 +35,10 @@ export async function startFakeCaptionService({
     assistantResponses: 0,
     chunkRequests: 0,
     chunkAudio: [],
-    usageReports: 0
+    usageReports: 0,
+    emittedFinals: []
   }
+  let scriptedItemSeq = 0
   const gatewayProtocol = 'ai-gateway-realtime.v1'
   const gatewayAuthProtocol = `ai-gateway-auth.${smokeRealtimeToken}`
   const realtime = new WebSocketServer({
@@ -121,8 +126,10 @@ export async function startFakeCaptionService({
     realtime.handleUpgrade(req, socket, head, (ws) => realtime.emit('connection', ws, req))
   })
 
+  const connectionStartedAt = new WeakMap()
   realtime.on('connection', (ws) => {
     state.realtimeConnections += 1
+    connectionStartedAt.set(ws, Date.now())
     let transcriptSent = false
     ws.on('message', (data) => {
       let message
@@ -153,7 +160,7 @@ export async function startFakeCaptionService({
         )
         return
       }
-      if (transcriptSent) return
+      if (transcriptSent || !autoTranscript) return
       transcriptSent = true
       ws.send(
         JSON.stringify({
@@ -204,6 +211,42 @@ export async function startFakeCaptionService({
   return {
     state,
     httpOrigin,
+    /**
+     * Push one scripted utterance to every open realtime client: speech
+     * started for a fresh item, then its completed transcription (the
+     * backend's final). Resolves with the number of clients reached, after
+     * the completion frame was written.
+     */
+    emitRealtimeFinal: async (text) => {
+      const scriptedItemId = `scripted-item-${++scriptedItemSeq}`
+      let reached = 0
+      for (const client of realtime.clients) {
+        if (client.readyState !== 1) continue
+        const startedAt = connectionStartedAt.get(client) ?? Date.now()
+        client.send(
+          JSON.stringify({
+            type: 'speech-started',
+            itemId: scriptedItemId,
+            raw: { audio_start_ms: Date.now() - startedAt, item_id: scriptedItemId }
+          })
+        )
+        reached += 1
+      }
+      if (reached === 0) return 0
+      await new Promise((resolveGap) => setTimeout(resolveGap, 25))
+      for (const client of realtime.clients) {
+        if (client.readyState !== 1) continue
+        client.send(
+          JSON.stringify({
+            type: 'input-transcription-completed',
+            itemId: scriptedItemId,
+            transcript: text
+          })
+        )
+      }
+      state.emittedFinals.push({ itemId: scriptedItemId, text, at: Date.now(), reached })
+      return reached
+    },
     close: async () => {
       for (const client of realtime.clients) client.terminate()
       realtime.close()

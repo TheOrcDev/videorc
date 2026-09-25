@@ -375,11 +375,42 @@ function clampUnit(value) {
 }
 
 /**
+ * Scripted wire-v2 `highlights` for one tick (pure, plan 060 S5). With a rule
+ * `{ score = 0.9, type = 'insight' }` EVERY message of the batch is suggested,
+ * and a message carrying the flag marker is ranked first at 0.99: the fake
+ * deliberately suggests what it also flags, so the smoke proves the desktop
+ * never puts a flagged message on stream whatever the server ranked. The
+ * others follow in batch order, 0.01 apart. `null` means no `highlights` key.
+ */
+export function planTickHighlights(messages, rule, flagMarker = null) {
+  if (!rule) return null
+  const baseScore = clampUnit(rule.score ?? 0.9)
+  const type = typeof rule.type === 'string' ? rule.type : 'insight'
+  const flagged = []
+  const clean = []
+  for (const message of messages ?? []) {
+    ;(messageHasMarker(message.text, flagMarker) ? flagged : clean).push(message)
+  }
+  return [
+    ...flagged.map((message) => ({ messageId: message.id, score: 0.99, type })),
+    ...clean.map((message, index) => ({
+      messageId: message.id,
+      score: clampUnit(baseScore - index * 0.01),
+      type
+    }))
+  ]
+}
+
+/**
  * Deterministic tick planner (pure). `memory` carries the per-question asker
  * and platform unions across ticks because the request's `openQuestions` only
- * echo id/text/count; `mintId` supplies new `q_<n>` ids.
+ * echo id/text/count; `mintId` supplies new `q_<n>` ids. `highlights` scripts
+ * the v2 `highlights` array (see `planTickHighlights`); absent by default.
  */
-export function planCohostTick(body, { mintId, flagMarker = null, memory = new Map() } = {}) {
+export function planCohostTick(
+  body,
+  { mintId, flagMarker = null, memory = new Map(), highlights = null } = {}
+) {
   const openByKey = new Map()
   for (const open of body.openQuestions ?? []) {
     openByKey.set(normalizeQuestionText(open.text), open)
@@ -437,7 +468,7 @@ export function planCohostTick(body, { mintId, flagMarker = null, memory = new M
     }))
 
   const messageCount = body.messages?.length ?? 0
-  return {
+  const response = {
     promptVersion: body.promptVersion ?? COHOST_PROMPT_VERSION,
     questions,
     resolved: [],
@@ -445,6 +476,9 @@ export function planCohostTick(body, { mintId, flagMarker = null, memory = new M
     mood: messageCount >= 5 ? 'hype' : 'calm',
     usage: { inputTokens: messageCount * 10, outputTokens: 5, model: 'smoke/fake-cohost' }
   }
+  const scriptedHighlights = planTickHighlights(body.messages, highlights, flagMarker)
+  if (scriptedHighlights) response.highlights = scriptedHighlights
+  return response
 }
 
 /**
@@ -463,11 +497,16 @@ export function planCohostTick(body, { mintId, flagMarker = null, memory = new M
  * failures via `queueSpotlightFailure` (same shapes plus
  * `{ status: 503, code: 'spotlight-disabled' | 'judge-unconfigured' }`,
  * `{ status: 504, code: 'judge-timeout' }` and `{ status: 404 }`).
+ *
+ * `tickHighlights` (plan 060 S5; replace at runtime with `setTickHighlights`)
+ * scripts the tick's v2 `highlights` (see `planTickHighlights`); every
+ * successful tick record then carries the suggested ids as `highlightIds`.
  */
 export async function startFakeCohostService({
   smokeSessionToken,
   flagMarker = null,
-  spotlightMatches = []
+  spotlightMatches = [],
+  tickHighlights = null
 }) {
   if (typeof smokeSessionToken !== 'string' || smokeSessionToken.length < 8) {
     throw new Error('startFakeCohostService requires a smoke-only session token.')
@@ -480,6 +519,7 @@ export async function startFakeCohostService({
     unknownRoutes: 0,
     queuedFailures: [],
     queuedSpotlightFailures: [],
+    tickHighlights,
     nextQuestionNumber: 1,
     memory: new Map()
   }
@@ -533,7 +573,16 @@ export async function startFakeCohostService({
         headers
       )
     }
-    return json(res, 200, planCohostTick(body, { mintId, flagMarker, memory: state.memory }))
+    const planned = planCohostTick(body, {
+      mintId,
+      flagMarker,
+      memory: state.memory,
+      highlights: state.tickHighlights
+    })
+    if (planned.highlights) {
+      record.highlightIds = planned.highlights.map((highlight) => highlight.messageId)
+    }
+    return json(res, 200, planned)
   })
 
   async function serveSpotlight(req, res) {
@@ -547,10 +596,19 @@ export async function startFakeCohostService({
     const declared = Number(req.headers['content-length'])
     if (Number.isFinite(declared) && declared > COHOST_SPOTLIGHT_MAX_BODY_BYTES) {
       await drain(req)
-      const record = { at: Date.now(), body: null, bytes: declared, status: 400, code: 'invalid-request' }
+      const record = {
+        at: Date.now(),
+        body: null,
+        bytes: declared,
+        status: 400,
+        code: 'invalid-request'
+      }
       state.spotlightRequests.push(record)
       return json(res, 400, {
-        error: { code: 'invalid-request', message: 'A JSON request body of at most 32 KB is required.' }
+        error: {
+          code: 'invalid-request',
+          message: 'A JSON request body of at most 32 KB is required.'
+        }
       })
     }
     let raw
@@ -575,7 +633,10 @@ export async function startFakeCohostService({
       record.status = 400
       record.code = 'invalid-request'
       return json(res, 400, {
-        error: { code: 'invalid-request', message: 'A JSON request body of at most 32 KB is required.' }
+        error: {
+          code: 'invalid-request',
+          message: 'A JSON request body of at most 32 KB is required.'
+        }
       })
     }
     const failure = validateCohostSpotlightRequest(body)
@@ -595,7 +656,12 @@ export async function startFakeCohostService({
         headers['retry-after'] = String(queued.retryAfterSeconds)
       }
       if (queued.status === 404 && !queued.code) {
-        return json(res, 404, { error: { code: 'not-found', message: 'No spotlight route.' } }, headers)
+        return json(
+          res,
+          404,
+          { error: { code: 'not-found', message: 'No spotlight route.' } },
+          headers
+        )
       }
       return json(
         res,
@@ -635,6 +701,12 @@ export async function startFakeCohostService({
         throw new Error('queueSpotlightFailure requires { status, code } (code optional for 404).')
       }
       state.queuedSpotlightFailures.push(failure)
+    },
+    setTickHighlights(rule) {
+      if (rule !== null && (typeof rule !== 'object' || Array.isArray(rule))) {
+        throw new Error('setTickHighlights requires a rule object or null.')
+      }
+      state.tickHighlights = rule
     },
     setSpotlightMatches(matches) {
       if (!Array.isArray(matches)) {

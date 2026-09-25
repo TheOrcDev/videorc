@@ -9,6 +9,7 @@ import {
   normalizeQuestionText,
   planCohostSpotlight,
   planCohostTick,
+  planTickHighlights,
   startFakeCohostService,
   validateCohostSpotlightRequest,
   validateCohostTickRequest
@@ -177,6 +178,40 @@ function spotlightBody(overrides = {}) {
   }
 }
 
+describe('fake co-host tick highlights', () => {
+  it('suggests every message with the flagged one first, and nothing without a rule', () => {
+    const batch = [message('lane-a', 0), message('lane-a', 1), message('lane-a', 2)]
+    assert.equal(planTickHighlights(batch, null, '#2'), null)
+    assert.deepEqual(planTickHighlights(batch, { score: 0.9, type: 'praise' }, '#2'), [
+      { messageId: batch[2].id, score: 0.99, type: 'praise' },
+      { messageId: batch[0].id, score: 0.9, type: 'praise' },
+      { messageId: batch[1].id, score: 0.89, type: 'praise' }
+    ])
+
+    let next = 1
+    const mintId = () => `q_${next++}`
+    const plain = planCohostTick(tickBody({ messages: batch }), { mintId, flagMarker: '#2' })
+    assert.ok(!('highlights' in plain), 'no rule keeps the v1-shaped response')
+    const scripted = planCohostTick(tickBody({ messages: batch }), {
+      mintId,
+      flagMarker: '#2',
+      highlights: { score: 0.8 }
+    })
+    assert.deepEqual(
+      scripted.highlights.map((highlight) => [highlight.messageId, highlight.type]),
+      [
+        [batch[2].id, 'insight'],
+        [batch[0].id, 'insight'],
+        [batch[1].id, 'insight']
+      ]
+    )
+    assert.deepEqual(
+      scripted.flags.map((flag) => flag.messageId),
+      [batch[2].id]
+    )
+  })
+})
+
 describe('fake co-host spotlight planner', () => {
   it('scripts matches on transcript substrings and echoes question fields only for question candidates', () => {
     const rules = [
@@ -187,13 +222,26 @@ describe('fake co-host spotlight planner', () => {
         questionId: 'q_1',
         answered: 0.85
       },
-      { whenTranscriptIncludes: 'message #1', messageId: 'smoke-session:twitch:lane-a:fake-1', about: 1 },
-      { whenTranscriptIncludes: 'never said', messageId: 'smoke-session:twitch:lane-a:fake-0', about: 1 }
+      {
+        whenTranscriptIncludes: 'message #1',
+        messageId: 'smoke-session:twitch:lane-a:fake-1',
+        about: 1
+      },
+      {
+        whenTranscriptIncludes: 'never said',
+        messageId: 'smoke-session:twitch:lane-a:fake-0',
+        about: 1
+      }
     ]
     const planned = planCohostSpotlight(spotlightBody(), rules)
     assert.equal(planned.seq, 1)
     assert.deepEqual(planned.matches, [
-      { messageId: 'smoke-session:twitch:lane-a:fake-0', about: 0.9, questionId: 'q_1', answered: 0.85 },
+      {
+        messageId: 'smoke-session:twitch:lane-a:fake-0',
+        about: 0.9,
+        questionId: 'q_1',
+        answered: 0.85
+      },
       { messageId: 'smoke-session:twitch:lane-a:fake-1', about: 0 }
     ])
     assert.equal(planned.usage.model, 'smoke/fake-cohost-spotlight')
@@ -201,7 +249,13 @@ describe('fake co-host spotlight planner', () => {
     // A rule for another question id never reports "answered" for this one;
     // a silent transcript yields zeros, never a missing candidate.
     const other = planCohostSpotlight(spotlightBody({ transcript: 'nothing to see' }), [
-      { whenTranscriptIncludes: 'nothing', messageId: 'smoke-session:twitch:lane-a:fake-0', about: 2, questionId: 'q_9', answered: 1 }
+      {
+        whenTranscriptIncludes: 'nothing',
+        messageId: 'smoke-session:twitch:lane-a:fake-0',
+        about: 2,
+        questionId: 'q_9',
+        answered: 1
+      }
     ])
     assert.deepEqual(other.matches[0], {
       messageId: 'smoke-session:twitch:lane-a:fake-0',
@@ -217,7 +271,10 @@ describe('fake co-host spotlight planner', () => {
       validateCohostSpotlightRequest(spotlightBody({ consentToProcessChat: false })).code,
       'consent-required'
     )
-    assert.equal(validateCohostSpotlightRequest(spotlightBody({ extra: 1 })).code, 'invalid-request')
+    assert.equal(
+      validateCohostSpotlightRequest(spotlightBody({ extra: 1 })).code,
+      'invalid-request'
+    )
     assert.equal(
       validateCohostSpotlightRequest(spotlightBody({ transcript: '   ' })).code,
       'invalid-request'
@@ -232,7 +289,9 @@ describe('fake co-host spotlight planner', () => {
     )
     assert.equal(
       validateCohostSpotlightRequest(
-        spotlightBody({ candidates: Array.from({ length: 21 }, (_, seq) => spotlightCandidate(seq)) })
+        spotlightBody({
+          candidates: Array.from({ length: 21 }, (_, seq) => spotlightCandidate(seq))
+        })
       ).code,
       'invalid-request'
     )
@@ -318,6 +377,33 @@ describe('fake co-host service', () => {
         ]
       )
       assert.equal(fake.state.unauthorized, 1)
+    } finally {
+      await fake.close()
+    }
+  })
+
+  it('serves scripted tick highlights and records the suggested ids', async () => {
+    const fake = await startFakeCohostService({ smokeSessionToken: sessionToken, flagMarker: '#2' })
+    const post = (body) =>
+      fetch(`${fake.httpOrigin}/api/ai/cohost/tick`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${sessionToken}`, 'content-type': 'application/json' },
+        body: JSON.stringify(body)
+      })
+    try {
+      const batch = [message('lane-a', 1), message('lane-a', 2)]
+      const before = await (await post(tickBody({ messages: batch }))).json()
+      assert.ok(!('highlights' in before))
+      assert.equal(fake.state.requests[0].highlightIds, undefined)
+
+      fake.setTickHighlights({ score: 0.7 })
+      const after = await (await post(tickBody({ tickSeq: 2, messages: batch }))).json()
+      assert.deepEqual(
+        after.highlights.map((highlight) => highlight.messageId),
+        [batch[1].id, batch[0].id]
+      )
+      assert.deepEqual(fake.state.requests[1].highlightIds, [batch[1].id, batch[0].id])
+      assert.throws(() => fake.setTickHighlights([]), /rule object or null/)
     } finally {
       await fake.close()
     }
