@@ -1701,6 +1701,7 @@ mod editor_draft_tests {
                 position: 0.5,
             }],
             scale: 1.5,
+            slot_css_width: None,
         }
     }
 

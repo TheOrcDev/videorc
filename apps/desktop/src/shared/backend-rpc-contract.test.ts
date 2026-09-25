@@ -857,7 +857,8 @@ describe('backend RPC contract', () => {
           { axis: 'x', position: 0.5 },
           { axis: 'y', position: 0.25 }
         ],
-        scale: 1.5
+        scale: 1.5,
+        slotCssWidth: 512
       }
     } satisfies SceneEditorDraftParams
     expectTypeOf<
@@ -870,7 +871,8 @@ describe('backend RPC contract', () => {
     >().toEqualTypeOf<SceneEditorDraftAck>()
 
     expect(validateBackendRpcParams('scene.editor.draft.set', params)).toEqual(params)
-    // The renderer omits activeHandle when no handle is dragged.
+    // The renderer omits activeHandle when no handle is dragged; an older
+    // caller may omit slotCssWidth and the backend falls back to scale.
     const moving = {
       ...params,
       chrome: { selected: transform, handles: false, guides: [], scale: 2 }
@@ -918,6 +920,9 @@ describe('backend RPC contract', () => {
       { ...params, chrome: { ...params.chrome, handles: 'yes' } },
       { ...params, chrome: { ...params.chrome, guides: [{ axis: 'z', position: 0.5 }] } },
       { ...params, chrome: { ...params.chrome, scale: -1 } },
+      { ...params, chrome: { ...params.chrome, slotCssWidth: 0 } },
+      { ...params, chrome: { ...params.chrome, slotCssWidth: null } },
+      { ...params, chrome: { ...params.chrome, slotCssWidth: '512' } },
       { ...params, chrome: { selected: transform, handles: true, scale: 1 } }
     ]) {
       expect(() => validateBackendRpcParams('scene.editor.draft.set', malformed)).toThrow()

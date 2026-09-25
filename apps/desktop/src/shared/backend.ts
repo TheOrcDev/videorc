@@ -558,8 +558,11 @@ export interface EditorGuide {
 /**
  * Selection chrome the compositor draws over the preview during a Scene
  * editor drag (plan 058): frame, handles and snap guides in normalized canvas
- * coordinates. `scale` = preview output pixels per CSS pixel of the on-screen
- * slot, so line thickness stays constant on screen.
+ * coordinates. `slotCssWidth` = the on-screen width of the canvas slot in CSS
+ * pixels; the compositor sizes the chrome from it and the frame it actually
+ * draws into, so line thickness stays constant on screen at every run size.
+ * `scale` (output pixels per CSS pixel as the renderer estimated it) is the
+ * fallback when `slotCssWidth` is absent.
  */
 export interface EditorChrome {
   selected: CameraTransform
@@ -567,6 +570,7 @@ export interface EditorChrome {
   activeHandle?: EditorHandleId
   guides: EditorGuide[]
   scale: number
+  slotCssWidth?: number
 }
 
 /**
