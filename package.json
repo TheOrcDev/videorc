@@ -131,6 +131,7 @@
     "smoke:capture-decay-soak:long-recording:endurance": "node scripts/smoke-capture-decay-long-recording.mjs --endurance",
     "smoke:session-decay:gate": "node scripts/run-with-env.mjs VIDEORC_DECAY_SESSIONS=3 VIDEORC_DECAY_RECORDING_MS=10000 VIDEORC_DECAY_IDLE_MS=1000 -- node scripts/smoke-recording-session-decay.mjs",
     "smoke:linux-encoder-acceptance": "node scripts/smoke-linux-encoder-acceptance.mjs",
+    "smoke:linux-portal-capture": "node scripts/smoke-linux-portal-capture.mjs",
     "smoke:remote-control": "node scripts/smoke-remote-control-app.mjs",
     "smoke:remote-lan": "node scripts/smoke-remote-lan-app.mjs",
     "smoke:record-latency": "node scripts/smoke-record-latency-app.mjs",

@@ -121,6 +121,38 @@ dev app before running `pnpm smoke:backend-single-instance` or any
 `smoke:*` command, or isolate the smoke with `VIDEORC_APP_DATA_DIR` and
 `VIDEORC_USER_DATA_DIR` pointing at scratch directories.
 
+## Release backend for pacing evidence
+
+`pnpm dev` runs a DEBUG backend, and its pacing numbers (encoder bridge
+input fps, CPU RGB→YUV conversion, repeated frames) are not evidence of the
+shipped binary. Set `VIDEORC_DEV_BACKEND_PROFILE=release` to make `pnpm dev`
+(and every smoke that launches it, including the launcher's prebuild) run
+`cargo run --release` from `target/release`. Use it for any OpenH264 pacing
+claim (Plan 0005); keep the debug default for everything else.
+
+## Portal screen capture (L4)
+
+Screen and window capture on Linux go through `org.freedesktop.portal.ScreenCast`
+and PipeWire (Plan 0006). The device list carries exactly two entries,
+`screen:portal:monitor` and `window:portal:window`; the compositor's own
+picker chooses the real source on the first start, and the backend keeps the
+portal restore token beside the database (`linux-portal/restore-tokens.json`)
+so later starts are silent. A refused token drops back to the picker once.
+The named states reach the renderer as the usual `preview.screen.status`:
+`starting` while the picker is up, `live` (message names the portal and
+PipeWire), `permission-needed` when the picker was cancelled,
+`source-missing` when the compositor revoked the share or no portal backend
+is reachable, with the fix named in the message.
+
+```bash
+pnpm smoke:linux-portal-capture   # first run: click Share in the picker
+VIDEORC_PORTAL_EXPECT=any pnpm smoke:linux-portal-capture   # unattended: a truthful refusal passes
+```
+
+Frames are memcpy'd BGRA into the shared screen frame store; DMA-BUF import
+is a follow-up. Hyprland needs `xdg-desktop-portal-hyprland`; GNOME and KDE
+use their own portal backends.
+
 ## Verify gates that work on Linux
 
 Cheap, no Electron (run these first):

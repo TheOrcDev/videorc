@@ -33,6 +33,9 @@ mod fifo;
 mod frame_store;
 mod h264_profile;
 #[cfg(any(test, target_os = "linux"))]
+mod linux_pipewire_stream;
+mod linux_portal_capture;
+mod linux_portal_session;
 mod linux_vaapi;
 mod live_chat;
 mod live_chat_persistence;

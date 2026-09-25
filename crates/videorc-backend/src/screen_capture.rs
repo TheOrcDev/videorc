@@ -102,7 +102,29 @@ pub(crate) fn graphics_adapter_driver_identity() -> String {
     )
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// Linux: the desktop portal owns the picker, so the list carries exactly one
+/// monitor entry and one window entry whose availability reflects the
+/// session environment (Plan 0006).
+#[cfg(target_os = "linux")]
+pub fn list_native_capture_sources() -> NativeCaptureSources {
+    let environment =
+        crate::linux_portal_capture::portal_environment_available(&|key| std::env::var(key).ok());
+    let warnings = environment
+        .as_ref()
+        .err()
+        .map(|reason| {
+            vec![format!(
+                "Desktop portal screen capture is unavailable: {reason}."
+            )]
+        })
+        .unwrap_or_default();
+    NativeCaptureSources {
+        devices: crate::linux_portal_capture::portal_capture_devices(environment),
+        warnings,
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 pub fn list_native_capture_sources() -> NativeCaptureSources {
     NativeCaptureSources {
         devices: Vec::new(),
