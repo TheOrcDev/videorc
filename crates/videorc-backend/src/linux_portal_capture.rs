@@ -5,22 +5,30 @@
 //! windows before consent. A source id therefore names a KIND of portal
 //! source (`screen:portal:monitor`, `window:portal:window`), and the portal's
 //! `restore_token` (persisted per source id beside the database) makes the
-//! second and later starts silent. Everything that does not need D-Bus or
-//! PipeWire lives here cfg-free so the state model is unit-tested on every
-//! platform; the D-Bus session runner and the PipeWire reader live in
+//! second and later starts silent. Source-id parsing stays available on
+//! every platform so a stored portal id is recognized outside Linux. The
+//! rest of the state model is compiled for tests on every platform
+//! (`cfg(any(test, target_os = "linux"))`) and for Linux production; the
+//! D-Bus session runner and the PipeWire reader live in
 //! `linux_portal_session` / `linux_pipewire_stream` behind
 //! `cfg(target_os = "linux")`.
 
+#[cfg(any(test, target_os = "linux"))]
 use std::path::{Path, PathBuf};
 
+#[cfg(any(test, target_os = "linux"))]
 use serde::{Deserialize, Serialize};
 
+#[cfg(any(test, target_os = "linux"))]
 use crate::protocol::{Device, DeviceKind, DeviceStatus};
+#[cfg(any(test, target_os = "linux"))]
 use crate::source_status::SourceLifecycleStatus;
 
 pub const PORTAL_MONITOR_SOURCE_ID: &str = "screen:portal:monitor";
 pub const PORTAL_WINDOW_SOURCE_ID: &str = "window:portal:window";
+#[cfg(any(test, target_os = "linux"))]
 const RESTORE_TOKENS_DIRECTORY_NAME: &str = "linux-portal";
+#[cfg(any(test, target_os = "linux"))]
 const RESTORE_TOKENS_FILE: &str = "restore-tokens.json";
 
 /// Which portal source type the id asks for.
@@ -41,6 +49,7 @@ pub fn parse_portal_source_id(id: &str) -> Option<PortalSourceType> {
 /// The states the port plan names for a portal-backed source. Every one
 /// maps to a `SourceLifecycleStatus` the renderer already renders, so a
 /// black frame always comes with its reason.
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "kebab-case")]
 pub enum PortalCaptureState {
@@ -63,6 +72,7 @@ pub enum PortalCaptureState {
     Reconnecting,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 impl PortalCaptureState {
     pub fn lifecycle_status(&self) -> SourceLifecycleStatus {
         match self {
@@ -104,17 +114,20 @@ impl PortalCaptureState {
 
 /// Persisted portal restore tokens, one per source id, so the picker only
 /// shows on the first start of each source.
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RestoreTokens {
     #[serde(default)]
     pub tokens: std::collections::BTreeMap<String, String>,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone)]
 pub struct RestoreTokenStore {
     directory: PathBuf,
 }
 
+#[cfg(any(test, target_os = "linux"))]
 impl RestoreTokenStore {
     pub fn new(directory: PathBuf) -> Self {
         Self { directory }
@@ -180,6 +193,7 @@ impl RestoreTokenStore {
 /// Whether this process can reach a desktop portal at all: a session bus
 /// address and a Wayland or X11 display. The portal itself decides the rest
 /// at start time (and reports it as `MissingSource`).
+#[cfg(any(test, target_os = "linux"))]
 pub fn portal_environment_available(env: &dyn Fn(&str) -> Option<String>) -> Result<(), String> {
     let has_bus = env("DBUS_SESSION_BUS_ADDRESS").is_some_and(|value| !value.is_empty())
         || env("XDG_RUNTIME_DIR").is_some_and(|value| !value.is_empty());
@@ -199,6 +213,7 @@ pub fn portal_environment_available(env: &dyn Fn(&str) -> Option<String>) -> Res
 /// The two portal entries the Linux device list carries. The portal owns the
 /// picker, so there is exactly one monitor entry and one window entry; their
 /// availability reflects the session environment, not a monitor enumeration.
+#[cfg(any(test, target_os = "linux"))]
 pub fn portal_capture_devices(environment: Result<(), String>) -> Vec<Device> {
     let (status, detail) = match &environment {
         Ok(()) => (
@@ -237,6 +252,7 @@ pub fn portal_capture_devices(environment: Result<(), String>) -> Vec<Device> {
 
 /// PipeWire hands the app whichever of these it negotiated; the frame store
 /// only speaks tightly packed BGRA, so every variant is converted on copy.
+#[cfg(any(test, target_os = "linux"))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortalPixelLayout {
     Bgrx,
@@ -249,6 +265,7 @@ pub enum PortalPixelLayout {
 /// into a tightly packed BGRA frame of `width`×`height`. Returns `false`
 /// when the buffer is too short for the claimed geometry (the frame is
 /// skipped, never published half-filled).
+#[cfg(any(test, target_os = "linux"))]
 pub fn copy_to_bgra(
     layout: PortalPixelLayout,
     src: &[u8],
