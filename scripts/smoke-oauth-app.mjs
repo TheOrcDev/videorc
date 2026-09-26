@@ -42,7 +42,13 @@ try {
     const callbackUrl = `${started.redirectUri}?state=${encodeURIComponent(started.state)}&code=smoke-code`
     const response = await fetch(callbackUrl)
     const body = await response.text()
-    if (!response.ok || !body.includes('Videorc OAuth received')) {
+    // The branded callback page (oauth_callback_page.rs): success tone and
+    // the "now connected" title.
+    if (
+      !response.ok ||
+      !body.includes('data-tone="good"') ||
+      !body.includes('now connected to Videorc')
+    ) {
       throw new Error(`OAuth callback route failed: ${response.status} ${body}`)
     }
 

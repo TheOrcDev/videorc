@@ -53,6 +53,7 @@ mod mpeg_ts;
 mod native_preview_host;
 mod noise_cleanup;
 mod oauth;
+mod oauth_callback_page;
 mod panic_hook;
 mod performance_check;
 mod pipeline;
@@ -1445,34 +1446,8 @@ async fn oauth_callback_handler(
         state.emit_event("platformAccounts.oauth.callback", result.clone());
     }
 
-    let title = match result.status {
-        oauth::OAuthCallbackStatus::Success => "Videorc OAuth received",
-        oauth::OAuthCallbackStatus::Failed => "Videorc OAuth failed",
-        oauth::OAuthCallbackStatus::Expired => "Videorc OAuth expired",
-        oauth::OAuthCallbackStatus::UnknownState => "Videorc OAuth state not found",
-    };
-    // Say WHY. A bare "OAuth failed" leaves the user with nothing to act on
-    // and nothing to report; the backend already knows the reason.
-    let detail = result
-        .message
-        .as_deref()
-        .map(|message| format!("<p>{}</p>", html_escape_text(message)))
-        .unwrap_or_default();
-    Html(format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><title>{title}</title></head>\
-         <body><h1>{title}</h1>{detail}<p>You can return to Videorc.</p></body></html>"
-    ))
-}
-
-/// Escape provider-supplied text before it reaches the callback page. The
-/// message can carry an upstream error string, so it is never trusted markup.
-fn html_escape_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
-        .replace('\'', "&#39;")
+    // The browser tab the provider returns to: branded, and on failure it says why.
+    Html(oauth_callback_page::render(&result))
 }
 
 const LOOPBACK_OAUTH_RETRY_DELAYS: [Duration; 5] = [
@@ -19191,20 +19166,6 @@ mod tests {
         assert!(!session_attaches_live_chat(
             &session_params_with_stream_output(true)
         ));
-    }
-
-    #[test]
-    fn callback_page_escapes_provider_supplied_failure_text() {
-        // Provider messages reach the page verbatim; markup in them must never
-        // become markup on the page.
-        let escaped = html_escape_text("<script>alert('x')</script> & \"quoted\"");
-
-        assert!(!escaped.contains('<'));
-        assert!(!escaped.contains('>'));
-        assert!(escaped.contains("&lt;script&gt;"));
-        assert!(escaped.contains("&amp;"));
-        assert!(escaped.contains("&quot;"));
-        assert!(escaped.contains("&#39;"));
     }
 
     #[test]
