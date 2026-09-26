@@ -363,6 +363,26 @@
         "isDeleted": false,
         "rawProviderType": "channel.follow",
         "details": { "kind": "follow" }
+      },
+      {
+        "id": "session-fixture:kick:kick-target:kicks-1",
+        "providerMessageId": "kicks-1",
+        "platform": "kick",
+        "targetId": "kick-target",
+        "sessionId": "session-fixture",
+        "authorId": "987654321",
+        "authorName": "gift_sender",
+        "authorBadges": [],
+        "authorRoles": [],
+        "publishedAt": "2026-09-24T10:05:00Z",
+        "receivedAt": "2026-09-24T10:05:00.010Z",
+        "messageText": "w",
+        "fragments": [],
+        "eventType": "paid",
+        "amountText": "500 KICKs",
+        "isDeleted": false,
+        "rawProviderType": "kicks.gifted",
+        "details": { "kind": "kicks", "amount": 500, "giftName": "Rage Quit" }
       }
     ]
   },

@@ -6,6 +6,7 @@ import { StatsBar } from '@/components/stream-manager/stats-bar'
 import {
   providerCapabilityLabel,
   providerCapabilityTitle,
+  providerProblem,
   StreamManagerStatusBar
 } from '@/components/stream-manager/stream-manager-status-bar'
 import type { LiveChatProviderState } from '@/lib/backend'
@@ -44,6 +45,29 @@ describe('Stream Manager status bar', () => {
     expect(providerCapabilityTitle(provider(), null).split('\n')[0]).toBe(
       'Twitch chat: reads and sends'
     )
+  })
+
+  // Plan 066: a stuck or stopped provider says why inline, not only on hover.
+  it('shows why chat is stuck instead of a bare state word', () => {
+    const relayDown = provider({
+      id: 'kick',
+      platform: 'kick',
+      read: 'waiting-for-broadcast-context',
+      state: 'waiting',
+      message: "Kick chat can't connect: Videorc's chat relay is down. Retrying automatically."
+    })
+    expect(providerProblem(relayDown)).toBe(relayDown.message)
+    expect(providerProblem(provider({ state: 'reconnecting', message: 'Reconnecting.' }))).toBe('')
+    expect(providerProblem(provider())).toBe('')
+    const markup = renderToStaticMarkup(
+      createElement(StreamManagerStatusBar, {
+        providers: [relayDown],
+        audience: null,
+        alwaysOnTop: false
+      })
+    )
+    expect(markup).toContain('data-slot="chat-state-problem"')
+    expect(markup).toContain('relay is down')
   })
 
   it('offers the Twitch reconnect when follow alerts need the opt-in scopes', () => {

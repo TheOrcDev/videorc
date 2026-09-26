@@ -158,8 +158,10 @@ pub fn parse_twitch_viewer_count(body: &Value) -> Option<u64> {
         .as_u64()
 }
 
-/// Kick `GET /public/v1/channels` → `data[0].stream.viewer_count`; 0 while
-/// the channel is not live (Kick keeps the last count on an offline stream).
+/// Kick `GET /public/v1/channels` → `data[0].stream.viewer_count`. Unknown
+/// (`None`) until Kick marks the channel live: Kick keeps the last count on an
+/// offline stream, and it takes a while to flip `is_live` after the video
+/// arrives, so a "0" there would read as nobody watching (plan 066).
 pub fn parse_kick_viewer_count(body: &Value) -> Option<u64> {
     let stream = body.get("data")?.as_array()?.first()?.get("stream")?;
     if !stream
@@ -167,7 +169,7 @@ pub fn parse_kick_viewer_count(body: &Value) -> Option<u64> {
         .and_then(Value::as_bool)
         .unwrap_or(false)
     {
-        return Some(0);
+        return None;
     }
     stream.get("viewer_count")?.as_u64()
 }
@@ -536,7 +538,7 @@ mod tests {
         let live = json!({ "data": [{ "stream": { "is_live": true, "viewer_count": 42 } }] });
         assert_eq!(parse_kick_viewer_count(&live), Some(42));
         let offline = json!({ "data": [{ "stream": { "is_live": false, "viewer_count": 9 } }] });
-        assert_eq!(parse_kick_viewer_count(&offline), Some(0));
+        assert_eq!(parse_kick_viewer_count(&offline), None);
         assert_eq!(parse_kick_viewer_count(&json!({ "data": [] })), None);
         let no_count = json!({ "data": [{ "stream": { "is_live": true } }] });
         assert_eq!(parse_kick_viewer_count(&no_count), None);

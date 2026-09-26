@@ -350,7 +350,7 @@ describe('shared high-risk protocol fixture', () => {
   })
 
   it('loads chat rows with and without structured event details', () => {
-    const [plain, cheer, resub, raid, superChat, follow] = fixtures.comments.eventMessages
+    const [plain, cheer, resub, raid, superChat, follow, kicks] = fixtures.comments.eventMessages
     expect('details' in plain || 'reply' in plain || 'firstMessage' in plain).toBe(false)
     expect(cheer.details).toEqual({ kind: 'cheer', bits: 1500 })
     expect(cheer.reply?.parentAuthorName).toBe('regular_viewer')
@@ -359,6 +359,7 @@ describe('shared high-risk protocol fixture', () => {
     expect(raid.details).toEqual({ kind: 'raid', viewerCount: 234 })
     expect(superChat.details).toMatchObject({ kind: 'super-chat', amountMicros: 5_000_000 })
     expect(follow.eventType).toBe('follow')
+    expect(kicks.details).toEqual({ kind: 'kicks', amount: 500, giftName: 'Rage Quit' })
 
     const snapshot = fixtures.comments.eventMessages.reduce(
       (current, message) => applyCommentsSnapshotDelta(current, { kind: 'message', message }),

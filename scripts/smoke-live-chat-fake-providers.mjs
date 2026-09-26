@@ -406,7 +406,8 @@ try {
       'follow',
       'super-chat',
       'super-sticker',
-      'membership'
+      'membership',
+      'kicks'
     ]
     const eventKinds = () =>
       new Set(
@@ -446,6 +447,16 @@ try {
     )
     if (kickFollow?.authorName !== 'kick_fan' || kickFollow.targetId !== 'smoke-kick-events') {
       throw new Error(`Kick follow row missing: ${JSON.stringify(eventRows)}`)
+    }
+    // Plan 066: a KICKs gift keeps its amount and gift name end to end.
+    const kicks = eventRows.find((message) => message.details?.kind === 'kicks')
+    if (
+      kicks?.platform !== 'kick' ||
+      kicks.details.amount !== 500 ||
+      kicks.details.giftName !== 'Rage Quit' ||
+      kicks.amountText !== '500 KICKs'
+    ) {
+      throw new Error(`Kick KICKs row missing: ${JSON.stringify(eventRows)}`)
     }
     await waitFor(
       () =>

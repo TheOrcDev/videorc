@@ -194,6 +194,14 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
   const peak = viewers?.peak ?? latest?.total ?? null
   const stale = !latest || viewerSampleStale(latest, input.nowMs)
   const count = latest ? formatViewerCount(latest.total) : '–'
+  // A live platform with no count yet says so instead of vanishing: Kick
+  // reports nothing until it marks the stream live (plan 066).
+  const reported = new Set((latest?.platforms ?? []).map((entry) => entry.platform))
+  const waiting = live
+    ? [...livePlatforms].filter(
+        (platform) => VIEWER_PLATFORMS.has(platform) && !reported.has(platform)
+      )
+    : []
   return {
     id: 'viewers',
     label: 'Viewers',
@@ -205,6 +213,11 @@ function viewersItem(input: StatsInput, livePlatforms: ReadonlySet<StreamPlatfor
         label: CHAT_PLATFORM_LABELS[entry.platform],
         value: formatViewerCount(entry.count),
         platform: entry.platform
+      })),
+      ...waiting.map((platform) => ({
+        label: CHAT_PLATFORM_LABELS[platform],
+        value: 'waiting',
+        platform
       })),
       ...(peak !== null ? [{ label: 'Peak', value: formatViewerCount(peak) }] : []),
       ...(latest && stale ? [{ label: 'Updated', value: 'over a minute ago' }] : [])

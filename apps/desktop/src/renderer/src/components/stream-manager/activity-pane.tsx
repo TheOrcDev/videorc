@@ -38,6 +38,7 @@ const KIND_ICONS: Record<ActivityKind, AppIcon | null> = {
   subscription: SupporterIcon,
   membership: SupporterIcon,
   cheer: TipIcon,
+  kicks: TipIcon,
   'super-chat': TipIcon,
   'super-sticker': TipIcon,
   raid: RaidIcon,
@@ -67,7 +68,7 @@ export function activityCapabilityNote(
     notes.push("X doesn't share who followed or tips, so new X followers show as a count.")
   }
   if (platforms.includes('kick')) {
-    notes.push("Kick shows new follows only, not a follower total, and doesn't share tips.")
+    notes.push("Kick shows each new follow but doesn't share a follower total.")
   }
   const twitch = audience?.platforms.find((entry) => entry.platform === 'twitch')
   if (platforms.includes('twitch') && twitch?.audienceScopes === false) {
