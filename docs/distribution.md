@@ -474,6 +474,23 @@ VIDEORC_BUNDLED_YOUTUBE_OAUTH_ENABLED=1
 pnpm package:backend
 ```
 
+Where the bundled values come from:
+
+- **macOS** builds on the release Mac and reads them from `~/.videorc-release.env`.
+- **Windows and Linux alpha candidates** build in GitHub Actions and read
+  repository secrets with the same names (`VIDEORC_BUNDLED_TWITCH_CLIENT_ID`,
+  `VIDEORC_BUNDLED_KICK_CLIENT_ID`, `VIDEORC_BUNDLED_KICK_CLIENT_SECRET`,
+  `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY`, `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET`,
+  and the two YouTube values). `release:preflight:windows` and
+  `release:preflight:linux` fail closed when a required one is missing
+  (`scripts/lib/release-bundled-oauth.mjs`). Until this check existed, every
+  Windows alpha shipped with no Twitch, Kick or X Live sign-in: users saw
+  "Twitch OAuth requires VIDEORC_TWITCH_CLIENT_ID." When a value rotates,
+  update both the release env and the repository secret.
+- `VIDEORC_BUNDLED_X_CLIENT_ID` is not mapped in CI: X OAuth 2.0 uses the
+  public client id written into `oauth.rs`, and an empty build variable counts
+  as unset.
+
 Runtime/self-host overrides:
 
 ```sh

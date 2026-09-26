@@ -1,3 +1,5 @@
+import { releaseBundledOauthChecks } from './release-bundled-oauth.mjs'
+
 export const WINDOWS_RELEASE_SIGNING_ENV = [
   'VIDEORC_WINDOWS_SIGNING_ENDPOINT',
   'VIDEORC_WINDOWS_SIGNING_ACCOUNT_NAME',
@@ -49,6 +51,8 @@ export function evaluateWindowsReleasePreflight({
       Boolean(changelogEntrySupportsWindows),
       `missing Windows platform declaration in changelog/${env.VIDEORC_RELEASE_ID ?? '<releaseId>'}.md`
     ),
+    // Sign-in is compiled into the backend; a build without these ships dead.
+    ...releaseBundledOauthChecks(env),
     ...WINDOWS_RELEASE_FORBIDDEN_CREDENTIAL_ENV.map((name) =>
       check(
         `env-forbidden-${name}`,

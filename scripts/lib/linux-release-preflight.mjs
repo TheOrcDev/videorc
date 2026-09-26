@@ -1,3 +1,5 @@
+import { releaseBundledOauthChecks } from './release-bundled-oauth.mjs'
+
 export const LINUX_RELEASE_CANDIDATE_UPLOAD_ENV = [
   ['VIDEORC_RELEASE_UPLOAD_S3_ACCESS_KEY_ID', 'VIDEORC_DOWNLOAD_S3_ACCESS_KEY_ID'],
   ['VIDEORC_RELEASE_UPLOAD_S3_SECRET_ACCESS_KEY', 'VIDEORC_DOWNLOAD_S3_SECRET_ACCESS_KEY'],
@@ -49,6 +51,8 @@ export function evaluateLinuxReleasePreflight({
       Boolean(changelogEntrySupportsLinux),
       `missing Linux platform declaration in changelog/${env.VIDEORC_RELEASE_ID ?? '<releaseId>'}.md`
     ),
+    // Sign-in is compiled into the backend; a build without these ships dead.
+    ...releaseBundledOauthChecks(env),
     check(
       'stage',
       'candidate stage is private',

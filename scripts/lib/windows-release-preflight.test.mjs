@@ -7,12 +7,14 @@ import {
   missingWindowsReleaseSigningEnv,
   WINDOWS_RELEASE_SIGNING_ENV
 } from './windows-release-preflight.mjs'
+import { RELEASE_BUNDLED_OAUTH_ENV } from './release-bundled-oauth.mjs'
 
 const completeEnv = Object.fromEntries(
   WINDOWS_RELEASE_SIGNING_ENV.map((name) => [name, `${name.toLowerCase()}-value`])
 )
 completeEnv.VIDEORC_RELEASE_ID = '0.10.0-alpha.1'
 completeEnv.VIDEORC_WINDOWS_SIGNING_ENDPOINT = 'https://weu.codesigning.azure.net'
+for (const name of RELEASE_BUNDLED_OAUTH_ENV) completeEnv[name] = `${name.toLowerCase()}-value`
 
 function facts(overrides = {}) {
   return {
@@ -38,6 +40,20 @@ describe('Windows release preflight', () => {
     const result = evaluateWindowsReleasePreflight(facts())
     assert.equal(result.ok, true)
     assert.match(formatWindowsReleasePreflightReport(result), /^windows-release-preflight: PASS/)
+  })
+
+  // Every Windows alpha through 0.9.114-alpha.1 shipped without these, so
+  // Twitch showed "Twitch OAuth requires VIDEORC_TWITCH_CLIENT_ID." instead
+  // of Connect.
+  it('fails closed on each missing bundled OAuth credential', () => {
+    for (const name of RELEASE_BUNDLED_OAUTH_ENV) {
+      const result = evaluateWindowsReleasePreflight(facts({ env: { ...completeEnv, [name]: '' } }))
+      assert.equal(result.ok, false)
+      assert.deepEqual(
+        result.failures.map((item) => item.id),
+        [`bundled-oauth-${name}`]
+      )
+    }
   })
 
   it('fails closed for a non-Windows host, dirty tree, or stale release id', () => {

@@ -31,10 +31,13 @@ const BUNDLED_YOUTUBE_CLIENT_SECRET: Option<&str> =
     option_env!("VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET");
 // The Videorc X OAuth app (public Native App client, PKCE — no secret involved).
 // Client IDs are public identifiers; build-time/runtime env still override.
+// An empty build variable counts as unset: CI expands a missing secret to "",
+// and that must not erase the public default.
 const BUNDLED_X_CLIENT_ID: Option<&str> = match option_env!("VIDEORC_BUNDLED_X_CLIENT_ID") {
-    Some(bundled) => Some(bundled),
-    None => Some("S0NBMDhTQll6cGp1am5HUFRySE86MTpjaQ"),
+    Some(bundled) if !bundled.is_empty() => Some(bundled),
+    _ => Some(DEFAULT_X_CLIENT_ID),
 };
+const DEFAULT_X_CLIENT_ID: &str = "S0NBMDhTQll6cGp1am5HUFRySE86MTpjaQ";
 // Kick (plan 063). Kick's token endpoint takes `client_secret` alongside the
 // PKCE verifier, so both are build-injected like Google's. Until a build bakes
 // them in (or the runtime vars are set) Kick stays Manual RTMP only.
@@ -3147,8 +3150,8 @@ fn provider_credential_status(
 ) -> OAuthProviderCredentialStatus {
     let client_id_source = credential_source(optional_env(client_id_env), bundled_client_id);
     let client_id_present = client_id_source != OAuthCredentialSource::Missing;
-    let client_secret_present =
-        optional_env(client_secret_env).is_some() || bundled_client_secret.is_some();
+    let client_secret_present = optional_env(client_secret_env).is_some()
+        || optional_static(bundled_client_secret).is_some();
     // `secret_optional = false` means the secret is REQUIRED, PKCE or not:
     // Kick and Google both demand it in the token exchange alongside the
     // verifier. Public PKCE clients (X) pass `secret_optional = true`.
@@ -5853,6 +5856,29 @@ mod tests {
         assert!(!status.client_secret_present);
         assert!(status.pkce);
         assert!(status.ready);
+    }
+
+    // A build variable set to "" (an unset CI secret) is not a secret.
+    #[test]
+    fn empty_bundled_client_secret_is_missing() {
+        let status = provider_credential_status(
+            StreamPlatform::Kick,
+            "VIDEORC_TEST_KICK_CLIENT_ID",
+            "VIDEORC_TEST_KICK_CLIENT_SECRET",
+            Some("bundled-kick-client"),
+            Some(""),
+            true,
+            false,
+        );
+
+        assert!(!status.client_secret_present);
+        assert!(!status.ready);
+    }
+
+    #[test]
+    fn x_client_id_always_has_a_non_empty_bundled_default() {
+        assert!(!DEFAULT_X_CLIENT_ID.is_empty());
+        assert!(optional_static(BUNDLED_X_CLIENT_ID).is_some());
     }
 
     #[test]
