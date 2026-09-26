@@ -70,9 +70,13 @@ pub fn output_owned_std_with_timeout(
             Ok(None) => {
                 let _ = terminate_bounded_process_tree(child_pid);
                 let kill_error = child.kill().err();
-                let wait_error = child.wait().err();
+                // A child stuck in a driver call can outlive TerminateProcess;
+                // waiting for it without a bound once ate the rest of a
+                // microphone's opening budget (plan 065, A2). An unreaped child
+                // stays in the backend Job Object, which kills it on exit.
+                let reap_error = reap_killed_child(&mut child, KILLED_CHILD_REAP_LIMIT).err();
                 let detail = kill_error
-                    .or(wait_error)
+                    .or(reap_error)
                     .map(|error| format!(" Child cleanup also failed: {error}."))
                     .unwrap_or_default();
                 return Err(io::Error::new(
@@ -103,6 +107,28 @@ pub fn output_owned_std_with_timeout(
         stdout,
         stderr,
     })
+}
+
+/// How long a killed child may take to be reaped before the caller moves on.
+const KILLED_CHILD_REAP_LIMIT: Duration = Duration::from_secs(2);
+
+fn reap_killed_child(child: &mut StdChild, limit: Duration) -> io::Result<()> {
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait()? {
+            Some(_) => return Ok(()),
+            None if Instant::now() >= deadline => {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!(
+                        "the killed child was not reaped within {}ms",
+                        limit.as_millis()
+                    ),
+                ));
+            }
+            None => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
 }
 
 fn read_child_pipe<R: Read>(pipe: Option<R>) -> io::Result<Vec<u8>> {
@@ -395,6 +421,35 @@ mod tests {
         terminate_process(pid, true).expect("terminate child");
         child.wait().expect("reap terminated child");
         assert!(!process_is_running(pid).expect("probe reaped child"));
+    }
+
+    #[test]
+    fn a_killed_child_is_reaped_within_its_limit_or_reported() {
+        // Not killed: the reap gives up at its limit instead of hanging.
+        let mut child = spawn_owned_std(&mut long_running_command()).unwrap();
+        let started = Instant::now();
+        let error = reap_killed_child(&mut child, Duration::from_millis(50))
+            .expect_err("a live child cannot be reaped");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(2));
+        // Killed: reaped well inside the production limit.
+        child.kill().unwrap();
+        reap_killed_child(&mut child, KILLED_CHILD_REAP_LIMIT).unwrap();
+    }
+
+    #[test]
+    fn bounded_output_timeout_includes_a_bounded_reap_on_every_platform() {
+        let mut command = long_running_command();
+        let started = Instant::now();
+        let error = output_owned_std_with_timeout(&mut command, Duration::from_millis(25))
+            .expect_err("long-running child must exceed the bounded wait");
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(error.to_string().contains("exceeded its 25ms deadline"));
+        assert!(
+            started.elapsed()
+                < Duration::from_millis(25) + KILLED_CHILD_REAP_LIMIT + Duration::from_secs(1),
+            "timeout cleanup must stay bounded by the reap limit"
+        );
     }
 
     #[cfg(unix)]

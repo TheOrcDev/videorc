@@ -10,6 +10,32 @@
 
 ## Status and decisions
 
+- Execution 2026-09-26, first PR (`fix/065-windows-mic-and-mf-probe`):
+  A0-A4, B1 and B2 done. A2 notes: no Windows process-tree terminate was
+  added (the probe children spawn no subprocesses; `child.kill()` plus the
+  new 2 s bounded reap covers them), and `yield_to_capture` needed no change
+  (the check's `running` flag clears only after `stop_recording` has
+  drained, bounded at 8 s). B2 ships two topologies: `auto` (D3D11 upload on
+  a video-capable, multithread-protected device) and `system-memory` (no
+  device manager). No separate I420 rung: the MFT setup already tries I420
+  before NV12 at `SetInputType`, and the bundle's `input=NV12` shows Quick
+  Sync refused I420 there. The rejection cache keys on adapter driver
+  identity plus profile. B4: each rung's `start_error` is already in the
+  backend log (support bundle); showing it in Settings needs a contract
+  change and moves to the second PR.
+- Second PR, NOT started: B0 (probe matrix tool), then B3 (stream
+  step-down) and the B4 renderer surface. B3 is larger than written below:
+  per-target stream profiles come from named presets
+  (`stream_target_output_video`) validated per provider, so a step-down
+  needs a per-target override threaded through
+  `resolve_provider_stream_output_plan_with_separate_roles`, the split-role
+  plan and the simulcast exclusion. Start it only if the tester's run on a
+  build with B1/B2 still shows `software-open-h264`.
+- Acceptance without B0: when both topologies fail, the combined probe
+  reason keeps the first topology's full text and only the stage and HRESULT
+  of the later one, so it fits the 480-byte fallback reason the session log
+  and support bundle carry. The tester's next bundle names which topology
+  passed or how each one failed, which answers B1 versus B2.
 - Status: PLANNED 2026-09-26. Diagnosed from the tester's support bundle
   `videorc-support-bundle-20260926-135101Z.json` (Windows 0.9.112 packaged,
   Intel Iris Xe laptop, Windows 11 26200, Cirrus Logic digital mic plus an

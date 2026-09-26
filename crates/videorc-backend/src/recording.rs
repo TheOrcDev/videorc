@@ -358,6 +358,41 @@ impl Drop for PublishedSessionStartGuard {
     }
 }
 
+/// Health code for a session that keeps its microphone through the direct
+/// DirectShow input because the capture worker could not open it (plan 065).
+pub(crate) const WORKER_MICROPHONE_FALLBACK_CODE: &str = "microphone-capture-worker-fallback";
+
+/// What a session does when the capture worker cannot open its microphone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WorkerMicrophoneFallback {
+    /// Keep the resolved Windows DirectShow input; FFmpeg opens it directly
+    /// as it did before the worker existed. Live replacement is unavailable.
+    DirectDshow,
+    /// Record silence: no Windows input to fall back to, or the device is
+    /// not in the DirectShow inventory, so a direct input would fail too.
+    Silence,
+}
+
+fn worker_microphone_fallback(
+    resolved: Option<&MicrophoneInput>,
+    error: &anyhow::Error,
+) -> WorkerMicrophoneFallback {
+    let device_missing = crate::audio_capture_adapter::worker_start_failure_kind(error)
+        == Some(crate::audio_capture_adapter::WorkerStartFailureKind::DeviceNotInInventory);
+    match resolved {
+        Some(MicrophoneInput::WindowsDshow { .. }) if !device_missing => {
+            WorkerMicrophoneFallback::DirectDshow
+        }
+        _ => WorkerMicrophoneFallback::Silence,
+    }
+}
+
+fn worker_microphone_fallback_message(reason: &str) -> String {
+    format!(
+        "The microphone is live, but it can't be changed until this session ends. The capture worker could not open it ({reason}), so Videorc is recording it directly."
+    )
+}
+
 fn live_captions_requested(params: &StartSessionParams) -> bool {
     params
         .captions
@@ -2963,6 +2998,10 @@ async fn start_session_with_timeline(
     // Capture-only workers own replaceable device inputs; the encoder reads
     // one persistent PCM track. Older Windows development bundles keep their
     // initial DirectShow path until the separately verified worker is present.
+    // When the worker cannot start, a present Windows microphone keeps that
+    // direct input instead of turning into silence (plan 065, A3).
+    let resolved_microphone = capture.microphone.clone();
+    let mut worker_fallback_reason: Option<String> = None;
     let worker_device = match capture.microphone.as_ref() {
         Some(MicrophoneInput::AvFoundationUid { uid_hex }) => {
             Some(format!("microphone:avfoundation-uid:{uid_hex}"))
@@ -2996,18 +3035,40 @@ async fn start_session_with_timeline(
             }
             Err(error) => {
                 let _ = crate::fifo::cleanup(&path);
-                capture.microphone = None;
-                state.emit_log(
-                    "warn",
-                    format!("Capture-worker microphone unavailable: {error}"),
-                );
-                let _ = emit_health_event(
-                    &state,
-                    Some(&session_id),
-                    HealthLevel::Warn,
-                    "microphone-capture-worker-unavailable",
-                    &format!("The selected microphone could not supply timestamped audio: {error}"),
-                );
+                match worker_microphone_fallback(resolved_microphone.as_ref(), &error) {
+                    WorkerMicrophoneFallback::DirectDshow => {
+                        capture.microphone = resolved_microphone.clone();
+                        let reason = format!("{error:#}");
+                        state.emit_log(
+                            "warn",
+                            format!("Capture-worker microphone fell back to DirectShow: {reason}"),
+                        );
+                        let _ = emit_health_event(
+                            &state,
+                            Some(&session_id),
+                            HealthLevel::Warn,
+                            WORKER_MICROPHONE_FALLBACK_CODE,
+                            &worker_microphone_fallback_message(&reason),
+                        );
+                        worker_fallback_reason = Some(reason);
+                    }
+                    WorkerMicrophoneFallback::Silence => {
+                        capture.microphone = None;
+                        state.emit_log(
+                            "warn",
+                            format!("Capture-worker microphone unavailable: {error:#}"),
+                        );
+                        let _ = emit_health_event(
+                            &state,
+                            Some(&session_id),
+                            HealthLevel::Warn,
+                            "microphone-capture-worker-unavailable",
+                            &format!(
+                                "The selected microphone could not supply timestamped audio: {error:#}"
+                            ),
+                        );
+                    }
+                }
             }
         }
     }
@@ -3134,16 +3195,26 @@ async fn start_session_with_timeline(
         state.emit_log(
             "info",
             format!(
-                "Encoding Media Foundation legs at probed bitrates (recording={}, stream={}) after the hardware probe rejected requested bitrates.",
+                "Encoding Media Foundation legs as probed (recording={} kbps {} input, stream={} {} input) after the hardware probe rejected the requested settings.",
                 windows_encoded_bridge_decision
                     .bitrate_overrides
                     .recording_bitrate_kbps
                     .unwrap_or(params.output.video.bitrate_kbps),
                 windows_encoded_bridge_decision
                     .bitrate_overrides
+                    .recording_input_topology
+                    .unwrap_or_default()
+                    .label(),
+                windows_encoded_bridge_decision
+                    .bitrate_overrides
                     .stream_bitrate_kbps
-                    .map(|value| value.to_string())
+                    .map(|value| format!("{value} kbps"))
                     .unwrap_or_else(|| "unchanged".to_string()),
+                windows_encoded_bridge_decision
+                    .bitrate_overrides
+                    .stream_input_topology
+                    .unwrap_or_default()
+                    .label(),
             ),
         );
     }
@@ -3332,11 +3403,16 @@ async fn start_session_with_timeline(
             camera_source_available: !camera_required || camera_input.is_some(),
             explicit_scene: params.scene.is_some(),
             unsupported_scene_features,
+            // A leg whose MFT passed only with system-memory input cannot be
+            // handed D3D11 textures (plan 065, B2).
             media_foundation_selected: use_encoder_bridge
                 && matches!(
                     encoder_bridge_video_output,
                     EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
-                ),
+                )
+                && windows_encoded_bridge_decision
+                    .bitrate_overrides
+                    .allows_d3d11_textures(),
             record_enabled: params.output.record_enabled,
             stream_enabled: params.output.stream_enabled,
             primary: WindowsD3d11VideoPlan {
@@ -3682,6 +3758,9 @@ async fn start_session_with_timeline(
             encoder_bridge_video_output,
             EncoderBridgeVideoOutput::WindowsMediaFoundationH264MpegTs
         )
+        && windows_encoded_bridge_decision
+            .bitrate_overrides
+            .allows_d3d11_textures()
         && params.output.record_enabled
         && !params.output.stream_enabled
         && params.scene.is_none()
@@ -4345,6 +4424,10 @@ async fn start_session_with_timeline(
             windows_d3d11_primary_input,
             encoder_bridge_video_output,
             Some(encoder_bridge_recording_bitrate_kbps),
+            windows_encoded_bridge_decision
+                .bitrate_overrides
+                .recording_input_topology
+                .unwrap_or_default(),
             // Low latency only when live legs consume THIS output (shared
             // leg while streaming); a record-only output — including the
             // recording leg beside a dedicated stream bridge — encodes for
@@ -4409,6 +4492,10 @@ async fn start_session_with_timeline(
                                 .stream_bitrate_kbps
                                 .unwrap_or(stream_profile.bitrate_kbps),
                         ),
+                        windows_encoded_bridge_decision
+                            .bitrate_overrides
+                            .stream_input_topology
+                            .unwrap_or_default(),
                         true,
                         stream_diagnostics_context,
                         video_epoch.clone(),
@@ -4721,6 +4808,10 @@ async fn start_session_with_timeline(
                     && crate::audio_capture_adapter::windows_worker_path(&ffmpeg_path).is_file()))
         {
             sources.enable_microphone();
+        } else if let Some(reason) = worker_fallback_reason.as_deref() {
+            sources.microphone_unavailable(&format!(
+                "The microphone can't be changed until this session ends: the capture worker could not open it ({reason})."
+            ));
         } else if cfg!(target_os = "windows") {
             sources.microphone_unavailable("Live microphone replacement requires the verified capture worker. This session keeps its initial microphone input.");
         }
@@ -12492,11 +12583,30 @@ fn recording_encoder_bridge_video_output(
 struct WindowsEncodedBridgeBitrateOverrides {
     recording_bitrate_kbps: Option<u32>,
     stream_bitrate_kbps: Option<u32>,
+    // Input topology the probe validated per leg when it was not the default
+    // (plan 065, B2). Same contract as the bitrates: encode as probed.
+    recording_input_topology:
+        Option<crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology>,
+    stream_input_topology:
+        Option<crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology>,
 }
 
 impl WindowsEncodedBridgeBitrateOverrides {
     fn any(self) -> bool {
-        self.recording_bitrate_kbps.is_some() || self.stream_bitrate_kbps.is_some()
+        self.recording_bitrate_kbps.is_some()
+            || self.stream_bitrate_kbps.is_some()
+            || self.recording_input_topology.is_some()
+            || self.stream_input_topology.is_some()
+    }
+
+    /// Whether every leg may be fed GPU textures (the unified D3D11 media
+    /// path and the direct D3D11 recording source do that).
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    fn allows_d3d11_textures(self) -> bool {
+        [self.recording_input_topology, self.stream_input_topology]
+            .into_iter()
+            .flatten()
+            .all(|topology| topology.allows_d3d11_textures())
     }
 }
 
@@ -12634,6 +12744,7 @@ enum MediaFoundationProfileProbe {
         // Bitrate the MFT actually accepted for this profile (differs from the
         // requested bitrate only after an Intel E_UNEXPECTED fallback ladder).
         bitrate_kbps: u32,
+        input_topology: crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology,
     },
     Rejected {
         reason: String,
@@ -12947,9 +13058,23 @@ fn summarize_media_foundation_topology_probes(
                 encoder_identity,
                 input_subtype: probe_input_subtype,
                 bitrate_kbps,
+                input_topology,
             }) => {
                 identity.get_or_insert_with(|| encoder_identity.clone());
                 input_subtype.get_or_insert_with(|| probe_input_subtype.clone());
+                if *input_topology
+                    != crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto
+                {
+                    match profile.role {
+                        EncoderOutputTopologyProbeRole::Shared
+                        | EncoderOutputTopologyProbeRole::Recording => {
+                            bitrate_overrides.recording_input_topology = Some(*input_topology);
+                        }
+                        EncoderOutputTopologyProbeRole::Stream => {
+                            bitrate_overrides.stream_input_topology = Some(*input_topology);
+                        }
+                    }
+                }
                 if *bitrate_kbps != profile.video.bitrate_kbps {
                     match profile.role {
                         EncoderOutputTopologyProbeRole::Shared
@@ -13410,6 +13535,7 @@ async fn probe_windows_media_foundation_topology(
                     encoder_identity: probe.encoder_identity,
                     input_subtype: probe.input_subtype.label().to_string(),
                     bitrate_kbps: probe.effective_bitrate_kbps,
+                    input_topology: probe.input_topology,
                 });
             }
             Err(error) => {
@@ -13507,6 +13633,44 @@ fn windows_native_encoded_probe_key(
     }
 }
 
+/// Media Foundation probe rejections, remembered so a machine whose MFT
+/// rejects every topology and bitrate pays for the ladder once per 10
+/// minutes instead of on every start (plan 065, B2). A tester's Iris Xe
+/// laptop spent 6.5 to 11.9 s re-probing per start, and the performance
+/// check's rungs ran out of their 15 s start budget doing it.
+#[cfg(any(test, target_os = "windows"))]
+const MEDIA_FOUNDATION_PROBE_REJECTION_TTL: Duration = Duration::from_secs(10 * 60);
+
+#[cfg(any(test, target_os = "windows"))]
+type MediaFoundationProbeRejectionKey = (String, u32, u32, u32, u32);
+
+#[cfg(any(test, target_os = "windows"))]
+#[derive(Debug, Default)]
+struct MediaFoundationProbeRejections {
+    entries: std::collections::HashMap<MediaFoundationProbeRejectionKey, (Instant, String)>,
+}
+
+#[cfg(any(test, target_os = "windows"))]
+impl MediaFoundationProbeRejections {
+    fn get(&self, key: &MediaFoundationProbeRejectionKey, now: Instant) -> Option<String> {
+        self.entries.get(key).and_then(|(at, reason)| {
+            (now.saturating_duration_since(*at) < MEDIA_FOUNDATION_PROBE_REJECTION_TTL)
+                .then(|| reason.clone())
+        })
+    }
+
+    fn insert(&mut self, key: MediaFoundationProbeRejectionKey, reason: String, now: Instant) {
+        self.entries.retain(|_, (at, _)| {
+            now.saturating_duration_since(*at) < MEDIA_FOUNDATION_PROBE_REJECTION_TTL
+        });
+        self.entries.insert(key, (now, reason));
+    }
+}
+
+#[cfg(target_os = "windows")]
+static WINDOWS_MF_PROBE_REJECTIONS: std::sync::OnceLock<StdMutex<MediaFoundationProbeRejections>> =
+    std::sync::OnceLock::new();
+
 #[cfg(target_os = "windows")]
 static WINDOWS_NATIVE_ENCODED_PROBE_CACHE: std::sync::OnceLock<
     StdMutex<std::collections::HashMap<WindowsNativeEncodedProbeKey, Option<String>>>,
@@ -13525,10 +13689,37 @@ async fn probe_windows_native_encoded_bridge(
         fps: video.fps,
         bitrate_kbps: video.bitrate_kbps,
         low_latency: true,
+        // The probe walks the topology ladder itself (plan 065, B2).
+        input_topology: crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
     };
-    let probe = tokio::task::spawn_blocking(move || probe_hardware_encoder(config))
+    let rejection_key = (
+        graphics_adapter_driver_identity.to_string(),
+        video.width,
+        video.height,
+        video.fps,
+        video.bitrate_kbps,
+    );
+    let rejections = WINDOWS_MF_PROBE_REJECTIONS
+        .get_or_init(|| StdMutex::new(MediaFoundationProbeRejections::default()));
+    if let Some(reason) = rejections
+        .lock()
+        .ok()
+        .and_then(|cache| cache.get(&rejection_key, Instant::now()))
+    {
+        bail!("{reason} (remembered from an earlier probe)");
+    }
+    let probe = match tokio::task::spawn_blocking(move || probe_hardware_encoder(config))
         .await
-        .context("Media Foundation hardware probe thread panicked")??;
+        .context("Media Foundation hardware probe thread panicked")?
+    {
+        Ok(probe) => probe,
+        Err(error) => {
+            if let Ok(mut cache) = rejections.lock() {
+                cache.insert(rejection_key, format!("{error:#}"), Instant::now());
+            }
+            return Err(error);
+        }
+    };
     let key = windows_native_encoded_probe_key(
         ffmpeg_path,
         graphics_adapter_driver_identity,
@@ -21367,6 +21558,8 @@ mod tests {
                 encoder_identity: "hardware-encoder".to_string(),
                 input_subtype: "NV12".to_string(),
                 bitrate_kbps: 6_000,
+                input_topology:
+                    crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
             },
             MediaFoundationProfileProbe::Rejected {
                 reason: format!("driver rejected stream profile\n{}", "x".repeat(1_000)),
@@ -21416,11 +21609,15 @@ mod tests {
                 encoder_identity: "hardware-encoder".to_string(),
                 input_subtype: "NV12".to_string(),
                 bitrate_kbps: 6_000,
+                input_topology:
+                    crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
             },
             MediaFoundationProfileProbe::Passed {
                 encoder_identity: "hardware-encoder".to_string(),
                 input_subtype: "NV12".to_string(),
                 bitrate_kbps: 6_000,
+                input_topology:
+                    crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
             },
         ];
         let decision = select_windows_encoded_bridge_decision(
@@ -21469,11 +21666,15 @@ mod tests {
                 encoder_identity: "Intel Quick Sync".to_string(),
                 input_subtype: "I420".to_string(),
                 bitrate_kbps: 5_000,
+                input_topology:
+                    crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
             },
             MediaFoundationProfileProbe::Passed {
                 encoder_identity: "Intel Quick Sync".to_string(),
                 input_subtype: "I420".to_string(),
                 bitrate_kbps: 4_500,
+                input_topology:
+                    crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
             },
         ];
         let decision = select_windows_encoded_bridge_decision(
@@ -21518,11 +21719,15 @@ mod tests {
                 encoder_identity: "Intel Quick Sync".to_string(),
                 input_subtype: "I420".to_string(),
                 bitrate_kbps: 6_000,
+                input_topology:
+                    crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
             },
             MediaFoundationProfileProbe::Passed {
                 encoder_identity: "Intel Quick Sync".to_string(),
                 input_subtype: "I420".to_string(),
                 bitrate_kbps: 4_000,
+                input_topology:
+                    crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
             },
         ];
         let summary = summarize_media_foundation_topology_probes(&plan, &probes);
@@ -21535,6 +21740,87 @@ mod tests {
 
         assert_eq!(bitrate_overrides.recording_bitrate_kbps, None);
         assert_eq!(bitrate_overrides.stream_bitrate_kbps, Some(4_000));
+        assert!(bitrate_overrides.allows_d3d11_textures());
+    }
+
+    #[test]
+    fn media_foundation_probe_rejections_are_remembered_for_ten_minutes() {
+        let mut cache = MediaFoundationProbeRejections::default();
+        let key = ("Intel Iris Xe 31.0.101".to_string(), 1920, 1080, 30, 6_000);
+        let now = Instant::now();
+        assert_eq!(cache.get(&key, now), None);
+        cache.insert(
+            key.clone(),
+            "E_UNEXPECTED at process-output".to_string(),
+            now,
+        );
+        assert_eq!(
+            cache.get(&key, now + Duration::from_secs(60)).as_deref(),
+            Some("E_UNEXPECTED at process-output")
+        );
+        // Another canvas or driver is probed on its own.
+        let smaller = ("Intel Iris Xe 31.0.101".to_string(), 1280, 720, 30, 4_000);
+        assert_eq!(cache.get(&smaller, now), None);
+        // A driver update or a long break re-probes.
+        let expired = now + MEDIA_FOUNDATION_PROBE_REJECTION_TTL;
+        assert_eq!(cache.get(&key, expired), None);
+        cache.insert(smaller.clone(), "rejected".to_string(), expired);
+        assert!(
+            !cache.entries.contains_key(&key),
+            "expired entries are pruned"
+        );
+        assert!(cache.entries.contains_key(&smaller));
+    }
+
+    #[test]
+    fn a_system_memory_probe_pass_pins_that_leg_and_keeps_textures_away() {
+        use crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology;
+        let video = |width, height, bitrate_kbps| VideoSettings {
+            preset: VideoPreset::StreamSafe1080p30,
+            width,
+            height,
+            fps: 30,
+            bitrate_kbps,
+        };
+        let plan =
+            EncoderOutputTopologyPlan::split(video(1920, 1080, 6_000), video(1280, 720, 4_500));
+        let probes = vec![
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "Intel® Quick Sync Video H.264 Encoder MFT".to_string(),
+                input_subtype: "NV12".to_string(),
+                bitrate_kbps: 6_000,
+                input_topology: MediaFoundationInputTopology::Auto,
+            },
+            MediaFoundationProfileProbe::Passed {
+                encoder_identity: "Intel® Quick Sync Video H.264 Encoder MFT".to_string(),
+                input_subtype: "NV12".to_string(),
+                bitrate_kbps: 4_500,
+                input_topology: MediaFoundationInputTopology::SystemMemory,
+            },
+        ];
+        let MediaFoundationTopologyProbe::Passed {
+            bitrate_overrides, ..
+        } = summarize_media_foundation_topology_probes(&plan, &probes)
+        else {
+            panic!("both profiles passed");
+        };
+        // Plan 065 (B2): the stream leg must be built as probed, the recording
+        // leg keeps the default, and no leg may be handed D3D11 textures.
+        assert_eq!(bitrate_overrides.recording_input_topology, None);
+        assert_eq!(
+            bitrate_overrides.stream_input_topology,
+            Some(MediaFoundationInputTopology::SystemMemory)
+        );
+        assert!(bitrate_overrides.any());
+        assert!(!bitrate_overrides.allows_d3d11_textures());
+        assert!(MediaFoundationInputTopology::Auto.allows_d3d11_textures());
+        assert_eq!(
+            MediaFoundationInputTopology::LADDER,
+            [
+                MediaFoundationInputTopology::Auto,
+                MediaFoundationInputTopology::SystemMemory
+            ]
+        );
     }
 
     #[test]
@@ -25308,6 +25594,60 @@ mod tests {
         let capture = resolve_capture_inputs("ffmpeg", &params).await;
 
         assert_eq!(capture.video, VideoInput::MacScreen { index: 3 });
+    }
+
+    #[test]
+    fn a_failed_capture_worker_keeps_a_present_windows_microphone() {
+        use crate::audio_capture_adapter::{WorkerStartError, WorkerStartFailureKind};
+        let dshow = MicrophoneInput::WindowsDshow {
+            device_name: "Digital Microphone (2- Cirrus Logic High Definition Audio)".to_string(),
+        };
+        // The two failures in the 2026-09-26 tester bundle: an inventory probe
+        // past its limit, and the whole open past its budget. Neither says the
+        // device is gone, so the session must keep it (plan 065, A3).
+        let probe_timeout = anyhow::Error::from(WorkerStartError::for_test(
+            WorkerStartFailureKind::ProbeTimedOut,
+            "The capture worker's device inventory probe timed out",
+        ));
+        let open_budget = anyhow::anyhow!(
+            "Microphone opening exceeded 15s; its owner is still responsible for cleanup."
+        );
+        let protocol = anyhow::Error::from(WorkerStartError::for_test(
+            WorkerStartFailureKind::ProtocolMissing,
+            "The capture worker lacks DirectShow clock protocol 1",
+        ));
+        for error in [&probe_timeout, &open_budget, &protocol] {
+            assert_eq!(
+                worker_microphone_fallback(Some(&dshow), error),
+                WorkerMicrophoneFallback::DirectDshow,
+                "{error}"
+            );
+        }
+        // A device missing from the DirectShow inventory cannot be opened by a
+        // direct input either: silence keeps the session alive.
+        let missing = anyhow::Error::from(WorkerStartError::for_test(
+            WorkerStartFailureKind::DeviceNotInInventory,
+            "The selected DirectShow device is missing or its friendly name is ambiguous",
+        ))
+        .context("Microphone opening failed");
+        assert_eq!(
+            worker_microphone_fallback(Some(&dshow), &missing),
+            WorkerMicrophoneFallback::Silence
+        );
+        // macOS worker inputs and an empty selection have no direct fallback here.
+        let avfoundation = MicrophoneInput::AvFoundationUid {
+            uid_hex: "00".to_string(),
+        };
+        assert_eq!(
+            worker_microphone_fallback(Some(&avfoundation), &probe_timeout),
+            WorkerMicrophoneFallback::Silence
+        );
+        assert_eq!(
+            worker_microphone_fallback(None, &probe_timeout),
+            WorkerMicrophoneFallback::Silence
+        );
+        let message = worker_microphone_fallback_message("probe timed out");
+        assert!(message.contains("microphone is live") && message.contains("probe timed out"));
     }
 
     #[tokio::test]

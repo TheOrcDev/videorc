@@ -4,6 +4,69 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_METADATA_BYTES: usize = 4096;
+
+/// Why a capture worker could not start, so a session can choose between
+/// the direct DirectShow input and silence (plan 065, A3). A timeout or a
+/// missing protocol says nothing about the device; only an inventory that
+/// lacks the device means a direct input would fail too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WorkerStartFailureKind {
+    /// The device is not in the DirectShow inventory, or its name is
+    /// ambiguous there: the direct `audio=<name>` input cannot open it either.
+    DeviceNotInInventory,
+    /// A probe child (protocol help or device inventory) exceeded its limit.
+    ProbeTimedOut,
+    /// The worker binary lacks the timestamped capture protocol.
+    ProtocolMissing,
+}
+
+#[derive(Debug)]
+pub(crate) struct WorkerStartError {
+    pub kind: WorkerStartFailureKind,
+    message: String,
+}
+
+impl WorkerStartError {
+    fn new(kind: WorkerStartFailureKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(kind: WorkerStartFailureKind, message: &str) -> Self {
+        Self::new(kind, message)
+    }
+}
+
+impl std::fmt::Display for WorkerStartError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for WorkerStartError {}
+
+/// The typed start failure inside an error chain, if any.
+pub(crate) fn worker_start_failure_kind(error: &anyhow::Error) -> Option<WorkerStartFailureKind> {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<WorkerStartError>())
+        .map(|failure| failure.kind)
+}
+
+fn probe_error(label: &str, error: std::io::Error) -> anyhow::Error {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        WorkerStartError::new(
+            WorkerStartFailureKind::ProbeTimedOut,
+            format!("The capture worker's {label} probe timed out: {error}"),
+        )
+        .into()
+    } else {
+        anyhow::Error::new(error).context(format!("The capture worker's {label} probe failed"))
+    }
+}
 const MAX_ANCHORS: usize = 64;
 const MAX_CAPTURE_AGE: Duration = Duration::from_millis(100);
 
@@ -463,32 +526,241 @@ fn resolve_target(ffmpeg: &str, id: &str) -> Result<(String, String)> {
         if name.is_empty() || name.contains(['\0', '\r', '\n']) {
             bail!("Invalid DirectShow device identity");
         }
-        let help = output_owned_std_with_timeout(
-            Command::new(ffmpeg).args(["-hide_banner", "-h", "demuxer=dshow"]),
-            Duration::from_secs(1),
+        ensure_dshow_protocol(ffmpeg)?;
+        let target = resolve_with_inventory_cache(
+            dshow_inventory_cache(),
+            std::path::Path::new(ffmpeg),
+            Instant::now(),
+            |inventory| resolve_dshow_name(inventory, &name),
+            || fetch_dshow_inventory(ffmpeg),
         )?;
-        let help = String::from_utf8_lossy(&help.stdout);
-        if !help.contains("-videorc_audio_clock")
-            || !help.contains("Videorc DShow clock protocol 1)")
-        {
-            bail!("The capture worker lacks DirectShow clock protocol 1");
-        }
-        let output = output_owned_std_with_timeout(
-            Command::new(ffmpeg).args([
-                "-hide_banner",
-                "-list_devices",
-                "true",
-                "-f",
-                "dshow",
-                "-i",
-                "dummy",
-            ]),
-            Duration::from_secs(2),
-        )?;
-        let target = resolve_dshow_name(&String::from_utf8_lossy(&output.stderr), &name)?;
         return Ok((target, name));
     }
     bail!("This microphone capture adapter does not recognize the device identity")
+}
+
+/// Limits for the worker's two probe children. A cold `ffmpeg-capture.exe`
+/// under antivirus scanning, or a DirectShow enumeration that walks virtual
+/// devices and capture cards, took longer than the old 1 s / 2 s on a
+/// tester's Iris Xe laptop and cost the whole session its microphone.
+const DSHOW_PROTOCOL_PROBE_LIMIT: Duration = Duration::from_secs(4);
+const DSHOW_INVENTORY_PROBE_LIMIT: Duration = Duration::from_secs(8);
+/// A cached inventory older than this is refreshed before use, so a device
+/// that was replaced (new moniker, same name) is not resolved stale forever.
+const DSHOW_INVENTORY_TTL: Duration = Duration::from_secs(10 * 60);
+
+fn probe_command(worker: &str) -> Command {
+    #[cfg_attr(not(windows), allow(unused_mut))]
+    let mut command = Command::new(worker);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NO_WINDOW, like the capture command itself.
+        command.creation_flags(0x0800_0000);
+    }
+    command
+}
+
+/// Workers whose protocol probe passed, keyed by path, size and mtime so a
+/// replaced binary is checked again. Failures are never cached.
+fn verified_workers() -> &'static Mutex<std::collections::HashSet<WorkerIdentity>> {
+    static VERIFIED: std::sync::OnceLock<Mutex<std::collections::HashSet<WorkerIdentity>>> =
+        std::sync::OnceLock::new();
+    VERIFIED.get_or_init(|| Mutex::new(std::collections::HashSet::new()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct WorkerIdentity {
+    path: std::path::PathBuf,
+    len: Option<u64>,
+    modified: Option<SystemTime>,
+}
+
+impl WorkerIdentity {
+    fn of(worker: &str) -> Self {
+        let metadata = std::fs::metadata(worker).ok();
+        Self {
+            path: std::path::PathBuf::from(worker),
+            len: metadata.as_ref().map(std::fs::Metadata::len),
+            modified: metadata.and_then(|metadata| metadata.modified().ok()),
+        }
+    }
+}
+
+fn ensure_dshow_protocol(worker: &str) -> Result<()> {
+    let identity = WorkerIdentity::of(worker);
+    if verified_workers()
+        .lock()
+        .map(|verified| verified.contains(&identity))
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let help = output_owned_std_with_timeout(
+        probe_command(worker).args(["-hide_banner", "-h", "demuxer=dshow"]),
+        DSHOW_PROTOCOL_PROBE_LIMIT,
+    )
+    .map_err(|error| probe_error("protocol", error))?;
+    let help = String::from_utf8_lossy(&help.stdout);
+    if !help.contains("-videorc_audio_clock") || !help.contains("Videorc DShow clock protocol 1)") {
+        return Err(WorkerStartError::new(
+            WorkerStartFailureKind::ProtocolMissing,
+            "The capture worker lacks DirectShow clock protocol 1",
+        )
+        .into());
+    }
+    if let Ok(mut verified) = verified_workers().lock() {
+        verified.insert(identity);
+    }
+    Ok(())
+}
+
+fn fetch_dshow_inventory(worker: &str) -> Result<String> {
+    let output = output_owned_std_with_timeout(
+        probe_command(worker).args([
+            "-hide_banner",
+            "-list_devices",
+            "true",
+            "-f",
+            "dshow",
+            "-i",
+            "dummy",
+        ]),
+        DSHOW_INVENTORY_PROBE_LIMIT,
+    )
+    .map_err(|error| probe_error("device inventory", error))?;
+    Ok(String::from_utf8_lossy(&output.stderr).into_owned())
+}
+
+/// The last DirectShow inventory the worker printed. Held while it is
+/// refreshed, so a session start waits for an in-flight warm-up instead of
+/// running a second enumeration beside it.
+#[derive(Debug, Clone)]
+pub(crate) struct CachedDshowInventory {
+    worker: std::path::PathBuf,
+    fetched_at: Instant,
+    text: String,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    microphone_names: Option<Vec<String>>,
+}
+
+pub(crate) type DshowInventoryCache = Mutex<Option<CachedDshowInventory>>;
+
+fn dshow_inventory_cache() -> &'static DshowInventoryCache {
+    static CACHE: std::sync::OnceLock<DshowInventoryCache> = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(None))
+}
+
+/// Resolves against the cached inventory, refreshing it when it is missing,
+/// stale, from another worker, or lacks the device (a newly connected mic).
+/// At most one refresh per call.
+fn resolve_with_inventory_cache(
+    cache: &DshowInventoryCache,
+    worker: &std::path::Path,
+    now: Instant,
+    mut resolve: impl FnMut(&str) -> Result<String>,
+    refresh: impl FnOnce() -> Result<String>,
+) -> Result<String> {
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = cached.as_ref()
+        && entry.worker == worker
+        && now.saturating_duration_since(entry.fetched_at) < DSHOW_INVENTORY_TTL
+    {
+        match resolve(&entry.text) {
+            Ok(target) => {
+                tracing::debug!("Capture worker resolved its device from the cached inventory");
+                return Ok(target);
+            }
+            Err(error)
+                if worker_start_failure_kind(&error)
+                    != Some(WorkerStartFailureKind::DeviceNotInInventory) =>
+            {
+                return Err(error);
+            }
+            Err(_) => {}
+        }
+    }
+    let text = refresh()?;
+    let target = resolve(&text);
+    *cached = Some(CachedDshowInventory {
+        worker: worker.to_path_buf(),
+        fetched_at: now,
+        text,
+        microphone_names: None,
+    });
+    target
+}
+
+/// Refreshes the cached inventory off the start path when the microphone set
+/// that discovery reports changed, or the cache is stale. Discovery calls it
+/// after every Windows device listing; one warm-up runs at a time.
+#[cfg(target_os = "windows")]
+pub(crate) fn warm_dshow_inventory(output_ffmpeg: &str, microphone_names: Vec<String>) {
+    static WARMING: AtomicBool = AtomicBool::new(false);
+    let worker = windows_worker_path(output_ffmpeg);
+    if !worker.is_file() || WARMING.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let spawned = thread::Builder::new()
+        .name("dshow-inventory-warm".into())
+        .spawn(move || {
+            let worker_text = worker.to_string_lossy().into_owned();
+            let _ = warm_inventory_cache(
+                dshow_inventory_cache(),
+                &worker,
+                microphone_names,
+                Instant::now(),
+                || {
+                    ensure_dshow_protocol(&worker_text)?;
+                    fetch_dshow_inventory(&worker_text)
+                },
+            );
+            WARMING.store(false, Ordering::Release);
+        });
+    if spawned.is_err() {
+        WARMING.store(false, Ordering::Release);
+    }
+}
+
+/// Returns whether a refresh ran.
+#[cfg(any(test, target_os = "windows"))]
+fn warm_inventory_cache(
+    cache: &DshowInventoryCache,
+    worker: &std::path::Path,
+    microphone_names: Vec<String>,
+    now: Instant,
+    refresh: impl FnOnce() -> Result<String>,
+) -> Result<bool> {
+    let mut microphone_names = microphone_names;
+    microphone_names.sort();
+    let mut cached = cache
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let current = cached.as_ref().is_some_and(|entry| {
+        entry.worker == worker
+            && now.saturating_duration_since(entry.fetched_at) < DSHOW_INVENTORY_TTL
+            && entry.microphone_names.as_ref() == Some(&microphone_names)
+    });
+    if current {
+        return Ok(false);
+    }
+    match refresh() {
+        Ok(text) => {
+            *cached = Some(CachedDshowInventory {
+                worker: worker.to_path_buf(),
+                fetched_at: now,
+                text,
+                microphone_names: Some(microphone_names),
+            });
+            Ok(true)
+        }
+        Err(error) => {
+            tracing::warn!("Capture worker inventory warm-up failed: {error:#}");
+            Err(error)
+        }
+    }
 }
 
 pub(crate) fn windows_worker_path(output_ffmpeg: &str) -> std::path::PathBuf {
@@ -521,7 +793,11 @@ fn resolve_dshow_kind(inventory: &str, selected: &str, kind: &str) -> Result<Str
     }
     let matching: Vec<_> = audio.iter().filter(|(name, _)| name == selected).collect();
     if matching.len() != 1 {
-        bail!("The selected DirectShow device is missing or its friendly name is ambiguous");
+        return Err(WorkerStartError::new(
+            WorkerStartFailureKind::DeviceNotInInventory,
+            "The selected DirectShow device is missing or its friendly name is ambiguous",
+        )
+        .into());
     }
     let target = matching[0].1.as_deref().unwrap_or(selected);
     if target.is_empty()
@@ -1315,6 +1591,12 @@ mod tests {
         );
         assert!(resolve_dshow_name(inventory, "Camera").is_err());
         assert!(resolve_dshow_name(inventory, "Missing").is_err());
+        // Plan 065: a device absent from the inventory is the one failure a
+        // direct DirectShow input cannot recover from, so it is typed.
+        assert_eq!(
+            worker_start_failure_kind(&resolve_dshow_name(inventory, "Missing").unwrap_err()),
+            Some(WorkerStartFailureKind::DeviceNotInInventory)
+        );
         let duplicate = format!(
             "{inventory}[dshow] \"Microphone\" (audio)\n[dshow] Alternative name \"@audio-2\"\n"
         );
@@ -1330,13 +1612,164 @@ mod tests {
         ] {
             let injected =
                 format!("[dshow] \"Microphone\" (audio)\n[dshow] Alternative name \"{target}\"\n");
-            assert!(resolve_dshow_name(&injected, "Microphone").is_err());
+            let error = resolve_dshow_name(&injected, "Microphone").unwrap_err();
+            // The friendly name is present; only its moniker is unusable, so
+            // the direct `audio=<name>` input can still open it.
+            assert_eq!(worker_start_failure_kind(&error), None);
         }
         assert!(
             resolve_target("must-not-spawn", "microphone:avfoundation:1")
                 .unwrap_err()
                 .to_string()
                 .contains("unbound device index")
+        );
+    }
+
+    #[test]
+    fn the_dshow_inventory_is_enumerated_once_and_refreshed_only_when_it_must_be() {
+        use std::cell::Cell;
+        let cache: DshowInventoryCache = Mutex::new(None);
+        let worker = std::path::Path::new("ffmpeg-capture.exe");
+        let first = "[dshow] \"Mic\" (audio)\n[dshow] Alternative name \"@mic\"\n";
+        let refreshes = Cell::new(0);
+        let fetch = |text: &'static str| {
+            let refreshes = &refreshes;
+            move || {
+                refreshes.set(refreshes.get() + 1);
+                Ok(text.to_string())
+            }
+        };
+        let now = Instant::now();
+        let resolve =
+            |name: &'static str| move |inventory: &str| resolve_dshow_name(inventory, name);
+
+        assert_eq!(
+            resolve_with_inventory_cache(&cache, worker, now, resolve("Mic"), fetch(first))
+                .unwrap(),
+            "@mic"
+        );
+        assert_eq!(refreshes.get(), 1);
+        // A second session start costs no child process.
+        assert_eq!(
+            resolve_with_inventory_cache(&cache, worker, now, resolve("Mic"), fetch(first))
+                .unwrap(),
+            "@mic"
+        );
+        assert_eq!(refreshes.get(), 1);
+
+        // A microphone connected after the last enumeration triggers exactly
+        // one refresh, and the refreshed inventory is kept.
+        let with_usb = "[dshow] \"Mic\" (audio)\n[dshow] Alternative name \"@mic\"\n[dshow] \"USB\" (audio)\n[dshow] Alternative name \"@usb\"\n";
+        assert_eq!(
+            resolve_with_inventory_cache(&cache, worker, now, resolve("USB"), fetch(with_usb))
+                .unwrap(),
+            "@usb"
+        );
+        assert_eq!(refreshes.get(), 2);
+        assert_eq!(
+            resolve_with_inventory_cache(&cache, worker, now, resolve("USB"), fetch(with_usb))
+                .unwrap(),
+            "@usb"
+        );
+        assert_eq!(refreshes.get(), 2);
+
+        // Still missing after the refresh: typed, so the session records silence.
+        let missing =
+            resolve_with_inventory_cache(&cache, worker, now, resolve("Gone"), fetch(with_usb))
+                .unwrap_err();
+        assert_eq!(
+            worker_start_failure_kind(&missing),
+            Some(WorkerStartFailureKind::DeviceNotInInventory)
+        );
+        assert_eq!(refreshes.get(), 3);
+
+        // A stale entry or another worker binary is never trusted.
+        let later = now + DSHOW_INVENTORY_TTL + Duration::from_secs(1);
+        resolve_with_inventory_cache(&cache, worker, later, resolve("Mic"), fetch(first)).unwrap();
+        assert_eq!(refreshes.get(), 4);
+        resolve_with_inventory_cache(
+            &cache,
+            std::path::Path::new("other-capture.exe"),
+            Instant::now(),
+            resolve("Mic"),
+            fetch(first),
+        )
+        .unwrap();
+        assert_eq!(refreshes.get(), 5);
+
+        // A failed refresh surfaces its typed error and keeps the old entry.
+        let timed_out =
+            resolve_with_inventory_cache(&cache, worker, Instant::now(), resolve("Nope"), || {
+                Err(probe_error(
+                    "device inventory",
+                    std::io::Error::new(std::io::ErrorKind::TimedOut, "slow"),
+                ))
+            })
+            .unwrap_err();
+        assert_eq!(
+            worker_start_failure_kind(&timed_out),
+            Some(WorkerStartFailureKind::ProbeTimedOut)
+        );
+        assert!(cache.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn discovery_warms_the_inventory_only_when_the_microphone_set_changed() {
+        let cache: DshowInventoryCache = Mutex::new(None);
+        let worker = std::path::Path::new("ffmpeg-capture.exe");
+        let now = Instant::now();
+        let names = |list: &[&str]| {
+            list.iter()
+                .map(|name| (*name).to_string())
+                .collect::<Vec<_>>()
+        };
+        let inventory = || Ok("[dshow] \"A\" (audio)\n".to_string());
+        assert!(warm_inventory_cache(&cache, worker, names(&["B", "A"]), now, inventory).unwrap());
+        // Same set in another order: nothing to do.
+        assert!(!warm_inventory_cache(&cache, worker, names(&["A", "B"]), now, inventory).unwrap());
+        // A device came or went: enumerate again.
+        assert!(warm_inventory_cache(&cache, worker, names(&["A"]), now, inventory).unwrap());
+        // A session-start refresh leaves the set unknown, so the next
+        // discovery re-warms once rather than trusting it.
+        resolve_with_inventory_cache(
+            &cache,
+            worker,
+            now + DSHOW_INVENTORY_TTL,
+            |text| resolve_dshow_name(text, "A"),
+            inventory,
+        )
+        .unwrap();
+        assert!(warm_inventory_cache(&cache, worker, names(&["A"]), now, inventory).unwrap());
+    }
+
+    #[test]
+    fn probe_failures_are_typed_so_a_session_can_fall_back() {
+        let timed_out = probe_error(
+            "device inventory",
+            std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "Owned child exceeded its 2000ms deadline.",
+            ),
+        );
+        assert_eq!(
+            worker_start_failure_kind(&timed_out),
+            Some(WorkerStartFailureKind::ProbeTimedOut)
+        );
+        assert!(
+            timed_out
+                .to_string()
+                .contains("device inventory probe timed out")
+        );
+        let spawn_failed = probe_error(
+            "protocol",
+            std::io::Error::new(std::io::ErrorKind::NotFound, "missing"),
+        );
+        assert_eq!(worker_start_failure_kind(&spawn_failed), None);
+        // The typed kind survives the context layers session_audio adds.
+        let wrapped = anyhow::Error::from(timed_out).context("Microphone opening failed");
+        assert_eq!(
+            worker_start_failure_kind(&wrapped),
+            Some(WorkerStartFailureKind::ProbeTimedOut)
         );
     }
 

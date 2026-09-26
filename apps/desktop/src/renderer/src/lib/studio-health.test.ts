@@ -243,6 +243,32 @@ describe('recordingStartupHealthToast', () => {
     expect(degraded?.duration).toBeLessThan(Infinity)
   })
 
+  it('surfaces the Windows microphone capture-worker outcomes as keyed warnings', () => {
+    const fallback = recordingStartupHealthToast({
+      code: 'microphone-capture-worker-fallback',
+      level: 'warn',
+      message:
+        "The microphone is live, but it can't be changed until this session ends. The capture worker could not open it (probe timed out), so Videorc is recording it directly."
+    })
+    expect(fallback).toMatchObject({
+      variant: 'warning',
+      id: 'microphone-capture-worker-fallback',
+      title: "Microphone can't be changed this session"
+    })
+    expect(fallback?.description).toContain('probe timed out')
+    const unavailable = recordingStartupHealthToast({
+      code: 'microphone-capture-worker-unavailable',
+      level: 'warn',
+      message: 'The selected microphone could not supply timestamped audio: missing.'
+    })
+    expect(unavailable).toMatchObject({
+      variant: 'warning',
+      id: 'microphone-capture-worker-unavailable',
+      title: 'Going on without a microphone'
+    })
+    expect(unavailable?.duration).toBeLessThan(Infinity)
+  })
+
   it('ignores every other health event, including non-error barrier levels', () => {
     expect(
       recordingStartupHealthToast({
