@@ -5438,6 +5438,14 @@ mod tests {
         );
         assert_eq!(messages[5].event_type, LiveChatEventType::Follow);
         assert_eq!(messages[5].details, Some(LiveChatEventDetails::Follow));
+        assert_eq!(messages[6].event_type, LiveChatEventType::Paid);
+        assert_eq!(
+            messages[6].details,
+            Some(LiveChatEventDetails::Kicks {
+                amount: 500,
+                gift_name: Some("Rage Quit".to_string()),
+            })
+        );
     }
 
     #[test]

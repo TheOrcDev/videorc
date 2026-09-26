@@ -69,6 +69,16 @@ export function providerCapabilityLabel(provider: LiveChatProviderState): string
   return 'read-only'
 }
 
+/**
+ * The provider's own words when chat is stuck or has stopped ("Kick chat
+ * can't connect: Videorc's chat relay is down…"), shown inline instead of a
+ * bare "waiting" (plan 066). Empty otherwise: healthy stays quiet.
+ */
+export function providerProblem(provider: LiveChatProviderState): string {
+  if (provider.state !== 'waiting' && provider.state !== 'failed') return ''
+  return provider.message.trim()
+}
+
 /** The hover text: what chat can do, the provider's own words, audience notes. */
 export function providerCapabilityTitle(
   provider: LiveChatProviderState,
@@ -122,6 +132,7 @@ export function StreamManagerStatusBar({
         <span className="flex min-w-0 items-center gap-3 overflow-hidden" data-slot="chat-states">
           {providers.map((provider) => {
             const label = providerCapabilityLabel(provider)
+            const problem = providerProblem(provider)
             const title = providerCapabilityTitle(provider, audience)
             return (
               <span
@@ -134,7 +145,14 @@ export function StreamManagerStatusBar({
               >
                 <ChatPlatformIcon decorative platform={provider.platform} />
                 <StatusDot tone={providerTone(provider)} />
-                {label ? (
+                {problem ? (
+                  <span
+                    className={cn('max-w-[32rem] truncate', ABOVE_NARROW)}
+                    data-slot="chat-state-problem"
+                  >
+                    {problem}
+                  </span>
+                ) : label ? (
                   <span className={cn('truncate', ABOVE_NARROW, COMPACT_LABEL)}>
                     {CHAT_PLATFORM_LABELS[provider.platform]} {label}
                   </span>

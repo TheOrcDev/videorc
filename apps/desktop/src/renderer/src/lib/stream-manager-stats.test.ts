@@ -202,6 +202,27 @@ describe('stats bar items (plan 057)', () => {
     expect(stale?.details.at(-1)).toEqual({ label: 'Updated', value: 'over a minute ago' })
   })
 
+  // Plan 066: Kick has no count until it marks the stream live; say so.
+  it('names a live platform that has not reported viewers yet', () => {
+    const dashboard = reduceDashboardViewers(live(), sample(30, 12), at(30))
+    const viewers = find(
+      statItems({
+        dashboard,
+        viewerSample: null,
+        messages: [],
+        providers: [provider('twitch'), provider('kick')],
+        nowMs: T0 + 40_000
+      }),
+      'viewers'
+    )
+    expect(viewers?.value).toBe('12')
+    expect(viewers?.details).toEqual([
+      { label: 'Twitch', value: '12', platform: 'twitch' },
+      { label: 'Kick', value: 'waiting', platform: 'kick' },
+      { label: 'Peak', value: '12' }
+    ])
+  })
+
   it('is quiet when healthy: the bitrate, with the rest on hover', () => {
     const health = find(
       statItems({

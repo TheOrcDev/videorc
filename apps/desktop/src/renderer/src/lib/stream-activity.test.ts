@@ -264,6 +264,48 @@ describe('stream activity', () => {
     ])
   })
 
+  // Plan 066: Kick subs have no tier, and KICKs are listed per gift.
+  it('reads Kick subs, gifts and KICKs without tiers or totals', () => {
+    const kickSub = (subscription: 'sub' | 'resub' | 'sub-gift', extra = {}) =>
+      row('kick', 'kick_fan', 'membership', {
+        kind: 'subscription',
+        subscription,
+        isPrime: false,
+        ...extra
+      })
+    const kicks = row(
+      'kick',
+      'tipper',
+      'paid',
+      { kind: 'kicks', amount: 500, giftName: 'Rage Quit' },
+      'w'
+    )
+    const items = activityItems([
+      kickSub('sub'),
+      kickSub('resub', { months: 3 }),
+      kickSub('sub-gift', { recipientName: 'lucky' }),
+      kicks
+    ])
+    const byKind = (kind: string) => items.filter((item) => item.kind === kind)
+    expect(byKind('subscription').map((item) => item.line)).toEqual([
+      'Gifted a sub to lucky',
+      'Resubscribed for 3 months',
+      'Subscribed'
+    ])
+    expect(byKind('kicks')).toEqual([
+      expect.objectContaining({
+        filter: 'tips',
+        name: 'tipper',
+        line: 'Sent 500 KICKs · Rage Quit',
+        short: '500 KICKs',
+        message: 'w'
+      })
+    ])
+    expect(thankYouDraft(byKind('kicks')[0])).toBe('Thank you so much, @tipper!')
+    const totals = activityTotals([kicks, kickSub('sub')])
+    expect(totals).toMatchObject({ supporters: 1, bits: 0, tips: [] })
+  })
+
   it('projects destination failures and recoveries, newest first', () => {
     const items = activityItems(
       [],

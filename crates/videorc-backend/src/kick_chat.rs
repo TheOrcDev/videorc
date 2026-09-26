@@ -25,7 +25,8 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::live_chat::{
     LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState,
-    ProviderSendReceipt, live_chat_message_id, set_provider_and_emit, try_deliver_message,
+    ProviderSendReceipt, SubscriptionKind, live_chat_message_id, set_provider_and_emit,
+    try_deliver_message,
 };
 use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
@@ -35,12 +36,26 @@ const RELAY_BIND_PATH: &str = "/api/desktop/kick-chat/bind";
 const RELAY_READ_PATH: &str = "/api/desktop/kick-chat";
 const KICK_SUBSCRIPTIONS_PATH: &str = "/public/v1/events/subscriptions";
 const KICK_CHAT_PATH: &str = "/public/v1/chat";
-/// The events the relay understands, all version 1.
-pub const KICK_SUBSCRIPTION_EVENTS: [&str; 3] = [
+/// The events the relay understands, all version 1. The first three are what
+/// chat needs; the rest are Stream Manager activity (plan 066) and never stop
+/// chat from connecting when Kick refuses them.
+pub const KICK_SUBSCRIPTION_EVENTS: [&str; 8] = [
+    "chat.message.sent",
+    "livestream.status.updated",
+    "channel.followed",
+    "channel.subscription.new",
+    "channel.subscription.renewal",
+    "channel.subscription.gifts",
+    "kicks.gifted",
+    "moderation.banned",
+];
+const KICK_CORE_EVENTS: [&str; 3] = [
     "chat.message.sent",
     "livestream.status.updated",
     "channel.followed",
 ];
+/// The relay's code for "storage is down, try again" (plan 066).
+const RELAY_UNAVAILABLE_CODE: &str = "kick-chat-relay-unavailable";
 /// Kick's documented chat limits.
 pub const KICK_CHAT_MAX_GRAPHEMES: usize = 500;
 pub const KICK_CHAT_MAX_BYTES: usize = 2_048;
@@ -49,6 +64,12 @@ pub const KICK_CHAT_WRITE_SCOPE: &str = "chat:write";
 pub const KICK_RATE_LIMITED_MESSAGE: &str = "Kick is rate limiting messages, try again in a moment";
 
 const FAILURE_REPORT_ATTEMPTS: usize = 8;
+/// After this many failed attempts in a row, the provider stops saying
+/// "Reconnecting" and says why, in plain words (plan 066).
+const UNAVAILABLE_AFTER_ATTEMPTS: usize = 3;
+/// Distinct failure reasons written to the log per connector, so a stream
+/// that fails for an hour does not fill it.
+const MAX_LOGGED_FAILURES: usize = 8;
 #[cfg(not(test))]
 const HTTP_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(test)]
@@ -184,6 +205,79 @@ struct RelayFollowPayload {
     follower_username: Option<String>,
 }
 
+// The relay's activity kinds (videorc-web `lib/kick-chat/webhook.ts`, plan
+// 066). Every field tolerates absence and null: a malformed row is dropped,
+// never a reason to stop reading.
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayUser {
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    username: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    is_anonymous: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelaySubscriptionPayload {
+    #[serde(default)]
+    renewal: Option<bool>,
+    #[serde(default)]
+    subscriber: Option<RelayUser>,
+    #[serde(default)]
+    duration_months: Option<u32>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayGiftPayload {
+    #[serde(default)]
+    gifter: Option<RelayUser>,
+    #[serde(default)]
+    giftees: Option<Vec<String>>,
+    #[serde(default)]
+    gift_count: Option<u32>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayKicksPayload {
+    #[serde(default)]
+    sender: Option<RelayUser>,
+    #[serde(default)]
+    amount: Option<u64>,
+    #[serde(default)]
+    gift_name: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RelayBanPayload {
+    #[serde(default)]
+    banned_user: Option<RelayUser>,
+    #[serde(default)]
+    moderator: Option<RelayUser>,
+    #[serde(default)]
+    reason: Option<String>,
+    #[serde(default)]
+    expires_at: Option<String>,
+    #[serde(default)]
+    created_at: Option<String>,
+}
+
 /// Retrying cannot fix this; the user has to act (sign in, reconnect Kick).
 #[derive(Debug)]
 struct KickChatTerminalFailure(String);
@@ -219,6 +313,31 @@ impl std::fmt::Display for KickApiError {
 
 impl std::error::Error for KickApiError {}
 
+/// The relay answered with an error it may recover from (storage down, a
+/// binding lost, a 5xx). Carried so the provider can say which.
+#[derive(Debug)]
+struct RelayHttpError {
+    status: u16,
+    code: String,
+    message: String,
+}
+
+impl std::fmt::Display for RelayHttpError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // A bare 5xx has no envelope; "(unknown): request failed" says nothing.
+        if self.code == "unknown" {
+            return write!(formatter, "Kick chat relay answered HTTP {}", self.status);
+        }
+        write!(
+            formatter,
+            "Kick chat relay answered HTTP {} ({}): {}",
+            self.status, self.code, self.message
+        )
+    }
+}
+
+impl std::error::Error for RelayHttpError {}
+
 fn kick_status(error: &anyhow::Error) -> Option<u16> {
     error
         .chain()
@@ -249,15 +368,27 @@ fn kick_base(base_url: Option<&str>) -> String {
 
 // --- Subscription lifecycle -----------------------------------------------
 
+/// What [`ensure_kick_subscriptions`] found or created.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct KickSubscriptions {
+    /// Every subscription id this app now holds for the relayed events.
+    pub ids: Vec<String>,
+    /// Activity events Kick refused, with its reason. Chat works without them.
+    pub skipped: Vec<String>,
+}
+
 /// Makes sure one webhook subscription exists for each relayed event and
 /// returns all their ids. Existing ones are reused; only missing ones are
 /// created. Errors carry [`KickApiError`] so callers can tell a refused token
-/// (401) or missing scope (403) from a transient failure.
+/// (401) or missing scope (403) from a transient failure. Only the core chat
+/// events can fail the call: when Kick refuses an activity event (or a whole
+/// batch that holds one), chat still connects and the refusal is reported in
+/// [`KickSubscriptions::skipped`].
 pub async fn ensure_kick_subscriptions(
     client: &reqwest::Client,
     api_base_url: Option<&str>,
     access_token: &str,
-) -> Result<Vec<String>> {
+) -> Result<KickSubscriptions> {
     let base = kick_base(api_base_url);
     let response = client
         .get(format!("{base}{KICK_SUBSCRIPTIONS_PATH}"))
@@ -298,10 +429,68 @@ pub async fn ensure_kick_subscriptions(
         .copied()
         .filter(|event| !present.contains(event))
         .collect();
+    let mut skipped = Vec::new();
     if missing.is_empty() {
-        return Ok(ids);
+        return Ok(KickSubscriptions { ids, skipped });
     }
-    let events: Vec<Value> = missing
+    let has_optional = missing
+        .iter()
+        .any(|event| !KICK_CORE_EVENTS.contains(event));
+    let created = match create_kick_subscriptions(client, &base, access_token, &missing).await {
+        // Kick refused the whole batch, perhaps over an activity event it
+        // does not offer this app: keep chat working with the core events.
+        Err(error)
+            if has_optional
+                && kick_status(&error)
+                    .is_some_and(|status| (400..500).contains(&status) && status != 401) =>
+        {
+            skipped.extend(
+                missing
+                    .iter()
+                    .filter(|event| !KICK_CORE_EVENTS.contains(event))
+                    .map(|event| format!("{event}: {error}")),
+            );
+            let core: Vec<&str> = missing
+                .iter()
+                .copied()
+                .filter(|event| KICK_CORE_EVENTS.contains(event))
+                .collect();
+            if core.is_empty() {
+                Vec::new()
+            } else {
+                create_kick_subscriptions(client, &base, access_token, &core).await?
+            }
+        }
+        other => other?,
+    };
+    let mut failures = Vec::new();
+    for (name, outcome) in created {
+        match outcome {
+            Ok(id) => ids.push(id),
+            Err(reason) if KICK_CORE_EVENTS.contains(&name.as_str()) => {
+                failures.push(format!("{name}: {reason}"))
+            }
+            Err(reason) => skipped.push(format!("{name}: {reason}")),
+        }
+    }
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "Kick did not create every event subscription ({}).",
+            failures.join("; ")
+        );
+    }
+    Ok(KickSubscriptions { ids, skipped })
+}
+
+/// One `POST /public/v1/events/subscriptions`: each event's new id, or
+/// Kick's reason for refusing it.
+async fn create_kick_subscriptions(
+    client: &reqwest::Client,
+    base: &str,
+    access_token: &str,
+    events: &[&str],
+) -> Result<Vec<(String, std::result::Result<String, String>)>> {
+    let body_events: Vec<Value> = events
         .iter()
         .map(|name| json!({ "name": name, "version": 1 }))
         .collect();
@@ -309,7 +498,7 @@ pub async fn ensure_kick_subscriptions(
         .post(format!("{base}{KICK_SUBSCRIPTIONS_PATH}"))
         .bearer_auth(access_token)
         .timeout(HTTP_REQUEST_TIMEOUT)
-        .json(&json!({ "events": events, "method": "webhook" }))
+        .json(&json!({ "events": body_events, "method": "webhook" }))
         .send()
         .await
         .context("Could not reach Kick to create event subscriptions.")?;
@@ -320,39 +509,34 @@ pub async fn ensure_kick_subscriptions(
         .json()
         .await
         .context("Could not parse Kick's new event subscriptions.")?;
-    let mut failures = Vec::new();
-    for created in body
+    Ok(body
         .get("data")
         .and_then(Value::as_array)
         .into_iter()
         .flatten()
-    {
-        let name = created
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or("event");
-        match (
-            created
-                .get("subscription_id")
+        .map(|created| {
+            let name = created
+                .get("name")
                 .and_then(Value::as_str)
-                .filter(|id| !id.is_empty()),
-            created
-                .get("error")
-                .and_then(Value::as_str)
-                .filter(|error| !error.is_empty()),
-        ) {
-            (Some(id), None) => ids.push(id.to_string()),
-            (_, Some(error)) => failures.push(format!("{name}: {error}")),
-            (None, None) => failures.push(format!("{name}: no subscription id")),
-        }
-    }
-    if !failures.is_empty() {
-        anyhow::bail!(
-            "Kick did not create every event subscription ({}).",
-            failures.join("; ")
-        );
-    }
-    Ok(ids)
+                .unwrap_or("event")
+                .to_string();
+            let outcome = match (
+                created
+                    .get("subscription_id")
+                    .and_then(Value::as_str)
+                    .filter(|id| !id.is_empty()),
+                created
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .filter(|error| !error.is_empty()),
+            ) {
+                (Some(id), None) => Ok(id.to_string()),
+                (_, Some(error)) => Err(error.to_string()),
+                (None, None) => Err("no subscription id".to_string()),
+            };
+            (name, outcome)
+        })
+        .collect())
 }
 
 /// Deletes subscriptions by id. A 404 means they are already gone.
@@ -448,6 +632,7 @@ pub async fn run_kick_chat_connector(
     );
     let mut failed_attempts = 0;
     let mut backoff_ms = MIN_RECONNECT_BACKOFF_MS;
+    let mut logged_failures: Vec<String> = Vec::new();
     loop {
         let mut reached_ready = false;
         let error = match run_kick_chat_session(
@@ -515,19 +700,76 @@ pub async fn run_kick_chat_connector(
                 ),
             );
         }
+        // The whole chain, once per distinct reason: the provider message
+        // below is for the streamer, this is for the support bundle.
+        let detail = format!("{error:#}");
+        if logged_failures.len() < MAX_LOGGED_FAILURES && !logged_failures.contains(&detail) {
+            state.emit_log(
+                "warn",
+                format!("Kick live chat attempt {failed_attempts} failed: {detail}"),
+            );
+            logged_failures.push(detail);
+        }
+        let (connection_state, message) = if failed_attempts >= UNAVAILABLE_AFTER_ATTEMPTS {
+            (
+                LiveChatProviderConnectionState::Waiting,
+                kick_chat_unavailable_message(&error),
+            )
+        } else {
+            (
+                LiveChatProviderConnectionState::Reconnecting,
+                format!("Reconnecting to Kick live chat: {error}"),
+            )
+        };
         set_provider_and_emit(
             &state,
             &session_id,
             session_generation,
             StreamPlatform::Kick,
             config.target_id.as_deref(),
-            LiveChatProviderConnectionState::Reconnecting,
-            &format!("Reconnecting to Kick live chat: {error}"),
+            connection_state,
+            &message,
         )
         .await;
         sleep(Duration::from_millis(backoff_ms)).await;
         backoff_ms = next_reconnect_backoff_ms(backoff_ms);
     }
+}
+
+/// What the Stream Manager says once Kick chat has failed a few times in a
+/// row (plan 066): which side is down, in the streamer's words, never
+/// "Reconnecting" for a whole stream.
+fn kick_chat_unavailable_message(error: &anyhow::Error) -> String {
+    if let Some(relay) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<RelayHttpError>())
+    {
+        if relay.status >= 500 || relay.code == RELAY_UNAVAILABLE_CODE {
+            return "Kick chat can't connect: Videorc's chat relay is down. Retrying automatically."
+                .to_string();
+        }
+        let reason = relay.message.trim().trim_end_matches('.');
+        return format!("Kick chat can't connect: {reason}. Retrying automatically.");
+    }
+    if let Some(kick) = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<KickApiError>())
+    {
+        return format!(
+            "Kick chat can't connect: Kick answered HTTP {}. Retrying automatically.",
+            kick.status
+        );
+    }
+    if error
+        .chain()
+        .any(|cause| cause.downcast_ref::<reqwest::Error>().is_some())
+    {
+        return "Kick chat can't reach Videorc or Kick. Check the internet connection; retrying automatically."
+            .to_string();
+    }
+    let reason = error.to_string();
+    let reason = reason.trim().trim_end_matches('.');
+    format!("Kick chat can't connect: {reason}. Retrying automatically.")
 }
 
 fn report_failure(state: &AppState, session_id: &str, message: &str) {
@@ -584,7 +826,9 @@ async fn run_kick_chat_session(
     {
         let _lifecycle = KICK_SUBSCRIPTION_LIFECYCLE.lock().await;
         let access_token = token.ensure_fresh(state, &relay.http).await.to_string();
-        let ids = match ensure_kick_subscriptions(&relay.http, api_base, &access_token).await {
+        let subscriptions = match ensure_kick_subscriptions(&relay.http, api_base, &access_token)
+            .await
+        {
             Err(error) if kick_status(&error) == Some(401) => {
                 let renewed = token
                     .renew_after_refusal(state, &relay.http)
@@ -603,7 +847,16 @@ async fn run_kick_chat_session(
             }
             _ => error,
         })?;
-        if let Err(error) = remember_subscription_ids(&config.account_id, &ids) {
+        if !subscriptions.skipped.is_empty() {
+            state.emit_log(
+                "warn",
+                format!(
+                    "Kick refused some activity events; chat still connects without them: {}",
+                    subscriptions.skipped.join("; ")
+                ),
+            );
+        }
+        if let Err(error) = remember_subscription_ids(&config.account_id, &subscriptions.ids) {
             state.emit_log(
                 "warn",
                 format!("Could not remember the Kick event subscription ids: {error}"),
@@ -814,7 +1067,12 @@ impl RelayClient {
                 "Your Videorc sign-in expired. Sign in again to receive Kick comments.",
             )),
             // Relay not configured, binding lost, 5xx: can heal on its own.
-            _ => anyhow::bail!("Kick chat relay answered HTTP {status} ({code}): {message}"),
+            _ => Err(RelayHttpError {
+                status: status.as_u16(),
+                code,
+                message,
+            }
+            .into()),
         }
     }
 }
@@ -1112,9 +1370,169 @@ fn relay_event_to_message(
             message.raw_provider_type = Some("channel.followed".to_string());
             Some(message)
         }
+        "subscription" => {
+            let payload: RelaySubscriptionPayload = serde_json::from_value(event.payload).ok()?;
+            let renewal = payload.renewal.unwrap_or(false);
+            let subscriber = payload.subscriber.unwrap_or_default();
+            let mut message = base(non_empty(Some(event.message_id))?);
+            apply_relay_author(&mut message, &subscriber);
+            let months = payload.duration_months.filter(|months| *months > 0);
+            message.message_text = match (renewal, months) {
+                (true, Some(months)) if months > 1 => {
+                    format!("{} resubscribed for {months} months", message.author_name)
+                }
+                (true, _) => format!("{} resubscribed", message.author_name),
+                (false, _) => format!("{} subscribed", message.author_name),
+            };
+            if let Some(created_at) = non_empty(payload.created_at) {
+                message.published_at = created_at;
+            }
+            message.event_type = LiveChatEventType::Membership;
+            // Kick has no sub tiers and no Prime.
+            message.details = Some(LiveChatEventDetails::Subscription {
+                subscription: if renewal {
+                    SubscriptionKind::Resub
+                } else {
+                    SubscriptionKind::Sub
+                },
+                tier: None,
+                is_prime: false,
+                months: if renewal { months } else { None },
+                streak_months: None,
+                gift_count: None,
+                recipient_name: None,
+                community_gift_id: None,
+            });
+            message.raw_provider_type = Some(
+                if renewal {
+                    "channel.subscription.renewal"
+                } else {
+                    "channel.subscription.new"
+                }
+                .to_string(),
+            );
+            Some(message)
+        }
+        "gift" => {
+            let payload: RelayGiftPayload = serde_json::from_value(event.payload).ok()?;
+            let giftees: Vec<String> = payload
+                .giftees
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|name| non_empty(Some(name)))
+                .collect();
+            let count = payload
+                .gift_count
+                .unwrap_or(giftees.len() as u32)
+                .max(giftees.len() as u32);
+            if count == 0 {
+                return None;
+            }
+            let mut message = base(non_empty(Some(event.message_id))?);
+            apply_relay_author(&mut message, &payload.gifter.unwrap_or_default());
+            let single = (count == 1).then(|| giftees.first().cloned()).flatten();
+            message.message_text = match &single {
+                Some(recipient) => format!("{} gifted a sub to {recipient}", message.author_name),
+                None => format!("{} gifted {count} subs", message.author_name),
+            };
+            if let Some(created_at) = non_empty(payload.created_at) {
+                message.published_at = created_at;
+            }
+            message.event_type = LiveChatEventType::Membership;
+            message.details = Some(LiveChatEventDetails::Subscription {
+                subscription: if single.is_some() {
+                    SubscriptionKind::SubGift
+                } else {
+                    SubscriptionKind::CommunitySubGift
+                },
+                tier: None,
+                is_prime: false,
+                months: None,
+                streak_months: None,
+                gift_count: (single.is_none()).then_some(count),
+                recipient_name: single,
+                community_gift_id: None,
+            });
+            message.raw_provider_type = Some("channel.subscription.gifts".to_string());
+            Some(message)
+        }
+        "kicks" => {
+            let payload: RelayKicksPayload = serde_json::from_value(event.payload).ok()?;
+            let amount = payload.amount?;
+            let mut message = base(non_empty(Some(event.message_id))?);
+            apply_relay_author(&mut message, &payload.sender.unwrap_or_default());
+            // Like a cheer: the viewer's own words are the row's text.
+            message.message_text = non_empty(payload.message).unwrap_or_default();
+            if let Some(created_at) = non_empty(payload.created_at) {
+                message.published_at = created_at;
+            }
+            message.event_type = LiveChatEventType::Paid;
+            message.amount_text = Some(kicks_amount_text(amount));
+            message.details = Some(LiveChatEventDetails::Kicks {
+                amount,
+                gift_name: non_empty(payload.gift_name),
+            });
+            message.raw_provider_type = Some("kicks.gifted".to_string());
+            Some(message)
+        }
+        "ban" => {
+            let payload: RelayBanPayload = serde_json::from_value(event.payload).ok()?;
+            let banned = relay_user_name(&payload.banned_user.unwrap_or_default());
+            let moderator = relay_user_name(&payload.moderator.unwrap_or_default());
+            let mut message = base(non_empty(Some(event.message_id))?);
+            // A ban with an end is a timeout.
+            let action = if non_empty(payload.expires_at).is_some() {
+                "timed out"
+            } else {
+                "banned"
+            };
+            let mut text = format!("{moderator} {action} {banned}.");
+            if let Some(reason) = non_empty(payload.reason) {
+                text = format!("{text} Reason: {reason}");
+            }
+            message.author_name = "Kick".to_string();
+            message.message_text = text;
+            if let Some(created_at) = non_empty(payload.created_at) {
+                message.published_at = created_at;
+            }
+            message.event_type = LiveChatEventType::Moderation;
+            message.raw_provider_type = Some("moderation.banned".to_string());
+            Some(message)
+        }
         // The model has no live/ended event; the session state already knows.
         _ => None,
     }
+}
+
+/// The display name of a relayed Kick user; anonymous gifters stay anonymous.
+fn relay_user_name(user: &RelayUser) -> String {
+    if user.is_anonymous == Some(true) {
+        return "Anonymous".to_string();
+    }
+    non_empty(user.username.clone()).unwrap_or_else(|| "Kick viewer".to_string())
+}
+
+fn apply_relay_author(message: &mut LiveChatMessage, user: &RelayUser) {
+    message.author_name = relay_user_name(user);
+    if user.is_anonymous == Some(true) {
+        return;
+    }
+    message.author_id = non_empty(user.id.clone());
+    message.author_avatar_url =
+        non_empty(user.avatar_url.clone()).filter(|url| url.starts_with("https://"));
+}
+
+/// "1 KICK", "1,000 KICKs".
+fn kicks_amount_text(amount: u64) -> String {
+    let digits = amount.to_string();
+    let mut grouped = String::with_capacity(digits.len() + digits.len() / 3);
+    for (index, digit) in digits.chars().enumerate() {
+        if index > 0 && (digits.len() - index).is_multiple_of(3) {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    format!("{grouped} {}", if amount == 1 { "KICK" } else { "KICKs" })
 }
 
 #[cfg(test)]
@@ -1141,6 +1559,12 @@ mod tests {
     enum MockMode {
         Deliver,
         FailReads(usize),
+        /// The first n binds answer a bare 500 (the missing-table outage).
+        FailBinds(usize),
+        /// Kick refuses this one event in an otherwise good batch.
+        RefuseEvent(&'static str),
+        /// Kick refuses any batch that holds an activity event.
+        RefuseOptionalBatch,
         BindRejected,
         SignedOut,
         SubscriptionForbidden,
@@ -1189,7 +1613,20 @@ mod tests {
         if bearer(&headers).as_deref() != Some(SESSION_TOKEN) || state.mode == MockMode::SignedOut {
             return relay_error(StatusCode::UNAUTHORIZED, "unauthorized");
         }
-        state.bind_bodies.lock().await.push(body);
+        let binds = {
+            let mut bodies = state.bind_bodies.lock().await;
+            bodies.push(body);
+            bodies.len()
+        };
+        if let MockMode::FailBinds(failures) = state.mode
+            && binds <= failures
+        {
+            // No error envelope, like the production outage.
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!("Internal Server Error")),
+            );
+        }
         if state.mode == MockMode::BindRejected {
             return relay_error(StatusCode::FORBIDDEN, "kick-chat-bind-rejected");
         }
@@ -1294,11 +1731,28 @@ mod tests {
     async fn mock_create_subscriptions(
         State(state): State<MockState>,
         Json(body): Json<Value>,
-    ) -> Json<Value> {
+    ) -> (StatusCode, Json<Value>) {
         state.created.lock().await.push(body.clone());
+        let events = body["events"].as_array().cloned().unwrap_or_default();
+        if state.mode == MockMode::RefuseOptionalBatch
+            && events.iter().any(|event| {
+                !KICK_CORE_EVENTS.contains(&event["name"].as_str().unwrap_or_default())
+            })
+        {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "message": "invalid event" })),
+            );
+        }
         let mut data = Vec::new();
-        for event in body["events"].as_array().cloned().unwrap_or_default() {
+        for event in events {
             let name = event["name"].as_str().unwrap_or_default().to_string();
+            if let MockMode::RefuseEvent(refused) = state.mode
+                && refused == name
+            {
+                data.push(json!({ "name": name, "version": 1, "error": "not allowed" }));
+                continue;
+            }
             let id = format!("sub-{name}");
             state.subscriptions.lock().await.push(json!({
                 "id": id, "app_id": "app", "broadcaster_user_id": 4242,
@@ -1307,7 +1761,7 @@ mod tests {
             }));
             data.push(json!({ "name": name, "version": 1, "subscription_id": id }));
         }
-        Json(json!({ "data": data }))
+        (StatusCode::OK, Json(json!({ "data": data })))
     }
 
     async fn mock_delete_subscriptions(
@@ -1593,24 +2047,20 @@ mod tests {
             vec![json!({ "accessToken": KICK_TOKEN })]
         );
         let created = server.state.created.lock().await.clone();
+        let events: Vec<Value> = KICK_SUBSCRIPTION_EVENTS
+            .iter()
+            .map(|name| json!({ "name": name, "version": 1 }))
+            .collect();
         assert_eq!(
             created,
-            vec![json!({
-                "events": [
-                    { "name": "chat.message.sent", "version": 1 },
-                    { "name": "livestream.status.updated", "version": 1 },
-                    { "name": "channel.followed", "version": 1 }
-                ],
-                "method": "webhook"
-            })]
+            vec![json!({ "events": events, "method": "webhook" })]
         );
         assert_eq!(
             stored_subscription_ids("kick-flow"),
-            vec![
-                "sub-chat.message.sent".to_string(),
-                "sub-livestream.status.updated".to_string(),
-                "sub-channel.followed".to_string()
-            ]
+            KICK_SUBSCRIPTION_EVENTS
+                .iter()
+                .map(|name| format!("sub-{name}"))
+                .collect::<Vec<_>>()
         );
         let queries = server.state.read_queries.lock().await;
         assert!(!queries[0].contains_key("after"));
@@ -1627,33 +2077,32 @@ mod tests {
         });
         let server = spawn_mock_server(MockMode::Deliver, vec![existing]).await;
         let client = reqwest::Client::new();
-        let ids = ensure_kick_subscriptions(&client, Some(&server.base_url), KICK_TOKEN)
+        let subscriptions = ensure_kick_subscriptions(&client, Some(&server.base_url), KICK_TOKEN)
             .await
             .unwrap();
-        assert_eq!(
-            ids,
-            vec![
-                "old-chat".to_string(),
-                "sub-livestream.status.updated".to_string(),
-                "sub-channel.followed".to_string()
-            ]
-        );
+        assert_eq!(subscriptions.ids[0], "old-chat");
+        assert_eq!(subscriptions.ids.len(), KICK_SUBSCRIPTION_EVENTS.len());
+        assert!(subscriptions.skipped.is_empty());
         let created = server.state.created.lock().await.clone();
-        assert_eq!(created[0]["events"].as_array().unwrap().len(), 2);
+        assert_eq!(
+            created[0]["events"].as_array().unwrap().len(),
+            KICK_SUBSCRIPTION_EVENTS.len() - 1
+        );
 
         // A second ensure creates nothing.
         let again = ensure_kick_subscriptions(&client, Some(&server.base_url), KICK_TOKEN)
             .await
             .unwrap();
-        assert_eq!(again.len(), 3);
+        assert_eq!(again.ids.len(), KICK_SUBSCRIPTION_EVENTS.len());
         assert_eq!(server.state.created.lock().await.len(), 1);
 
-        delete_kick_subscriptions(&client, Some(&server.base_url), KICK_TOKEN, &again)
+        delete_kick_subscriptions(&client, Some(&server.base_url), KICK_TOKEN, &again.ids)
             .await
             .unwrap();
-        assert_eq!(
-            server.state.deleted_queries.lock().await[0],
-            "id=old-chat&id=sub-livestream.status.updated&id=sub-channel.followed"
+        assert!(
+            server.state.deleted_queries.lock().await[0].starts_with(
+                "id=old-chat&id=sub-livestream.status.updated&id=sub-channel.followed"
+            )
         );
         assert!(server.state.subscriptions.lock().await.is_empty());
         let _ = server.shutdown.send(());
@@ -1733,6 +2182,243 @@ mod tests {
         connector.abort();
         assert_eq!(message.author_name, "viewer");
         let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn a_refused_activity_event_never_stops_chat() {
+        let server = spawn_mock_server(MockMode::RefuseEvent("kicks.gifted"), Vec::new()).await;
+        let client = reqwest::Client::new();
+        let subscriptions = ensure_kick_subscriptions(&client, Some(&server.base_url), KICK_TOKEN)
+            .await
+            .unwrap();
+        assert_eq!(subscriptions.ids.len(), KICK_SUBSCRIPTION_EVENTS.len() - 1);
+        assert_eq!(subscriptions.skipped, vec!["kicks.gifted: not allowed"]);
+        let _ = server.shutdown.send(());
+
+        // Kick refusing the whole batch retries with the chat events alone.
+        let server = spawn_mock_server(MockMode::RefuseOptionalBatch, Vec::new()).await;
+        let subscriptions = ensure_kick_subscriptions(&client, Some(&server.base_url), KICK_TOKEN)
+            .await
+            .unwrap();
+        assert_eq!(
+            subscriptions.ids,
+            KICK_CORE_EVENTS
+                .iter()
+                .map(|name| format!("sub-{name}"))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            subscriptions.skipped.len(),
+            KICK_SUBSCRIPTION_EVENTS.len() - KICK_CORE_EVENTS.len()
+        );
+        assert!(subscriptions.skipped[0].contains("HTTP 400"));
+        let created = server.state.created.lock().await.clone();
+        assert_eq!(created.len(), 2);
+        assert_eq!(
+            created[1]["events"].as_array().unwrap().len(),
+            KICK_CORE_EVENTS.len()
+        );
+        let _ = server.shutdown.send(());
+    }
+
+    #[tokio::test]
+    async fn a_down_relay_says_so_and_then_connects() {
+        let server = spawn_mock_server(MockMode::FailBinds(4), Vec::new()).await;
+        let state = test_state();
+        let generation = start_test_session(&state, "session-1").await;
+        let connector = tokio::spawn(run_kick_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            generation,
+            mock_config(&server, "kick-relay-down"),
+        ));
+        let waiting =
+            wait_for_provider_state(&state, LiveChatProviderConnectionState::Waiting).await;
+        assert_eq!(
+            waiting.message,
+            "Kick chat can't connect: Videorc's chat relay is down. Retrying automatically."
+        );
+        let message = wait_for_message(&state, "message-1").await;
+        let connected =
+            wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
+        connector.abort();
+        assert_eq!(message.author_name, "viewer");
+        assert_eq!(connected.message, "Kick live chat connected.");
+        let _ = server.shutdown.send(());
+    }
+
+    #[test]
+    fn unavailable_messages_name_the_side_that_is_down() {
+        let relay_down: anyhow::Error = RelayHttpError {
+            status: 500,
+            code: "unknown".to_string(),
+            message: "request failed".to_string(),
+        }
+        .into();
+        assert_eq!(relay_down.to_string(), "Kick chat relay answered HTTP 500");
+        assert!(kick_chat_unavailable_message(&relay_down).contains("relay is down"));
+
+        let unavailable: anyhow::Error = RelayHttpError {
+            status: 503,
+            code: RELAY_UNAVAILABLE_CODE.to_string(),
+            message: "Kick chat is temporarily unavailable.".to_string(),
+        }
+        .into();
+        assert!(kick_chat_unavailable_message(&unavailable).contains("relay is down"));
+
+        let not_bound: anyhow::Error = RelayHttpError {
+            status: 404,
+            code: "kick-chat-not-bound".to_string(),
+            message: "No Kick account is bound to this Videorc account.".to_string(),
+        }
+        .into();
+        assert_eq!(
+            kick_chat_unavailable_message(&not_bound),
+            "Kick chat can't connect: No Kick account is bound to this Videorc account. Retrying automatically."
+        );
+
+        let kick_down: anyhow::Error = KickApiError {
+            status: 503,
+            message: "request failed".to_string(),
+        }
+        .into();
+        assert_eq!(
+            kick_chat_unavailable_message(&kick_down),
+            "Kick chat can't connect: Kick answered HTTP 503. Retrying automatically."
+        );
+    }
+
+    #[test]
+    fn relay_activity_rows_map_to_subs_gifts_kicks_and_bans() {
+        let map = |kind: &str, payload: Value| {
+            relay_event_to_message(
+                serde_json::from_value(json!({
+                    "kind": kind, "messageId": format!("{kind}-1"), "payload": payload
+                }))
+                .unwrap(),
+                "s1",
+                Some("kick-target"),
+            )
+        };
+        let user = |name: &str| {
+            json!({
+                "id": "5", "username": name, "isAnonymous": false,
+                "avatarUrl": "https://files.kick.com/a.webp"
+            })
+        };
+
+        let sub = map(
+            "subscription",
+            json!({ "renewal": false, "subscriber": user("new_sub"), "durationMonths": 1,
+                    "createdAt": "2026-09-26T21:00:00.000Z" }),
+        )
+        .unwrap();
+        assert_eq!(sub.author_name, "new_sub");
+        assert_eq!(sub.event_type, LiveChatEventType::Membership);
+        assert_eq!(sub.published_at, "2026-09-26T21:00:00.000Z");
+        assert!(matches!(
+            sub.details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::Sub,
+                months: None,
+                tier: None,
+                ..
+            })
+        ));
+
+        let resub = map(
+            "subscription",
+            json!({ "renewal": true, "subscriber": user("loyal"), "durationMonths": 3 }),
+        )
+        .unwrap();
+        assert_eq!(resub.message_text, "loyal resubscribed for 3 months");
+        assert!(matches!(
+            resub.details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::Resub,
+                months: Some(3),
+                ..
+            })
+        ));
+
+        let single = map(
+            "gift",
+            json!({ "gifter": user("santa"), "giftees": ["lucky"], "giftCount": 1 }),
+        )
+        .unwrap();
+        assert_eq!(single.message_text, "santa gifted a sub to lucky");
+        assert!(matches!(
+            single.details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::SubGift,
+                recipient_name: Some(ref name),
+                ..
+            }) if name == "lucky"
+        ));
+
+        let anonymous = map(
+            "gift",
+            json!({ "gifter": { "isAnonymous": true, "id": "9", "username": "hidden" },
+                    "giftees": ["a", "b", "c"], "giftCount": 3 }),
+        )
+        .unwrap();
+        assert_eq!(anonymous.author_name, "Anonymous");
+        assert!(anonymous.author_id.is_none());
+        assert!(matches!(
+            anonymous.details,
+            Some(LiveChatEventDetails::Subscription {
+                subscription: SubscriptionKind::CommunitySubGift,
+                gift_count: Some(3),
+                ..
+            })
+        ));
+
+        let kicks = map(
+            "kicks",
+            json!({ "sender": user("tipper"), "amount": 1500, "giftName": "Rage Quit",
+                    "message": "gg", "createdAt": null }),
+        )
+        .unwrap();
+        assert_eq!(kicks.event_type, LiveChatEventType::Paid);
+        assert_eq!(kicks.amount_text.as_deref(), Some("1,500 KICKs"));
+        assert_eq!(kicks.message_text, "gg");
+        assert_eq!(
+            kicks.details,
+            Some(LiveChatEventDetails::Kicks {
+                amount: 1500,
+                gift_name: Some("Rage Quit".to_string()),
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(&kicks.details).unwrap(),
+            json!({ "kind": "kicks", "amount": 1500, "giftName": "Rage Quit" })
+        );
+        assert!(map("kicks", json!({ "sender": user("tipper") })).is_none());
+
+        let timeout = map(
+            "ban",
+            json!({ "bannedUser": user("troll"), "moderator": user("mod"),
+                    "reason": "spam", "expiresAt": "2026-09-26T21:10:00.000Z" }),
+        )
+        .unwrap();
+        assert_eq!(timeout.event_type, LiveChatEventType::Moderation);
+        assert_eq!(timeout.message_text, "mod timed out troll. Reason: spam");
+        let ban = map(
+            "ban",
+            json!({ "bannedUser": user("troll"), "moderator": user("mod"), "expiresAt": null }),
+        )
+        .unwrap();
+        assert_eq!(ban.message_text, "mod banned troll.");
+
+        assert!(map("gift", json!({ "gifter": user("santa"), "giftees": [] })).is_none());
+    }
+
+    #[test]
+    fn kicks_amounts_read_like_numbers() {
+        assert_eq!(kicks_amount_text(1), "1 KICK");
+        assert_eq!(kicks_amount_text(100), "100 KICKs");
+        assert_eq!(kicks_amount_text(1_000), "1,000 KICKs");
+        assert_eq!(kicks_amount_text(1_234_567), "1,234,567 KICKs");
     }
 
     #[tokio::test]

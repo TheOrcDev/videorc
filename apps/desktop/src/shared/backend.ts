@@ -4079,6 +4079,8 @@ export type LiveChatEventDetails =
       communityGiftId?: string
     }
   | { kind: 'cheer'; bits: number }
+  /** Kick KICKs (plan 066): `amount` in KICKs, `giftName` the gift ("Rage Quit"). */
+  | { kind: 'kicks'; amount: number; giftName?: string }
   | { kind: 'raid'; viewerCount: number }
   | { kind: 'announcement'; color?: string }
   | { kind: 'follow' }

@@ -18,6 +18,7 @@ export type ActivityKind =
   | 'subscription'
   | 'membership'
   | 'cheer'
+  | 'kicks'
   | 'super-chat'
   | 'super-sticker'
   | 'raid'
@@ -31,7 +32,7 @@ export type ActivityFilter = 'follows' | 'support' | 'tips' | 'raids' | 'destina
 export const ACTIVITY_FILTERS: readonly { id: ActivityFilter; label: string; title: string }[] = [
   { id: 'follows', label: 'Follows', title: 'New followers' },
   { id: 'support', label: 'Subs', title: 'Subs, gifts and memberships' },
-  { id: 'tips', label: 'Tips', title: 'Bits, Super Chats and Super Stickers' },
+  { id: 'tips', label: 'Tips', title: 'Bits, KICKs, Super Chats and Super Stickers' },
   { id: 'raids', label: 'Raids', title: 'Raids into your channel' },
   { id: 'destinations', label: 'Destinations', title: 'A destination failed or came back' }
 ]
@@ -105,17 +106,19 @@ type MembershipDetails = Extract<LiveChatEventDetails, { kind: 'membership' }>
 
 function subscriptionLine(details: SubscriptionDetails): string {
   const tier = subscriptionTierLabel(details.tier, details.isPrime)
+  // Kick subs have no tier (plan 066): "Subscribed", never "at a sub".
+  const tiered = details.isPrime || details.tier !== undefined
+  const giftSub = tiered ? `a ${tier} sub` : 'a sub'
   const lines: Record<LiveChatSubscriptionKind, () => string> = {
-    sub: () => (details.isPrime ? 'Subscribed with Prime' : `Subscribed at ${tier}`),
+    sub: () =>
+      details.isPrime ? 'Subscribed with Prime' : tiered ? `Subscribed at ${tier}` : 'Subscribed',
     resub: () => {
       const months = details.months ? ` for ${plural(details.months, 'month', 'months')}` : ''
-      const at = details.isPrime ? ' with Prime' : ` at ${tier}`
+      const at = details.isPrime ? ' with Prime' : tiered ? ` at ${tier}` : ''
       return `Resubscribed${months}${at}`
     },
     'sub-gift': () =>
-      details.recipientName
-        ? `Gifted a ${tier} sub to ${details.recipientName}`
-        : `Gifted a ${tier} sub`,
+      details.recipientName ? `Gifted ${giftSub} to ${details.recipientName}` : `Gifted ${giftSub}`,
     'community-sub-gift': () => `Gifted ${plural(details.giftCount ?? 1, 'sub', 'subs')}`,
     'gift-paid-upgrade': () => 'Continued their gifted sub',
     'prime-paid-upgrade': () => `Upgraded from Prime to ${tier}`,
@@ -238,6 +241,17 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
         line: membershipLine(details),
         short: membershipShort(details),
         ...(details.membership === 'gift' ? { gift: true } : {}),
+        ...(viewerWords ? { message: viewerWords } : {})
+      }
+    case 'kicks':
+      return {
+        ...base,
+        kind: 'kicks',
+        filter: 'tips',
+        line: `Sent ${plural(details.amount, 'KICK', 'KICKs')}${
+          details.giftName ? ` · ${details.giftName}` : ''
+        }`,
+        short: plural(details.amount, 'KICK', 'KICKs'),
         ...(viewerWords ? { message: viewerWords } : {})
       }
     case 'cheer': {
@@ -414,6 +428,9 @@ export function activityTotals(messages: readonly LiveChatMessage[]): ActivityTo
       case 'cheer':
         totals.bits += details.bits
         break
+      // Listed per gift in Activity, never summed (plan 066).
+      case 'kicks':
+        break
       case 'super-chat':
       case 'super-sticker':
         tips.set(details.currency, (tips.get(details.currency) ?? 0) + details.amountMicros)
@@ -492,6 +509,7 @@ export function thankYouDraft(item: ActivityItem): string {
     case 'membership':
       return `Thank you for the support, ${name}!`
     case 'cheer':
+    case 'kicks':
     case 'super-chat':
     case 'super-sticker':
       return `Thank you so much, ${name}!`

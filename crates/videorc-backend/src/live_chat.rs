@@ -173,6 +173,14 @@ pub enum LiveChatEventDetails {
     },
     /// Twitch bits.
     Cheer { bits: u64 },
+    /// Kick KICKs (Kick's own gift currency, plan 066); `amount` is in KICKs
+    /// and `gift_name` is the gift's name ("Rage Quit").
+    #[serde(rename_all = "camelCase")]
+    Kicks {
+        amount: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        gift_name: Option<String>,
+    },
     /// A Twitch raid; the author is the raiding channel.
     #[serde(rename_all = "camelCase")]
     Raid { viewer_count: u64 },
@@ -3019,14 +3027,27 @@ fn fake_events(
                 None,
             ),
         ],
-        StreamPlatform::Kick => vec![event(
-            "channel.followed",
-            "kick_fan",
-            LiveChatEventType::Follow,
-            LiveChatEventDetails::Follow,
-            "kick_fan followed",
-            None,
-        )],
+        StreamPlatform::Kick => vec![
+            event(
+                "channel.followed",
+                "kick_fan",
+                LiveChatEventType::Follow,
+                LiveChatEventDetails::Follow,
+                "kick_fan followed",
+                None,
+            ),
+            event(
+                "kicks.gifted",
+                "kick_tipper",
+                LiveChatEventType::Paid,
+                LiveChatEventDetails::Kicks {
+                    amount: 500,
+                    gift_name: Some("Rage Quit".to_string()),
+                },
+                "w",
+                Some("500 KICKs"),
+            ),
+        ],
         StreamPlatform::Youtube => vec![
             event(
                 "super-chat",
