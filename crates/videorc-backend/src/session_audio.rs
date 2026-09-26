@@ -538,6 +538,17 @@ async fn prepare_native_with_readiness(
     .await
 }
 
+/// How long opening a microphone may take before the session gives up on
+/// it. On Windows this includes the capture worker's protocol and DirectShow
+/// inventory probes (cached after the first run); a busy laptop needed more
+/// than the old 5 s and lost its microphone (plan 065, A2). Elsewhere opening
+/// is a single in-process call.
+const MICROPHONE_OPEN_BUDGET: Duration = if cfg!(target_os = "windows") {
+    Duration::from_secs(15)
+} else {
+    Duration::from_secs(5)
+};
+
 #[derive(Debug)]
 struct PreparationCleanupPending(String);
 impl std::fmt::Display for PreparationCleanupPending {
@@ -621,11 +632,12 @@ async fn prepare_producer_with(
         drop(owner);
     }))?;
     let result: anyhow::Result<ManagedProducer> = async {
-        tokio::time::timeout(Duration::from_secs(5), opened_rx)
+        tokio::time::timeout(MICROPHONE_OPEN_BUDGET, opened_rx)
             .await
             .map_err(|_| {
                 anyhow::anyhow!(
-                    "Microphone opening exceeded 5s; its owner is still responsible for cleanup."
+                    "Microphone opening exceeded {}s; its owner is still responsible for cleanup.",
+                    MICROPHONE_OPEN_BUDGET.as_secs()
                 )
             })???;
         let producer = tokio::time::timeout(Duration::from_secs(2), ready_rx)

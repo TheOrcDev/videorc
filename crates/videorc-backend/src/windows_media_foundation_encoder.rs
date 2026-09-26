@@ -17,19 +17,22 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use windows::Win32::Foundation::{E_NOTIMPL, HMODULE, RECT, VARIANT_BOOL};
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN};
+use windows::Win32::Graphics::Direct3D::{
+    D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0,
+    D3D_FEATURE_LEVEL_11_1,
+};
 use windows::Win32::Graphics::Direct3D11::{
     D3D11_BIND_RENDER_TARGET, D3D11_BIND_SHADER_RESOURCE, D3D11_BIND_VIDEO_ENCODER,
-    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_SDK_VERSION, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV,
-    D3D11_TEXTURE2D_DESC, D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE,
-    D3D11_VIDEO_PROCESSOR_CAPS, D3D11_VIDEO_PROCESSOR_CONTENT_DESC,
-    D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ALPHA_STREAM, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC,
-    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0, D3D11_VIDEO_PROCESSOR_STREAM,
-    D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT, D3D11_CREATE_DEVICE_FLAG, D3D11_CREATE_DEVICE_VIDEO_SUPPORT,
+    D3D11_SDK_VERSION, D3D11_TEX2D_VPIV, D3D11_TEX2D_VPOV, D3D11_TEXTURE2D_DESC,
+    D3D11_USAGE_DEFAULT, D3D11_VIDEO_FRAME_FORMAT_PROGRESSIVE, D3D11_VIDEO_PROCESSOR_CAPS,
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC, D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_ALPHA_STREAM,
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC, D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC_0,
+    D3D11_VIDEO_PROCESSOR_STREAM, D3D11_VIDEO_USAGE_OPTIMAL_SPEED, D3D11_VPIV_DIMENSION_TEXTURE2D,
     D3D11_VPOV_DIMENSION_TEXTURE2D, D3D11CreateDevice, ID3D11Device, ID3D11DeviceContext,
-    ID3D11Texture2D, ID3D11VideoContext1, ID3D11VideoDevice, ID3D11VideoProcessor,
-    ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorOutputView,
+    ID3D11Multithread, ID3D11Texture2D, ID3D11VideoContext1, ID3D11VideoDevice,
+    ID3D11VideoProcessor, ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorOutputView,
 };
 use windows::Win32::Graphics::Dxgi::Common::{
     DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
@@ -76,10 +79,11 @@ use crate::diagnostics::RECORDING_FRAME_ACCOUNTING;
 use crate::frame_store::RetainedD3D11Texture;
 use crate::windows_d3d11_device::WindowsD3d11Device;
 use crate::windows_d3d11_encoder_contract::{
-    WindowsD3d11EncoderContractErrorCode, WindowsD3d11EncoderDiagnostics,
-    WindowsD3d11EncoderLeaseRelease, WindowsD3d11EncoderOwnershipState,
-    WindowsD3d11EncoderReleaseCallback, WindowsD3d11EncoderReleaseDisposition,
-    WindowsD3d11EncoderRole, WindowsD3d11EncoderSubmissionMetadata, WindowsD3d11EncoderWaitStatus,
+    MediaFoundationInputTopology, WindowsD3d11EncoderContractErrorCode,
+    WindowsD3d11EncoderDiagnostics, WindowsD3d11EncoderLeaseRelease,
+    WindowsD3d11EncoderOwnershipState, WindowsD3d11EncoderReleaseCallback,
+    WindowsD3d11EncoderReleaseDisposition, WindowsD3d11EncoderRole,
+    WindowsD3d11EncoderSubmissionMetadata, WindowsD3d11EncoderWaitStatus,
 };
 
 const EVENT_POLL_INTERVAL: Duration = Duration::from_millis(1);
@@ -159,6 +163,8 @@ pub struct MediaFoundationEncoderConfig {
     pub fps: u32,
     pub bitrate_kbps: u32,
     pub low_latency: bool,
+    /// How CPU frames reach the MFT; ignored when a source texture is given.
+    pub input_topology: MediaFoundationInputTopology,
 }
 
 impl MediaFoundationEncoderConfig {
@@ -181,8 +187,12 @@ impl MediaFoundationEncoderConfig {
     }
 
     pub fn profile_label(&self) -> String {
+        let topology = match self.input_topology {
+            MediaFoundationInputTopology::Auto => "",
+            MediaFoundationInputTopology::SystemMemory => " system-memory",
+        };
         format!(
-            "{}x{}@{} {}kbps",
+            "{}x{}@{} {}kbps{topology}",
             self.width, self.height, self.fps, self.bitrate_kbps
         )
     }
@@ -214,6 +224,9 @@ pub struct MediaFoundationProbe {
     // ladder settled on; sessions must encode at THIS bitrate or the same MFT
     // will reject the config mid-session where there is no clean retry.
     pub effective_bitrate_kbps: u32,
+    /// Input topology the probe validated (plan 065, B2); the session encoder
+    /// must be built with the same one for the same reason as the bitrate.
+    pub input_topology: MediaFoundationInputTopology,
 }
 
 pub struct MediaFoundationH264Encoder {
@@ -585,7 +598,10 @@ impl MediaFoundationH264Encoder {
                 })
             })
             .transpose()?;
-        let d3d11_cpu_upload = if source_texture.is_none() && d3d11_aware != 0 {
+        let d3d11_cpu_upload = if source_texture.is_none()
+            && d3d11_aware != 0
+            && config.input_topology == MediaFoundationInputTopology::Auto
+        {
             Some(
                 D3D11CpuUploadInput::new(&config, adapter_luid).map_err(|error| {
                 anyhow!(
@@ -1349,6 +1365,15 @@ impl MediaFoundationH264Encoder {
     }
 }
 
+/// Creation flags for the device that uploads CPU frames into the encoder's
+/// NV12 surfaces. They match the capture device (`windows_d3d11_device.rs`):
+/// an Intel Quick Sync MFT on Iris Xe rejected 1080p30 at every bitrate with
+/// E_UNEXPECTED at process-output while this device lacked VIDEO_SUPPORT and
+/// multithread protection (plan 065, B1).
+const CPU_UPLOAD_DEVICE_FLAGS: D3D11_CREATE_DEVICE_FLAG = D3D11_CREATE_DEVICE_FLAG(
+    D3D11_CREATE_DEVICE_BGRA_SUPPORT.0 | D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0,
+);
+
 impl D3D11CpuUploadInput {
     fn new(config: &MediaFoundationEncoderConfig, adapter_luid: Option<u64>) -> Result<Self> {
         let adapter = adapter_luid.map(dxgi_adapter_for_luid).transpose()?;
@@ -1363,23 +1388,32 @@ impl D3D11CpuUploadInput {
         };
         let mut device = None;
         let mut immediate_context = None;
+        let feature_levels = [D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0];
         unsafe {
             D3D11CreateDevice(
                 adapter.as_ref(),
                 driver_type,
                 HMODULE::default(),
-                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                None,
+                CPU_UPLOAD_DEVICE_FLAGS,
+                Some(&feature_levels),
                 D3D11_SDK_VERSION,
                 Some(&mut device),
                 None,
                 Some(&mut immediate_context),
             )
         }
-        .context("create D3D11 device for reusable CPU frame uploads")?;
+        .context("create video-capable D3D11 device for reusable CPU frame uploads")?;
         let device = device.context("D3D11CreateDevice returned no CPU upload device")?;
         let immediate_context = immediate_context
             .context("D3D11CreateDevice returned no CPU upload immediate context")?;
+        // The asynchronous MFT reads these surfaces on its own worker thread
+        // while this thread's immediate context uploads the next frame.
+        let multithread: ID3D11Multithread = immediate_context
+            .cast()
+            .context("the CPU upload D3D11 context has no ID3D11Multithread")?;
+        unsafe {
+            let _ = multithread.SetMultithreadProtected(true);
+        }
 
         let mut reset_token = 0_u32;
         let mut device_manager = None;
@@ -3093,7 +3127,67 @@ impl Drop for MediaFoundationD3d11H264Encoder {
     }
 }
 
+/// Probes the hardware H.264 MFT for `config`, walking the input topology
+/// ladder (plan 065, B2) and, inside each topology, the Intel bitrate ladder.
+/// The first combination that produces an IDR wins; its topology and bitrate
+/// are what the session must encode with.
 pub fn probe_hardware_encoder(
+    config: MediaFoundationEncoderConfig,
+) -> Result<MediaFoundationProbe> {
+    let mut failures: Vec<(MediaFoundationInputTopology, anyhow::Error)> = Vec::new();
+    for topology in MediaFoundationInputTopology::LADDER {
+        let candidate = MediaFoundationEncoderConfig {
+            input_topology: topology,
+            ..config.clone()
+        };
+        match probe_hardware_encoder_bitrates(candidate) {
+            Ok(probe) => {
+                if let Some((_, first)) = failures.first() {
+                    tracing::warn!(
+                        "Media Foundation hardware probe passed with {} input after {} input failed: {first:#}",
+                        topology.label(),
+                        failures
+                            .iter()
+                            .map(|(failed, _)| failed.label())
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    );
+                }
+                return Ok(probe);
+            }
+            Err(error) => failures.push((topology, error)),
+        }
+    }
+    let mut failures = failures.into_iter();
+    let (_, primary) = failures.next().expect("the topology ladder is never empty");
+    let others: Vec<String> = failures
+        .map(|(topology, error)| {
+            format!(
+                "{} input also failed: {}",
+                topology.label(),
+                probe_failure_without_encoder(&format!("{error:#}"))
+            )
+        })
+        .collect();
+    if others.is_empty() {
+        Err(primary)
+    } else {
+        // Keep the first topology's stage/HRESULT text first: fallback-reason
+        // parsing and support bundles read it.
+        Err(anyhow!("{primary:#} ({})", others.join("; ")))
+    }
+}
+
+/// A later topology's failure repeats the encoder name and profile the first
+/// one already printed. The session keeps 480 bytes of the combined reason,
+/// so only the stage and HRESULT of the later ones are kept.
+fn probe_failure_without_encoder(text: &str) -> &str {
+    text.split_once(" encoder=")
+        .map_or(text, |(stage, _)| stage)
+        .trim_end()
+}
+
+fn probe_hardware_encoder_bitrates(
     config: MediaFoundationEncoderConfig,
 ) -> Result<MediaFoundationProbe> {
     // Iris Xe iGPUs can E_UNEXPECTED at 1080p30 / 6000 CBR (see support bundle
@@ -3197,6 +3291,7 @@ fn try_probe_once(config: MediaFoundationEncoderConfig) -> Result<MediaFoundatio
         input_subtype,
         frames,
         effective_bitrate_kbps: config.bitrate_kbps,
+        input_topology: config.input_topology,
     })
 }
 
@@ -3656,6 +3751,34 @@ mod tests {
     }
 
     #[test]
+    fn the_cpu_upload_device_is_created_like_the_capture_device() {
+        // Plan 065 (B1): video support is what lets the hardware MFT use the
+        // device the surfaces live on; BGRA stays for the uploads.
+        assert_ne!(
+            CPU_UPLOAD_DEVICE_FLAGS.0 & D3D11_CREATE_DEVICE_VIDEO_SUPPORT.0,
+            0
+        );
+        assert_ne!(
+            CPU_UPLOAD_DEVICE_FLAGS.0 & D3D11_CREATE_DEVICE_BGRA_SUPPORT.0,
+            0
+        );
+    }
+
+    #[test]
+    fn a_later_topology_failure_keeps_only_its_stage_and_hresult() {
+        // The 2026-09-26 Iris Xe text, as the system-memory rung would print it.
+        let text = "Media Foundation probe stage=process-output HRESULT=0x8000FFFF (E_UNEXPECTED) encoder=\"Intel® Quick Sync Video H.264 Encoder MFT\" input=NV12 profile=1920x1080@30 5000kbps";
+        assert_eq!(
+            probe_failure_without_encoder(text),
+            "Media Foundation probe stage=process-output HRESULT=0x8000FFFF (E_UNEXPECTED)"
+        );
+        assert_eq!(
+            probe_failure_without_encoder("no hardware encoder"),
+            "no hardware encoder"
+        );
+    }
+
+    #[test]
     fn probe_fallback_bitrates_cover_intel_recommendations() {
         assert_eq!(probe_fallback_bitrates(6000), vec![6000, 5500, 5000]);
         assert_eq!(probe_fallback_bitrates(5500), vec![5500, 5000]);
@@ -3716,6 +3839,7 @@ mod tests {
             fps: 60,
             bitrate_kbps: 9_000,
             low_latency: true,
+            input_topology: MediaFoundationInputTopology::Auto,
         };
         let mut descriptor = D3D11_TEXTURE2D_DESC {
             Width: 1920,

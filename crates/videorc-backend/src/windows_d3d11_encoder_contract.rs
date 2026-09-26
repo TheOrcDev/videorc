@@ -1,6 +1,38 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+/// How CPU frames reach a Media Foundation hardware encoder (plan 065, B2).
+///
+/// `Auto` keeps the MFT's own preference: a D3D11-aware MFT gets NV12
+/// surfaces uploaded on a video-capable D3D11 device. `SystemMemory` binds no
+/// device manager and feeds system-memory samples. The probe walks this
+/// ladder in order and the session encoder must use the topology that passed:
+/// an Intel Quick Sync MFT that accepts one and rejects the other would fail
+/// mid-session with no clean retry.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) enum MediaFoundationInputTopology {
+    #[default]
+    Auto,
+    SystemMemory,
+}
+
+impl MediaFoundationInputTopology {
+    pub(crate) const LADDER: [Self; 2] = [Self::Auto, Self::SystemMemory];
+
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::SystemMemory => "system-memory",
+        }
+    }
+
+    /// Whether the unified D3D11 media path, which hands the encoder GPU
+    /// textures, may use an encoder that only passed with this topology.
+    pub(crate) const fn allows_d3d11_textures(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) enum WindowsD3d11EncoderRole {
     Record,

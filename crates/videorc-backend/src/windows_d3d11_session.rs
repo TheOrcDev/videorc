@@ -1531,6 +1531,8 @@ mod runtime {
             fps: plan.fps,
             bitrate_kbps: plan.bitrate_kbps,
             low_latency: true,
+            input_topology:
+                crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology::Auto,
         }
     }
 

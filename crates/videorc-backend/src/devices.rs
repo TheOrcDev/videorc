@@ -42,8 +42,14 @@ pub async fn list_devices(ffmpeg_path: &str) -> DeviceList {
 
     #[cfg(target_os = "windows")]
     {
-        let _ = ffmpeg_path;
-        list_windows_devices()
+        let list = list_windows_devices();
+        // Plan 065 (A1): enumerate DirectShow for the capture worker here, off
+        // the session-start path, whenever the microphone set changed.
+        crate::audio_capture_adapter::warm_dshow_inventory(
+            ffmpeg_path,
+            available_microphone_names(&list.devices),
+        );
+        list
     }
 
     #[cfg(target_os = "linux")]
@@ -185,6 +191,17 @@ fn list_windows_devices() -> DeviceList {
         list_native_cameras(),
         list_native_microphones(),
     )
+}
+
+#[cfg(any(test, target_os = "windows"))]
+fn available_microphone_names(devices: &[Device]) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|device| {
+            device.kind == DeviceKind::Microphone && device.status == DeviceStatus::Available
+        })
+        .map(|device| device.name.clone())
+        .collect()
 }
 
 #[cfg(any(test, target_os = "windows"))]
@@ -1194,6 +1211,11 @@ mod tests {
         assert_eq!(
             devices.warnings,
             vec!["screen warning".to_string(), "camera warning".to_string()]
+        );
+        // Only available microphones key the capture worker's inventory warm-up.
+        assert_eq!(
+            available_microphone_names(&devices.devices),
+            vec!["Microphone Array".to_string()]
         );
     }
 

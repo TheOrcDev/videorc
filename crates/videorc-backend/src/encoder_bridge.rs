@@ -2684,6 +2684,9 @@ pub fn start_synthetic_recording_bridge(
     #[cfg(target_os = "windows")] d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
     video_output: EncoderBridgeVideoOutput,
     bitrate_kbps: Option<u32>,
+    // The Media Foundation input topology the hardware probe validated for
+    // this leg (plan 065, B2). Ignored by non-MF outputs.
+    mf_input_topology: crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology,
     // True when a live leg consumes this output (streaming posture: speed over
     // quality, 1-frame delay cap). Record-only outputs pass false and the
     // VideoToolbox session spends its headroom on quality instead.
@@ -2745,6 +2748,7 @@ pub fn start_synthetic_recording_bridge(
                 d3d11_input: writer_d3d11_input,
                 video_output,
                 bitrate_kbps,
+                mf_input_topology,
                 low_latency,
                 diagnostics_context,
                 stop: writer_stop,
@@ -2959,6 +2963,8 @@ struct SyntheticRecordingWriterParams {
     d3d11_input: Option<WindowsD3d11EncoderTicketSource>,
     video_output: EncoderBridgeVideoOutput,
     bitrate_kbps: Option<u32>,
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    mf_input_topology: crate::windows_d3d11_encoder_contract::MediaFoundationInputTopology,
     low_latency: bool,
     diagnostics_tx: watch::Sender<Option<EncoderBridgeWriterEvent>>,
     diagnostics_context: EncoderBridgeDiagnosticsContext,
@@ -2997,6 +3003,10 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
         d3d11_input,
         video_output,
         bitrate_kbps,
+        #[cfg(target_os = "windows")]
+        mf_input_topology,
+        #[cfg(not(target_os = "windows"))]
+            mf_input_topology: _,
         low_latency,
         diagnostics_tx,
         diagnostics_context,
@@ -3115,6 +3125,7 @@ fn write_synthetic_recording_frames(params: SyntheticRecordingWriterParams) {
             fps: target_fps.max(1),
             bitrate_kbps: bitrate_kbps.unwrap_or(6_000),
             low_latency,
+            input_topology: mf_input_topology,
         };
         let first_direct_texture = direct_d3d11_source
             .as_ref()

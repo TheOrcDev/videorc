@@ -14,6 +14,13 @@ export const RECORDING_STARTUP_CADENCE_UNSTEADY_CODE = 'recording-startup-cadenc
 export const RECORDING_OUTPUT_STEPPED_DOWN_CODE = 'recording-output-stepped-down'
 /** The recording leg is producing far fewer frames than the selected fps (fires once per session). */
 export const RECORDING_DEGRADED_CODE = 'recording-degraded'
+/**
+ * Windows (plan 065): the capture worker could not open the microphone, so the
+ * session records it directly and it can't be swapped until the session ends.
+ */
+export const MICROPHONE_CAPTURE_WORKER_FALLBACK_CODE = 'microphone-capture-worker-fallback'
+/** The selected microphone could not be opened at all; the session records silence. */
+export const MICROPHONE_CAPTURE_WORKER_UNAVAILABLE_CODE = 'microphone-capture-worker-unavailable'
 /** Sonner key for the unsteady-start warning: one per start, never a stack. */
 export const RECORDING_STARTUP_UNSTEADY_TOAST_ID = 'recording-startup-cadence-unsteady'
 
@@ -72,6 +79,26 @@ export function recordingStartupHealthToast(
       variant: 'warning',
       id: RECORDING_DEGRADED_CODE,
       title: 'Recording is falling behind',
+      description: event.message,
+      duration: 20000
+    }
+  }
+  // A tester streamed twice with silence and no hint: the drop reached only
+  // the log. Both are news the Studio does not show anywhere else.
+  if (event.code === MICROPHONE_CAPTURE_WORKER_FALLBACK_CODE) {
+    return {
+      variant: 'warning',
+      id: MICROPHONE_CAPTURE_WORKER_FALLBACK_CODE,
+      title: "Microphone can't be changed this session",
+      description: event.message,
+      duration: 15000
+    }
+  }
+  if (event.code === MICROPHONE_CAPTURE_WORKER_UNAVAILABLE_CODE) {
+    return {
+      variant: 'warning',
+      id: MICROPHONE_CAPTURE_WORKER_UNAVAILABLE_CODE,
+      title: 'Going on without a microphone',
       description: event.message,
       duration: 20000
     }
