@@ -17,6 +17,43 @@ const KICK_API_BASE_URL: &str = "https://api.kick.com";
 /// `stream.url`; the channel's own URL always wins.
 pub const KICK_RTMP_SERVER_URL: &str =
     "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app";
+/// Normalizes the ingest URL Kick returns in `stream.url` into the server URL
+/// FFmpeg pushes to. Kick's channel read returns the bare host
+/// (`rtmps://<id>.global-contribute.live-video.net`) while its ingest expects
+/// `rtmps://<host>:443/app/<stream-key>`. Found live on 2026-09-26: the
+/// bare-host URL produced `rtmps://<host>/<key>` and Kick answered
+/// "Input/output error" until the stream was stopped. Keep the channel's own
+/// host, add the `:443` port when missing, and make sure the path ends in
+/// `/app`. Anything unparsable falls back to the documented public ingest.
+pub fn kick_ingest_server_url(api_url: Option<&str>) -> String {
+    let raw = api_url
+        .map(str::trim)
+        .filter(|url| !url.is_empty())
+        .unwrap_or(KICK_RTMP_SERVER_URL);
+    let Ok(mut url) = Url::parse(raw) else {
+        return KICK_RTMP_SERVER_URL.to_string();
+    };
+    if !matches!(url.scheme(), "rtmp" | "rtmps") || url.host_str().is_none() {
+        return KICK_RTMP_SERVER_URL.to_string();
+    }
+    if url.scheme() == "rtmps" && url.port().is_none() {
+        // 443 is the RTMPS default, but the ingest is documented with it and
+        // FFmpeg's librtmp path is happier when it is explicit.
+        let _ = url.set_port(Some(443));
+    }
+    let path = url.path().trim_end_matches('/').to_string();
+    if path.is_empty() || path == "/" {
+        url.set_path("/app");
+    } else if !path.ends_with("/app") {
+        url.set_path(&format!("{path}/app"));
+    } else {
+        url.set_path(&path);
+    }
+    url.set_query(None);
+    url.set_fragment(None);
+    url.to_string().trim_end_matches('/').to_string()
+}
+
 /// Kick does not document a stream title limit. Cap at Twitch's 140 so an
 /// over-long title fails here with a clear message instead of at Kick.
 const KICK_TITLE_MAX_CHARS: usize = 140;
@@ -232,14 +269,7 @@ pub async fn prepare_kick_broadcast(
         .context(
             "Kick did not return a stream key. Reconnect Kick so Videorc can read it (streamkey:read).",
         )?;
-    let server_url = stream
-        .url
-        .as_deref()
-        .map(str::trim)
-        .filter(|url| !url.is_empty())
-        .unwrap_or(KICK_RTMP_SERVER_URL)
-        .trim_end_matches('/')
-        .to_string();
+    let server_url = kick_ingest_server_url(stream.url.as_deref());
 
     let stream_key_secret_ref = format!("platform:kick:{}:stream-key", request.account_id);
     put_secret(&stream_key_secret_ref, stream_key).context("Could not store Kick stream key.")?;
@@ -544,6 +574,40 @@ mod tests {
         );
         assert_eq!(logs[1].method, "GET");
         assert_eq!(logs[1].query, "");
+    }
+
+    #[test]
+    fn kick_ingest_url_gets_port_and_app_path() {
+        assert_eq!(
+            kick_ingest_server_url(Some(
+                "rtmps://fa723fc1b171.global-contribute.live-video.net"
+            )),
+            "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app"
+        );
+        assert_eq!(
+            kick_ingest_server_url(Some(
+                "rtmps://fa723fc1b171.global-contribute.live-video.net/"
+            )),
+            "rtmps://fa723fc1b171.global-contribute.live-video.net:443/app"
+        );
+        assert_eq!(
+            kick_ingest_server_url(Some("rtmps://ingest.example.live-video.net:443/app/")),
+            "rtmps://ingest.example.live-video.net:443/app"
+        );
+        assert_eq!(
+            kick_ingest_server_url(Some("rtmp://ingest.example.live-video.net/app")),
+            "rtmp://ingest.example.live-video.net/app"
+        );
+        assert_eq!(kick_ingest_server_url(None), KICK_RTMP_SERVER_URL);
+        assert_eq!(kick_ingest_server_url(Some("   ")), KICK_RTMP_SERVER_URL);
+        assert_eq!(
+            kick_ingest_server_url(Some("not a url")),
+            KICK_RTMP_SERVER_URL
+        );
+        assert_eq!(
+            kick_ingest_server_url(Some("https://kick.com/whatever")),
+            KICK_RTMP_SERVER_URL
+        );
     }
 
     #[tokio::test]

@@ -1151,6 +1151,66 @@ pub struct AppState {
     pub cohost_transcript: crate::cohost::CohostTranscriptSlot,
 }
 
+/// Masks the path of every `rtmp://` / `rtmps://` URL in a log line. FFmpeg
+/// reports output failures with the full destination URL, and for RTMP
+/// destinations the path IS the stream key (seen live on 2026-09-26: a Kick
+/// key landed in `backend.log` and the in-app log). Host and port stay so the
+/// destination is still recognisable.
+pub(crate) fn redact_stream_urls(message: &str) -> String {
+    const SCHEMES: [&str; 2] = ["rtmps://", "rtmp://"];
+    let mut out = String::with_capacity(message.len());
+    let mut rest = message;
+    while !rest.is_empty() {
+        let Some((idx, scheme)) = SCHEMES
+            .into_iter()
+            .filter_map(|scheme| rest.find(scheme).map(|idx| (idx, scheme)))
+            .min_by_key(|(idx, _)| *idx)
+        else {
+            out.push_str(rest);
+            break;
+        };
+        out.push_str(&rest[..idx]);
+        let after_scheme = &rest[idx + scheme.len()..];
+        let host_end = after_scheme
+            .find(|c: char| c == '/' || c == '|' || c.is_whitespace() || c == '"' || c == '\'')
+            .unwrap_or(after_scheme.len());
+        let host = &after_scheme[..host_end];
+        out.push_str(scheme);
+        out.push_str(host);
+        let tail = &after_scheme[host_end..];
+        if tail.starts_with('/') {
+            let path_end = tail
+                .find(|c: char| c == '|' || c.is_whitespace() || c == '"' || c == '\'')
+                .unwrap_or(tail.len());
+            // FFmpeg writes `Error opening <url>: <reason>`; the colon is
+            // punctuation, not part of the key.
+            let path_end = if tail[..path_end].ends_with(':') {
+                path_end - 1
+            } else {
+                path_end
+            };
+            let path = &tail[..path_end];
+            // Keep an already-redacted path readable. Otherwise keep the
+            // application path (`/app`, `/live2`) and mask the last segment,
+            // which is where every RTMP provider puts the key.
+            if path.ends_with("/<stream-key>") || path.ends_with("/••••") {
+                out.push_str(path);
+            } else {
+                let application = path
+                    .trim_end_matches('/')
+                    .rsplit_once('/')
+                    .map_or("", |(application, _)| application);
+                out.push_str(application);
+                out.push_str("/••••");
+            }
+            rest = &tail[path_end..];
+        } else {
+            rest = tail;
+        }
+    }
+    out
+}
+
 impl AppState {
     pub fn new(
         token: String,
@@ -1477,7 +1537,7 @@ impl AppState {
     pub fn emit_log(&self, level: impl Into<String>, message: impl Into<String>) {
         let payload = BackendLogEvent {
             level: level.into(),
-            message: message.into(),
+            message: redact_stream_urls(&message.into()),
             timestamp: Utc::now().to_rfc3339(),
         };
         let level = payload.level.clone();
@@ -1629,5 +1689,44 @@ mod tests {
                 .current_depth,
             0
         );
+    }
+}
+
+#[cfg(test)]
+mod redact_stream_urls_tests {
+    use super::redact_stream_urls;
+
+    #[test]
+    fn masks_rtmp_paths_but_keeps_hosts() {
+        let line = "[fifo @ 0x1] Error opening rtmps://fa72.global-contribute.live-video.net/sk_us-west-2_abc_def: Input/output error";
+        assert_eq!(
+            redact_stream_urls(line),
+            "[fifo @ 0x1] Error opening rtmps://fa72.global-contribute.live-video.net/••••: Input/output error"
+        );
+        assert_eq!(
+            redact_stream_urls(
+                "tee rtmps://host:443/app/sk_live_1|rtmp://b.example/live/key2 'rtmps://c.example/app/k3'"
+            ),
+            "tee rtmps://host:443/app/••••|rtmp://b.example/live/•••• 'rtmps://c.example/app/••••'"
+        );
+        // A trailing slash never exposes the key as "the application path".
+        assert_eq!(
+            redact_stream_urls("rtmp://host/live/key/ x"),
+            "rtmp://host/live/•••• x"
+        );
+        assert_eq!(
+            redact_stream_urls("push rtmp://a.rtmp.youtube.com/live2/abcd-efgh done"),
+            "push rtmp://a.rtmp.youtube.com/live2/•••• done"
+        );
+    }
+
+    #[test]
+    fn leaves_redacted_and_plain_text_alone() {
+        assert_eq!(
+            redact_stream_urls("Kick rtmps://host:443/app/<stream-key> ready"),
+            "Kick rtmps://host:443/app/<stream-key> ready"
+        );
+        assert_eq!(redact_stream_urls("no urls here"), "no urls here");
+        assert_eq!(redact_stream_urls("rtmps://host.only"), "rtmps://host.only");
     }
 }

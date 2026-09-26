@@ -19709,6 +19709,10 @@ pub fn emit_health_event(
     code: &str,
     message: &str,
 ) -> Result<()> {
+    // Health events are persisted and exported in support bundles, and the
+    // `ffmpeg-warning` code carries raw FFmpeg lines that can quote an RTMP
+    // URL, whose path is the stream key.
+    let message = &crate::state::redact_stream_urls(message);
     let event = state
         .database
         .add_health_event(session_id, level, code, message)?;
