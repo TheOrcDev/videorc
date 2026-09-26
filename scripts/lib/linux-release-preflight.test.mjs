@@ -8,10 +8,14 @@ import {
   linuxReleaseUploadEndpoint,
   missingLinuxReleaseUploadEnv
 } from './linux-release-preflight.mjs'
+import { RELEASE_BUNDLED_OAUTH_ENV } from './release-bundled-oauth.mjs'
 
 const completeEnv = {
   VIDEORC_RELEASE_ID: '0.10.0-alpha.1',
-  VIDEORC_LINUX_RELEASE_STAGE: 'candidate'
+  VIDEORC_LINUX_RELEASE_STAGE: 'candidate',
+  ...Object.fromEntries(
+    RELEASE_BUNDLED_OAUTH_ENV.map((name) => [name, `${name.toLowerCase()}-value`])
+  )
 }
 
 function facts(overrides = {}) {
@@ -38,6 +42,17 @@ describe('Linux release preflight', () => {
     const result = evaluateLinuxReleasePreflight(facts())
     assert.equal(result.ok, true)
     assert.match(formatLinuxReleasePreflightReport(result), /^linux-release-preflight: PASS/)
+  })
+
+  it('fails closed on each missing bundled OAuth credential', () => {
+    for (const name of RELEASE_BUNDLED_OAUTH_ENV) {
+      const result = evaluateLinuxReleasePreflight(facts({ env: { ...completeEnv, [name]: '' } }))
+      assert.equal(result.ok, false)
+      assert.deepEqual(
+        result.failures.map((item) => item.id),
+        [`bundled-oauth-${name}`]
+      )
+    }
   })
 
   it('fails closed for a non-Linux host, dirty tree, or stale release id', () => {
@@ -115,10 +130,7 @@ describe('Linux release preflight', () => {
       linuxReleaseUploadEndpoint(neonOnly),
       'https://example.storage.eu-central-1.aws.neon.tech'
     )
-    assert.equal(
-      isHttpsReleaseUploadEndpoint(linuxReleaseUploadEndpoint(neonOnly)),
-      true
-    )
+    assert.equal(isHttpsReleaseUploadEndpoint(linuxReleaseUploadEndpoint(neonOnly)), true)
   })
 
   it('reports missing Neon upload fields without printing secret values', () => {

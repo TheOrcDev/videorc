@@ -160,7 +160,26 @@ describe('signed Windows electron-builder config', () => {
     assert.doesNotMatch(unsignedJob, /environment: windows-alpha-release/)
     assert.doesNotMatch(unsignedJob, /id-token: write/)
     assert.doesNotMatch(unsignedJob, /azure\/login@/)
-    assert.doesNotMatch(unsignedJob, /\$\{\{ secrets\./)
+    // The unsigned job runs third-party install and build scripts, so it gets
+    // no signing, storage or cloud credential. The one exception is the
+    // sign-in credentials compiled into the backend: they ship inside every
+    // downloaded binary, so this job learns nothing a user cannot extract.
+    // They may appear only in the packaging step.
+    const unsignedSecrets = [...unsignedJob.matchAll(/\$\{\{ secrets\.([A-Z0-9_]+) \}\}/g)]
+    assert.ok(unsignedSecrets.length > 0, 'the unsigned build must bake the sign-in credentials')
+    for (const [, name] of unsignedSecrets) {
+      assert.match(name, /^VIDEORC_BUNDLED_[A-Z0-9_]+$/, `unsigned job must not read ${name}`)
+    }
+    const packagingStep = unsignedJob.slice(
+      unsignedJob.indexOf('- name: Build exact unsigned staging payload'),
+      unsignedJob.indexOf('- name: Verify unsigned handoff and bind its manifest')
+    )
+    assert.equal(
+      (packagingStep.match(/\$\{\{ secrets\./g) ?? []).length,
+      unsignedSecrets.length,
+      'sign-in credentials may only reach the packaging step'
+    )
+    assert.equal((unsignedJob.match(/\$\{\{ secrets\./g) ?? []).length, unsignedSecrets.length)
 
     assert.match(signingJob, /needs: unsigned/)
     assert.match(signingJob, /environment: windows-alpha-release/)

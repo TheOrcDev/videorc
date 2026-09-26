@@ -126,6 +126,17 @@ jobs:
 
       - name: Build exact unsigned staging payload
         env:
+          # Sign-in credentials compiled into the backend (option_env! in
+          # oauth.rs). Repository secrets, because this job runs outside the
+          # reviewer-gated environment; the release preflight fails closed on
+          # a missing one. Values are masked in logs.
+          VIDEORC_BUNDLED_TWITCH_CLIENT_ID: ${{ secrets.VIDEORC_BUNDLED_TWITCH_CLIENT_ID }}
+          VIDEORC_BUNDLED_KICK_CLIENT_ID: ${{ secrets.VIDEORC_BUNDLED_KICK_CLIENT_ID }}
+          VIDEORC_BUNDLED_KICK_CLIENT_SECRET: ${{ secrets.VIDEORC_BUNDLED_KICK_CLIENT_SECRET }}
+          VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY: ${{ secrets.VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY }}
+          VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET: ${{ secrets.VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET }}
+          VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID: ${{ secrets.VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID }}
+          VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET: ${{ secrets.VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET }}
           VIDEORC_MSYS2_ROOT: ${{ steps.capture-msys2.outputs.msys2-location }}
           VIDEORC_RELEASE_ID: ${{ inputs.release_id }}
           VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
