@@ -8,6 +8,7 @@ import { describe, it } from 'node:test'
 import { promisify } from 'node:util'
 
 import { CAPTURE_DECAY_APP_BUNDLE_PROFILE } from './capture-decay-app-bundle.mjs'
+import { SYMLINK_TEST_SKIP } from './symlink-test-support.mjs'
 import {
   buildCaptureDecayAttemptLedgerManifest,
   finishCaptureDecayAttempt,
@@ -27,7 +28,6 @@ import {
   verifyCaptureDecayD3PublishedReleaseRoutes
 } from './capture-decay-published-release.mjs'
 import { assembleCaptureDecayD3PublicationReceipt } from './capture-decay-publication-receipt-assembly.mjs'
-
 import {
   CAPTURE_DECAY_D3_ACCEPTANCE_PROFILE,
   CAPTURE_DECAY_D3_ACCEPTANCE_RECORD_PATH,
@@ -71,6 +71,10 @@ import {
 } from './macos-d3-sealed-candidate.mjs'
 import { buildMacosD3PublicationReservation } from './release-upload-s3.mjs'
 import { captureDecaySanitizedChildEnvironment } from '../run-capture-decay-real-release.mjs'
+
+const symlinkTest = (name, test) => it(name, { skip: SYMLINK_TEST_SKIP }, test)
+const symlinkArtifactTestName =
+  'rejects exact-byte checkpoint and sidecar substitutions through symlinks'
 
 const execFileAsync = promisify(execFile)
 
@@ -791,7 +795,7 @@ describe('immutable evidence bundle loading', () => {
     }
   })
 
-  it('rejects exact-byte checkpoint and sidecar substitutions through symlinks', async () => {
+  symlinkTest(symlinkArtifactTestName, async () => {
     const substitutions = [
       'run-1/capture-decay-soak.json',
       'run-1/capture-decay-soak.csv',
@@ -1819,7 +1823,7 @@ describe('pending -> accepted -> satisfied publication state', () => {
     })
   })
 
-  it('rejects symlinked accepted records before parsing their target bytes', async () => {
+  symlinkTest('rejects symlinked accepted records before parsing their target bytes', async () => {
     const accepted = buildAccepted(validate(validEvidence()))
     await withAcceptanceGitRepository(accepted, async ({ recordPath, repoRoot }) => {
       const targetPath = join(repoRoot, 'attacker-controlled-accepted.json')
