@@ -1176,7 +1176,14 @@ pub(crate) fn redact_stream_urls(message: &str) -> String {
             .unwrap_or(after_scheme.len());
         let host = &after_scheme[..host_end];
         out.push_str(scheme);
-        out.push_str(host);
+        // Custom RTMP servers can carry `user:password@` in the authority.
+        match host.rsplit_once('@') {
+            Some((_, host)) => {
+                out.push_str("••••@");
+                out.push_str(host);
+            }
+            None => out.push_str(host),
+        }
         let tail = &after_scheme[host_end..];
         if tail.starts_with('/') {
             let path_end = tail
@@ -1708,6 +1715,10 @@ mod redact_stream_urls_tests {
                 "tee rtmps://host:443/app/sk_live_1|rtmp://b.example/live/key2 'rtmps://c.example/app/k3'"
             ),
             "tee rtmps://host:443/app/••••|rtmp://b.example/live/•••• 'rtmps://c.example/app/••••'"
+        );
+        assert_eq!(
+            redact_stream_urls("Error opening rtmp://bob:hunter2@ingest.example:1935/live/k1: x"),
+            "Error opening rtmp://••••@ingest.example:1935/live/••••: x"
         );
         // A trailing slash never exposes the key as "the application path".
         assert_eq!(
