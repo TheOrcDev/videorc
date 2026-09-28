@@ -1454,6 +1454,34 @@ describe('pending -> accepted -> satisfied publication state', () => {
     )
   })
 
+  it('keeps the pre-install D3 publication verifier free of third-party package imports', async () => {
+    const repositoryRoot = resolve(import.meta.dirname, '..', '..')
+    const thirdParty = []
+    const pending = ['scripts/verify-macos-capture-decay-d3.mjs']
+    const seen = new Set()
+    while (pending.length > 0) {
+      const repositoryPath = pending.shift()
+      if (seen.has(repositoryPath)) continue
+      seen.add(repositoryPath)
+      const source = await readFile(join(repositoryRoot, ...repositoryPath.split('/')), 'utf8')
+      for (const specifier of allModuleSpecifiers(source)) {
+        if (specifier.startsWith('node:')) continue
+        if (specifier.startsWith('.')) {
+          const dependencyPath = await resolveLocalModulePath({
+            importerPath: join(repositoryRoot, ...repositoryPath.split('/')),
+            repositoryRoot,
+            specifier
+          })
+          if (!seen.has(dependencyPath)) pending.push(dependencyPath)
+          continue
+        }
+        thirdParty.push(`${repositoryPath} -> ${specifier}`)
+      }
+    }
+    assert.deepEqual(thirdParty, [])
+    assert.ok(seen.has('scripts/lib/macos-d3-sealed-candidate.mjs'))
+  })
+
   it('derives satisfied only from the exact accepted record and verified published release', () => {
     const accepted = buildAccepted(validate(validEvidence()))
     const publication = publicationFixture(accepted)
@@ -3204,17 +3232,21 @@ async function captureDecayD3GateScriptClosure() {
   return [...closure].sort()
 }
 
-function localStaticModuleSpecifiers(source) {
+function allModuleSpecifiers(source) {
   const specifiers = new Set()
   for (const pattern of [
     /\b(?:import|export)\s+(?:[^'";]*?\s+from\s+)?['"]([^'"]+)['"]/g,
     /\bimport\s*\(\s*['"]([^'"]+)['"]\s*\)/g
   ]) {
     for (const match of source.matchAll(pattern)) {
-      if (match[1].startsWith('.')) specifiers.add(match[1])
+      specifiers.add(match[1])
     }
   }
   return specifiers
+}
+
+function localStaticModuleSpecifiers(source) {
+  return new Set([...allModuleSpecifiers(source)].filter((specifier) => specifier.startsWith('.')))
 }
 
 async function resolveLocalModulePath({ importerPath, repositoryRoot, specifier }) {

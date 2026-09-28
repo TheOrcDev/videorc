@@ -263,6 +263,16 @@ Required GitHub secrets:
 - `APPLE_ID`: Apple Developer account email
 - `APPLE_APP_SPECIFIC_PASSWORD`: app-specific password for notarization
 - `APPLE_TEAM_ID`: Apple Developer Team ID
+- `VIDEORC_BUNDLED_TWITCH_CLIENT_ID`: baked into `videorc-backend` at compile time
+- `VIDEORC_BUNDLED_KICK_CLIENT_ID`: baked into `videorc-backend` at compile time
+- `VIDEORC_BUNDLED_KICK_CLIENT_SECRET`: baked into `videorc-backend` only (never `app.asar`)
+- `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY`: allow-listed X app API key; Native X Live is dead without it
+- `VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET`: allow-listed X app API secret; `release:validate:macos` fails closed if either X half is missing
+
+A local keychain release reads the same bundled OAuth names from
+`~/.videorc-release.env` (source `export NAME=` lines too). Do not invent
+placeholder values. Optional while YouTube OAuth is paused:
+`VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID` and `VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET`.
 
 Required private download storage secrets:
 

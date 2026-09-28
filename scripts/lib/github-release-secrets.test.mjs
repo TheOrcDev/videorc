@@ -64,6 +64,26 @@ describe('evaluateMacosReleaseGithubSecrets', () => {
     assert.doesNotMatch(report, /not-a-secret-value/)
   })
 
+  it('requires the baked OAuth secrets the macOS validate gate fails closed on', () => {
+    const names = (list) => list.map((secret) => secret.name)
+    for (const name of [
+      'VIDEORC_BUNDLED_TWITCH_CLIENT_ID',
+      'VIDEORC_BUNDLED_KICK_CLIENT_ID',
+      'VIDEORC_BUNDLED_KICK_CLIENT_SECRET',
+      'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_KEY',
+      'VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET'
+    ]) {
+      assert.ok(names(REQUIRED_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
+    }
+    for (const name of [
+      'VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID',
+      'VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET'
+    ]) {
+      assert.ok(names(CONDITIONAL_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
+      assert.ok(!names(REQUIRED_MACOS_RELEASE_GITHUB_SECRETS).includes(name), name)
+    }
+  })
+
   it('lists the neon and hetzner origin keys as conditional, never required', () => {
     const names = (list) => list.map((secret) => secret.name)
     for (const name of [

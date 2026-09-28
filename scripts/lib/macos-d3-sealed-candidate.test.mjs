@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { createHash } from 'node:crypto'
-import { constants } from 'node:fs'
+import { constants, readFileSync } from 'node:fs'
 import { Readable } from 'node:stream'
 import { mkdtemp, readFile, rm, symlink, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
@@ -68,6 +68,16 @@ const validDmgSigningDetails = [
   'Authority=Apple Root CA',
   'TeamIdentifier=C2PA37RB58'
 ].join('\n')
+
+describe('pre-install D3 verifier import graph', () => {
+  it('does not statically import js-yaml', () => {
+    const source = readFileSync(new URL('./macos-d3-sealed-candidate.mjs', import.meta.url), 'utf8')
+    assert.match(source, /createRequire\(import\.meta\.url\)/)
+    assert.match(source, /requireYaml\('js-yaml'\)/)
+    assert.doesNotMatch(source, /from ['"]js-yaml['"]/)
+    assert.doesNotMatch(source, /import\(\s*['"]js-yaml['"]\s*\)/)
+  })
+})
 
 describe('sealed macOS D3 candidate plan', () => {
   it('canonically binds exactly the six signed release/update artifacts', async () => {

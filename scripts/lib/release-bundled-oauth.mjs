@@ -1,11 +1,11 @@
 // OAuth credentials a public desktop build compiles into the Rust backend
-// (`option_env!` in crates/videorc-backend/src/oauth.rs). The macOS release
-// reads them from ~/.videorc-release.env on the release Mac; the Windows and
-// Linux alpha candidates build in GitHub Actions and read repository secrets
-// of the same names. A build without them ships with sign-in dead: Windows
-// users saw "Twitch OAuth requires VIDEORC_TWITCH_CLIENT_ID." in place of
-// Connect because no workflow ever passed these values, so the release
-// preflights fail closed on each one.
+// (`option_env!` in crates/videorc-backend/src/oauth.rs). A local macOS
+// keychain release reads them from ~/.videorc-release.env. GitHub Actions
+// macOS, Windows, and Linux release workflows read repository secrets of the
+// same names. A build without them ships with sign-in dead: Windows users
+// saw "Twitch OAuth requires VIDEORC_TWITCH_CLIENT_ID." in place of Connect
+// because no workflow ever passed these values, so the release preflights
+// fail closed on each one.
 
 import { isPlaceholderCredential } from './provider-readiness.mjs'
 
@@ -40,7 +40,7 @@ export function releaseBundledOauthChecks(env = process.env) {
       ok: value.length > 0 && !placeholder,
       detail: placeholder
         ? 'template text, not a real credential'
-        : 'missing: set the repository secret of the same name (Windows and Linux) or ~/.videorc-release.env (macOS)'
+        : 'missing: set the repository secret of the same name, or ~/.videorc-release.env for a local macOS keychain release'
     }
   })
 }

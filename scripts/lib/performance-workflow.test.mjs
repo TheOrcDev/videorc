@@ -240,6 +240,11 @@ describe('macOS performance workflow', () => {
 
     assert.match(releaseWorkflow, /fetch-depth: 0/)
     assert.ok(sourceGateIndex >= 0 && sourceGateIndex < buildIndex)
+    const installIndex = releaseWorkflow.indexOf('      - name: Install dependencies')
+    assert.ok(
+      sourceGateIndex < installIndex,
+      'D3 publication-state verify must run before pnpm install so lifecycle scripts cannot rewrite origin/main'
+    )
     assert.match(releaseWorkflow.slice(sourceGateIndex, buildIndex), /--regular-release/)
     assert.doesNotMatch(releaseWorkflow, /attest-d3-publication:/)
     assert.doesNotMatch(releaseWorkflow, /capture-decay-d3-publication-receipt\.json/)

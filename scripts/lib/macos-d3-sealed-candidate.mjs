@@ -17,10 +17,9 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { Readable, Transform } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
+import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-
-import { JSON_SCHEMA, load as loadYaml } from 'js-yaml'
 
 import {
   assertCaptureDecayAppBundleIdentityEqual,
@@ -102,6 +101,18 @@ const RELEASE_MANIFEST_FIELDS = Object.freeze([
 ])
 
 const execFileAsync = promisify(execFile)
+const requireYaml = createRequire(import.meta.url)
+let yamlModule
+
+// The regular macOS release workflow runs the D3 publication-state verifier
+// before `pnpm install` so lifecycle scripts cannot rewrite origin/main. That
+// verifier imports this module. Keep the js-yaml load lazy so the pre-install
+// path only pays for YAML when a later feed-validation function actually runs.
+function loadYamlDocument(text) {
+  yamlModule ??= requireYaml('js-yaml')
+  return yamlModule.load(text, { schema: yamlModule.JSON_SCHEMA })
+}
+
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const macosReleaseArtifactValidatorPath = join(
   repoRoot,
@@ -1386,7 +1397,7 @@ export async function normalizeMacosD3UpdateFeedForSealing({
 
   let feed
   try {
-    feed = loadYaml(await readUtf8File(feedPath, 'macOS update feed'), { schema: JSON_SCHEMA })
+    feed = loadYamlDocument(await readUtf8File(feedPath, 'macOS update feed'))
   } catch (cause) {
     throw candidateErrorWithCause(
       'candidate-feed-yaml',
@@ -1500,7 +1511,7 @@ export function validateMacosUpdateFeed(
 ) {
   let feed
   try {
-    feed = loadYaml(feedText, { schema: JSON_SCHEMA })
+    feed = loadYamlDocument(feedText)
   } catch {
     throw candidateError('candidate-feed-yaml', 'latest-mac.yml is not strict valid YAML.')
   }

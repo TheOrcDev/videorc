@@ -44,19 +44,23 @@ describe('release bundled OAuth credentials', () => {
     }
   })
 
-  // The Windows/Linux alpha builds compile the backend in GitHub Actions. The
-  // values only reach `cargo build` if the workflow maps each secret into the
-  // step that builds, and into the step that runs the preflight.
+  // The Windows/Linux alpha builds and the hosted macOS release compile the
+  // backend in GitHub Actions. The values only reach `cargo build` if the
+  // workflow maps each secret into the step that builds, and into the step
+  // that runs the preflight or artifact validate.
   it('maps every credential from a repository secret into the building workflows', () => {
     const windows = workflow('release-windows-alpha.yml')
     const linux = workflow('release-linux-alpha.yml')
+    const macos = workflow('release-macos.yml')
     for (const name of [...RELEASE_BUNDLED_OAUTH_ENV, ...RELEASE_OPTIONAL_BUNDLED_OAUTH_ENV]) {
       const mapping = `${name}: \${{ secrets.${name} }}`
       assert.equal(windows.split(mapping).length - 1, 1, `Windows build step maps ${name}`)
       // Linux: once for the preflight step, once for the package step.
       assert.equal(linux.split(mapping).length - 1, 2, `Linux preflight + package map ${name}`)
+      // macOS: once for the signed build, once for release:validate:macos.
+      assert.equal(macos.split(mapping).length - 1, 2, `macOS build + validate map ${name}`)
     }
-    for (const text of [windows, linux]) {
+    for (const text of [windows, linux, macos]) {
       assert.doesNotMatch(text, /VIDEORC_BUNDLED_X_CLIENT_ID/)
     }
   })
