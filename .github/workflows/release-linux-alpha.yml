@@ -75,7 +75,10 @@ jobs:
 
       - name: Install Linux packaging dependencies
         # pkg-config, clang, libpipewire-0.3-dev, and libspa-0.2-dev match
-        # linux.yml so libspa-sys / pipewire can compile.
+        # linux.yml so libspa-sys / pipewire can compile. `rpm` lets
+        # electron-builder's rpmbuild step create the Fedora package;
+        # libarchive-tools (bsdtar) powers the deb/rpm listing fallback in
+        # validate-linux-dist-package.mjs.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -89,7 +92,9 @@ jobs:
             pkg-config \
             clang \
             libpipewire-0.3-dev \
-            libspa-0.2-dev
+            libspa-0.2-dev \
+            rpm \
+            libarchive-tools
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
@@ -123,7 +128,7 @@ jobs:
           VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET: ${{ secrets.VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET }}
         run: pnpm release:preflight:linux
 
-      - name: Build unsigned Linux AppImage
+      - name: Build unsigned Linux AppImage, deb and rpm
         env:
           VIDEORC_LINUX_ACCEPTANCE_STATUS: pending
           VIDEORC_LINUX_RELEASE_STAGE: candidate
@@ -138,7 +143,7 @@ jobs:
           VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET: ${{ secrets.VIDEORC_BUNDLED_X_OAUTH1_CONSUMER_SECRET }}
           VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID: ${{ secrets.VIDEORC_BUNDLED_YOUTUBE_CLIENT_ID }}
           VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET: ${{ secrets.VIDEORC_BUNDLED_YOUTUBE_CLIENT_SECRET }}
-        run: pnpm package:desktop:linux
+        run: pnpm package:desktop:linux:dist
 
       - name: Generate isolated Linux Alpha manifests
         env:
@@ -153,10 +158,17 @@ jobs:
           VIDEORC_RELEASE_SOURCE_COMMIT: ${{ github.sha }}
         run: pnpm release:validate:linux
 
+      - name: Validate deb and rpm payloads
+        # Structural gate for the distro packages: naming contract, backend,
+        # bundled LGPL FFmpeg pair, payload metainfo, desktop entry, hicolor
+        # icons (plan 071 S2/S4).
+        run: pnpm validate:linux:dist
+
       - name: Record Ubuntu 24.04 packaged-smoke follow-up
         run: |
-          echo "GitHub-hosted ubuntu-24.04 can package and validate the AppImage."
-          echo "Named-box packaged smoke, updater proof, and videorc-web promotion remain follow-ups."
+          echo "GitHub-hosted ubuntu-24.04 can package and validate AppImage, deb and rpm."
+          echo "Named-box acceptance remains: dpkg -i + launch + portal capture smoke on the"
+          echo "Ubuntu 24.04 tester box, and a Fedora/RHEL box for rpm (plan 071)."
 
       - name: Check private candidate upload secrets
         env:
@@ -181,3 +193,18 @@ jobs:
           VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL }}
           VIDEORC_RELEASE_UPLOAD_NEON_S3_FORCE_PATH_STYLE: 'true'
         run: pnpm release:candidate:upload:linux
+
+      - name: Store deb and rpm distro candidates
+        # Same immutable candidate prefix as the AppImage; release.json and
+        # latest-linux.yml stay AppImage-only (plan 071).
+        env:
+          VIDEORC_LINUX_FFMPEG_LICENSE_PATH: apps/desktop/release/linux-unpacked/resources/ffmpeg/LICENSE.txt
+          VIDEORC_LINUX_FFMPEG_SOURCE_PATH: apps/desktop/release/linux-unpacked/resources/ffmpeg/SOURCE.txt
+          VIDEORC_DOWNLOAD_STORAGE_PRIMARY: ${{ vars.VIDEORC_DOWNLOAD_STORAGE_PRIMARY || 'neon' }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID: ${{ secrets.VIDEORC_RELEASE_UPLOAD_NEON_S3_ACCESS_KEY_ID }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY: ${{ secrets.VIDEORC_RELEASE_UPLOAD_NEON_S3_SECRET_ACCESS_KEY }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_BUCKET }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_REGION }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL: ${{ vars.VIDEORC_RELEASE_UPLOAD_NEON_S3_ENDPOINT_URL }}
+          VIDEORC_RELEASE_UPLOAD_NEON_S3_FORCE_PATH_STYLE: 'true'
+        run: pnpm release:candidate:upload:linux:dist

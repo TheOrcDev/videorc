@@ -53,6 +53,11 @@ describe('updater status mapping', () => {
     expect(
       updateStatusFromEvent({ type: 'unsupported', reason: 'windows-feed-unpublished' })
     ).toEqual({ phase: 'unsupported', reason: 'windows-feed-unpublished' })
+    // Distro-managed Linux installs (deb/rpm/AUR, plan 071) carry their reason
+    // through to the Settings copy verbatim.
+    expect(
+      updateStatusFromEvent({ type: 'unsupported', reason: 'linux-native-install' })
+    ).toEqual({ phase: 'unsupported', reason: 'linux-native-install' })
   })
 
   it('clamps and rounds download progress into 0–100', () => {
@@ -86,6 +91,11 @@ describe('updater status mapping', () => {
     expect(
       shouldBackgroundRecheck({ phase: 'unsupported', reason: 'windows-feed-unpublished' })
     ).toBe(true)
+    // A distro-managed Linux install never re-checks: the package manager owns
+    // updates and no feed artifact could ever satisfy it.
+    expect(
+      shouldBackgroundRecheck({ phase: 'unsupported', reason: 'linux-native-install' })
+    ).toBe(false)
 
     expect(BACKGROUND_RECHECK_INTERVAL_MS).toBe(30 * 60 * 1000)
   })

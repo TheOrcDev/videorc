@@ -3685,7 +3685,11 @@ export type UpdateStatus =
   | { phase: 'error'; message: string }
   // `windows-feed-unpublished`: a Windows build found no update published for
   // it (no public Alpha feed, and no signed-in pilot access). Rechecked.
-  | { phase: 'unsupported'; reason?: 'windows-feed-unpublished' }
+  // `linux-native-install`: a Linux build shipped through a distro package
+  // (deb/rpm/AUR). The update feed is AppImage-only, so native installs report
+  // "managed by your package manager" instead of probing a feed they cannot
+  // consume (plan 071).
+  | { phase: 'unsupported'; reason?: 'windows-feed-unpublished' | 'linux-native-install' }
 
 export type AccountCallbackEnvelope = {
   id: string

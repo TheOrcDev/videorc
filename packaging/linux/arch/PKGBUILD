@@ -1,0 +1,64 @@
+# Maintainer: TheOrcDev (set the real maintainer name + email before AUR submission)
+
+# Videorc binary AUR package (plan 071). Distribution-native Arch support that
+# keeps the product's LGPL-only FFmpeg policy: the AppImage payload (which
+# bundles the pinned LGPL FFmpeg with VAAPI + OpenH264) is extracted and
+# installed under /opt/videorc; the package NEVER depends on a distro ffmpeg.
+#
+# The source URL goes live with public Linux promotion (docs/linux-port-plan.md
+# L6). Until then the Linux Alpha lane uploads candidates to a private prefix,
+# so this PKGBUILD is checked in for the AUR submission run, not for building
+# before the public URL exists.
+pkgname=videorc-bin
+pkgver=0.9.120
+pkgrel=1
+pkgdesc="AI-native recording and livestreaming studio for creators (binary release)"
+arch=('x86_64')
+url="https://www.videorc.com"
+license=('AGPL-3.0-only')
+depends=('gtk3' 'nss' 'alsa-lib' 'at-spi2-core' 'pipewire' 'xdg-desktop-portal')
+optdepends=(
+  'intel-media-driver: VAAPI hardware encoding on Intel GPUs'
+  'mesa: VAAPI hardware encoding on AMD GPUs'
+  'nvidia-vaapi-driver: VAAPI hardware encoding on NVIDIA GPUs'
+)
+install='videorc.install'
+# TODO(gate: public Linux promotion): pin the sha256 from the release lane's
+# <artifact>.sha256 sidecar. SKIP is acceptable only while the URL is private.
+source=(
+  "https://www.videorc.com/downloads/linux/Videorc-${pkgver}-linux-x64.AppImage"
+)
+sha256sums=('SKIP')
+
+package() {
+  cd "$srcdir"
+
+  # Extract the AppImage payload without FUSE: --appimage-extract makes the
+  # embedded runtime unpack its own squashfs. unsquashfs is a fallback if a
+  # future runtime refuses.
+  if ! ./Videorc-${pkgver}-linux-x64.AppImage --appimage-extract >/dev/null 2>&1; then
+    if command -v unsquashfs >/dev/null 2>&1; then
+      unsquashfs -q -d squashfs-root Videorc-${pkgver}-linux-x64.AppImage
+    else
+      msg 'Failed to extract the AppImage payload (no unsquashfs fallback).'
+      return 1
+    fi
+  fi
+
+  # The whole payload usr/ tree becomes /opt/videorc (lib/videorc holds the
+  # Electron app + resources; bin/videorc is the launcher symlink).
+  install -d "$pkgdir/opt/videorc"
+  cp -a squashfs-root/usr/. "$pkgdir/opt/videorc/"
+
+  # /usr/bin launcher and freedesktop integration.
+  install -dm755 "$pkgdir/usr/bin"
+  ln -s /opt/videorc/bin/videorc "$pkgdir/usr/bin/videorc"
+  install -Dm644 squashfs-root/usr/share/applications/videorc.desktop \
+    "$pkgdir/usr/share/applications/videorc.desktop"
+  install -d "$pkgdir/usr/share/icons/hicolor"
+  cp -a squashfs-root/usr/share/icons/hicolor/. "$pkgdir/usr/share/icons/hicolor/"
+  # AppStream metainfo ships in the payload at lib/videorc/resources/metainfo/.
+  install -Dm644 \
+    squashfs-root/usr/lib/videorc/resources/metainfo/dev.theorcdev.videorc.metainfo.xml \
+    "$pkgdir/usr/share/metainfo/dev.theorcdev.videorc.metainfo.xml"
+}

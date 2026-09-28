@@ -12,7 +12,7 @@ export type UpdaterEvent =
   | { type: 'progress'; percent: number }
   | { type: 'downloaded'; version: string }
   | { type: 'error'; message: string }
-  | { type: 'unsupported'; reason?: 'windows-feed-unpublished' }
+  | { type: 'unsupported'; reason?: 'windows-feed-unpublished' | 'linux-native-install' }
 
 // electron-updater surfaces an unpublished feed — no `latest*.yml` for this
 // build's platform/channel — as a 404 / "Cannot find channel" error. That is

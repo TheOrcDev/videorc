@@ -129,17 +129,39 @@ win:
 # FFmpeg pair (fetch-ffmpeg-linux.mjs verifies configure flags and the
 # h264_vaapi + libopenh264 encoder table) ride as extraResources, so the
 # packaged app resolves them from process.resourcesPath exactly like the
-# macOS and Windows builds. The icon is derived from icon.icns.
+# macOS and Windows builds. The icon is derived from icon.icns (and the
+# 512px build-resources/icon.png drives the hicolor set for deb/rpm/AUR).
+# The AppStream metainfo (packaging/linux/metainfo) ships in the package
+# payload; deb/rpm/AUR after-install steps install it to /usr/share/metainfo.
 #
-# Hardcode x64 in the AppImage filename. On Linux AppImage builds,
-# electron-builder expands ${arch} to x86_64, which produces
-# Videorc-<version>-linux-x86_64.AppImage and fails the Linux Alpha
-# release contract (Videorc-<version>-linux-x64.AppImage).
+# Hardcode x64 in the Linux filenames. On AppImage builds electron-builder
+# expands ${arch} to x86_64 and on deb/rpm to x86_64 too, which would fail
+# the Linux Alpha release contract (Videorc-<version>-linux-x64.*).
 linux:
   artifactName: ${productName}-${version}-${os}-x64.${ext}
   category: Video
+  packageCategory: video
   executableName: videorc
   maintainer: TheOrcDev
+  synopsis: AI-native recording and livestreaming studio for creators
+  description: >-
+    Videorc is an AI-native recording and livestreaming studio for creators:
+    screen and window capture, camera and microphone sources, recording,
+    multi-destination livestreaming, captions, and scene composition, all in
+    one desktop app.
+  # Registered recording/export containers only. MPEG-TS is an internal stream
+  # transport, not a saved artifact; extend when new output formats ship.
+  mimeTypes:
+    - video/mp4
+  desktop:
+    entry:
+      Name: Videorc
+      Comment: AI-native recording and livestreaming studio for creators
+      Categories: AudioVideo;Video;Audio;Recorder;
+      # Electron derives WM_CLASS from the app name (Videorc). Verify on the
+      # Ubuntu 24.04 box with xprop if the launcher grouping misbehaves.
+      StartupWMClass: Videorc
+      Terminal: false
   extraResources:
     - from: ../../target/release/videorc-backend
       to: videorc-backend
@@ -153,9 +175,53 @@ linux:
         - LICENSE.txt
         - SOURCE.txt
         - BUILD-CONFIG.txt
+    - from: ../../packaging/linux/metainfo
+      to: metainfo
+      filter:
+        - '*.xml'
   target:
     - dir
     - AppImage
+    - deb
+    - rpm
+
+# Ubuntu/Debian native package (port plan L6; baseline Ubuntu 24.04 — the t64
+# runtime lib names don't exist on older LTSes). Ships the same payload as the
+# AppImage plus /usr/bin/videorc, the hicolor icon set and the desktop entry.
+# The AppStream metainfo is copied into /usr/share/metainfo from the payload by
+# after-install.sh. Runtime libs mirror the release-lane install list; the
+# LGPL FFmpeg stays bundled (never a distro dependency). VAAPI drivers + the
+# desktop portal are recommendations, not hard deps: OpenH264 covers the
+# software fallback so the package must install without them.
+deb:
+  afterInstall: ../../packaging/linux/deb/after-install.sh
+  afterRemove: ../../packaging/linux/deb/after-remove.sh
+  priority: optional
+  depends:
+    - libgtk-3-0t64
+    - libnss3
+    - libasound2t64
+    - libatk-bridge2.0-0t64
+  recommends:
+    - libva2
+    - pipewire
+    - xdg-desktop-portal
+
+# Fedora/RHEL native package (plan 071). Config + CI structural validation;
+# install/launch acceptance stays blocked until a named Fedora box is recorded
+# in docs/linux-port-plan.md. Same payload, metainfo and bundling rules as deb.
+rpm:
+  afterInstall: ../../packaging/linux/rpm/after-install.sh
+  afterRemove: ../../packaging/linux/rpm/after-remove.sh
+  depends:
+    - gtk3
+    - nss
+    - alsa-lib
+    - at-spi2-core
+    - pipewire
+    - xdg-desktop-portal
+  recommends:
+    - libva
 
 # Install window, designed in Dmgly. The background already carries the
 # "Drag to Applications" text, the arrow and both label pills; Finder supplies

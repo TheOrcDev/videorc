@@ -60,6 +60,24 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+// Linux builds shipped through a distro package (deb/rpm/AUR, plan 071) are
+// updated by the distro package manager, not by the feed: latest-linux.yml is
+// intentionally AppImage-only, and DebUpdater/RpmUpdater would probe a feed
+// that never carries their artifacts. AppImage runs set APPIMAGE, so its
+// absence identifies a native install. Report the honest unsupported state in
+// Settings instead of hitting the feed.
+function isLinuxNativeInstall(): boolean {
+  return process.platform === 'linux' && !process.env.APPIMAGE
+}
+
+// Status to report when the updater must not run: explicit unsupported for
+// distro-managed Linux installs, plain unsupported otherwise.
+function blockedStatus(): UpdateStatus {
+  return isLinuxNativeInstall()
+    ? updateStatusFromEvent({ type: 'unsupported', reason: 'linux-native-install' })
+    : updateStatusFromEvent({ type: 'unsupported' })
+}
+
 // A caught updater failure becomes the benign 'unsupported' state when it is
 // just an unpublished feed (no channel for this platform yet); otherwise it is
 // a real, user-facing error.
@@ -312,6 +330,13 @@ export function initAutoUpdater(
     return
   }
 
+  // Distro packages manage their own updates; never probe the AppImage feed.
+  if (isLinuxNativeInstall()) {
+    delete process.env.VIDEORC_WINDOWS_PILOT_UPDATE_TOKEN
+    setStatus(updateStatusFromEvent({ type: 'unsupported', reason: 'linux-native-install' }))
+    return
+  }
+
   let backgroundUpdatesDisabled: boolean
   try {
     const startup = consumeWindowsUpdaterStartupConfig(process.env, process.platform)
@@ -396,8 +421,8 @@ export function registerUpdaterIpc(
   secureIpcHandle('updates:get-status', () => currentStatus)
 
   secureIpcHandle('updates:check', async (): Promise<UpdateStatus> => {
-    if (!app.isPackaged || updaterConfigurationBlocked) {
-      setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    if (!app.isPackaged || updaterConfigurationBlocked || isLinuxNativeInstall()) {
+      setStatus(blockedStatus())
       return currentStatus
     }
     try {
@@ -421,8 +446,8 @@ export function registerUpdaterIpc(
   })
 
   secureIpcHandle('updates:download', async (): Promise<UpdateStatus> => {
-    if (!app.isPackaged || updaterConfigurationBlocked) {
-      setStatus(updateStatusFromEvent({ type: 'unsupported' }))
+    if (!app.isPackaged || updaterConfigurationBlocked || isLinuxNativeInstall()) {
+      setStatus(blockedStatus())
       return currentStatus
     }
     try {
@@ -438,7 +463,7 @@ export function registerUpdaterIpc(
   // Quit, install, and relaunch. The renderer MUST block this while a capture is
   // live — never interrupt a recording.
   secureIpcHandle('updates:install', async () => {
-    if (!app.isPackaged || updaterConfigurationBlocked) {
+    if (!app.isPackaged || updaterConfigurationBlocked || isLinuxNativeInstall()) {
       return
     }
     try {

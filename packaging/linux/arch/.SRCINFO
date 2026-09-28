@@ -1,0 +1,21 @@
+pkgbase = videorc-bin
+	pkgdesc = AI-native recording and livestreaming studio for creators (binary release)
+	pkgver = 0.9.120
+	pkgrel = 1
+	url = https://www.videorc.com
+	install = videorc.install
+	arch = x86_64
+	license = AGPL-3.0-only
+	depends = gtk3
+	depends = nss
+	depends = alsa-lib
+	depends = at-spi2-core
+	depends = pipewire
+	depends = xdg-desktop-portal
+	optdepends = intel-media-driver: VAAPI hardware encoding on Intel GPUs
+	optdepends = mesa: VAAPI hardware encoding on AMD GPUs
+	optdepends = nvidia-vaapi-driver: VAAPI hardware encoding on NVIDIA GPUs
+	source = https://www.videorc.com/downloads/linux/Videorc-0.9.120-linux-x64.AppImage
+	sha256sums = SKIP
+
+pkgname = videorc-bin

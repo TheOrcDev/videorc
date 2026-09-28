@@ -179,9 +179,24 @@ Success looks like `compositorState=live`, `sourcePixelsPresent=true`, and
 (`isNative*` false); the proof path must remain `electron-proof-surface`.
 Do not enable AMD VAAPI / renderD129 for this smoke.
 
-## Packaged run (L6 / Plan 0008)
+## Packaged run (L6 / Plan 0008, distro packages Plan 071)
 
 `pnpm package:desktop:linux` builds an unsigned x64 AppImage after `package:backend`, `ffmpeg:fetch:linux`, and `scripts/preflight-linux-package.mjs`. Ubuntu 24.04 remains the named packaging box; ogre can produce the artifact for smoke. Dispatch `release-linux-alpha.yml` from protected `main` to store a private candidate. Public updater promotion and the videorc-web download button are still owed.
+
+`pnpm package:desktop:linux:dist` builds `AppImage + deb + rpm` in one
+electron-builder run. When a package exists,
+`pnpm validate:linux:dist [--format deb|rpm] [--artifact path]` checks the
+naming contract and payload (backend, bundled LGPL FFmpeg, metainfo, desktop
+entry, hicolor icons). The rpm is a config + CI structural gate only: install
+and launch acceptance is blocked until a named Fedora/RHEL box is recorded.
+
+On a native install (`deb`, `rpm`, or the AUR `videorc-bin` package) the
+in-app updater reports "Updates are managed by your package manager on this
+install" — `latest-linux.yml` is AppImage-only by design. To prove a packaged
+run's update posture, launch the installed app and check Settings →
+About & updates shows the unsupported `linux-native-install` copy, and confirm
+no update feed requests leave the process (no `APPIMAGE` env on a distro
+install).
 
 ## Verify gates that work on Linux
 

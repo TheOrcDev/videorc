@@ -12,7 +12,8 @@ import {
   classifyLinuxCandidateObjectHead,
   LinuxReleaseCandidateError,
   linuxCandidateIdentity,
-  linuxCandidatePrefix
+  linuxCandidatePrefix,
+  linuxDistPackageObjectDescriptors
 } from './linux-release-candidate.mjs'
 
 const sourceCommit = 'b'.repeat(40)
@@ -193,5 +194,67 @@ describe('Linux Alpha candidate storage', () => {
         error instanceof LinuxReleaseCandidateError &&
         error.code === 'insecure-candidate-storage-endpoint'
     )
+  })
+
+  // Plan 071: deb/rpm share the immutable candidate prefix but never enter
+  // release.json or latest-linux.yml, which stay AppImage-only.
+  function pendingManifest() {
+    return {
+      acceptanceRecordUrl: null,
+      acceptanceStatus: 'pending',
+      architecture: 'x64',
+      bundleVersion: '0.10.0',
+      channel: 'alpha',
+      displayVersion: '0.10.0 alpha 1',
+      filename,
+      knownIssuesUrl: 'https://www.videorc.com/linux-alpha',
+      minimumOS: 'Ubuntu 24.04 LTS or later',
+      objectKey: `releases/linux-alpha/0.10.0-alpha.1/${filename}`,
+      platform: 'linux',
+      product: 'Videorc',
+      releaseId: '0.10.0-alpha.1',
+      releasedAt: '2026-09-25T00:00:00.000Z',
+      releaseNotesUrl: 'https://www.videorc.com/releases/0.10.0-alpha.1',
+      sha256: 'a'.repeat(64),
+      signingStatus: 'unsigned',
+      sizeBytes: 12,
+      sourceCommit,
+      stage: 'candidate'
+    }
+  }
+
+  it('describes deb/rpm objects under the isolated candidate prefix', () => {
+    const descriptors = linuxDistPackageObjectDescriptors(pendingManifest(), ['deb', 'rpm'])
+    assert.equal(descriptors.length, 2)
+    const byLabel = Object.fromEntries(descriptors.map((item) => [item.label, item]))
+    const prefix = `candidates/linux-alpha/0.10.0-alpha.1/${sourceCommit}`
+    assert.equal(byLabel.deb.filename, 'Videorc-0.10.0-linux-x64.deb')
+    assert.equal(byLabel.deb.objectKey, `${prefix}/Videorc-0.10.0-linux-x64.deb`)
+    assert.equal(byLabel.deb.contentType, 'application/vnd.debian.binary-package')
+    assert.equal(byLabel.rpm.filename, 'Videorc-0.10.0-linux-x64.rpm')
+    assert.equal(byLabel.rpm.objectKey, `${prefix}/Videorc-0.10.0-linux-x64.rpm`)
+    assert.equal(byLabel.rpm.contentType, 'application/x-rpm')
+    assert.throws(
+      () => linuxDistPackageObjectDescriptors(pendingManifest(), ['flatpak']),
+      (error) =>
+        error instanceof LinuxReleaseCandidateError &&
+        error.code === 'unsupported-dist-format'
+    )
+  })
+
+  it('adds deb/rpm artifacts to the plan when distPackagePaths are given', async () => {
+    const seeded = await seed()
+    const debPath = join(seeded.releaseDir, 'Videorc-0.10.0-linux-x64.deb')
+    const rpmPath = join(seeded.releaseDir, 'Videorc-0.10.0-linux-x64.rpm')
+    await writeFile(debPath, 'fake-deb')
+    await writeFile(rpmPath, 'fake-rpm')
+    const plan = await buildLinuxCandidateStoragePlan({
+      ...seeded,
+      distPackagePaths: { deb: debPath, rpm: rpmPath }
+    })
+    const keys = plan.artifacts.map((artifact) => artifact.objectKey)
+    assert.ok(keys.includes(`${plan.prefix}/Videorc-0.10.0-linux-x64.deb`))
+    assert.ok(keys.includes(`${plan.prefix}/Videorc-0.10.0-linux-x64.rpm`))
+    assert.ok(keys.every((key) => key.startsWith(plan.prefix)))
   })
 })
