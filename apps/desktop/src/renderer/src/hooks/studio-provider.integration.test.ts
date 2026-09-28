@@ -92,7 +92,7 @@ import {
   type StudioCoreContextValue,
   type StudioRecordingContextValue
 } from './use-studio'
-import { DEFAULT_BASIC_ENTITLEMENTS, PREMIUM_STREAMING_LIMITS } from '../lib/entitlements'
+import { DEFAULT_BASIC_ENTITLEMENTS, STREAMING_LIMITS } from '../lib/entitlements'
 import {
   defaultCaptureConfig,
   STORAGE_KEYS,
@@ -134,7 +134,7 @@ const premiumEntitlements = {
   })),
   limits: {
     ...DEFAULT_BASIC_ENTITLEMENTS.limits,
-    streaming: PREMIUM_STREAMING_LIMITS
+    streaming: STREAMING_LIMITS
   }
 }
 
@@ -4555,7 +4555,7 @@ describe('real StudioProvider lifecycle', () => {
     )
   })
 
-  it('gates the provider-resolved profile for Basic Twitch/X and high-rate YouTube', () => {
+  it('allows the provider-resolved profile on Basic — streaming quality is free (Plan 075)', () => {
     for (const platform of ['twitch', 'x'] as const) {
       const captureConfig = {
         ...defaultCaptureConfig,
@@ -4579,7 +4579,13 @@ describe('real StudioProvider lifecycle', () => {
       ).toEqual({ allowed: true })
     }
 
-    for (const preset of ['stream-youtube-1080p30', 'stream-youtube-1080p60'] as const) {
+    // The higher-rate YouTube profiles used to be Premium-only; since Plan
+    // 075 the whole streaming-quality ceiling is shared by every tier.
+    for (const preset of [
+      'stream-youtube-1080p30',
+      'stream-youtube-1080p60',
+      'stream-youtube-4k30'
+    ] as const) {
       const captureConfig = {
         ...defaultCaptureConfig,
         recordEnabled: false,
@@ -4599,11 +4605,7 @@ describe('real StudioProvider lifecycle', () => {
 
       expect(
         resolvedStreamingProfileEntitlementGate(captureConfig, DEFAULT_BASIC_ENTITLEMENTS)
-      ).toMatchObject({
-        allowed: false,
-        featureId: 'livestreaming',
-        reason: expect.stringContaining('Videorc Premium')
-      })
+      ).toEqual({ allowed: true })
     }
   })
 

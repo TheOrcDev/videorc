@@ -2,9 +2,8 @@ import { describe, expect, it } from 'vitest'
 
 import type { EntitlementsSnapshot } from './backend'
 import {
-  BASIC_STREAMING_LIMITS,
   DEFAULT_BASIC_ENTITLEMENTS,
-  PREMIUM_STREAMING_LIMITS,
+  STREAMING_LIMITS,
   STREAMING_MAX_DESTINATIONS,
   entitlementCapability,
   entitlementDisabledReason,
@@ -68,7 +67,7 @@ describe('entitlements', () => {
     expect(entitlementDisabledReason(null, 'local-recording')).toBeNull()
   })
 
-  it('treats Basic fallback as full-quality 4K recording plus free HD multistreaming', () => {
+  it('treats Basic fallback as full-quality 4K recording, streaming and multistreaming', () => {
     expect(isFeatureEntitled(null, 'livestreaming')).toBe(true)
     expect(entitlementDisabledReason(null, 'livestreaming')).toBeNull()
     // Multistreaming is free for every plan; a missing snapshot must never
@@ -83,31 +82,24 @@ describe('entitlements', () => {
     expect(entitlementDisabledReason(null, 'noise-cleanup')).toBe(
       'Noise Cleanup requires Videorc Premium.'
     )
-    // Recording is free at full quality — the website promises free 4K
-    // local recording; only streaming quality is tiered.
+    // Recording AND streaming are free at full quality — the website promises
+    // free 4K recording, and streaming quality went free with Plan 075. The
+    // tiers differ only in cloud features.
     expect(DEFAULT_BASIC_ENTITLEMENTS.limits.recording).toMatchObject({
       maxWidth: 3840,
       maxHeight: 2160,
       maxFps: 60
     })
     expect(STREAMING_MAX_DESTINATIONS).toBe(5)
-    expect(DEFAULT_BASIC_ENTITLEMENTS.limits.streaming).toMatchObject({
-      maxWidth: 1920,
-      maxHeight: 1080,
-      maxFps: 30,
-      maxBitrateKbps: 6000,
-      maxDestinations: STREAMING_MAX_DESTINATIONS
-    })
-    expect(DEFAULT_BASIC_ENTITLEMENTS.limits.streaming).toEqual(BASIC_STREAMING_LIMITS)
-    expect(PREMIUM_STREAMING_LIMITS).toEqual({
+    expect(STREAMING_LIMITS).toEqual({
       maxWidth: 3840,
       maxHeight: 2160,
       maxFps: 60,
       maxBitrateKbps: 30000,
       maxDestinations: STREAMING_MAX_DESTINATIONS
     })
-    // One shared cap: the destination count is not a Premium boundary.
-    expect(PREMIUM_STREAMING_LIMITS.maxDestinations).toBe(BASIC_STREAMING_LIMITS.maxDestinations)
+    // One shared ceiling: streaming quality is not a Premium boundary.
+    expect(DEFAULT_BASIC_ENTITLEMENTS.limits.streaming).toEqual(STREAMING_LIMITS)
   })
 
   it('treats developer override state as entitled', () => {

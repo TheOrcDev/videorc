@@ -11,14 +11,19 @@ describe('premium upgrade helpers', () => {
     expect(VIDEORC_PREMIUM_URL).toBe('https://www.videorc.com/premium')
   })
 
-  // The still-Premium streaming-quality reason (videoProfileEntitlementGate);
-  // multistreaming is free, so its destination-cap copy must NOT match.
-  const premiumProfileReason =
-    '3840x2160 @ 30 FPS requires Videorc Premium. Your streaming limit is 1920x1080 @ 30 FPS and 6000 kbps.'
+  // A still-Premium reason (cloud features only since Plan 075). Streaming
+  // quality and the multistreaming destination cap are free pipeline limits,
+  // so their copy must NOT match the upgrade sniff.
+  const premiumCloudReason = 'Cloud AI is a Videorc Premium feature.'
+  const streamingLimitReason =
+    '3840x2160 @ 60 FPS exceeds the streaming limit. Your streaming limit is 3840x2160 @ 60 FPS and 30000 kbps.'
 
   it('detects premium blocker copy', () => {
-    expect(isPremiumUpgradeMessage(premiumProfileReason)).toBe(true)
-    expect(isPremiumUpgradeMessage('Cloud AI is a Videorc Premium feature.')).toBe(true)
+    expect(isPremiumUpgradeMessage(premiumCloudReason)).toBe(true)
+    expect(isPremiumUpgradeMessage('Noise Cleanup requires Videorc Premium.')).toBe(true)
+    // Streaming quality is free (Plan 075): its over-limit copy must never
+    // read as an upgrade prompt.
+    expect(isPremiumUpgradeMessage(streamingLimitReason)).toBe(false)
     expect(isPremiumUpgradeMessage('No streaming destination is ready.')).toBe(false)
     expect(isPremiumUpgradeMessage('You can stream to up to 5 destinations at once.')).toBe(false)
     expect(
@@ -42,10 +47,10 @@ describe('premium upgrade helpers', () => {
           },
           {
             severity: 'error',
-            message: premiumProfileReason
+            message: premiumCloudReason
           }
         ]
       })
-    ).toBe(premiumProfileReason)
+    ).toBe(premiumCloudReason)
   })
 })

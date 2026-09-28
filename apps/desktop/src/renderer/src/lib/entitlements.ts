@@ -8,20 +8,18 @@ import type {
 /**
  * Multistreaming is free for every plan (mirror of the backend's
  * STREAMING_MAX_DESTINATIONS): one shared destination cap for Basic, Premium
- * and Developer. Only streaming QUALITY is tiered.
+ * and Developer.
  */
 export const STREAMING_MAX_DESTINATIONS = 5
 
-export const BASIC_STREAMING_LIMITS: StreamingEntitlementLimits = {
-  maxWidth: 1920,
-  maxHeight: 1080,
-  maxFps: 30,
-  maxBitrateKbps: 6000,
-  maxDestinations: STREAMING_MAX_DESTINATIONS
-}
-
-/** Mirrors the backend's Premium and Developer streaming entitlement ceiling. */
-export const PREMIUM_STREAMING_LIMITS: StreamingEntitlementLimits = {
+/**
+ * Streaming quality is free for every plan too (Plan 075, 2026-09-28): one
+ * shared ceiling for Basic, Premium and Developer, mirroring the backend's
+ * STREAMING_MAX_* constants. The rectangular 4K×60 ceiling does not make 4K60
+ * a supported stream profile — profile validation still rejects it, and true
+ * 4K remains the exact YouTube 4K30 profile.
+ */
+export const STREAMING_LIMITS: StreamingEntitlementLimits = {
   maxWidth: 3840,
   maxHeight: 2160,
   maxFps: 60,
@@ -72,7 +70,7 @@ export const DEFAULT_BASIC_ENTITLEMENTS: EntitlementsSnapshot = {
       maxHeight: 2160,
       maxFps: 60
     },
-    streaming: BASIC_STREAMING_LIMITS
+    streaming: STREAMING_LIMITS
   }
 }
 
