@@ -460,4 +460,17 @@ describe('stream activity', () => {
     )
     expect(thankYouDraft(failed)).toBe('')
   })
+
+  // Plan 071, S5: only the login mentions anyone.
+  it('thanks a follower by their handle, and shows their display name', () => {
+    const [named] = activityItems([
+      row('twitch', 'クールユーザー', 'follow', { kind: 'follow', handle: 'cool_user' }, 'followed')
+    ])
+    expect(named.name).toBe('クールユーザー')
+    expect(named.handle).toBe('cool_user')
+    expect(thankYouDraft(named)).toBe('Thanks for the follow, @cool_user!')
+    // An older row without a handle falls back to the name.
+    const [legacy] = activityItems([fixtures.follow])
+    expect(thankYouDraft(legacy)).toBe('Thanks for the follow, @Cool_User!')
+  })
 })

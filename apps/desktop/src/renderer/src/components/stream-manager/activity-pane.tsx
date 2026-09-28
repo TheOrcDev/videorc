@@ -91,7 +91,13 @@ export function activityCapabilityNote(
 ): string | null {
   const notes: string[] = []
   if (platforms.includes('x')) {
-    notes.push("X doesn't share who followed or tips, so new X followers show as a count.")
+    // X names each follower while its follow subscription is live (plan 071,
+    // S4); it never shares tips.
+    const x = audience?.platforms.find((entry) => entry.platform === 'x')
+    const named = Boolean(x?.namedFollowsSince) && !x?.namedFollowsUntil
+    notes.push(
+      named ? "X doesn't share tips." : "X doesn't share tips. New X followers show as a count."
+    )
   }
   if (platforms.includes('kick')) {
     notes.push("Kick shows each new follow but doesn't share a follower total.")

@@ -189,8 +189,13 @@ pub enum LiveChatEventDetails {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         color: Option<String>,
     },
-    /// A new follower.
-    Follow,
+    /// A new follower. `handle` is the @-mentionable login (Twitch
+    /// `user_login`, X and Kick `username`) when it differs from, or is
+    /// missing from, the display name (plan 071, S5).
+    Follow {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        handle: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -3050,7 +3055,9 @@ fn fake_events(
                 "follow",
                 "new_friend",
                 LiveChatEventType::Follow,
-                LiveChatEventDetails::Follow,
+                LiveChatEventDetails::Follow {
+                    handle: Some("new_friend".to_string()),
+                },
                 "new_friend followed",
                 None,
             ),
@@ -3060,7 +3067,9 @@ fn fake_events(
                 "channel.followed",
                 "kick_fan",
                 LiveChatEventType::Follow,
-                LiveChatEventDetails::Follow,
+                LiveChatEventDetails::Follow {
+                    handle: Some("kick_fan".to_string()),
+                },
                 "kick_fan followed",
                 None,
             ),
@@ -3160,6 +3169,25 @@ mod tests {
     use crate::storage::Database;
     use crate::streaming::PlatformAccountStatus;
     use tokio::sync::broadcast;
+
+    // Plan 071, S5: follow rows stored before the handle existed still load,
+    // and a follow without one keeps its exact old wire shape.
+    #[test]
+    fn follow_details_keep_their_wire_shape_and_read_old_rows() {
+        let old: LiveChatEventDetails = serde_json::from_str(r#"{"kind":"follow"}"#).unwrap();
+        assert_eq!(old, LiveChatEventDetails::Follow { handle: None });
+        assert_eq!(
+            serde_json::to_value(LiveChatEventDetails::Follow { handle: None }).unwrap(),
+            serde_json::json!({ "kind": "follow" })
+        );
+        assert_eq!(
+            serde_json::to_value(LiveChatEventDetails::Follow {
+                handle: Some("cool_user".to_string())
+            })
+            .unwrap(),
+            serde_json::json!({ "kind": "follow", "handle": "cool_user" })
+        );
+    }
 
     fn test_state() -> AppState {
         let (events, _) = broadcast::channel(64);

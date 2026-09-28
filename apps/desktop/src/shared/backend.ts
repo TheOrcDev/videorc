@@ -4167,7 +4167,8 @@ export type LiveChatEventDetails =
   | { kind: 'kicks'; amount: number; giftName?: string }
   | { kind: 'raid'; viewerCount: number }
   | { kind: 'announcement'; color?: string }
-  | { kind: 'follow' }
+  /** `handle`: the @-mentionable login when the platform sent one (plan 071). */
+  | { kind: 'follow'; handle?: string }
 
 /** The message a chat message replies to, when the platform threads replies. */
 export interface LiveChatReply {

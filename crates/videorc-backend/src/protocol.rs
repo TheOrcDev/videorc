@@ -5591,7 +5591,10 @@ mod tests {
             Some(LiveChatEventDetails::Cheer { bits: 1500 })
         );
         assert_eq!(messages[5].event_type, LiveChatEventType::Follow);
-        assert_eq!(messages[5].details, Some(LiveChatEventDetails::Follow));
+        assert!(matches!(
+            messages[5].details,
+            Some(LiveChatEventDetails::Follow { .. })
+        ));
         assert_eq!(messages[6].event_type, LiveChatEventType::Paid);
         assert_eq!(
             messages[6].details,

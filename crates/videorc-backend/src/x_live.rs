@@ -1339,6 +1339,12 @@ pub async fn send_broadcast_chat_message(
 }
 
 pub const X_BROADCAST_CHAT_EVENT_TYPE: &str = "broadcast.chat";
+/// Someone followed (inbound) or the user followed someone (outbound);
+/// Videorc subscribes inbound only (plan 071, S4).
+pub const X_FOLLOW_EVENT_TYPE: &str = "follow.follow";
+/// A follow subscription lapses this long after its last refresh, so follows
+/// stop reaching the relay soon after a stream ends even if the app quits.
+pub const X_FOLLOW_SUBSCRIPTION_TTL: chrono::Duration = chrono::Duration::hours(2);
 const X_VERIFY_CREDENTIALS_PATH: &str = "/2/users/me";
 
 /// An X Activity API call failed. `rejected` means X refused the credentials
@@ -1504,6 +1510,19 @@ fn broadcast_chat_subscriptions(
     list: &serde_json::Value,
     user_id: &str,
 ) -> Vec<(String, Option<String>)> {
+    activity_subscriptions(list, X_BROADCAST_CHAT_EVENT_TYPE, user_id)
+        .into_iter()
+        .map(|(id, webhook_id, _)| (id, webhook_id))
+        .collect()
+}
+
+/// This user's subscriptions of one event type: id, webhook id, and the
+/// `direction` qualifier (either spelling XAA echoes).
+fn activity_subscriptions(
+    list: &serde_json::Value,
+    event_type: &str,
+    user_id: &str,
+) -> Vec<(String, Option<String>, Option<String>)> {
     list.get("data")
         .and_then(|data| data.as_array())
         .into_iter()
@@ -1512,7 +1531,7 @@ fn broadcast_chat_subscriptions(
             subscription
                 .get("event_type")
                 .and_then(|value| value.as_str())
-                == Some(X_BROADCAST_CHAT_EVENT_TYPE)
+                == Some(event_type)
                 && subscription
                     .pointer("/filter/user_id")
                     .and_then(|value| value.as_str())
@@ -1524,7 +1543,12 @@ fn broadcast_chat_subscriptions(
                 .get("webhook_id")
                 .and_then(|value| value.as_str())
                 .map(ToOwned::to_owned);
-            Some((id, webhook_id))
+            let direction = subscription
+                .pointer("/filter/qualifiers/direction")
+                .or_else(|| subscription.pointer("/filter/direction"))
+                .and_then(|value| value.as_str())
+                .map(ToOwned::to_owned);
+            Some((id, webhook_id, direction))
         })
         .collect()
 }
@@ -1593,6 +1617,92 @@ pub async fn ensure_broadcast_chat_subscription(
             rejected: false,
             message: "X Activity API did not return a subscription id.".to_string(),
         })
+}
+
+/// Make sure one inbound `follow.follow` subscription delivers this user's new
+/// followers to the relay webhook until `expires_at` (plan 071, S4). Unlike
+/// chat it lapses on its own: follows happen off stream too, and the relay
+/// should only see them around a stream. Posting the same subscription again
+/// is XAA's refresh, so a live connector calls this periodically. Any follow
+/// subscription on another webhook or without the inbound qualifier is
+/// removed first.
+pub async fn ensure_follow_subscription(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+    webhook_id: &str,
+    expires_at: chrono::DateTime<chrono::Utc>,
+) -> Result<(), XActivityApiError> {
+    let url = |path: &str| {
+        endpoint(base_url, path).map_err(|error| XActivityApiError {
+            rejected: false,
+            message: format!("X Activity API endpoint could not be built: {error}"),
+        })
+    };
+    let list = send_x_activity_request(
+        client,
+        XActivityAuth::User(credentials),
+        Method::GET,
+        url("/2/activity/subscriptions")?,
+        None,
+    )
+    .await?;
+    let stale: Vec<String> =
+        activity_subscriptions(&list, X_FOLLOW_EVENT_TYPE, &credentials.user_id)
+            .into_iter()
+            .filter(|(_, existing_webhook, direction)| {
+                existing_webhook.as_deref() != Some(webhook_id)
+                    || direction.as_deref() != Some("inbound")
+            })
+            .map(|(subscription_id, _, _)| subscription_id)
+            .collect();
+    delete_x_activity_subscriptions(client, credentials, base_url, &stale).await?;
+    send_x_activity_request(
+        client,
+        XActivityAuth::User(credentials),
+        Method::POST,
+        url("/2/activity/subscriptions")?,
+        Some(json!({
+            "event_type": X_FOLLOW_EVENT_TYPE,
+            "filter": {
+                "user_id": credentials.user_id,
+                "qualifiers": { "direction": "inbound" },
+            },
+            "webhook_id": webhook_id,
+            "tag": "videorc-follows",
+            "expires_at": expires_at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+        })),
+    )
+    .await?;
+    Ok(())
+}
+
+/// Remove this user's `follow.follow` subscriptions (X disconnect).
+pub async fn delete_follow_subscriptions(
+    client: &reqwest::Client,
+    credentials: &XLivestreamCredentials,
+    base_url: &str,
+) -> Result<usize, XActivityApiError> {
+    let url =
+        endpoint(base_url, "/2/activity/subscriptions").map_err(|error| XActivityApiError {
+            rejected: false,
+            message: format!("X Activity API endpoint could not be built: {error}"),
+        })?;
+    let list = send_x_activity_request(
+        client,
+        XActivityAuth::User(credentials),
+        Method::GET,
+        url,
+        None,
+    )
+    .await?;
+    let subscription_ids: Vec<String> =
+        activity_subscriptions(&list, X_FOLLOW_EVENT_TYPE, &credentials.user_id)
+            .into_iter()
+            .map(|(subscription_id, _, _)| subscription_id)
+            .collect();
+    delete_x_activity_subscriptions(client, credentials, base_url, &subscription_ids).await?;
+    Ok(subscription_ids.len())
 }
 
 /// Remove this user's `broadcast.chat` subscriptions (X disconnect). Returns

@@ -808,7 +808,13 @@ fn normalize_follow(
     message.author_id = Some(user_id);
     message.author_name = name;
     message.event_type = LiveChatEventType::Follow;
-    message.details = Some(LiveChatEventDetails::Follow);
+    message.details = Some(LiveChatEventDetails::Follow {
+        handle: event["user_login"]
+            .as_str()
+            .map(str::trim)
+            .filter(|login| !login.is_empty())
+            .map(ToOwned::to_owned),
+    });
     message.raw_provider_type = Some("channel.follow".to_string());
     Some(message)
 }
@@ -1857,7 +1863,12 @@ mod tests {
         )
         .expect("follow row");
         assert_eq!(row.event_type, LiveChatEventType::Follow);
-        assert_eq!(row.details, Some(LiveChatEventDetails::Follow));
+        assert_eq!(
+            row.details,
+            Some(LiveChatEventDetails::Follow {
+                handle: Some("cool_user".to_string())
+            })
+        );
         assert_eq!(row.author_name, "Cool_User");
         assert_eq!(row.author_id.as_deref(), Some("1234"));
         assert_eq!(row.message_text, "Cool_User followed");

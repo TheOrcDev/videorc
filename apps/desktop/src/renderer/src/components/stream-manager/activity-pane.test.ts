@@ -2,7 +2,11 @@ import { createElement } from 'react'
 import { renderToStaticMarkup } from 'react-dom/server'
 import { describe, expect, it } from 'vitest'
 
-import { ActivityPane, activityRowShowsPerson } from '@/components/stream-manager/activity-pane'
+import {
+  ActivityPane,
+  activityCapabilityNote,
+  activityRowShowsPerson
+} from '@/components/stream-manager/activity-pane'
 import type { LiveChatProviderState } from '@/lib/backend'
 import type { ActivityItem } from '@/lib/stream-activity'
 
@@ -176,5 +180,31 @@ describe('ActivityPane Show who followed', () => {
   it('hides it once the permission is granted, or when the window cannot act', () => {
     expect(render(true, true)).not.toContain('activity-follow-names')
     expect(render(false, false)).not.toContain('activity-follow-names')
+  })
+})
+
+// Plan 071, S4: X names followers while its follow subscription is live.
+describe('activityCapabilityNote for X', () => {
+  const note = (namedFollowsSince?: string, namedFollowsUntil?: string) =>
+    activityCapabilityNote(['x'], {
+      sessionId: 's',
+      updatedAt: '2026-09-28T10:00:00Z',
+      platforms: [
+        {
+          platform: 'x',
+          metric: 'followers',
+          capability: 'available',
+          ...(namedFollowsSince ? { namedFollowsSince } : {}),
+          ...(namedFollowsUntil ? { namedFollowsUntil } : {})
+        }
+      ]
+    })
+
+  it('says follows are a count only while X is not naming them', () => {
+    expect(note()).toBe("X doesn't share tips. New X followers show as a count.")
+    expect(note('2026-09-28T10:00:00Z')).toBe("X doesn't share tips.")
+    expect(note('2026-09-28T10:00:00Z', '2026-09-28T10:30:00Z')).toBe(
+      "X doesn't share tips. New X followers show as a count."
+    )
   })
 })

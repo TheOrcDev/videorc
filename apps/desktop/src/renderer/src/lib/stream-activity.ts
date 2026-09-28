@@ -60,6 +60,9 @@ export interface ActivityItem {
   /** Follows the platform counted but never named (X, or Twitch without
    * the follow scope): the row thanks everyone instead of one viewer. */
   unnamed?: boolean
+  /** The follower's @-mentionable login (plan 071, S5); the row still shows
+   * the display name, but "Thank in chat" mentions this. */
+  handle?: string
 }
 
 export interface TipTotal {
@@ -221,7 +224,14 @@ function itemFromMessage(message: LiveChatMessage): ActivityItem | null {
       : undefined
   switch (details.kind) {
     case 'follow':
-      return { ...base, kind: 'follow', filter: 'follows', line: 'Followed', short: 'Follow' }
+      return {
+        ...base,
+        kind: 'follow',
+        filter: 'follows',
+        line: 'Followed',
+        short: 'Follow',
+        ...(details.handle?.trim() ? { handle: details.handle.trim() } : {})
+      }
     case 'subscription':
       return {
         ...base,
@@ -513,7 +523,10 @@ export function chatActivity(
 /** The action text "Thank in chat" prefills for an activity row. */
 export function thankYouDraft(item: ActivityItem): string {
   if (item.unnamed) return 'Thanks for the follows, and welcome in!'
-  const name = item.name.startsWith('@') ? item.name : `@${item.name}`
+  // A display name can differ from the login (Twitch casing or CJK names),
+  // and only the login mentions anyone.
+  const mention = item.handle ?? item.name
+  const name = mention.startsWith('@') ? mention : `@${mention}`
   switch (item.kind) {
     case 'follow':
       return `Thanks for the follow, ${name}!`

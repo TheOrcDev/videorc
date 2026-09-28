@@ -10,13 +10,16 @@
 //!    `GET /2/users/me` header leaves the machine, never the token);
 //! 2. make sure one `broadcast.chat` subscription points at the relay webhook
 //!    (OAuth 1.0a user context, the "Authorize X Live" credentials);
-//! 3. long-poll the relay for this broadcast's messages.
+//! 3. long-poll the relay for this broadcast's messages, and the account's
+//!    new followers: an inbound `follow.follow` subscription that lapses on
+//!    its own and is refreshed while the stream runs (plan 071, S4).
 //!
 //! The legacy Periscope WebSocket handoff this replaced was shut off by X: the
 //! socket closed right after subscribe on every session and never delivered a
 //! message. Sending lives in `x_live::send_broadcast_chat_message`.
 
-use std::time::Duration;
+use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,8 +27,8 @@ use serde_json::json;
 use tokio::time::sleep;
 
 use crate::live_chat::{
-    LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState, live_chat_message_id,
-    set_provider_and_emit, try_deliver_message,
+    LiveChatEventDetails, LiveChatEventType, LiveChatMessage, LiveChatProviderConnectionState,
+    live_chat_message_id, set_provider_and_emit, try_deliver_message,
 };
 use crate::live_chat_persistence::LiveChatPersistenceFailure;
 use crate::state::AppState;
@@ -55,6 +58,13 @@ const MIN_RECONNECT_BACKOFF_MS: u64 = 10;
 const MAX_RECONNECT_BACKOFF_MS: u64 = 30_000;
 #[cfg(test)]
 const MAX_RECONNECT_BACKOFF_MS: u64 = 40;
+
+/// How often a live connector extends the follow subscription's
+/// `expires_at` (`X_FOLLOW_SUBSCRIPTION_TTL` ahead).
+#[cfg(not(test))]
+const FOLLOW_SUBSCRIPTION_REFRESH: Duration = Duration::from_secs(30 * 60);
+#[cfg(test)]
+const FOLLOW_SUBSCRIPTION_REFRESH: Duration = Duration::from_millis(50);
 
 #[cfg(not(test))]
 const DEFAULT_X_API_BASE_URL: &str = crate::x_live::DEFAULT_API_BASE_URL;
@@ -118,7 +128,12 @@ struct RelayPage {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RelayEvent {
+    /// `follow` for a new follower (plan 071); absent on chat rows.
+    #[serde(default)]
+    kind: Option<String>,
     message_id: String,
+    /// Chat only; a follow row has none.
+    #[serde(default)]
     text: String,
     #[serde(default)]
     is_subscriber: bool,
@@ -211,6 +226,10 @@ pub async fn run_x_chat_connector(
 
     let mut failed_attempts = 0;
     let mut backoff_ms = MIN_RECONNECT_BACKOFF_MS;
+    // One row per follower per stream, even across relay reconnects and an
+    // unfollow followed by a refollow.
+    let mut seen_followers = HashSet::new();
+    let mut follows_live = false;
     loop {
         let mut reached_ready = false;
         let error = match run_x_chat_session(
@@ -219,6 +238,8 @@ pub async fn run_x_chat_connector(
             session_generation,
             &config,
             &mut reached_ready,
+            &mut seen_followers,
+            &mut follows_live,
         )
         .await
         {
@@ -249,6 +270,9 @@ pub async fn run_x_chat_connector(
                 .map(ToString::to_string)
         });
         if let Some(message) = terminal_message {
+            if follows_live {
+                crate::audience::set_named_follows(&state, &session_id, StreamPlatform::X, false);
+            }
             report_failure(&state, &session_id, &message);
             set_provider_and_emit(
                 &state,
@@ -313,6 +337,8 @@ async fn run_x_chat_session(
     session_generation: u64,
     config: &XChatConfig,
     reached_ready: &mut bool,
+    seen_followers: &mut HashSet<String>,
+    follows_live: &mut bool,
 ) -> Result<()> {
     ensure_active_session(state, session_id, session_generation).await?;
     let session_token = config
@@ -356,6 +382,16 @@ async fn run_x_chat_session(
     })?;
     ensure_active_session(state, session_id, session_generation).await?;
 
+    // Follows are extra: a refusal never costs the chat (plan 071, S4).
+    let follows = FollowSubscription {
+        client: &relay.http,
+        credentials: &credentials,
+        base_url: x_api_base_url,
+        webhook_id: &binding.webhook_id,
+    };
+    follows.refresh(state, session_id, follows_live).await;
+    let mut follows_refreshed_at = Instant::now();
+
     // The first read carries no cursor: the relay answers "from now" so a new
     // stream never replays a previous broadcast's backlog.
     let mut cursor = relay.read(None, &config.broadcast_id).await?.cursor;
@@ -373,6 +409,10 @@ async fn run_x_chat_session(
     *reached_ready = true;
 
     loop {
+        if follows_refreshed_at.elapsed() >= FOLLOW_SUBSCRIPTION_REFRESH {
+            follows.refresh(state, session_id, follows_live).await;
+            follows_refreshed_at = Instant::now();
+        }
         let page = relay.read(Some(&cursor), &config.broadcast_id).await?;
         ensure_active_session(state, session_id, session_generation).await?;
         for event in page.events {
@@ -381,11 +421,58 @@ async fn run_x_chat_session(
             else {
                 continue;
             };
+            if chat_message.event_type == LiveChatEventType::Follow
+                && let Some(follower_id) = chat_message.author_id.clone()
+                && !seen_followers.insert(follower_id)
+            {
+                continue;
+            }
             deliver_durably(state, session_id, session_generation, config, chat_message).await?;
         }
         // Advance only after every message of the page is durable: a failure
         // above re-reads the same page, and message ids de-duplicate it.
         cursor = page.cursor;
+    }
+}
+
+/// The account's inbound `follow.follow` subscription (plan 071, S4).
+struct FollowSubscription<'a> {
+    client: &'a reqwest::Client,
+    credentials: &'a XLivestreamCredentials,
+    base_url: &'a str,
+    webhook_id: &'a str,
+}
+
+impl FollowSubscription<'_> {
+    /// Creates or extends the subscription and tells the audience whether X
+    /// follows are named from now on. A failure is logged (at most once per
+    /// refresh interval) and leaves X follows as counts.
+    async fn refresh(&self, state: &AppState, session_id: &str, follows_live: &mut bool) {
+        let expires_at = chrono::Utc::now() + crate::x_live::X_FOLLOW_SUBSCRIPTION_TTL;
+        let live = match crate::x_live::ensure_follow_subscription(
+            self.client,
+            self.credentials,
+            self.base_url,
+            self.webhook_id,
+            expires_at,
+        )
+        .await
+        {
+            Ok(()) => true,
+            Err(error) => {
+                state.emit_log(
+                    "warn",
+                    format!(
+                        "X follows will show as a count: the follow subscription failed ({error})."
+                    ),
+                );
+                false
+            }
+        };
+        if live != *follows_live {
+            *follows_live = live;
+            crate::audience::set_named_follows(state, session_id, StreamPlatform::X, live);
+        }
     }
 }
 
@@ -480,6 +567,9 @@ impl RelayClient {
         let mut query = vec![
             ("broadcastId", broadcast_id.to_string()),
             ("waitMs", RELAY_READ_WAIT_MS.to_string()),
+            // New followers ride the same page (plan 071); the relay leaves
+            // them out for desktops that do not ask.
+            ("include", "follows".to_string()),
         ];
         if let Some(after) = after {
             query.push(("after", after.to_string()));
@@ -537,8 +627,8 @@ impl RelayClient {
     }
 }
 
-/// Best-effort cleanup when the user disconnects X: drop the XAA subscription
-/// and the relay binding so no chat keeps flowing for a disconnected account.
+/// Best-effort cleanup when the user disconnects X: drop the XAA subscriptions
+/// (chat and follows) and the relay binding so no chat keeps flowing for a disconnected account.
 /// `credentials` must be captured before the local token pair is deleted.
 pub async fn forget_x_chat_relay(state: AppState, credentials: XLivestreamCredentials) {
     let client = reqwest::Client::new();
@@ -552,6 +642,18 @@ pub async fn forget_x_chat_relay(state: AppState, credentials: XLivestreamCreden
         state.emit_log(
             "warn",
             format!("Could not remove the X live chat subscription: {error}"),
+        );
+    }
+    if let Err(error) = crate::x_live::delete_follow_subscriptions(
+        &client,
+        &credentials,
+        crate::x_live::DEFAULT_API_BASE_URL,
+    )
+    .await
+    {
+        state.emit_log(
+            "warn",
+            format!("Could not remove the X follow subscription: {error}"),
         );
     }
     let Some(session_token) = crate::account::stored_session_token() else {
@@ -610,6 +712,20 @@ fn relay_event_to_message(
     target_id: Option<&str>,
 ) -> Option<LiveChatMessage> {
     let provider_message_id = non_empty(Some(event.message_id))?;
+    match event.kind.as_deref() {
+        None | Some("chat") => {}
+        Some("follow") => {
+            return follow_event_to_message(
+                event.author,
+                provider_message_id,
+                event.received_at,
+                session_id,
+                target_id,
+            );
+        }
+        // A later relay kind must never break this desktop.
+        Some(_) => return None,
+    }
     if event.text.trim().is_empty() {
         return None;
     }
@@ -656,6 +772,51 @@ fn relay_event_to_message(
     })
 }
 
+/// A new X follower as an Activity row; it never shows in the chat list.
+fn follow_event_to_message(
+    author: RelayAuthor,
+    provider_message_id: String,
+    received_at: Option<String>,
+    session_id: &str,
+    target_id: Option<&str>,
+) -> Option<LiveChatMessage> {
+    let author_id = non_empty(author.id)?;
+    let username = non_empty(author.username);
+    let author_name = non_empty(author.name)
+        .or_else(|| username.clone())
+        .unwrap_or_else(|| "X user".to_string());
+    let now = chrono::Utc::now().to_rfc3339();
+    let provider_message_id = format!("follow:{provider_message_id}");
+    Some(LiveChatMessage {
+        id: live_chat_message_id(
+            session_id,
+            StreamPlatform::X,
+            target_id,
+            &provider_message_id,
+        ),
+        provider_message_id,
+        platform: StreamPlatform::X,
+        target_id: target_id.map(ToOwned::to_owned),
+        session_id: session_id.to_string(),
+        author_id: Some(author_id),
+        message_text: format!("{author_name} followed"),
+        author_name,
+        author_avatar_url: non_empty(author.avatar_url).filter(|url| url.starts_with("https://")),
+        author_badges: Vec::new(),
+        author_roles: Vec::new(),
+        published_at: non_empty(received_at).unwrap_or_else(|| now.clone()),
+        received_at: now,
+        fragments: Vec::new(),
+        event_type: LiveChatEventType::Follow,
+        amount_text: None,
+        is_deleted: false,
+        raw_provider_type: Some("x.follow".to_string()),
+        details: Some(LiveChatEventDetails::Follow { handle: username }),
+        reply: None,
+        first_message: false,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -687,6 +848,10 @@ mod tests {
         BindRejected,
         SignedOut,
         SubscriptionRejected,
+        /// X refuses only the `follow.follow` subscription (plan 071).
+        FollowRejected,
+        /// The first page carries a comment and two follows by one person.
+        DeliverFollows,
         HangRead,
         WaitForRelease,
     }
@@ -754,6 +919,21 @@ mod tests {
         Json(json!({ "ok": true }))
     }
 
+    fn follow_relay_event(event_uuid: &str, follower_id: &str) -> Value {
+        json!({
+            "id": "43",
+            "kind": "follow",
+            "messageId": event_uuid,
+            "receivedAt": "2026-09-28T10:00:00.000Z",
+            "author": {
+                "id": follower_id,
+                "username": "newfan",
+                "name": "New Fan",
+                "avatarUrl": "https://pbs.twimg.com/profile_images/5/fan_normal.jpg"
+            }
+        })
+    }
+
     fn relay_event(id: &str) -> Value {
         json!({
             "id": "42",
@@ -798,9 +978,15 @@ mod tests {
             _ => {}
         }
         if after == "41" {
+            let mut events = vec![relay_event("message-1")];
+            if state.mode == MockMode::DeliverFollows {
+                // The same person twice: an unfollow and a refollow.
+                events.push(follow_relay_event("-7953119945885597316", "555"));
+                events.push(follow_relay_event("-7953119945885597317", "555"));
+            }
             return (
                 StatusCode::OK,
-                Json(json!({ "cursor": "42", "events": [relay_event("message-1")] })),
+                Json(json!({ "cursor": "42", "events": events })),
             );
         }
         sleep(Duration::from_millis(10)).await;
@@ -831,12 +1017,21 @@ mod tests {
     async fn mock_create_subscription(
         State(state): State<MockState>,
         Json(body): Json<Value>,
-    ) -> Json<Value> {
+    ) -> (StatusCode, Json<Value>) {
+        if state.mode == MockMode::FollowRejected && body["event_type"] == "follow.follow" {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(json!({ "title": "Forbidden", "detail": "Forbidden" })),
+            );
+        }
         state.created_subscriptions.lock().await.push(body.clone());
         let mut subscription = body;
         subscription["subscription_id"] = json!("new-subscription");
         state.subscriptions.lock().await.push(subscription.clone());
-        Json(json!({ "data": { "subscription": subscription } }))
+        (
+            StatusCode::OK,
+            Json(json!({ "data": { "subscription": subscription } })),
+        )
     }
 
     async fn mock_app_token(headers: HeaderMap) -> (StatusCode, Json<Value>) {
@@ -1175,14 +1370,31 @@ mod tests {
 
         let created = server.state.created_subscriptions.lock().await;
         assert_eq!(
-            *created,
-            vec![json!({
+            created[0],
+            json!({
                 "event_type": "broadcast.chat",
                 "filter": { "user_id": X_USER_ID },
                 "webhook_id": WEBHOOK_ID,
                 "tag": "videorc-live-chat",
-            })]
+            })
         );
+        // Plan 071, S4: then the inbound follow subscription, refreshed
+        // (re-posted with a later expiry) while the stream runs.
+        assert!(created.len() >= 2);
+        for follow in &created[1..] {
+            assert_eq!(follow["event_type"], "follow.follow");
+            assert_eq!(
+                follow["filter"],
+                json!({ "user_id": X_USER_ID, "qualifiers": { "direction": "inbound" } })
+            );
+            assert_eq!(follow["webhook_id"], WEBHOOK_ID);
+            let expires_at = chrono::DateTime::parse_from_rfc3339(
+                follow["expires_at"].as_str().expect("expires_at"),
+            )
+            .unwrap();
+            let ahead = expires_at.with_timezone(&chrono::Utc) - chrono::Utc::now();
+            assert!(ahead > chrono::Duration::minutes(110) && ahead <= chrono::Duration::hours(2));
+        }
 
         let queries = server.state.read_queries.lock().await;
         assert!(!queries[0].contains_key("after"));
@@ -1192,7 +1404,184 @@ mod tests {
                 .iter()
                 .all(|query| query.get("broadcastId").map(String::as_str) == Some("1NGarompkEqJj"))
         );
+        assert!(
+            queries
+                .iter()
+                .all(|query| query.get("include").map(String::as_str) == Some("follows"))
+        );
         assert!(failure_events(&state, "session-1").is_empty());
+    }
+
+    // Plan 071, S4: a new X follower arrives as a named follow row, once per
+    // person, and X follows count as named from then on.
+    #[tokio::test]
+    async fn a_follow_becomes_one_named_row_and_marks_x_follows_named() {
+        let server = spawn_mock_server(MockMode::DeliverFollows, Vec::new()).await;
+        let state = test_state();
+        let session_generation = start_test_session(&state, "session-1").await;
+        let connector = tokio::spawn(run_x_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            mock_config(&server),
+        ));
+        wait_for_message(&state, "message-1").await;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let follows = loop {
+            let follows: Vec<LiveChatMessage> = current_status(&state)
+                .await
+                .messages
+                .into_iter()
+                .filter(|message| message.event_type == LiveChatEventType::Follow)
+                .collect();
+            if !follows.is_empty() {
+                break follows;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for the follow"
+            );
+            sleep(Duration::from_millis(10)).await;
+        };
+        // Give a duplicate time to arrive, if the dedupe failed.
+        sleep(Duration::from_millis(100)).await;
+        connector.abort();
+        let _ = server.shutdown.send(());
+
+        assert_eq!(follows.len(), 1, "one row per follower: {follows:?}");
+        let follow = &follows[0];
+        assert_eq!(follow.author_name, "New Fan");
+        assert_eq!(follow.author_id.as_deref(), Some("555"));
+        assert_eq!(
+            follow.author_avatar_url.as_deref(),
+            Some("https://pbs.twimg.com/profile_images/5/fan_normal.jpg")
+        );
+        assert_eq!(
+            follow.details,
+            Some(LiveChatEventDetails::Follow {
+                handle: Some("newfan".to_string())
+            })
+        );
+        assert_eq!(follow.raw_provider_type.as_deref(), Some("x.follow"));
+        let snapshot =
+            state
+                .audience
+                .lock()
+                .unwrap()
+                .begin("session-1", &[StreamPlatform::X], "t0");
+        assert!(snapshot.platforms[0].named_follows_since.is_some());
+    }
+
+    #[tokio::test]
+    async fn a_refused_follow_subscription_leaves_chat_running_and_follows_counted() {
+        let server = spawn_mock_server(MockMode::FollowRejected, Vec::new()).await;
+        let state = test_state();
+        let session_generation = start_test_session(&state, "session-1").await;
+        let connector = tokio::spawn(run_x_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            mock_config(&server),
+        ));
+        wait_for_message(&state, "message-1").await;
+        let provider =
+            wait_for_provider_state(&state, LiveChatProviderConnectionState::Connected).await;
+        connector.abort();
+        let _ = server.shutdown.send(());
+
+        assert_eq!(provider.message, "X live chat connected.");
+        let snapshot =
+            state
+                .audience
+                .lock()
+                .unwrap()
+                .begin("session-1", &[StreamPlatform::X], "t0");
+        assert!(snapshot.platforms[0].named_follows_since.is_none());
+    }
+
+    #[tokio::test]
+    async fn stale_follow_subscriptions_are_replaced_and_removed_on_disconnect() {
+        let wrong_webhook = json!({
+            "subscription_id": "wrong-webhook",
+            "event_type": "follow.follow",
+            "filter": { "user_id": X_USER_ID, "qualifiers": { "direction": "inbound" } },
+            "webhook_id": "old-webhook"
+        });
+        let both_directions = json!({
+            "subscription_id": "both-directions",
+            "event_type": "follow.follow",
+            "filter": { "user_id": X_USER_ID },
+            "webhook_id": WEBHOOK_ID
+        });
+        let chat = json!({
+            "subscription_id": "chat",
+            "event_type": "broadcast.chat",
+            "filter": { "user_id": X_USER_ID },
+            "webhook_id": WEBHOOK_ID
+        });
+        let server = spawn_mock_server(
+            MockMode::Deliver,
+            vec![wrong_webhook, both_directions, chat],
+        )
+        .await;
+        let client = reqwest::Client::new();
+        crate::x_live::ensure_follow_subscription(
+            &client,
+            &test_credentials(),
+            &server.base_url,
+            WEBHOOK_ID,
+            chrono::Utc::now() + chrono::Duration::hours(2),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            *server.state.deleted_subscriptions.lock().await,
+            vec!["wrong-webhook".to_string(), "both-directions".to_string()]
+        );
+        assert_eq!(server.state.created_subscriptions.lock().await.len(), 1);
+
+        let removed = crate::x_live::delete_follow_subscriptions(
+            &client,
+            &test_credentials(),
+            &server.base_url,
+        )
+        .await
+        .unwrap();
+        assert_eq!(removed, 1);
+        let remaining: Vec<Value> = server.state.subscriptions.lock().await.clone();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0]["subscription_id"], "chat");
+        let _ = server.shutdown.send(());
+    }
+
+    #[test]
+    fn relay_follow_rows_parse_and_unknown_kinds_are_skipped() {
+        let follow: RelayEvent = serde_json::from_value(follow_relay_event("-1", "555")).unwrap();
+        let message = relay_event_to_message(follow, "session-1", Some("x-target")).unwrap();
+        assert_eq!(message.event_type, LiveChatEventType::Follow);
+        assert_eq!(message.message_text, "New Fan followed");
+        assert_eq!(message.provider_message_id, "follow:-1");
+
+        let mut insecure = follow_relay_event("-2", "556");
+        insecure["author"]["avatarUrl"] = json!("http://pbs.twimg.com/a.jpg");
+        let message =
+            relay_event_to_message(serde_json::from_value(insecure).unwrap(), "session-1", None)
+                .unwrap();
+        assert!(message.author_avatar_url.is_none());
+
+        let mut anonymous = follow_relay_event("-3", "557");
+        anonymous["author"] = json!({});
+        assert!(
+            relay_event_to_message(
+                serde_json::from_value(anonymous).unwrap(),
+                "session-1",
+                None
+            )
+            .is_none()
+        );
+        let mystery: RelayEvent =
+            serde_json::from_value(json!({ "kind": "mystery", "messageId": "m" })).unwrap();
+        assert!(relay_event_to_message(mystery, "session-1", None).is_none());
     }
 
     #[tokio::test]
