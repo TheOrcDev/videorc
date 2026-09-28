@@ -414,7 +414,10 @@ export function registerUpdaterIpc(
   ) => ReturnType<AcquireBackendInterruption>
 ): void {
   getMainWindow = mainWindowGetter
-  if (!updaterConfigurationBlocked) {
+  // Distro-managed Linux installs never wire feed listeners (initAutoUpdater
+  // already returned early for them, and every trigger below is guarded), so
+  // keep the same skip here; the status + blocked-operation handlers stay live.
+  if (!updaterConfigurationBlocked && !isLinuxNativeInstall()) {
     attachUpdaterListeners()
   }
 
