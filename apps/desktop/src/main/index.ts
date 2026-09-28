@@ -22,6 +22,7 @@ import {
   session,
   shell,
   systemPreferences,
+  WebContentsView,
   type NativeImage
 } from 'electron'
 import { randomBytes, randomUUID } from 'node:crypto'
@@ -256,6 +257,7 @@ import {
   type DockSlotReport,
   type PreviewWindowMode
 } from './preview-dock'
+import { InWindowProofSurface, type ProofSurfaceHost } from './in-window-proof-surface'
 import { backendIsolationEnv } from './backend-isolation'
 import {
   AVATAR_CACHE_MAX_FILES,
@@ -589,7 +591,7 @@ function setShortcutRecorderArmed(armed: boolean): ShortcutRecorderArmResult {
 app.on('will-quit', () => {
   unregisterGlobalShortcutsWhenReady(globalShortcut, () => app.isReady())
 })
-let nativePreviewSurfaceWindow: BrowserWindow | null = null
+let nativePreviewSurfaceWindow: ProofSurfaceHost | null = null
 let notesWindow: BrowserWindow | null = null
 let notesWindowLastFrame: Electron.Rectangle | null = null
 let notesWindowAlwaysOnTop = false
@@ -1955,7 +1957,7 @@ const previewWindowMotionReconciler = new NativePreviewMotionReconciler(() => {
   if (!window || window.isDestroyed() || previewWindow !== window) {
     return
   }
-  previewSupervisor.setWindowVisible(window.isVisible() && !window.isMinimized())
+  previewSupervisor.setWindowVisible(previewWindowPresentedVisible(window))
   pushPreviewWindowPlacement()
   emitPreviewWindowState()
 })
@@ -3393,13 +3395,18 @@ type PreviewWindowState = {
 function previewWindowState(): PreviewWindowState {
   const window = previewWindow
   const open = previewWindowIsOpenForSurface()
-  // The VIDEO region: window content minus the drag bar. Everything downstream
-  // (surface placement, probe asserts) follows this rect.
-  const contentBounds = open ? previewWindowVideoBounds(window!) : null
   const mode = currentPreviewWindowMode()
+  // The VIDEO region: window content minus the drag bar. Everything downstream
+  // (surface placement, probe asserts) follows this rect. An in-window dock
+  // has no window of its own at the slot: the rect is the slot itself.
+  const contentBounds = !open
+    ? null
+    : previewDockedInWindow()
+      ? inWindowDockedVideoBounds()
+      : previewWindowVideoBounds(window!)
   return {
     open,
-    visible: open ? window!.isVisible() && !window!.isMinimized() : false,
+    visible: open ? previewWindowPresentedVisible(window!) : false,
     bounds: open ? window!.getBounds() : null,
     contentBounds,
     captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(window),
@@ -3427,6 +3434,34 @@ function dockVisibilityDecision(): ReturnType<typeof decideDockVisibility> {
     ),
     overlayOpen: previewDockOverlayOpen
   })
+}
+
+// Linux docks the proof surface INTO the main window (in-window-proof-surface.ts);
+// the preview BrowserWindow stays hidden and only owns the lifecycle.
+function previewDockedInWindow(): boolean {
+  return proofSurfaceHostedInWindow && currentPreviewWindowMode() === 'docked'
+}
+
+// What the user sees of the preview: the window itself, or for an in-window
+// dock the slot surface, which the one dock predicate shows or hides.
+function previewWindowPresentedVisible(window: BrowserWindow): boolean {
+  if (previewDockedInWindow()) {
+    return dockVisibilityDecision().visible
+  }
+  return window.isVisible() && !window.isMinimized()
+}
+
+// The Studio/Scene slot in main-window content terms. Before the first report
+// (and after every epoch bump) there is no slot: a 1x1 rect at the content
+// origin keeps the placement push flowing so visible:false reaches the surface.
+function inWindowDockedVideoBounds(): Electron.Rectangle | null {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return null
+  }
+  const content = mainWindow.getContentBounds()
+  return previewDockSlot
+    ? composeDockedScreenRect(previewDockSlot, content)
+    : { x: content.x, y: content.y, width: 1, height: 1 }
 }
 
 // The docked placement hot path: recompute the docked window frame from the
@@ -3457,6 +3492,18 @@ function applyDockedPreviewPlacement(): void {
     return
   }
   const decision = dockVisibilityDecision()
+  if (previewDockedInWindow()) {
+    // Wayland would ignore a frame for the preview window anyway: it stays
+    // hidden, and the placement push moves the in-window surface to the slot
+    // (visible or not, per the same predicate).
+    if (window.isVisible()) {
+      window.hide()
+    }
+    previewSupervisor.setWindowVisible(decision.visible)
+    pushPreviewWindowPlacement()
+    emitPreviewWindowState()
+    return
+  }
   if (!decision.visible) {
     if (window.isVisible()) {
       window.hide()
@@ -3730,7 +3777,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
     clearNativePreviewNativePlacementAuthority()
   }
   previewWindowFloatingFrame = frame
-  previewSupervisor.windowOpened(window.isVisible() && !window.isMinimized())
+  previewSupervisor.windowOpened(previewWindowPresentedVisible(window))
   previewWindowAlwaysOnTop = prefs.alwaysOnTop === true
   if (previewWindowAlwaysOnTop && !docked) {
     window.setAlwaysOnTop(true, 'floating')
@@ -3769,7 +3816,7 @@ async function openPreviewWindow(): Promise<PreviewWindowState> {
   for (const event of ['show', 'hide', 'minimize', 'restore', 'focus'] as const) {
     window.on(event as 'move', () => {
       if (previewWindow === window) {
-        previewSupervisor.setWindowVisible(window.isVisible() && !window.isMinimized())
+        previewSupervisor.setWindowVisible(previewWindowPresentedVisible(window))
         pushPreviewWindowPlacement()
         emitPreviewWindowState()
       }
@@ -4132,7 +4179,7 @@ function writeNativePreviewSurfaceHtmlShell(): string {
   return htmlPath
 }
 
-async function loadNativePreviewSurfaceHtml(surfaceWindow: BrowserWindow): Promise<void> {
+async function loadNativePreviewSurfaceHtml(surfaceWindow: ProofSurfaceHost): Promise<void> {
   let lastError: unknown = null
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const htmlPath = writeNativePreviewSurfaceHtmlShell()
@@ -5165,6 +5212,72 @@ function surfaceWindowPlacement(bounds: PreviewSurfaceBounds): {
   }
 }
 
+// Linux hosts the proof surface inside its window (in-window-proof-surface.ts):
+// Wayland compositors ignore the absolute frames a separate surface window and
+// the docked preview window ask for, so both landed wherever the compositor
+// chose — centred over the app, or re-tiled under Hyprland.
+const proofSurfaceHostedInWindow = process.platform === 'linux'
+
+function proofSurfaceWebPreferences(): Electron.WebPreferences {
+  return {
+    sandbox: true,
+    contextIsolation: true,
+    nodeIntegration: false,
+    backgroundThrottling: backgroundThrottlingFor('proof-surface', electronBackgroundPolicy)
+  }
+}
+
+function createProofSurfaceBrowserWindow(): BrowserWindow {
+  const surfaceWindow = new BrowserWindow({
+    // The fallback surface is a child of the preview window: it stacks above
+    // it and moves with it like one app.
+    parent: previewWindow ?? mainWindow ?? undefined,
+    frame: false,
+    // Transparency requires the GPU compositor on Windows — with a broken
+    // GPU process (Windows Insider builds) a transparent window composites
+    // NOTHING and the preview reads as a blank canvas even though the <img>
+    // polling underneath is fully software-safe. Off macOS the surface is
+    // opaque over a solid dark base; macOS keeps transparency (its real
+    // preview path is the CAMetalLayer helper anyway).
+    transparent: isMac,
+    focusable: false,
+    skipTaskbar: true,
+    hasShadow: false,
+    resizable: false,
+    // Placement is owned by the preview window; the proof surface is never
+    // user-movable and never a click target.
+    movable: false,
+    show: false,
+    backgroundColor: isMac ? '#00000000' : '#101014',
+    ...appWindowIconOptions(),
+    webPreferences: proofSurfaceWebPreferences()
+  })
+  applyVideorcWindowCaptureProtection(surfaceWindow, 'proof-surface', {
+    onFailure: (reason) =>
+      safeConsole.warn(`Proof-surface content protection could not be enabled: ${reason}`)
+  })
+  installCaptureProtectionSmokeMarker(surfaceWindow, 'proof-surface')
+  return surfaceWindow
+}
+
+// The docked surface sits in the main window over the Studio slot or Scene
+// canvas; the floating one sits in the preview window under its drag strip.
+// Content protection is a no-op on Linux, and the host window carries its own.
+function createInWindowProofSurface(): InWindowProofSurface {
+  return new InWindowProofSurface({
+    createView: () => {
+      const view = new WebContentsView({ webPreferences: proofSurfaceWebPreferences() })
+      view.setBackgroundColor('#101014')
+      return view
+    },
+    resolveParent: () => {
+      const host = currentPreviewWindowMode() === 'docked' ? mainWindow : previewWindow
+      return host && !host.isDestroyed() ? host : null
+    },
+    cornerRadius: () => (currentPreviewWindowMode() === 'docked' ? DOCKED_PREVIEW_CORNER_RADIUS : 0)
+  })
+}
+
 async function createNativePreviewSurfaceWindow(generation: number): Promise<void> {
   let lastError: unknown = null
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -5175,40 +5288,9 @@ async function createNativePreviewSurfaceWindow(generation: number): Promise<voi
       return
     }
 
-    const surfaceWindow = new BrowserWindow({
-      // The fallback surface is a child of the preview window: it stacks above
-      // it and moves with it like one app.
-      parent: previewWindow ?? mainWindow,
-      frame: false,
-      // Transparency requires the GPU compositor on Windows — with a broken
-      // GPU process (Windows Insider builds) a transparent window composites
-      // NOTHING and the preview reads as a blank canvas even though the <img>
-      // polling underneath is fully software-safe. Off macOS the surface is
-      // opaque over a solid dark base; macOS keeps transparency (its real
-      // preview path is the CAMetalLayer helper anyway).
-      transparent: isMac,
-      focusable: false,
-      skipTaskbar: true,
-      hasShadow: false,
-      resizable: false,
-      // Placement is owned by the preview window; the proof surface is never
-      // user-movable and never a click target.
-      movable: false,
-      show: false,
-      backgroundColor: isMac ? '#00000000' : '#101014',
-      ...appWindowIconOptions(),
-      webPreferences: {
-        sandbox: true,
-        contextIsolation: true,
-        nodeIntegration: false,
-        backgroundThrottling: backgroundThrottlingFor('proof-surface', electronBackgroundPolicy)
-      }
-    })
-    applyVideorcWindowCaptureProtection(surfaceWindow, 'proof-surface', {
-      onFailure: (reason) =>
-        safeConsole.warn(`Proof-surface content protection could not be enabled: ${reason}`)
-    })
-    installCaptureProtectionSmokeMarker(surfaceWindow, 'proof-surface')
+    const surfaceWindow: ProofSurfaceHost = proofSurfaceHostedInWindow
+      ? createInWindowProofSurface()
+      : createProofSurfaceBrowserWindow()
     nativePreviewSurfaceWindow = surfaceWindow
     surfaceWindow.setIgnoreMouseEvents(true)
     // Geometry changes re-derive the DPR-aware frame width cap; moving across
@@ -5359,9 +5441,11 @@ async function createNativePreviewSurface(
     nativePreviewSurfaceStatusIsRealSurface(nativePreviewSurfaceStatus) &&
     nativeSurfaceOwnsPlacement()
   await setNativePreviewProofAnimationSuspended(preserveNativeSurface || !placement.visible)
-  const fallbackMessage = nativePreviewSurfaceScene
-    ? 'Electron proof scene preview surface.'
-    : 'Synthetic Electron proof preview surface.'
+  const fallbackMessage = `${
+    nativePreviewSurfaceScene
+      ? 'Electron proof scene preview surface.'
+      : 'Synthetic Electron proof preview surface.'
+  }${proofSurfaceHostedInWindow ? ' Hosted inside the app window (Wayland cannot place a separate surface window).' : ''}`
   nativePreviewSurfaceStatus = {
     ...(preserveNativeSurface ? nativePreviewSurfaceStatus : {}),
     state: 'live',
@@ -6705,7 +6789,7 @@ async function setNativePreviewSurfaceFramePollingSuppressed(
 // source pixels than its own content width × display scale, so that is the
 // width the frame requests are bounded by (quantized + floored in shared
 // nativePreviewProofPollingMaxWidth).
-function nativePreviewProofSurfacePixelWidth(surfaceWindow: BrowserWindow): number | undefined {
+function nativePreviewProofSurfacePixelWidth(surfaceWindow: ProofSurfaceHost): number | undefined {
   try {
     const contentWidth = surfaceWindow.getContentBounds().width
     if (!Number.isFinite(contentWidth) || contentWidth <= 0) {
@@ -6850,7 +6934,7 @@ async function syncNativePreviewProofPollingSuppression(): Promise<boolean> {
 }
 
 async function readNativePreviewSurfaceMetricsAfterPaint(
-  surfaceWindow: BrowserWindow | null = nativePreviewSurfaceWindow
+  surfaceWindow: ProofSurfaceHost | null = nativePreviewSurfaceWindow
 ): Promise<Record<string, unknown> | null> {
   if (
     !surfaceWindow ||
@@ -7153,7 +7237,7 @@ function computeTimingPercentile(values: number[], percentileRank: number): numb
 }
 
 async function waitForNativePreviewSurfaceScript(
-  surfaceWindow: BrowserWindow | null = nativePreviewSurfaceWindow,
+  surfaceWindow: ProofSurfaceHost | null = nativePreviewSurfaceWindow,
   timeoutMs = 5000
 ): Promise<void> {
   if (!surfaceWindow || surfaceWindow.isDestroyed()) {
@@ -7185,7 +7269,7 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolveDelay) => setTimeout(resolveDelay, ms))
 }
 
-function sendWindowCenterClick(window: BrowserWindow | null): boolean {
+function sendWindowCenterClick(window: BrowserWindow | ProofSurfaceHost | null): boolean {
   if (!window || window.isDestroyed() || window.webContents.isDestroyed()) {
     return false
   }
@@ -9899,8 +9983,19 @@ async function runSmokePreviewMotionCommand(
         exists: Boolean(surface && !surface.isDestroyed()),
         visible: Boolean(surface && !surface.isDestroyed() && surface.isVisible()),
         bounds: surface && !surface.isDestroyed() ? surface.getBounds() : null,
-        ...smokeNativeWindowIdentity(surface),
-        captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(surface)
+        // Linux: the surface is a view inside this window, not a window of its own.
+        hostedInWindow:
+          surface instanceof InWindowProofSurface
+            ? surface.hostWindow() === mainWindow
+              ? 'main'
+              : surface.hostWindow() === previewWindow
+                ? 'preview'
+                : 'detached'
+            : null,
+        ...smokeNativeWindowIdentity(surface instanceof BrowserWindow ? surface : null),
+        captureProtectionMarkerInstalled: captureProtectionMarkerInstalled(
+          surface instanceof BrowserWindow ? surface : null
+        )
       },
       nativeOwnsPlacement: nativeSurfaceOwnsPlacement(),
       framePollingSuppressedFlag: nativePreviewSurfaceFramePollingSuppressed,
