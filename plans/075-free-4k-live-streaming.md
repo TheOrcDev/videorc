@@ -21,7 +21,8 @@
 - **Depends on**: nothing in-repo; W-slices need videorc-web access
 - **Category**: direction, product boundary, docs
 - **Planned at**: commit `febb5ca8`, 2026-09-28
-- **Status**: PLANNED
+- **Status**: IMPLEMENTED (desktop D1–D3) 2026-09-28; D4/D5 macOS smokes and
+  W1–W3 (videorc-web) outstanding — see the ledger
 
 ## Owner decision being implemented
 
@@ -335,14 +336,14 @@ acceptable, no server coordination needed.
 
 ## Ledger
 
-| Slice | Status | Evidence |
-| ----- | ------ | -------- |
-| D0    | TODO   |          |
-| D1    | TODO   |          |
-| D2    | TODO   |          |
-| D3    | TODO   |          |
-| D4    | TODO   |          |
-| D5    | TODO   |          |
-| W1    | TODO   |          |
-| W2    | TODO   |          |
-| W3    | TODO   |          |
+| Slice | Status      | Evidence                                                                                                                                                                                                                                                                                          |
+| ----- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| D0    | DONE        | Owner instructed "execute the entire plan" (2026-09-28); the full quality-tier collapse (1080p60 + 4K30 + 30,000 kbps) is in scope.                                                                                                                                                                |
+| D1    | DONE        | One shared `STREAMING_MAX_*` ceiling in `entitlements.rs`; `basic/premium/developer_limits` collapsed to `entitlement_limits()`; entitlement + recording gate tests updated (Basic accepts YouTube 4K30/1080p60; over-ceiling rejected for every tier without upsell). `cargo test` on Linux host. |
+| D2    | DONE        | Renderer `STREAMING_LIMITS` mirror; `videoProfileEntitlementGate` streaming reasons carry no "Premium" (no upgrade URL possible); tests flipped. Desktop suite 232 files green; typecheck/lint/format green.                                                                                       |
+| D3    | PARTIAL     | `docs/distribution.md` matrix + enforcement bullet, README bullet, Plan 016 addendum done. Public `changelog/` entry is release-time (entries land in the release bump commit); owed to the next release.                                                                                         |
+| D4    | BLOCKED     | This host is a headless Linux VM: the dev-app smokes cannot run. Substituted Rust session-start proof (`entitlement_guard_allows_true_4k_streaming_on_basic`, `youtube_1080p_provider_rates_pass_on_every_tier`); the `VIDEORC_PREMIUM_FEATURES=0` dev-app run is owed on a macOS host.           |
+| D5    | BLOCKED     | `smoke:recording-matrix` / `smoke:multistream` need macOS; ran the full Linux-runnable gate set instead (cargo fmt/clippy/test, desktop unit, typecheck, lint, format, test:scripts).                                                                                                               |
+| W1    | BLOCKED     | videorc-web repo is not accessible from this environment (token is scoped to TheOrcDev/videorc); contract in this plan stands.                                                                                                                                                                     |
+| W2    | BLOCKED     | Same access blocker as W1.                                                                                                                                                                                                                                                                         |
+| W3    | BLOCKED     | Same access blocker as W1; the changelog flows automatically once the release entry (D3 remainder) ships.                                                                                                                                                                                          |
