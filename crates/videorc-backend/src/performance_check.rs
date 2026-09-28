@@ -176,7 +176,11 @@ pub(crate) fn should_fast_skip_next(measurement: &RungMeasurement) -> bool {
             .is_some_and(|speed| speed < FAST_SKIP_ENCODER_SPEED)
 }
 
-/// First passing rung wins; with none, the floor is recommended and flagged.
+/// First passing rung wins; with none, the floor is recommended. `below_floor`
+/// is only true when that floor was actually measured and failed — a skipped
+/// floor (budget ran out, cancelled mid-ladder) must not be reported as
+/// "this computer cannot hold 720p". Linux first-rung VAAPI probing can eat
+/// most of `TOTAL_BUDGET` before 720p is reached.
 pub(crate) fn recommend(rungs: &[PerformanceCheckRung]) -> Option<(VideoSettings, bool)> {
     if let Some(passed) = rungs
         .iter()
@@ -184,7 +188,24 @@ pub(crate) fn recommend(rungs: &[PerformanceCheckRung]) -> Option<(VideoSettings
     {
         return Some((passed.video.clone(), false));
     }
-    rungs.last().map(|floor| (floor.video.clone(), true))
+    rungs.last().map(|floor| {
+        (
+            floor.video.clone(),
+            floor.verdict == PerformanceCheckRungVerdict::Failed,
+        )
+    })
+}
+
+/// Remaining rungs after a pass are omitted. Fast-skip and the total wall
+/// budget may drop mid-ladder rungs, but never the floor: the check must
+/// measure 720p before it is allowed to say the machine cannot hold it.
+pub(crate) fn should_skip_rung(
+    already_passed: bool,
+    skip_next: bool,
+    over_budget: bool,
+    is_floor: bool,
+) -> bool {
+    already_passed || ((skip_next || over_budget) && !is_floor)
 }
 
 const RESULT_SETTING_KEY: &str = "performance_check_result";
@@ -351,7 +372,12 @@ async fn run_ladder(
             bail!("cancelled");
         }
         let is_floor = index as u32 + 1 == rung_count;
-        if passed || (skip_next && !is_floor) || started.elapsed() > TOTAL_BUDGET {
+        if should_skip_rung(
+            passed,
+            skip_next,
+            started.elapsed() > TOTAL_BUDGET,
+            is_floor,
+        ) {
             if !passed {
                 rungs.push(PerformanceCheckRung {
                     video,
@@ -786,5 +812,25 @@ mod tests {
         let (video, below_floor) = recommend(&all_failed).expect("floor");
         assert_eq!((video.width, video.height, below_floor), (1280, 720, true));
         assert!(recommend(&[]).is_none());
+    }
+
+    #[test]
+    fn a_skipped_floor_is_not_reported_as_below_the_machine() {
+        let ladder = ladder_under_ceiling(1920, 1080, 30);
+        let unfinished = vec![
+            rung(ladder[0].clone(), PerformanceCheckRungVerdict::Failed),
+            rung(ladder[1].clone(), PerformanceCheckRungVerdict::Skipped),
+        ];
+        let (video, below_floor) = recommend(&unfinished).expect("floor");
+        assert_eq!((video.width, video.height, below_floor), (1280, 720, false));
+    }
+
+    #[test]
+    fn budget_and_fast_skip_never_drop_the_floor() {
+        assert!(!should_skip_rung(false, true, true, true));
+        assert!(should_skip_rung(false, true, false, false));
+        assert!(should_skip_rung(false, false, true, false));
+        assert!(should_skip_rung(true, false, false, true));
+        assert!(!should_skip_rung(false, false, false, true));
     }
 }

@@ -13,6 +13,7 @@ import {
   outputVerdict,
   performanceCheckLine,
   performanceCheckCeiling,
+  performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
 } from './performance-check'
 
@@ -179,6 +180,35 @@ describe('performanceCheckLine', () => {
     const nothing = result([['tutorial-720p30', 'failed']], 'tutorial-720p30', true)
     expect(
       line({ running: false, stale: false, result: nothing }, 'tutorial-720p30')
-    ).toMatchObject({ tone: 'warning', checkLabel: 'Check again' })
+    ).toMatchObject({
+      tone: 'warning',
+      checkLabel: 'Check again',
+      text: 'Nothing held steady on this computer, not even 720p 30. Close other apps and check again.'
+    })
+  })
+})
+
+describe('performanceCheckTooHeavyToast', () => {
+  it('warns once when a chosen output is heavier than what held', () => {
+    expect(performanceCheckTooHeavyToast(videoPresets['tutorial-1440p30'], weak)).toEqual({
+      title: '1440p 30 is too heavy for this computer',
+      description:
+        'Recordings will stutter. 720p 30 held steady. Switch in Recording → Output.'
+    })
+  })
+
+  it('does not claim the floor held when nothing passed', () => {
+    const nothing = result([['tutorial-720p30', 'failed']], 'tutorial-720p30', true)
+    expect(performanceCheckTooHeavyToast(videoPresets['tutorial-720p30'], nothing)).toBeUndefined()
+    expect(performanceCheckTooHeavyToast(videoPresets['record-4k30'], nothing)).toBeUndefined()
+  })
+
+  it('stays quiet for a shipped default and for a verified selection', () => {
+    expect(
+      performanceCheckTooHeavyToast(videoPresets['tutorial-1080p30'], weak)
+    ).toBeUndefined()
+    expect(
+      performanceCheckTooHeavyToast(videoPresets['tutorial-720p30'], weak)
+    ).toBeUndefined()
   })
 })

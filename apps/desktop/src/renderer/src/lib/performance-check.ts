@@ -122,6 +122,25 @@ export interface PerformanceCheckLine {
   checkLabel?: 'Check this computer' | 'Check again'
 }
 
+/** Toast for a user-chosen output this computer measurably cannot hold. */
+export function performanceCheckTooHeavyToast(
+  chosen: VideoSettings,
+  result: PerformanceCheckResult
+): { title: string; description: string } | undefined {
+  // The floor is recommended even when it failed. Do not claim it held.
+  if (
+    result.belowFloor ||
+    isShippedDefaultOutput(chosen) ||
+    outputVerdict(chosen, result) !== 'too-heavy'
+  ) {
+    return undefined
+  }
+  return {
+    title: `${outputLabel(chosen)} is too heavy for this computer`,
+    description: `Recordings will stutter. ${outputLabel(result.recommended)} held steady. Switch in Recording → Output.`
+  }
+}
+
 /** The one line under the preset select in Recording → Output. */
 export function performanceCheckLine({
   state,
