@@ -1,6 +1,10 @@
 # Plan 071: Activity names each new follower, with their avatar
 
-Status: **PLANNED 2026-09-28** against `origin/main` `4d36bd76` (0.9.120).
+Status: **IMPLEMENTED 2026-09-28** (S1 to S5 code) on
+`plan/071-named-followers`, with web PRs videorc-web #56 (Kick) and #57 (X).
+See [Implementation record](#implementation-record-2026-09-28). Owed: S0's X
+follow check and S5's acceptance stream on the owner's accounts. Planned
+against `origin/main` `4d36bd76` (0.9.120).
 Priority P1. Size M-L. There are 6 slices, S0 to S5. Two repos are involved:
 `videorc` (desktop) and `videorc-web` (`~/projects/videorcweb`: the Kick relay
 in S3 and the X relay in S4).
@@ -415,3 +419,56 @@ record is written.
   dedupe by follower id on the desktop. When unsure, stay unnamed.
 - **Contract drift.** New optional fields must skip nulls, or the app fails to
   load (`videorc-serde-null-contract-trap`).
+
+## Implementation record (2026-09-28)
+
+Desktop branch `plan/071-named-followers`, one commit per slice. Web:
+videorc-web #56 (Kick avatar) and #57 (X follows, migration 0017). Deploy
+both web PRs before the desktop release.
+
+What shipped, and where it differs from the plan above:
+
+- **S1.** Named rows show `AvatarCircle` (initials until the cached image
+  loads). This covers follows, subs, gifts, tips and raids. Unnamed counts,
+  announcements and destinations keep the glyph. The design skill's Activity
+  rule was updated.
+- **S2, a bug found while building it.** Activity hid Twitch follower gains as
+  soon as the account held the audience scopes, but the chat session only
+  subscribes to `channel.follow` at Go Live. A mid-stream grant would have
+  hidden every Twitch follow for the rest of the stream. The fix:
+  - the connector now reports when its follow subscription is live;
+  - `stream.audience` carries `namedFollowsSince` and `namedFollowsUntil`,
+    and Activity skips only gains read inside that window;
+  - an open EventSub socket adds `channel.follow` on a keepalive within about
+    30 s of the grant, with no new Go Live needed.
+
+  "Show who followed" is a row action and an empty-state button, relayed from
+  the Stream Manager to the main window (`comments-window:follow-names`). A
+  first Twitch connection requests the audience scopes by default. A
+  reconnect keeps them when the account already had them, where before a
+  plain reconnect silently dropped them.
+
+- **S3.** As planned: relay `followerAvatarUrl`, https only on both sides.
+- **S4, differences from the plan:**
+  - The X chat subscription is _not_ deleted at stream end: it persists
+    across streams and is deleted on X disconnect. A follow subscription
+    can't copy that, because follows happen off stream too. It is created
+    with `expires_at` two hours ahead and re-posted every 30 minutes while
+    the connector runs (XAA treats a re-post as a refresh). It is also
+    deleted on X disconnect.
+  - Instead of reusing `audience_scopes`, X reports the same
+    `namedFollowsSince` window as Twitch.
+  - The relay returns follows only for `include=follows`, with the XAA
+    `event_uuid` as `messageId`.
+- **S5, a difference from the plan.** The handle lives on
+  `LiveChatEventDetails::Follow { handle }`, not on a new `LiveChatMessage`
+  field. It is only needed for follows, details already persist as JSON, and
+  `{"kind":"follow"}` rows stored earlier still load.
+
+Not done here, and needs the owner:
+
+- **S0:** the X app-bearer probe, and the owner's Twitch scopes.
+- **S4 gate:** a dev Go Live to X, to confirm that X accepts the OAuth 1.0a
+  `follow.follow` subscription. If X refuses it, the connector logs "X
+  follows will show as a count" and X stays count-only. Chat is unaffected.
+- **S5:** the three-platform acceptance stream, recorded in `docs/acceptance/`.
