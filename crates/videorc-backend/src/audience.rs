@@ -100,6 +100,16 @@ pub struct PlatformAudience {
     /// Twitch only does with the opt-in scope, so Activity lists these.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub follower_gains: Vec<FollowerGain>,
+    /// Since when a follow event subscription has been naming each new
+    /// follower this session (Twitch `channel.follow`, X `follow.follow`;
+    /// plan 071). Gains read from then on are already named rows, so
+    /// Activity skips them. Absent while no follow subscription is live.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_follows_since: Option<String>,
+    /// When that subscription stopped (the connector failed or lost it):
+    /// gains read from then on are unnamed again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub named_follows_until: Option<String>,
 }
 
 /// New followers seen by one read (`at` is the read time).
@@ -164,6 +174,9 @@ pub struct AudienceHub {
     /// Highest follower total per platform this session: a gain counts only
     /// above it, so an unfollow and a refollow never read as a new follower.
     peaks: Vec<(StreamPlatform, u64)>,
+    /// Named-follow reports that arrived before `begin` registered their
+    /// platform: chat connectors start before the audience does.
+    pending_named_follows: Vec<(String, StreamPlatform, Option<String>)>,
 }
 
 impl AudienceHub {
@@ -179,6 +192,8 @@ impl AudienceHub {
             Some(snapshot) if snapshot.session_id == session_id => snapshot,
             _ => {
                 self.peaks.clear();
+                self.pending_named_follows
+                    .retain(|(pending, _, _)| pending == session_id);
                 self.snapshot.insert(AudienceSnapshot {
                     session_id: session_id.to_string(),
                     platforms: Vec::new(),
@@ -205,9 +220,17 @@ impl AudienceHub {
                     subscriber_points: None,
                     audience_scopes: None,
                     follower_gains: Vec::new(),
+                    named_follows_since: self
+                        .pending_named_follows
+                        .iter()
+                        .find(|(pending, held, _)| pending == session_id && held == platform)
+                        .and_then(|(_, _, since)| since.clone()),
+                    named_follows_until: None,
                 });
             }
         }
+        self.pending_named_follows
+            .retain(|(pending, held, _)| pending != session_id || !platforms.contains(held));
         snapshot.platforms.sort_by_key(|entry| entry.platform as u8);
         snapshot.updated_at = now.to_string();
         snapshot.clone()
@@ -343,6 +366,63 @@ impl AudienceHub {
         }
         entry.subscribers = Some(count.total);
         entry.subscriber_points = Some(count.points);
+        snapshot.updated_at = now.to_string();
+        Some(snapshot.clone())
+    }
+
+    /// Whether a follow event subscription names each new follower on this
+    /// platform (plan 071). `live` opens the window in which gains are
+    /// skipped and `false` closes it, so gains read before or after it still
+    /// show as counts. Returns the snapshot to emit when that changed.
+    pub fn set_named_follows(
+        &mut self,
+        session_id: &str,
+        platform: StreamPlatform,
+        live: bool,
+        now: &str,
+    ) -> Option<AudienceSnapshot> {
+        let registered = self
+            .snapshot
+            .as_ref()
+            .filter(|snapshot| snapshot.session_id == session_id)
+            .is_some_and(|snapshot| {
+                snapshot
+                    .platforms
+                    .iter()
+                    .any(|entry| entry.platform == platform)
+            });
+        if !registered {
+            let since = live.then(|| now.to_string());
+            match self
+                .pending_named_follows
+                .iter_mut()
+                .find(|(pending, held, _)| pending == session_id && *held == platform)
+            {
+                Some((_, _, pending_since)) => {
+                    if !live || pending_since.is_none() {
+                        *pending_since = since;
+                    }
+                }
+                None => self
+                    .pending_named_follows
+                    .push((session_id.to_string(), platform, since)),
+            }
+            return None;
+        }
+        let snapshot = self.snapshot.as_mut()?;
+        let entry = snapshot
+            .platforms
+            .iter_mut()
+            .find(|entry| entry.platform == platform)?;
+        let open = entry.named_follows_since.is_some() && entry.named_follows_until.is_none();
+        match (live, open) {
+            (true, false) => {
+                entry.named_follows_since = Some(now.to_string());
+                entry.named_follows_until = None;
+            }
+            (false, true) => entry.named_follows_until = Some(now.to_string()),
+            _ => return None,
+        }
         snapshot.updated_at = now.to_string();
         Some(snapshot.clone())
     }
@@ -830,6 +910,20 @@ fn apply_reading(
     }
 }
 
+/// A chat connector's follow event subscription went live or stopped
+/// (plan 071): Activity names this platform's follows from now on.
+pub fn set_named_follows(state: &AppState, session_id: &str, platform: StreamPlatform, live: bool) {
+    let now = chrono::Utc::now().to_rfc3339();
+    let snapshot = state
+        .audience
+        .lock()
+        .ok()
+        .and_then(|mut hub| hub.set_named_follows(session_id, platform, live, &now));
+    if let Some(snapshot) = snapshot {
+        publish(state, snapshot, true);
+    }
+}
+
 /// A follow event arrived from a platform without a follower total.
 pub fn record_follow(state: &AppState, session_id: &str, platform: StreamPlatform) {
     let now = chrono::Utc::now().to_rfc3339();
@@ -1283,6 +1377,66 @@ mod tests {
             wire["platforms"][0]["followerGains"],
             json!([{ "at": "t10", "count": 1 }])
         );
+    }
+
+    // Plan 071: the window in which a platform's follows are named rows.
+    #[test]
+    fn named_follows_open_and_close_a_window_and_wait_for_registration() {
+        let mut hub = AudienceHub::default();
+        // A connector can report before the audience begins.
+        assert!(
+            hub.set_named_follows("s", StreamPlatform::Twitch, true, "t1")
+                .is_none()
+        );
+        let begun = hub.begin("s", &[StreamPlatform::Twitch, StreamPlatform::X], "t2");
+        let twitch = &begun.platforms[0];
+        assert_eq!(twitch.named_follows_since.as_deref(), Some("t1"));
+        assert_eq!(twitch.named_follows_until, None);
+        assert_eq!(begun.platforms[1].named_follows_since, None);
+
+        // A repeat report changes nothing.
+        assert!(
+            hub.set_named_follows("s", StreamPlatform::Twitch, true, "t3")
+                .is_none()
+        );
+        // The subscription stops: the window closes.
+        let closed = hub
+            .set_named_follows("s", StreamPlatform::Twitch, false, "t4")
+            .expect("closed");
+        assert_eq!(
+            closed.platforms[0].named_follows_since.as_deref(),
+            Some("t1")
+        );
+        assert_eq!(
+            closed.platforms[0].named_follows_until.as_deref(),
+            Some("t4")
+        );
+        // And reopens from the new time.
+        let reopened = hub
+            .set_named_follows("s", StreamPlatform::Twitch, true, "t5")
+            .expect("reopened");
+        assert_eq!(
+            reopened.platforms[0].named_follows_since.as_deref(),
+            Some("t5")
+        );
+        assert_eq!(reopened.platforms[0].named_follows_until, None);
+
+        // Another session's report never lands on this one.
+        assert!(
+            hub.set_named_follows("other", StreamPlatform::X, true, "t6")
+                .is_none()
+        );
+        let next = hub.begin("next", &[StreamPlatform::X], "t7");
+        assert_eq!(next.platforms[0].named_follows_since, None);
+    }
+
+    #[test]
+    fn named_follows_never_serialize_when_absent() {
+        let mut hub = AudienceHub::default();
+        let snapshot = hub.begin("s", &[StreamPlatform::Twitch], "t0");
+        let wire = serde_json::to_value(&snapshot).unwrap();
+        assert!(wire["platforms"][0].get("namedFollowsSince").is_none());
+        assert!(wire["platforms"][0].get("namedFollowsUntil").is_none());
     }
 
     #[test]

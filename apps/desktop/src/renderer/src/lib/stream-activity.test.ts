@@ -366,17 +366,52 @@ describe('stream activity', () => {
       ['x', '3 new followers', 'follows'],
       ['twitch', 'New follower', 'follows']
     ])
-    expect(items[1].line).toBe("3 new followers. X doesn't share who followed.")
+    expect(items[1].line).toBe("3 new followers. X didn't say who followed.")
+    expect(items[0].line).toBe('2 new followers. Show who followed to name them from now on.')
     expect(thankYouDraft(items[1])).toBe('Thanks for the follows, and welcome in!')
     expect(activityFilterCounts(items).follows).toBe(3)
-    // With the follow scope Twitch sends named follow rows; no double count.
+    // While Twitch's follow subscription is live it sends named follow rows;
+    // gains read inside that window are skipped, so nobody counts twice.
     const named = activityItems([], [], {
       ...audience,
       platforms: audience.platforms.map((entry) =>
-        entry.platform === 'twitch' ? { ...entry, audienceScopes: true } : entry
+        entry.platform === 'twitch'
+          ? { ...entry, audienceScopes: true, namedFollowsSince: '2026-09-25T10:40:00Z' }
+          : entry
       )
     })
     expect(named.map((item) => item.platform)).toEqual(['x'])
+  })
+
+  it('never hides gains for the scope alone, only inside the named window (plan 071)', () => {
+    const twitch = (extra: Partial<AudienceSnapshot['platforms'][number]>) =>
+      activityItems([], [], {
+        sessionId: 's',
+        updatedAt: '2026-09-25T10:50:00Z',
+        platforms: [
+          {
+            platform: 'twitch',
+            metric: 'followers',
+            capability: 'available',
+            followerGains: [
+              { at: '2026-09-25T10:41:00Z', count: 1 },
+              { at: '2026-09-25T10:45:00Z', count: 1 },
+              { at: '2026-09-25T10:49:00Z', count: 1 }
+            ],
+            ...extra
+          }
+        ]
+      }).map((item) => item.at)
+    // A mid-stream reconnect grants the scope before the chat socket
+    // subscribes: the counts must stay until named rows really flow.
+    expect(twitch({ audienceScopes: true })).toHaveLength(3)
+    expect(twitch({ namedFollowsSince: '2026-09-25T10:44:00Z' })).toEqual(['2026-09-25T10:41:00Z'])
+    expect(
+      twitch({
+        namedFollowsSince: '2026-09-25T10:44:00Z',
+        namedFollowsUntil: '2026-09-25T10:47:00Z'
+      })
+    ).toEqual(['2026-09-25T10:49:00Z', '2026-09-25T10:41:00Z'])
   })
 
   it('filters by kind and platform; announcements show only under All', () => {

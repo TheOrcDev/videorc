@@ -18,3 +18,22 @@ export function hasTwitchAudienceScopes(scopes: readonly string[]): {
     subscriberCount: scopes.includes(TWITCH_AUDIENCE_SCOPES[1])
   }
 }
+
+/**
+ * Optional scopes a connect asks for when the caller named none (plan 071,
+ * S2). A first Twitch connection asks for the audience scopes, so Activity
+ * names followers from the first stream; a reconnect keeps them when the
+ * account already had them, instead of silently dropping follow names.
+ * Other existing connections are never forced to reconnect.
+ */
+export function twitchAudienceScopesByDefault(
+  platform: string,
+  accounts: readonly { platform: string; scopes: readonly string[] }[]
+): readonly string[] {
+  if (platform !== 'twitch') return []
+  const twitch = accounts.filter((account) => account.platform === 'twitch')
+  if (twitch.length === 0) return TWITCH_AUDIENCE_SCOPES
+  return twitch.some((account) => hasTwitchAudienceScopes(account.scopes).followEvents)
+    ? TWITCH_AUDIENCE_SCOPES
+    : []
+}

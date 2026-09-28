@@ -319,18 +319,18 @@ function itemFromDestination(event: DestinationEvent): ActivityItem {
 }
 
 /**
- * Follows only a follower total can show: X never names followers, and
- * Twitch names them only with the opt-in `moderator:read:followers` scope,
- * which sends real follow rows instead (so those gains are skipped).
+ * Follows only a follower total can show. A platform names its followers
+ * while a follow event subscription is live (Twitch `channel.follow` with the
+ * opt-in scope, X `follow.follow`; plan 071): gains read inside that window
+ * are already named rows and are skipped, so nobody is counted twice.
  */
 function itemsFromFollowerGains(audience: AudienceSnapshot | null | undefined): ActivityItem[] {
   const items: ActivityItem[] = []
   for (const entry of audience?.platforms ?? []) {
     // Kick sends named follow rows and never a total, so it has no gains.
-    const named =
-      (entry.platform === 'twitch' && entry.audienceScopes === true) || entry.platform === 'kick'
-    if (named || entry.metric !== 'followers') continue
+    if (entry.platform === 'kick' || entry.metric !== 'followers') continue
     for (const gain of entry.followerGains ?? []) {
+      if (gainIsNamed(gain.at, entry.namedFollowsSince, entry.namedFollowsUntil)) continue
       items.push({
         id: `follower-gain:${entry.platform}:${gain.at}`,
         kind: 'follow',
@@ -338,9 +338,9 @@ function itemsFromFollowerGains(audience: AudienceSnapshot | null | undefined): 
         platform: entry.platform,
         name: gain.count === 1 ? 'New follower' : `${gain.count.toLocaleString()} new followers`,
         line: `${plural(gain.count, 'new follower', 'new followers')}. ${
-          entry.platform === 'x'
-            ? "X doesn't share who followed."
-            : 'Reconnect Twitch in Livestream → Setup to see who followed.'
+          entry.platform === 'twitch'
+            ? 'Show who followed to name them from now on.'
+            : "X didn't say who followed."
         }`,
         short: '',
         at: gain.at,
@@ -349,6 +349,18 @@ function itemsFromFollowerGains(audience: AudienceSnapshot | null | undefined): 
     }
   }
   return items
+}
+
+/** Whether a gain read at `at` falls inside the named-follows window. */
+export function gainIsNamed(
+  at: string,
+  since: string | null | undefined,
+  until: string | null | undefined
+): boolean {
+  if (!since) return false
+  const read = Date.parse(at)
+  if (!Number.isFinite(read) || read < Date.parse(since)) return false
+  return !until || read < Date.parse(until)
 }
 
 /**

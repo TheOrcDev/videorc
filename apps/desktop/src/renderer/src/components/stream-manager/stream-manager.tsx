@@ -172,6 +172,9 @@ export interface StreamManagerProps {
   /** Mark the current moment for a clip (plan 068 D6); shown only on air. */
   onMarkClip?: () => void
   onOpenPreview?: () => void
+  /** Show who followed (plan 071, S2): reconnect Twitch with its follow
+   * permission, relayed to the main window. */
+  onShowFollowNames?: () => void
   sendPending?: boolean
   sendOperation?: CommentsSendOperation | null
   sendFailures?: ChatSendFailure[]
@@ -228,6 +231,7 @@ export function StreamManager({
   onClear,
   onMarkClip,
   onOpenPreview,
+  onShowFollowNames,
   sendPending = false,
   sendOperation = null,
   sendFailures = [],
@@ -706,6 +710,7 @@ export function StreamManager({
             providers={snapshot.providers}
             onShowOnStream={live && onHighlight ? showActivityOnStream : undefined}
             onThank={live && onSend ? thankInChat : undefined}
+            onShowFollowNames={onShowFollowNames}
           />
         </div>
         {orclePane ? (

@@ -33,11 +33,12 @@ import {
 describe('Electron IPC contract', () => {
   it('maps every renderer-facing invoke channel to a real async API method', () => {
     expectTypeOf<ElectronInvokeMappingInvariant>().toEqualTypeOf<true>()
-    // 108: plan 068 added the Stream Manager mark-clip relay pair (plan 062
-    // had added the shortcut recorder arm; plan 055 the dashboard push and
-    // get; plan 050 retired glass:wallpaper:get with the wallpaper underlay).
-    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(108)
-    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(108)
+    // 110: plan 071 added the Stream Manager Show who followed relay pair
+    // (plan 068 had added the mark-clip relay pair; plan 062 the shortcut
+    // recorder arm; plan 055 the dashboard push and get; plan 050 retired
+    // glass:wallpaper:get with the wallpaper underlay).
+    expect(Object.keys(electronInvokeApiMethods)).toHaveLength(110)
+    expect(new Set(Object.values(electronInvokeApiMethods)).size).toBe(110)
     expectTypeOf<ElectronInvokeArgs<'resource:trash-session-deletion'>>().toEqualTypeOf<
       Parameters<VideorcApi['trashSessionDeletion']>
     >()

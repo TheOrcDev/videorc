@@ -12,6 +12,7 @@ import {
 } from '@/components/stream-manager/activity-icons'
 import { KebabMenu, type KebabMenuItem } from '@/components/kebab-menu'
 import { StatusDot } from '@/components/status-dot'
+import { Button } from '@/components/ui/button'
 import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
@@ -73,6 +74,16 @@ export function activityRowShowsPerson(item: ActivityItem): boolean {
   )
 }
 
+/** Twitch counts followers without naming them until the account allows
+ * the follow permission (plan 071, S2). */
+export function twitchNeedsFollowNames(
+  platforms: readonly StreamPlatform[],
+  audience?: AudienceSnapshot | null
+): boolean {
+  const twitch = audience?.platforms.find((entry) => entry.platform === 'twitch')
+  return platforms.includes('twitch') && twitch?.audienceScopes === false
+}
+
 /** What Activity can never show for these platforms, said plainly. */
 export function activityCapabilityNote(
   platforms: readonly StreamPlatform[],
@@ -85,9 +96,8 @@ export function activityCapabilityNote(
   if (platforms.includes('kick')) {
     notes.push("Kick shows each new follow but doesn't share a follower total.")
   }
-  const twitch = audience?.platforms.find((entry) => entry.platform === 'twitch')
-  if (platforms.includes('twitch') && twitch?.audienceScopes === false) {
-    notes.push('Reconnect Twitch in Livestream → Setup to see who followed.')
+  if (twitchNeedsFollowNames(platforms, audience)) {
+    notes.push('Twitch names each follower once you allow it.')
   }
   if (platforms.some((platform) => ['tiktok', 'instagram', 'custom'].includes(platform))) {
     notes.push('TikTok, Instagram and custom RTMP have no public live API.')
@@ -99,12 +109,14 @@ function ActivityRow({
   item,
   nowMs,
   onShowOnStream,
-  onThank
+  onThank,
+  onShowFollowNames
 }: {
   item: ActivityItem
   nowMs: number
   onShowOnStream?: (item: ActivityItem) => void
   onThank?: (item: ActivityItem) => void
+  onShowFollowNames?: () => void
 }): ReactElement {
   const Icon = item.gift ? GiftIcon : KIND_ICONS[item.kind]
   const destination = item.kind === 'destination-failed' || item.kind === 'destination-recovered'
@@ -122,6 +134,18 @@ function ActivityRow({
       : []),
     ...(onThank && !destination && item.kind !== 'announcement'
       ? [{ id: 'thank', label: 'Thank in chat', icon: SendIcon, onSelect: () => onThank(item) }]
+      : []),
+    // A Twitch count without names: one click opens the reconnect that
+    // grants the follow permission (plan 071, S2).
+    ...(onShowFollowNames && item.unnamed && item.platform === 'twitch'
+      ? [
+          {
+            id: 'follow-names',
+            label: 'Show who followed',
+            icon: FollowIcon,
+            onSelect: onShowFollowNames
+          }
+        ]
       : []),
     {
       id: 'copy',
@@ -200,7 +224,8 @@ export function ActivityPane({
   nowMs,
   className,
   onShowOnStream,
-  onThank
+  onThank,
+  onShowFollowNames
 }: {
   items: readonly ActivityItem[]
   audience?: AudienceSnapshot | null
@@ -209,6 +234,8 @@ export function ActivityPane({
   className?: string
   onShowOnStream?: (item: ActivityItem) => void
   onThank?: (item: ActivityItem) => void
+  /** Reconnect Twitch with its follow permission (plan 071, S2). */
+  onShowFollowNames?: () => void
 }): ReactElement {
   const [filter, setFilter] = useState<ActivityFilter | 'all'>('all')
   const [platform, setPlatform] = useState<StreamPlatform | 'all'>('all')
@@ -289,6 +316,7 @@ export function ActivityPane({
                 nowMs={nowMs}
                 onShowOnStream={onShowOnStream}
                 onThank={onThank}
+                onShowFollowNames={onShowFollowNames}
               />
             ))}
           </ol>
@@ -301,6 +329,17 @@ export function ActivityPane({
                   : 'Follows, subs, gifts, tips and raids appear here as they happen.'}
                 {note ? <span className="mt-1 block text-subtle">{note}</span> : null}
               </EmptyDescription>
+              {onShowFollowNames && twitchNeedsFollowNames(platforms, audience) ? (
+                <Button
+                  className="mt-2"
+                  data-slot="activity-follow-names"
+                  size="sm"
+                  variant="outline"
+                  onClick={onShowFollowNames}
+                >
+                  Show who followed
+                </Button>
+              ) : null}
             </EmptyHeader>
           </Empty>
         )}

@@ -146,3 +146,35 @@ describe('activityRowShowsPerson', () => {
     expect(activityRowShowsPerson({ ...base, kind: 'destination-failed' })).toBe(false)
   })
 })
+
+// Plan 071, S2: the Twitch reconnect is one click from Activity.
+describe('ActivityPane Show who followed', () => {
+  const render = (audienceScopes: boolean, withAction: boolean) =>
+    renderToStaticMarkup(
+      createElement(ActivityPane, {
+        items: [],
+        providers: [provider('twitch')],
+        nowMs: Date.parse('2026-09-24T10:01:00Z'),
+        audience: {
+          sessionId: 's',
+          updatedAt: '2026-09-24T10:00:00Z',
+          platforms: [
+            { platform: 'twitch', metric: 'followers', capability: 'available', audienceScopes }
+          ]
+        },
+        ...(withAction ? { onShowFollowNames: () => undefined } : {})
+      })
+    )
+
+  it('offers the reconnect while Twitch lacks the follow permission', () => {
+    const markup = render(false, true)
+    expect(markup).toContain('data-slot="activity-follow-names"')
+    expect(markup).toContain('Twitch names each follower once you allow it.')
+    expect(markup).not.toContain('Livestream → Setup')
+  })
+
+  it('hides it once the permission is granted, or when the window cannot act', () => {
+    expect(render(true, true)).not.toContain('activity-follow-names')
+    expect(render(false, false)).not.toContain('activity-follow-names')
+  })
+})

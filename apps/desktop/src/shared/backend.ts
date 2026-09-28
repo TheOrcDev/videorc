@@ -2960,6 +2960,13 @@ export interface ClipMarkCommand {
   requestId: string
 }
 
+/** Show who followed (plan 071, S2): reconnect a platform with its follow
+ * permission. Only Twitch needs one today. */
+export interface FollowNamesCommand {
+  requestId: string
+  platform: 'twitch'
+}
+
 export interface ClipSuggestResult {
   sessionId: string
   moments: ClipMoment[]
@@ -3827,6 +3834,12 @@ export interface VideorcApi {
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
   onClipMarkRequest: (callback: (command: ClipMarkCommand) => void) => () => void
   pushClipMarkResult: (resolution: CommentsCommandResolution<ClipMarkedEvent>) => Promise<boolean>
+  /** Show who followed from the Stream Manager (plan 071, S2): the MAIN
+   * renderer owns the backend socket and starts the reconnect that grants
+   * the platform's follow permission. Resolves once the browser opened. */
+  showFollowNamesFromCommentsWindow: (command: FollowNamesCommand) => Promise<boolean>
+  onFollowNamesRequest: (callback: (command: FollowNamesCommand) => void) => () => void
+  pushFollowNamesResult: (resolution: CommentsCommandResolution<boolean>) => Promise<boolean>
   /** Co-host relay: the main renderer pushes state, the window seeds + follows
    * it, and window actions come back through the same correlated broker. */
   pushCohostWindowState: (state: CohostWindowState) => Promise<void>
@@ -4947,6 +4960,11 @@ export interface PlatformAudience {
   audienceScopes?: boolean
   /** Followers gained this stream, one per read that set a new high, oldest first. */
   followerGains?: FollowerGain[]
+  /** Since when a follow event subscription names each new follower (plan
+   * 071): gains read in [since, until) are already named rows. */
+  namedFollowsSince?: string | null
+  /** When that subscription stopped; gains read from then on are unnamed again. */
+  namedFollowsUntil?: string | null
 }
 
 /** New followers seen by one audience read; the platform never said who. */

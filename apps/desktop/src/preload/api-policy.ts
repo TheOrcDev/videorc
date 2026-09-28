@@ -23,6 +23,8 @@ export const AUXILIARY_API_KEYS = {
     'clearComments',
     // Mark clip from the Stream Manager (plan 068 D6): relayed, like clear.
     'markClipFromCommentsWindow',
+    // Show who followed (plan 071, S2): the main renderer starts the reconnect.
+    'showFollowNamesFromCommentsWindow',
     'getCommentsWindowState',
     'setCommentsWindowAlwaysOnTop',
     'setCommentsWindowHighlightAnchor',

@@ -834,12 +834,15 @@ enum SubscribeError {
     Other(anyhow::Error),
 }
 
+/// Makes the chat subscriptions, and the follow subscription when `follows`.
+/// Returns whether follows are subscribed on this socket.
 async fn create_subscriptions(
     client: &reqwest::Client,
     config: &TwitchChatConfig,
     access_token: &str,
     session_id: &str,
-) -> std::result::Result<(), SubscribeError> {
+    follows: bool,
+) -> std::result::Result<bool, SubscribeError> {
     let base_url = config
         .api_base_url
         .clone()
@@ -876,21 +879,67 @@ async fn create_subscriptions(
             }
         }
     }
-    if config.follow_events {
-        // Follows are extra: a refusal here never costs the chat itself.
-        let _ = client
-            .post(&url)
-            .bearer_auth(access_token)
-            .header("Client-Id", &config.client_id)
-            .json(&follow_subscription_body(
-                &config.broadcaster_user_id,
-                session_id,
-            ))
-            .send()
-            .await;
-    }
-    Ok(())
+    // Follows are extra: a refusal here never costs the chat itself.
+    Ok(follows && create_follow_subscription(client, config, access_token, session_id).await)
 }
+
+/// `channel.follow` v2 on this socket. True when Twitch holds it (a 409
+/// means an earlier attempt already made it).
+async fn create_follow_subscription(
+    client: &reqwest::Client,
+    config: &TwitchChatConfig,
+    access_token: &str,
+    session_id: &str,
+) -> bool {
+    let base_url = config
+        .api_base_url
+        .clone()
+        .unwrap_or_else(|| TWITCH_API_BASE_URL.to_string());
+    let url = format!(
+        "{}/helix/eventsub/subscriptions",
+        base_url.trim_end_matches('/')
+    );
+    client
+        .post(url)
+        .bearer_auth(access_token)
+        .header("Client-Id", &config.client_id)
+        .json(&follow_subscription_body(
+            &config.broadcaster_user_id,
+            session_id,
+        ))
+        .send()
+        .await
+        .is_ok_and(|response| {
+            response.status().is_success() || response.status() == reqwest::StatusCode::CONFLICT
+        })
+}
+
+/// Whether the account now holds `moderator:read:followers`. Read from the
+/// stored account, not only the start config, so a reconnect that grants it
+/// mid-stream names the rest of this stream's follows (plan 071, S2).
+fn follow_scope_held(state: &AppState, config: &TwitchChatConfig) -> bool {
+    if config.follow_events {
+        return true;
+    }
+    let crate::session_token::SessionTokenSource::Account {
+        platform: StreamPlatform::Twitch,
+        account_id,
+    } = &config.token_source
+    else {
+        return false;
+    };
+    crate::twitch_account_credentials(state, account_id.as_deref()).is_ok_and(|credential| {
+        credential
+            .account
+            .scopes
+            .iter()
+            .any(|scope| scope == crate::oauth::TWITCH_FOLLOWERS_SCOPE)
+    })
+}
+
+/// How often an open socket without follows checks whether the scope
+/// arrived. Keepalives come about every 10 s; the check is a local read.
+const FOLLOW_SCOPE_RECHECK: Duration = Duration::from_secs(30);
 
 /// Subscribes this socket, renewing a refused token once (plan 055, B2).
 async fn subscribe_socket(
@@ -899,7 +948,8 @@ async fn subscribe_socket(
     config: &TwitchChatConfig,
     token: &mut crate::session_token::SessionToken,
     socket_session: &str,
-) -> std::result::Result<(), String> {
+) -> std::result::Result<bool, String> {
+    let follows = follow_scope_held(state, config);
     let access_token = token.ensure_fresh(state, client).await.to_string();
     let subscribe_failed = |error: anyhow::Error| {
         state.emit_log(
@@ -909,8 +959,8 @@ async fn subscribe_socket(
         "Could not subscribe to Twitch live chat. Reconnect Twitch to enable live comments."
             .to_string()
     };
-    match create_subscriptions(client, config, &access_token, socket_session).await {
-        Ok(()) => return Ok(()),
+    match create_subscriptions(client, config, &access_token, socket_session, follows).await {
+        Ok(follows_live) => return Ok(follows_live),
         Err(SubscribeError::Other(error)) => return Err(subscribe_failed(error)),
         Err(SubscribeError::Unauthorized) => {}
     }
@@ -918,7 +968,7 @@ async fn subscribe_socket(
         return Err(TWITCH_SIGN_IN_EXPIRED.to_string());
     };
     let renewed = renewed.to_string();
-    create_subscriptions(client, config, &renewed, socket_session)
+    create_subscriptions(client, config, &renewed, socket_session, follows)
         .await
         .map_err(|error| match error {
             SubscribeError::Unauthorized => TWITCH_SIGN_IN_EXPIRED.to_string(),
@@ -944,12 +994,15 @@ async fn run_eventsub_session(
     subscribe: bool,
     seen: &mut HashSet<String>,
     avatars: &mut TwitchAvatarCache,
+    follows_live: &mut bool,
 ) -> SessionOutcome {
     let (session_id, session_generation) = session_owner;
     let Ok((ws_stream, _response)) = connect_async(ws_url).await else {
         return SessionOutcome::Reconnect(None);
     };
     let (mut sink, mut stream) = ws_stream.split();
+    let mut socket_session_id: Option<String> = None;
+    let mut follow_scope_checked_at = std::time::Instant::now();
 
     while let Some(frame) = stream.next().await {
         let Ok(message) = frame else {
@@ -960,12 +1013,25 @@ async fn run_eventsub_session(
                 EventSubFrame::Welcome {
                     session_id: socket_session,
                 } => {
-                    if subscribe
-                        && let Err(message) =
-                            subscribe_socket(state, client, config, token, &socket_session).await
-                    {
-                        return SessionOutcome::Fatal(message);
+                    // A socket from Twitch's reconnect URL keeps the old
+                    // socket's subscriptions, follows included.
+                    if subscribe {
+                        match subscribe_socket(state, client, config, token, &socket_session).await
+                        {
+                            Ok(follows) => {
+                                *follows_live = follows;
+                                crate::audience::set_named_follows(
+                                    state,
+                                    session_id,
+                                    StreamPlatform::Twitch,
+                                    follows,
+                                );
+                            }
+                            Err(message) => return SessionOutcome::Fatal(message),
+                        }
                     }
+                    socket_session_id = Some(socket_session);
+                    follow_scope_checked_at = std::time::Instant::now();
                     set_provider_and_emit(
                         state,
                         session_id,
@@ -1064,7 +1130,36 @@ async fn run_eventsub_session(
                             .to_string(),
                     );
                 }
-                EventSubFrame::Keepalive | EventSubFrame::Unknown => {}
+                EventSubFrame::Keepalive => {
+                    // The scope can arrive mid-stream (Show who followed):
+                    // add follows to this socket without a new Go Live.
+                    if !*follows_live
+                        && let Some(socket_session) = socket_session_id.as_deref()
+                        && follow_scope_checked_at.elapsed() >= FOLLOW_SCOPE_RECHECK
+                    {
+                        follow_scope_checked_at = std::time::Instant::now();
+                        if follow_scope_held(state, config) {
+                            let access_token = token.ensure_fresh(state, client).await.to_string();
+                            if create_follow_subscription(
+                                client,
+                                config,
+                                &access_token,
+                                socket_session,
+                            )
+                            .await
+                            {
+                                *follows_live = true;
+                                crate::audience::set_named_follows(
+                                    state,
+                                    session_id,
+                                    StreamPlatform::Twitch,
+                                    true,
+                                );
+                            }
+                        }
+                    }
+                }
+                EventSubFrame::Unknown => {}
             },
             Message::Ping(payload) => {
                 let _ = sink.send(Message::Pong(payload)).await;
@@ -1114,6 +1209,7 @@ pub async fn run_twitch_chat_connector(
     .await;
 
     let mut avatars = TwitchAvatarCache::default();
+    let mut follows_live = false;
     loop {
         match run_eventsub_session(
             &state,
@@ -1125,6 +1221,7 @@ pub async fn run_twitch_chat_connector(
             subscribe,
             &mut seen,
             &mut avatars,
+            &mut follows_live,
         )
         .await
         {
@@ -1147,6 +1244,15 @@ pub async fn run_twitch_chat_connector(
                 backoff_ms = next_backoff_ms(backoff_ms);
             }
             SessionOutcome::Fatal(message) => {
+                if follows_live {
+                    // No named follows from here on: counts show again.
+                    crate::audience::set_named_follows(
+                        &state,
+                        &session_id,
+                        StreamPlatform::Twitch,
+                        false,
+                    );
+                }
                 set_provider_and_emit(
                     &state,
                     &session_id,
@@ -1274,6 +1380,7 @@ mod tests {
         socket_connections: Arc<AtomicUsize>,
         notifications_sent: Arc<AtomicUsize>,
         replay_notifications: bool,
+        frame: Arc<String>,
     }
 
     async fn mock_eventsub_ws(
@@ -1300,7 +1407,7 @@ mod tests {
             };
             if should_send {
                 let _ = socket
-                    .send(AxumMessage::Text(chat_message_frame().into()))
+                    .send(AxumMessage::Text(state.frame.as_str().into()))
                     .await;
             }
             sleep(Duration::from_millis(100)).await;
@@ -1355,6 +1462,20 @@ mod tests {
         Arc<AtomicUsize>,
         oneshot::Sender<()>,
     ) {
+        spawn_mock_twitch_server_sending(replay_notifications, chat_message_frame()).await
+    }
+
+    async fn spawn_mock_twitch_server_sending(
+        replay_notifications: bool,
+        frame: String,
+    ) -> (
+        String,
+        String,
+        Arc<Mutex<Vec<Value>>>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+        oneshot::Sender<()>,
+    ) {
         let subscriptions = Arc::new(Mutex::new(Vec::new()));
         let socket_connections = Arc::new(AtomicUsize::new(0));
         let notifications_sent = Arc::new(AtomicUsize::new(0));
@@ -1363,6 +1484,7 @@ mod tests {
             socket_connections: socket_connections.clone(),
             notifications_sent: notifications_sent.clone(),
             replay_notifications,
+            frame: Arc::new(frame),
         };
         let app = Router::new()
             .route("/eventsub", get(mock_eventsub_ws))
@@ -1754,9 +1876,16 @@ mod tests {
                 crate::session_token::SessionTokenSource::Fixed,
             );
             config.follow_events = follow_events;
-            create_subscriptions(&reqwest::Client::new(), &config, "token-1", "socket-1")
-                .await
-                .unwrap();
+            let follows_live = create_subscriptions(
+                &reqwest::Client::new(),
+                &config,
+                "token-1",
+                "socket-1",
+                follow_events,
+            )
+            .await
+            .unwrap();
+            assert_eq!(follows_live, follow_events);
             let bodies = subscriptions.lock().await.clone();
             let follow = bodies
                 .iter()
@@ -1776,6 +1905,98 @@ mod tests {
             }
             let _ = shutdown.send(());
         }
+    }
+
+    fn follow_frame() -> String {
+        json!({
+            "metadata": {
+                "message_type": "notification",
+                "subscription_type": "channel.follow",
+                "message_id": "delivery-follow-1",
+                "message_timestamp": "2026-09-28T10:00:00Z"
+            },
+            "payload": {
+                "subscription": { "type": "channel.follow" },
+                "event": {
+                    "user_id": "987",
+                    "user_login": "coolviewer",
+                    "user_name": "CoolViewer",
+                    "broadcaster_user_id": "broadcaster-1",
+                    "followed_at": "2026-09-28T10:00:00Z"
+                }
+            }
+        })
+        .to_string()
+    }
+
+    // Plan 071, S2: a follow is a named row with the follower's Helix avatar,
+    // and the audience learns that Twitch follows are named from now on.
+    #[tokio::test]
+    async fn a_follow_arrives_with_the_followers_avatar_and_marks_follows_named() {
+        let (api_base_url, eventsub_ws_url, subscriptions, _, _, shutdown) =
+            spawn_mock_twitch_server_sending(false, follow_frame()).await;
+        let state = test_state();
+        state
+            .database
+            .ensure_fake_live_chat_session("session-1")
+            .unwrap();
+        let session_generation = {
+            let mut coordinator = state.live_chat.lock().await;
+            coordinator.start_session("session-1".to_string(), vec![twitch_provider_row()]);
+            coordinator.session_generation()
+        };
+        let mut config = expiring_config(
+            api_base_url,
+            eventsub_ws_url,
+            crate::session_token::SessionTokenSource::Fixed,
+        );
+        config.follow_events = true;
+        let connector = tokio::spawn(run_twitch_chat_connector(
+            state.clone(),
+            "session-1".to_string(),
+            session_generation,
+            config,
+        ));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let follow = loop {
+            let snapshot = current_status(&state).await;
+            if let Some(message) = snapshot
+                .messages
+                .iter()
+                .find(|message| message.event_type == LiveChatEventType::Follow)
+            {
+                break message.clone();
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for the follow row: {snapshot:?}"
+            );
+            sleep(Duration::from_millis(25)).await;
+        };
+        connector.abort();
+        let _ = shutdown.send(());
+
+        assert_eq!(follow.author_name, "CoolViewer");
+        assert_eq!(
+            follow.author_avatar_url.as_deref(),
+            Some("https://static-cdn.jtvnw.net/viewer.png")
+        );
+        assert!(
+            subscriptions
+                .lock()
+                .await
+                .iter()
+                .any(|body| body["type"] == "channel.follow")
+        );
+        // The connector reported before the audience began: the report waits
+        // for the platform and applies when it registers.
+        let snapshot =
+            state
+                .audience
+                .lock()
+                .unwrap()
+                .begin("session-1", &[StreamPlatform::Twitch], "t0");
+        assert!(snapshot.platforms[0].named_follows_since.is_some());
     }
 
     fn sender_config(api_base_url: String) -> TwitchChatSenderConfig {

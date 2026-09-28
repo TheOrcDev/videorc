@@ -428,6 +428,25 @@ function CommentsWindowApp(): ReactElement {
             : undefined
         }
         onOpenPreview={() => void window.videorc?.openPreviewWindow?.()}
+        onShowFollowNames={() => {
+          void window.videorc
+            ?.showFollowNamesFromCommentsWindow?.({
+              requestId: crypto.randomUUID(),
+              platform: 'twitch'
+            })
+            .then(() =>
+              toast.success('Allow the follow permission in your browser', {
+                id: 'follow-names',
+                description: 'New Twitch followers show by name once Twitch confirms.'
+              })
+            )
+            .catch((error) =>
+              toast.error(
+                error instanceof Error ? error.message : 'Could not open the Twitch reconnect.',
+                { id: 'follow-names' }
+              )
+            )
+        }}
         onSend={(text, options) => {
           if (!snapshot.sessionId) return
           const operationId = crypto.randomUUID()

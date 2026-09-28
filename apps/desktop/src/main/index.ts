@@ -422,6 +422,7 @@ import type {
   CommentHighlightState,
   ClipMarkCommand,
   ClipMarkedEvent,
+  FollowNamesCommand,
   CommentsClearCommand,
   CommentsCommandResolution,
   CommentsSendCommand,
@@ -13670,6 +13671,31 @@ app.whenReady().then(async () => {
   secureIpcHandle(
     'comments-window:clip-mark-result-push',
     (event, resolution: CommentsCommandResolution<ClipMarkedEvent>) => {
+      if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
+      return commentsCommandBroker.resolve(resolution)
+    }
+  )
+  // Show who followed (plan 071, S2): the main renderer owns the backend
+  // socket, so it starts the reconnect that grants the follow permission.
+  secureIpcHandle('comments-window:follow-names', (event, value: unknown): Promise<boolean> => {
+    if (!commentsWindow || event.sender.id !== commentsWindow.webContents.id) {
+      return Promise.reject(new Error('Only the Chat window can ask to show who followed.'))
+    }
+    const requestId = commentsCommandRequestId(value)
+    const platform = (value as { platform?: unknown }).platform
+    if (platform !== 'twitch') {
+      return Promise.reject(new Error('Only Twitch needs a reconnect to show who followed.'))
+    }
+    const command: FollowNamesCommand = { requestId, platform }
+    return commentsCommandBroker.request(requestId, () => {
+      if (!mainWindow || mainWindow.webContents.isDestroyed()) return false
+      sendElectronEvent(mainWindow.webContents, 'comments-window:follow-names-request', command)
+      return true
+    })
+  })
+  secureIpcHandle(
+    'comments-window:follow-names-result-push',
+    (event, resolution: CommentsCommandResolution<boolean>) => {
       if (!mainWindow || event.sender.id !== mainWindow.webContents.id) return false
       return commentsCommandBroker.resolve(resolution)
     }

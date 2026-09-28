@@ -70,6 +70,10 @@ const api: VideorcApi = {
   markClipFromCommentsWindow: (command) => invoke('comments-window:clip-mark', command),
   onClipMarkRequest: (callback) => subscribe('comments-window:clip-mark-request', callback),
   pushClipMarkResult: (resolution) => invoke('comments-window:clip-mark-result-push', resolution),
+  showFollowNamesFromCommentsWindow: (command) => invoke('comments-window:follow-names', command),
+  onFollowNamesRequest: (callback) => subscribe('comments-window:follow-names-request', callback),
+  pushFollowNamesResult: (resolution) =>
+    invoke('comments-window:follow-names-result-push', resolution),
   onCommentHighlightState: (callback) => subscribe('comments-window:highlight-state', callback),
   getBundledBackgroundAssets: () => invoke('backgrounds:bundled-assets'),
   beginAccountSignIn: (authorizeUrl) => invoke('account:begin-sign-in', authorizeUrl),
