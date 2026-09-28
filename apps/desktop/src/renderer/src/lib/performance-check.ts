@@ -54,11 +54,29 @@ export function performanceCheckCeiling(
   }
 }
 
+/**
+ * Linux v1 `belowFloor` + every measured rung `did-not-start` is a failed
+ * ladder, not a machine class (ogre / Omarchy 2026-09-28). Do not apply it
+ * or show "too heavy" from it. Packaged auto-run still fires once.
+ */
+export function isUntrustedPerformanceCheckResult(
+  result: PerformanceCheckResult | undefined
+): boolean {
+  if (!result?.belowFloor || !result.capabilityKey.startsWith('performance-check-v1:')) {
+    return false
+  }
+  const measured = result.rungs.filter((rung) => rung.verdict !== 'skipped')
+  return (
+    measured.length > 0 &&
+    measured.every((rung) => rung.verdict === 'failed' && rung.reasons.includes('did-not-start'))
+  )
+}
+
 export function outputVerdict(
   video: VideoSettings,
   result: PerformanceCheckResult | undefined
 ): OutputVerdict {
-  if (!result) {
+  if (!result || isUntrustedPerformanceCheckResult(result)) {
     return 'unknown'
   }
   if (result.rungs.some((rung) => rung.verdict === 'passed' && dominates(rung.video, video))) {
@@ -72,6 +90,9 @@ export function outputVerdict(
 
 /** The preset an untouched install is moved to, or undefined to leave it. */
 export function autoApplyPreset(result: PerformanceCheckResult): VideoPreset | undefined {
+  if (isUntrustedPerformanceCheckResult(result)) {
+    return undefined
+  }
   if (result.belowFloor) {
     return result.recommended.preset
   }
@@ -103,7 +124,11 @@ export function isShippedDefaultOutput(video: VideoSettings): boolean {
 
 /** Run when nothing was ever measured, or it was measured on other hardware. */
 export function shouldRunPerformanceCheck(state: PerformanceCheckState | undefined): boolean {
-  return state !== undefined && !state.running && (state.result === undefined || state.stale)
+  return (
+    state !== undefined &&
+    !state.running &&
+    (state.result === undefined || state.stale || isUntrustedPerformanceCheckResult(state.result))
+  )
 }
 
 export function outputLabel(video: Pick<VideoSettings, 'width' | 'height' | 'fps'>): string {
@@ -164,7 +189,7 @@ export function performanceCheckLine({
     }
   }
   const result = state.result
-  if (!result) {
+  if (!result || isUntrustedPerformanceCheckResult(result)) {
     return {
       tone: 'muted',
       busy: false,

@@ -13672,7 +13672,15 @@ pub(crate) fn graphics_adapter_driver_identity() -> String {
     })
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+pub(crate) fn graphics_adapter_driver_identity() -> String {
+    crate::linux_vaapi::linux_graphics_adapter_driver_identity(
+        Path::new("/dev/dri"),
+        Path::new("/sys/class/drm"),
+    )
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 pub(crate) fn graphics_adapter_driver_identity() -> String {
     format!(
         "platform={};windows-adapter-driver=not-applicable",

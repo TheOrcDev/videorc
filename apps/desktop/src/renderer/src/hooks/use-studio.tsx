@@ -122,6 +122,7 @@ import {
 import {
   autoApplyPreset,
   isShippedDefaultOutput,
+  isUntrustedPerformanceCheckResult,
   performanceCheckCeiling,
   performanceCheckTooHeavyToast,
   shouldRunPerformanceCheck
@@ -13434,7 +13435,13 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     }
     // An install that never picked an output follows the measurement; anyone
     // who chose one only ever gets the suggestion in Recording → Output.
-    if (next.running || next.stale || !next.result || outputChosenByUser()) {
+    if (
+      next.running ||
+      next.stale ||
+      !next.result ||
+      outputChosenByUser() ||
+      isUntrustedPerformanceCheckResult(next.result)
+    ) {
       return
     }
     const preset = autoApplyPreset(next.result)

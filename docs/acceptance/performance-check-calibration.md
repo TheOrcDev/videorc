@@ -16,7 +16,8 @@ only together with a new row here.
 | Compositor tick gap p95 | <= 1.5 frames | `compositorTickGapP95Ms` |
 | Encoder pipe write p95 | <= 1 frame | raw / encoded FIFO write p95 |
 | Drain after Stop | <= 2000 ms | wall time of `stop_recording` |
-| Fast skip of the next rung | speed < 0.5 | — |
+| Fast skip of the next rung | speed < 0.5, never on Linux | ogre Omarchy 2026-09-28: VAAPI soft-failed 1440p and skipped 1080p while Record→file @1080p passed |
+| OpenH264 synthetic speed / fps / stalls | ignored | ogre Omarchy 2026-09-28: speed ≈ 0.08 at 720p while Record→file @1080p passed |
 
 Each rung: 1.5 s warm-up (discarded) + 4 s measured, hard synthetic content
 (per-frame noise), test-pattern source, no microphone.
@@ -55,7 +56,24 @@ test `uhd_600_bundle_shape_fails_loudly_and_fast_skips`.
 | 2560x1440@30 (OpenH264, CPU compositor) | 0.277 | 2.5 | 12 000 ms | 9 700 ms | > 3 s (we TERMed it) |
 
 Every budget above fails on these numbers by an order of magnitude; the fast
-skip also removes the next rung.
+skip also removes the next rung. OpenH264 synthetic scoring still fails this
+shape on queue, pipe, drain and finalize.
+
+### 2026-09-28 — Omarchy Linux, i7-8750H + UHD 630 (ogre)
+
+Fresh ladder vs. acceptance Record→file on the same box. The stored
+`performance_check_result` was `belowFloor` with every rung `did-not-start`;
+the v1 capability key used a constant Linux GPU string and crate `0.9.0`, so
+packaged auto-rerun never fired.
+
+| Path | 720p30 | 1080p30 | Notes |
+| --- | --- | --- | --- |
+| OpenH264 synthetic | speed ≈ 0.08 (would fail the old speed budget) | — | Acceptance Record→file @1080p already PASS |
+| VAAPI renderD128 | passed | fast-skipped after a soft 1440 fail | Acceptance Record→file @1080p already PASS |
+
+Scoring change: OpenH264 synthetic no longer uses speed, delivered fps or
+stalled frames. Linux never fast-skips mid-ladder. Capability key is now v2
+plus desktop app version plus render-node identity.
 
 ## Still to calibrate
 

@@ -9,6 +9,7 @@ import { videoPresets } from './capture'
 import {
   autoApplyPreset,
   isShippedDefaultOutput,
+  isUntrustedPerformanceCheckResult,
   outputLabel,
   outputVerdict,
   performanceCheckLine,
@@ -117,6 +118,28 @@ describe('shouldRunPerformanceCheck', () => {
     expect(shouldRunPerformanceCheck({ running: true, stale: false })).toBe(false)
     expect(shouldRunPerformanceCheck({ running: false, stale: true, result: strong })).toBe(true)
     expect(shouldRunPerformanceCheck({ running: false, stale: false, result: strong })).toBe(false)
+  })
+
+  it('reruns Linux v1 did-not-start below-floor poison without applying it', () => {
+    const poison = result([['tutorial-720p30', 'failed']], 'tutorial-720p30', true)
+    poison.rungs[0].reasons = ['did-not-start']
+    expect(isUntrustedPerformanceCheckResult(poison)).toBe(true)
+    expect(autoApplyPreset(poison)).toBeUndefined()
+    expect(outputVerdict(videoPresets['tutorial-720p30'], poison)).toBe('unknown')
+    expect(shouldRunPerformanceCheck({ running: false, stale: false, result: poison })).toBe(true)
+    expect(
+      performanceCheckLine({
+        state: { running: false, stale: false, result: poison },
+        progress: null,
+        video: videoPresets['tutorial-720p30']
+      })
+    ).toMatchObject({
+      checkLabel: 'Check this computer',
+      text: 'This computer has not been measured yet.'
+    })
+    const trustedV2 = { ...poison, capabilityKey: 'performance-check-v2:abc' }
+    expect(isUntrustedPerformanceCheckResult(trustedV2)).toBe(false)
+    expect(autoApplyPreset(trustedV2)).toBe('tutorial-720p30')
   })
 })
 
