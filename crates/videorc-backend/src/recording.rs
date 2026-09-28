@@ -12129,6 +12129,7 @@ fn windows_media_foundation_hardware_probe_args(video: &VideoSettings) -> Vec<St
         FfmpegH264Platform::WindowsHardware,
         true,
         LinuxVaapiArgProfile::Standard,
+        false,
     );
     // Plan 035 / issue #156: h264_mf has PASSED a null-output probe and then
     // failed during TEE header creation in production. Exercise the exact
@@ -12163,6 +12164,7 @@ fn linux_vaapi_probe_args(device: &Path, profile: LinuxVaapiArgProfile) -> Vec<S
         false,
         false,
         profile,
+        false,
     );
     crate::linux_vaapi::probe_args(device, &video, &encode_args)
 }
@@ -12421,6 +12423,7 @@ fn append_h264_encoding_args_for_platform_preserving_input_timestamps(
     platform: FfmpegH264Platform,
     low_latency: bool,
     vaapi_profile: LinuxVaapiArgProfile,
+    performance_check: bool,
 ) {
     append_h264_encoding_args_for_platform_with_timing(
         args,
@@ -12429,6 +12432,7 @@ fn append_h264_encoding_args_for_platform_preserving_input_timestamps(
         false,
         low_latency,
         vaapi_profile,
+        performance_check,
     );
     args.extend(["-fps_mode".to_string(), "vfr".to_string()]);
 }
@@ -12454,6 +12458,7 @@ fn append_h264_encoding_args_for_platform(
     platform: FfmpegH264Platform,
     low_latency: bool,
     vaapi_profile: LinuxVaapiArgProfile,
+    performance_check: bool,
 ) {
     append_h264_encoding_args_for_platform_with_timing(
         args,
@@ -12462,6 +12467,7 @@ fn append_h264_encoding_args_for_platform(
         true,
         low_latency,
         vaapi_profile,
+        performance_check,
     );
 }
 
@@ -12472,6 +12478,7 @@ fn append_h264_encoding_args_for_platform_with_timing(
     force_output_fps: bool,
     low_latency: bool,
     vaapi_profile: LinuxVaapiArgProfile,
+    performance_check: bool,
 ) {
     let encoder = ffmpeg_h264_encoder(platform);
     if force_output_fps {
@@ -12618,6 +12625,9 @@ fn append_h264_encoding_args_for_platform_with_timing(
             | FfmpegH264Platform::LinuxVaapi
     ) {
         args.extend(h264_bt709_vui_rewrite_bsf_args());
+    }
+    if performance_check {
+        disable_openh264_frame_skip(args);
     }
 }
 
@@ -16035,10 +16045,8 @@ fn bridge_compositor_ffmpeg_args_with_encoder(
                     encoder.platform,
                     !stream_targets.is_empty(),
                     encoder.vaapi_arg_profile,
+                    performance_check,
                 );
-                if performance_check {
-                    disable_openh264_frame_skip(&mut args);
-                }
             }
             EncoderBridgeVideoOutput::VideoToolboxH264AnnexB
             | EncoderBridgeVideoOutput::VideoToolboxH264MpegTs
@@ -16721,6 +16729,7 @@ fn ffmpeg_args_with_encoder(
         encoder.platform,
         !stream_targets.is_empty(),
         encoder.vaapi_arg_profile,
+        params.purpose.is_performance_check(),
     );
     append_audio_encoding_with_video_clock(
         &mut args,
@@ -21796,6 +21805,7 @@ mod tests {
             FfmpegH264Platform::Macos,
             false,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(arg_value(&macos_args, "-profile:v"), Some("high"));
         // Record-only drops the speed-over-quality hint; -realtime stays.
@@ -21821,6 +21831,7 @@ mod tests {
             FfmpegH264Platform::Macos,
             false,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(arg_value(&experimental_args, "-level"), Some("5.2"));
         // 4K stays speed-priority even record-only: quality-mode 4K warmup
@@ -21836,6 +21847,7 @@ mod tests {
             FfmpegH264Platform::WindowsHardware,
             false,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(arg_value(&windows_args, "-profile:v"), None);
         assert_eq!(arg_value(&windows_args, "-level"), None);
@@ -21860,6 +21872,7 @@ mod tests {
             FfmpegH264Platform::Macos,
             true,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(arg_value(&macos_args, "-c:v"), Some("h264_videotoolbox"));
         assert_eq!(arg_value(&macos_args, "-pix_fmt"), Some("yuv420p"));
@@ -21874,6 +21887,7 @@ mod tests {
             FfmpegH264Platform::WindowsHardware,
             true,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(arg_value(&windows_args, "-c:v"), Some("h264_mf"));
         assert_eq!(arg_value(&windows_args, "-pix_fmt"), Some("nv12"));
@@ -21889,6 +21903,7 @@ mod tests {
             FfmpegH264Platform::WindowsSoftware,
             true,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(
             arg_value(&windows_software_args, "-c:v"),
@@ -21915,6 +21930,7 @@ mod tests {
             FfmpegH264Platform::LinuxVaapi,
             true,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(arg_value(&linux_vaapi_args, "-c:v"), Some("h264_vaapi"));
         assert_eq!(arg_value(&linux_vaapi_args, "-pix_fmt"), Some("vaapi"));
@@ -21930,6 +21946,7 @@ mod tests {
             FfmpegH264Platform::LinuxVaapi,
             false,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(arg_value(&linux_vaapi_record_args, "-rc_mode"), Some("VBR"));
         assert_eq!(arg_value(&linux_vaapi_record_args, "-bf"), Some("0"));
@@ -21941,6 +21958,7 @@ mod tests {
             FfmpegH264Platform::LinuxSoftware,
             true,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert_eq!(arg_value(&linux_software_args, "-c:v"), Some("libopenh264"));
         assert_eq!(arg_value(&linux_software_args, "-pix_fmt"), Some("yuv420p"));
@@ -21974,6 +21992,7 @@ mod tests {
             FfmpegH264Platform::LinuxVaapi,
             false,
             LinuxVaapiArgProfile::Compat,
+            false,
         );
         assert_eq!(
             arg_value(&linux_vaapi_compat_args, "-c:v"),
@@ -22096,6 +22115,7 @@ mod tests {
             false,
             false,
             LinuxVaapiArgProfile::Standard,
+            false,
         );
         assert!(!session_args.is_empty());
         assert!(
@@ -27427,6 +27447,65 @@ mod tests {
             Some(output_path),
             fifo_path,
             EncoderBridgeVideoOutput::RawYuv420p,
+            &vaapi,
+        )
+        .unwrap();
+        assert_eq!(arg_value(&vaapi_args, "-allow_skip_frames"), None);
+    }
+
+    #[test]
+    fn performance_check_legacy_args_encode_every_openh264_frame() {
+        let output_path = Path::new("/tmp/videorc-benchmark-legacy.mkv");
+        let capture = CaptureInputs {
+            video: VideoInput::TestPattern,
+            camera_index: None,
+            microphone: None,
+        };
+        let args_for = |params: &StartSessionParams, platform: FfmpegH264Platform| {
+            ffmpeg_args_with_encoder(
+                &capture,
+                params,
+                Some(output_path),
+                &[],
+                None,
+                &ResolvedFfmpegH264Encoder::for_platform(platform),
+            )
+            .unwrap()
+        };
+        let capture_params = base_params(true, false);
+        let mut benchmark_params = base_params(true, false);
+        benchmark_params.purpose = crate::protocol::SessionPurpose::PerformanceCheck;
+
+        for platform in [
+            FfmpegH264Platform::LinuxSoftware,
+            FfmpegH264Platform::WindowsSoftware,
+        ] {
+            // The legacy builder is the escape hatch when
+            // VIDEORC_ENCODER_BRIDGE / VIDEORC_RECORDING_ENCODER_BRIDGE
+            // disable the compositor bridge. Benchmark sessions must still
+            // encode every noise frame; real sessions keep skip-on-overshoot.
+            let capture_args = args_for(&capture_params, platform);
+            assert_eq!(arg_value(&capture_args, "-allow_skip_frames"), Some("1"));
+            let benchmark_args = args_for(&benchmark_params, platform);
+            assert_eq!(arg_value(&benchmark_args, "-c:v"), Some("libopenh264"));
+            assert_eq!(arg_value(&benchmark_args, "-allow_skip_frames"), Some("0"));
+            assert_eq!(
+                benchmark_args
+                    .iter()
+                    .filter(|arg| *arg == "-allow_skip_frames")
+                    .count(),
+                1
+            );
+        }
+
+        let mut vaapi = ResolvedFfmpegH264Encoder::for_platform(FfmpegH264Platform::LinuxVaapi);
+        vaapi.vaapi_device = Some(PathBuf::from("/dev/dri/renderD128"));
+        let vaapi_args = ffmpeg_args_with_encoder(
+            &capture,
+            &benchmark_params,
+            Some(output_path),
+            &[],
+            None,
             &vaapi,
         )
         .unwrap();

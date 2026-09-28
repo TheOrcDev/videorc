@@ -56,9 +56,13 @@ class FakeWindow {
   readonly webContents = new FakeWebContents()
   readonly children: FakeView[] = []
   destroyed = false
+  visible = true
   constructor(public content: Rect) {}
   isDestroyed(): boolean {
     return this.destroyed
+  }
+  isVisible(): boolean {
+    return this.visible && !this.destroyed
   }
   getContentBounds(): Rect {
     return { ...this.content }
@@ -233,17 +237,54 @@ describe('InWindowProofSurface', () => {
     expect(events).toEqual(['resize', 'move', 'move'])
   })
 
-  it('passes pointer input through to the host and never keeps focus', () => {
+  it('cancels view mouse events, passes them to the host, and never keeps focus', () => {
     const { surface, view, main } = harness()
     surface.setBounds({ x: 440, y: 168, width: 1320, height: 743 })
-    view.webContents.emit('input-event', {}, { type: 'mouseDown', x: 5, y: 6, button: 'left' })
-    view.webContents.emit('input-event', {}, { type: 'keyDown' })
+    const prevented: string[] = []
+    const emitMouse = (input: ObservedInputEvent): void => {
+      view.webContents.emit(
+        'before-mouse-event',
+        {
+          preventDefault: () => {
+            prevented.push(input.type)
+          }
+        },
+        input
+      )
+    }
+
+    emitMouse({ type: 'mouseDown', x: 5, y: 6, button: 'left' })
+    emitMouse({ type: 'mouseMove', x: 12, y: 14 })
+    emitMouse({ type: 'mouseUp', x: 12, y: 14, button: 'left' })
+    emitMouse({ type: 'mouseWheel', x: 12, y: 14, deltaY: -120 })
+    emitMouse({ type: 'mouseEnter', x: 1, y: 1 })
     view.webContents.emit('focus')
 
+    expect(prevented).toEqual(['mouseDown', 'mouseMove', 'mouseUp', 'mouseWheel'])
     expect(main.webContents.sent).toEqual([
-      { type: 'mouseDown', x: 445, y: 174, button: 'left', modifiers: [] }
+      { type: 'mouseDown', x: 445, y: 174, button: 'left', modifiers: [] },
+      { type: 'mouseMove', x: 452, y: 182, modifiers: [] },
+      { type: 'mouseUp', x: 452, y: 182, button: 'left', modifiers: [] },
+      { type: 'mouseWheel', x: 452, y: 182, modifiers: [], deltaY: -120 }
     ])
+    expect(view.webContents.focused).toBe(0)
     expect(main.webContents.focused).toBe(1)
+  })
+
+  it('is not visible when the host window is hidden or destroyed', () => {
+    const { surface, main } = harness()
+    surface.setBounds({ x: 440, y: 168, width: 1320, height: 743 })
+    surface.showInactive()
+    expect(surface.isVisible()).toBe(true)
+
+    main.visible = false
+    expect(surface.isVisible()).toBe(false)
+
+    main.visible = true
+    expect(surface.isVisible()).toBe(true)
+
+    main.destroyed = true
+    expect(surface.isVisible()).toBe(false)
   })
 
   it('stays detached while no host window exists', () => {

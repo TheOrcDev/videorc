@@ -63,8 +63,9 @@ const FORWARDED_MOUSE_TYPES: ReadonlySet<string> = new Set<ForwardedMouseType>([
   'contextMenu'
 ])
 
-// Fields of the runtime `input-event` payload the pass-through reads. Electron
-// types the listener argument as the base InputEvent; mouse events carry more.
+// Fields of the runtime `before-mouse-event` payload the pass-through reads.
+// Electron types that listener's mouse argument as MouseInputEvent; the fake
+// and older input-event payloads are a looser bag of the same fields.
 export interface ObservedInputEvent {
   type: string
   modifiers?: string[]
@@ -89,8 +90,11 @@ export type ForwardedMouseEvent = Electron.MouseInputEvent | Electron.MouseWheel
 // Pointer pass-through: the docked BrowserWindow ignored mouse events so the
 // Scene canvas hit layer under it kept every click and drag (plan 058), and the
 // Studio page kept wheel scrolling. A WebContentsView cannot ignore input, so
-// its mouse events are replayed on the host window's web contents at the same
-// point. Non-mouse events (keys, enter/leave) are not replayed; null = drop.
+// `before-mouse-event` cancels Chromium dispatch (`preventDefault`) and the
+// same mouse is replayed on the host window's web contents. `input-event`
+// cannot cancel, so it would leave the view handling the click and the host
+// with a second synthetic copy. Non-mouse events (keys, enter/leave) are not
+// replayed; null = drop.
 export function forwardedMouseEvent(
   input: ObservedInputEvent,
   viewOrigin: { x: number; y: number }
@@ -156,8 +160,8 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
     super()
     this.view = options.createView()
     this.view.setVisible(false)
-    this.view.webContents.on('input-event', (_event, input) => {
-      this.forwardInput(input as ObservedInputEvent)
+    this.view.webContents.on('before-mouse-event', (event, mouse) => {
+      this.forwardInput(event, mouse as ObservedInputEvent)
     })
     // The surface must never hold keyboard focus: shortcuts and Scene editing
     // keys belong to the window underneath, exactly as with the focusable:false
@@ -189,7 +193,14 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
   }
 
   isVisible(): boolean {
-    return !this.isDestroyed() && this.visible && this.parent !== null
+    const parent = this.parent
+    return (
+      !this.isDestroyed() &&
+      this.visible &&
+      parent !== null &&
+      !parent.isDestroyed() &&
+      parent.isVisible()
+    )
   }
 
   showInactive(): void {
@@ -318,15 +329,19 @@ export class InWindowProofSurface extends EventEmitter implements ProofSurfaceHo
     }
   }
 
-  private forwardInput(input: ObservedInputEvent): void {
+  private forwardInput(event: { preventDefault(): void }, input: ObservedInputEvent): void {
+    if (!FORWARDED_MOUSE_TYPES.has(input.type)) {
+      return
+    }
+    event.preventDefault()
     const parent = this.parent
     const origin = this.viewBounds
     if (!parent || parent.isDestroyed() || parent.webContents.isDestroyed() || !origin) {
       return
     }
-    const event = forwardedMouseEvent(input, origin)
-    if (event) {
-      parent.webContents.sendInputEvent(event)
+    const forwarded = forwardedMouseEvent(input, origin)
+    if (forwarded) {
+      parent.webContents.sendInputEvent(forwarded)
     }
   }
 }
