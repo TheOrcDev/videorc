@@ -11,10 +11,10 @@ pkgbase = videorc-bin
 	depends = alsa-lib
 	depends = at-spi2-core
 	depends = pipewire
-	depends = xdg-desktop-portal
 	optdepends = intel-media-driver: VAAPI hardware encoding on Intel GPUs
 	optdepends = mesa: VAAPI hardware encoding on AMD GPUs
 	optdepends = nvidia-vaapi-driver: VAAPI hardware encoding on NVIDIA GPUs
+	optdepends = xdg-desktop-portal: Wayland screen capture through the desktop portal
 	source = https://www.videorc.com/downloads/linux/Videorc-0.9.120-linux-x64.AppImage
 	sha256sums = SKIP
 

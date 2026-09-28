@@ -16,11 +16,12 @@ pkgdesc="AI-native recording and livestreaming studio for creators (binary relea
 arch=('x86_64')
 url="https://www.videorc.com"
 license=('AGPL-3.0-only')
-depends=('gtk3' 'nss' 'alsa-lib' 'at-spi2-core' 'pipewire' 'xdg-desktop-portal')
+depends=('gtk3' 'nss' 'alsa-lib' 'at-spi2-core' 'pipewire')
 optdepends=(
   'intel-media-driver: VAAPI hardware encoding on Intel GPUs'
   'mesa: VAAPI hardware encoding on AMD GPUs'
   'nvidia-vaapi-driver: VAAPI hardware encoding on NVIDIA GPUs'
+  'xdg-desktop-portal: Wayland screen capture through the desktop portal'
 )
 install='videorc.install'
 # TODO(gate: public Linux promotion): pin the sha256 from the release lane's
@@ -32,6 +33,10 @@ sha256sums=('SKIP')
 
 package() {
   cd "$srcdir"
+
+  # makepkg downloads sources without the executable bit; the AppImage runtime
+  # needs +x to unpack itself.
+  chmod +x "Videorc-${pkgver}-linux-x64.AppImage"
 
   # Extract the AppImage payload without FUSE: --appimage-extract makes the
   # embedded runtime unpack its own squashfs. unsquashfs is a fallback if a

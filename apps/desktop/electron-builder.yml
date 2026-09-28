@@ -134,8 +134,8 @@ win:
 # The AppStream metainfo (packaging/linux/metainfo) ships in the package
 # payload; deb/rpm/AUR after-install steps install it to /usr/share/metainfo.
 #
-# Hardcode x64 in the Linux filenames. On AppImage builds electron-builder
-# expands ${arch} to x86_64 and on deb/rpm to x86_64 too, which would fail
+# Hardcode x64 in the Linux filenames. electron-builder expands ${arch} to
+# x86_64 on AppImage and rpm builds but amd64 on deb builds, which would fail
 # the Linux Alpha release contract (Videorc-<version>-linux-x64.*).
 linux:
   artifactName: ${productName}-${version}-${os}-x64.${ext}
@@ -209,7 +209,9 @@ deb:
 
 # Fedora/RHEL native package (plan 071). Config + CI structural validation;
 # install/launch acceptance stays blocked until a named Fedora box is recorded
-# in docs/linux-port-plan.md. Same payload, metainfo and bundling rules as deb.
+# in docs/linux-port-plan.md. Same payload, metainfo and bundling rules as deb;
+# the desktop portal is a recommendation, not a hard dep, so the package
+# installs without it (OpenH264 covers the software fallback).
 rpm:
   afterInstall: ../../packaging/linux/rpm/after-install.sh
   afterRemove: ../../packaging/linux/rpm/after-remove.sh
@@ -219,9 +221,9 @@ rpm:
     - alsa-lib
     - at-spi2-core
     - pipewire
-    - xdg-desktop-portal
   recommends:
     - libva
+    - xdg-desktop-portal
 
 # Install window, designed in Dmgly. The background already carries the
 # "Drag to Applications" text, the arrow and both label pills; Finder supplies

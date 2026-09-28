@@ -20,9 +20,12 @@ hicolor icon set. **No package ever depends on a distro ffmpeg.**
 The AUR path is the checked-in binary PKGBUILD, never the electron-builder
 `pacman` target: the PKGBUILD extracts the AppImage payload (no FUSE, no distro
 ffmpeg) into `/opt/videorc` and wires freedesktop integration. The `source` URL
-is the planned public downloads URL and the pinned `sha256sums` is `SKIP` until
-that URL goes live with public Linux promotion; the release lane uploads
-candidates to a private prefix today.
+is the planned public downloads URL; the release lane uploads candidates to a
+private prefix today, so `sha256sums` is `SKIP` only while that URL stays
+private. **AUR submission gate:** before the downloads URL goes live or the
+PKGBUILD is submitted to the AUR, `sha256sums` must be pinned to the release
+lane's `<artifact>.sha256` sidecar value and verified by `makepkg` against the
+fetched AppImage; submission while `sha256sums` is `SKIP` is not allowed.
 
 ## Install paths and integration
 
@@ -38,11 +41,12 @@ and `packaging/linux/rpm/after-remove.sh`).
 - deb depends: `libgtk-3-0t64 libnss3 libasound2t64 libatk-bridge2.0-0t64`
   (Ubuntu 24.04 `t64` names — the `t64` runtime libs do not exist on older
   LTSes); Recommends: `libva2 pipewire xdg-desktop-portal`.
-- rpm depends: `gtk3 nss alsa-lib at-spi2-core pipewire xdg-desktop-portal`;
-  Recommends: `libva`. OpenH264 covers the software fallback, so the packages
-  must install without VAAPI drivers or the portal.
-- AUR `depends`: `gtk3 nss alsa-lib at-spi2-core pipewire xdg-desktop-portal`;
-  optdepends for VAAPI drivers (Intel/AMD/NVIDIA convenience).
+- rpm depends: `gtk3 nss alsa-lib at-spi2-core pipewire`;
+  Recommends: `libva xdg-desktop-portal`. OpenH264 covers the software
+  fallback, so the packages must install without VAAPI drivers or the portal.
+- AUR `depends`: `gtk3 nss alsa-lib at-spi2-core pipewire`;
+  optdepends: VAAPI drivers (Intel/AMD/NVIDIA) plus `xdg-desktop-portal` for
+  Wayland screen capture.
 
 ## Update posture
 
@@ -79,8 +83,8 @@ immutability and collision rules.
   + icon logic (`assertLinuxAppIconPng`, 512x512).
 - `appstreamcli validate packaging/linux/metainfo/dev.theorcdev.videorc.metainfo.xml`
   runs in the Linux CI gate; the 512x512 PNG IHDR check runs there too.
-- `makepkg --printsrcinfo` from `packaging/linux/arch/` regenerates `.SRCINFO`
-  after PKGBUILD edits; the checked-in `.SRCINFO` must stay in sync.
+- `makepkg --printsrcinfo > .SRCINFO` from `packaging/linux/arch/` regenerates
+  the checked-in `.SRCINFO` after PKGBUILD edits; it must stay in sync.
 
 ## Version bumps per release
 
@@ -88,7 +92,8 @@ immutability and collision rules.
   entry: add one `<release version="..." date="..."/>` per shipped release.
 - `packaging/linux/arch/PKGBUILD` `pkgver` (and regenerate `.SRCINFO`).
 - Re-pin the AUR `sha256sums` from the release lane `<artifact>.sha256` sidecar
-  once the public downloads URL exists.
+  once the public downloads URL exists; verify it with `makepkg` against the
+  fetched AppImage before any AUR submission (see the submission gate above).
 
 ## Documented gates (AGENTS.md)
 

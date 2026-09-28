@@ -20,7 +20,8 @@ pre_remove() {
 }
 
 post_remove() {
-  rm -f /usr/share/metainfo/dev.theorcdev.videorc.metainfo.xml
+  # The metainfo file is package-owned (installed under /usr/share/metainfo in
+  # package()), so pacman removes it; only the caches need refreshing here.
   if command -v gtk-update-icon-cache >/dev/null 2>&1; then
     gtk-update-icon-cache -f -t /usr/share/icons/hicolor >/dev/null 2>&1 || true
   fi
