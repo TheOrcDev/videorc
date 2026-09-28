@@ -16,6 +16,7 @@ import { Empty, EmptyDescription, EmptyHeader } from '@/components/ui/empty'
 import { ScrollArea } from '@/components/ui/scroll-area'
 import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 import type { AudienceSnapshot, LiveChatProviderState, StreamPlatform } from '@/lib/backend'
+import { AvatarCircle } from '@/lib/chat-avatar'
 import { CHAT_PLATFORM_LABELS } from '@/lib/live-chat-view'
 import {
   ACTIVITY_FILTERS,
@@ -31,7 +32,9 @@ import { cn } from '@/lib/utils'
 // Follows, subs and gifts, tips, raids and announcements from the chat
 // snapshot, and destination failures from the relayed dashboard. A row reads
 // at a glance (plan 057, D3): the name and the short fact on one line, the
-// viewer's own words below, the full sentence on hover.
+// viewer's own words below, the full sentence on hover. A row about one
+// person shows that person (plan 071, S1): their avatar, or their initials
+// until it loads, so the streamer can thank them by name.
 
 const KIND_ICONS: Record<ActivityKind, AppIcon | null> = {
   follow: FollowIcon,
@@ -56,6 +59,18 @@ export function relativeTime(iso: string, nowMs: number): string {
   if (minutes < 60) return `${minutes}m`
   const hours = Math.floor(minutes / 60)
   return `${hours}h ${minutes % 60}m`
+}
+
+/** A row about one named viewer or channel shows who, not what: follows,
+ * subs, gifts, tips and raids. Unnamed follower counts, announcements and
+ * destinations keep their glyph. */
+export function activityRowShowsPerson(item: ActivityItem): boolean {
+  if (item.unnamed) return false
+  return (
+    item.kind !== 'announcement' &&
+    item.kind !== 'destination-failed' &&
+    item.kind !== 'destination-recovered'
+  )
 }
 
 /** What Activity can never show for these platforms, said plainly. */
@@ -93,6 +108,7 @@ function ActivityRow({
 }): ReactElement {
   const Icon = item.gift ? GiftIcon : KIND_ICONS[item.kind]
   const destination = item.kind === 'destination-failed' || item.kind === 'destination-recovered'
+  const person = activityRowShowsPerson(item)
   const actions: KebabMenuItem[] = [
     ...(onShowOnStream && item.messageId
       ? [
@@ -124,8 +140,16 @@ function ActivityRow({
       data-kind={item.kind}
       data-slot="activity-row"
     >
-      <span className="relative mt-0.5 flex size-7 shrink-0 items-center justify-center rounded-chip bg-foreground/[0.06] text-muted-foreground">
-        {Icon ? (
+      <span
+        className={cn(
+          'relative mt-0.5 flex size-7 shrink-0 items-center justify-center',
+          !person && 'rounded-chip bg-foreground/[0.06] text-muted-foreground'
+        )}
+        data-slot={person ? 'activity-avatar' : 'activity-glyph'}
+      >
+        {person ? (
+          <AvatarCircle avatarUrl={item.authorAvatarUrl} className="size-7" name={item.name} />
+        ) : Icon ? (
           <Icon aria-hidden className="size-4" weight="duotone" />
         ) : (
           <StatusDot tone={item.kind === 'destination-failed' ? 'error' : 'good'} />

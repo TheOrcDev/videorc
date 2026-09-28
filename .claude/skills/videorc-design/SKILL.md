@@ -208,10 +208,14 @@ made it chat first: one thin stats bar and fewer words.
 - **Chat keeps the big-text rows** (plan 055, decision 5), virtualized with
   `@tanstack/react-virtual`. While live, a row's time appears on hover.
   Filters are inline chips from 640 px and one Filters menu below it.
-- **Activity rows** use the platform tile with the event glyph (the
-  window-scoped registry `components/stream-manager/activity-icons.tsx`), the
-  name and a short fact on one line ("Resub · 14 months"), the viewer's
-  words, and a ⋯ menu. Filter chips carry their counts.
+- **Activity rows** lead with who: a row about one named person (a follow,
+  sub, gift, tip or raid) shows their avatar circle, with initials until it
+  loads (plan 071). Counts the platform never named, announcements and
+  destinations keep the event glyph tile (the window-scoped registry
+  `components/stream-manager/activity-icons.tsx`). Either way the platform
+  icon sits bottom-right. Then comes the name and a short fact on one line
+  ("Resub · 14 months"), the viewer's words, and a ⋯ menu. Filter chips carry
+  their counts.
 - **Proof.** `pnpm probe:comments-window` sweeps 320/480/640/800/1040/1280.
   It fails on any overflow, a stats bar taller than one row, main stats
   apart or clipped, a stat cut at the bar's edge, a hidden viewer count, a

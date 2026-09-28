@@ -49,12 +49,12 @@ works like this:
 
 ## Per-platform truth (checked 2026-09-28)
 
-| Platform | Who followed | Avatar | Today in Videorc | Gap |
-| --- | --- | --- | --- | --- |
-| Twitch | EventSub `channel.follow` v2 has `user_id`, `user_login`, `user_name`, `followed_at`. It needs the **opt-in** `moderator:read:followers` scope. | Not in the event. Helix `GET /users` returns `profile_image_url`. `TwitchAvatarCache` in `twitch_chat.rs` already backfills it for every EventSub row that has an `author_id`. | Named rows arrive only after the user pressed the opt-in reconnect in Livestream → Setup (`streaming-tab.tsx:1191`). The owner's account had not done this, so it produced a count-only row. | The scope is hard to find. The row doesn't render the avatar. |
-| Kick | The `channel.followed` webhook body has `follower { user_id, username, profile_picture, … }`. | `profile_picture` is in the webhook. | Named rows exist. The relay (`videorc-web lib/kick-chat/webhook.ts` ~l.475) forwards only `followerId` and `followerUsername`. Desktop `RelayFollowPayload` (`kick_chat.rs:201`) has no avatar. | The relay drops the avatar. The row doesn't render it anyway. |
-| X | The **X Activity API (XAA)** has a `follow.follow` event. Its `direction: inbound` filter means "someone followed this user". The payload's `source.data` is the follower: `id`, `username`, `name`, `profile_image_url`. This is the same XAA that the Livestream API uses for `broadcast.chat`, which Videorc already relays. | `profile_image_url` is in the event (`pbs.twimg.com` is already in the avatar allowlist). | Count only: `GET /2/users/me` `public_metrics.followers_count`. `docs/specs/stream-manager-provider-facts.md` says "X doesn't share who followed". That is out of date, because XAA added follow events. | Subscribe to `follow.follow` (inbound) next to `broadcast.chat`, and relay it the same way. S0 confirms the auth and the tier on the owner's account. |
-| YouTube | No follow or subscribe events. `subscriptions.list myRecentSubscribers` lists only public subscriptions, and YouTube OAuth is off in public builds. | n/a | Subscribers total only, with no gains (`follower_gains_count_only_new_highs_and_never_youtube`). | **Out of scope.** |
+| Platform | Who followed                                                                                                                                                                                                                                                                                                                    | Avatar                                                                                                                                                                         | Today in Videorc                                                                                                                                                                                         | Gap                                                                                                                                                   |
+| -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Twitch   | EventSub `channel.follow` v2 has `user_id`, `user_login`, `user_name`, `followed_at`. It needs the **opt-in** `moderator:read:followers` scope.                                                                                                                                                                                 | Not in the event. Helix `GET /users` returns `profile_image_url`. `TwitchAvatarCache` in `twitch_chat.rs` already backfills it for every EventSub row that has an `author_id`. | Named rows arrive only after the user pressed the opt-in reconnect in Livestream → Setup (`streaming-tab.tsx:1191`). The owner's account had not done this, so it produced a count-only row.             | The scope is hard to find. The row doesn't render the avatar.                                                                                         |
+| Kick     | The `channel.followed` webhook body has `follower { user_id, username, profile_picture, … }`.                                                                                                                                                                                                                                   | `profile_picture` is in the webhook.                                                                                                                                           | Named rows exist. The relay (`videorc-web lib/kick-chat/webhook.ts` ~l.475) forwards only `followerId` and `followerUsername`. Desktop `RelayFollowPayload` (`kick_chat.rs:201`) has no avatar.          | The relay drops the avatar. The row doesn't render it anyway.                                                                                         |
+| X        | The **X Activity API (XAA)** has a `follow.follow` event. Its `direction: inbound` filter means "someone followed this user". The payload's `source.data` is the follower: `id`, `username`, `name`, `profile_image_url`. This is the same XAA that the Livestream API uses for `broadcast.chat`, which Videorc already relays. | `profile_image_url` is in the event (`pbs.twimg.com` is already in the avatar allowlist).                                                                                      | Count only: `GET /2/users/me` `public_metrics.followers_count`. `docs/specs/stream-manager-provider-facts.md` says "X doesn't share who followed". That is out of date, because XAA added follow events. | Subscribe to `follow.follow` (inbound) next to `broadcast.chat`, and relay it the same way. S0 confirms the auth and the tier on the owner's account. |
+| YouTube  | No follow or subscribe events. `subscriptions.list myRecentSubscribers` lists only public subscriptions, and YouTube OAuth is off in public builds.                                                                                                                                                                             | n/a                                                                                                                                                                            | Subscribers total only, with no gains (`follower_gains_count_only_new_highs_and_never_youtube`).                                                                                                         | **Out of scope.**                                                                                                                                     |
 
 Existing pieces this plan reuses:
 
@@ -84,7 +84,7 @@ Existing pieces this plan reuses:
 - Retroactively naming follows from before this plan ships.
 - Twitch Helix follower-list reconcile for follows EventSub missed during a
   reconnect. Add it only if S5 acceptance shows missed rows.
-- Changing Twitch's *base* scopes. That would force every existing connection
+- Changing Twitch's _base_ scopes. That would force every existing connection
   to reconnect.
 
 ## Slices
@@ -131,6 +131,7 @@ Answer these questions and record the answers in
      (`tweet.read` covers `follow.*`).
    - `follow.follow` isn't in the docs' public or private event lists, so the
      answer has to come from trying it.
+
 2. **If app bearer is refused as a private event:** this doesn't stop S4. The
    user-context subscription (OAuth 1.0a, which is how `broadcast.chat` is
    subscribed today) is proven by S4's first step, the gate described there.
@@ -198,7 +199,7 @@ Changes:
   `onConnect('twitch', { optionalScopes: TWITCH_AUDIENCE_SCOPES })`. This
   replaces the text-only "Reconnect Twitch in Livestream → Setup". Keep
   Livestream → Setup as it is.
-- **New connections opt in by default.** Every *fresh* Twitch connect (no
+- **New connections opt in by default.** Every _fresh_ Twitch connect (no
   existing account) requests `TWITCH_AUDIENCE_SCOPES` as optional scopes.
   Existing connections are not forced to reconnect. The comment in
   `platform-scopes.ts` still holds, because the base set doesn't change.
@@ -231,7 +232,7 @@ absent, so the order is safe either way.
   - Open its own PR and deploy before the desktop release.
 - **Desktop**, `kick_chat.rs`:
   - `RelayFollowPayload` adds `#[serde(default)] follower_avatar_url:
-    Option<String>`.
+Option<String>`.
   - The `"follow"` arm sets `author_avatar_url` through the same
     `https://`-only filter that `apply_relay_author` uses.
   - Tests cover three payloads: with an avatar, without one, and with an
@@ -271,6 +272,7 @@ one event that names one person.
   Follows are stored with `kind = 'follow'` and no broadcast id. After deploy,
   confirm that production applied it (Kick's 0015 once didn't; see
   `videorc-kick-chat-relay-migration-missing`).
+
 - **Old-desktop safety.** Today's desktop parses each event with a **required**
   `text` (`x_chat.rs` `RelayEvent`). A follow row in its page would fail the
   whole page and break X chat. So the read route returns follows **only**
@@ -278,7 +280,7 @@ one event that names one person.
   broadcast plus this user's follows, with the query
   `(kind = 'chat' AND broadcast_id = ?) OR kind = 'follow'`.
   - Follows serialize as `{ kind: "follow", id, messageId, receivedAt,
-    author }`.
+author }`.
   - Chat rows keep their exact current shape.
   - Without the parameter, the response is byte-identical to today.
   - Add a test for that.
@@ -326,6 +328,7 @@ one event that names one person.
 
   Unknown kinds are skipped, not treated as errors, so a later relay kind
   can't break this desktop either.
+
 - **One follower is counted once.** Keep a per-session set of X follower ids,
   so an unfollow followed by a refollow isn't a second row.
 - **No double counting with the count poll.** While the follow subscription is
@@ -366,7 +369,7 @@ and Kick (`username`), the mention must use the **handle**. A Twitch display
 name can be CJK or differently cased, and then `@` won't mention anyone.
 
 - Add `author_handle: Option<String>` (`skip_serializing_if =
-  "Option::is_none"`) to `LiveChatMessage`, and mirror it in `shared/backend.ts`
+"Option::is_none"`) to `LiveChatMessage`, and mirror it in `shared/backend.ts`
   and `backend-rpc-contract.ts`.
 - Fill it for follow rows on all three platforms.
 - `thankYouDraft` prefers `@handle` and falls back to today's name.
@@ -376,7 +379,7 @@ name can be CJK or differently cased, and then `@` won't mention anyone.
 together. Three test accounts follow during the stream.
 
 - Each row shows the right avatar and name within seconds on all three
-  platforms. Only the follower *total* waits for the 120 s count poll.
+  platforms. Only the follower _total_ waits for the 120 s count poll.
 - "Thank in chat" prefills `Thanks for the follow, @handle!`.
 - The Follows count equals the number of distinct followers.
 - A follow from before the stream never appears.
