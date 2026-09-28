@@ -3834,12 +3834,11 @@ export interface VideorcApi {
   markClipFromCommentsWindow: (command: ClipMarkCommand) => Promise<ClipMarkedEvent>
   onClipMarkRequest: (callback: (command: ClipMarkCommand) => void) => () => void
   pushClipMarkResult: (resolution: CommentsCommandResolution<ClipMarkedEvent>) => Promise<boolean>
-  /** Show who followed from the Stream Manager (plan 071, S2): the MAIN
-   * renderer owns the backend socket and starts the reconnect that grants
-   * the platform's follow permission. Resolves once the browser opened. */
+  /** Show who followed from the Stream Manager (plan 071, S2): Electron main
+   * starts the Twitch reconnect with the follow permission over its admin
+   * socket and opens the browser, so the main window's eager bundle carries
+   * none of it. Resolves once the browser opened. */
   showFollowNamesFromCommentsWindow: (command: FollowNamesCommand) => Promise<boolean>
-  onFollowNamesRequest: (callback: (command: FollowNamesCommand) => void) => () => void
-  pushFollowNamesResult: (resolution: CommentsCommandResolution<boolean>) => Promise<boolean>
   /** Co-host relay: the main renderer pushes state, the window seeds + follows
    * it, and window actions come back through the same correlated broker. */
   pushCohostWindowState: (state: CohostWindowState) => Promise<void>

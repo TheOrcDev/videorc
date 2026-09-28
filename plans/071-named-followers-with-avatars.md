@@ -442,11 +442,15 @@ What shipped, and where it differs from the plan above:
   - an open EventSub socket adds `channel.follow` on a keepalive within about
     30 s of the grant, with no new Go Live needed.
 
-  "Show who followed" is a row action and an empty-state button, relayed from
-  the Stream Manager to the main window (`comments-window:follow-names`). A
-  first Twitch connection requests the audience scopes by default. A
-  reconnect keeps them when the account already had them, where before a
-  plain reconnect silently dropped them.
+  "Show who followed" is a row action and an empty-state button. The Stream
+  Manager asks Electron main (`comments-window:follow-names`), and main
+  starts the Twitch OAuth with the audience scopes over its admin socket
+  (`platformAccounts.oauth.startProvider` was added to its allowlist) and
+  opens the browser. The backend's own device-grant poller completes it.
+  This keeps it out of the main window's eager bundle, which has 37 bytes of
+  headroom after #489: a renderer relay measured 1,214 bytes over. A first
+  Twitch connection from Livestream → Setup asks for the audience scopes. The
+  backend already keeps them on a reconnect (`retained_optional_scopes`).
 
 - **S3.** As planned: relay `followerAvatarUrl`, https only on both sides.
 - **S4, differences from the plan:**

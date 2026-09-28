@@ -14,7 +14,6 @@ import type {
   CommentHighlightCommand,
   CommentHighlightState,
   ClipMarkCommand,
-  FollowNamesCommand,
   CommentsClearCommand,
   CommentsSendCommand,
   CommentsSnapshotDelta,
@@ -130,7 +129,6 @@ export const electronInvokeApiMethods = {
   'comments-window:clip-mark': 'markClipFromCommentsWindow',
   'comments-window:clip-mark-result-push': 'pushClipMarkResult',
   'comments-window:follow-names': 'showFollowNamesFromCommentsWindow',
-  'comments-window:follow-names-result-push': 'pushFollowNamesResult',
   'comments-window:viewers-push': 'pushViewerSample',
   'comments-window:viewers-get': 'getViewerSample',
   'comments-window:dashboard-push': 'pushDashboard',
@@ -204,7 +202,6 @@ export interface ElectronIpcEventMap {
   'comments-window:send-request': CommentsSendCommand
   'comments-window:clear-request': CommentsClearCommand
   'comments-window:clip-mark-request': ClipMarkCommand
-  'comments-window:follow-names-request': FollowNamesCommand
   'comments-window:viewers': ViewerSample | null
   'comments-window:dashboard': LiveDashboardState | null
   'comments-window:cohost': CohostWindowState
@@ -244,7 +241,6 @@ export const electronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:clip-mark-request',
-  'comments-window:follow-names-request',
   'comments-window:viewers',
   'comments-window:dashboard',
   'comments-window:cohost',
@@ -1051,7 +1047,6 @@ export const boundedPassthroughElectronInvokeChannels = [
   'comments-window:clip-mark',
   'comments-window:clip-mark-result-push',
   'comments-window:follow-names',
-  'comments-window:follow-names-result-push',
   'comments-window:viewers-push',
   'comments-window:viewers-get',
   'comments-window:dashboard-push',
@@ -1192,7 +1187,6 @@ export const boundedPassthroughElectronEventChannels = [
   'comments-window:send-request',
   'comments-window:clear-request',
   'comments-window:clip-mark-request',
-  'comments-window:follow-names-request',
   'comments-window:viewers',
   'comments-window:dashboard',
   'comments-window:cohost',

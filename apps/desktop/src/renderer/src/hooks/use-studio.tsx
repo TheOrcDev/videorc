@@ -4,10 +4,6 @@ import { confirmedSourceSelection } from '@/lib/source-selection-confirmed'
 import type { LiveSourceSelectionState } from '@/lib/live-source-selection'
 import { globalShortcutLayout, nextEligibleLayout } from '../../../shared/global-shortcuts'
 import { clipMarkedToast } from '../../../shared/clip-marks'
-import {
-  TWITCH_AUDIENCE_SCOPES,
-  twitchAudienceScopesByDefault
-} from '../../../shared/platform-scopes'
 import { BUILTIN_LAYOUTS } from '@/lib/layout-framing-memory'
 import { useScenePresets } from '@/hooks/use-scene-presets'
 import {
@@ -10477,10 +10473,9 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       try {
         setLastError(null)
         const redirectUri = await window.videorc.getOAuthCallbackRedirectUri(platform)
-        const requested = options?.optionalScopes?.length
-          ? options.optionalScopes
-          : twitchAudienceScopesByDefault(platform, platformAccounts)
-        const optionalScopes = requested.length ? { optionalScopes: [...requested] } : {}
+        const optionalScopes = options?.optionalScopes?.length
+          ? { optionalScopes: [...options.optionalScopes] }
+          : {}
         const params = redirectUri
           ? { platform, redirectUri, ...optionalScopes }
           : { platform, ...optionalScopes }
@@ -10515,26 +10510,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         reportError(error)
       }
     },
-    [client, platformAccounts, reportError, wsStatus]
-  )
-
-  // Show who followed (plan 071, S2): the Stream Manager asks, and this
-  // window, which owns the backend socket, opens the reconnect that grants
-  // the follow permission. A failure is reported here like any connect.
-  useEffect(
-    () =>
-      window.videorc?.onFollowNamesRequest?.((command) => {
-        void connectPlatformAccount(command.platform, {
-          optionalScopes: TWITCH_AUDIENCE_SCOPES
-        }).then(() =>
-          window.videorc?.pushFollowNamesResult?.({
-            requestId: command.requestId,
-            ok: true,
-            value: true
-          })
-        )
-      }),
-    [connectPlatformAccount]
+    [client, reportError, wsStatus]
   )
 
   const signOutAccount = useCallback(async () => {

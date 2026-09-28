@@ -1045,7 +1045,13 @@ function OAuthAccountPanel({
                   setYoutubeConsentAccepted(false)
                   setYoutubeConsentOpen(true)
                 } else {
-                  onConnect(platform)
+                  // A first Twitch connection asks for the follow and sub
+                  // permissions too (plan 071, S2), so Activity names
+                  // followers from the first stream.
+                  onConnect(
+                    platform,
+                    platform === 'twitch' ? { optionalScopes: TWITCH_AUDIENCE_SCOPES } : undefined
+                  )
                 }
               }}
             >
