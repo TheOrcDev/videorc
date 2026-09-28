@@ -190,10 +190,9 @@ describe('performanceCheckLine', () => {
 
 describe('performanceCheckTooHeavyToast', () => {
   it('warns once when a chosen output is heavier than what held', () => {
-    expect(performanceCheckTooHeavyToast(videoPresets['tutorial-1440p30'], weak)).toEqual({
-      title: '1440p 30 is too heavy for this computer',
-      description:
-        'Recordings will stutter. 720p 30 held steady. Switch in Recording → Output.'
+    expect(performanceCheckTooHeavyToast(videoPresets['record-4k30'], weak)).toEqual({
+      title: '4K 30 is too heavy for this computer',
+      description: 'Recordings will stutter. 720p 30 held steady. Switch in Recording → Output.'
     })
   })
 
@@ -204,11 +203,7 @@ describe('performanceCheckTooHeavyToast', () => {
   })
 
   it('stays quiet for a shipped default and for a verified selection', () => {
-    expect(
-      performanceCheckTooHeavyToast(videoPresets['tutorial-1080p30'], weak)
-    ).toBeUndefined()
-    expect(
-      performanceCheckTooHeavyToast(videoPresets['tutorial-720p30'], weak)
-    ).toBeUndefined()
+    expect(performanceCheckTooHeavyToast(videoPresets['tutorial-1080p30'], weak)).toBeUndefined()
+    expect(performanceCheckTooHeavyToast(videoPresets['tutorial-720p30'], weak)).toBeUndefined()
   })
 })
