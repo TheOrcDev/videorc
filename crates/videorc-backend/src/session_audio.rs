@@ -6789,7 +6789,7 @@ mod mix_tests {
                         if last_data.elapsed() >= IDLE_END {
                             return bytes;
                         }
-                        thread::sleep(Duration::from_millis(2));
+                        wait_readable(&file);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(error) => panic!("{error}"),
@@ -6797,6 +6797,60 @@ mod mix_tests {
             }
         });
         (reader, progress_rx)
+    }
+
+    /// Waits for data (or the writer's close) instead of a fixed sleep, so
+    /// the reader drains as fast as a real one on a slow machine too: a
+    /// VM stretches a 2 ms sleep into a crawl that looks like a stalled
+    /// reader to the bus (plan 076).
+    fn wait_readable(file: &std::fs::File) {
+        #[cfg(unix)]
+        {
+            use std::os::fd::AsRawFd;
+            let mut descriptor = libc::pollfd {
+                fd: file.as_raw_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: one pollfd for a descriptor this thread owns.
+            unsafe {
+                libc::poll(&mut descriptor, 1, 20);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = file;
+            thread::sleep(Duration::from_millis(2));
+        }
+    }
+
+    /// Everything the bus reports until an output stall is (the episode
+    /// ends once the bus catches up, which a slow machine takes longer to
+    /// do), and the output position at that moment.
+    async fn observe_until_stall_reported(
+        bus: &Bus,
+    ) -> (
+        Vec<SourceLoss>,
+        Vec<OutputStallReport>,
+        NativeAudioInputState,
+        usize,
+    ) {
+        let (mut losses, mut stalls) = (Vec::new(), Vec::new());
+        let deadline = Instant::now() + Duration::from_secs(25);
+        loop {
+            let observation = bus.session.observation(false);
+            losses.extend(observation.losses);
+            stalls.extend(observation.output_stalls);
+            if !stalls.is_empty() || Instant::now() >= deadline {
+                return (
+                    losses,
+                    stalls,
+                    observation.input_state,
+                    *bus.progress.borrow(),
+                );
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
     }
 
     struct BusRun {
@@ -7231,7 +7285,7 @@ mod mix_tests {
     async fn an_output_stall_never_retires_a_healthy_microphone() {
         for options in [SessionAudioOptions::default(), system_options()] {
             let epoch = Instant::now() + Duration::from_millis(100);
-            let microphone = signal_packets(epoch, 0, 48_000 * 9, 480, |_| (0.2, 0.2));
+            let microphone = signal_packets(epoch, 0, 48_000 * 30, 480, |_| (0.2, 0.2));
             let bus = start_bus_with_stall(
                 epoch,
                 Some(microphone),
@@ -7240,16 +7294,16 @@ mod mix_tests {
                 Some((72_000, Duration::from_secs(3))),
             )
             .await;
-            bus.wait_for_frames(48_000 * 8).await;
-            let observation = bus.session.observation(false);
+            let (losses, stalls, input_state, caught_up) = observe_until_stall_reported(&bus).await;
+            // One second of output after the bus caught up.
+            bus.wait_for_frames(caught_up + 48_000 * 2).await;
             assert!(bus.session.microphone_owner_present(), "never retired");
             let (bytes, _) = bus.finish();
             let samples = decode(&bytes);
-            assert_eq!(observation.losses, vec![], "not a source loss");
-            assert_eq!(observation.input_state, NativeAudioInputState::Live);
+            assert_eq!(losses, vec![], "not a source loss");
+            assert_eq!(input_state, NativeAudioInputState::Live);
             // Scheduling jitter may split the episode; together they cover
             // the stall.
-            let stalls = &observation.output_stalls;
             assert!(!stalls.is_empty(), "the stall is reported");
             let longest = stalls.iter().map(|stall| stall.duration_ms).max().unwrap();
             assert!(longest >= 2_500, "{stalls:?}");
@@ -7257,8 +7311,8 @@ mod mix_tests {
             assert!(lost >= 1_000, "{stalls:?}");
             assert_eq!(frames_at(&samples, 24_000, 72_000, 0.2), 48_000, "before");
             assert_eq!(
-                frames_at(&samples, 312_000, 384_000, 0.2),
-                72_000,
+                frames_at(&samples, caught_up + 48_000, caught_up + 96_000, 0.2),
+                48_000,
                 "the microphone is back after the stall"
             );
         }
@@ -7269,7 +7323,7 @@ mod mix_tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn an_output_stall_keeps_system_audio_in_the_mix() {
         let epoch = Instant::now() + Duration::from_millis(100);
-        let microphone = signal_packets(epoch, 0, 48_000 * 9, 480, |_| (0.2, 0.2));
+        let microphone = signal_packets(epoch, 0, 48_000 * 30, 480, |_| (0.2, 0.2));
         let bus = start_bus_with_stall(
             epoch,
             Some(microphone),
@@ -7281,25 +7335,22 @@ mod mix_tests {
         let system = bus.session.system_audio();
         let producer = prepare_system(
             &system,
-            signal_packets(epoch, 0, 48_000 * 9, 960, |_| (0.5, 0.25)),
+            signal_packets(epoch, 0, 48_000 * 30, 960, |_| (0.5, 0.25)),
             quiet_failure(),
         )
         .await;
         bus.session.attach_system(producer).await.unwrap();
-        bus.wait_for_frames(48_000 * 8).await;
-        let observation = bus.session.observation(false);
+        let (losses, stalls, _, caught_up) = observe_until_stall_reported(&bus).await;
+        bus.wait_for_frames(caught_up + 48_000 * 2).await;
         assert!(system.observation().attached, "still in the mix");
         assert_eq!(system.claim_loss(), None, "no system loss");
         let (bytes, _) = bus.finish();
         let samples = decode(&bytes);
-        assert_eq!(observation.losses, vec![]);
-        assert!(
-            !observation.output_stalls.is_empty(),
-            "the stall is reported"
-        );
+        assert_eq!(losses, vec![]);
+        assert!(!stalls.is_empty(), "the stall is reported");
         assert_eq!(
-            frames_at(&samples, 312_000, 384_000, 0.7),
-            72_000,
+            frames_at(&samples, caught_up + 48_000, caught_up + 96_000, 0.7),
+            48_000,
             "microphone plus system after the stall"
         );
     }
