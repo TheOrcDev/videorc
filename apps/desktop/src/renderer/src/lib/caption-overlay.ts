@@ -629,6 +629,11 @@ export async function renderCommentHighlightPng(params: {
       context.lineTo(centerX - badgeSize * 0.12, centerY + badgeSize * 0.2)
       context.closePath()
       context.fill()
+    } else if (platformBadge.glyph === 'facebook') {
+      context.font = `bold ${badgeSize * 0.7}px sans-serif`
+      context.textAlign = 'center'
+      context.textBaseline = 'middle'
+      context.fillText('f', centerX, centerY + badgeSize * 0.08)
     } else if (platformBadge.glyph === 'x') {
       context.beginPath()
       context.moveTo(centerX - badgeSize * 0.18, centerY - badgeSize * 0.22)

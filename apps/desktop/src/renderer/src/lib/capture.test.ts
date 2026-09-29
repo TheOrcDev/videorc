@@ -12,6 +12,8 @@ import {
   buildMicrophoneSources,
   capturePickerDevices,
   defaultCaptureConfig,
+  bridgeStreamingToLegacy,
+  oauthUnavailableReason,
   formatMeasuredAudioLag,
   legacyStreamKeyMigrationCandidates,
   mergeSourceKind,
@@ -2224,5 +2226,49 @@ describe('canvas orientation lock (the Studio mode owns the orientation)', () =>
       width: 1920,
       height: 1080
     })
+  })
+})
+
+describe('Facebook stream-key destination', () => {
+  it('reloads its secret reference on the pinned horizontal leg and bridges to Custom RTMP', () => {
+    const facebook = defaultCaptureConfig.streaming.targets.find(
+      (target) => target.id === 'facebook'
+    )!
+    expect(facebook).toMatchObject({
+      platform: 'facebook',
+      serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+      outputOrientation: 'horizontal',
+      authMode: 'manual-rtmp',
+      enabled: false
+    })
+    const streaming = normalizeStreamingSettings({
+      enabled: true,
+      enabledTargetIds: ['facebook'],
+      targets: [
+        {
+          ...facebook,
+          enabled: true,
+          outputOrientation: 'vertical',
+          streamKeySecretRef: 'stream-target:facebook:manual-stream-key',
+          streamKeyPresent: true
+        }
+      ]
+    })
+    expect(streaming.targets.find((target) => target.id === 'facebook')).toMatchObject({
+      platform: 'facebook',
+      outputOrientation: 'horizontal',
+      streamKey: '',
+      streamKeyPresent: true,
+      streamKeySecretRef: 'stream-target:facebook:manual-stream-key'
+    })
+    const config = bridgeStreamingToLegacy({ ...defaultCaptureConfig, streaming })
+    expect(config).toMatchObject({
+      streamEnabled: true,
+      rtmpPreset: 'custom',
+      rtmpServerUrl: facebook.serverUrl
+    })
+    expect(oauthUnavailableReason('facebook')).toBe(
+      "Connecting a Facebook Page isn't available yet"
+    )
   })
 })

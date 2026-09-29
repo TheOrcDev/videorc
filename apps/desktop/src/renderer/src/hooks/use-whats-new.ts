@@ -1,18 +1,9 @@
 import { useCallback, useEffect, useState } from 'react'
-import { toast } from 'sonner'
+import type { ChangelogEntry } from '@/lib/whats-new'
+import { WHATS_NEW_STORAGE_KEY } from '@/lib/whats-new-storage'
 
-import {
-  changelogPlatformForRuntime,
-  fetchChangelogEntries,
-  resolveWhatsNewAction,
-  WHATS_NEW_STORAGE_KEY,
-  type ChangelogEntry
-} from '@/lib/whats-new'
-
-// Post-update "What's new": when the app version changed since the last seen
-// one, fetch the changelog entries published in between and surface the newest
-// in a dialog. First run initializes silently; a failed fetch retries on the
-// next launch (last-seen is only advanced on a good answer or dismissal).
+// The optional release-note controller loads after runtime discovery or the
+// user's Settings action, leaving its parsing and network code off startup.
 export function useWhatsNew(
   version: string | undefined,
   runtimePlatform: string | undefined
@@ -24,67 +15,34 @@ export function useWhatsNew(
 } {
   const [entry, setEntry] = useState<ChangelogEntry | null>(null)
   const [open, setOpen] = useState(false)
-  const platform = changelogPlatformForRuntime(runtimePlatform)
+  const show = useCallback((next: ChangelogEntry) => {
+    setEntry(next)
+    setOpen(true)
+  }, [])
 
   useEffect(() => {
-    const action = resolveWhatsNewAction({
-      version,
-      lastSeen: localStorage.getItem(WHATS_NEW_STORAGE_KEY)
-    })
-    if (action === 'idle' || !version) {
-      return
-    }
-    if (action === 'initialize') {
-      localStorage.setItem(WHATS_NEW_STORAGE_KEY, version)
-      return
-    }
-    if (!platform) {
-      return
-    }
-
+    if (!version) return
     let cancelled = false
-    void fetchChangelogEntries({
-      platform,
-      since: localStorage.getItem(WHATS_NEW_STORAGE_KEY) ?? undefined
-    }).then((entries) => {
-      if (cancelled || entries === null) {
-        return
-      }
-      if (entries.length === 0) {
-        localStorage.setItem(WHATS_NEW_STORAGE_KEY, version)
-        return
-      }
-      setEntry(entries[0])
-      setOpen(true)
-    })
+    void import('@/lib/whats-new-controller')
+      .then((controller) =>
+        controller.checkWhatsNew(version, runtimePlatform, () => cancelled, show)
+      )
+      .catch(() => undefined)
     return () => {
       cancelled = true
     }
-  }, [platform, version])
+  }, [runtimePlatform, show, version])
 
   const dismiss = useCallback(() => {
-    if (version) {
-      localStorage.setItem(WHATS_NEW_STORAGE_KEY, version)
-    }
+    if (version) localStorage.setItem(WHATS_NEW_STORAGE_KEY, version)
     setOpen(false)
   }, [version])
 
-  // Manual entry point (Settings → About & updates): always shows the latest
-  // release, independent of the last-seen gate.
   const showLatest = useCallback(() => {
-    if (!platform) {
-      toast.info('Release notes are not available right now.')
-      return
-    }
-    void fetchChangelogEntries({ platform }).then((entries) => {
-      if (entries === null || entries.length === 0) {
-        toast.info('Release notes are not available right now.')
-        return
-      }
-      setEntry(entries[0])
-      setOpen(true)
-    })
-  }, [platform])
+    void import('@/lib/whats-new-controller')
+      .then((controller) => controller.showLatestWhatsNew(runtimePlatform, show))
+      .catch(() => undefined)
+  }, [runtimePlatform, show])
 
   return { entry, open, dismiss, showLatest }
 }

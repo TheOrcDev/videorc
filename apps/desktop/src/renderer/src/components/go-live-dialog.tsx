@@ -1,6 +1,7 @@
 import { AlertIcon, CaptionsIcon, LivestreamIcon, SuccessIcon } from '@/components/icons'
 import type { ReactElement } from 'react'
 
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import {
@@ -235,6 +236,7 @@ export function GoLiveConfirmationDialog({
               </div>
             </div>
 
+            <GoLiveFacebookReminder />
             <GoLiveSimulcastAdvisory />
 
             {entitlementBlocker ? (
@@ -568,6 +570,8 @@ function platformLabel(platform: StreamPlatform): string {
       return 'Kick'
     case 'x':
       return 'X'
+    case 'facebook':
+      return 'Facebook'
     case 'tiktok':
       return 'TikTok'
     case 'instagram':
@@ -610,5 +614,30 @@ function GoLiveSimulcastAdvisory(): ReactElement | null {
         </span>
       ) : null}
     </div>
+  )
+}
+
+function GoLiveFacebookReminder(): ReactElement | null {
+  const { captureConfig } = useStudioCore()
+  const { streaming } = captureConfig
+  if (
+    !streaming.targets.some(
+      (target) =>
+        target.platform === 'facebook' &&
+        target.authMode === 'manual-rtmp' &&
+        target.enabled &&
+        streaming.enabledTargetIds.includes(target.id)
+    )
+  ) {
+    return null
+  }
+  return (
+    <Alert>
+      <AlertTitle>Publish in Facebook Live Producer</AlertTitle>
+      <AlertDescription>
+        After Videorc starts streaming, press Go live in Facebook Live Producer. Facebook removes
+        live videos after 30 days; keep a local recording to archive yours.
+      </AlertDescription>
+    </Alert>
   )
 }

@@ -58,3 +58,24 @@ channel:write chat:write streamkey:read events:subscribe`.
 
 These have no public live chat, viewer or follower API, and Videorc uses manual
 stream keys for them. The Stream Manager says so rather than showing zeros.
+
+## Facebook (plan 079)
+
+Execution started 2026-09-30. Only the stream-key destination is implemented.
+Connected Page behavior remains blocked by the owner's Meta setup and the S0
+sign-in decision. The facts in plan 079 are research inputs, not live acceptance.
+Meta's linked help pages redirected this session to a login/block page, and the
+device-login reference returned HTTP 429; neither verifies account behavior.
+
+| S0 probe                                                                       | Result                                            | Consequence                                                   |
+| ------------------------------------------------------------------------------ | ------------------------------------------------- | ------------------------------------------------------------- |
+| Device login with all five Page permissions, `/me/accounts`, Page-token expiry | Pending owner app and eligible Page               | Option A or B is undecided; Facebook OAuth stays unavailable. |
+| Development loopback redirect                                                  | Not tested                                        | No claim that Meta accepts a development loopback callback.   |
+| SSE comments, `comment_rate`, returned fields                                  | Not tested                                        | No connected comments connector enabled.                      |
+| Push drops for 5/15/30/60 seconds                                              | Not tested                                        | No automatic Facebook broadcast recovery implemented.         |
+| 1080p30/60 ingest health at 6 Mbps                                             | Not tested against Facebook                       | Local fan-out checks do not substitute for Meta acceptance.   |
+| Live Producer persistent key and browser publish step                          | Plan copy implemented, owner confirmation pending | Setup and Go Live explain the browser publish action.         |
+
+The shipped stream-key mode has no comments, viewers, followers or metadata
+API. It uses the existing secure manual-key store and horizontal stream leg.
+A connected Page must never be inferred from a pasted key.

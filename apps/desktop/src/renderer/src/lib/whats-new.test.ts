@@ -2,12 +2,11 @@ import { describe, expect, it } from 'vitest'
 
 import {
   changelogPlatformForRuntime,
-  fetchChangelogEntries,
   filterChangelogEntriesByPlatform,
   formatChangelogVersion,
-  parseChangelogEntries,
   resolveWhatsNewAction
 } from './whats-new'
+import { fetchChangelogEntries, parseChangelogEntries } from './whats-new-fetch'
 
 const entry = (
   version: string,

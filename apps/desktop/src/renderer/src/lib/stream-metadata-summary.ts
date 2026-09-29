@@ -23,6 +23,8 @@ export function metadataPlatformLabel(platform: StreamPlatform): string {
       return 'Kick'
     case 'x':
       return 'X'
+    case 'facebook':
+      return 'Facebook'
     case 'tiktok':
       return 'TikTok'
     case 'instagram':

@@ -1,5 +1,6 @@
 import {
   type AppIcon,
+  FacebookIcon,
   InstagramIcon,
   KickIcon,
   LivestreamIcon,
@@ -18,6 +19,7 @@ const PLATFORM_ICON: Record<StreamPlatform, AppIcon> = {
   twitch: TwitchIcon,
   kick: KickIcon,
   x: XPlatformIcon,
+  facebook: FacebookIcon,
   tiktok: TiktokIcon,
   instagram: InstagramIcon,
   custom: LivestreamIcon
@@ -33,6 +35,7 @@ const PLATFORM_GLYPH_TINT: Record<StreamPlatform, string> = {
   kick: 'bg-platform-kick text-platform-kick-ink',
   x: 'bg-foreground/10 text-foreground',
   tiktok: 'bg-foreground/10 text-foreground',
+  facebook: 'bg-platform-facebook/15 text-platform-facebook',
   instagram: 'bg-platform-instagram/15 text-platform-instagram',
   custom: 'bg-foreground/10 text-muted-foreground'
 }

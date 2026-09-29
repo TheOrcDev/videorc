@@ -252,6 +252,40 @@ try {
   assert.equal(customFullUrl.streamKeySecretRef, undefined)
   assert.equal(customFullUrl.streamKeyPresent, false)
 
+  const persistedFacebook = persistableCaptureConfig({
+    ...defaultCaptureConfig,
+    rtmpPreset: 'custom',
+    streamKey: 'raw-facebook-key',
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      enabledTargetIds: ['facebook'],
+      targets: defaultCaptureConfig.streaming.targets.map((target) =>
+        target.platform === 'facebook'
+          ? {
+              ...target,
+              enabled: true,
+              streamKey: 'raw-facebook-key',
+              streamKeySecretRef: 'stream-target:facebook:manual-stream-key',
+              streamKeyPresent: true
+            }
+          : target
+      )
+    }
+  })
+  assert.equal(persistedFacebook.streamKey, '')
+  const facebook = persistedFacebook.streaming.targets.find((target) => target.id === 'facebook')
+  assert.equal(facebook.platform, 'facebook')
+  assert.equal(facebook.streamKey, '')
+  assert.equal(facebook.streamKeyPresent, true)
+  assert.equal(facebook.streamKeySecretRef, 'stream-target:facebook:manual-stream-key')
+  assert.equal(
+    normalizeStreamingSettings(persistedFacebook.streaming).targets.find(
+      (target) => target.id === 'facebook'
+    ).platform,
+    'facebook'
+  )
+
   console.log(
     'Streaming secret smoke OK - available YouTube OAuth and manual secret refs persist without raw keys.'
   )

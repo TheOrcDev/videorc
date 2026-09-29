@@ -904,6 +904,7 @@ mod tests {
             StreamPlatform::Twitch => "twitch",
             StreamPlatform::Kick => "kick",
             StreamPlatform::X => "x",
+            StreamPlatform::Facebook => "facebook",
             StreamPlatform::Tiktok => "tiktok",
             StreamPlatform::Instagram => "instagram",
             StreamPlatform::Custom => "custom",

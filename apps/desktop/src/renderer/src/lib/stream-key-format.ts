@@ -32,6 +32,7 @@ const PLATFORM_LABEL: Record<string, string> = {
   twitch: 'Twitch',
   youtube: 'YouTube',
   kick: 'Kick',
+  facebook: 'Facebook',
   x: 'X',
   custom: 'Custom RTMP'
 }

@@ -464,6 +464,7 @@ export const CHAT_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   twitch: 'Twitch',
   kick: 'Kick',
   x: 'X',
+  facebook: 'Facebook',
   tiktok: 'TikTok',
   instagram: 'Instagram',
   custom: 'Custom'

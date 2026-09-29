@@ -90,6 +90,7 @@ import {
   TerminalWindow,
   TextAa,
   Trash,
+  FacebookLogo,
   InstagramLogo,
   TiktokLogo,
   TwitchLogo,
@@ -262,6 +263,7 @@ export const TwitchIcon: AppIcon = TwitchLogo
 export const XPlatformIcon: AppIcon = XLogo
 export const YoutubeIcon: AppIcon = YoutubeLogo
 export const TiktokIcon: AppIcon = TiktokLogo
+export const FacebookIcon: AppIcon = FacebookLogo
 export const InstagramIcon: AppIcon = InstagramLogo
 
 /**

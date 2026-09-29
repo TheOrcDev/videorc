@@ -498,6 +498,7 @@ export const STREAM_PLATFORM_ORDER: readonly StreamPlatform[] = [
   'twitch',
   'kick',
   'x',
+  'facebook',
   'tiktok',
   'instagram',
   'custom'
@@ -508,6 +509,7 @@ const STREAM_PLATFORM_LABELS: Record<StreamPlatform, string> = {
   twitch: 'Twitch',
   kick: 'Kick',
   x: 'X / Twitter',
+  facebook: 'Facebook',
   tiktok: 'TikTok',
   instagram: 'Instagram',
   custom: 'Custom RTMP'
@@ -530,6 +532,13 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
   { id: 'twitch', platform: 'twitch', label: 'Twitch', serverUrl: rtmpDefaults.twitch },
   { id: 'kick', platform: 'kick', label: 'Kick', serverUrl: rtmpDefaults.kick },
   { id: 'x', platform: 'x', label: 'X / Twitter', serverUrl: '' },
+  {
+    id: 'facebook',
+    platform: 'facebook',
+    label: 'Facebook',
+    serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+    outputOrientation: 'horizontal'
+  },
   {
     id: 'youtube-vertical',
     platform: 'youtube',
@@ -555,6 +564,9 @@ export const STREAM_TARGET_DEFS: ReadonlyArray<{
 ]
 
 export function oauthUnavailableReason(platform: StreamPlatform): string | null {
+  if (platform === 'facebook') {
+    return "Connecting a Facebook Page isn't available yet"
+  }
   if (platform === 'custom') {
     return 'Custom RTMP does not support OAuth.'
   }
@@ -779,6 +791,13 @@ export const streamPlatformOutputCapabilities: Record<
     maxWidth: 1920,
     maxHeight: 1080,
     maxFps: 30,
+    maxBitrateKbps: 6000,
+    true4k: false
+  },
+  facebook: {
+    maxWidth: 1920,
+    maxHeight: 1080,
+    maxFps: 60,
     maxBitrateKbps: 6000,
     true4k: false
   },
@@ -1883,9 +1902,11 @@ function normalizeStreamTarget(
     // Leg binding survives reloads; anything unexpected (and every legacy
     // config) falls back to the platform default's orientation.
     outputOrientation:
-      saved.outputOrientation === 'horizontal' || saved.outputOrientation === 'vertical'
-        ? saved.outputOrientation
-        : base.outputOrientation,
+      base.platform === 'facebook'
+        ? 'horizontal'
+        : saved.outputOrientation === 'horizontal' || saved.outputOrientation === 'vertical'
+          ? saved.outputOrientation
+          : base.outputOrientation,
     createdAt: typeof saved.createdAt === 'string' ? saved.createdAt : base.createdAt,
     updatedAt: typeof saved.updatedAt === 'string' ? saved.updatedAt : base.updatedAt
   }
@@ -2018,7 +2039,9 @@ export function bridgeStreamingToLegacy(config: CaptureConfig): CaptureConfig {
 
   if (primary) {
     const legacyPreset: RtmpPreset =
-      primary.platform === 'tiktok' || primary.platform === 'instagram'
+      primary.platform === 'facebook' ||
+      primary.platform === 'tiktok' ||
+      primary.platform === 'instagram'
         ? 'custom'
         : primary.platform
     return {
