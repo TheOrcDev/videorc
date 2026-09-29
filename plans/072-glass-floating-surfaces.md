@@ -262,9 +262,11 @@ Evidence: [docs/acceptance/2026-09-28-glass-floating-surfaces.md](../docs/accept
   the tone, on the box.
 - **Toasts:** sonner injects unlayered CSS, so the toast glass lives in an
   unlayered `styles.css` block that outranks sonner by specificity:
-  `@apply glass-float`, plus `tone-* glass-float-tinted` per type, which only
-  feeds glass-float's rim and sheen variables. The `richColors` slab colours
-  are pointed at the glass and the text stays monochrome. Keeping it in CSS
+  `@apply glass-float`, plus `tone-*` per type, which colours the icon only.
+  The `richColors` slab colours are pointed at the glass and the text stays
+  monochrome. (A tinted rim and sheen per type shipped in #488. The owner
+  rejected the amber-washed warning toast on 2026-09-29, and the follow-up
+  removed it.) Keeping it in CSS
   kept the renderer eager JS under its 2,000,000-byte raw budget. Main sits
   at 2,000,010; this branch builds 1,999,654.
 - **S4:** `probe:ui-glass --surfaces` gates lift, contrast and bleed (below the

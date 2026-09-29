@@ -94,6 +94,21 @@ describe('renderer style guards (plan 050)', () => {
     expect(offenders(/\bbg-popover\b/, (path) => /\.(tsx|ts)$/.test(path))).toEqual([])
   })
 
+  it('keeps every toast the same neutral glass: a type colours its icon only', () => {
+    // An amber-tinted rim and sheen made a warning toast read as a yellow
+    // panel (owner call 2026-09-29). A typed toast rule may set its tone and
+    // nothing else; the icon rule is the one place the tone paints.
+    const styles = files.find(({ path }) => path === 'src/styles.css')?.code ?? ''
+    const typed = [...styles.matchAll(/\[data-sonner-toast\]\[data-type='(\w+)'\]\s*\{([^}]*)\}/g)]
+    expect(typed.map(([, type]) => type).sort()).toEqual(['error', 'info', 'success', 'warning'])
+    for (const [, type, body] of typed) {
+      expect(body.trim(), type).toMatch(/^@apply tone-\w+;$/)
+    }
+    expect(styles).not.toMatch(
+      /glass-float-tinted|--(?:success|error|warning|info)-bg:(?!\s*var\(--glass-float\))/
+    )
+  })
+
   it('never uses cursor-pointer: desktop controls use the arrow', () => {
     expect(offenders(/\bcursor-pointer\b|cursor:\s*pointer/)).toEqual([])
   })
