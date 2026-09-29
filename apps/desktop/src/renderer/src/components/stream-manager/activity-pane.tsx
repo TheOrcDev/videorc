@@ -99,6 +99,9 @@ export function activityCapabilityNote(
       named ? "X doesn't share tips." : "X doesn't share tips. New X followers show as a count."
     )
   }
+  if (platforms.includes('facebook')) {
+    notes.push('Facebook comments, viewers and followers need a connected Page.')
+  }
   if (platforms.includes('kick')) {
     notes.push("Kick shows each new follow but doesn't share a follower total.")
   }

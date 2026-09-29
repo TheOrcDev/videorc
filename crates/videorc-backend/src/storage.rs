@@ -11298,6 +11298,52 @@ mod tests {
     }
 
     #[test]
+    fn facebook_account_reloads_as_facebook_without_exposing_secret_refs() {
+        let database = test_database();
+
+        let account = database
+            .upsert_platform_account(UpsertPlatformAccount {
+                platform: StreamPlatform::Facebook,
+                account_id: "channel-123".to_string(),
+                account_label: "Main Channel".to_string(),
+                account_handle: Some("@main".to_string()),
+                avatar_url: Some("https://example.test/avatar.png".to_string()),
+                scopes: vec![
+                    "pages_manage_posts".to_string(),
+                    " pages_read_engagement ".to_string(),
+                    "pages_manage_posts".to_string(),
+                    "".to_string(),
+                ],
+                token_secret_ref: Some("platform:facebook:channel-123:access".to_string()),
+                refresh_token_secret_ref: Some("platform:facebook:channel-123:refresh".to_string()),
+                stream_key_secret_ref: Some("platform:facebook:channel-123:stream-key".to_string()),
+                expires_at: Some("2026-06-03T12:00:00Z".to_string()),
+                status: PlatformAccountStatus::Connected,
+            })
+            .unwrap();
+
+        assert_eq!(account.platform, StreamPlatform::Facebook);
+        assert_eq!(account.account_label, "Main Channel");
+        assert_eq!(
+            account.scopes,
+            vec![
+                "pages_manage_posts".to_string(),
+                "pages_read_engagement".to_string()
+            ]
+        );
+        assert!(account.access_token_present);
+        assert!(account.refresh_token_present);
+        assert!(account.stream_key_present);
+
+        let json = serde_json::to_string(&account).unwrap();
+        assert!(!json.contains("secretRef"));
+        assert!(!json.contains("platform:facebook"));
+
+        let accounts = database.list_platform_accounts().unwrap();
+        assert_eq!(accounts, vec![account]);
+    }
+
+    #[test]
     fn platform_accounts_are_one_per_platform_and_disconnect_deletes_secrets() {
         let database = test_database();
         database

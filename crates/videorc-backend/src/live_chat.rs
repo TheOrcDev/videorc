@@ -506,6 +506,17 @@ pub fn chat_capability(
                 crate::streaming::stream_platform_label(platform)
             ),
         },
+        StreamPlatform::Facebook => ChatCapability {
+            platform,
+            state: ChatCapabilityState::Unsupported,
+            read: CommentsReadState::Unavailable,
+            write: CommentsWriteState::Unavailable,
+            chat_read_available: false,
+            required_scope: None,
+            account_id: None,
+            account_label: None,
+            message: "Facebook comments need a connected Page".to_string(),
+        },
         StreamPlatform::Custom => ChatCapability {
             platform,
             state: ChatCapabilityState::Unsupported,
@@ -591,6 +602,7 @@ pub fn chat_capabilities(accounts: &[PlatformAccount]) -> Vec<ChatCapability> {
         StreamPlatform::Twitch,
         StreamPlatform::X,
         StreamPlatform::Kick,
+        StreamPlatform::Facebook,
     ]
     .into_iter()
     .map(|platform| {
@@ -1532,7 +1544,10 @@ where
                 .kick
                 .as_ref()
                 .and_then(|config| config.target_id.clone()),
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => None,
+            StreamPlatform::Facebook
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => None,
         };
         let configured_target_id = configured_target_id.or_else(|| {
             params
@@ -5368,7 +5383,7 @@ mod tests {
     fn capabilities_cover_every_native_platform() {
         let accounts = vec![account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE])];
         let capabilities = chat_capabilities(&accounts);
-        assert_eq!(capabilities.len(), 4);
+        assert_eq!(capabilities.len(), 5);
         assert_eq!(capabilities[0].platform, StreamPlatform::Youtube);
         assert_eq!(capabilities[0].state, ChatCapabilityState::Unsupported);
         assert_eq!(capabilities[1].platform, StreamPlatform::Twitch);
@@ -5377,6 +5392,13 @@ mod tests {
         assert_eq!(capabilities[2].state, ChatCapabilityState::NotConnected);
         assert_eq!(capabilities[3].platform, StreamPlatform::Kick);
         assert_eq!(capabilities[3].state, ChatCapabilityState::NotConnected);
+        assert_eq!(capabilities[4].platform, StreamPlatform::Facebook);
+        assert_eq!(capabilities[4].state, ChatCapabilityState::Unsupported);
+        assert!(!capabilities[4].chat_read_available);
+        assert_eq!(
+            capabilities[4].message,
+            "Facebook comments need a connected Page"
+        );
     }
 
     #[test]
@@ -5518,7 +5540,7 @@ mod tests {
     fn initial_snapshot_maps_capabilities_to_provider_rows() {
         let accounts = vec![account(StreamPlatform::Youtube, &[YOUTUBE_CHAT_SCOPE])];
         let snapshot = initial_chat_snapshot(&accounts, "now".to_string());
-        assert_eq!(snapshot.providers.len(), 4);
+        assert_eq!(snapshot.providers.len(), 5);
         assert!(snapshot.messages.is_empty());
         assert_eq!(snapshot.providers[0].platform, StreamPlatform::Youtube);
         assert_eq!(

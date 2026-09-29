@@ -20,6 +20,7 @@ pub enum StreamPlatform {
     Twitch,
     Kick,
     X,
+    Facebook,
     Tiktok,
     Instagram,
     Custom,
@@ -453,6 +454,7 @@ pub(crate) fn stream_platform_id(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Twitch => "twitch",
         StreamPlatform::Kick => "kick",
         StreamPlatform::X => "x",
+        StreamPlatform::Facebook => "facebook",
         StreamPlatform::Tiktok => "tiktok",
         StreamPlatform::Instagram => "instagram",
         StreamPlatform::Custom => "custom",
@@ -465,6 +467,7 @@ pub(crate) fn stream_platform_from_id(platform: &str) -> Option<StreamPlatform> 
         "twitch" => Some(StreamPlatform::Twitch),
         "kick" => Some(StreamPlatform::Kick),
         "x" => Some(StreamPlatform::X),
+        "facebook" => Some(StreamPlatform::Facebook),
         "tiktok" => Some(StreamPlatform::Tiktok),
         "instagram" => Some(StreamPlatform::Instagram),
         "custom" => Some(StreamPlatform::Custom),
@@ -565,6 +568,7 @@ pub(crate) fn stream_platform_label(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Twitch => "Twitch",
         StreamPlatform::Kick => "Kick",
         StreamPlatform::X => "X / Twitter",
+        StreamPlatform::Facebook => "Facebook",
         StreamPlatform::Tiktok => "TikTok",
         StreamPlatform::Instagram => "Instagram",
         StreamPlatform::Custom => "Custom RTMP",
@@ -658,6 +662,13 @@ pub fn default_stream_targets() -> Vec<StreamTargetSettings> {
         ),
         default_stream_target(StreamPlatform::X, "X / Twitter", ""),
         default_stream_target_with_id(
+            "facebook",
+            StreamPlatform::Facebook,
+            "Facebook",
+            "rtmps://rtmp-api.facebook.com:443/rtmp/",
+            Some(StreamOutputOrientation::Horizontal),
+        ),
+        default_stream_target_with_id(
             "youtube-vertical",
             StreamPlatform::Youtube,
             "YouTube Vertical",
@@ -736,6 +747,7 @@ mod tests {
             StreamPlatform::Twitch,
             StreamPlatform::Kick,
             StreamPlatform::X,
+            StreamPlatform::Facebook,
             StreamPlatform::Tiktok,
             StreamPlatform::Instagram,
             StreamPlatform::Custom,
@@ -749,6 +761,29 @@ mod tests {
             assert_eq!(serde_id, stream_platform_id(platform));
         }
         assert_eq!(stream_platform_from_id("mixer"), None);
+    }
+
+    #[test]
+    fn facebook_default_is_manual_and_pinned_horizontal() {
+        let targets = default_stream_targets();
+        let index = targets
+            .iter()
+            .position(|target| target.platform == StreamPlatform::Facebook)
+            .unwrap();
+        let facebook = &targets[index];
+        assert_eq!(targets[index - 1].platform, StreamPlatform::X);
+        assert_eq!(facebook.id, "facebook");
+        assert_eq!(
+            facebook.server_url,
+            "rtmps://rtmp-api.facebook.com:443/rtmp/"
+        );
+        assert_eq!(facebook.auth_mode, StreamAuthMode::ManualRtmp);
+        assert_eq!(
+            facebook.output_orientation,
+            Some(StreamOutputOrientation::Horizontal)
+        );
+        assert!(!facebook.enabled);
+        assert!(!facebook.stream_key_present);
     }
 
     #[test]

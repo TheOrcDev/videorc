@@ -523,6 +523,7 @@ fn reconnect_message(platform: StreamPlatform) -> &'static str {
         StreamPlatform::Youtube => "Reconnect YouTube to show subscribers.",
         StreamPlatform::X => "Reconnect X to show followers.",
         StreamPlatform::Kick => "Reconnect Kick to show new follows.",
+        StreamPlatform::Facebook => "Reconnect Facebook to show followers.",
         _ => "Reconnect this account to show its audience.",
     }
 }
@@ -873,6 +874,9 @@ async fn read_with_token(
         StreamPlatform::Youtube => fetch_youtube_subscribers(client, YOUTUBE_API_BASE, token).await,
         StreamPlatform::X => {
             fetch_x_followers_oauth2(client, crate::x_live::DEFAULT_API_BASE_URL, token).await
+        }
+        StreamPlatform::Facebook => {
+            AudienceReading::Unavailable("Facebook followers need a connected Page".to_string())
         }
         _ => AudienceReading::Unavailable("This platform has no audience API.".to_string()),
     }

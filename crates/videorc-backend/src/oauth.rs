@@ -58,6 +58,7 @@ pub const YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE: &str = "YouTube OAuth is temporaril
 
 pub fn provider_oauth_unavailable_message(platform: StreamPlatform) -> Option<&'static str> {
     match platform {
+        StreamPlatform::Facebook => Some("Connecting a Facebook Page isn't available yet"),
         StreamPlatform::Youtube if !youtube_oauth_enabled() => {
             Some(YOUTUBE_OAUTH_UNAVAILABLE_MESSAGE)
         }
@@ -607,9 +608,10 @@ impl OAuthSessions {
             StreamPlatform::Twitch => &self.twitch_finalization,
             StreamPlatform::Kick => &self.kick_finalization,
             StreamPlatform::X => &self.x_finalization,
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {
-                &self.custom_finalization
-            }
+            StreamPlatform::Facebook
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => &self.custom_finalization,
         };
         lock.clone().lock_owned().await
     }
@@ -2548,6 +2550,7 @@ fn parse_provider_profile(
         StreamPlatform::X => parse_x_profile(value),
         StreamPlatform::Kick => parse_kick_profile(value),
         StreamPlatform::Custom => anyhow::bail!("Custom RTMP does not support OAuth profiles."),
+        StreamPlatform::Facebook => anyhow::bail!("Connecting a Facebook Page isn't available yet"),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
             "{} livestreams use a manual stream key. There is no OAuth to connect.",
             crate::streaming::stream_platform_label(platform)
@@ -2861,6 +2864,7 @@ impl OAuthTokenResponse {
 
 fn provider_config(platform: StreamPlatform) -> Result<OAuthProviderConfig> {
     match platform {
+        StreamPlatform::Facebook => anyhow::bail!("Connecting a Facebook Page isn't available yet"),
         StreamPlatform::Tiktok | StreamPlatform::Instagram => anyhow::bail!(
             "{} livestreams use a manual stream key. There is no OAuth to connect.",
             crate::streaming::stream_platform_label(platform)
@@ -3021,6 +3025,11 @@ pub fn provider_credential_statuses() -> Vec<OAuthProviderCredentialStatus> {
     };
     vec![
         youtube,
+        disabled_provider_credential_status(
+            StreamPlatform::Facebook,
+            "Connecting a Facebook Page isn't available yet",
+            false,
+        ),
         // Twitch ships as a PUBLIC client type (dev console setting), so no
         // client secret exists. That does NOT make the authorization-code
         // grant work: Twitch rejects a secretless public client with
@@ -5354,10 +5363,39 @@ mod tests {
     }
 
     #[test]
+    fn facebook_oauth_stays_unavailable_in_stream_key_mode() {
+        let expected = "Connecting a Facebook Page isn't available yet";
+        assert_eq!(
+            provider_oauth_unavailable_message(StreamPlatform::Facebook),
+            Some(expected)
+        );
+        assert!(
+            provider_config(StreamPlatform::Facebook)
+                .unwrap_err()
+                .to_string()
+                .contains(expected)
+        );
+        assert!(
+            parse_provider_profile(StreamPlatform::Facebook, serde_json::json!({}))
+                .unwrap_err()
+                .to_string()
+                .contains(expected)
+        );
+        let status = provider_credential_statuses()
+            .into_iter()
+            .find(|status| status.platform == StreamPlatform::Facebook)
+            .unwrap();
+        assert!(!status.ready);
+        assert!(!status.client_id_present);
+        assert!(!status.client_secret_present);
+        assert_eq!(status.message, expected);
+    }
+
+    #[test]
     fn provider_credential_statuses_cover_native_platforms_without_secret_values() {
         let statuses = provider_credential_statuses();
 
-        assert_eq!(statuses.len(), 4);
+        assert_eq!(statuses.len(), 5);
         let youtube = statuses
             .iter()
             .find(|status| status.platform == StreamPlatform::Youtube)

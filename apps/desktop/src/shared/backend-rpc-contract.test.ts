@@ -1729,7 +1729,46 @@ describe('backend RPC contract', () => {
     expect(validateBackendRpcResult('cohost.status', state)).toEqual(state)
 
     // One question can gather askers from every platform, Kick included.
-    const everyPlatform = ['youtube', 'twitch', 'kick', 'x', 'tiktok', 'instagram', 'custom']
+    const everyPlatform = [
+      'youtube',
+      'twitch',
+      'kick',
+      'x',
+      'facebook',
+      'tiktok',
+      'instagram',
+      'custom'
+    ]
+    const audience = {
+      sessionId: 'all-platforms',
+      platforms: everyPlatform.map((platform) => ({
+        platform,
+        metric: 'followers',
+        capability: 'unavailable'
+      })),
+      updatedAt: '2026-09-30T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('stream.audience.snapshot', audience)).toEqual(audience)
+    expect(() =>
+      validateBackendRpcResult('stream.audience.snapshot', {
+        ...audience,
+        platforms: [...audience.platforms, audience.platforms[0]]
+      })
+    ).toThrow()
+    const viewers = {
+      sessionId: 'all-platforms',
+      platforms: everyPlatform.map((platform) => ({ platform, count: 1 })),
+      total: everyPlatform.length,
+      at: '2026-09-30T00:00:00Z'
+    }
+    expect(validateBackendRpcResult('sessions.viewers.list', { samples: [viewers] })).toEqual({
+      samples: [viewers]
+    })
+    expect(() =>
+      validateBackendRpcResult('sessions.viewers.list', {
+        samples: [{ ...viewers, platforms: [...viewers.platforms, viewers.platforms[0]] }]
+      })
+    ).toThrow()
     const widest = { ...state, questions: [{ ...state.questions[0], platforms: everyPlatform }] }
     expect(validateBackendEventPayload('cohost.state', widest)).toEqual(widest)
     expect(() =>

@@ -42,7 +42,7 @@ export interface ObsImportPlanResult {
     | { kind: 'rtmp-custom'; serverUrl: string; hasKey: boolean }
     | {
         kind: 'rtmp-platform'
-        platform: 'youtube' | 'kick'
+        platform: 'youtube' | 'kick' | 'facebook'
         serviceLabel: string
         serverUrl: string
         hasKey: boolean
@@ -157,7 +157,10 @@ function volumeToGainDb(volume: number): number {
 function detectPlatform(
   serviceLabel: string,
   serverUrl?: string
-): 'youtube' | 'twitch' | 'kick' | 'other' {
+): 'youtube' | 'twitch' | 'kick' | 'facebook' | 'other' {
+  if (fuzzyIncludes(serviceLabel, 'facebook')) {
+    return 'facebook'
+  }
   if (fuzzyIncludes(serviceLabel, 'youtube')) {
     return 'youtube'
   }
@@ -438,8 +441,12 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
     } else {
       const label = setup.service.service ?? 'streaming service'
       const platform = detectPlatform(label, setup.service.server)
-      const platformName = platform === 'kick' ? 'Kick' : 'YouTube'
-      if ((platform === 'youtube' || platform === 'kick') && setup.service.server) {
+      const platformName =
+        platform === 'facebook' ? 'Facebook' : platform === 'kick' ? 'Kick' : 'YouTube'
+      if (
+        (platform === 'youtube' || platform === 'kick' || platform === 'facebook') &&
+        setup.service.server
+      ) {
         result.stream = {
           kind: 'rtmp-platform',
           platform,
@@ -454,7 +461,7 @@ export function mapObsSetup(setup: ObsSetup, devices: Device[]): ObsImportPlanRe
             ? `server and stream key imported to ${platformName} Manual RTMP`
             : `server imported to ${platformName} Manual RTMP (no key found)`
         })
-      } else if (platform === 'youtube' || platform === 'kick') {
+      } else if (platform === 'youtube' || platform === 'kick' || platform === 'facebook') {
         report.push({
           verdict: 'approximated',
           subject: label,

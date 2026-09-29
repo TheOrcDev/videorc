@@ -28,11 +28,20 @@ try {
     // shipped, but an empty smoke profile has no connected X account and X remains read-only.
     const capability = await request(ws, timeoutMs, 'liveChat.capability', {})
     const platforms = capability.map((entry) => entry.platform)
-    for (const platform of ['youtube', 'twitch', 'kick', 'x']) {
+    for (const platform of ['youtube', 'twitch', 'kick', 'x', 'facebook']) {
       if (!platforms.includes(platform)) {
         throw new Error(`liveChat.capability missing ${platform}: ${JSON.stringify(platforms)}`)
       }
     }
+    const facebook = capability.find((entry) => entry.platform === 'facebook')
+    if (
+      facebook.state !== 'unsupported' ||
+      facebook.chatReadAvailable ||
+      facebook.message !== 'Facebook comments need a connected Page'
+    ) {
+      throw new Error(`Facebook manual chat capability mismatch: ${JSON.stringify(facebook)}`)
+    }
+
     const x = capability.find((entry) => entry.platform === 'x')
     if (x.state !== 'not-connected' || x.chatReadAvailable) {
       throw new Error(`X chat should be available but not connected, got ${JSON.stringify(x)}`)

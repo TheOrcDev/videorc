@@ -3163,7 +3163,10 @@ async fn prepare_session_live_chat(
                     }
                 }
             }
-            StreamPlatform::Tiktok | StreamPlatform::Instagram | StreamPlatform::Custom => {}
+            StreamPlatform::Facebook
+            | StreamPlatform::Tiktok
+            | StreamPlatform::Instagram
+            | StreamPlatform::Custom => {}
         }
     }
     params.audience = session_audience_sources(streaming, &enabled);
@@ -19477,10 +19480,16 @@ mod tests {
             default_bitrate_kbps: 6000,
             enabled_target_ids: Vec::new(),
         };
-        let enabled: std::collections::HashSet<&str> =
-            ["youtube", "twitch", "x", "youtube-vertical", "tiktok"]
-                .into_iter()
-                .collect();
+        let enabled: std::collections::HashSet<&str> = [
+            "youtube",
+            "twitch",
+            "x",
+            "youtube-vertical",
+            "tiktok",
+            "facebook",
+        ]
+        .into_iter()
+        .collect();
         let sources = session_audience_sources(&streaming, &enabled);
         assert_eq!(
             sources,

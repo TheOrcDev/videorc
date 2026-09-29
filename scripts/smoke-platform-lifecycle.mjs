@@ -121,6 +121,20 @@ try {
   assert.equal(failedTarget.status.state, 'failed')
   assert.equal(failedTarget.status.message, 'YouTube setup failed.')
 
+  const facebookManual = {
+    ...defaultCaptureConfig.streaming,
+    enabled: true,
+    enabledTargetIds: ['facebook'],
+    targets: defaultCaptureConfig.streaming.targets.map((target) =>
+      target.id === 'facebook'
+        ? { ...target, enabled: true, streamKey: 'facebook-manual-key', streamKeyPresent: true }
+        : target
+    )
+  }
+  assert.deepEqual(readyStreamTargetLabels(facebookManual), ['Facebook'])
+  assert.deepEqual(preparedYouTubeActivationTargets(facebookManual), [])
+  assert.deepEqual(preparedYouTubeCompletionTargets(facebookManual), [])
+
   console.log(
     'Platform lifecycle smoke OK - available YouTube OAuth, ready labels, and status patching verified.'
   )

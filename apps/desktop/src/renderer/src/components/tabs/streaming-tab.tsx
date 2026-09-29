@@ -946,6 +946,12 @@ function manualKeyGuidance(
   platform: StreamPlatform
 ): { copy: string; url: string; linkLabel: string } | null {
   switch (platform) {
+    case 'facebook':
+      return {
+        copy: 'In Facebook Live Producer, choose Streaming software and copy the stream key (turn on Persistent stream key to reuse it). After Videorc starts streaming, press Go live in Live Producer.',
+        url: 'https://www.facebook.com/live/producer/',
+        linkLabel: 'Live Producer'
+      }
     case 'tiktok':
       return {
         copy: 'TikTok keys change every broadcast and need LIVE access on your account. Paste a fresh server URL and key each time from',
@@ -1919,6 +1925,8 @@ function platformLabel(platform: StreamPlatform): string {
       return 'Twitch'
     case 'kick':
       return 'Kick'
+    case 'facebook':
+      return 'Facebook'
     case 'x':
       return 'X'
     default:

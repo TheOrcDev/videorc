@@ -352,4 +352,25 @@ describe('mapping table rows', () => {
     expect(result.backgroundAsset?.id).toBe('bg-managed')
     expect(reportNotes(result, 'skipped').join('\n')).toContain('BG2')
   })
+  it('imports the OBS Facebook Live service as a named manual-key destination', () => {
+    const result = mapObsSetup(
+      setupFrom({
+        sources: [display],
+        scenes: [{ name: 'S', current: true, items: [item('Screen')] }],
+        service: {
+          type: 'rtmp_common',
+          service: 'Facebook Live',
+          server: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+          hasKey: true
+        }
+      }),
+      DEVICES
+    )
+    expect(result.stream).toMatchObject({
+      kind: 'rtmp-platform',
+      platform: 'facebook',
+      hasKey: true
+    })
+    expect(reportNotes(result, 'imported').join('\n')).toContain('Facebook Manual RTMP')
+  })
 })

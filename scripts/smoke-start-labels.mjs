@@ -138,6 +138,25 @@ try {
   assert.equal(manualMissingKey.streamEnabled, true)
   assert.equal(areEnabledStreamTargetsStartReady(manualMissingKey.streaming), false)
 
+  const facebookManual = bridgeStreamingToLegacy({
+    ...defaultCaptureConfig,
+    recordEnabled: false,
+    streaming: {
+      ...defaultCaptureConfig.streaming,
+      enabled: true,
+      enabledTargetIds: ['facebook'],
+      targets: defaultCaptureConfig.streaming.targets.map((target) =>
+        target.id === 'facebook'
+          ? { ...target, enabled: true, streamKey: 'facebook-manual-key', streamKeyPresent: true }
+          : target
+      )
+    }
+  })
+  assert.equal(facebookManual.rtmpPreset, 'custom')
+  assert.equal(facebookManual.rtmpServerUrl, 'rtmps://rtmp-api.facebook.com:443/rtmp/')
+  assert.equal(areEnabledStreamTargetsStartReady(facebookManual.streaming), true)
+  assert.equal(startButtonLabel(false, facebookManual.streamEnabled), 'Start Livestream')
+
   console.log(
     'Start label smoke OK - record, livestream, dual-output, and pending labels verified.'
   )

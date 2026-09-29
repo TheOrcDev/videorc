@@ -132,7 +132,7 @@ export interface CommentHighlightPlatformBadge {
   color: string
   /** Glyph colour; white unless the brand colour is too light for it. */
   ink?: string
-  glyph: 'play' | 'twitch' | 'kick' | 'x' | 'dot'
+  glyph: 'play' | 'twitch' | 'kick' | 'x' | 'facebook' | 'dot'
 }
 
 /** Small stream-safe brand mark painted over the avatar. The adjacent identity
@@ -148,6 +148,8 @@ export function commentHighlightPlatformBadge(
       return { label: 'Twitch', color: '#9146FF', glyph: 'twitch' }
     case 'kick':
       return { label: 'Kick', color: '#53FC18', ink: '#0B1A05', glyph: 'kick' }
+    case 'facebook':
+      return { label: 'Facebook', color: '#1877F2', glyph: 'facebook' }
     case 'x':
       return { label: 'X', color: '#111111', glyph: 'x' }
     case 'custom':

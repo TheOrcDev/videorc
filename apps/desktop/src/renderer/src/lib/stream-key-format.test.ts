@@ -56,3 +56,10 @@ describe('stream-key-format', () => {
     expect(streamKeyTailHint('tiny')).toBe('••••')
   })
 })
+
+it('labels Facebook in mismatched-key warnings without guessing its opaque key format', () => {
+  expect(streamKeyPlatformMismatch('facebook', 'live_12345_AbCdEf')).toContain(
+    'saving it to Facebook'
+  )
+  expect(streamKeyPlatformMismatch('facebook', 'opaque-facebook-persistent-key')).toBeNull()
+})

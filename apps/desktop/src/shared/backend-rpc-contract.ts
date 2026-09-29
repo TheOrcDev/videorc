@@ -627,6 +627,7 @@ const STREAM_PLATFORMS = [
   'twitch',
   'kick',
   'x',
+  'facebook',
   'tiktok',
   'instagram',
   'custom'
@@ -674,7 +675,7 @@ const audienceSnapshotSchema = objectSchema(
         },
         { allowUnknown: false }
       ),
-      { maxLength: 7 }
+      { maxLength: STREAM_PLATFORMS.length }
     ),
     updatedAt: boundedString
   },
@@ -689,7 +690,7 @@ const viewerSampleSchema = objectSchema(
         { platform: streamPlatformSchema, count: numberSchema({ integer: true, min: 0 }) },
         { allowUnknown: false }
       ),
-      { maxLength: 7 }
+      { maxLength: STREAM_PLATFORMS.length }
     ),
     total: numberSchema({ integer: true, min: 0 }),
     at: boundedString
@@ -1868,7 +1869,7 @@ const cohostQuestionSchema = objectSchema(
     text: stringSchema({ maxLength: 2000 }),
     messageIds: arraySchema(boundedString, { maxLength: 500 }),
     askers: arraySchema(stringSchema({ maxLength: 512 }), { maxLength: 500 }),
-    platforms: arraySchema(streamPlatformSchema, { maxLength: 7 }),
+    platforms: arraySchema(streamPlatformSchema, { maxLength: STREAM_PLATFORMS.length }),
     priority: enumSchema(['high', 'normal', 'low']),
     suggestedReply: stringSchema({ maxLength: 2000 }),
     fromNotes: booleanSchema,

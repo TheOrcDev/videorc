@@ -151,3 +151,12 @@ describe('provider readiness evidence', () => {
     assert.equal(twitch.ready, true)
   })
 })
+
+it('reports Facebook as stream-key only without requesting credentials or enabling connected mode', () => {
+  const result = evaluateProviderReadiness({ env: completeEnv() })
+  const facebook = result.providers.find((provider) => provider.label === 'Facebook')
+  assert.equal(facebook.paused, true)
+  assert.equal(facebook.ready, true)
+  assert.match(facebook.pauseReason, /use a stream key/)
+  assert.deepEqual(facebook.missing, [])
+})

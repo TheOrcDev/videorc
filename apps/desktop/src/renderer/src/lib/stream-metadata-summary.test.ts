@@ -140,3 +140,12 @@ describe('metadataOverrideSummary', () => {
     ).toBe('Custom title · Announces')
   })
 })
+
+it('shows no metadata override for Facebook stream-key mode', () => {
+  expect(
+    visibleMetadataOverrides(
+      [target('facebook', 'Facebook')],
+      [...allOverrides, override('facebook')]
+    )
+  ).toEqual([])
+})

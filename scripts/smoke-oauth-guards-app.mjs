@@ -29,6 +29,18 @@ try {
       throw new Error(`YouTube provider OAuth should be paused: ${JSON.stringify(youtubeStart)}`)
     }
 
+    const facebookStart = await requestRaw(ws, timeoutMs, 'platformAccounts.oauth.startProvider', {
+      platform: 'facebook'
+    })
+    if (
+      facebookStart.ok ||
+      !String(facebookStart.error?.message).includes(
+        "Connecting a Facebook Page isn't available yet"
+      )
+    ) {
+      throw new Error(`Facebook OAuth must remain unavailable: ${JSON.stringify(facebookStart)}`)
+    }
+
     const refreshedAccounts = await request(ws, timeoutMs, 'platformAccounts.refresh')
     if (!Array.isArray(refreshedAccounts)) {
       throw new Error(

@@ -16,6 +16,15 @@ export const YOUTUBE_OAUTH_PAUSED_REASON =
 
 export const PROVIDERS = [
   {
+    label: 'Facebook',
+    paused: true,
+    pauseReason:
+      "Connecting a Facebook Page isn't available yet; use a stream key in Live Producer.",
+    clientIdVars: [],
+    secretVars: [],
+    accountChecks: []
+  },
+  {
     label: 'YouTube',
     paused: true,
     pauseReason: YOUTUBE_OAUTH_PAUSED_REASON,

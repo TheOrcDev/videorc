@@ -129,3 +129,30 @@ describe('mergeObsImportIntoConfig', () => {
     expect(next.streaming.enabledTargetIds).toContain('youtube')
   })
 })
+
+it('merges an imported Facebook key into its own card and secret migration', () => {
+  const next = mergeObsImportIntoConfig(
+    defaultCaptureConfig,
+    plan({
+      stream: {
+        kind: 'rtmp-platform',
+        platform: 'facebook',
+        serviceLabel: 'Facebook Live',
+        serverUrl: 'rtmps://rtmp-api.facebook.com:443/rtmp/',
+        hasKey: true
+      }
+    }),
+    'facebook-import-key'
+  )
+  expect(next.streaming.targets.find((target) => target.id === 'facebook')).toMatchObject({
+    platform: 'facebook',
+    enabled: true,
+    authMode: 'manual-rtmp',
+    outputOrientation: 'horizontal',
+    streamKey: 'facebook-import-key'
+  })
+  expect(legacyStreamKeyMigrationCandidates(next)).toContainEqual({
+    targetId: 'facebook',
+    streamKey: 'facebook-import-key'
+  })
+})
