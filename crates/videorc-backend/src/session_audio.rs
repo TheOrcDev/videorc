@@ -2016,8 +2016,10 @@ impl TimelineFault {
 /// A stall episode starts when the cursor trails the wall clock by this much
 /// (250 ms), and ends once it is back within [`OUTPUT_CAUGHT_UP_FRAMES`].
 const OUTPUT_STALL_START_FRAMES: u64 = 12_000;
-/// 50 ms: a bus paces one 10 ms chunk behind the wall clock at most.
-const OUTPUT_CAUGHT_UP_FRAMES: u64 = 2_400;
+/// 100 ms. A bus paces one 10 ms chunk behind the wall clock, but on a busy
+/// machine (exactly when stalls happen) its thread wakes tens of ms late, so
+/// a 50 ms line could leave an episode open long after the reader resumed.
+const OUTPUT_CAUGHT_UP_FRAMES: u64 = 4_800;
 /// An episode excuses its sources this long. An output that stays behind
 /// longer is stuck, not stalled, and its sources report the loss.
 const OUTPUT_STALL_FORGIVENESS: Duration = Duration::from_secs(15);
@@ -7245,10 +7247,14 @@ mod mix_tests {
             let samples = decode(&bytes);
             assert_eq!(observation.losses, vec![], "not a source loss");
             assert_eq!(observation.input_state, NativeAudioInputState::Live);
-            assert_eq!(observation.output_stalls.len(), 1, "one stall episode");
-            let stall = &observation.output_stalls[0];
-            assert!(stall.duration_ms >= 2_500, "{stall:?}");
-            assert!(stall.lost_ms >= 1_000, "{stall:?}");
+            // Scheduling jitter may split the episode; together they cover
+            // the stall.
+            let stalls = &observation.output_stalls;
+            assert!(!stalls.is_empty(), "the stall is reported");
+            let longest = stalls.iter().map(|stall| stall.duration_ms).max().unwrap();
+            assert!(longest >= 2_500, "{stalls:?}");
+            let lost: u64 = stalls.iter().map(|stall| stall.lost_ms).sum();
+            assert!(lost >= 1_000, "{stalls:?}");
             assert_eq!(frames_at(&samples, 24_000, 72_000, 0.2), 48_000, "before");
             assert_eq!(
                 frames_at(&samples, 312_000, 384_000, 0.2),
@@ -7287,7 +7293,10 @@ mod mix_tests {
         let (bytes, _) = bus.finish();
         let samples = decode(&bytes);
         assert_eq!(observation.losses, vec![]);
-        assert_eq!(observation.output_stalls.len(), 1);
+        assert!(
+            !observation.output_stalls.is_empty(),
+            "the stall is reported"
+        );
         assert_eq!(
             frames_at(&samples, 312_000, 384_000, 0.7),
             72_000,
@@ -7428,6 +7437,9 @@ mod mix_tests {
             }
         );
         assert!(!stall.output_behind(t0 + ms(3_200)));
+        // A busy machine wakes the bus tens of ms late: that is caught up.
+        assert_eq!(stall.observe(t0 + ms(4_000), 12_000, 0), None);
+        assert!(stall.observe(t0 + ms(5_000), 3_000, 0).is_some());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
