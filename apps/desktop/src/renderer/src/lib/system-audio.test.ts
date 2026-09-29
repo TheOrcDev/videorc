@@ -1,8 +1,12 @@
+import { readFileSync } from 'node:fs'
+import { fileURLToPath } from 'node:url'
+
 import { describe, expect, it } from 'vitest'
 
 import type { AudioTrack, Device } from '@/lib/backend'
 import { backendMeterReading } from '@/lib/mic-meter'
 import {
+  SYSTEM_AUDIO_RESUME_EVENT,
   confirmedSystemAudioMix,
   systemAudioDevice,
   systemAudioIssueCopy,
@@ -75,6 +79,22 @@ describe('systemAudioIssueFromHealthEvent', () => {
       'System audio is off for this session because the microphone is on a fallback input.'
     )
     expect(systemAudioIssueFromHealthEvent({ code: 'microphone-input-lost' })).toBeNull()
+  })
+
+  it('maps the echo guard pause, and a recovery is not an issue (plan 076)', () => {
+    expect(systemAudioIssueFromHealthEvent({ code: 'system-audio-echo-paused' })).toBe('echo')
+    expect(systemAudioIssueFromHealthEvent({ code: 'system-audio-recovered' })).toBeNull()
+    expect(systemAudioIssueCopy('echo')).toBe(
+      'Paused: your stream is playing on this Mac and coming back as an echo. Mute that tab, then resume.'
+    )
+  })
+
+  it('names the event the Studio listens to for Resume', () => {
+    const studio = readFileSync(
+      fileURLToPath(new URL('../hooks/use-studio.tsx', import.meta.url)),
+      'utf8'
+    )
+    expect(studio).toContain(`window.addEventListener('${SYSTEM_AUDIO_RESUME_EVENT}', resume)`)
   })
 })
 
@@ -157,6 +177,12 @@ describe('systemAudioSwitchView', () => {
     expect(
       view({ sessionActive: true, requested: false, confirmed: false, issue: 'lost' }).issue
     ).toBeNull()
+  })
+
+  it('says Paused while the echo guard holds system audio out (plan 076)', () => {
+    expect(
+      view({ sessionActive: true, requested: true, confirmed: false, issue: 'echo' })
+    ).toMatchObject({ checked: true, issue: 'echo', meter: false, stateLabel: 'Paused' })
   })
 })
 

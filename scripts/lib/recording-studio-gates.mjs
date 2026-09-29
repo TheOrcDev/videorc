@@ -111,6 +111,14 @@ export function buildRecordingStudioGateSteps({
         args: ['smoke:record-latency:gate']
       },
       {
+        // Plan 076: FFmpeg pauses its audio input while video is late; the
+        // session audio bus must keep a healthy microphone through it (the
+        // owner's 0.9.120 live stream lost it for good).
+        label: 'output-stall microphone survival smoke',
+        command: 'pnpm',
+        args: ['smoke:output-stall']
+      },
+      {
         label: 'imported screen image recording smoke',
         command: 'pnpm',
         args: ['smoke:screens']

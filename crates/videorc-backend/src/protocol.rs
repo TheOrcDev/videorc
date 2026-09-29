@@ -1197,6 +1197,10 @@ pub struct AudioSettings {
     /// System audio level in dB, within `SYSTEM_AUDIO_GAIN_DB_MIN..=MAX`.
     #[serde(default = "default_system_audio_gain_db")]
     pub system_audio_gain_db: f32,
+    /// Pause System audio when it carries the streamer's own stream back
+    /// into itself (plan 076). On by default; older clients omit the key.
+    #[serde(default = "default_true")]
+    pub system_audio_echo_guard: bool,
 }
 
 impl Default for AudioSettings {
@@ -1207,6 +1211,7 @@ impl Default for AudioSettings {
             microphone_sync_offset_ms: default_microphone_sync_offset_ms(),
             system_audio_enabled: false,
             system_audio_gain_db: default_system_audio_gain_db(),
+            system_audio_echo_guard: true,
         }
     }
 }
@@ -1248,6 +1253,9 @@ pub struct AudioProcessingUpdateParams {
     /// Live System audio level in dB. Omitted means "unchanged".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_audio_gain_db: Option<f32>,
+    /// Live echo guard On/Off (plan 076). Omitted means "unchanged".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub system_audio_echo_guard: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]

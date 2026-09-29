@@ -14,6 +14,7 @@ import {
 import { revealInFileManagerLabel } from '@/lib/platform'
 import { VIDEORC_PREMIUM_URL } from '@/lib/premium-upgrade'
 import { recordingStartupHealthToast } from '@/lib/studio-health'
+import { requestSystemAudioResume, SYSTEM_AUDIO_ECHO_TOAST_ID } from '@/lib/system-audio'
 import { isTransientBackendError, shouldToastBackendError } from '@/lib/backend-transport'
 import type { WsStatus } from '@/lib/capture'
 import { toast } from 'sonner'
@@ -328,7 +329,31 @@ export function showSessionHealthEvent(
       duration: 15_000
     })
   }
+  showSessionAudioNews(event)
   return null
+}
+
+/**
+ * Plan 076: what the audio bus reports mid-session. An echo pause stays up
+ * until it is resumed (a live loop repeats every word); a stall and a
+ * recovered microphone are news the interface shows nowhere else.
+ */
+function showSessionAudioNews(event: HealthEvent): void {
+  if (event.code === 'system-audio-echo-paused') {
+    toast.warning('System audio paused: your stream was echoing', {
+      id: SYSTEM_AUDIO_ECHO_TOAST_ID,
+      description: event.message,
+      duration: Infinity,
+      action: { label: 'Resume', onClick: requestSystemAudioResume }
+    })
+  } else if (event.code === 'audio-output-stalled') {
+    toast.warning('Audio dropped for a moment', {
+      description: event.message,
+      duration: 12_000
+    })
+  } else if (event.code === 'microphone-timeline-recovered') {
+    toast.success('Microphone is back', { description: event.message, duration: 8_000 })
+  }
 }
 
 export function showNoiseCleanupCompleted(jobId: string, outputSessionId: string): void {

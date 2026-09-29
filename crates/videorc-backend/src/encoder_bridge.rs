@@ -108,6 +108,10 @@ const VIDEOTOOLBOX_FIFO_WRITE_STALL_TOLERANCE: Duration = FIFO_FRAME_WRITE_HARD_
 const VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_AFTER_FRAMES";
 #[cfg(all(target_os = "macos", debug_assertions))]
 const VIDEORC_TEST_VT_FIFO_PAUSE_MS_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_MS";
+/// Plan 076: repeat the pause this many times (default 1), each after one
+/// more written access unit. Sustained pressure, never 2 s without progress.
+#[cfg(all(target_os = "macos", debug_assertions))]
+const VIDEORC_TEST_VT_FIFO_PAUSE_REPEAT_ENV: &str = "VIDEORC_TEST_VT_FIFO_PAUSE_REPEAT";
 // Media Foundation can stop draining the raw-video pipe for several seconds
 // while its MFT catches up. A raw YUV frame is indivisible once writing starts:
 // timing it out truncates a plane, kills FFmpeg, strands the recovery MKV, and
@@ -5703,16 +5707,18 @@ enum VideoToolboxFifoEnqueueOutcome {
 struct VideoToolboxFifoTestPause {
     after_frames: u64,
     duration: Duration,
-    fired: bool,
+    /// Pauses left; each later one comes after one more written access unit.
+    remaining: u32,
 }
 
 #[cfg(target_os = "macos")]
 impl VideoToolboxFifoTestPause {
     fn take_before_write(&mut self, written_frames: u64) -> Option<Duration> {
-        if self.fired || written_frames < self.after_frames {
+        if self.remaining == 0 || written_frames < self.after_frames {
             return None;
         }
-        self.fired = true;
+        self.remaining -= 1;
+        self.after_frames = written_frames + 1;
         Some(self.duration)
     }
 }
@@ -5722,6 +5728,7 @@ fn parse_video_toolbox_fifo_test_pause(
     role: EncoderBridgeOutputRole,
     after_frames: Option<&str>,
     pause_ms: Option<&str>,
+    repeat: Option<&str>,
 ) -> Option<VideoToolboxFifoTestPause> {
     if !matches!(
         role,
@@ -5734,10 +5741,14 @@ fn parse_video_toolbox_fifo_test_pause(
     if pause_ms == 0 {
         return None;
     }
+    let remaining = repeat
+        .and_then(|repeat| repeat.trim().parse::<u32>().ok())
+        .unwrap_or(1)
+        .clamp(1, 20);
     Some(VideoToolboxFifoTestPause {
         after_frames,
         duration: Duration::from_millis(pause_ms),
-        fired: false,
+        remaining,
     })
 }
 
@@ -5751,6 +5762,9 @@ fn video_toolbox_fifo_test_pause_from_env(
             .ok()
             .as_deref(),
         std::env::var(VIDEORC_TEST_VT_FIFO_PAUSE_MS_ENV)
+            .ok()
+            .as_deref(),
+        std::env::var(VIDEORC_TEST_VT_FIFO_PAUSE_REPEAT_ENV)
             .ok()
             .as_deref(),
     )
@@ -10848,6 +10862,7 @@ mod tests {
                     EncoderBridgeOutputRole::Recording,
                     after_frames,
                     pause_ms,
+                    None,
                 )
                 .is_none(),
                 "invalid pause configuration must remain disabled"
@@ -10858,6 +10873,7 @@ mod tests {
                 EncoderBridgeOutputRole::Stream,
                 Some("60"),
                 Some("350"),
+                None,
             )
             .is_none(),
             "the recording-pressure hook must never pause the stream-only writer"
@@ -10871,8 +10887,9 @@ mod tests {
             EncoderBridgeOutputRole::Recording,
             EncoderBridgeOutputRole::Shared,
         ] {
-            let pause = parse_video_toolbox_fifo_test_pause(role, Some(" 60 "), Some(" 350 "))
-                .expect("valid recording pressure hook");
+            let pause =
+                parse_video_toolbox_fifo_test_pause(role, Some(" 60 "), Some(" 350 "), None)
+                    .expect("valid recording pressure hook");
             assert_eq!(pause.after_frames, 60);
             assert_eq!(pause.duration, Duration::from_millis(350));
         }
@@ -10885,6 +10902,7 @@ mod tests {
             EncoderBridgeOutputRole::Recording,
             Some("2"),
             Some("350"),
+            None,
         )
         .expect("valid recording pressure hook");
 
@@ -10893,6 +10911,35 @@ mod tests {
         assert_eq!(pause.take_before_write(2), Some(Duration::from_millis(350)));
         assert_eq!(pause.take_before_write(2), None);
         assert_eq!(pause.take_before_write(3), None);
+    }
+
+    /// Plan 076: sustained pressure, one access unit of progress between
+    /// pauses, so no single pause trips the 2 s no-progress watchdog.
+    #[cfg(all(target_os = "macos", debug_assertions))]
+    #[test]
+    fn videotoolbox_fifo_test_pause_repeats_after_each_next_access_unit() {
+        let mut pause = parse_video_toolbox_fifo_test_pause(
+            EncoderBridgeOutputRole::Recording,
+            Some("2"),
+            Some("900"),
+            Some("3"),
+        )
+        .expect("valid repeating pressure hook");
+        let pause_ms = Some(Duration::from_millis(900));
+        assert_eq!(pause.take_before_write(1), None);
+        assert_eq!(pause.take_before_write(2), pause_ms);
+        assert_eq!(pause.take_before_write(2), None, "one access unit first");
+        assert_eq!(pause.take_before_write(3), pause_ms);
+        assert_eq!(pause.take_before_write(4), pause_ms);
+        assert_eq!(pause.take_before_write(5), None, "three in all");
+        let clamped = parse_video_toolbox_fifo_test_pause(
+            EncoderBridgeOutputRole::Recording,
+            Some("0"),
+            Some("10"),
+            Some("500"),
+        )
+        .unwrap();
+        assert_eq!(clamped.remaining, 20);
     }
 
     #[cfg(target_os = "macos")]

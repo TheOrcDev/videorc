@@ -15,6 +15,7 @@ import {
   sessionRuntimeContinuationIsCurrent,
   sessionRuntimeRecoveryPlan,
   showOAuthCallbackResult,
+  showSessionHealthEvent,
   showXPlaybackEvent
 } from '@/lib/session-runtime-recovery'
 
@@ -229,4 +230,60 @@ it('recovers both audio sources after reconnect without dropping either explanat
       currentNotice: presentation.notice
     })
   ).toBeNull()
+})
+
+describe('session audio news (plan 076)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+  })
+
+  function healthEvent(code: string, level: HealthEvent['level'] = 'warn'): HealthEvent {
+    return {
+      id: code,
+      sessionId: 'live',
+      level,
+      code,
+      message: `${code} message`,
+      createdAt: '2026-09-28T14:03:44.000Z'
+    }
+  }
+
+  it('keeps an echo pause up with a Resume that asks the Studio to turn System audio on', () => {
+    const dispatchEvent = vi.fn()
+    vi.stubGlobal('window', { dispatchEvent })
+    try {
+      showSessionHealthEvent(healthEvent('system-audio-echo-paused'), false)
+      expect(toastSpies.warning).toHaveBeenCalledWith(
+        'System audio paused: your stream was echoing',
+        expect.objectContaining({
+          id: 'system-audio-echo-paused',
+          description: 'system-audio-echo-paused message',
+          duration: Infinity,
+          action: expect.objectContaining({ label: 'Resume' })
+        })
+      )
+      const options = toastSpies.warning.mock.calls[0][1] as { action: { onClick: () => void } }
+      options.action.onClick()
+      expect(dispatchEvent).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'videorc:resume-system-audio' })
+      )
+    } finally {
+      vi.unstubAllGlobals()
+    }
+  })
+
+  it('reports a stalled output and a recovered microphone once each', () => {
+    showSessionHealthEvent(healthEvent('audio-output-stalled'), false)
+    expect(toastSpies.warning).toHaveBeenCalledWith(
+      'Audio dropped for a moment',
+      expect.objectContaining({ description: 'audio-output-stalled message' })
+    )
+    showSessionHealthEvent(healthEvent('microphone-timeline-recovered', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledWith(
+      'Microphone is back',
+      expect.objectContaining({ description: 'microphone-timeline-recovered message' })
+    )
+    showSessionHealthEvent(healthEvent('system-audio-recovered', 'info'), false)
+    expect(toastSpies.success).toHaveBeenCalledTimes(1)
+  })
 })

@@ -1237,7 +1237,8 @@ export const defaultCaptureConfig: CaptureConfig = {
     microphoneSyncOffsetMs: 0,
     microphoneSyncOffsetUserSet: false,
     systemAudioEnabled: false,
-    systemAudioGainDb: SYSTEM_AUDIO_GAIN_DB_DEFAULT
+    systemAudioGainDb: SYSTEM_AUDIO_GAIN_DB_DEFAULT,
+    systemAudioEchoGuard: true
   },
   // 1080p30 until the performance check has measured this computer: the old
   // 1440p default sent an Intel UHD 600 into a 0.28x software encode.
@@ -1430,7 +1431,8 @@ export function normalizeAudioSettings(audio: unknown): AudioSettings {
     microphoneSyncOffsetMs,
     microphoneSyncOffsetUserSet: offsetUserSet,
     systemAudioEnabled: candidate.systemAudioEnabled === true,
-    systemAudioGainDb: normalizeSystemAudioGainDb(candidate.systemAudioGainDb)
+    systemAudioGainDb: normalizeSystemAudioGainDb(candidate.systemAudioGainDb),
+    systemAudioEchoGuard: candidate.systemAudioEchoGuard !== false
   }
 }
 

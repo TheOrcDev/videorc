@@ -1,3 +1,5 @@
+import { toast } from 'sonner'
+
 import type { Device, DeviceList, DeviceStatus } from '@/lib/backend'
 import type { SystemAudioIssue } from '@/lib/system-audio-session'
 
@@ -84,7 +86,14 @@ export function systemAudioSwitchView(input: SystemAudioSwitchInput): SystemAudi
 
   const issue = input.requested && input.confirmed !== true ? input.issue : null
   if (issue) {
-    return { ...hidden, visible: true, checked: true, disabled: false, issue, stateLabel: 'On' }
+    return {
+      ...hidden,
+      visible: true,
+      checked: true,
+      disabled: false,
+      issue,
+      stateLabel: issue === 'echo' ? 'Paused' : 'On'
+    }
   }
 
   const mixed = input.confirmed ?? input.requested
@@ -112,7 +121,23 @@ export function systemAudioIssueCopy(issue: SystemAudioIssue): string {
     ? 'System audio stopped. The session keeps going.'
     : issue === 'bypassed'
       ? 'System audio is off for this session because the microphone is on a fallback input.'
-      : 'System audio could not start.'
+      : issue === 'echo'
+        ? 'Paused: your stream is playing on this Mac and coming back as an echo. Mute that tab, then resume.'
+        : 'System audio could not start.'
+}
+
+/** The window event the Studio answers by turning System audio on again. */
+export const SYSTEM_AUDIO_RESUME_EVENT = 'videorc:resume-system-audio'
+/** The toast the echo guard's pause shows (plan 076). */
+export const SYSTEM_AUDIO_ECHO_TOAST_ID = 'system-audio-echo-paused'
+
+/**
+ * Plan 076: resume System audio after the echo guard paused it. The Studio
+ * owns the switch; a lazy surface asks through a window event.
+ */
+export function requestSystemAudioResume(): void {
+  toast.dismiss(SYSTEM_AUDIO_ECHO_TOAST_ID)
+  window.dispatchEvent(new Event(SYSTEM_AUDIO_RESUME_EVENT))
 }
 
 /**

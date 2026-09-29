@@ -595,7 +595,22 @@ describe('systemAudioProcessingDelta (plan 069)', () => {
     })
   })
 
-  it('sends both when the session state is unknown', () => {
-    expect(systemAudioProcessingDelta(off, null)).toStrictEqual(off)
+  it('sends every field when the session state is unknown', () => {
+    expect(systemAudioProcessingDelta(off, null)).toStrictEqual({
+      ...off,
+      systemAudioEchoGuard: true
+    })
+  })
+
+  it('sends the echo guard only when it changes, and absent means On (plan 076)', () => {
+    expect(systemAudioProcessingDelta({ ...off, systemAudioEchoGuard: true }, off)).toStrictEqual(
+      {}
+    )
+    expect(systemAudioProcessingDelta({ ...off, systemAudioEchoGuard: false }, off)).toStrictEqual({
+      systemAudioEchoGuard: false
+    })
+    expect(systemAudioProcessingDelta(off, { ...off, systemAudioEchoGuard: false })).toStrictEqual({
+      systemAudioEchoGuard: true
+    })
   })
 })

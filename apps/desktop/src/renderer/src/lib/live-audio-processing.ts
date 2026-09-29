@@ -8,7 +8,10 @@ import type {
 export type LiveAudioProcessingValues = Pick<AudioSettings, 'microphoneGainDb' | 'microphoneMuted'>
 
 /** The system-audio switch and level (plan 069), sent only when they change. */
-export type LiveSystemAudioValues = Pick<AudioSettings, 'systemAudioEnabled' | 'systemAudioGainDb'>
+export type LiveSystemAudioValues = Pick<
+  AudioSettings,
+  'systemAudioEnabled' | 'systemAudioGainDb' | 'systemAudioEchoGuard'
+>
 
 export interface LiveAudioProcessingSessionStartSnapshot extends LiveAudioProcessingValues {
   sessionId: string
@@ -109,7 +112,11 @@ export class LatestWinsLiveAudioProcessingQueue {
   }
 }
 
-const OPTIONAL_AUDIO_PROCESSING_FIELDS = ['systemAudioEnabled', 'systemAudioGainDb'] as const
+const OPTIONAL_AUDIO_PROCESSING_FIELDS = [
+  'systemAudioEnabled',
+  'systemAudioGainDb',
+  'systemAudioEchoGuard'
+] as const
 
 /**
  * Newest value per field wins. Optional fields the newer request omits keep
@@ -128,6 +135,8 @@ export function mergeAudioProcessingParams(
   if (systemAudioEnabled !== undefined) merged.systemAudioEnabled = systemAudioEnabled
   const systemAudioGainDb = newer.systemAudioGainDb ?? older.systemAudioGainDb
   if (systemAudioGainDb !== undefined) merged.systemAudioGainDb = systemAudioGainDb
+  const systemAudioEchoGuard = newer.systemAudioEchoGuard ?? older.systemAudioEchoGuard
+  if (systemAudioEchoGuard !== undefined) merged.systemAudioEchoGuard = systemAudioEchoGuard
   return merged
 }
 
@@ -185,6 +194,11 @@ export function systemAudioProcessingDelta(
   }
   if (known?.systemAudioGainDb !== desired.systemAudioGainDb) {
     delta.systemAudioGainDb = desired.systemAudioGainDb
+  }
+  // Plan 076: absent means On on both sides.
+  const echoGuard = desired.systemAudioEchoGuard !== false
+  if (!known || (known.systemAudioEchoGuard !== false) !== echoGuard) {
+    delta.systemAudioEchoGuard = echoGuard
   }
   return delta
 }

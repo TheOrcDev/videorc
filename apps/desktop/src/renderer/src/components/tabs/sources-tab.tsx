@@ -51,6 +51,7 @@ import {
 import { systemAccessAction, systemAccessRows } from '@/lib/system-access'
 import {
   systemAudioDevice,
+  requestSystemAudioResume,
   systemAudioIssueCopy,
   systemAudioSwitchView,
   type SystemAudioSwitchView
@@ -591,7 +592,15 @@ export function SourcesTab(): ReactElement {
                 audio: { ...current.audio, systemAudioGainDb }
               }))
             }
+            echoGuard={captureConfig.audio.systemAudioEchoGuard !== false}
+            onEchoGuardChange={(systemAudioEchoGuard) =>
+              setCaptureConfig((current) => ({
+                ...current,
+                audio: { ...current.audio, systemAudioEchoGuard }
+              }))
+            }
             onOpenPermissions={() => openSettings('permissions')}
+            onResume={requestSystemAudioResume}
           />
         ) : null}
       </PanelSection>
@@ -604,16 +613,23 @@ export function SystemAudioSettings({
   view,
   gainDb,
   macOS,
+  echoGuard,
   onEnabledChange,
   onGainChange,
-  onOpenPermissions
+  onEchoGuardChange,
+  onOpenPermissions,
+  onResume
 }: {
   view: SystemAudioSwitchView
   gainDb: number
   macOS: boolean
+  /** Plan 076: pause System audio when it carries the stream back. */
+  echoGuard: boolean
   onEnabledChange: (enabled: boolean) => void
   onGainChange: (gainDb: number) => void
+  onEchoGuardChange: (enabled: boolean) => void
   onOpenPermissions: () => void
+  onResume: () => void
 }): ReactElement {
   return (
     <div
@@ -639,9 +655,23 @@ export function SystemAudioSettings({
         </span>
       </div>
       <p className="text-xs text-muted-foreground">
-        Everything your computer plays, except Videorc. Use headphones so your mic doesn't pick it
-        up twice.{macOS ? " Your Mac's volume and mute don't change what's recorded." : null}
+        Everything your computer plays, except Videorc, including your own stream if it is open in a
+        browser tab: mute that tab, because headphones don't stop it. Use headphones so your mic
+        doesn't pick up your speakers.
+        {macOS ? " Your Mac's volume and mute don't change what's recorded." : null}
       </p>
+      <div className="flex items-center justify-between gap-3">
+        <span className="min-w-0 text-xs text-muted-foreground">
+          Pause System audio if your stream echoes back
+        </span>
+        <Switch
+          aria-label="Pause System audio if your stream echoes back"
+          checked={echoGuard}
+          disabled={view.permissionRequired}
+          size="sm"
+          onCheckedChange={onEchoGuardChange}
+        />
+      </div>
       <PowerSlider
         bipolar
         defaultValue={SYSTEM_AUDIO_GAIN_DB_DEFAULT}
@@ -663,6 +693,13 @@ export function SystemAudioSettings({
           </span>
           <Button className="shrink-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
             Open Settings
+          </Button>
+        </div>
+      ) : view.issue === 'echo' ? (
+        <div className="flex items-center justify-between gap-2 text-xs text-warning">
+          <span className="min-w-0">{systemAudioIssueCopy('echo')}</span>
+          <Button className="shrink-0" size="xs" variant="ghost" onClick={onResume}>
+            Resume
           </Button>
         </div>
       ) : view.issue ? (

@@ -20,7 +20,8 @@ function render(input: Partial<SystemAudioSwitchInput>): string {
     createElement(SystemAudioInspectorValue, {
       view,
       onEnabledChange: noop,
-      onOpenPermissions: noop
+      onOpenPermissions: noop,
+      onResume: noop
     })
   )
 }
@@ -43,6 +44,13 @@ describe('Studio inputs System audio row (plan 069)', () => {
     const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'lost' })
     expect(markup).toContain('>Stopped<')
     expect(markup).toContain('title="System audio stopped. The session keeps going."')
+    expect(markup).toContain('aria-checked="true"')
+  })
+
+  it('puts Resume where the status goes when the echo guard paused it (plan 076)', () => {
+    const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'echo' })
+    expect(markup).toContain('>Resume<')
+    expect(markup).toContain('coming back as an echo')
     expect(markup).toContain('aria-checked="true"')
   })
 

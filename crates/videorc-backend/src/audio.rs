@@ -415,6 +415,24 @@ impl AudioCaptureStats {
         );
     }
 
+    /// Plan 076: a source whose timeline loss ended is live again, and a later
+    /// loss is reported anew. A stopped source never comes back this way.
+    pub(crate) fn mark_recovered(&self) {
+        if self
+            .input_state
+            .compare_exchange(
+                NativeAudioInputState::SourceLost.as_u8(),
+                NativeAudioInputState::Live.as_u8(),
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            self.source_loss_event_claimed
+                .store(false, Ordering::Release);
+        }
+    }
+
     pub(crate) fn mark_downstream_closed(&self) {
         for from in [
             NativeAudioInputState::Starting,

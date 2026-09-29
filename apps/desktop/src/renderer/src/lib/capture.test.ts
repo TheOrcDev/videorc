@@ -973,9 +973,11 @@ describe('system audio settings (plan 069)', () => {
       microphoneSyncOffsetMs: 0,
       microphoneSyncOffsetUserSet: false,
       systemAudioEnabled: false,
-      systemAudioGainDb: -6
+      systemAudioGainDb: -6,
+      systemAudioEchoGuard: true
     })
     expect(normalizeAudioSettings(undefined).systemAudioEnabled).toBe(false)
+    expect(normalizeAudioSettings({ systemAudioEchoGuard: false }).systemAudioEchoGuard).toBe(false)
     expect(normalizeAudioSettings(null).systemAudioGainDb).toBe(-6)
   })
 

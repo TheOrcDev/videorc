@@ -147,6 +147,7 @@
     "smoke:record-latency": "node scripts/smoke-record-latency-app.mjs",
     "smoke:record-latency:gate": "node scripts/smoke-record-latency-app.mjs --enforce",
     "smoke:system-audio": "node scripts/smoke-system-audio-app.mjs",
+    "smoke:output-stall": "node scripts/smoke-output-stall-app.mjs",
     "smoke:backend-single-instance": "node scripts/smoke-backend-single-instance.mjs",
     "smoke:backend-resilience": "node scripts/smoke-backend-resilience.mjs",
     "smoke:command-lanes": "node scripts/smoke-command-lanes.mjs",

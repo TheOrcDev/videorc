@@ -2565,6 +2565,9 @@ pub async fn update_active_audio_processing(
             if let Some(gain_db) = params.system_audio_gain_db {
                 system_audio.set_gain_db(gain_db);
             }
+            if let Some(echo_guard) = params.system_audio_echo_guard {
+                system_audio.set_echo_guard(echo_guard);
+            }
             if let Some(enabled) = params.system_audio_enabled {
                 system_audio.request(enabled);
             }
@@ -5724,7 +5727,8 @@ fn system_audio_lost_message(kind: crate::session_audio::SourceLossReason) -> &'
 }
 
 const SYSTEM_AUDIO_LOST_MESSAGE: &str = "System audio stopped during this session. The session continues without it; turn System audio off and on to try again.";
-const SYSTEM_AUDIO_TIMELINE_LOST_MESSAGE: &str = "System audio kept arriving, but Videorc could not place it on the session timeline. The session continues without it; turn System audio off and on to try again.";
+/// Plan 076: a placement loss keeps the source; the bus realigns it.
+const SYSTEM_AUDIO_TIMELINE_LOST_MESSAGE: &str = "System audio kept arriving, but Videorc could not place it on the session timeline. Videorc is realigning it; until then the gap is silent.";
 
 /// Marks a freshly-created session row failed if session startup bails before
 /// the pipeline takes ownership (F-017 — phantom "running" Library rows).
@@ -8039,6 +8043,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                             observation.selected_input,
                             observation.generation,
                             system_audio_sample(active),
+                            observation.recoveries,
+                            observation.output_stalls,
                         )
                     })
                 }
@@ -8057,6 +8063,8 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
             selected_input,
             generation,
             system_audio,
+            recoveries,
+            output_stalls,
         )) = counters
         else {
             return;
@@ -8064,13 +8072,17 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
 
         // Plan 069: a system-audio stream the platform stopped mid-session.
         // The bus already ramped it out; the session keeps its microphone.
-        if let Some((_, losses)) = system_audio.as_ref()
-            && !losses.is_empty()
+        // Plan 076: a timeline loss keeps the slot, and reports its recovery.
+        if let Some(sample) = system_audio.as_ref()
+            && emit_system_audio_sample_events(&state, &session_id, sample)
         {
-            for loss in losses {
-                emit_system_audio_lost_health_event(&state, &session_id, loss);
-            }
             reemit_active_recording_status(&state, &session_id).await;
+        }
+        for report in &output_stalls {
+            emit_audio_output_stalled_health_event(&state, &session_id, report);
+        }
+        for recovery in &recoveries {
+            emit_microphone_recovered_health_event(&state, &session_id, recovery);
         }
 
         if generation != microphone_generation {
@@ -8133,7 +8145,7 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
                     coverage,
                     Some(live_peak),
                 ),
-                system_audio.as_ref().map(|(observation, _)| observation),
+                system_audio.as_ref().map(|sample| &sample.observation),
             );
             *diagnostics = next.clone();
             next
@@ -8145,18 +8157,147 @@ async fn sample_native_audio_during_recording(state: AppState, session_id: Strin
     }
 }
 
-/// The session's system-audio meter and counters, plus any losses the bus
-/// reported since the last sample. `None` where the session cannot mix
-/// system audio (its `diagnostics.stats` omits every system field).
-fn system_audio_sample(
-    active: &ActiveRecording,
-) -> Option<(
-    crate::session_audio::SystemAudioObservation,
-    Vec<crate::session_audio::SystemAudioLoss>,
-)> {
+/// The session's system-audio meter and counters, plus the events the bus
+/// reported since the last sample.
+#[derive(Debug)]
+struct SystemAudioSample {
+    observation: crate::session_audio::SystemAudioObservation,
+    losses: Vec<crate::session_audio::SystemAudioLoss>,
+    /// Plan 076: timeline losses that ended with the slot still in the mix.
+    recoveries: Vec<crate::session_audio::SystemAudioRecovery>,
+    /// Plan 076: loops the echo guard paused.
+    echo_pauses: Vec<crate::session_audio::SystemAudioEchoPause>,
+}
+
+/// `None` where the session cannot mix system audio (its `diagnostics.stats`
+/// omits every system field).
+fn system_audio_sample(active: &ActiveRecording) -> Option<SystemAudioSample> {
     let system_audio = active.system_audio.as_ref()?;
-    let losses = std::iter::from_fn(|| system_audio.claim_loss()).collect();
-    Some((system_audio.observation(), losses))
+    Some(SystemAudioSample {
+        losses: std::iter::from_fn(|| system_audio.claim_loss()).collect(),
+        recoveries: std::iter::from_fn(|| system_audio.claim_recovery()).collect(),
+        echo_pauses: std::iter::from_fn(|| system_audio.claim_echo_pause()).collect(),
+        observation: system_audio.observation(),
+    })
+}
+
+/// Emits the health events of one sample. Returns whether the mix changed
+/// (a slot left it), so the caller re-emits `recording.status`.
+fn emit_system_audio_sample_events(
+    state: &AppState,
+    session_id: &str,
+    sample: &SystemAudioSample,
+) -> bool {
+    for loss in &sample.losses {
+        emit_system_audio_lost_health_event(state, session_id, loss);
+    }
+    for recovery in &sample.recoveries {
+        emit_system_audio_recovered_health_event(state, session_id, recovery);
+    }
+    for pause in &sample.echo_pauses {
+        emit_system_audio_echo_paused_health_event(state, session_id, pause);
+    }
+    !sample.echo_pauses.is_empty()
+        || sample
+            .losses
+            .iter()
+            .any(|loss| loss.kind == crate::session_audio::SourceLossReason::CaptureStopped)
+}
+
+/// Plan 076: the echo guard paused system audio. Free of device words, so
+/// the health row links no permission pane.
+fn emit_system_audio_echo_paused_health_event(
+    state: &AppState,
+    session_id: &str,
+    pause: &crate::session_audio::SystemAudioEchoPause,
+) {
+    let message = system_audio_echo_paused_message(pause.lag_ms);
+    state.emit_log("warn", &message);
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Warn,
+        crate::system_audio_session::SYSTEM_AUDIO_ECHO_PAUSED_CODE,
+        &message,
+    );
+}
+
+fn system_audio_echo_paused_message(lag_ms: u32) -> String {
+    format!(
+        "System audio is paused: your stream is playing on this Mac and came back {:.1} seconds later, so viewers heard it twice. Mute that tab, then turn System audio on again.",
+        f64::from(lag_ms) / 1_000.0
+    )
+}
+
+/// Plan 076: the output stalled and audio in the gap is silent. Free of
+/// device words, so the health row links no permission pane.
+fn emit_audio_output_stalled_health_event(
+    state: &AppState,
+    session_id: &str,
+    report: &crate::session_audio::OutputStallReport,
+) {
+    let message = audio_output_stalled_message(report);
+    state.emit_log("warn", &message);
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Warn,
+        AUDIO_OUTPUT_STALLED_CODE,
+        &message,
+    );
+}
+
+const AUDIO_OUTPUT_STALLED_CODE: &str = "audio-output-stalled";
+
+fn audio_output_stalled_message(report: &crate::session_audio::OutputStallReport) -> String {
+    format!(
+        "Videorc's output fell behind for {:.1} seconds while this Mac was busy, so {:.1} seconds of audio are silent. Every input kept working.",
+        report.duration_ms as f64 / 1_000.0,
+        report.lost_ms as f64 / 1_000.0
+    )
+}
+
+/// Plan 076: the microphone's timeline loss ended; it never stopped.
+fn emit_microphone_recovered_health_event(
+    state: &AppState,
+    session_id: &str,
+    recovery: &crate::session_audio::SourceRecovery,
+) {
+    let message = format!(
+        "Microphone \"{}\" is back. {:.1} seconds of it were replaced with silence.",
+        recovery.device_name,
+        recovery.gap_ms as f64 / 1_000.0
+    );
+    state.emit_log("info", &message);
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Info,
+        MICROPHONE_TIMELINE_RECOVERED_CODE,
+        &message,
+    );
+}
+
+const MICROPHONE_TIMELINE_RECOVERED_CODE: &str = "microphone-timeline-recovered";
+
+/// Plan 076: system audio places again after a timeline loss.
+fn emit_system_audio_recovered_health_event(
+    state: &AppState,
+    session_id: &str,
+    recovery: &crate::session_audio::SystemAudioRecovery,
+) {
+    let message = format!(
+        "System audio is back. {:.1} seconds of it were replaced with silence.",
+        recovery.gap_ms as f64 / 1_000.0
+    );
+    state.emit_log("info", &message);
+    let _ = emit_health_event(
+        state,
+        Some(session_id),
+        HealthLevel::Info,
+        crate::system_audio_session::SYSTEM_AUDIO_RECOVERED_CODE,
+        &message,
+    );
 }
 
 fn emit_microphone_input_lost_health_event(
@@ -8196,7 +8337,7 @@ fn microphone_input_lost_message(device_name: &str, source_loss_after_ms: u64) -
 /// The microphone kept delivering; the session timeline refused its samples.
 fn microphone_timeline_lost_message(device_name: &str, source_loss_after_ms: u64) -> String {
     format!(
-        "Microphone \"{device_name}\" kept delivering audio, but Videorc could not place it on the session timeline after {:.1} seconds. Videorc replaced the missing input with silence.",
+        "Microphone \"{device_name}\" kept delivering audio, but Videorc could not place it on the session timeline after {:.1} seconds. Videorc is realigning it; until then the gap is silent.",
         source_loss_after_ms as f64 / 1_000.0
     )
 }
@@ -8513,6 +8654,8 @@ async fn monitor_session(
                     input_state: observation.input_state,
                     source_loss_after_ms: observation.source_loss_after_ms,
                     unreported_source_loss_after_ms: observation.losses,
+                    unreported_recoveries: observation.recoveries,
+                    unreported_output_stalls: observation.output_stalls,
                     system_audio: system_audio_sample(active),
                 }
             });
@@ -8757,16 +8900,12 @@ async fn monitor_session(
             );
             // The system meter falls silent too (a detached observation
             // omits it); the final counters stay.
-            let final_system_audio =
-                native_audio_stats
-                    .system_audio
-                    .as_ref()
-                    .map(
-                        |(observation, _)| crate::session_audio::SystemAudioObservation {
-                            attached: false,
-                            ..observation.clone()
-                        },
-                    );
+            let final_system_audio = native_audio_stats.system_audio.as_ref().map(|sample| {
+                crate::session_audio::SystemAudioObservation {
+                    attached: false,
+                    ..sample.observation.clone()
+                }
+            });
             let next = apply_system_audio_stats(next, final_system_audio.as_ref());
             *diagnostics = next.clone();
             next
@@ -8775,12 +8914,14 @@ async fn monitor_session(
             "diagnostics.stats",
             apply_runtime_diagnostics_snapshot(diagnostic_stats, state.ffmpeg_work.snapshot()),
         );
-        for loss in native_audio_stats
-            .system_audio
-            .iter()
-            .flat_map(|(_, losses)| losses)
-        {
-            emit_system_audio_lost_health_event(&state, &session_id, loss);
+        if let Some(sample) = native_audio_stats.system_audio.as_ref() {
+            emit_system_audio_sample_events(&state, &session_id, sample);
+        }
+        for report in &native_audio_stats.unreported_output_stalls {
+            emit_audio_output_stalled_health_event(&state, &session_id, report);
+        }
+        for recovery in &native_audio_stats.unreported_recoveries {
+            emit_microphone_recovered_health_event(&state, &session_id, recovery);
         }
         for source_loss_after_ms in &native_audio_stats.unreported_source_loss_after_ms {
             emit_microphone_input_lost_health_event(
@@ -10801,12 +10942,12 @@ struct NativeAudioStats {
     input_state: NativeAudioInputState,
     source_loss_after_ms: Option<u64>,
     unreported_source_loss_after_ms: Vec<crate::session_audio::SourceLoss>,
-    /// Final system-audio counters and losses the sampler had not reported
+    /// Recoveries and output stalls the sampler had not reported (plan 076).
+    unreported_recoveries: Vec<crate::session_audio::SourceRecovery>,
+    unreported_output_stalls: Vec<crate::session_audio::OutputStallReport>,
+    /// Final system-audio counters and events the sampler had not reported
     /// (plan 069 S4); `None` where the session cannot mix system audio.
-    system_audio: Option<(
-        crate::session_audio::SystemAudioObservation,
-        Vec<crate::session_audio::SystemAudioLoss>,
-    )>,
+    system_audio: Option<SystemAudioSample>,
 }
 
 impl NativeAudioStats {
@@ -17359,6 +17500,7 @@ fn session_audio_options(
             microphone_delay_frames: split.microphone_delay_frames,
             system_delay_frames: split.system_delay_frames,
             system_gain_db: audio.system_audio_gain_db,
+            echo_guard: audio.system_audio_echo_guard,
         },
         None => crate::session_audio::SessionAudioOptions::default(),
     }
@@ -21182,6 +21324,8 @@ mod tests {
             input_state: NativeAudioInputState::Stopped,
             source_loss_after_ms: None,
             unreported_source_loss_after_ms: vec![],
+            unreported_recoveries: vec![],
+            unreported_output_stalls: vec![],
             system_audio: None,
         };
         assert_eq!(stats.silence_verdict(), None);
@@ -21222,9 +21366,12 @@ mod tests {
         let microphone = microphone_timeline_lost_message("MacBook Pro Microphone", 2_100);
         assert!(microphone.contains("kept delivering audio"), "{microphone}");
         assert!(!microphone.contains("stopped"), "{microphone}");
+        // Plan 076: the source stays and is realigned, never retired.
+        assert!(microphone.contains("realigning"), "{microphone}");
         let system =
             system_audio_lost_message(crate::session_audio::SourceLossReason::TimelineRejected);
         assert!(!system.contains("stopped"), "{system}");
+        assert!(system.contains("realigning"), "{system}");
         // No device words: the health row must not link a permission pane.
         assert!(!system.to_lowercase().contains("microphone"), "{system}");
         assert!(!system.to_lowercase().contains("screen"), "{system}");
@@ -30652,6 +30799,7 @@ mod tests {
                     microphone_muted: false,
                     system_audio_enabled: None,
                     system_audio_gain_db: None,
+                    system_audio_echo_guard: None,
                 },
             )
             .await
@@ -30700,6 +30848,7 @@ mod tests {
                 microphone_muted: true,
                 system_audio_enabled: None,
                 system_audio_gain_db: None,
+                system_audio_echo_guard: None,
             },
         )
         .await;
@@ -35264,6 +35413,7 @@ mod tests {
                         microphone_muted: false,
                         system_audio_enabled: enabled,
                         system_audio_gain_db: Some(-3.0),
+                        system_audio_echo_guard: None,
                     },
                 )
                 .await
@@ -35514,6 +35664,7 @@ mod tests {
                     microphone_muted: true,
                     system_audio_enabled: Some(true),
                     system_audio_gain_db: Some(6.0),
+                    system_audio_echo_guard: None,
                 },
             )
             .await;
@@ -35682,6 +35833,7 @@ mod tests {
                 microphone_muted: false,
                 system_audio_enabled: enabled,
                 system_audio_gain_db: Some(-3.0),
+                system_audio_echo_guard: None,
             };
             let result = update_active_audio_processing(&state, update(Some(true))).await;
             assert!(result.applied, "{result:?}");

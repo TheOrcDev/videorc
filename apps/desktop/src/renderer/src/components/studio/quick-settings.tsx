@@ -41,6 +41,7 @@ import {
 } from '@/lib/capture'
 import {
   systemAudioDevice,
+  requestSystemAudioResume,
   systemAudioIssueCopy,
   systemAudioSwitchView,
   type SystemAudioSwitchView
@@ -265,6 +266,7 @@ export function QuickSettings(): ReactElement {
                 }))
               }
               onOpenPermissions={() => openSettings('permissions')}
+              onResume={requestSystemAudioResume}
             />
           </InspectorRow>
         ) : null}
@@ -337,20 +339,25 @@ export function QuickSettings(): ReactElement {
 export function SystemAudioInspectorValue({
   view,
   onEnabledChange,
-  onOpenPermissions
+  onOpenPermissions,
+  onResume
 }: {
   view: SystemAudioSwitchView
   onEnabledChange: (enabled: boolean) => void
   onOpenPermissions: () => void
+  /** Plan 076: turn System audio on again after the echo guard paused it. */
+  onResume: () => void
 }): ReactElement {
   const status =
     view.issue === 'lost'
       ? 'Stopped'
       : view.issue === 'bypassed'
         ? 'Off for this session'
-        : view.issue
-          ? 'Could not start'
-          : view.stateLabel
+        : view.issue === 'echo'
+          ? 'Paused'
+          : view.issue
+            ? 'Could not start'
+            : view.stateLabel
   return (
     <div className="flex h-control min-w-0 items-center justify-end gap-2.5 px-2">
       {view.permissionRequired ? (
@@ -367,12 +374,25 @@ export function SystemAudioInspectorValue({
         </Button>
       ) : (
         <>
-          <span
-            className="min-w-0 truncate text-sm font-medium"
-            title={view.issue ? systemAudioIssueCopy(view.issue) : undefined}
-          >
-            {status}
-          </span>
+          {view.issue === 'echo' ? (
+            // The row is narrow: Resume replaces the status; its title says why.
+            <Button
+              className="min-w-0"
+              size="xs"
+              title={systemAudioIssueCopy('echo')}
+              variant="ghost"
+              onClick={onResume}
+            >
+              <span className="truncate">Resume</span>
+            </Button>
+          ) : (
+            <span
+              className="min-w-0 truncate text-sm font-medium"
+              title={view.issue ? systemAudioIssueCopy(view.issue) : undefined}
+            >
+              {status}
+            </span>
+          )}
           <Switch
             aria-label="System audio"
             checked={view.checked}

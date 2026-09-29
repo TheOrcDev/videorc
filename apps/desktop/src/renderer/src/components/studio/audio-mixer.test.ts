@@ -50,7 +50,8 @@ describe('System audio mixer row (plan 069)', () => {
             reading,
             macOS,
             onEnabledChange: noop,
-            onOpenPermissions: noop
+            onOpenPermissions: noop,
+            onResume: noop
           })
         )
       : ''
@@ -104,6 +105,15 @@ describe('System audio mixer row (plan 069)', () => {
     expect(markup).toContain('Needs Screen Recording permission')
     expect(markup).toContain('Open Settings')
     expect(markup).toMatch(/role="switch"[^>]*disabled=""/)
+  })
+
+  it('offers Resume when the echo guard paused it (plan 076)', () => {
+    const markup = render({ requested: true, sessionActive: true, confirmed: false, issue: 'echo' })
+    expect(markup).toContain('data-videorc-system-audio-row="issue-echo"')
+    expect(markup).toContain('aria-checked="true"')
+    expect(markup).toContain('>Paused<')
+    expect(markup).toContain('coming back as an echo. Mute that tab, then resume.')
+    expect(markup).toContain('>Resume<')
   })
 
   it('says what happened on a health issue and keeps the switch On', () => {

@@ -25,6 +25,7 @@ import {
 import { systemAccessAction, systemAccessRows, type SystemAccessAction } from '@/lib/system-access'
 import {
   systemAudioDevice,
+  requestSystemAudioResume,
   systemAudioIssueCopy,
   systemAudioSwitchView,
   type SystemAudioSwitchView
@@ -315,6 +316,7 @@ function SystemAudioMixerRow({
         }))
       }
       onOpenPermissions={onOpenPermissions}
+      onResume={requestSystemAudioResume}
     />
   )
 }
@@ -325,7 +327,8 @@ export function SystemAudioMixerRowView({
   reading,
   macOS,
   onEnabledChange,
-  onOpenPermissions
+  onOpenPermissions,
+  onResume
 }: {
   view: SystemAudioSwitchView
   reading: BackendMeterReading | null
@@ -333,6 +336,8 @@ export function SystemAudioMixerRowView({
   macOS: boolean
   onEnabledChange: (enabled: boolean) => void
   onOpenPermissions: () => void
+  /** Plan 076: turn System audio on again after the echo guard paused it. */
+  onResume: () => void
 }): ReactElement {
   const readout = reading?.peakDb != null ? formatDb(reading.peakDb) : view.stateLabel
 
@@ -397,6 +402,13 @@ export function SystemAudioMixerRowView({
           </span>
           <Button className="shrink-0" size="xs" variant="ghost" onClick={onOpenPermissions}>
             Open Settings
+          </Button>
+        </div>
+      ) : view.issue === 'echo' ? (
+        <div className="flex items-center justify-between gap-2 text-xs text-warning">
+          <span className="min-w-0">{systemAudioIssueCopy('echo')}</span>
+          <Button className="shrink-0" size="xs" variant="ghost" onClick={onResume}>
+            Resume
           </Button>
         </div>
       ) : view.issue ? (

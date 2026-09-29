@@ -23,8 +23,8 @@ use tokio::sync::{mpsc, watch};
 
 use crate::protocol::AudioTrackSource;
 use crate::session_audio::{
-    ProducerPoolBusy, ProducerSource, SystemAudioHandle, SystemAudioLoss, SystemAudioObservation,
-    SystemAudioProducer,
+    ProducerPoolBusy, ProducerSource, SystemAudioEchoPause, SystemAudioHandle, SystemAudioLoss,
+    SystemAudioObservation, SystemAudioProducer, SystemAudioRecovery,
 };
 
 /// Plan 069 decision 8: system audio's sync offset `o_sys` in ms (positive
@@ -39,6 +39,11 @@ pub(crate) const SYSTEM_AUDIO_SYNC_OFFSET_MS: i32 = 0;
 /// `health.event` codes (the renderer's `SYSTEM_AUDIO_*_CODE`).
 pub(crate) const SYSTEM_AUDIO_UNAVAILABLE_CODE: &str = "system-audio-unavailable";
 pub(crate) const SYSTEM_AUDIO_LOST_CODE: &str = "system-audio-lost";
+/// Plan 076: the bus paused system audio because it carried the stream back
+/// into itself.
+pub(crate) const SYSTEM_AUDIO_ECHO_PAUSED_CODE: &str = "system-audio-echo-paused";
+/// Plan 076: a timeline loss ended; the slot never left the mix.
+pub(crate) const SYSTEM_AUDIO_RECOVERED_CODE: &str = "system-audio-recovered";
 /// The session's microphone is a direct FFmpeg input (on Windows, the
 /// DirectShow fallback when the capture worker cannot open it, or a bundle
 /// without the worker), so the session audio bus that mixes system audio is
@@ -303,6 +308,21 @@ impl SessionSystemAudio {
     /// One loss per stream that stopped with an error (the bus ramped it out).
     pub(crate) fn claim_loss(&self) -> Option<SystemAudioLoss> {
         self.handle.claim_loss()
+    }
+
+    /// One recovery per timeline loss that ended (plan 076).
+    pub(crate) fn claim_recovery(&self) -> Option<SystemAudioRecovery> {
+        self.handle.claim_recovery()
+    }
+
+    /// One pause per loop the echo guard caught (plan 076).
+    pub(crate) fn claim_echo_pause(&self) -> Option<SystemAudioEchoPause> {
+        self.handle.claim_echo_pause()
+    }
+
+    /// Live echo guard On/Off (plan 076).
+    pub(crate) fn set_echo_guard(&self, enabled: bool) {
+        self.handle.set_echo_guard(enabled);
     }
 
     /// Session stop: no more starts, and a start still opening is cancelled.
@@ -659,6 +679,9 @@ mod tests {
     fn health_codes_match_the_capture_and_the_renderer() {
         assert_eq!(SYSTEM_AUDIO_UNAVAILABLE_CODE, "system-audio-unavailable");
         assert_eq!(SYSTEM_AUDIO_LOST_CODE, "system-audio-lost");
+        // Plan 076; the renderer's lib/system-audio-session.ts mirrors both.
+        assert_eq!(SYSTEM_AUDIO_ECHO_PAUSED_CODE, "system-audio-echo-paused");
+        assert_eq!(SYSTEM_AUDIO_RECOVERED_CODE, "system-audio-recovered");
         #[cfg(target_os = "macos")]
         {
             assert_eq!(

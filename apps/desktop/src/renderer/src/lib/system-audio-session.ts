@@ -7,7 +7,7 @@ import type { AudioTrack, HealthEvent } from '@/lib/backend'
 export const SYSTEM_AUDIO_LOST_CODE = 'system-audio-lost'
 export const SYSTEM_AUDIO_UNAVAILABLE_CODE = 'system-audio-unavailable'
 
-export type SystemAudioIssue = 'lost' | 'unavailable' | 'bypassed'
+export type SystemAudioIssue = 'lost' | 'unavailable' | 'bypassed' | 'echo'
 
 /**
  * What the running session actually mixes, from `recording.status`:
@@ -33,7 +33,9 @@ export function systemAudioIssueFromHealthEvent({
   const suffix = code.startsWith('system-audio-') ? code.slice(13) : ''
   return suffix === 'mic-fallback-bypass'
     ? 'bypassed'
-    : suffix === 'lost' || suffix === 'unavailable'
-      ? suffix
-      : null
+    : suffix === 'echo-paused'
+      ? 'echo'
+      : suffix === 'lost' || suffix === 'unavailable'
+        ? suffix
+        : null
 }

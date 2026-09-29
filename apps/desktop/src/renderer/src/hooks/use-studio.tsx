@@ -6157,6 +6157,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
         if (/^(microphone-(input|timeline)|system-audio)-lost$/.test(event.code)) {
           void publishMicrophoneInputLost(event)
         } else {
+          // Plan 076: a timeline loss that recovered clears its notice.
+          if (
+            /-recovered$/.test(event.code) &&
+            sessionRuntimeNoticeRef.current?.kind === 'microphone-input-lost'
+          ) {
+            microphoneInputLostSessionRef.current = null
+            dismissSessionRuntimeNotice()
+          }
           const qualityDedupeKey = event.sessionId ?? event.message
           const continuationEpoch = sessionRuntimeEpochRef.current
           void loadSessionRuntimeRecovery().then((runtime) => {
@@ -9603,6 +9611,14 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       audio: { ...current.audio, systemAudioEnabled }
     }))
   }
+  // Plan 076: Resume after the echo guard paused System audio, from its
+  // toast or a mixer row (lazy chunks), re-sends On like a shortcut does.
+  const resumeSystemAudio = useEffectEvent(() => setSystemAudioEnabled(true))
+  useEffect(() => {
+    const resume = (): void => resumeSystemAudio()
+    window.addEventListener('videorc:resume-system-audio', resume)
+    return () => window.removeEventListener('videorc:resume-system-audio', resume)
+  }, [])
 
   const currentStreamOutputTopologyRequest = useMemo(
     () =>
@@ -9996,6 +10012,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
     captureConfig.audio.microphoneMuted,
     captureConfig.audio.systemAudioEnabled,
     captureConfig.audio.systemAudioGainDb,
+    captureConfig.audio.systemAudioEchoGuard,
     systemAudioRetry,
     commitLiveAudioProcessingApplied,
     failLiveMicrophoneWaiters,
@@ -12023,7 +12040,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
                 microphoneMuted: nextSessionParams.audio.microphoneMuted,
                 systemAudio: {
                   systemAudioEnabled: nextSessionParams.audio.systemAudioEnabled,
-                  systemAudioGainDb: nextSessionParams.audio.systemAudioGainDb
+                  systemAudioGainDb: nextSessionParams.audio.systemAudioGainDb,
+                  systemAudioEchoGuard: nextSessionParams.audio.systemAudioEchoGuard
                 }
               }
             : null
