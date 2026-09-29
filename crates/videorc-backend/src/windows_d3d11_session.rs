@@ -3133,7 +3133,9 @@ mod tests {
         assert_eq!(left.x, 43.0 / 1920.0);
         assert_eq!(left.y, 43.0 / 1080.0);
 
-        // Vertical 1080x1920: margin = round(1920 * 0.04) = 77 px.
+        // Vertical 1080x1920: side margin round(1920 * 0.04) = 77 px; the top
+        // edge keeps the portrait platform safe area, round(1920 * 0.08) = 154
+        // px (plan 077).
         let (vertical, _) = windows_d3d11_overlay_layer_geometry(
             (600, 200),
             (1080, 1920),
@@ -3141,7 +3143,7 @@ mod tests {
             0,
         );
         assert_eq!(vertical.x, (1080 - 600 - 77) as f32 / 1080.0);
-        assert_eq!(vertical.y, 77.0 / 1920.0);
+        assert_eq!(vertical.y, 154.0 / 1920.0);
 
         // Captions stay centred and honour the collision inset.
         let (caption, _) = windows_d3d11_overlay_layer_geometry(

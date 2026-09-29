@@ -43,8 +43,10 @@ export const DEFAULT_COMMENT_HIGHLIGHT_ANCHOR = 'bottom-left'
  * scanned: a card that ignored the anchor must fail this gate.
  *
  * On a portrait canvas (the vertical simulcast leg) the card is only ~10% of
- * the height and sits ~5% from the edge, so the vertical span hugs the
- * anchored edge (3%..22%) instead of diluting the card in half the frame. */
+ * the height and keeps out of the platform UI bands (plan 077): 8% below the
+ * top or 22% above the bottom. The vertical span covers exactly that band
+ * (top 6%..26%, bottom 20%..40% from the anchored edge) instead of diluting
+ * the card in half the frame. */
 export function commentHighlightCardRegion(
   anchor = DEFAULT_COMMENT_HIGHLIGHT_ANCHOR,
   { width, height }
@@ -53,8 +55,10 @@ export function commentHighlightCardRegion(
     throw new Error(`Unknown comment highlight anchor: ${anchor}`)
   }
   const portrait = height > width
+  const top = anchor.startsWith('top-')
   const span = (size, fromStart, vertical = false) => {
-    const [nearFraction, farFraction] = portrait && vertical ? [0.03, 0.22] : [0.08, 0.62]
+    const [nearFraction, farFraction] =
+      portrait && vertical ? (top ? [0.06, 0.26] : [0.2, 0.4]) : [0.08, 0.62]
     const near = Math.round(size * nearFraction)
     const far = Math.round(size * farFraction)
     const start = fromStart ? near : size - far

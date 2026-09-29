@@ -210,22 +210,23 @@ describe('comment highlight artifact gate', () => {
     assert.throws(() => commentHighlightCardRegion('top', size), /Unknown comment highlight anchor/)
   })
 
-  it('hugs the anchored edge vertically on a portrait (vertical leg) canvas', () => {
+  it('scans the portrait safe-area band where a vertical-leg card sits', () => {
     const portrait = { width: 100, height: 200 }
-    // Horizontal span is unchanged; the vertical span is 3%..22% of the height
-    // from the anchored edge, where a ~10%-tall portrait card actually sits.
+    // Horizontal span is unchanged. Vertically the card keeps out of the
+    // platform UI bands (plan 077): bottom 20%..40%, top 6%..26% of the height
+    // from the anchored edge.
     assert.deepEqual(commentHighlightCardRegion('bottom-left', portrait), {
       xStart: 8,
       xEnd: 62,
-      yStart: 156,
-      yEnd: 194,
+      yStart: 120,
+      yEnd: 160,
       top: false
     })
     assert.deepEqual(commentHighlightCardRegion('top-right', portrait), {
       xStart: 38,
       xEnd: 92,
-      yStart: 6,
-      yEnd: 44,
+      yStart: 12,
+      yEnd: 52,
       top: true
     })
   })

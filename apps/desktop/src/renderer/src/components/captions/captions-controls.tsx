@@ -45,7 +45,7 @@ import {
   captionsStatusIsActive,
   latestFinalCaptionText
 } from '@/lib/captions-ui'
-import type { CaptionBurnTarget, CaptionsCaptureSettings } from '@/lib/capture'
+import { simulcastArmed, type CaptionBurnTarget, type CaptionsCaptureSettings } from '@/lib/capture'
 import { cloudAiUploadGate } from '@/lib/entitlement-ui'
 import { displayKeyGlyph } from '@/lib/platform'
 import { cn } from '@/lib/utils'
@@ -206,6 +206,9 @@ export function CaptionsControls(): ReactElement {
   const finalAnnouncement = latestFinalCaptionText(captionLines)
   const streamChecked = captions.burnTarget === 'stream' || captions.burnTarget === 'both'
   const recordingChecked = captions.burnTarget === 'recording' || captions.burnTarget === 'both'
+  // A vertical destination shares the recording's picture with the
+  // horizontal stream, so livestream captions land in the recording too.
+  const verticalLegArmed = simulcastArmed(captureConfig)
   const canEnable = gate.allowed || captions.enabled
   const showRetry =
     captions.enabled &&
@@ -451,7 +454,11 @@ export function CaptionsControls(): ReactElement {
           <div className="grid gap-3 sm:grid-cols-2">
             <OutputCheckbox
               checked={streamChecked}
-              description="Visible to livestream viewers."
+              description={
+                verticalLegArmed
+                  ? 'Visible on your horizontal and vertical streams.'
+                  : 'Visible to livestream viewers.'
+              }
               disabled={isSessionActive}
               id="captions-output-stream"
               title="Livestream"
@@ -461,7 +468,11 @@ export function CaptionsControls(): ReactElement {
             />
             <OutputCheckbox
               checked={recordingChecked}
-              description="Visible in the captioned recording copy."
+              description={
+                verticalLegArmed && streamChecked
+                  ? 'Already in the recording while a vertical destination is on: it shares the horizontal stream picture.'
+                  : 'Visible in the captioned recording copy.'
+              }
               disabled={isSessionActive}
               id="captions-output-recording"
               title="Recording"

@@ -7524,9 +7524,8 @@ async fn publish_compositor_frame(
     let mut auxiliary_proof = None;
     if let (Some(stream_output), Some(stream_frame_store)) = (stream_output, stream_frame_store) {
         // A simulcast-bound aux composes the VERTICAL scene; the classic
-        // caption/profile-split aux re-renders the primary snapshot. The
-        // vertical leg carries no caption bar (its raster is sized for the
-        // primary geometry); the highlight card uses its own portrait raster.
+        // caption/profile-split aux re-renders the primary snapshot. Caption
+        // bar and highlight card both arrive as portrait rasters for it.
         let aux_snapshot = if stream_output.composes_simulcast_scene {
             simulcast_snapshot.as_ref()
         } else {
@@ -7546,16 +7545,14 @@ async fn publish_compositor_frame(
             screen_frame: screen_frame
                 .as_ref()
                 .filter(|_| scene_accepts_source(aux_snapshot, screen_key)),
-            // The auxiliary (stream) leg carries the bar per the leg plan.
-            caption_overlay: if stream_output.composes_simulcast_scene {
-                None
-            } else {
-                caption_overlay_for_output(
-                    &caption_overlays,
-                    crate::captions::CaptionOverlayTarget::Auxiliary,
-                    caption_overlay_on_aux,
-                )
-            },
+            // The auxiliary leg carries the bar per the leg plan. On the
+            // vertical simulcast leg the renderer rasterizes the Auxiliary
+            // bar for that portrait canvas (plan 077).
+            caption_overlay: caption_overlay_for_output(
+                &caption_overlays,
+                crate::captions::CaptionOverlayTarget::Auxiliary,
+                caption_overlay_on_aux,
+            ),
             highlight_overlay: if !highlight_overlay_on_aux {
                 None
             } else if stream_output.composes_simulcast_scene {
@@ -8494,6 +8491,30 @@ fn render_synthetic_source_rect(
 
 /// Vertical safe margin for the caption bar, as a fraction of canvas height.
 const CAPTION_OVERLAY_MARGIN: f64 = 0.04;
+/// Portrait canvases (the vertical simulcast leg, vertical scenes) are watched
+/// in TikTok, Shorts and Reels, which draw their own caption, username, music
+/// line and buttons across the bottom fifth and a header across the top.
+/// Overlays keep out of those bands; the side margin is unchanged (plan 077).
+/// Mirrored by the renderer's `captionBarFramePosition`.
+const PORTRAIT_OVERLAY_TOP_MARGIN: f64 = 0.08;
+const PORTRAIT_OVERLAY_BOTTOM_MARGIN: f64 = 0.22;
+
+/// The distance an overlay keeps from the top or bottom edge it is anchored to.
+fn overlay_edge_margin(
+    canvas_width: usize,
+    canvas_height: usize,
+    vertical: crate::captions::CaptionOverlayPosition,
+) -> usize {
+    let fraction = if canvas_height > canvas_width {
+        match vertical {
+            crate::captions::CaptionOverlayPosition::Top => PORTRAIT_OVERLAY_TOP_MARGIN,
+            crate::captions::CaptionOverlayPosition::Bottom => PORTRAIT_OVERLAY_BOTTOM_MARGIN,
+        }
+    } else {
+        CAPTION_OVERLAY_MARGIN
+    };
+    ((canvas_height as f64) * fraction).round() as usize
+}
 const OVERLAY_COLLISION_GAP: f64 = 0.02;
 
 /// The comment-highlight card owns its anchor corner and never yields. A
@@ -8572,7 +8593,8 @@ pub(crate) fn overlay_collision_inset(
 /// the Windows D3D11 layer transform. Returns
 /// `(source_left, dest_left, dest_top, draw_width)`.
 ///
-/// Vertical: 4% of canvas height as the safe margin (plus `safe_inset`).
+/// Vertical: 4% of canvas height as the safe margin (plus `safe_inset`); on a
+/// portrait canvas the platform safe area instead (8% top, 22% bottom).
 /// Horizontal: `Center` is centred (captions); `Left`/`Right` sit the SAME
 /// pixel margin from the side edge, so a corner card is visually square in
 /// landscape and vertical. Wider-than-canvas overlays are center-cropped.
@@ -8607,13 +8629,14 @@ pub(crate) fn caption_overlay_layout_with_inset(
     let draw_height = overlay_height.min(canvas_height);
     let source_left = (overlay_width - draw_width) / 2;
     let margin = ((canvas_height as f64) * CAPTION_OVERLAY_MARGIN).round() as usize;
+    let edge_margin = overlay_edge_margin(canvas_width, canvas_height, placement.vertical);
     let max_dest_left = canvas_width - draw_width;
     let dest_left = match placement.horizontal {
         crate::captions::OverlayHorizontal::Left => margin.min(max_dest_left),
         crate::captions::OverlayHorizontal::Center => max_dest_left / 2,
         crate::captions::OverlayHorizontal::Right => max_dest_left.saturating_sub(margin),
     };
-    let inset_margin = margin.saturating_add(safe_inset);
+    let inset_margin = edge_margin.saturating_add(safe_inset);
     let dest_top = match placement.vertical {
         crate::captions::CaptionOverlayPosition::Top => {
             inset_margin.min(canvas_height.saturating_sub(draw_height))
@@ -14414,7 +14437,46 @@ mod tests {
     }
 
     #[test]
-    fn overlay_layout_corner_anchors_have_square_margins_in_landscape_and_vertical() {
+    fn overlay_layout_portrait_keeps_out_of_the_platform_ui_bands() {
+        use crate::captions::CaptionOverlayPosition;
+
+        // A 1080x1920 vertical leg: a centred caption bar sits 8% below the
+        // top or 22% above the bottom, clear of TikTok/Shorts/Reels chrome.
+        let (bar_width, bar_height) = (820_usize, 160_usize);
+        let (_, left, top, width) = caption_overlay_layout(
+            bar_width,
+            bar_height,
+            1080,
+            1920,
+            CaptionOverlayPosition::Top,
+        );
+        assert_eq!((left, top, width), ((1080 - 820) / 2, 154, 820));
+        let (_, _, top, _) = caption_overlay_layout(
+            bar_width,
+            bar_height,
+            1080,
+            1920,
+            CaptionOverlayPosition::Bottom,
+        );
+        assert_eq!(top, 1920 - 422 - 160);
+        // The yielding inset still stacks on top of the safe area.
+        let (_, _, top, _) = caption_overlay_layout_with_inset(
+            bar_width,
+            bar_height,
+            1080,
+            1920,
+            CaptionOverlayPosition::Bottom,
+            100,
+        );
+        assert_eq!(top, 1920 - 422 - 100 - 160);
+        // Square and landscape canvases keep the 4% rule.
+        let (_, _, top, _) =
+            caption_overlay_layout(100, 10, 1000, 1000, CaptionOverlayPosition::Bottom);
+        assert_eq!(top, 1000 - 40 - 10);
+    }
+
+    #[test]
+    fn overlay_layout_corner_anchors_keep_their_margins_in_landscape_and_vertical() {
         use crate::comment_highlight::CommentHighlightAnchor;
 
         let (card_width, card_height) = (400_usize, 200_usize);
@@ -14450,9 +14512,25 @@ mod tests {
                         canvas_height - bottom
                     }
                 };
+                // Landscape corners are square; portrait corners keep the
+                // side margin but clear the platform UI bands vertically.
+                let expected_y_margin = if canvas_height > canvas_width {
+                    match anchor {
+                        CommentHighlightAnchor::TopLeft | CommentHighlightAnchor::TopRight => {
+                            ((canvas_height as f64) * PORTRAIT_OVERLAY_TOP_MARGIN).round() as usize
+                        }
+                        CommentHighlightAnchor::BottomLeft
+                        | CommentHighlightAnchor::BottomRight => {
+                            ((canvas_height as f64) * PORTRAIT_OVERLAY_BOTTOM_MARGIN).round()
+                                as usize
+                        }
+                    }
+                } else {
+                    margin
+                };
                 assert_eq!(
                     (x_margin, y_margin),
-                    (margin, margin),
+                    (margin, expected_y_margin),
                     "{anchor:?} at {canvas_width}x{canvas_height}"
                 );
             }
@@ -14463,13 +14541,9 @@ mod tests {
     fn overlay_layout_center_placement_matches_the_legacy_caption_formula() {
         use crate::captions::CaptionOverlayPosition;
 
-        for (canvas_width, canvas_height) in [
-            (1920_usize, 1080_usize),
-            (1080, 1920),
-            (32, 16),
-            (16, 8),
-            (1, 1),
-        ] {
+        // Portrait canvases use the platform safe area instead (asserted in
+        // `overlay_layout_portrait_keeps_out_of_the_platform_ui_bands`).
+        for (canvas_width, canvas_height) in [(1920_usize, 1080_usize), (32, 16), (16, 8), (1, 1)] {
             for (overlay_width, overlay_height) in [
                 (960_usize, 120_usize),
                 (1921, 300),

@@ -131,7 +131,7 @@ describe('layoutCommentHighlight', () => {
     // Same type size on a phone as on the 16:9 stream, not the width-based 23px.
     expect(vertical.metrics.textFontPx).toBe(horizontal.metrics.textFontPx)
     // The horizontal card could be 1152px wide; the portrait one never crops.
-    expect(vertical.cardWidthPx).toBeLessThanOrEqual(Math.floor(1080 * 0.85))
+    expect(vertical.cardWidthPx).toBeLessThanOrEqual(Math.floor(1080 * 0.78))
     expect(vertical.textLines.length).toBeLessThanOrEqual(HIGHLIGHT_MAX_TEXT_LINES)
     // Omitting the height keeps the landscape recipe.
     expect(highlightMetrics(1920)).toEqual(highlightMetrics(1920, 1080))

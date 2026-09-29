@@ -301,6 +301,37 @@ describe('captionOverlayTargetPlan', () => {
     streamVideo: { width: 1920, height: 1080 }
   }
 
+  it('rasterizes both legs beside a vertical destination (plan 077)', () => {
+    const verticalLeg = { width: 1080, height: 1920 }
+    const bothLegs = [
+      { target: 'primary', outputLeg: 'stream', canvasWidth: 3840, canvasHeight: 2160 },
+      { target: 'auxiliary', outputLeg: 'stream', canvasWidth: 1080, canvasHeight: 1920 }
+    ]
+    for (const recordEnabled of [true, false]) {
+      for (const burnTarget of ['stream', 'both'] as const) {
+        expect(
+          captionOverlayTargetPlan({
+            ...base,
+            burnTarget,
+            recordEnabled,
+            streamEnabled: true,
+            verticalLeg
+          })
+        ).toEqual(bothLegs)
+      }
+    }
+    // Recording-only captions never burn a live leg.
+    expect(
+      captionOverlayTargetPlan({
+        ...base,
+        burnTarget: 'recording',
+        recordEnabled: true,
+        streamEnabled: true,
+        verticalLeg
+      })
+    ).toEqual([])
+  })
+
   it('keeps the 4K source recording clean and maps only the 1080p stream auxiliary', () => {
     expect(
       captionOverlayTargetPlan({
