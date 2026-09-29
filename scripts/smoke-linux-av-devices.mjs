@@ -9,6 +9,7 @@
 //               video file at the requested size.
 //
 //   VIDEORC_LINUX_AV_LEGS            comma list, default "mic,camera"
+//   VIDEORC_LINUX_AV_MICROPHONE_ID   optional available microphone id
 //   VIDEORC_LINUX_AV_RECORDING_MS    take length (default 6000)
 //   VIDEORC_LINUX_AV_STEP_TIMEOUT_MS every backend request (default 45000)
 //   VIDEORC_SMOKE_OUTPUT_DIR         evidence + recordings
@@ -226,7 +227,11 @@ try {
     warnings: list.warnings ?? []
   })
   const mics = assessLinuxDeviceList(list.devices, 'microphone')
-  const microphoneId = mics.devices[0]?.id ?? null
+  const requestedMicrophoneId = process.env.VIDEORC_LINUX_AV_MICROPHONE_ID
+  const microphoneId = requestedMicrophoneId ?? mics.devices[0]?.id ?? null
+  if (requestedMicrophoneId && !mics.devices.some((device) => device.id === requestedMicrophoneId)) {
+    throw new Error('The requested Linux microphone is not available.')
+  }
 
   if (legs.has('mic')) {
     check('mic devices.list', mics)
@@ -237,21 +242,43 @@ try {
       })
       step('mic audio.meter.sample', meter)
       check('mic meter', assessMicMeter(meter))
-      const { summary } = await record(ws, smoke, 'mic-test-pattern', {
-        sources: {
-          screenId: null,
-          windowId: null,
-          cameraId: null,
-          microphoneId,
-          testPattern: true
-        },
-        layoutPreset: 'screen-camera',
-        playTone: toneEnabled
-      })
-      check(
-        'mic recording audio',
-        assessMicRecordingAudio(summary, toneEnabled ? { minPeakDb: -40 } : undefined)
-      )
+      // The live Pulse/PCM startup regression is timing-sensitive: a cold
+      // closed-preview recording can pass while the next open-preview start
+      // stalls in FFmpeg's shortest queue. Exercise both and a warm retry.
+      for (const [label, previewOpen] of [
+        ['mic-test-pattern', false],
+        ['mic-preview-open', true],
+        ['mic-preview-closed-again', false]
+      ]) {
+        await requestSmokeCommand(
+          smoke,
+          previewOpen ? 'preview-window-open' : 'preview-window-close',
+          {},
+          { timeoutMs: stepTimeoutMs }
+        )
+        const { summary, metrics } = await record(ws, smoke, label, {
+          sources: {
+            screenId: null,
+            windowId: null,
+            cameraId: null,
+            microphoneId,
+            testPattern: true
+          },
+          layoutPreset: 'screen-camera',
+          playTone: toneEnabled
+        })
+        check(
+          `${label} audio`,
+          assessMicRecordingAudio(summary, toneEnabled ? { minPeakDb: -40 } : undefined)
+        )
+        check(
+          `${label} video`,
+          assessPortalRecording(
+            { metrics, sizeBytes: summary.sizeBytes },
+            { width: video.width, height: video.height, recordingMs }
+          )
+        )
+      }
     }
   }
 

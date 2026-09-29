@@ -4717,6 +4717,25 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
         ${NATIVE_PREVIEW_PROOF_POLLER_RUNTIME_SCRIPT}
         ${NATIVE_PREVIEW_PROOF_MEASUREMENT_RUNTIME_SCRIPT}
 
+        function updateProofReadout() {
+          // Source polls and compositor presents advance independently. Derive
+          // their shared label from the same state so neither callback replaces
+          // a live compositor label with a transient source-only label.
+          if (compositorStatus?.state === 'live') {
+            const liveSources = Array.isArray(compositorStatus.sources)
+              ? compositorStatus.sources.filter((source) => source.state === 'live').map((source) => source.kind)
+              : [];
+            readout.textContent = liveSources.length
+              ? 'native compositor: ' + liveSources.join(' + ')
+              : 'native compositor surface';
+            return;
+          }
+          const liveLayers = [...layers.values()].filter(({ image }) => image?.dataset.live === '1');
+          readout.textContent = liveLayers.length
+            ? (liveLayers.some(({ layer }) => layer.kind === 'screen-image') ? 'native scene + screen image' : 'native scene source')
+            : (scene?.sources?.some((layer) => layer.visible !== false) ? 'native scene waiting for source' : 'native synthetic surface');
+        }
+
         function markLive(kind, sourceId) {
           sourceFrames.set(sourceId, (sourceFrames.get(sourceId) ?? 0) + 1);
           const poller = pollers.get(sourceId);
@@ -4727,7 +4746,7 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           if (liveLayerCount > 0) {
             document.body.classList.add('surface-live');
           }
-          readout.textContent = kind === 'screen-image' ? 'native scene + screen image' : 'native scene source';
+          updateProofReadout();
         }
 
         function stopMissingPollers(activeIds) {
@@ -4973,8 +4992,8 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
           liveLayerCount = [...layers.values()].filter(({ image }) => image?.dataset.live === '1').length;
           if (liveLayerCount === 0) {
             document.body.classList.remove('surface-live');
-            readout.textContent = nextLayers.length ? 'native scene waiting for source' : 'native synthetic surface';
           }
+          updateProofReadout();
         }
 
         window.__videorcSetPreviewScene = applyScene;
@@ -5023,13 +5042,8 @@ function nativePreviewSurfaceHtml(initialScene: PreviewSurfaceSceneState | null)
             document.body.style.setProperty('--dot-x', String((x / Math.max(1, width)) * 100) + '%');
             document.body.style.setProperty('--offset', String((frame * 3) % 240) + 'px');
             document.body.style.setProperty('--stripe-offset', String((frame * 5) % 120) + 'px');
-            const liveSources = Array.isArray(nextStatus.sources)
-              ? nextStatus.sources.filter((source) => source.state === 'live').map((source) => source.kind)
-              : [];
-            readout.textContent = liveSources.length
-              ? 'native compositor: ' + liveSources.join(' + ')
-              : 'native compositor surface';
           }
+          updateProofReadout();
         }
 
         window.__videorcSetCompositorStatus = applyCompositorStatus;
