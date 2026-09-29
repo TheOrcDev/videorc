@@ -451,25 +451,12 @@
  * (Command in a Dialog) stays transparent.
  */
 @utility glass-float {
-  border-color: var(--glass-float-edge, var(--glass-float-rim));
+  border-color: var(--glass-float-rim);
   background-color: var(--glass-float);
-  background-image: linear-gradient(
-    to bottom,
-    var(--glass-float-tint, var(--glass-float-sheen)),
-    transparent 35%
-  );
+  background-image: linear-gradient(to bottom, var(--glass-float-sheen), transparent 35%);
   box-shadow:
     inset 0 1px 0 var(--glass-float-highlight),
     var(--glass-float-drop);
-}
-
-/* A floating surface that carries news in a tone (a failed or successful
-   toast): the rim and the sheen take the --chip-tone (the tone-* utilities),
-   the text stays monochrome. It only feeds glass-float's variables, so the
-   two never fight over a property. */
-@utility glass-float-tinted {
-  --glass-float-edge: color-mix(in oklch, var(--chip-tone) var(--chip-tint-rim), transparent);
-  --glass-float-tint: color-mix(in oklch, var(--chip-tone) var(--chip-tint-top), transparent);
 }
 
 /* The status dot: the tone, a 2 px halo at 22% and an 8 px glow. */
@@ -523,10 +510,11 @@
 /*
  * Toasts (plan 072): sonner injects its own unlayered CSS at runtime, so this
  * block is unlayered too and outranks sonner's selectors by specificity (the
- * :root prefix). Every toast is the float glass. `richColors` would paint
- * solid green and red slabs; its colours point at the glass instead, the
- * text stays monochrome, and a typed toast carries its tone in the icon and
- * a tinted rim and sheen (glass-float-tinted).
+ * :root prefix). Every toast is the same neutral float glass. `richColors`
+ * would paint solid green, amber and red slabs; its colours point at the
+ * glass instead and the text stays monochrome. A typed toast carries its
+ * tone in the 16 px icon ONLY: never in the panel, its rim or its sheen (an
+ * amber-washed warning toast read as a yellow panel; owner call 2026-09-29).
  */
 :root [data-sonner-toaster][data-sonner-theme] {
   --normal-bg: var(--glass-float);
@@ -552,19 +540,19 @@
 }
 
 :root [data-sonner-toaster] [data-sonner-toast][data-type='success'] {
-  @apply tone-success glass-float-tinted;
+  @apply tone-success;
 }
 
 :root [data-sonner-toaster] [data-sonner-toast][data-type='error'] {
-  @apply tone-destructive glass-float-tinted;
+  @apply tone-destructive;
 }
 
 :root [data-sonner-toaster] [data-sonner-toast][data-type='warning'] {
-  @apply tone-warning glass-float-tinted;
+  @apply tone-warning;
 }
 
 :root [data-sonner-toaster] [data-sonner-toast][data-type='info'] {
-  @apply tone-info glass-float-tinted;
+  @apply tone-info;
 }
 
 :root [data-sonner-toaster] [data-sonner-toast][data-type] [data-icon] {

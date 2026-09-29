@@ -110,8 +110,10 @@ themes:
 The hover card now reads as a raised grey glass panel above the window, with
 a rim and a top highlight, and the filter labels under it no longer show. The
 palette is one surface (its `Command` no longer double-coats the dialog).
-Typed toasts keep monochrome text, with the tone in the icon and in a tinted
-rim and sheen, never the old solid green or red slab. The captures stay local
+Typed toasts keep monochrome text, never the old solid green or red slab.
+(At merge the tone also tinted the toast's rim and sheen. On 2026-09-29 the
+owner rejected that as a yellow panel, so the tone now lives in the icon
+only.) The captures stay local
 (no media in the tree).
 
 Not captured: the tooltip. Its only consumer is a Library row, which an empty

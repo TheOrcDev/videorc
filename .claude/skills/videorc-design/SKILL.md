@@ -270,8 +270,9 @@ once in `styles.css`.
 Dialogs, popovers, hover cards, menus, selects, tooltips, toasts, and the
 palette are raised pieces of the window glass: `border glass-float` (plan
 072). One surface per float: a `Command` inside a Dialog or Popover stays
-transparent. A toast with a type tints the glass edge
-(`tone-* glass-float-tinted`) and keeps monochrome text. Never `bg-popover`:
+transparent. Every toast is the same neutral glass: a type (success,
+warning, error, info) colours its 16 px icon only, never the panel, rim or
+sheen, and the text stays monochrome. Never `bg-popover`:
 a guard test fails on it, so a fresh shadcn add must be moved onto the
 utility.
 
@@ -373,7 +374,7 @@ confirming a routine interaction the user just watched succeed.
 | Dividers                  | `Separator` or a `border-border` hairline       |
 | Scroll regions            | `PaneBody` or `ScrollArea type="scroll"`        |
 | Menus / popovers          | `DropdownMenu` / `Popover` on `glass-float`     |
-| Toasts                    | sonner on `glass-float`, tinted by type         |
+| Toasts                    | sonner on `glass-float`; type colours the icon  |
 
 Missing a primitive? Install it through the shadcn CLI (see the shadcn skill);
 do not hand-roll it.
