@@ -10,7 +10,7 @@ import {
 } from './entitlement-ui'
 import {
   DEFAULT_BASIC_ENTITLEMENTS,
-  PREMIUM_STREAMING_LIMITS,
+  STREAMING_LIMITS,
   STREAMING_MAX_DESTINATIONS
 } from './entitlements'
 import { VIDEORC_PREMIUM_URL } from './premium-upgrade'
@@ -50,7 +50,7 @@ const premiumEntitlements: EntitlementsSnapshot = {
       maxFps: 60,
       maxBitrateKbps: 50000
     },
-    streaming: PREMIUM_STREAMING_LIMITS
+    streaming: STREAMING_LIMITS
   }
 }
 
@@ -194,46 +194,21 @@ describe('entitlement UI gates', () => {
     }
   })
 
-  it('adds Premium upgrade metadata for Cloud AI and Basic media caps', () => {
+  it('adds Premium upgrade metadata for Cloud AI only', () => {
     expect(cloudAiUploadGate(basicEntitlements)).toEqual({
       allowed: false,
       featureId: 'cloud-ai',
       reason: 'Cloud AI is a Videorc Premium feature.',
       upgradeUrl: VIDEORC_PREMIUM_URL
     })
-
-    const youtube4k: VideoSettings = {
-      preset: 'stream-youtube-4k30',
-      width: 3840,
-      height: 2160,
-      fps: 30,
-      bitrateKbps: 30000
-    }
-
-    expect(
-      videoProfileEntitlementGate({
-        entitlements: basicEntitlements,
-        kind: 'streaming',
-        video: youtube4k
-      })
-    ).toMatchObject({
-      allowed: false,
-      featureId: 'livestreaming',
-      upgradeUrl: VIDEORC_PREMIUM_URL,
-      allowFixAction: true
-    })
-
-    expect(
-      videoProfileEntitlementGate({
-        entitlements: premiumEntitlements,
-        kind: 'streaming',
-        video: youtube4k
-      })
-    ).toEqual({ allowed: true })
   })
 
-  it('gates exact higher-rate YouTube 1080p profiles by tier', () => {
-    const youtubeProfiles: VideoSettings[] = [
+  // 4K/1080p60 live streaming is free for every plan (Plan 075, 2026-09-28):
+  // the profiles that used to carry a Premium lock pass on Basic and on a
+  // missing snapshot.
+  it('allows every supported stream profile on Basic — streaming quality is not premium-gated', () => {
+    const streamProfiles: VideoSettings[] = [
+      { preset: 'stream-youtube-4k30', width: 3840, height: 2160, fps: 30, bitrateKbps: 30000 },
       {
         preset: 'stream-youtube-1080p30',
         width: 1920,
@@ -247,39 +222,29 @@ describe('entitlement UI gates', () => {
         height: 1080,
         fps: 60,
         bitrateKbps: 12000
-      }
+      },
+      { preset: 'stream-safe-1080p60', width: 1920, height: 1080, fps: 60, bitrateKbps: 6000 }
     ]
 
-    for (const video of youtubeProfiles) {
-      expect(
-        videoProfileEntitlementGate({
-          entitlements: basicEntitlements,
-          kind: 'streaming',
-          video
-        })
-      ).toMatchObject({
-        allowed: false,
-        featureId: 'livestreaming',
-        upgradeUrl: VIDEORC_PREMIUM_URL
-      })
-      expect(
-        videoProfileEntitlementGate({
-          entitlements: premiumEntitlements,
-          kind: 'streaming',
-          video
-        })
-      ).toEqual({ allowed: true })
-      expect(
-        videoProfileEntitlementGate({
-          entitlements: developerEntitlements,
-          kind: 'streaming',
-          video
-        })
-      ).toEqual({ allowed: true })
+    for (const video of streamProfiles) {
+      for (const entitlements of [
+        null,
+        basicEntitlements,
+        premiumEntitlements,
+        developerEntitlements
+      ]) {
+        expect(
+          videoProfileEntitlementGate({
+            entitlements,
+            kind: 'streaming',
+            video
+          })
+        ).toEqual({ allowed: true })
+      }
     }
   })
 
-  it('rejects unsupported 4K60 streaming even when the tier ceiling allows it', () => {
+  it('rejects unsupported 4K60 streaming even though the shared ceiling allows it', () => {
     const unsupported4k60: VideoSettings = {
       preset: 'custom',
       width: 3840,
@@ -288,7 +253,7 @@ describe('entitlement UI gates', () => {
       bitrateKbps: 30000
     }
 
-    for (const entitlements of [premiumEntitlements, developerEntitlements]) {
+    for (const entitlements of [basicEntitlements, premiumEntitlements, developerEntitlements]) {
       expect(
         videoProfileEntitlementGate({
           entitlements,
@@ -300,6 +265,40 @@ describe('entitlement UI gates', () => {
         featureId: 'livestreaming',
         reason: expect.stringContaining('exact YouTube 4K30 profile')
       })
+    }
+  })
+
+  it('refuses over-ceiling streaming profiles with a neutral reason and no upgradeUrl', () => {
+    const overCeilingBitrate: VideoSettings = {
+      preset: 'custom',
+      width: 1920,
+      height: 1080,
+      fps: 30,
+      bitrateKbps: 40000
+    }
+
+    for (const entitlements of [
+      null,
+      basicEntitlements,
+      premiumEntitlements,
+      developerEntitlements
+    ]) {
+      const gate = videoProfileEntitlementGate({
+        entitlements,
+        kind: 'streaming',
+        video: overCeilingBitrate
+      })
+      expect(gate).toMatchObject({
+        allowed: false,
+        featureId: 'livestreaming',
+        allowFixAction: true
+      })
+      if (!gate.allowed) {
+        // Streaming quality is free: the ceiling refusal must never read as
+        // an upgrade prompt, so no reason may contain "Premium".
+        expect(gate.reason).not.toMatch(/premium/i)
+        expect(gate).not.toHaveProperty('upgradeUrl')
+      }
     }
   })
 
@@ -358,21 +357,11 @@ describe('entitlement UI gates', () => {
   })
 
   it('keeps premium toasts as fallbacks by linking normal locked controls', () => {
-    const premiumStreamingProfile: VideoSettings = {
-      preset: 'stream-youtube-4k30',
-      width: 3840,
-      height: 2160,
-      fps: 30,
-      bitrateKbps: 30000
-    }
+    // Only the cloud features carry an upgrade link since Plan 075; streaming
+    // profile gates are covered by the neutral-reason test above.
     const normalLockedGates = [
       cloudAiUploadGate(basicEntitlements),
-      noiseCleanupGate(basicEntitlements),
-      videoProfileEntitlementGate({
-        entitlements: basicEntitlements,
-        kind: 'streaming',
-        video: premiumStreamingProfile
-      })
+      noiseCleanupGate(basicEntitlements)
     ]
 
     for (const gate of normalLockedGates) {

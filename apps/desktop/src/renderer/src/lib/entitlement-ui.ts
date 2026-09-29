@@ -125,9 +125,11 @@ export function videoProfileEntitlementGate({
     return unsupportedReason ? lockedGate(featureId, unsupportedReason, true) : { allowed: true }
   }
 
-  const reason = shouldOfferPremiumForProfileLimit(entitlements)
-    ? `${formatVideoProfile(video)} requires Videorc Premium. ${formatLimit(kind, limits)}`
-    : `${formatVideoProfile(video)} exceeds your ${kind} plan. ${formatLimit(kind, limits)}`
+  // Recording and streaming quality are both free (Plan 075): an over-limit
+  // profile is a shared pipeline ceiling, never a plan gate. The reason must
+  // not mention Premium — lockedGate would attach an upgrade URL and the
+  // toast layer would turn it into an upgrade prompt.
+  const reason = `${formatVideoProfile(video)} exceeds the ${kind} limit. ${formatLimit(kind, limits)}`
   return lockedGate(featureId, reason, true)
 }
 
@@ -175,10 +177,6 @@ function streamingMaxDestinations(entitlements: EntitlementsSnapshot | null): nu
     entitlements?.limits.streaming.maxDestinations ??
     DEFAULT_BASIC_ENTITLEMENTS.limits.streaming.maxDestinations
   )
-}
-
-function shouldOfferPremiumForProfileLimit(entitlements: EntitlementsSnapshot | null): boolean {
-  return !entitlements || entitlements.tier === 'basic'
 }
 
 function formatVideoProfile(video: VideoSettings): string {

@@ -1,5 +1,13 @@
 # Plan 016: Add the open-core entitlement boundary for premium features
 
+> **Addendum 2026-09-28**: streaming quality moved to the free tier for every
+> plan ([Plan 075](075-free-4k-live-streaming.md)): one shared streaming
+> ceiling (1080p60 / YouTube 4K30, 30,000 kbps) for Basic, Premium and
+> Developer, for the same reason multistreaming went free — the encode and
+> upload run on the user's machine and cost Videorc nothing to serve.
+> Premium = cloud AI, live captions, co-host, Noise Cleanup. The
+> streaming-quality premium claims below are historical.
+
 > **Addendum 2026-09-15**: multistreaming moved to the free tier for every
 > plan (cap 5 destinations, one shared `STREAMING_MAX_DESTINATIONS` constant on
 > each side). The `multistreaming` feature id stays on the wire as `enabled`

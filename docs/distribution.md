@@ -412,13 +412,15 @@ needed, failures, and final PASS/FAIL/BLOCKED verdict in a dated note under
 ## Open-Core Capability Boundary
 
 Videorc's product boundary is open core: the local recording studio, its
-technical file-management tools, and livestreaming (including multistreaming)
-remain a first-class free product, while cloud-assisted workflows, higher
-streaming quality, and optional local creative transforms are premium
+technical file-management tools, and livestreaming (including multistreaming
+and full streaming quality) remain a first-class free product, while
+cloud-assisted workflows and optional local creative transforms are premium
 capabilities. Multistreaming is free because the tee fan-out runs on the
-user's machine and costs Videorc nothing to serve (since 2026-09-15). This
-repository enforces the capability boundary; pricing and purchase flows belong
-to the product/website layer.
+user's machine and costs Videorc nothing to serve (since 2026-09-15), and
+streaming quality is free for the same reason: the encode runs on the user's
+machine and the RTMP upload rides the user's own bandwidth (since 2026-09-28,
+Plan 075). This repository enforces the capability boundary; pricing and
+purchase flows belong to the product/website layer.
 
 | Capability                 | Free/core                                                                                        | Premium                                                                                  |
 | -------------------------- | ------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------- |
@@ -428,7 +430,7 @@ to the product/website layer.
 | Local library              | Included: session metadata, local files, remux, repair, and export helpers stay local.           | Included.                                                                                |
 | Local audio extraction     | Included when no cloud upload is requested.                                                      | Included.                                                                                |
 | Local creative transforms  | Not included: optional content-enhancement transforms are separate from technical repair/export. | Included: one-click on-device Noise Cleanup for finished recordings.                     |
-| Livestreaming destinations | Included: up to 5 destinations at the Basic HD limits.                                           | Included: higher streaming quality (1080p60 / 4K30).                                     |
+| Livestreaming destinations | Included: up to 5 destinations at full streaming quality (1080p60 / YouTube 4K30).               | Included.                                                                                |
 | Cloud AI workflow          | Not included in free/core.                                                                       | Included when the user grants cloud AI consent and required API credentials are present. |
 
 How the boundary is enforced (since 2026-07-05 there is no runtime unlock):
@@ -437,9 +439,9 @@ How the boundary is enforced (since 2026-07-05 there is no runtime unlock):
   hydrates a verified premium entitlement. No environment variable can raise
   the tier — `VIDEORC_PREMIUM_FEATURES` is downgrade-only: `=0`/`basic` forces
   Basic (for exercising the gates), every other value is ignored with a
-  warning. The tier changes streaming quality, cloud AI, live captions,
-  Orcle, and Noise Cleanup; the destination cap is the same shared number
-  for every tier and is a pipeline limit, not a plan gate.
+  warning. The tier changes cloud AI, live captions, Orcle, and Noise
+  Cleanup; the streaming quality ceiling and the destination cap are the same
+  shared numbers for every tier and are pipeline limits, not plan gates.
 - **The premium entitlement is a signed proof**, not a boolean: videorc.com
   mints an Ed25519-signed token (7-day expiry) that the backend verifies
   against a compiled-in public key and persists locally, so a premium user who

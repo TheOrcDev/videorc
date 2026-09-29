@@ -42,6 +42,8 @@ happens underneath.
 - **Record and stream in one pipeline.** Local MKV recording (with automatic
   MP4 remux), RTMP streaming, or both from a single encode — including
   simulcast fan-out to multiple destinations with per-target health status.
+  Streaming quality is free on every plan: up to 1080p60, and true 4K30 on
+  YouTube (other platforms ingest up to 1080p).
 - **Live captions.** Streaming speech-to-text (~1s latency) with optional
   caption burn-in on the stream, the recording, both, or neither.
 - **Post-recording AI.** Transcript, title/description suggestions, summaries,

@@ -11453,7 +11453,8 @@ async fn get_ai_capabilities() -> Result<protocol::AiCapabilities> {
 }
 
 /// Re-verify the signed-in account's entitlement and hydrate the enforcement
-/// snapshot (the Premium gates: cloud AI, co-host, streaming quality).
+/// snapshot (the Premium gates: cloud AI, live captions, co-host, Noise
+/// Cleanup — streaming quality is free for every tier since Plan 075).
 /// Signed-out clears to basic instantly;
 /// a network failure keeps the last verified hydration (bounded by the 24h
 /// staleness ceiling in entitlements.rs) so a flaky connection cannot flap a

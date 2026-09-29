@@ -25795,8 +25795,10 @@ mod tests {
         assert!(error.contains("only for YouTube"), "{error}");
     }
 
+    // Streaming quality is free for every plan (2026-09-28, Plan 075): the
+    // provider 1080p rates that used to be Premium-only pass on Basic too.
     #[test]
-    fn youtube_1080p_provider_rates_follow_streaming_entitlements() {
+    fn youtube_1080p_provider_rates_pass_on_every_tier() {
         for (preset, bitrate_kbps) in [
             (VideoPreset::StreamYoutube1080p30, 10_000),
             (VideoPreset::StreamYoutube1080p60, 12_000),
@@ -25811,14 +25813,7 @@ mod tests {
             streaming.default_bitrate_kbps = bitrate_kbps;
             params.streaming = Some(streaming);
 
-            let basic_error =
-                validate_session_entitlements(&params, &entitlements::basic_entitlements())
-                    .unwrap_err()
-                    .to_string();
-            assert!(
-                basic_error.contains("allows livestreaming up to 1920x1080"),
-                "{basic_error}"
-            );
+            validate_session_entitlements(&params, &entitlements::basic_entitlements()).unwrap();
             validate_session_entitlements(
                 &params,
                 &entitlements::premium_entitlements(EntitlementSource::Creem),
@@ -32985,7 +32980,7 @@ mod tests {
     }
 
     // Multistreaming is free for every plan (2026-09-15): Basic streams to as
-    // many destinations as the shared cap allows, at Basic quality.
+    // many destinations as the shared cap allows.
     #[test]
     fn entitlement_guard_allows_basic_multistreaming_up_to_cap() {
         let snapshot = entitlements::basic_entitlements();
@@ -33087,12 +33082,14 @@ mod tests {
         validate_session_entitlements(&params, &snapshot).unwrap();
     }
 
+    // 4K live streaming is free for every plan (2026-09-28, Plan 075): the
+    // exact YouTube 4K30 profile passes the entitlement gate on Basic.
     // macOS-only: pins the VideoToolbox encoded split-output bridge. Windows
     // has no encoded bridge output yet (RawYuv420p default; plan 019 / the
     // windows-port recording-path decision owns the Windows behavior).
     #[cfg(target_os = "macos")]
     #[test]
-    fn entitlement_guard_blocks_true_4k_streaming_on_basic() {
+    fn entitlement_guard_allows_true_4k_streaming_on_basic() {
         let mut params = base_params(true, true);
         params.output.video = VideoSettings {
             preset: VideoPreset::Record4k30,
@@ -33110,20 +33107,47 @@ mod tests {
         streaming.default_bitrate_kbps = 30_000;
         params.streaming = Some(streaming);
         let snapshot = entitlements::basic_entitlements();
-        let error = validate_session_entitlements(&params, &snapshot)
-            .expect_err("Basic streams HD only — true 4K streaming is Premium");
 
-        assert!(
-            error
-                .to_string()
-                .contains("allows livestreaming up to 1920x1080"),
-            "{error}"
-        );
+        validate_session_entitlements(&params, &snapshot).unwrap();
     }
 
-    // 4K streaming is a Premium feature (2026-07-06): premium streams up to
-    // 4K30; only basic stays HD. Recording is never the blocker — every tier
-    // records 4K.
+    // Above the shared ceiling nothing changes with the tier: a 4K stream
+    // request that is not the exact YouTube 4K30 profile is rejected for
+    // EVERY tier by profile validation (which caps every valid profile at or
+    // below the shared entitlement ceiling), and the refusal must never read
+    // as an upgrade prompt — there is nothing left to buy.
+    #[test]
+    fn over_ceiling_stream_profile_is_rejected_for_every_tier_without_upsell() {
+        for snapshot in [
+            entitlements::basic_entitlements(),
+            entitlements::premium_entitlements(EntitlementSource::Creem),
+            entitlements::developer_test_entitlements(),
+        ] {
+            let mut params = base_params(false, true);
+            params.output.video = VideoSettings {
+                preset: VideoPreset::Custom,
+                width: 3840,
+                height: 2160,
+                fps: 30,
+                bitrate_kbps: 50_000,
+            };
+            let error = validate_session_entitlements(&params, &snapshot)
+                .expect_err("a non-YouTube-4K30 true-4K stream request must be rejected");
+            let message = error.to_string();
+
+            assert!(
+                message.contains("YouTube 4K30"),
+                "{:?}: {message}",
+                snapshot.tier
+            );
+            assert!(
+                !message.contains("Premium"),
+                "{:?}: the refusal must not read as an upgrade prompt: {message}",
+                snapshot.tier
+            );
+        }
+    }
+
     // macOS-only: pins the VideoToolbox encoded split-output bridge. Windows
     // has no encoded bridge output yet (RawYuv420p default; plan 019 / the
     // windows-port recording-path decision owns the Windows behavior).
