@@ -133,9 +133,20 @@ export function captionOverlayTargetPlan(input: {
   streamEnabled: boolean
   recordingVideo: { width: number; height: number }
   streamVideo: { width: number; height: number }
+  /** Portrait canvas of the armed dual-orientation vertical leg. */
+  verticalLeg?: { width: number; height: number }
 }): CaptionOverlayTargetPlan[] {
   const streamRequested =
     input.streamEnabled && (input.burnTarget === 'stream' || input.burnTarget === 'both')
+
+  // Plan 077: the vertical leg owns the auxiliary output and horizontal
+  // viewers share the primary (the recording's canvas), so each gets a bar.
+  if (streamRequested && input.verticalLeg) {
+    return [
+      { target: 'primary', outputLeg: 'stream', ...canvas(input.recordingVideo) },
+      { target: 'auxiliary', outputLeg: 'stream', ...canvas(input.verticalLeg) }
+    ]
+  }
 
   if (input.recordEnabled && input.streamEnabled) {
     // Recording captions are rendered later into a non-destructive copy. The
@@ -168,6 +179,10 @@ export function captionOverlayTargetPlan(input: {
     ]
   }
   return []
+}
+
+function canvas(video: { width: number; height: number }) {
+  return { canvasWidth: video.width, canvasHeight: video.height }
 }
 
 /** Everything that can change pixels belongs in the key. */

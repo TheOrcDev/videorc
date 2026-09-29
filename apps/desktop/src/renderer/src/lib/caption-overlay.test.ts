@@ -23,6 +23,33 @@ describe('captionBarMetrics', () => {
     // Tiny canvases never go below the readable floor.
     expect(captionBarMetrics(320, 's').fontPx).toBe(24)
   })
+
+  it('sizes a vertical-leg bar like its landscape twin and keeps it narrow (plan 077)', () => {
+    const landscape = captionBarMetrics(1920, 'm', 'glass', 1080)
+    const portrait = captionBarMetrics(1080, 'm', 'glass', 1920)
+    // Same type on a phone as on the 16:9 stream, not the width-based 27px.
+    expect(portrait.fontPx).toBe(landscape.fontPx)
+    expect(portrait.fontPx).toBe(48)
+    // Clear of the platform's right-hand buttons: at most 76% of the width.
+    expect(portrait.maxTextWidthPx + portrait.paddingXPx * 2).toBeLessThanOrEqual(
+      Math.floor(1080 * 0.76)
+    )
+    // Omitting the height keeps the landscape recipe.
+    expect(captionBarMetrics(1920, 'm')).toEqual(landscape)
+
+    for (const styleId of CAPTION_STYLE_IDS) {
+      const layout = layoutCaptionBar({
+        text: 'captions stay readable on a phone while the conversation keeps moving along',
+        canvasWidth: 1080,
+        canvasHeight: 1920,
+        textSize: 'm',
+        styleId,
+        measure
+      })!
+      expect(layout.lines.length).toBeLessThanOrEqual(MAX_CAPTION_BAR_LINES)
+      expect(layout.barWidthPx, styleId).toBeLessThanOrEqual(Math.floor(1080 * 0.76))
+    }
+  })
 })
 
 describe('caption style registry', () => {
@@ -144,6 +171,18 @@ describe('captionBarFramePosition', () => {
       position: 'top'
     })
     expect(top).toEqual({ x: 560, y: Math.round(1080 * 0.04) })
+  })
+
+  it('keeps a portrait bar out of the platform UI bands, mirroring the compositor', async () => {
+    const { captionBarFramePosition } = await import('./caption-overlay')
+    const frame = { canvasWidth: 1080, canvasHeight: 1920, barWidthPx: 820, barHeightPx: 160 }
+    // Same numbers the Rust layout oracle asserts:
+    // overlay_layout_portrait_keeps_out_of_the_platform_ui_bands.
+    expect(captionBarFramePosition({ ...frame, position: 'top' })).toEqual({ x: 130, y: 154 })
+    expect(captionBarFramePosition({ ...frame, position: 'bottom' })).toEqual({
+      x: 130,
+      y: 1920 - 422 - 160
+    })
   })
 })
 

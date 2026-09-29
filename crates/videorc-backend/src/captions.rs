@@ -576,6 +576,30 @@ pub fn caption_overlay_leg_plan(
     }
 }
 
+/// `caption_overlay_leg_plan` for a session that may run the dual-orientation
+/// vertical leg. That leg owns the auxiliary output, and horizontal viewers
+/// share the primary leg with the recording, so a stream-burning target burns
+/// BOTH legs: the horizontal bar on the primary, a portrait bar on the
+/// vertical aux. The recording then carries the captions itself (it shares
+/// the horizontal pixels), so no second captioned copy is rendered: it would
+/// burn the bar twice. Owner decision 2026-09-29 (plan 077).
+pub fn caption_overlay_leg_plan_with_vertical_leg(
+    record_enabled: bool,
+    stream_enabled: bool,
+    target: CaptionBurnTarget,
+    vertical_leg: bool,
+) -> CaptionOverlayLegPlan {
+    if vertical_leg && stream_enabled && target.burns_stream() {
+        return CaptionOverlayLegPlan {
+            primary: true,
+            aux: true,
+            force_same_profile_split: false,
+            captioned_copy: false,
+        };
+    }
+    caption_overlay_leg_plan(record_enabled, stream_enabled, target)
+}
+
 /// What a session's auxiliary compositor leg carries, as far as the
 /// comment-highlight card is concerned.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -7092,6 +7116,43 @@ mod tests {
             .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
             .expect("test png encodes");
         base64::engine::general_purpose::STANDARD.encode(png)
+    }
+
+    #[test]
+    fn caption_leg_plan_burns_both_legs_beside_a_vertical_leg() {
+        use CaptionBurnTarget::*;
+        let both_legs = CaptionOverlayLegPlan {
+            primary: true,
+            aux: true,
+            force_same_profile_split: false,
+            captioned_copy: false,
+        };
+        for record_enabled in [true, false] {
+            for target in [Stream, Both] {
+                assert_eq!(
+                    caption_overlay_leg_plan_with_vertical_leg(record_enabled, true, target, true),
+                    both_legs,
+                    "record={record_enabled} {target:?}"
+                );
+            }
+        }
+        // Recording-only captions never touch a live leg; the clean source
+        // still gets its captioned copy.
+        assert_eq!(
+            caption_overlay_leg_plan_with_vertical_leg(true, true, Recording, true),
+            caption_overlay_leg_plan(true, true, Recording)
+        );
+        assert_eq!(
+            caption_overlay_leg_plan_with_vertical_leg(true, true, Off, true),
+            caption_overlay_leg_plan(true, true, Off)
+        );
+        // Without a vertical leg nothing changes.
+        for target in [Off, Stream, Recording, Both] {
+            assert_eq!(
+                caption_overlay_leg_plan_with_vertical_leg(true, true, target, false),
+                caption_overlay_leg_plan(true, true, target)
+            );
+        }
     }
 
     #[test]

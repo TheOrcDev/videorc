@@ -12,8 +12,9 @@ export const HIGHLIGHT_MAX_TEXT_LINES = 3
 /** The card never exceeds this fraction of the video width. */
 const MAX_CARD_WIDTH_FRACTION = 0.6
 /** A portrait canvas (the vertical simulcast leg, a vertical scene) is narrow
- * and watched on a phone: the card may span most of its width. */
-const MAX_PORTRAIT_CARD_WIDTH_FRACTION = 0.85
+ * and watched on a phone: the card spans most of its width but, like the
+ * caption bar, stays clear of the platform's right-hand buttons (plan 077). */
+const MAX_PORTRAIT_CARD_WIDTH_FRACTION = 0.78
 
 export function commentHighlightExpiryDelay(
   state: CommentHighlightState,

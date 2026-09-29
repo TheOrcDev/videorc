@@ -125,14 +125,33 @@ export type TextMeasurer = (text: string, fontPx: number) => number
 
 const SIZE_FACTOR: Record<CaptionTextSize, number> = { s: 0.8, m: 1.0, l: 1.25 }
 export const MAX_CAPTION_BAR_LINES = 2
+/** A portrait bar stays narrow enough to clear the platform's right-hand
+ *  action buttons (TikTok, Shorts, Reels). */
+const PORTRAIT_MAX_BAR_WIDTH_FRACTION = 0.76
 
+function isPortraitCanvas(canvasWidth: number, canvasHeight?: number): boolean {
+  return canvasHeight !== undefined && canvasHeight > canvasWidth
+}
+
+function captionBarWidthFraction(style: CaptionStyleDefinition, portrait: boolean): number {
+  return portrait
+    ? Math.min(style.maxWidthFraction, PORTRAIT_MAX_BAR_WIDTH_FRACTION)
+    : style.maxWidthFraction
+}
+
+/** Type sizes off the canvas LONG edge, so a 1080x1920 vertical bar reads on a
+ *  phone like its 1920x1080 twin instead of shrinking to a width-based size
+ *  (plan 077). `canvasHeight` omitted means landscape. */
 export function captionBarMetrics(
   canvasWidth: number,
   textSize: CaptionTextSize,
-  styleId: CaptionStyleId = 'glass'
+  styleId: CaptionStyleId = 'glass',
+  canvasHeight?: number
 ): CaptionBarMetrics {
   const style = captionStyleDefinition(styleId)
-  const fontPx = Math.max(24, Math.round((canvasWidth / 40) * SIZE_FACTOR[textSize]))
+  const portrait = isPortraitCanvas(canvasWidth, canvasHeight)
+  const scaleEdge = portrait ? (canvasHeight as number) : canvasWidth
+  const fontPx = Math.max(24, Math.round((scaleEdge / 40) * SIZE_FACTOR[textSize]))
   const paddingXPx = Math.round(fontPx * style.paddingXFactor)
   return {
     fontPx,
@@ -140,7 +159,8 @@ export function captionBarMetrics(
     paddingXPx,
     paddingYPx: Math.round(fontPx * style.paddingYFactor),
     radiusPx: Math.round(fontPx * style.radiusFactor),
-    maxTextWidthPx: Math.floor(canvasWidth * style.maxWidthFraction) - paddingXPx * 2
+    maxTextWidthPx:
+      Math.floor(canvasWidth * captionBarWidthFraction(style, portrait)) - paddingXPx * 2
   }
 }
 
@@ -183,18 +203,28 @@ export function wrapCaptionText(
 export function layoutCaptionBar(params: {
   text: string
   canvasWidth: number
+  /** Omitted = landscape. A portrait canvas gets the phone-sized bar. */
+  canvasHeight?: number
   textSize: CaptionTextSize
   styleId?: CaptionStyleId
   measure: TextMeasurer
 }): CaptionBarLayout | null {
   const style = captionStyleDefinition(params.styleId ?? 'glass')
-  const metrics = captionBarMetrics(params.canvasWidth, params.textSize, style.id)
+  const metrics = captionBarMetrics(
+    params.canvasWidth,
+    params.textSize,
+    style.id,
+    params.canvasHeight
+  )
   const lines = wrapCaptionText(params.text, metrics, params.measure)
   if (lines.length === 0) {
     return null
   }
   const widest = Math.max(...lines.map((line) => params.measure(line, metrics.fontPx)))
-  const maxBarWidth = Math.floor(params.canvasWidth * style.maxWidthFraction)
+  const maxBarWidth = Math.floor(
+    params.canvasWidth *
+      captionBarWidthFraction(style, isPortraitCanvas(params.canvasWidth, params.canvasHeight))
+  )
   const barWidthPx = style.wide
     ? maxBarWidth
     : Math.min(Math.ceil(widest) + metrics.paddingXPx * 2, maxBarWidth)
@@ -204,6 +234,10 @@ export function layoutCaptionBar(params: {
 
 /** Vertical safe margin the compositor uses — mirrored for burned frames. */
 export const CAPTION_FRAME_MARGIN_FRACTION = 0.04
+/** Portrait platform safe area (TikTok, Shorts, Reels chrome), mirroring the
+ *  compositor's PORTRAIT_OVERLAY_*_MARGIN (plan 077). */
+export const PORTRAIT_FRAME_TOP_MARGIN_FRACTION = 0.08
+export const PORTRAIT_FRAME_BOTTOM_MARGIN_FRACTION = 0.22
 
 /** Transparent padding around the bar so the elevation shadow isn't clipped
  *  when the live overlay renders on a bar-sized bitmap. */
@@ -222,8 +256,12 @@ export function captionBarFramePosition(params: {
    *  copy and the live bar sit at the same height. */
   shadowPadPx?: number
 }): { x: number; y: number } {
-  const margin =
-    Math.round(params.canvasHeight * CAPTION_FRAME_MARGIN_FRACTION) + (params.shadowPadPx ?? 0)
+  const fraction = !isPortraitCanvas(params.canvasWidth, params.canvasHeight)
+    ? CAPTION_FRAME_MARGIN_FRACTION
+    : params.position === 'top'
+      ? PORTRAIT_FRAME_TOP_MARGIN_FRACTION
+      : PORTRAIT_FRAME_BOTTOM_MARGIN_FRACTION
+  const margin = Math.round(params.canvasHeight * fraction) + (params.shadowPadPx ?? 0)
   return {
     x: Math.round((params.canvasWidth - params.barWidthPx) / 2),
     y:
@@ -339,6 +377,8 @@ async function canvasToBase64Png(canvas: OffscreenCanvas): Promise<string> {
 export async function renderCaptionOverlayPng(params: {
   text: string
   canvasWidth: number
+  /** Omitted = landscape. The vertical leg passes its portrait height. */
+  canvasHeight?: number
   textSize: CaptionTextSize
   styleId?: CaptionStyleId
 }): Promise<string | null> {
@@ -391,6 +431,7 @@ export async function renderCaptionCueFramePng(params: {
     const layout = layoutCaptionBar({
       text: params.text,
       canvasWidth: params.canvasWidth,
+      canvasHeight: params.canvasHeight,
       textSize: params.textSize,
       styleId,
       measure: measurer.measure

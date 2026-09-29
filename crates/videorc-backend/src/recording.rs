@@ -18862,18 +18862,13 @@ fn validate_caption_output_policy(params: &StartSessionParams) -> Result<()> {
     if !captions.effective_burn_target().burns_stream() || !params.output.stream_enabled {
         return Ok(());
     }
-    // The simulcast leg claims the ONE auxiliary output, and stream-burned
-    // captions need it for the clean-recording split — the two are mutually
-    // exclusive in Phase 1 (documented engine-plan fallback).
-    if params.simulcast.is_some() {
-        bail!(
-            "Live caption burn-in and dual-orientation streaming cannot run together yet. Set captions to Off or Recording, or disable the vertical destinations."
-        );
-    }
     let plan = caption_leg_plan(params);
     let live_caption_profiles = resolved_enabled_stream_output_videos(params)?;
 
-    if plan.aux {
+    // With a vertical leg the aux is that leg, not a captioned horizontal
+    // split: horizontal destinations already share the one primary encode
+    // (plan 077), so the one-captioned-profile rule does not apply.
+    if plan.aux && params.simulcast.is_none() {
         let mut distinct_profiles = Vec::<VideoSettings>::new();
         for profile in live_caption_profiles.iter().cloned() {
             if !distinct_profiles
@@ -18890,7 +18885,12 @@ fn validate_caption_output_policy(params: &StartSessionParams) -> Result<()> {
         }
     }
 
-    if params.output.video.fps > 30 || live_caption_profiles.iter().any(|profile| profile.fps > 30)
+    if params.output.video.fps > 30
+        || live_caption_profiles.iter().any(|profile| profile.fps > 30)
+        || params
+            .simulcast
+            .as_ref()
+            .is_some_and(|simulcast| simulcast.video.fps > 30)
     {
         bail!(
             "Live caption burn-in supports stream profiles up to 30fps. Select Off or Recording captions for higher-frame-rate streaming."
@@ -19038,7 +19038,12 @@ fn caption_burn_target(params: &StartSessionParams) -> crate::captions::CaptionB
 }
 
 fn caption_live_burn_output_eligible(params: &StartSessionParams) -> bool {
-    if params.output.video.fps > 30 {
+    if params.output.video.fps > 30
+        || params
+            .simulcast
+            .as_ref()
+            .is_some_and(|simulcast| simulcast.video.fps > 30)
+    {
         return false;
     }
     let Ok(profiles) = resolved_enabled_stream_output_videos(params) else {
@@ -19065,10 +19070,11 @@ fn caption_live_burn_output_eligible(params: &StartSessionParams) -> bool {
 }
 
 fn caption_leg_plan(params: &StartSessionParams) -> crate::captions::CaptionOverlayLegPlan {
-    crate::captions::caption_overlay_leg_plan(
+    crate::captions::caption_overlay_leg_plan_with_vertical_leg(
         params.output.record_enabled,
         params.output.stream_enabled,
         caption_burn_target(params),
+        params.simulcast.is_some(),
     )
 }
 
@@ -33646,7 +33652,7 @@ mod tests {
     }
 
     #[test]
-    fn simulcast_refuses_mixed_horizontal_profiles_and_stream_burned_captions() {
+    fn simulcast_refuses_mixed_horizontal_profiles_and_burns_captions_on_both_legs() {
         use crate::streaming::StreamOutputOrientation as Orientation;
         // A horizontal target asking for a DIFFERENT profile cannot get a
         // third encode: the provider plan folds it onto the primary (shared,
@@ -33679,15 +33685,35 @@ mod tests {
         .expect("simulcast auxiliary output");
         assert!(stream_output.composes_simulcast_scene);
 
-        // Captions burning the stream leg conflict with the simulcast aux.
+        // Stream-burned captions beside the vertical leg (plan 077): valid,
+        // and planned on BOTH legs. The primary carries the horizontal bar
+        // (it is the horizontal stream and the recording), the vertical aux
+        // its portrait bar, and no second captioned copy is rendered.
+        for enabled in [true, false] {
+            let (mut params, _) = simulcast_split_params(true);
+            params.captions = Some(crate::protocol::CaptionsSessionParams {
+                enabled,
+                burn_target: crate::captions::CaptionBurnTarget::Both,
+                ..Default::default()
+            });
+            validate_outputs(&params).unwrap();
+            assert!(caption_live_burn_output_eligible(&params));
+            let plan = caption_leg_plan(&params);
+            assert!(plan.primary && plan.aux, "enabled={enabled} {plan:?}");
+            assert!(!plan.force_same_profile_split && !plan.captioned_copy);
+        }
+
+        // The vertical leg obeys the same 30 fps burn-in ceiling.
         let (mut params, _) = simulcast_split_params(true);
         params.captions = Some(crate::protocol::CaptionsSessionParams {
             enabled: true,
             burn_target: crate::captions::CaptionBurnTarget::Stream,
             ..Default::default()
         });
+        params.simulcast.as_mut().unwrap().video.fps = 60;
+        assert!(!caption_live_burn_output_eligible(&params));
         let error = validate_outputs(&params).unwrap_err().to_string();
-        assert!(error.contains("dual-orientation"), "{error}");
+        assert!(error.contains("30fps"), "{error}");
 
         // Sanity: the untouched dual shape still validates.
         let (params, _) = simulcast_split_params(true);

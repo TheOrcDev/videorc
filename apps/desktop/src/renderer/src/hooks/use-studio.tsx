@@ -10148,6 +10148,7 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       const pngBase64 = await renderCaptionOverlayPng({
         text: work.text,
         canvasWidth: output.canvasWidth,
+        canvasHeight: output.canvasHeight,
         textSize: work.textSize,
         styleId: work.styleId
       })
@@ -10239,7 +10240,8 @@ export function StudioProvider({ children }: { children: ReactNode }): ReactElem
       recordEnabled: captureConfig.recordEnabled,
       streamEnabled: captureConfig.streamEnabled,
       recordingVideo: captureConfig.video,
-      streamVideo
+      streamVideo,
+      verticalLeg: simulcastLegLiveRequest(captureConfig)?.video
     })
     const candidateKey = latest
       ? outputs
