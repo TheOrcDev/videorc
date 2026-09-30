@@ -33,7 +33,11 @@ try {
     env: {
       VIDEORC_SMOKE_COMMAND_SERVER: '1',
       VIDEORC_SMOKE_STATE_DIR: outputDirectory,
-      VIDEORC_USER_DATA_DIR: userDataDir
+      VIDEORC_USER_DATA_DIR: userDataDir,
+      // Every scenario records the test pattern. On Linux the renderer's
+      // screen preview asks the portal for consent after each take, and the
+      // unattended picker held the next session.start until it timed out.
+      ...(process.platform === 'linux' ? { VIDEORC_DISABLE_AUTO_SOURCE_PREVIEW: '1' } : {})
     },
     timeoutMs,
     requiredMarkers: ['backend-ready', 'preview-motion-ready'],
