@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Result, bail};
 use sha2::{Digest, Sha256};
 
+use crate::capture_interruption::CaptureAdmissionBlocker;
 use crate::protocol::{
     DiagnosticStats, EncodeBackend, OutputSettings, PerformanceCheckProgress,
     PerformanceCheckResult, PerformanceCheckRunParams, PerformanceCheckRung,
@@ -96,6 +97,9 @@ fn pixels(video: &VideoSettings) -> u64 {
 pub(crate) struct RungMeasurement {
     pub started: bool,
     pub start_error: Option<String>,
+    /// The start was refused because another capture session held the
+    /// slot. That measures the studio, not the machine.
+    pub studio_busy: bool,
     pub target_fps: u32,
     pub encoder_speed: Option<f64>,
     pub delivered_fps: Option<f64>,
@@ -196,6 +200,20 @@ pub(crate) fn should_fast_skip_next_on(measurement: &RungMeasurement, linux: boo
         && measurement
             .encoder_speed
             .is_some_and(|speed| speed < FAST_SKIP_ENCODER_SPEED)
+}
+
+/// Start refusals that mean another session owns the capture slot. The
+/// check was started from an idle studio, so this is a collision (a Record
+/// click, a renderer preview start), never a property of the machine.
+pub(crate) fn start_error_means_busy_studio(message: &str) -> bool {
+    [
+        CaptureAdmissionBlocker::SessionStarting.to_string(),
+        CaptureAdmissionBlocker::CaptureActive.to_string(),
+        CaptureAdmissionBlocker::InterruptionInProgress.to_string(),
+        "A capture session is already running".to_string(),
+    ]
+    .iter()
+    .any(|busy| message.contains(busy.as_str()))
 }
 
 /// First passing rung wins; with none, the floor is recommended. `below_floor`
@@ -328,8 +346,8 @@ pub(crate) fn capability_key_from(
 
 /// v1 keys never match the v2 hasher, and Linux `belowFloor` rows whose
 /// every measured rung is `did-not-start` are a failed ladder, not a
-/// machine class. v2 poison is left trusted so a missing FFmpeg cannot
-/// auto-rerun the packaged check on every launch.
+/// machine class. `run_ladder` no longer saves a ladder where nothing
+/// started, so only rows written before that rule can match.
 pub(crate) fn stored_result_is_stale(result: &PerformanceCheckResult) -> bool {
     result.capability_key != capability_key() || linux_did_not_start_below_floor(result)
 }
@@ -442,6 +460,8 @@ async fn run_ladder(
     let mut rungs = Vec::with_capacity(ladder.len());
     let mut skip_next = false;
     let mut passed = false;
+    let mut any_started = false;
+    let mut last_start_error = None;
     for (index, video) in ladder.into_iter().enumerate() {
         if state.performance_check.cancelled() {
             discard_benchmark_sessions(state, &directory).await;
@@ -479,6 +499,20 @@ async fn run_ladder(
         );
         let (measurement, stats) = measure_rung(state, &video, &directory).await;
         discard_benchmark_sessions(state, &directory).await;
+        if measurement.studio_busy {
+            // ogre 2026-09-30: the check ran while a session was starting,
+            // every rung was refused in 100 ms, and the refusals were saved
+            // as "this computer cannot hold 720p". Keep the previous verdict.
+            bail!(
+                "the studio became busy ({}); no verdict recorded",
+                measurement
+                    .start_error
+                    .as_deref()
+                    .unwrap_or("capture active")
+            );
+        }
+        any_started |= measurement.started;
+        last_start_error = measurement.start_error.clone().or(last_start_error);
         let encode_backend = stats.as_ref().and_then(|stats| stats.encode_backend);
         let mut reasons = score_rung_for_backend(&measurement, encode_backend);
         if forced_failure_above_height().is_some_and(|height| video.height > height) {
@@ -523,6 +557,14 @@ async fn run_ladder(
         });
     }
 
+    if !any_started {
+        // Nothing was measured, so there is no verdict to keep. Saving one
+        // would brand the floor "too heavy" until the key changes.
+        bail!(
+            "no benchmark session started ({}); no verdict recorded",
+            last_start_error.as_deref().unwrap_or("no rung measured")
+        );
+    }
     let Some((recommended, below_floor)) = recommend(&rungs) else {
         bail!("the ladder produced no rungs");
     };
@@ -598,7 +640,9 @@ async fn measure_rung(
     match start {
         Ok(Ok(_)) => measurement.started = true,
         Ok(Err(error)) => {
-            measurement.start_error = Some(format!("{error:#}"));
+            let message = format!("{error:#}");
+            measurement.studio_busy = start_error_means_busy_studio(&message);
+            measurement.start_error = Some(message);
             return (measurement, None);
         }
         Err(_) => {
@@ -720,6 +764,7 @@ mod tests {
         RungMeasurement {
             started: true,
             start_error: None,
+            studio_busy: false,
             target_fps,
             encoder_speed: Some(1.0),
             delivered_fps: Some(f64::from(target_fps)),
@@ -744,6 +789,24 @@ mod tests {
             drain_after_stop_ms: None,
             reasons: Vec::new(),
         }
+    }
+
+    #[test]
+    fn a_busy_studio_refusal_is_not_a_machine_verdict() {
+        // ogre 2026-09-30 support log, verbatim start errors.
+        assert!(start_error_means_busy_studio(
+            "A capture session is starting"
+        ));
+        assert!(start_error_means_busy_studio(
+            "A capture session is active or finalizing"
+        ));
+        assert!(start_error_means_busy_studio(
+            "A capture session is already running"
+        ));
+        assert!(!start_error_means_busy_studio("start timed out"));
+        assert!(!start_error_means_busy_studio(
+            "FFmpeg is unavailable: No such file or directory"
+        ));
     }
 
     #[test]

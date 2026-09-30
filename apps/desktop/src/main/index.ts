@@ -12338,6 +12338,7 @@ async function runtimeInfo(): Promise<RuntimeInfo> {
   return buildRuntimeInfo({
     appVersion: app.getVersion(),
     execPath: process.execPath,
+    isPackaged: app.isPackaged,
     captureExecPath: resolveBackendPermissionTargetPath(),
     platform: process.platform,
     arch: process.arch,

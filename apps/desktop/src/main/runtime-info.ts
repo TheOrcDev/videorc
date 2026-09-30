@@ -27,6 +27,13 @@ export interface RuntimeInfoInput {
   /** `app.getVersion()` — the running app version. */
   appVersion: string
   execPath: string
+  /**
+   * `app.isPackaged`. The execPath heuristic below only recognises the macOS
+   * dev bundle (`Electron.app`); Linux and Windows dev Electron (`electron`,
+   * `electron.exe`) read as packaged, which auto-ran the performance check in
+   * every dev launch and smoke on ogre and persisted its collisions.
+   */
+  isPackaged?: boolean
   captureExecPath?: string
   platform?: NodeJS.Platform
   arch?: string
@@ -90,6 +97,7 @@ export function assertPermissionShortcutSupported(platform: NodeJS.Platform): vo
 export function buildRuntimeInfo({
   appVersion,
   execPath,
+  isPackaged: isPackagedInput,
   captureExecPath,
   platform = process.platform,
   arch = process.arch,
@@ -108,7 +116,7 @@ export function buildRuntimeInfo({
   env
 }: RuntimeInfoInput): RuntimeInfo {
   const targetPath = permissionTargetPath(execPath)
-  const isPackaged = !targetPath.endsWith('/Electron.app')
+  const isPackaged = isPackagedInput ?? !targetPath.endsWith('/Electron.app')
   const captureTargetPath = permissionTargetPath(captureExecPath ?? execPath)
 
   return {

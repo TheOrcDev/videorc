@@ -31,6 +31,28 @@ describe('runtime info helpers', () => {
     })
   })
 
+  it('trusts app.isPackaged over the macOS-only execPath heuristic', () => {
+    // Linux dev Electron has no `Electron.app` in its path; the heuristic
+    // alone called it packaged and auto-ran the performance check.
+    const linuxDev = buildRuntimeInfo({
+      appVersion: '9.9.9-test',
+      execPath: '/home/orcdev/videorc/node_modules/electron/dist/electron',
+      isPackaged: false,
+      platform: 'linux',
+      env: {}
+    })
+    expect(linuxDev.isPackaged).toBe(false)
+
+    const windowsPackaged = buildRuntimeInfo({
+      appVersion: '9.9.9-test',
+      execPath: 'C:\\Program Files\\Videorc\\Videorc.exe',
+      isPackaged: true,
+      platform: 'win32',
+      env: {}
+    })
+    expect(windowsPackaged.isPackaged).toBe(true)
+  })
+
   it('reports the backend helper as the capture permission target when provided', () => {
     const info = buildRuntimeInfo({
       appVersion: '9.9.9-test',
